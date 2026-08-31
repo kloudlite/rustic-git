@@ -997,9 +997,11 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
         return;
     }
 
-    // The reaper runs every pass regardless of what follows: a dead node's stale replica rows
-    // must not wait on this node having anything to pull.
+    // Both dead-node sweeps run every pass regardless of what follows: a dead node's stale
+    // replica rows and stranded claims must not wait on this node having anything to pull, and
+    // they run beside each other so the two never drift onto different dead-node rules.
     reap_dead_replicas(ctx).await;
+    unclaim_dead_nodes(ctx).await;
 
     let candidates = match pool_nodes(&ctx.client).await {
         Ok(v) => v,
@@ -1283,6 +1285,22 @@ async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool) -> Res
 /// listing, not per-row, since a partial list would make an actually-live node look absent). A
 /// node absent from a POSITIVELY-listed set counts as dead; a node present with no readable
 /// `Ready` condition history does not — the API server just hasn't reported one yet.
+/// The one positive-evidence rule both dead-node sweeps below apply, factored out once so the
+/// replica reaper and the claim-unclaim sweep can never drift apart: absent from a nodes list we
+/// DID get is dead; present with `Ready=false` past `floor` seconds is dead; present with no
+/// readable `Ready` condition at all is NOT dead — the API server just hasn't converged one yet.
+fn node_is_dead(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timestamp) -> bool {
+    match node {
+        None => true,
+        Some(n) => n
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
+            .is_some_and(|c| c.status != "True" && c.last_transition_time.as_ref().is_some_and(|t| now.as_second() - t.0.as_second() > floor)),
+    }
+}
+
 async fn reap_dead_replicas(ctx: &Arc<Ctx>) {
     let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(list) => list.items,
@@ -1308,22 +1326,98 @@ async fn reap_dead_replicas(ctx: &Arc<Ctx>) {
     let floor = node_dead_secs();
     let replica_api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
     for r in replicas {
-        let node = &r.spec.node;
-        let dead = match nodes.iter().find(|n| n.name_any() == *node) {
-            None => true, // absent from a list we DID get: gone
-            Some(n) => n
-                .status
-                .as_ref()
-                .and_then(|s| s.conditions.as_ref())
-                .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
-                .is_some_and(|c| {
-                    c.status != "True" && c.last_transition_time.as_ref().is_some_and(|t| now.as_second() - t.0.as_second() > floor)
-                }),
-        };
+        let dead = node_is_dead(nodes.iter().find(|n| n.name_any() == r.spec.node), floor, now);
         if dead {
             let rname = r.name_any();
             if let Err(e) = replica_api.delete(&rname, &Default::default()).await {
                 tracing::warn!(replica = %rname, error = %e, "pull: reaper: deleting a dead node's replica row");
+            }
+        }
+    }
+}
+
+/// The unclaim half of the same dead-node sweep: a Workspace or Environment whose `status.nodeName`
+/// names a node that is dead (same `node_is_dead` rule as the replica reaper) has its claim
+/// cleared — `status.nodeName` alone, everything else in its status preserved — so the placement
+/// watch picks it back up as unplaced. A Ready node's claim is never touched: this is the ONLY
+/// place besides the claim itself allowed to write `status.nodeName`, per the module doc's
+/// one-fact-one-writer rule.
+async fn unclaim_dead_nodes(ctx: &Arc<Ctx>) {
+    let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: unclaim: listing nodes; clearing nothing");
+            return;
+        }
+    };
+    let now = k8s_openapi::jiff::Timestamp::now();
+    let floor = node_dead_secs();
+    unclaim_kind::<crd::Workspace>(ctx, "Workspace", &nodes, floor, now, |w| {
+        w.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or("")
+    }, |w| {
+        let mut st = w.status.clone().unwrap_or_default();
+        st.node_name = String::new();
+        serde_json::to_value(st).expect("WorkspaceStatus serializes")
+    })
+    .await;
+    unclaim_kind::<crd::Environment>(ctx, "Environment", &nodes, floor, now, |e| {
+        e.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or("")
+    }, |e| {
+        let mut st = e.status.clone().unwrap_or_default();
+        st.node_name = String::new();
+        serde_json::to_value(st).expect("EnvironmentStatus serializes")
+    })
+    .await;
+}
+
+/// One kind's half of `unclaim_dead_nodes`. The write is the SAME guarded primitive
+/// `claim.rs`'s own claim uses (`replace_status`, a PUT carrying `resourceVersion`, one re-read on
+/// a 409) — clearing a claim races the same way winning one does, and losing that race here just
+/// means a peer's own pass (or this node's next tick) clears it instead.
+#[allow(clippy::too_many_arguments)]
+async fn unclaim_kind<K>(
+    ctx: &Arc<Ctx>,
+    kind: &'static str,
+    nodes: &[Node],
+    floor: i64,
+    now: k8s_openapi::jiff::Timestamp,
+    node_name: impl Fn(&K) -> &str,
+    cleared_status: impl Fn(&K) -> serde_json::Value,
+) where
+    K: kube::Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let api: Api<K> = Api::all(ctx.client.clone());
+    let list = match api.list(&ListParams::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(%kind, error = %e, "pull: unclaim: listing; clearing nothing");
+            return;
+        }
+    };
+    for obj in list {
+        let claimed_by = node_name(&obj);
+        if claimed_by.is_empty() {
+            continue; // already unplaced: nothing to clear
+        }
+        if !node_is_dead(nodes.iter().find(|n| n.name_any() == claimed_by), floor, now) {
+            continue; // a Ready node's claim is never touched
+        }
+        let name = obj.name_any();
+        let mut cur = obj;
+        for attempt in 0..2 {
+            match replace_status(&api, &cur, kind, cleared_status(&cur)).await {
+                Ok(()) => break,
+                Err(kube::Error::Api(s)) if s.code == 409 && attempt == 0 => match api.get(&name).await {
+                    Ok(fresh) => cur = fresh,
+                    Err(e) => {
+                        tracing::warn!(%kind, %name, error = %e, "pull: unclaim: re-read after conflict");
+                        break;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(%kind, %name, error = %e, "pull: unclaim: clearing a dead node's claim");
+                    break;
+                }
             }
         }
     }
@@ -1909,5 +2003,70 @@ fi
         reap_dead_replicas(&ctx).await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a nodes-list error must reap nothing");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The unclaim sweep: `unclaim_dead_nodes`, beside the reaper, same dead-node rule.
+    // -----------------------------------------------------------------------------------------
+
+    fn ws_placed(name: &str, node: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "name": name, "region": "r1", "image": "img", "desiredState": "running", "packages": []},
+            "status": {"phase": "ready", "nodeName": node, "compatibleNodes": [node]},
+        })
+    }
+
+    fn env_placed(name: &str, node: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
+            "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "acme", "name": name, "region": "r1", "services": [], "desiredState": "running"},
+            "status": {"phase": "creating", "nodeName": node, "compatibleNodes": [node]},
+        })
+    }
+
+    /// A dead node's claim is cleared — `status.nodeName` alone — on both kinds; a Ready node's
+    /// claim is never written at all, which the absence of its status route makes provable (the
+    /// mock 404s any call it did not expect).
+    #[tokio::test]
+    async fn unclaim_clears_a_dead_nodes_claims_and_never_touches_a_ready_node() {
+        let old = "2000-01-01T00:00:00Z";
+        let routes = vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_json("node-a", "True", old), node_json("node-b", "False", old)]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-live", "node-a"), ws_placed("ws-dead", "node-b")]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![env_placed("env-dead", "node-b")]) },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status".into(), status: 200, body: ws_placed("ws-dead", "") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/environments/env-dead/status".into(), status: 200, body: env_placed("env-dead", "") },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+
+        unclaim_dead_nodes(&ctx).await;
+
+        let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status");
+        assert_eq!(ws_sent.len(), 1, "the dead node's workspace claim is cleared once: {:?}", rec.calls());
+        assert_eq!(ws_sent[0]["status"]["nodeName"], "", "nodeName cleared");
+        assert_eq!(ws_sent[0]["status"]["phase"], "ready", "nothing else in status is touched");
+        let env_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/environments/env-dead/status");
+        assert_eq!(env_sent.len(), 1, "the dead node's environment claim is cleared once");
+        assert_eq!(env_sent[0]["status"]["nodeName"], "");
+        assert!(
+            !rec.calls().iter().any(|c| c == "PUT /apis/rustic-git.io/v1alpha1/workspaces/ws-live/status"),
+            "a Ready node's claim must never be written: {:?}", rec.calls()
+        );
+    }
+
+    /// Positive evidence only, same as the reaper: a nodes-list error must clear nothing.
+    #[tokio::test]
+    async fn unclaim_clears_nothing_when_the_node_list_errors() {
+        let routes = vec![Route { method: "GET", path: NODES.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+
+        unclaim_dead_nodes(&ctx).await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("PUT")), "a nodes-list error must clear nothing: {:?}", rec.calls());
     }
 }

@@ -2053,6 +2053,25 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         }
     }
 
+    // Commit-model worktree materialization: a workspace just claimed onto this node (or one
+    // whose pod was never started here) has no `live/{id}` subvolume yet. `head` is `None` on a
+    // brand-new workspace (bootstrap: an empty worktree) and otherwise whatever this node last
+    // reported — never invented here, only preserved, since `status.head` is written ONLY by the
+    // node that actually ran the checkout. `WORKTREE_EXISTS` converges a race (this pass and an
+    // earlier one both reaching here, or a pod restart finding its own worktree already there)
+    // into a no-op rather than an error.
+    if std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1") {
+        let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
+        let result = tokio::task::spawn_blocking(move || engine.checkout(&vol_id, head.as_deref(), &ws_id))
+            .await
+            .map_err(|e| ReconcileErr(e.to_string()))?;
+        match result {
+            Ok(()) => {}
+            Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
+            Err(e) => return Err(ReconcileErr(e.0)),
+        }
+    }
+
     let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
     let owner_ref = owner_ref_of_kind(w)?;
     let pod_ctx = k8s::PodContext {

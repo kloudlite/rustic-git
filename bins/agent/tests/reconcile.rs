@@ -541,6 +541,132 @@ async fn a_clone_is_claimed_only_where_its_source_lives() {
     );
 }
 
+// ── commit-model placement (WS_COMMIT_MODEL=1) ──────────────────────────────
+
+const SNAPSHOTS_LIST: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
+
+fn commit_list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
+}
+
+fn snapshot_cr(name: &str, volume: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": name, "uid": "snap-uid"},
+        "spec": {"volume": volume, "owner": "alice", "parent": "", "pinned": false},
+        "status": {"phase": "ready"},
+    })
+}
+
+fn volume_replica(volume: &str, node: &str, phase: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": crd::replica_name(volume, node), "uid": "vr-uid"},
+        "spec": {"volume": volume, "node": node},
+        "status": {"phase": phase, "branches": {}},
+    })
+}
+
+/// Sets `WS_COMMIT_MODEL=1` for the life of the guard — same set/remove shape `peer.rs`'s own
+/// commit-model tests use, since this crate has no per-test env isolation.
+struct CommitModelOn;
+impl CommitModelOn {
+    fn new() -> Self {
+        std::env::set_var("WS_COMMIT_MODEL", "1");
+        CommitModelOn
+    }
+}
+impl Drop for CommitModelOn {
+    fn drop(&mut self) {
+        std::env::remove_var("WS_COMMIT_MODEL");
+    }
+}
+
+/// A workspace whose volume already has commits and whose replica on THIS node reports Synced is
+/// claimed exactly like the old `compatibleNodes` arm — ruling A.
+#[tokio::test]
+async fn commit_model_a_synced_replica_claims_a_workspace_with_commits() {
+    let _flag = CommitModelOn::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
+            rustic_git_workspaces::kube_test::get(
+                format!("/apis/rustic-git.io/v1alpha1/volumereplicas/{}", crd::replica_name("vol-1", "node-a")),
+                volume_replica("vol-1", "node-a", "Synced"),
+            ),
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "Synced: claimed");
+}
+
+/// The same volume, but this node's replica is Syncing (or absent) — ruling A's other half: no
+/// claim, and the object is left unplaced for whichever node IS Synced.
+#[tokio::test]
+async fn commit_model_a_syncing_replica_does_not_claim_a_workspace_with_commits() {
+    let _flag = CommitModelOn::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
+            rustic_git_workspaces::kube_test::not_found(format!(
+                "/apis/rustic-git.io/v1alpha1/volumereplicas/{}",
+                crd::replica_name("vol-1", "node-a")
+            )),
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "no replica on this node: never started dataless");
+}
+
+/// A volume with ZERO `Snapshot` CRs is the bootstrap case (ruling B) — claimable by any pool
+/// node with no replica at all, same as the old empty-`compatibleNodes` arm.
+#[tokio::test]
+async fn commit_model_a_zero_commit_volume_is_claimable_as_bootstrap() {
+    let _flag = CommitModelOn::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "zero commits: bootstrap, claimable");
+}
+
+/// A brand-new workspace has no child `Volume` at all yet (`volumeRef` unset) — the same bootstrap
+/// case, reached with no Snapshot list at all since there is no volume to list.
+#[tokio::test]
+async fn commit_model_a_workspace_with_no_volume_yet_is_claimable_as_bootstrap() {
+    let _flag = CommitModelOn::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+
+    rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1);
+    assert!(!rec.calls().iter().any(|c| c.starts_with(&format!("GET {SNAPSHOTS_LIST}"))), "nothing to list without a volume");
+}
+
 fn env_json(status: serde_json::Value) -> serde_json::Value {
     let mut o = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1",
@@ -3453,5 +3579,26 @@ async fn a_workspace_gets_its_pod_once_ready() {
     assert!(
         rec.calls().iter().all(|c| !c.contains("persistentvolume")),
         "no PV or PVC traffic at all: {:?}", rec.calls()
+    );
+}
+
+/// `WS_COMMIT_MODEL=1`: a workspace whose `live/{id}` worktree already exists on this node (a
+/// re-reconcile after an earlier pass materialized it, or a pod restarting on the same disk)
+/// converges through `WORKTREE_EXISTS` rather than erroring — the pass still reaches the pod, so
+/// materialization never blocks a workspace whose worktree is already there. Real btrfs is not
+/// available in this test environment, so this is the one commit-model path exercisable here: the
+/// `Engine::checkout` call, without ever shelling out, because `dst.exists()` is checked first.
+#[tokio::test]
+async fn commit_model_checkout_converges_on_an_existing_worktree() {
+    let _flag = CommitModelOn::new();
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/ws-1/live/ws-1")).unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), ssh_routes());
+
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")),
+        "an already-materialized worktree must not block the pod: {:?}", rec.calls()
     );
 }

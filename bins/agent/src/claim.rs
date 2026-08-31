@@ -10,22 +10,59 @@
 //! here (node allocatable minus scheduled pod requests), which is a change to this function only.
 
 use crate::controller::{replace_status, Ctx, ReconcileErr};
-use kube::api::{Api, PostParams};
+use kube::api::{Api, ListParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Resource, ResourceExt};
 use rustic_git_workspaces::crd::{self, binding_name, OwnerBinding, OwnerBindingSpec};
 use std::sync::Arc;
+
+/// What the commit-model arm needs about the volume behind an unplaced object, gathered once in
+/// `decide` (async) and handed to the pure, testable `may_claim` below.
+struct CommitPlacement {
+    /// Any `Snapshot` CR for this volume, Ready or not — "a commit was ever started" is enough to
+    /// leave the never-started-dataless guard armed; only a volume with none at all is bootstrap.
+    has_commits: bool,
+    my_replica_synced: bool,
+}
 
 /// Whether THIS node may claim `object`, given the nodes already known to hold its data.
 ///
 /// Empty `compatible` with no source means "nowhere holds it yet", which every node may claim. A
 /// `cloneOf` is the exception the spec calls out: the new object holds nothing, but a local clone
 /// needs the SOURCE's disk, so the source's memory decides.
-fn may_claim(me: &str, compatible: &[String], source_compatible: Option<&[String]>) -> bool {
+///
+/// `commit` is `Some` only under `WS_COMMIT_MODEL=1` (and only once a `cloneOf` source has not
+/// already decided it): rulings A+B from the task brief replace the `compatibleNodes` check
+/// entirely in that case — a volume with no commits yet is the bootstrap case, claimable by any
+/// node; once it has commits, only a node whose `VolumeReplica` reports `Synced` may claim (which
+/// also means a volume with commits but no Synced replica anywhere is left unplaced, on purpose —
+/// every node's own `decide` reaches this same `false`).
+fn may_claim(me: &str, compatible: &[String], source_compatible: Option<&[String]>, commit: Option<&CommitPlacement>) -> bool {
     if let Some(src) = source_compatible {
         return src.iter().any(|n| n == me);
     }
-    compatible.is_empty() || compatible.iter().any(|n| n == me)
+    match commit {
+        Some(c) => !c.has_commits || c.my_replica_synced,
+        None => compatible.is_empty() || compatible.iter().any(|n| n == me),
+    }
+}
+
+/// Gathers `CommitPlacement` for `volume` (`None` when the child `Volume` has not been created
+/// yet — every workspace/environment starts that way, and that IS the bootstrap case). Errors
+/// propagate rather than being swallowed: a claim decided on a partial read of "does anyone have
+/// this" is exactly the never-started-dataless bug the guard exists to prevent.
+async fn commit_placement(ctx: &Arc<Ctx>, volume: Option<&str>) -> Result<CommitPlacement, ReconcileErr> {
+    let Some(volume) = volume else {
+        return Ok(CommitPlacement { has_commits: false, my_replica_synced: false });
+    };
+    let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let has_commits = !snaps.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await?.items.is_empty();
+    let replicas: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
+    let my_replica_synced = replicas
+        .get_opt(&crd::replica_name(volume, &ctx.node))
+        .await?
+        .is_some_and(|r| r.status.is_some_and(|s| s.phase == "Synced"));
+    Ok(CommitPlacement { has_commits, my_replica_synced })
 }
 
 /// The nodes holding a `cloneOf` source's disk, when there is one. A source that has vanished
@@ -92,6 +129,7 @@ async fn decide(
     node_name: &str,
     compatible: &[String],
     storage: Option<&crd::WorkspaceStorage>,
+    volume: Option<&str>,
     phase: crd::Phase,
     gen: i64,
 ) -> Result<Option<serde_json::Value>, ReconcileErr> {
@@ -101,7 +139,14 @@ async fn decide(
         return Ok(None);
     }
     let src = source_nodes(ctx, storage_source(storage)).await?;
-    if !may_claim(&ctx.node, compatible, src.as_deref()) {
+    // Fetched only when the flag is on and there is no cloneOf source: a cloneOf's own arm never
+    // needs it, and inert-until-enabled means no extra API traffic while the flag is off.
+    let commit = if src.is_none() && std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1") {
+        Some(commit_placement(ctx, volume).await?)
+    } else {
+        None
+    };
+    if !may_claim(&ctx.node, compatible, src.as_deref(), commit.as_ref()) {
         return Ok(None);
     }
     Ok(Some(serde_json::json!({
@@ -134,6 +179,10 @@ struct Parts<'a> {
     node_name: String,
     compatible: Vec<String>,
     storage: Option<&'a crd::WorkspaceStorage>,
+    /// The child `Volume`'s name, once the reconciler has created and reported it — `None` for
+    /// every object that has never been placed at all, which the commit-model arm reads as "no
+    /// commits, bootstrap".
+    volume: Option<&'a str>,
     region: &'a str,
     owner: &'a str,
 }
@@ -159,6 +208,7 @@ where
             &p.node_name,
             &p.compatible,
             p.storage,
+            p.volume,
             phase,
             obj.meta().generation.unwrap_or(0),
         )
@@ -204,6 +254,7 @@ pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             node_name: st.node_name,
             compatible: st.compatible_nodes,
             storage: o.spec.storage.as_ref(),
+            volume: o.status.as_ref().and_then(|s| s.volume_ref.as_deref()),
             region: &o.spec.region,
             owner: &o.spec.owner,
         }
@@ -221,6 +272,7 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             node_name: st.node_name,
             compatible: st.compatible_nodes,
             storage: o.spec.storage.as_ref(),
+            volume: o.status.as_ref().and_then(|s| s.volume_ref.as_deref()),
             region: &o.spec.region,
             owner: &o.spec.owner,
         }
