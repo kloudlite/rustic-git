@@ -63,7 +63,18 @@ pub enum DesiredState {
 #[serde(rename_all = "camelCase")]
 pub enum VolumeSource {
     /// A local snapshot of a sibling on the same pool — no registry round trip.
-    CloneOf { volume: String },
+    ///
+    /// Under the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a
+    /// destination this object owns) and no child `Volume` is ever created for it: the clone is a
+    /// second worktree of the same volume, checked out at `commit` — the head the API resolved
+    /// ONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting
+    /// with the source's later pushes. `None` is every clone written before the commit model (and
+    /// flag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.
+    CloneOf {
+        volume: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+    },
     /// A pushed commit, named by id, fetched from the registry.
     ///
     /// `region` is the region the RECORD names, which is not always the region this node runs in:

@@ -67,6 +67,37 @@ impl Engine {
         }
     }
 
+    /// Restore-in-place, reinterpreted as a checkout: replace worktree `ws` of `volume` with a
+    /// fresh checkout of `commit`. Checked out into a THROWAWAY sibling first — reusing
+    /// `checkout`'s own missing-commit validation (`NO_SUCH_RECORD`) — so a bad commit id fails
+    /// before the live worktree is touched at all; only then two plain renames (a btrfs subvolume
+    /// renames like any other directory) swap it in, and the displaced old worktree is deleted.
+    /// Any leftover staging subvolume from an earlier, crashed attempt is discarded first, same
+    /// as `checkout`'s own idempotent-retry rule.
+    pub fn swap_worktree(&self, volume: &str, ws: &str, commit: &str) -> Result<(), EngErr> {
+        let staging = format!("{ws}-restoring");
+        let staging_path = self.pool.worktree(volume, &staging);
+        if staging_path.exists() {
+            run(&["btrfs", "subvolume", "delete", staging_path.to_str().unwrap()])?;
+        }
+        self.checkout(volume, Some(commit), &staging)?;
+
+        let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
+        let live = self.pool.worktree(volume, ws);
+        let backup = self.pool.worktree(volume, &format!("{ws}-before-restore"));
+        if backup.exists() {
+            run(&["btrfs", "subvolume", "delete", backup.to_str().unwrap()])?;
+        }
+        if live.exists() {
+            std::fs::rename(&live, &backup).map_err(EngErr::io)?;
+        }
+        std::fs::rename(&staging_path, &live).map_err(EngErr::io)?;
+        if backup.exists() {
+            run(&["btrfs", "subvolume", "delete", backup.to_str().unwrap()])?;
+        }
+        Ok(())
+    }
+
     /// Commits present on this pool for `volume`: a plain dir listing of `snap_dir`, not a
     /// registry read — this answers "what can this node check out locally right now", which the
     /// registry (durable, shared, but not necessarily pulled here yet) can't.

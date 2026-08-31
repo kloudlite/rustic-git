@@ -1099,6 +1099,18 @@ async fn clone_ws(
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
+    // Commit model: a clone is a second worktree of the SOURCE's own volume, pinned to the
+    // head the caller saw right now — resolved ONCE, here, so the clone never drifts with the
+    // source's later pushes. An uncommitted source has nothing to pin to, so that is a 400, not a
+    // clone of an empty worktree indistinguishable from a real one.
+    let source = if s.commit_model {
+        let head = src.status.as_ref().and_then(|st| st.head.clone()).ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "source workspace has no commits yet; push before cloning").into_response()
+        })?;
+        VolumeSource::CloneOf { volume, commit: Some(head) }
+    } else {
+        VolumeSource::CloneOf { volume, commit: None }
+    };
     let w = create_workspace(
         c,
         &new_id,
@@ -1109,10 +1121,7 @@ async fn clone_ws(
             name: body.name,
             region: src.spec.region.clone(),
             image: src.spec.image.clone(),
-            storage: Some(crd::WorkspaceStorage {
-                quota_gb: quota,
-                source: Some(VolumeSource::CloneOf { volume }),
-            }),
+            storage: Some(crd::WorkspaceStorage { quota_gb: quota, source: Some(source) }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: src.spec.packages.clone(),
@@ -1608,7 +1617,10 @@ async fn clone_env(
             services: src.spec.services.clone(),
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
-                source: Some(VolumeSource::CloneOf { volume }),
+                // ponytail: environment clone still copies bytes into a fresh child Volume even
+                // under commit_model — the brief scoped the shared-worktree architecture change to
+                // workspaces only. Extend the same way `clone_ws` does below if environments need it.
+                source: Some(VolumeSource::CloneOf { volume, commit: None }),
             }),
             desired_state: DesiredState::Running,
             restore: None,
@@ -1756,15 +1768,25 @@ async fn restore_env_in_place(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
-    // An in-place restore is of THIS environment's own history, so the volume is known and the
-    // search is one read. A snapshot of some other volume is a 404 here, which is right: putting
-    // another environment's bytes under this one's services is a new environment, not a restore.
-    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id, env_volume(&e)).await?;
+    let volume = env_volume(&e).ok_or_else(not_ready)?.to_string();
+    // Commit model: the wish names a `Snapshot` CR of this environment's OWN volume — validated
+    // Ready and same-volume BEFORE the wish is written, so a bad id is a fast 4xx here rather than
+    // a silent hang in `restore_gate` (which reads the wish uncritically, per its own doc comment).
+    let (src_owner, volume, region) = if s.commit_model {
+        let snap = find_commit_model_snapshot(&s, &caller_id, &volume, &body.snapshot_id).await?;
+        (snap.spec.owner, snap.spec.volume, None)
+    } else {
+        // An in-place restore is of THIS environment's own history, so the volume is known and the
+        // search is one read. A snapshot of some other volume is a 404 here, which is right: putting
+        // another environment's bytes under this one's services is a new environment, not a restore.
+        let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id, Some(&volume)).await?;
+        (src_owner, volume, Some(record.region.clone()))
+    };
     let wish = crd::RestoreWish {
         snapshot_id: body.snapshot_id,
         volume,
         owner: Some(src_owner),
-        region: Some(record.region.clone()),
+        region,
         // What makes a repeat of the SAME snapshot a new wish: the controllers compare the id
         // against what is already live, so without this a second attempt after a failure would
         // look like a restore that had already happened.
@@ -2075,6 +2097,28 @@ async fn commit_model_snapshots(s: &ApiState, caller_id: &str, name: &str) -> Re
     // this ordering only makes a stable read.
     items.sort_by_key(|sn| sn.creation_timestamp().map(|t| t.0));
     Ok(items)
+}
+
+/// A single `Ready` commit-model snapshot of `volume`, scoped by `caller_owners` exactly like
+/// `commit_model_snapshots`. Used by restore: a 404 here is "unknown", "not yours", "not this
+/// volume's", or "not cut yet" alike — the caller only needs to know it cannot restore onto it,
+/// never which of those it was, the same way `find_snapshot`'s registry twin already collapses
+/// "no such snapshot" and "not yours" into one 404.
+async fn find_commit_model_snapshot(
+    s: &ApiState,
+    caller_id: &str,
+    volume: &str,
+    snapshot_id: &str,
+) -> Result<crd::Snapshot, Response> {
+    check_path_segment(snapshot_id)?;
+    let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
+    let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
+    let snap = api.get_opt(snapshot_id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    let ready = snap.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
+    if snap.spec.volume != volume || !owners.contains(&snap.spec.owner) || !ready {
+        return Err(not_found());
+    }
+    Ok(snap)
 }
 
 fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {

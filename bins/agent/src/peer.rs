@@ -589,7 +589,7 @@ fn write_gate(path: &FsPath, gen: u64) -> std::io::Result<()> {
 /// extents against.
 fn clone_of(v: &crd::Volume) -> Option<String> {
     match &v.spec.source {
-        Some(crd::VolumeSource::CloneOf { volume }) => Some(volume.clone()),
+        Some(crd::VolumeSource::CloneOf { volume, .. }) => Some(volume.clone()),
         _ => None,
     }
 }

@@ -531,7 +531,7 @@ async fn a_clone_is_claimed_only_where_its_source_lives() {
     let mut w = workspace(serde_json::json!({}));
     w.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
-        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into() }),
+        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: None }),
     });
 
     rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
@@ -2402,7 +2402,7 @@ fn src_volume(node: &str) -> serde_json::Value {
 fn cloned_env(source: &str) -> crd::Environment {
     let mut e = environment(serde_json::json!({}));
     e.spec.storage =
-        Some(crd::WorkspaceStorage { quota_gb: 20, source: Some(crd::VolumeSource::CloneOf { volume: source.into() }) });
+        Some(crd::WorkspaceStorage { quota_gb: 20, source: Some(crd::VolumeSource::CloneOf { volume: source.into(), commit: None }) });
     e
 }
 
@@ -3722,5 +3722,173 @@ async fn commit_model_environment_bootstrap_materializes_its_worktree() {
     assert!(
         rec.calls().iter().any(|c| c.starts_with("PATCH") && c.contains("/namespaces/env-1")),
         "the worktree materialized and the pass reached namespace reconciliation: {:?}", rec.calls()
+    );
+}
+
+// ── commit-model clone/restore (Task 6b) ────────────────────────────────
+
+/// A `Ready` `Snapshot` of the volume a `cloneOf` names — the precondition `commit_ready` checks
+/// before ever letting a clone check out. Kept separate from `snapshot_cr` (worktree/parent don't
+/// matter here) so the volume and phase are the only things a test has to vary.
+fn ready_commit(name: &str, volume: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": name, "uid": "commit-uid"},
+        "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": "", "pinned": false},
+        "status": {"phase": "ready"},
+    })
+}
+
+/// `check_source` proves the clone SOURCE object exists (Workspace, then Environment) before
+/// anything else — independent of, and ahead of, the volume-level checks below.
+fn source_workspace_exists(id: &str) -> Route {
+    rustic_git_workspaces::kube_test::get(
+        format!("/apis/rustic-git.io/v1alpha1/workspaces/{id}"),
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+                           "metadata": {"name": id},
+                           "spec": {"owner": "alice", "team": "", "name": id, "region": "r1",
+                                    "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
+                           "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"]}}),
+    )
+}
+
+fn ready_source_volume(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": id, "uid": "src-vol-uid"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true},
+    })
+}
+
+/// A workspace whose `cloneOf` carries a graft commit and no worktree yet — a fresh clone.
+fn cloned_workspace(commit: &str, head: Option<&str>) -> crd::Workspace {
+    let mut status = serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]});
+    if let Some(h) = head {
+        status["head"] = serde_json::json!(h);
+    }
+    let mut w = workspace(status);
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: Some(commit.into()) }),
+    });
+    w
+}
+
+/// A clone with no head of its own yet checks out the GRAFTED commit (never bootstraps empty next
+/// to the source's real history) and records it as its own `head` on the very first pass — the
+/// same preserve-pattern write `snapshot::advance_head` uses for a push, so retention's
+/// `worktree_heads` sees it from here on. `resolve_volume` also proves clone PLACEMENT here: the
+/// SOURCE's volume (`ws-src`), not a freshly created child, is what gets read — the route list has
+/// no `POST /volumes` at all, so `ensure_child_volume` was never called.
+#[tokio::test]
+async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The worktree name is the WORKSPACE's own id, on the SOURCE volume's snap tree — never
+    // `vol/ws-1/...`, which would be a fresh (and wrong) child volume.
+    std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
+    let routes = vec![
+        source_workspace_exists("ws-src"),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        ready_binding(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let w = cloned_workspace("ws-src-aaaaaaaa", None);
+
+    // The pass runs past the checkout arm and then fails on the next unmocked route (namespace,
+    // profile, ...) — not the point here; the head write already landed by then.
+    let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert!(
+        sent.iter().any(|s| s["status"]["head"] == "ws-src-aaaaaaaa"),
+        "the graft commit must be recorded as this clone's own head: {sent:?}"
+    );
+    assert!(!rec.calls().iter().any(|c| c.contains("POST") && c.contains("/volumes")), "a shared-volume clone creates no child Volume");
+}
+
+/// A clone naming a commit that is not a `Ready` `Snapshot` of its source volume — swept by
+/// retention, or simply never existed — settles PERMANENTLY with its own reason, distinct from a
+/// bad clone SOURCE (`NoSuchSource`, settled earlier by `check_source`): retrying at TICK would
+/// spin on the same missing snapshot forever.
+#[tokio::test]
+async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let routes = vec![
+        source_workspace_exists("ws-src"),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-gone"),
+        ready_binding(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let w = cloned_workspace("ws-src-gone", None);
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "settled permanently, not requeued");
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    let last = sent.last().expect("a status write");
+    assert_eq!(last["status"]["phase"], "error");
+    let cond = &last["status"]["conditions"][0];
+    assert_eq!(cond["reason"], "NoSuchCommit");
+}
+
+/// A clone that already has its own `head` (it pushed since being grafted) never re-derives it
+/// from `cloneOf` — the graft is a ONE-TIME starting point, not a value this pass keeps re-reading.
+#[tokio::test]
+async fn commit_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
+    let routes = vec![
+        source_workspace_exists("ws-src"),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    let w = cloned_workspace("ws-src-aaaaaaaa", Some("ws-1-own-commit"));
+
+    let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
+
+    // No snapshot GET at all: an already-owned head skips `commit_ready`'s validation of the
+    // graft commit entirely, and no status write ever names the graft commit as `head`.
+    assert!(!rec.calls().iter().any(|c| c.contains("/snapshots/")), "{:?}", rec.calls());
+    assert!(rec.sent("PATCH", WS_STATUS).iter().all(|s| s["status"]["head"] != "ws-src-aaaaaaaa"));
+}
+
+/// Restore-in-place under the flag never touches the registry (`get_history`/`restore`'s HTTP
+/// calls) — the checkout-swap branch (`Engine::swap_worktree`) is entirely local. Real btrfs is
+/// unavailable in this test environment, so the swap itself errors past the point this asserts;
+/// the point is which BRANCH ran; `volume_work`'s `commit_model` flag is what decides it.
+#[tokio::test]
+async fn commit_model_restore_in_place_never_calls_the_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "env-1", "uid": "vol-uid-1", "generation": 2},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20,
+                 "restoreTo": {"snapshotId": "env-1-bbbbbbbb", "volume": "env-1", "requestedAt": "2026-09-01T00:00:00Z"}},
+        "status": {"phase": "ready", "subvolumePresent": true},
+    });
+    let routes = vec![
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/env-1/status".into(), status: 200, body: vol.clone() },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    let v: crd::Volume = serde_json::from_value(vol).unwrap();
+
+    let _ = rustic_git_agent::controller::apply_volume(&v, &ctx).await;
+    wait_idle(&ctx).await;
+
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("get_history") || c.contains("registry")),
+        "commit-model restore must never fetch from the registry: {:?}", rec.calls()
     );
 }

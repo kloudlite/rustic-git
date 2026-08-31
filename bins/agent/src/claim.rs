@@ -73,6 +73,19 @@ pub(crate) async fn has_commits(ctx: &Arc<Ctx>, volume: &str) -> Result<bool, Re
     Ok(!snaps.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await?.items.is_empty())
 }
 
+/// Whether `commit` is a `Ready` `Snapshot` of `volume` — the check a clone's grafted commit and a
+/// restore's wished commit both need before checking out or swapping onto it, so naming a
+/// retention-deleted (or foreign-volume) commit is caught here rather than as a bare btrfs
+/// `NO_SUCH_RECORD` with no distinct reason a person could search for. Errors propagate, same rule
+/// as `has_commits`: a listing failure must never read as "no such commit".
+pub(crate) async fn commit_ready(ctx: &Arc<Ctx>, volume: &str, commit: &str) -> Result<bool, ReconcileErr> {
+    let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    Ok(snaps
+        .get_opt(commit)
+        .await?
+        .is_some_and(|s| s.spec.volume == volume && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)))
+}
+
 /// The nodes holding a `cloneOf` source's disk, when there is one. A source that has vanished
 /// yields `Some([])` — nobody claims, and the object stays visible as unplaced rather than being
 /// silently started somewhere with no data.
@@ -85,7 +98,7 @@ async fn source_nodes(
     ctx: &Arc<Ctx>,
     source: Option<&crd::VolumeSource>,
 ) -> Result<Option<Vec<String>>, ReconcileErr> {
-    let Some(crd::VolumeSource::CloneOf { volume }) = source else { return Ok(None) };
+    let Some(crd::VolumeSource::CloneOf { volume, .. }) = source else { return Ok(None) };
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     let nodes = match api.get_opt(volume).await? {
         Some(v) => vec![v.spec.node_name],

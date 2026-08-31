@@ -912,8 +912,9 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let materialize = !observed && restore.is_none();
     let quota_gb = v.spec.quota_gb;
     let home = crd::is_home_volume(v);
+    let commit_model = ctx.commit_model;
     let handle = tokio::task::spawn_blocking(move || {
-        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home })
+        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home, commit_model })
     });
     let handle = wake_on_finish(
         handle,
@@ -958,10 +959,13 @@ pub struct Work {
     pub restore: Option<crd::RestoreWish>,
     pub quota_gb: u64,
     pub home: bool,
+    /// Whether an in-place restore is a checkout-swap (this volume's own worktree, from a local
+    /// `Snapshot` CR) rather than a registry fetch — see `swap_worktree`.
+    pub commit_model: bool,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner, source, materialize, restore, quota_gb, home } = w;
+    let Work { id, owner, source, materialize, restore, quota_gb, home, commit_model } = w;
     let (id, owner) = (id.as_str(), owner.as_str());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
@@ -977,7 +981,7 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
             } else {
                 match &source {
                     None => engine.create_subvol(id).map_err(|e| e.to_string())?,
-                    Some(VolumeSource::CloneOf { volume }) => {
+                    Some(VolumeSource::CloneOf { volume, .. }) => {
                         engine.clone_local_ids(owner, volume, id).await.map_err(|e| e.to_string())?
                     }
                     // `owner` is the SOURCE's registry label and `region` the region the RECORD
@@ -1005,17 +1009,24 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         // leaves `live` exactly as it was, and `replace_live` keeps the pre-restore bytes as a
         // local RO snapshot before swapping. Nothing here can lose the current state silently.
         if let Some(w) = &restore {
-            let staging = format!("{id}-restoring");
-            let src_owner = w.owner.as_deref().unwrap_or(owner);
-            // Always from nothing: the staging id is deterministic, and `pull_core` treats an
-            // existing `live` as "already converged" — so bytes left by a restore that failed
-            // half-way would be swapped in and labelled as THIS snapshot.
-            engine.discard_staging(&staging).map_err(|e| e.to_string())?;
-            engine
-                .restore(src_owner, &w.volume, &w.snapshot_id, &staging, w.region.as_deref())
-                .await
-                .map_err(|e| e.to_string())?;
-            engine.replace_live(id, &staging).map_err(|e| e.to_string())?;
+            if commit_model {
+                // The wish names a commit of THIS volume's own history — no registry fetch, no
+                // staging id, just a checkout swapped into the worktree that already carries
+                // this volume's own id (the API validated Ready + same-volume before writing it).
+                engine.swap_worktree(&w.volume, id, &w.snapshot_id).map_err(|e| e.to_string())?;
+            } else {
+                let staging = format!("{id}-restoring");
+                let src_owner = w.owner.as_deref().unwrap_or(owner);
+                // Always from nothing: the staging id is deterministic, and `pull_core` treats an
+                // existing `live` as "already converged" — so bytes left by a restore that failed
+                // half-way would be swapped in and labelled as THIS snapshot.
+                engine.discard_staging(&staging).map_err(|e| e.to_string())?;
+                engine
+                    .restore(src_owner, &w.volume, &w.snapshot_id, &staging, w.region.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                engine.replace_live(id, &staging).map_err(|e| e.to_string())?;
+            }
         }
         // After every path that can leave a new `live` behind, same rule as the quota below: a
         // home's caches are nested subvolumes, and a received stream does not carry them.
@@ -1341,7 +1352,7 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
         None | Some(VolumeSource::GitRepo { .. }) => Ok(()),
         // Workspace THEN Environment: `clone_env` names an environment's id here, and checking only
         // the workspace kind settled every cloned environment as a permanent `NoSuchSource`.
-        Some(VolumeSource::CloneOf { volume }) => {
+        Some(VolumeSource::CloneOf { volume, .. }) => {
             let ws: Api<crd::Workspace> = Api::all(ctx.client.clone());
             if ws.get_opt(volume).await.map_err(Outcome::from)?.is_some() {
                 return Ok(());
@@ -1431,9 +1442,37 @@ where
     }
 
     let s = storage.as_ref().expect("settled above");
-    let vol =
-        ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx)
-            .await?;
+    // Commit model: a `cloneOf` carrying a resolved commit is a second WORKTREE of the source's
+    // OWN volume, not a new subvolume — `ensure_child_volume` (and the btrfs clone it would
+    // trigger via `clone_local_ids`) is skipped entirely, and `volumeRef` ends up naming the
+    // source's volume directly. `check_source` above already proved the source object exists;
+    // this reads the Volume itself, which is what placement (`claim::source_nodes`) already
+    // pinned this parent's node to.
+    let shared = match &s.source {
+        Some(VolumeSource::CloneOf { volume, commit: Some(_) }) if ctx.commit_model => {
+            let vols: Api<crd::Volume> = Api::all(ctx.client.clone());
+            Some(vols.get_opt(volume).await?)
+        }
+        _ => None,
+    };
+    let vol = match shared {
+        Some(Some(v)) => v,
+        // The source volume vanished between claim and this pass — same shape as any other
+        // "wait for the child to exist" case, not a permanent failure: `check_source` already
+        // proved the source OBJECT exists, so a missing Volume is a materialize race, not a typo.
+        Some(None) => {
+            return Ok(Resolved::Wait {
+                volume_ref: None,
+                phase: crd::Phase::Creating,
+                cond: crd::condition("Ready", false, "SourceVolumeNotReady", "waiting for the clone source's volume", gen),
+                action: Action::requeue(TICK),
+            });
+        }
+        None => {
+            ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx)
+                .await?
+        }
+    };
     let id = vol.name_any();
     // The belt to `ensure_child_volume`'s brace: two places allowed to name a node is two places
     // that can disagree about where the data is, and the failure mode is an owner's data split
@@ -2080,7 +2119,20 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // own head just has not been recorded yet" — the guard below tells the two apart the same way
     // the claim itself does, by asking whether the VOLUME has any commits at all.
     if ctx.commit_model {
-        if prev.head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+        // A clone pinned to a commit already knows its head — grafted by the API at clone time,
+        // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
+        // the source's real history, even on the very first pass.
+        let clone_commit = w
+            .spec
+            .storage
+            .as_ref()
+            .and_then(|s| s.source.as_ref())
+            .and_then(|src| match src {
+                VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
+                _ => None,
+            });
+        let effective_head = prev.head.clone().or_else(|| clone_commit.map(str::to_string));
+        if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
             // F2 guard: the volume has commits but this workspace's own `head` is still `None` —
             // checking out `None` here would hand it an EMPTY worktree next to real history,
             // which is the never-started-dataless bug in worktree form. Wait for Task 5/6 to
@@ -2099,9 +2151,36 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             write_ws_status(w, st, ctx).await?;
             return Ok(Action::requeue(TICK));
         }
+        // A clone naming a commit that retention has since swept is wrong forever, not
+        // transient: retrying at TICK would spin on the same missing snapshot until someone
+        // notices, so this settles Permanent with its own reason distinct from a bad clone
+        // SOURCE (`NoSuchSource`, settled earlier in `resolve_volume`/`check_source`).
+        if let Some(commit) = clone_commit {
+            if prev.head.is_none() && !crate::claim::commit_ready(ctx, &id, commit).await? {
+                let prev = prev.clone();
+                let vref = id.clone();
+                return settle(
+                    Outcome::Permanent(format!("clone commit {commit} is not a ready snapshot of volume {id}"), "NoSuchCommit"),
+                    w,
+                    "Workspace",
+                    gen,
+                    move |cond| {
+                        serde_json::json!({
+                            "phase": crd::Phase::Error,
+                            "volumeRef": vref,
+                            "conditions": ws_conditions(&prev, cond),
+                        })
+                    },
+                    ctx,
+                )
+                .await;
+            }
+        }
         // `WORKTREE_EXISTS` converges a race (this pass and an earlier one both reaching here, or
         // a pod restart finding its own worktree already there) into a no-op rather than an error.
-        let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
+        // The worktree name is the WORKSPACE's own id, never the volume's — the two differ for a
+        // shared-volume clone, whose `id` (`volumeRef`) names the SOURCE's volume.
+        let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), w.name_any(), effective_head.clone());
         let result = tokio::task::spawn_blocking(move || engine.checkout(&vol_id, head.as_deref(), &ws_id))
             .await
             .map_err(|e| ReconcileErr(e.to_string()))?;
@@ -2109,6 +2188,16 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             Ok(()) => {}
             Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
             Err(e) => return Err(ReconcileErr(e.0)),
+        }
+        // First graft: this pass checked out the clone's commit, and nothing else will ever write
+        // it as `head` (a clone never gets Task 5's push-time `advance_head` unless it pushes
+        // itself) — the preserve pattern, same as `snapshot::advance_head`.
+        if prev.head.is_none() {
+            if let Some(commit) = clone_commit {
+                let prev2 = prev.clone();
+                write_ws_status(w, crd::WorkspaceStatus { head: Some(commit.to_string()), ..prev2 }, ctx).await?;
+                prev.head = Some(commit.to_string());
+            }
         }
     }
 
@@ -2684,6 +2773,14 @@ async fn restore_gate(
         st.and_then(|s| s.restored_to.as_deref()),
         st.and_then(|s| s.restore_requested_at.as_deref()),
     ) {
+        // Commit model: the wish IS a commit, so a freshly granted one is this environment's new
+        // head — written once, on the first pass that observes the grant (every later pass finds
+        // `head` already equal and no-ops). Preserve pattern: merge onto whatever this environment
+        // currently reports, never blank `podRef`/`serviceStatus`/anything else already there.
+        if ctx.commit_model && e.status.as_ref().and_then(|s| s.head.as_deref()) != Some(wish.snapshot_id.as_str()) {
+            let prev = e.status.clone().unwrap_or_default();
+            write_env_status(e, crd::EnvironmentStatus { head: Some(wish.snapshot_id.clone()), ..prev }, ctx).await?;
+        }
         return Ok(None);
     }
 

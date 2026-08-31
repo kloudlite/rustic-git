@@ -125,8 +125,12 @@
                         ],
                         "properties": {
                           "cloneOf": {
-                            "description": "A local snapshot of a sibling on the same pool — no registry round trip.",
+                            "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nUnder the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the head the API resolved\nONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before the commit model (and\nflag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
                             "properties": {
+                              "commit": {
+                                "nullable": true,
+                                "type": "string"
+                              },
                               "volume": {
                                 "type": "string"
                               }
@@ -441,8 +445,12 @@
                             ],
                             "properties": {
                               "cloneOf": {
-                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.",
+                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nUnder the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the head the API resolved\nONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before the commit model (and\nflag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
                                 "properties": {
+                                  "commit": {
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
                                   "volume": {
                                     "type": "string"
                                   }
@@ -869,8 +877,12 @@
                             ],
                             "properties": {
                               "cloneOf": {
-                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.",
+                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nUnder the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the head the API resolved\nONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before the commit model (and\nflag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
                                 "properties": {
+                                  "commit": {
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
                                   "volume": {
                                     "type": "string"
                                   }
