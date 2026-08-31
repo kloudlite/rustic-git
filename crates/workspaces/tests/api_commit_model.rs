@@ -89,6 +89,7 @@ async fn server(routes: Vec<Route>) -> Server {
 async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa")),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -119,6 +120,7 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
 async fn first_push_of_a_workspace_has_no_parent() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -134,7 +136,8 @@ async fn first_push_of_a_workspace_has_no_parent() {
     assert_eq!(req["spec"]["parent"], "");
 }
 
-/// `/history` walks `Snapshot` CRs, oldest first, parent-linked — no registry round trip.
+/// `/history` walks `Snapshot` CRs, NEWEST first (F2: matches the registry path's order),
+/// parent-linked — no registry round trip.
 #[tokio::test]
 async fn history_lists_snapshot_crs_in_parent_order() {
     let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
@@ -156,10 +159,10 @@ async fn history_lists_snapshot_crs_in_parent_order() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let rows: Vec<Value> = resp.json().await.unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0]["id"], "ws-1-aaaaaaaa");
-    assert_eq!(rows[0]["parent"], Value::Null);
-    assert_eq!(rows[1]["id"], "ws-1-bbbbbbbb");
-    assert_eq!(rows[1]["parent"], "ws-1-aaaaaaaa");
+    assert_eq!(rows[0]["id"], "ws-1-bbbbbbbb");
+    assert_eq!(rows[0]["parent"], "ws-1-aaaaaaaa");
+    assert_eq!(rows[1]["id"], "ws-1-aaaaaaaa");
+    assert_eq!(rows[1]["parent"], Value::Null);
 }
 
 /// `/refs` names the newest commit as `main` — same "first = tip" convention the registry path
@@ -343,4 +346,102 @@ async fn restore_in_place_of_a_valid_commit_writes_the_wish() {
     let patch = &s.rec.sent("PATCH", &format!("{API}/environments/env-1"))[0];
     assert_eq!(patch["spec"]["restore"]["snapshotId"], "env-1-aaaaaaaa");
     assert_eq!(patch["spec"]["restore"]["volume"], "env-1");
+}
+
+/// F1: a second push while the first is still `Working` is refused before it can create a second
+/// racing cut — the loser would become a Ready commit no worktree's `head` ever points at, so
+/// retention (which walks only the winner's chain) would never revisit and never delete it.
+#[tokio::test]
+async fn a_racing_push_while_one_is_still_working_is_refused() {
+    let racing = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "working");
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(
+            format!("{API}/snapshots"),
+            json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [racing]}),
+        ),
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409, "{}", resp.text().await.unwrap());
+    assert!(!s.rec.calls().iter().any(|c| c.contains(&format!("POST {API}/snapshots"))), "no second CR");
+}
+
+/// F2: history stays NEWEST first — the registry path's `records.first()` is always its tip, and
+/// a consumer switched over at cutover must see the same order, not a reversed one.
+#[tokio::test]
+async fn history_stays_newest_first_across_a_three_commit_chain() {
+    let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
+    root["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
+    let mut mid = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "ready");
+    mid["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
+    let mut tip = snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "ws-1-bbbbbbbb", "ready");
+    tip["metadata"]["creationTimestamp"] = json!("2026-01-03T00:00:00Z");
+    let routes = vec![get(
+        format!("{API}/snapshots"),
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [mid, root, tip]}),
+    )];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<Value> = resp.json().await.unwrap();
+    let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["ws-1-cccccccc", "ws-1-bbbbbbbb", "ws-1-aaaaaaaa"], "newest first, same as the registry path");
+}
+
+/// F3: `createdAt` is RFC3339 — the registry path's `chrono::DateTime<Utc>` serializes that way,
+/// and every consumer already parses it.
+#[tokio::test]
+async fn history_created_at_is_rfc3339() {
+    let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
+    root["metadata"]["creationTimestamp"] = json!("2026-01-01T12:34:56Z");
+    let routes = vec![get(
+        format!("{API}/snapshots"),
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [root]}),
+    )];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    let rows: Vec<Value> = resp.json().await.unwrap();
+    let created_at = rows[0]["createdAt"].as_str().unwrap();
+    chrono::DateTime::parse_from_rfc3339(created_at).unwrap_or_else(|e| panic!("{created_at:?} is not RFC3339: {e}"));
+}
+
+/// F6: `/refs` on a volume with zero commits (never pushed) is `{"main": null}`, the same shape
+/// the registry path answers with — never 404, which would read as "no such volume" instead of
+/// "no commits yet".
+#[tokio::test]
+async fn refs_of_a_zero_commit_volume_is_null_not_not_found() {
+    let routes = vec![get(
+        format!("{API}/snapshots"),
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
+    )];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/volumes/ws-1/refs", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["main"], Value::Null);
 }

@@ -13,7 +13,7 @@ use kube::api::ListParams;
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd;
+use rustic_git_workspaces::crd::{self, VolumeSource};
 use std::sync::Arc;
 
 /// The finalizer wrapper, exactly the shape `reconcile_volume` has: a delete routes every pass to
@@ -362,16 +362,30 @@ async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections
     let prefix = format!("{volume}-");
     let mut heads = std::collections::HashSet::new();
     for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
-        if let Some(h) = w.status.and_then(|s| s.head) {
+        if let Some(h) = w.status.as_ref().and_then(|s| s.head.clone()) {
             if h.starts_with(&prefix) {
                 heads.insert(h);
             }
         }
+        // F4: a clone's grafted commit is unprotected until its FIRST checkout writes
+        // `status.head` — a busy source can sweep it out of the keep-window in that gap, and
+        // the clone lands `NoSuchCommit` forever. The spec already names it, so retention reads
+        // it from there too, same list this loop is already paying for.
+        if let Some(VolumeSource::CloneOf { commit: Some(c), .. }) = w.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
+            if c.starts_with(&prefix) {
+                heads.insert(c.clone());
+            }
+        }
     }
     for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
-        if let Some(h) = e.status.and_then(|s| s.head) {
+        if let Some(h) = e.status.as_ref().and_then(|s| s.head.clone()) {
             if h.starts_with(&prefix) {
                 heads.insert(h);
+            }
+        }
+        if let Some(VolumeSource::CloneOf { commit: Some(c), .. }) = e.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
+            if c.starts_with(&prefix) {
+                heads.insert(c.clone());
             }
         }
     }
@@ -691,6 +705,48 @@ mod commit_tests {
         retain(&ctx, "vol-1", "vol-1-tip").await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a volumeRef-less head must still be spared: {:?}", rec.calls());
+    }
+
+    /// F4: a clone's grafted commit (`cloneOf.commit` in the WORKSPACE SPEC) is unprotected
+    /// until its first checkout writes `status.head` — a busy source pushing past the keep window
+    /// in that gap would otherwise sweep the very commit the clone is pinned to, and the clone
+    /// lands `NoSuchCommit` forever. This clone has never had a `head` of its own (fresh, never
+    /// checked out), so only the SPEC names its commit — and that alone must be enough to spare
+    /// it.
+    #[tokio::test]
+    async fn retention_spares_a_spec_only_clone_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let older = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "vol-1-old", "uid": "old-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-src", "parent": "", "pinned": false},
+            "status": {"phase": "ready"},
+        });
+        let tip = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "vol-1-tip", "uid": "tip-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-src", "parent": "vol-1-old", "pinned": false},
+            "status": {"phase": "ready"},
+        });
+        // No `status.head` at all — a fresh clone that has never checked out. Only the spec's
+        // `cloneOf.commit` names `vol-1-old`.
+        let clone = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-clone", "uid": "clone-uid"},
+            "spec": {"owner": "alice", "team": "", "name": "clone", "region": "r1", "image": "img", "desiredState": "running",
+                     "storage": {"quotaGb": 20, "source": {"cloneOf": {"volume": "vol-1", "commit": "vol-1-old"}}}},
+            "status": {"phase": "creating", "nodeName": "node-a"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![older, tip]) },
+            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![clone]) },
+            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        retain(&ctx, "vol-1", "vol-1-tip").await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a spec-only clone commit must survive: {:?}", rec.calls());
     }
 
     /// Keep-biased: a `Snapshot`-list error must delete nothing at all, not even the obviously

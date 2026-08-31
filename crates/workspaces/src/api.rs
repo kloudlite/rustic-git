@@ -1725,6 +1725,23 @@ async fn create_commit(
     parent: Option<String>,
     message: Option<String>,
 ) -> Result<Response, Response> {
+    // F1: two pushes of the same worktree before the first is cut both read the same `head` and
+    // both claim it as `parent` — the loser becomes a Ready commit no worktree's `head` ever
+    // reaches, and `worktree_heads`/retention only walks the WINNER's chain, so the loser is never
+    // revisited: an unbounded CR+disk leak, with a `parent` that misdescribes what it holds. A
+    // worktree may have at most one `Working` cut in flight at a time — refuse the second here,
+    // before it exists, rather than reconcile two winners later.
+    let api: Api<crd::Snapshot> = Api::all(c.clone());
+    let racing = api
+        .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await
+        .map_err(kube_err)?
+        .items
+        .into_iter()
+        .any(|sn| sn.spec.worktree == worktree && sn.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Working));
+    if racing {
+        return Err((StatusCode::CONFLICT, "a snapshot is already being cut for this workspace").into_response());
+    }
     let name = crd::snapshot_name(volume);
     let mut snap = crd::Snapshot::new(
         &name,
@@ -1741,7 +1758,6 @@ async fn create_commit(
     // this is how the object is born `Working` instead of the schema's `Pending` default —
     // `reconcile_commit` only ever acts on `Working`.
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
-    let api: Api<crd::Snapshot> = Api::all(c.clone());
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())
 }
@@ -2082,6 +2098,18 @@ async fn delete_snapshot(
 /// records. Scoped by `caller_owners` exactly like `volume_owner` — a volume under a label the
 /// caller may not read is a 404, same as the registry path.
 async fn commit_model_snapshots(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
+    let items = commit_model_snapshots_maybe_empty(s, caller_id, name).await?;
+    if items.is_empty() {
+        return Err(not_found());
+    }
+    Ok(items)
+}
+
+/// `commit_model_snapshots`, minus the "no rows" 404 — F6: `/refs` on a workspace that has never
+/// pushed has zero `Snapshot` CRs, which is a real, ownable volume with no commits yet, not an
+/// unknown one; the registry path answers that with `{"main": null}`, never 404, and this is what
+/// lets `volume_refs` match it.
+async fn commit_model_snapshots_maybe_empty(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
     check_path_segment(name)?;
     let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
     let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
@@ -2090,12 +2118,9 @@ async fn commit_model_snapshots(s: &ApiState, caller_id: &str, name: &str) -> Re
         .await
         .map_err(kube_err)?;
     let mut items: Vec<crd::Snapshot> = list.items.into_iter().filter(|sn| owners.contains(&sn.spec.owner)).collect();
-    if items.is_empty() {
-        return Err(not_found());
-    }
-    // Oldest first, matching the registry path's chain order — `parent` is what draws the tree,
-    // this ordering only makes a stable read.
-    items.sort_by_key(|sn| sn.creation_timestamp().map(|t| t.0));
+    // F2: NEWEST first, matching the registry path's order (`records.first()` is always its
+    // tip) — a consumer rendering history the old way would show it backwards otherwise.
+    items.sort_by_key(|sn| std::cmp::Reverse(sn.creation_timestamp().map(|t| t.0)));
     Ok(items)
 }
 
@@ -2132,6 +2157,10 @@ fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> 
                 "lineage": [],
                 "region": "",
                 "message": sn.spec.message,
+                // F3: `jiff::Timestamp`'s `Display` IS RFC3339 (`2026-01-01T00:00:00Z`), the
+                // same shape `chrono::DateTime<Utc>`'s serde impl gives the registry path's
+                // `created_at` — asserted directly in `commit_model_history_rows_createdat_is_rfc3339`
+                // rather than trusted, since a jiff/chrono formatting drift would be silent otherwise.
                 "createdAt": sn.creation_timestamp().map(|t| t.0.to_string()),
                 "parent": if sn.spec.parent.is_empty() { serde_json::Value::Null } else { serde_json::json!(sn.spec.parent) },
                 "phase": phase.as_str(),
@@ -2185,8 +2214,10 @@ async fn volume_refs(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     if s.commit_model {
-        let items = commit_model_snapshots(&s, &caller_id, &name).await?;
-        let tip = items.last().map(|sn| sn.name_any());
+        // F6: never 404 here — a zero-commit volume is `{"main": null}`, same shape the
+        // registry path already answers with.
+        let items = commit_model_snapshots_maybe_empty(&s, &caller_id, &name).await?;
+        let tip = items.first().map(|sn| sn.name_any());
         return Ok(Json(serde_json::json!({crate::registry_client::MAIN_REF: tip})).into_response());
     }
     let (_, records) = volume_owner(&s, &caller_id, &name).await?;
