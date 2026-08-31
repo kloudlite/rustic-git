@@ -100,6 +100,9 @@ pub struct ApiState {
     /// and in tests that do not exercise them: the volume routes answer 503, the same way every
     /// other route here reports a missing dependency rather than pretending it does not exist.
     pub upstream: Option<Arc<crate::upstream::Upstream>>,
+    /// `WS_COMMIT_MODEL=1`, read ONCE at construction — mirrors `Ctx.commit_model` on the agent.
+    /// Never a per-request env read: every route below asks this field, not the environment.
+    pub commit_model: bool,
 }
 
 impl ApiState {
@@ -114,6 +117,7 @@ impl ApiState {
             kube: None,
             keys: None,
             upstream: None,
+            commit_model: std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1"),
         }
     }
 
@@ -1671,6 +1675,11 @@ async fn push_ws(
     let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
     let msg = optional_push_message(body).await?;
+    if s.commit_model {
+        let volume = ws_volume(&w).ok_or_else(not_ready)?;
+        let head = w.status.as_ref().and_then(|st| st.head.clone());
+        return create_commit(kube(&s)?, volume, &w.spec.owner, &id, head, msg).await;
+    }
     request_snapshot(kube(&s)?, ws_volume(&w), msg).await
 }
 
@@ -1683,7 +1692,46 @@ async fn push_env(
     let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body).await?;
+    if s.commit_model {
+        let volume = env_volume(&e).ok_or_else(not_ready)?;
+        let head = e.status.as_ref().and_then(|st| st.head.clone());
+        return create_commit(kube(&s)?, volume, &e.spec.owner, &id, head, msg).await;
+    }
     request_snapshot(kube(&s)?, env_volume(&e), msg).await
+}
+
+/// The commit-model push: a `Snapshot` CR, created `Working` so the agent's `reconcile_commit`
+/// can act on the very first pass — CR-first (module doc), same as the old `SnapshotRequest`, just
+/// without the annotation-shaped outcome that kind needed a finalizer to protect. No
+/// `SnapshotRequest` is created here: the two kinds are mutually exclusive per push, gated on
+/// `s.commit_model`.
+async fn create_commit(
+    c: &kube::Client,
+    volume: &str,
+    owner: &str,
+    worktree: &str,
+    parent: Option<String>,
+    message: Option<String>,
+) -> Result<Response, Response> {
+    let name = crd::snapshot_name(volume);
+    let mut snap = crd::Snapshot::new(
+        &name,
+        crd::SnapshotSpec {
+            volume: volume.to_string(),
+            owner: owner.to_string(),
+            worktree: worktree.to_string(),
+            parent: parent.unwrap_or_default(),
+            message,
+            pinned: false,
+        },
+    );
+    // `status` on CREATE is stored verbatim (the subresource split only governs UPDATE/PATCH), so
+    // this is how the object is born `Working` instead of the schema's `Pending` default —
+    // `reconcile_commit` only ever acts on `Working`.
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
+    let api: Api<crd::Snapshot> = Api::all(c.clone());
+    api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -2008,12 +2056,56 @@ async fn delete_snapshot(
     }
 }
 
+/// The commit-model reads for `/history` and `/refs`: `Snapshot` CRs instead of registry
+/// records. Scoped by `caller_owners` exactly like `volume_owner` — a volume under a label the
+/// caller may not read is a 404, same as the registry path.
+async fn commit_model_snapshots(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
+    check_path_segment(name)?;
+    let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
+    let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
+    let list = api
+        .list(&ListParams::default().fields(&format!("spec.volume={name}")))
+        .await
+        .map_err(kube_err)?;
+    let mut items: Vec<crd::Snapshot> = list.items.into_iter().filter(|sn| owners.contains(&sn.spec.owner)).collect();
+    if items.is_empty() {
+        return Err(not_found());
+    }
+    // Oldest first, matching the registry path's chain order — `parent` is what draws the tree,
+    // this ordering only makes a stable read.
+    items.sort_by_key(|sn| sn.creation_timestamp().map(|t| t.0));
+    Ok(items)
+}
+
+fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .map(|sn| {
+            let phase = sn.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending);
+            serde_json::json!({
+                "id": sn.name_any(),
+                "state": serde_json::Value::Null,
+                "lineage": [],
+                "region": "",
+                "message": sn.spec.message,
+                "createdAt": sn.creation_timestamp().map(|t| t.0.to_string()),
+                "parent": if sn.spec.parent.is_empty() { serde_json::Value::Null } else { serde_json::json!(sn.spec.parent) },
+                "phase": phase.as_str(),
+            })
+        })
+        .collect()
+}
+
 async fn volume_history(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
+    if s.commit_model {
+        let items = commit_model_snapshots(&s, &caller_id, &name).await?;
+        return Ok(Json(commit_model_history_rows(&items)).into_response());
+    }
     let (_, records) = volume_owner(&s, &caller_id, &name).await?;
     // A record carries its whole blob chain and never names another record, so "parent" is
     // derived: the record whose chain is this one's chain minus its last blob. An in-place restore
@@ -2048,6 +2140,11 @@ async fn volume_refs(
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
+    if s.commit_model {
+        let items = commit_model_snapshots(&s, &caller_id, &name).await?;
+        let tip = items.last().map(|sn| sn.name_any());
+        return Ok(Json(serde_json::json!({crate::registry_client::MAIN_REF: tip})).into_response());
+    }
     let (_, records) = volume_owner(&s, &caller_id, &name).await?;
     let tip = records.first().map(|r| r.id.clone());
     Ok(Json(serde_json::json!({crate::registry_client::MAIN_REF: tip})).into_response())
