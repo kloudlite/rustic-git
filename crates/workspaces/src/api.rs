@@ -1739,6 +1739,11 @@ async fn create_commit(
         .items
         .into_iter()
         .any(|sn| sn.spec.worktree == worktree && sn.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Working));
+    // ponytail: list-then-create leaves a TOCTOU sliver — two pushes landing between each
+    // other's list and create both slip through and fork the chain. The 409 closes the common
+    // case (a user double-clicking, a retrying client); the sliver's cost is one orphan commit,
+    // and the upgrade path is a deterministic Working-CR name per worktree so the second create
+    // itself collides.
     if racing {
         return Err((StatusCode::CONFLICT, "a snapshot is already being cut for this workspace").into_response());
     }
