@@ -231,6 +231,16 @@ commit minted from it becomes the root (`spec.parent: ""`). Until that first com
 replicas the volume has no durable floor — true, and visible: `durable` is empty, the same honest
 empty as an N=1 cluster.
 
+### Homes are volumes in this model
+
+The deletion table removes the home-push beat — which is today the ONLY durability homes have
+(they were excluded from replication v1). Removing it without a replacement would leave every
+owner's dotfiles, shell history and editor state with no copy anywhere. So homes join the model
+as ordinary volumes: one repository per owner's home, one worktree per node the owner works on,
+committed and pulled exactly like everything else. Nothing about homes is special-cased beyond
+what already exists (`crd::home_volume_name`, the nested cache subvolumes that never travel in a
+send — both unchanged).
+
 ### Verbs in this model
 
 | verb | meaning |
