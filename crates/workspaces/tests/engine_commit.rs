@@ -113,6 +113,28 @@ fn drop_commit_of_an_absent_commit_is_a_no_op() {
     e.drop_commit("v1", "no-such-commit").unwrap();
 }
 
+/// Task 7a F5: `drop_worktree` is what reclaims a shared-volume clone's worktree on delete (no
+/// ownerReference reaches `{pool}/vol/{volume}/live/{ws}`). Same retry-convergence shape as
+/// `drop_commit`: gone once, and a second call against the same (now-absent) path is still Ok.
+#[test]
+fn drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
+        return;
+    }
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+
+    e.checkout("v1", None, "ws1").unwrap();
+    assert!(e.pool.worktree("v1", "ws1").exists());
+
+    e.drop_worktree("v1", "ws1").unwrap();
+    assert!(!e.pool.worktree("v1", "ws1").exists(), "the worktree subvolume must be gone");
+
+    // Retried (a reconcile after this already landed, or a worktree never checked out at all).
+    e.drop_worktree("v1", "ws1").unwrap();
+}
+
 #[test]
 fn checkout_of_missing_commit_errors_without_creating_anything() {
     if !have_btrfs() {

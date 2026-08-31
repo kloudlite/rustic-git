@@ -756,51 +756,100 @@ async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
     assert!(!tmp.path().join("vol/ws-1/live/ws-1").exists(), "no bootstrap worktree either");
 }
 
-/// Task 7a F5: a shared-volume clone's worktree lives under the SOURCE volume's `live/`, which no
-/// ownerReference reaches, so `cleanup_workspace_worktree` (the WORKTREE_FINALIZER's cleanup arm)
-/// is the only thing that drops it. It calls `Engine::drop_worktree` for exactly that case.
-#[tokio::test]
-async fn clone_delete_drops_its_worktree_under_the_source_volume() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, _rec) = ctx(tmp.path(), vec![]);
-    let ctx = commit_model_on(ctx);
-    let worktree = tmp.path().join("vol/vol-src/live/ws-clone");
-    std::fs::create_dir_all(&worktree).unwrap();
+const WS_CLONE_OBJ: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-clone";
+const WS_1_OBJ: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
 
+/// A shared-volume clone workspace (`cloneOf { commit: Some(_) }`), whose worktree lives under
+/// the SOURCE volume's `live/`, not its own.
+fn clone_workspace() -> crd::Workspace {
     let mut w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-src"}));
     w.metadata.name = Some("ws-clone".into());
     w.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
         source: Some(crd::VolumeSource::CloneOf { volume: "vol-src".into(), commit: Some("vol-src-abcd".into()) }),
     });
-
-    let err = rustic_git_agent::controller::cleanup_workspace_worktree(&w, &ctx).await.unwrap_err();
-
-    // No real `btrfs` on this box (and even on a real host this is a plain directory, not a
-    // subvolume) — the point proved is the ATTEMPT, not a clean delete: `drop_worktree` only
-    // reaches `run(["btrfs", ...])` when the worktree path exists at all, so an error naming
-    // `btrfs` is exactly the signal that this IS the clone case and it tried.
-    assert!(err.0.contains("btrfs"), "expected an attempted btrfs delete, got: {}", err.0);
+    w
 }
 
-/// The counterpart: an OWNED volume's worktree (no `cloneOf`, or a `cloneOf` with no `commit` —
-/// the pre-commit-model full-copy clone) is left for the Volume's own `SUBVOLUME_FINALIZER` to
-/// reclaim with the rest of the voldir — `cleanup_workspace_worktree` must not touch it.
+/// (i) Task 7a finding 1 / item 3: a fresh clone reconcile ADDS the finalizer. kube-rs's
+/// `finalizer()` combinator patches it on and returns `await_change()` WITHOUT running `Apply` at
+/// all ("No point applying here, since the patch will cause a new reconciliation") — so this needs
+/// no other route.
 #[tokio::test]
-async fn owned_volume_delete_does_not_touch_its_worktree() {
+async fn a_clone_reconcile_adds_the_worktree_finalizer() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, _rec) = ctx(tmp.path(), vec![]);
+    let route = Route { method: "PATCH", path: WS_CLONE_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-src"})) };
+    let (ctx, rec) = ctx(tmp.path(), vec![route]);
     let ctx = commit_model_on(ctx);
-    let worktree = tmp.path().join("vol/ws-1/live/ws-1");
-    std::fs::create_dir_all(&worktree).unwrap();
 
-    let w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"}));
-    // No `source` at all: an ordinary, owned workspace.
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(clone_workspace()), ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", WS_CLONE_OBJ).len(), 1, "the finalizer-add patch");
+}
+
+/// (ii) An OWNED workspace (no `cloneOf`, or one with no `commit` — the pre-commit-model
+/// full-copy clone) never grows the finalizer: `reconcile_workspace` must route it straight to
+/// `apply_workspace` without ever touching `WS_1_OBJ` — no route is registered for it, so a
+/// mistaken PATCH there would 404 and fail this test on its own.
+#[tokio::test]
+async fn an_owned_workspace_reconcile_does_not_add_the_finalizer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ws_stop_routes(None);
+    routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let ctx = commit_model_on(ctx);
+    let mut w = stopping_ws();
+    w.status.as_mut().unwrap().pod_ref = None;
     assert!(w.spec.storage.as_ref().and_then(|s| s.source.as_ref()).is_none());
 
-    rustic_git_agent::controller::cleanup_workspace_worktree(&w, &ctx).await.unwrap();
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
 
-    assert!(worktree.exists(), "an owned volume's worktree is the Volume finalizer's job, not this one's");
+    assert!(rec.calls().iter().all(|c| c != &format!("PATCH {WS_1_OBJ}")), "no finalizer patch: {:?}", rec.calls());
+}
+
+/// (iii) A deleting clone that already carries the finalizer: `reconcile_workspace` runs the
+/// `Cleanup` arm (which calls `drop_worktree` — proved for real by
+/// `engine_commit.rs`'s `drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry`; here the
+/// worktree is simply absent, so `drop_worktree`'s own no-op-on-absent path keeps this a pure loop
+/// test), then removes the finalizer via kube-rs's Test+Remove JSON patch.
+#[tokio::test]
+async fn a_deleting_clones_reconcile_drops_its_worktree_then_removes_the_finalizer() {
+    let tmp = tempfile::tempdir().unwrap();
+    // `ws_lock` needs `vol/` to exist to create its lock file — normally left behind by an
+    // earlier checkout; nothing else in this pure-loop test ever creates it.
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let route = Route { method: "PATCH", path: WS_CLONE_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-src"})) };
+    let (ctx, rec) = ctx(tmp.path(), vec![route]);
+    let ctx = commit_model_on(ctx);
+    let mut w = clone_workspace();
+    w.metadata.finalizers = Some(vec![crd::WORKTREE_FINALIZER.to_string()]);
+    w.metadata.deletion_timestamp =
+        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", WS_CLONE_OBJ).len(), 1, "the finalizer-remove patch");
+}
+
+/// (iv) Flag OFF, but the object still carries a finalizer left by an earlier commit_model pass
+/// (a rollback) and is deleting: `reconcile_workspace` must still enter the wrapper — the guard is
+/// "nothing to add AND nothing to remove", not "flag off" alone — run the no-op Cleanup arm, and
+/// remove the finalizer, or the object is stranded in Terminating forever.
+#[tokio::test]
+async fn a_flag_off_reconcile_of_an_already_finalized_deleting_workspace_removes_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let route = Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) };
+    let (ctx, rec) = ctx(tmp.path(), vec![route]);
+    // commit_model deliberately left OFF.
+    let mut w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"}));
+    w.metadata.finalizers = Some(vec![crd::WORKTREE_FINALIZER.to_string()]);
+    w.metadata.deletion_timestamp =
+        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", WS_1_OBJ).len(), 1, "the finalizer-remove patch, even with the flag off");
 }
 
 fn env_json(status: serde_json::Value) -> serde_json::Value {

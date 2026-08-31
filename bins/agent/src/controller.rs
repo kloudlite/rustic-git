@@ -2005,16 +2005,42 @@ async fn stop_workspace(
     Ok(Action::await_change())
 }
 
-/// `WORKTREE_FINALIZER` only under commit_model — flag off must never see this object grow a
-/// finalizer it never carried before, so the whole wrapper is skipped rather than added and
-/// immediately no-op'd.
+/// A shared-volume clone (`spec.storage.source` is `CloneOf { commit: Some(_), .. }`) checks out
+/// a worktree under the SOURCE volume's `live/`, not its own — it owns no `Volume` child, so
+/// nothing's ownerReference GC ever reclaims that worktree. An owned-volume workspace needs
+/// nothing here: its `Volume`'s own `SUBVOLUME_FINALIZER` deletes the whole voldir, worktree
+/// included.
+fn is_shared_clone(w: &crd::Workspace) -> bool {
+    w.spec
+        .storage
+        .as_ref()
+        .and_then(|s| s.source.as_ref())
+        .is_some_and(|src| matches!(src, VolumeSource::CloneOf { commit: Some(_), .. }))
+}
+
+fn has_worktree_finalizer(w: &crd::Workspace) -> bool {
+    w.metadata.finalizers.as_ref().is_some_and(|fs| fs.iter().any(|f| f == crd::WORKTREE_FINALIZER))
+}
+
+/// `WORKTREE_FINALIZER` is added ONLY to a shared-volume clone, and only under commit_model — an
+/// owned workspace, or any workspace with the flag off, never grows one. But a finalizer already
+/// present (added by an earlier commit_model pass, now rolled back, or a clone whose spec no
+/// longer reads as one) must still be REMOVABLE with the flag off or the clone-ness gone: a
+/// short-circuit that skipped the wrapper whenever `!commit_model` would strand every such
+/// object in Terminating forever the moment someone deletes it after a rollback. So the guard is
+/// "nothing to add AND nothing to remove", not just "flag off".
 pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    if !ctx.commit_model {
+    let should_carry = ctx.commit_model && is_shared_clone(&w);
+    if !should_carry && !has_worktree_finalizer(&w) {
         return apply_workspace(&w, &ctx).await;
     }
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
+    let commit_model = ctx.commit_model;
     finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {
         match event {
+            // Flag off: never touch the disk, just let the combinator strip the leftover
+            // marker so the object can finish deleting.
+            FinalizerEvent::Cleanup(_) if !commit_model => Ok(Action::await_change()),
             FinalizerEvent::Cleanup(w) => cleanup_workspace_worktree(&w, &ctx).await,
             FinalizerEvent::Apply(w) => apply_workspace(&w, &ctx).await,
         }
@@ -2023,18 +2049,11 @@ pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Resul
     .map_err(|e| ReconcileErr(e.to_string()))
 }
 
-/// F5: a shared-volume clone's worktree lives under the SOURCE volume's `live/`, which no
-/// ownerReference reaches — this is the only thing that drops it on delete. An owned-volume
-/// workspace's worktree dies with its `Volume` (that finalizer removes the whole voldir), so this
-/// is a no-op for it.
+/// F5: drop a shared-volume clone's worktree on delete — the only thing that ever reclaims it
+/// (see `is_shared_clone`'s doc comment). Called from `reconcile_workspace`'s finalizer only when
+/// commit_model is on, so this never runs for the flag-off no-op cleanup.
 pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    let is_shared_clone = w
-        .spec
-        .storage
-        .as_ref()
-        .and_then(|s| s.source.as_ref())
-        .is_some_and(|src| matches!(src, VolumeSource::CloneOf { commit: Some(_), .. }));
-    if is_shared_clone {
+    if is_shared_clone(w) {
         // `volumeRef` names the SOURCE volume (see `resolve_volume`'s `shared` arm); the worktree
         // under it is named by this workspace's own id, same as every checkout call.
         if let Some(volume) = w.status.as_ref().and_then(|s| s.volume_ref.clone()) {

@@ -125,6 +125,16 @@ pub(crate) fn run(argv: &[&str]) -> Result<(), EngErr> {
     Ok(())
 }
 
+/// A btrfs subvolume's root directory always has inode number 256 — the cheapest correct way to
+/// tell "this path is a subvolume" from "this path is a plain directory a subvolume happens to
+/// contain" without shelling out to `btrfs subvolume show` (which errors on a non-subvolume path
+/// anyway, making it no cheaper). A path that doesn't exist reads as "not a subvolume", not an
+/// error: the caller's existence check runs separately.
+fn is_subvolume(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).is_ok_and(|m| m.ino() == 256)
+}
+
 /// The `Generation:` line of `btrfs subvolume show`. Split from the command so the parse has a test
 /// that runs where btrfs does not.
 pub fn parse_generation(subvolume_show: &str) -> Option<u64> {
@@ -220,10 +230,16 @@ impl Engine {
     /// double-count in a qgroup's exclusive counter anyway, so this undercounts if anything), but
     /// it caps runaway growth from any one worktree, which is what the limit is for.
     pub fn set_quota(&self, id: &str, quota_gb: u64, commit_model: bool) -> Result<Option<String>, EngErr> {
-        if commit_model {
+        let live = self.pool.live(id);
+        // Mixed-state pool: a volume can be commit_model-eligible but not yet MIGRATED — `live`
+        // is still the old single subvolume, not a directory of worktrees. Descending into it as
+        // a worktree directory would `read_dir` straight into the user's own files and qgroup-
+        // limit each one, which fails (a plain file/dir is not a subvolume) into "unenforced" —
+        // silently uncapping the volume. The layout is decided by what's actually on disk, not by
+        // the flag alone: `is_subvolume` is the same "root inode 256" check btrfs itself uses.
+        if commit_model && !is_subvolume(&live) {
             return self.set_quota_worktrees(id, quota_gb);
         }
-        let live = self.pool.live(id);
         if !live.exists() {
             return Err(EngErr::other(format!("{}: no live subvolume to limit", live.display())));
         }
