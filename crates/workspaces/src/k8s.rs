@@ -67,6 +67,11 @@ pub struct PodContext<'a> {
     pub runtime_class: Option<&'a str>,
     /// The tagged image behind `model::DEFAULT_WS_IMAGE`, from the agent's `WS_DEFAULT_IMAGE`.
     pub default_image: &'a str,
+    /// `WS_COMMIT_MODEL=1` (`Ctx.commit_model`, read once at construction — see `controller.rs`).
+    /// Selects which layout the `live` mount's hostPath points at: the old single-subvolume
+    /// `Pool::live` or the new per-worktree `Pool::worktree` (`{pool}/vol/{volume}/live/{ws}`).
+    /// A parameter, never an env read in here — see the module doc.
+    pub commit_model: bool,
 }
 
 pub(crate) fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
@@ -677,9 +682,22 @@ fn workspaces_volume() -> Volume {
     Volume { name: "workspaces".to_string(), empty_dir: Some(Default::default()), ..Default::default() }
 }
 
-/// The workspace's own subvolume.
-fn live_volume(pool: &str, id: &str) -> Volume {
-    host_dir("live", live_path(pool, id))
+/// `{pool}/vol/{volume}/live/{ws}` — commit model's per-worktree layout (mirrors
+/// `engine::pool::Pool::worktree`, which this crate cannot depend on directly: `engine` is
+/// gated behind btrfs tooling this crate's tests don't need).
+fn worktree_path(pool: &str, volume: &str, ws: &str) -> String {
+    format!("{pool}/vol/{volume}/live/{ws}")
+}
+
+/// The pod's `live` mount: the old single-subvolume path, or under commit_model the WORKTREE path
+/// — `volume` and `ws` differ for a shared-volume clone, so both are threaded in rather than
+/// reusing the pod's own id.
+fn live_worktree_volume(pool: &str, volume: &str, ws: &str, commit_model: bool) -> Volume {
+    if commit_model {
+        host_dir("live", worktree_path(pool, volume, ws))
+    } else {
+        host_dir("live", live_path(pool, volume))
+    }
 }
 
 /// Keep the pod on its role's nodes and on the node holding its subvolume, and tolerate that
@@ -803,7 +821,11 @@ pub fn git_init_container(
 }
 
 /// The workspace's one pod.
-pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Option<Container>) -> Pod {
+/// `id` names the pod (and, pre-commit-model, its volume — the two were always the same subvolume
+/// then). `ws_id` is the WORKSPACE's own id, only ever different from `id` under commit_model for
+/// a shared-volume clone (`id` is `volumeRef`, the source volume; `ws_id` is this workspace's own
+/// worktree name) — see `Pool::worktree`.
+pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodContext, init: Option<Container>) -> Pod {
     // ssh is a feature of the DEFAULT image only: a user image brings its own entrypoint, and we
     // cannot replace it with sshd without breaking whatever it was built to run.
     let default_image = crate::model::is_default_image(&spec.image);
@@ -873,7 +895,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             let mut v = vec![
                 home_volume(ctx.pool, &crate::crd::home_volume_name(&spec.owner)),
                 workspaces_volume(),
-                live_volume(ctx.pool, id),
+                live_worktree_volume(ctx.pool, id, ws_id, ctx.commit_model),
                 nix_volume(),
                 attach_volume(ctx.pool, id),
                 user_key_volume(init.is_some()),
@@ -991,7 +1013,10 @@ pub fn service_statefulset(
             security_context: Some(hardened()),
             ..Default::default()
         }],
-        volumes: Some(vec![live_volume(ctx.pool, env_id)]),
+        // An environment's worktree is checked out under its OWN id (`run_environment` checks out
+        // `(volume=id, ws=id)` — an environment never shares its volume the way a workspace clone
+        // can), so volume and ws are the same id here.
+        volumes: Some(vec![live_worktree_volume(ctx.pool, env_id, env_id, ctx.commit_model)]),
         // An environment's services are the likeliest place a private image appears — they are
         // whatever the user named, not our default.
         image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
@@ -1366,7 +1391,7 @@ mod tests {
     /// rather than a failed mount.
     #[test]
     fn every_volume_is_a_typed_host_path() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         assert!(
             vols.iter().all(|v| v.persistent_volume_claim.is_none()),
@@ -1386,7 +1411,7 @@ mod tests {
     /// The pod's three hostPath mounts point at the paths the agent actually manages on disk.
     #[test]
     fn a_workspace_pods_host_paths_match_the_agents_layout() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let path = |n: &str| {
             vols.iter().find(|v| v.name == n).unwrap_or_else(|| panic!("no {n} volume"))
@@ -1397,11 +1422,35 @@ mod tests {
         assert_eq!(path("attach"), attach_file(ctx().pool, "ws-1"));
     }
 
+    /// Task 7a: under commit_model the `live` mount is the WORKTREE path, not the old
+    /// single-subvolume one — and `id` (volumeRef) vs `ws_id` (this workspace's own id) matter:
+    /// a shared-volume clone's worktree lives under the SOURCE volume's `live/`, named by the
+    /// clone's own id.
+    #[test]
+    fn a_workspace_pods_live_mount_is_the_worktree_path_under_commit_model() {
+        let commit_ctx = PodContext { commit_model: true, ..ctx() };
+        let p = workspace_pod(&ws_spec(), "vol-1", "ws-1", &commit_ctx, None);
+        let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        let live = vols.iter().find(|v| v.name == "live").unwrap();
+        assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/vol-1/live/ws-1", ctx().pool));
+        assert_eq!(live.host_path.as_ref().unwrap().type_.as_deref(), Some("Directory"));
+    }
+
+    /// Flag off must stay byte-identical even when `id` and `ws_id` differ (they never do in
+    /// practice pre-commit_model, but the builder must not silently start using `ws_id` anyway).
+    #[test]
+    fn a_workspace_pods_live_mount_ignores_ws_id_when_commit_model_is_off() {
+        let p = workspace_pod(&ws_spec(), "vol-1", "ws-1", &ctx(), None);
+        let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        let live = vols.iter().find(|v| v.name == "live").unwrap();
+        assert_eq!(live.host_path.as_ref().unwrap().path, live_path(ctx().pool, "vol-1"));
+    }
+
     /// Placement is the pod's own now that no PV carries node affinity, and it is ADDED to the
     /// role selector rather than replacing it.
     #[test]
     fn the_pod_selects_its_node_by_hostname() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
@@ -1421,8 +1470,19 @@ mod tests {
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 
+    /// Task 7a: an environment's worktree is checked out under its OWN id (volume == ws, see
+    /// `run_environment`), so `env_id` alone determines the path.
+    #[test]
+    fn the_service_pods_live_mount_is_the_worktree_path_under_commit_model() {
+        let commit_ctx = PodContext { commit_model: true, ..ctx() };
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &commit_ctx).unwrap();
+        let vols = d.spec.unwrap().template.spec.unwrap().volumes.unwrap();
+        let live = vols.iter().find(|v| v.name == "live").unwrap();
+        assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/env-1/live/env-1", ctx().pool));
+    }
+
     fn ctx() -> PodContext<'static> {
-        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef" }
+        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef", commit_model: false }
     }
 
     fn svc(folder: &str, path: &str) -> model::Service {
@@ -1464,7 +1524,7 @@ mod tests {
     #[test]
     fn a_workspace_pod_mounts_its_own_resolv_conf() {
         let spec = ws_spec();
-        let pod = workspace_pod(&spec, "ws-1", &ctx(), None);
+        let pod = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None);
         let podspec = pod.spec.unwrap();
         let vol = podspec.volumes.unwrap().into_iter().find(|v| v.name == "attach").expect("attach volume");
         let h = vol.host_path.unwrap();
@@ -1541,7 +1601,7 @@ mod tests {
     #[test]
     fn tenant_pods_run_under_the_sandbox_when_one_is_configured() {
         let ctx = ctx(); // runtime_class: Some("gvisor")
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx, None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx, None);
         assert_eq!(p.spec.unwrap().runtime_class_name.as_deref(), Some("gvisor"));
 
         let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
@@ -1552,15 +1612,15 @@ mod tests {
         );
 
         // Unset means the host kernel, not a broken pod.
-        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef" };
-        assert!(workspace_pod(&ws_spec(), "ws-1", &bare, None).spec.unwrap().runtime_class_name.is_none());
+        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef", commit_model: false };
+        assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None).spec.unwrap().runtime_class_name.is_none());
     }
 
     #[test]
     fn no_pod_this_module_builds_uses_a_claim() {
         // A PVC binds through the StorageClass and a local PV; the pods mount the host directly
         // now, so a PVC reappearing here would mean a builder regressed to the old shape.
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         for v in p.spec.unwrap().volumes.unwrap() {
             assert!(v.persistent_volume_claim.is_none(), "workspace pod must mount a hostPath, not a claim");
             // The key is a Secret, `~/workspaces` is a per-pod emptyDir (baseline allows it);
@@ -1575,7 +1635,7 @@ mod tests {
 
     #[test]
     fn a_user_pod_cannot_reach_the_api_server_or_escalate() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         assert_eq!(s.automount_service_account_token, Some(false));
         assert_eq!(s.restart_policy.as_deref(), Some("Always"));
@@ -1696,7 +1756,7 @@ mod tests {
     /// git which key to use.
     #[test]
     fn a_workspace_pod_carries_the_owners_platform_key() {
-        let spec = workspace_pod(&ws_spec(), "ws-1", &ctx(), None).spec.unwrap();
+        let spec = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).spec.unwrap();
         let v = spec.volumes.unwrap().into_iter().find(|v| v.name == "user-key").expect("volume");
         let sv = v.secret.unwrap();
         assert_eq!(sv.secret_name.as_deref(), Some(USER_KEY_SECRET));
@@ -1719,7 +1779,7 @@ mod tests {
     /// public image and means a namespace given a credential just works.
     #[test]
     fn tenant_pods_reference_the_namespace_pull_secret() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let refs = p.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(refs[0].name, PULL_SECRET);
 
@@ -1740,7 +1800,7 @@ mod tests {
 
     #[test]
     fn a_workspace_pod_mounts_the_store_and_only_its_own_profile_read_only() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let c = &p.spec.as_ref().unwrap().containers[0];
         let mounts = c.volume_mounts.as_ref().unwrap();
         let store = mounts.iter().find(|m| m.mount_path == "/nix/store").expect("store mount");
@@ -1767,7 +1827,7 @@ mod tests {
 
     #[test]
     fn a_workspace_pod_mounts_its_volume_at_workspace_and_only_there() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.name == "live" && v.host_path.is_some());
         assert_eq!(claims.count(), 1);
@@ -1781,7 +1841,7 @@ mod tests {
     /// mounts under `/home/kl/.ssh` land inside the home too — a Secret inside a PV is fine.
     #[test]
     fn a_workspace_pod_mounts_the_home_and_the_workspace_inside_it() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
         assert_eq!(home.host_path.as_ref().unwrap().path, live_path(ctx().pool, &crate::crd::home_volume_name(&ws_spec().owner)));
@@ -1796,7 +1856,7 @@ mod tests {
         // A custom image gets the home too: it is the person's, not the image's.
         let mut custom = ws_spec();
         custom.image = "ghcr.io/someone/theirs:1".into();
-        let s = workspace_pod(&custom, "ws-1", &ctx(), None).spec.unwrap();
+        let s = workspace_pod(&custom, "ws-1", "ws-1", &ctx(), None).spec.unwrap();
         assert!(s.volumes.as_ref().unwrap().iter().any(|v| v.name == "home"));
     }
 
@@ -1807,7 +1867,7 @@ mod tests {
     fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_keys() {
         let mut spec = ws_spec();
         spec.image = crate::model::DEFAULT_WS_IMAGE.into();
-        let s = workspace_pod(&spec, "ws-1", &ctx(), None).spec.unwrap();
+        let s = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None).spec.unwrap();
         let c = &s.containers[0];
         let cmd = c.command.as_ref().unwrap();
         assert_eq!(cmd[0], "/bin/sh");
@@ -1944,7 +2004,7 @@ mod tests {
     fn a_custom_image_keeps_its_entrypoint_and_gets_no_sshd() {
         let mut spec = ws_spec();
         spec.image = "ghcr.io/acme/dev:1".into();
-        let s = workspace_pod(&spec, "ws-1", &ctx(), None).spec.unwrap();
+        let s = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None).spec.unwrap();
         assert!(s.containers[0].command.is_none(), "a user image keeps its entrypoint");
         assert!(s.containers[0].ports.is_none());
         assert!(s.volumes.as_ref().unwrap().iter().all(|v| v.name != "ws-ssh" && v.name != "authorized-keys"));
@@ -2022,7 +2082,7 @@ mod tests {
     fn every_child_object_cascades_on_delete() {
         // Reclamation via garbage collection rather than cleanup code that can be skipped or crash
         // halfway. If this regresses, deleting a workspace leaks its pod or namespace.
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         assert_eq!(p.metadata.owner_references.unwrap()[0].controller, Some(true));
         assert_eq!(namespace("env-1", "team", "environment", Some(&owner_ref())).metadata.owner_references.unwrap().len(), 1);
         for pol in default_policies("env-1", "team", &owner_ref()) {

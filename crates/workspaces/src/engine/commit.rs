@@ -140,4 +140,18 @@ impl Engine {
         }
         run(&["btrfs", "subvolume", "delete", path.to_str().unwrap()])
     }
+
+    /// Delete worktree `ws` of `volume` (Task 7a's F5 fix: a deleted shared-volume clone's
+    /// worktree, `{pool}/vol/{volume}/live/{ws}`, has no child `Volume` and no ownerReference to
+    /// garbage-collect it — this is the only thing that removes it). Ok-on-absent, same
+    /// reconcile-convergence shape as `drop_commit`: a retry after this already ran (or a
+    /// worktree that was never checked out) must not error.
+    pub fn drop_worktree(&self, volume: &str, ws: &str) -> Result<(), EngErr> {
+        let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
+        let path = self.pool.worktree(volume, ws);
+        if !path.exists() {
+            return Ok(());
+        }
+        run(&["btrfs", "subvolume", "delete", path.to_str().unwrap()])
+    }
 }

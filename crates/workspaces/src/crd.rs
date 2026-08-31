@@ -49,6 +49,15 @@ pub const SUBVOLUME_FINALIZER: &str = "rustic-git.io/subvolume";
 /// possible `POST /commits` with no object left to record the outcome in — and the Volume's own
 /// finalizer does not cover it, because a SnapshotRequest is deliberately not the Volume's child.
 pub const SNAPSHOT_FINALIZER: &str = "rustic-git.io/snapshot";
+/// Held on a Workspace only under `WS_COMMIT_MODEL=1` (Task 7a's F5 fix). A workspace that is a
+/// shared-volume clone (`spec.storage.source` is `CloneOf { commit: Some(_), .. }`) checks out a
+/// worktree under the SOURCE volume's `live/`, not its own — it owns no `Volume` child, so
+/// nothing's ownerReference GC ever reclaims that worktree. This finalizer is what makes the
+/// delete drop it. An owned-volume workspace also carries this finalizer (added uniformly to
+/// avoid distinguishing the two cases before the spec's `source` is known to be gone at delete
+/// time), but its cleanup is a no-op: the owned `Volume`'s own `SUBVOLUME_FINALIZER` already
+/// deletes the whole voldir, worktree included.
+pub const WORKTREE_FINALIZER: &str = "rustic-git.io/worktree";
 
 /// What the operator asked for, independent of what is currently true.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

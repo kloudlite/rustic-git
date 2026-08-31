@@ -332,7 +332,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             |r| owned_by::<crd::Workspace, _>(&r),
         )
         .shutdown_on_signal()
-        .run(|w, c| timed("workspace", async move { apply_workspace(&w, &c).await }), error_policy, ctx.clone())
+        .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "workspace reconcile")
@@ -1037,7 +1037,7 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         // plain quota edit too (a spec change is a new generation, which is a materialize pass
         // that finds `live` already there). Per subvolume, so a restore's fresh `live` would
         // otherwise come up uncapped.
-        let quota_unenforced = engine.set_quota(id, quota_gb).map_err(|e| e.to_string())?;
+        let quota_unenforced = engine.set_quota(id, quota_gb, commit_model).map_err(|e| e.to_string())?;
         Ok(Done {
             phase: Phase::Ready,
             lineage_tip: None,
@@ -2005,6 +2005,49 @@ async fn stop_workspace(
     Ok(Action::await_change())
 }
 
+/// `WORKTREE_FINALIZER` only under commit_model — flag off must never see this object grow a
+/// finalizer it never carried before, so the whole wrapper is skipped rather than added and
+/// immediately no-op'd.
+pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    if !ctx.commit_model {
+        return apply_workspace(&w, &ctx).await;
+    }
+    let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
+    finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {
+        match event {
+            FinalizerEvent::Cleanup(w) => cleanup_workspace_worktree(&w, &ctx).await,
+            FinalizerEvent::Apply(w) => apply_workspace(&w, &ctx).await,
+        }
+    })
+    .await
+    .map_err(|e| ReconcileErr(e.to_string()))
+}
+
+/// F5: a shared-volume clone's worktree lives under the SOURCE volume's `live/`, which no
+/// ownerReference reaches — this is the only thing that drops it on delete. An owned-volume
+/// workspace's worktree dies with its `Volume` (that finalizer removes the whole voldir), so this
+/// is a no-op for it.
+pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    let is_shared_clone = w
+        .spec
+        .storage
+        .as_ref()
+        .and_then(|s| s.source.as_ref())
+        .is_some_and(|src| matches!(src, VolumeSource::CloneOf { commit: Some(_), .. }));
+    if is_shared_clone {
+        // `volumeRef` names the SOURCE volume (see `resolve_volume`'s `shared` arm); the worktree
+        // under it is named by this workspace's own id, same as every checkout call.
+        if let Some(volume) = w.status.as_ref().and_then(|s| s.volume_ref.clone()) {
+            let (engine, ws_id) = (ctx.engine.clone(), w.name_any());
+            tokio::task::spawn_blocking(move || engine.drop_worktree(&volume, &ws_id))
+                .await
+                .map_err(|e| ReconcileErr(e.to_string()))?
+                .map_err(|e| ReconcileErr(e.0))?;
+        }
+    }
+    Ok(Action::await_change())
+}
+
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
@@ -2181,9 +2224,16 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         // The worktree name is the WORKSPACE's own id, never the volume's — the two differ for a
         // shared-volume clone, whose `id` (`volumeRef`) names the SOURCE's volume.
         let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), w.name_any(), effective_head.clone());
-        let result = tokio::task::spawn_blocking(move || engine.checkout(&vol_id, head.as_deref(), &ws_id))
-            .await
-            .map_err(|e| ReconcileErr(e.to_string()))?;
+        let quota_gb = vol.spec.quota_gb;
+        let result = tokio::task::spawn_blocking(move || {
+            engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
+            // Quota the worktree the instant it exists — waiting for the volume's next reconcile
+            // pass would leave a freshly checked-out worktree briefly unquota'd.
+            engine.set_quota_worktree(&vol_id, &ws_id, quota_gb)?;
+            Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
+        })
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?;
         match result {
             Ok(()) => {}
             Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
@@ -2209,6 +2259,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         owner_ref: owner_ref.clone(),
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
+        commit_model: ctx.commit_model,
     };
     // Resolve the attachment before writing anything: a missing or cross-region environment is
     // reported and treated as unattached, never as a half-applied grant.
@@ -2329,7 +2380,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     }
                 }
             };
-            create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx, init)).await?;
+            create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init)).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
             // from the apply made a broken workspace indistinguishable from a working one.
@@ -2612,9 +2663,14 @@ async fn run_environment(
             return Ok(Action::requeue(TICK));
         }
         let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
-        let result = tokio::task::spawn_blocking(move || engine.checkout(&vol_id, head.as_deref(), &ws_id))
-            .await
-            .map_err(|e| ReconcileErr(e.to_string()))?;
+        let quota_gb = vol.spec.quota_gb;
+        let result = tokio::task::spawn_blocking(move || {
+            engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
+            engine.set_quota_worktree(&vol_id, &ws_id, quota_gb)?;
+            Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
+        })
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?;
         match result {
             Ok(()) => {}
             Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
@@ -2655,6 +2711,7 @@ async fn run_environment(
         owner_ref: owner_ref.clone(),
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
+        commit_model: ctx.commit_model,
     };
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
     // security check, not a formality: `create_dir_all` on an unvalidated folder is itself the

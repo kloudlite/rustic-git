@@ -343,11 +343,11 @@ async fn quota_is_reported_unavailable_then_enforced_once_the_pool_has_qgroups()
     let base = registry_server().await;
     let e = engine(lp.pool(), Arc::new(InMemory::new()), &base);
     e.create_subvol("ws-quota").unwrap();
-    assert!(e.set_quota("ws-quota", 1).unwrap().is_some(), "a pool without qgroups must say so, not fail");
+    assert!(e.set_quota("ws-quota", 1, false).unwrap().is_some(), "a pool without qgroups must say so, not fail");
 
     run(&["btrfs", "quota", "enable", lp.pool.root.to_str().unwrap()]);
     run(&["btrfs", "quota", "rescan", "-w", lp.pool.root.to_str().unwrap()]);
-    assert_eq!(e.set_quota("ws-quota", 1).unwrap(), None);
+    assert_eq!(e.set_quota("ws-quota", 1, false).unwrap(), None);
 
     // 1 GiB cap on a 4 GiB pool: the writes must stop well before the pool does.
     let chunk = vec![0xabu8; 64 << 20];
@@ -367,6 +367,58 @@ async fn quota_is_reported_unavailable_then_enforced_once_the_pool_has_qgroups()
     assert!(written < 2 << 30, "the cap must bite near the limit, not the pool: {written}");
     e.create_subvol("ws-sibling").unwrap();
     std::fs::write(e.pool.live("ws-sibling").join("still-writable"), b"x").expect("a sibling is unaffected");
+}
+
+/// Task 7a's ruling on commit_model quota: under the per-worktree layout, `set_quota(id, gb,
+/// true)` limits EVERY worktree of the volume individually, not one subvolume — and
+/// `set_quota_worktree` (called right after `checkout`) limits just the one it names.
+#[tokio::test]
+async fn quota_under_commit_model_is_applied_per_worktree() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let base = registry_server().await;
+    let e = engine(lp.pool(), Arc::new(InMemory::new()), &base);
+    run(&["btrfs", "quota", "enable", lp.pool.root.to_str().unwrap()]);
+    run(&["btrfs", "quota", "rescan", "-w", lp.pool.root.to_str().unwrap()]);
+
+    e.checkout("vol-quota", None, "ws-a").unwrap();
+    e.checkout("vol-quota", None, "ws-b").unwrap();
+
+    // A volume-level pass covers every worktree it already has.
+    assert_eq!(e.set_quota("vol-quota", 1, true).unwrap(), None);
+    let out = std::process::Command::new("btrfs")
+        .args(["qgroup", "show", "-r", e.pool.worktree("vol-quota", "ws-a").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1.00GiB"), "ws-a should carry the 1 GiB limit");
+
+    // A single fresh worktree (the checkout-time call) is limited without touching the others.
+    e.checkout("vol-quota", None, "ws-c").unwrap();
+    assert_eq!(e.set_quota_worktree("vol-quota", "ws-c", 2).unwrap(), None);
+    let out = std::process::Command::new("btrfs")
+        .args(["qgroup", "show", "-r", e.pool.worktree("vol-quota", "ws-c").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("2.00GiB"), "ws-c should carry its own 2 GiB limit");
+}
+
+/// Flag off: `set_quota` never looks at `live/*` and never touches `set_quota_worktrees` at all —
+/// same single-subvolume call the pre-commit-model test above exercises.
+#[tokio::test]
+async fn quota_flag_off_is_byte_identical_to_before() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let base = registry_server().await;
+    let e = engine(lp.pool(), Arc::new(InMemory::new()), &base);
+    e.create_subvol("ws-plain").unwrap();
+    // No qgroups enabled: unenforced, exactly as the pre-commit-model behavior.
+    assert!(e.set_quota("ws-plain", 1, false).unwrap().is_some());
 }
 
 #[tokio::test]

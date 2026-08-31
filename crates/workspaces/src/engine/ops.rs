@@ -212,13 +212,54 @@ impl Engine {
     /// line existed has none. That is not the volume's fault, so it is not an `Err` — the caller
     /// surfaces it as a condition and the volume stays usable, unenforced, until an operator
     /// enables quotas on the pool. Level-triggered: the next reconcile re-applies.
-    pub fn set_quota(&self, id: &str, quota_gb: u64) -> Result<Option<String>, EngErr> {
+    /// `commit_model`: btrfs qgroups are per-SUBVOLUME, and under the commit model `live` is a
+    /// directory of worktree subvolumes (`Pool::worktree`), not one subvolume — there is no
+    /// single tree to limit any more. RULING (Task 7a, the spec's open quota question): apply the
+    /// volume's `quota_gb` to EACH worktree subvolume individually, same number per tree. Not
+    /// billing-exact for shared extents across worktrees of the same volume (CoW shares don't
+    /// double-count in a qgroup's exclusive counter anyway, so this undercounts if anything), but
+    /// it caps runaway growth from any one worktree, which is what the limit is for.
+    pub fn set_quota(&self, id: &str, quota_gb: u64, commit_model: bool) -> Result<Option<String>, EngErr> {
+        if commit_model {
+            return self.set_quota_worktrees(id, quota_gb);
+        }
         let live = self.pool.live(id);
         if !live.exists() {
             return Err(EngErr::other(format!("{}: no live subvolume to limit", live.display())));
         }
         let limit = if quota_gb == 0 { "none".to_string() } else { format!("{quota_gb}G") };
         Ok(run(&["btrfs", "qgroup", "limit", &limit, live.to_str().unwrap()]).err().map(|e| e.0))
+    }
+
+    /// Limit every worktree subvolume this pool currently has checked out for `id`
+    /// (`{pool}/vol/{id}/live/*`) to `quota_gb`. No worktrees yet (volume Ready before any
+    /// workspace has checked one out) is not an error — nothing to limit, and the checkout path
+    /// applies the same limit to a worktree the moment it exists.
+    fn set_quota_worktrees(&self, id: &str, quota_gb: u64) -> Result<Option<String>, EngErr> {
+        let live_dir = self.pool.voldir(id).join("live");
+        let entries = match std::fs::read_dir(&live_dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(EngErr::io(e)),
+        };
+        let limit = if quota_gb == 0 { "none".to_string() } else { format!("{quota_gb}G") };
+        let mut first_failure = None;
+        for entry in entries {
+            let entry = entry.map_err(EngErr::io)?;
+            if let Err(e) = run(&["btrfs", "qgroup", "limit", &limit, entry.path().to_str().unwrap()]) {
+                first_failure.get_or_insert(e.0);
+            }
+        }
+        Ok(first_failure)
+    }
+
+    /// Same limit as `set_quota_worktrees`, applied to exactly ONE worktree — called right after
+    /// `checkout` so a freshly created worktree is never briefly unquota'd while it waits for the
+    /// volume's next reconcile pass.
+    pub fn set_quota_worktree(&self, volume: &str, ws: &str, quota_gb: u64) -> Result<Option<String>, EngErr> {
+        let path = self.pool.worktree(volume, ws);
+        let limit = if quota_gb == 0 { "none".to_string() } else { format!("{quota_gb}G") };
+        Ok(run(&["btrfs", "qgroup", "limit", &limit, path.to_str().unwrap()]).err().map(|e| e.0))
     }
 
     /// The nested subvolumes that keep a home's caches out of every push and out of its quota

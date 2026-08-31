@@ -756,6 +756,53 @@ async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
     assert!(!tmp.path().join("vol/ws-1/live/ws-1").exists(), "no bootstrap worktree either");
 }
 
+/// Task 7a F5: a shared-volume clone's worktree lives under the SOURCE volume's `live/`, which no
+/// ownerReference reaches, so `cleanup_workspace_worktree` (the WORKTREE_FINALIZER's cleanup arm)
+/// is the only thing that drops it. It calls `Engine::drop_worktree` for exactly that case.
+#[tokio::test]
+async fn clone_delete_drops_its_worktree_under_the_source_volume() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![]);
+    let ctx = commit_model_on(ctx);
+    let worktree = tmp.path().join("vol/vol-src/live/ws-clone");
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    let mut w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-src"}));
+    w.metadata.name = Some("ws-clone".into());
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::CloneOf { volume: "vol-src".into(), commit: Some("vol-src-abcd".into()) }),
+    });
+
+    let err = rustic_git_agent::controller::cleanup_workspace_worktree(&w, &ctx).await.unwrap_err();
+
+    // No real `btrfs` on this box (and even on a real host this is a plain directory, not a
+    // subvolume) — the point proved is the ATTEMPT, not a clean delete: `drop_worktree` only
+    // reaches `run(["btrfs", ...])` when the worktree path exists at all, so an error naming
+    // `btrfs` is exactly the signal that this IS the clone case and it tried.
+    assert!(err.0.contains("btrfs"), "expected an attempted btrfs delete, got: {}", err.0);
+}
+
+/// The counterpart: an OWNED volume's worktree (no `cloneOf`, or a `cloneOf` with no `commit` —
+/// the pre-commit-model full-copy clone) is left for the Volume's own `SUBVOLUME_FINALIZER` to
+/// reclaim with the rest of the voldir — `cleanup_workspace_worktree` must not touch it.
+#[tokio::test]
+async fn owned_volume_delete_does_not_touch_its_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![]);
+    let ctx = commit_model_on(ctx);
+    let worktree = tmp.path().join("vol/ws-1/live/ws-1");
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    let w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"}));
+    // No `source` at all: an ordinary, owned workspace.
+    assert!(w.spec.storage.as_ref().and_then(|s| s.source.as_ref()).is_none());
+
+    rustic_git_agent::controller::cleanup_workspace_worktree(&w, &ctx).await.unwrap();
+
+    assert!(worktree.exists(), "an owned volume's worktree is the Volume finalizer's job, not this one's");
+}
+
 fn env_json(status: serde_json::Value) -> serde_json::Value {
     let mut o = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1",
@@ -1214,7 +1261,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     let init = k8s::git_init_container(source, "alpine/git:2.45.2", "git.example.com", "22")
         .expect("a valid repo is accepted")
         .expect("a gitRepo source seeds with an init container");
-    let pod = k8s::workspace_pod(&spec, "ws-1", &test_pod_ctx(), Some(init));
+    let pod = k8s::workspace_pod(&spec, "ws-1", "ws-1", &test_pod_ctx(), Some(init));
 
     let inits = pod.spec.as_ref().unwrap().init_containers.as_ref().expect("init containers");
     assert_eq!(inits.len(), 1);
@@ -1266,6 +1313,7 @@ fn test_pod_ctx() -> rustic_git_workspaces::k8s::PodContext<'static> {
             block_owner_deletion: Some(true),
         },
         runtime_class: None,
+        commit_model: false,
     }
 }
 
