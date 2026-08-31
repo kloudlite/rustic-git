@@ -9,25 +9,26 @@
 use crate::controller::{replace_status, volume_is_ready, Ctx};
 use crate::janitor::SWEEP_MIN_AGE;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::{Node, Pod};
-use kube::api::ListParams;
+use kube::api::{Api, ListParams, PostParams};
 use kube::ResourceExt;
 use rustic_git_storage::store::valid_segment;
 use rustic_git_workspaces::crd;
+use rustic_git_workspaces::engine::Engine;
 use rustic_git_workspaces::replicate;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::io::StreamReader;
 
 /// Everything the router needs, minus the parts of `Ctx` it does not use (janitor state, nix,
@@ -71,6 +72,7 @@ pub fn router(state: PeerState) -> Router {
     Router::new()
         .route("/peer/v1/snapshots/{owner}/{id}", get(snapshots))
         .route("/peer/v1/replicate/{owner}/{id}", post(replicate))
+        .route("/peer/v1/commit/{volume}/{name}", get(commit))
         .with_state(Arc::new(state))
 }
 
@@ -217,6 +219,84 @@ async fn replicate(
     }
 
     (StatusCode::OK, received).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CommitQuery {
+    parent: Option<String>,
+}
+
+/// The pull side's send: streams `btrfs send [-p parent] snap_dir/{name}`'s stdout as the response
+/// body. Auth and `valid_segment` first, same order as `replicate` above — the body here is a
+/// root-run `btrfs send`, so nothing about the path is trusted before the secret is.
+async fn commit(
+    State(state): State<Arc<PeerState>>,
+    headers: HeaderMap,
+    Path((volume, name)): Path<(String, String)>,
+    Query(q): Query<CommitQuery>,
+) -> impl IntoResponse {
+    if !secret_ok(&headers, &state.secret) {
+        return (StatusCode::UNAUTHORIZED, Body::empty()).into_response();
+    }
+    if !valid_segment(&volume) || !valid_segment(&name) || !q.parent.as_deref().map(valid_segment).unwrap_or(true) {
+        return (StatusCode::BAD_REQUEST, Body::empty()).into_response();
+    }
+
+    let dir = std::path::Path::new(&state.pool).join("vol").join(&volume).join("snap");
+    let snap = dir.join(&name);
+    if !snap.exists() {
+        return (StatusCode::NOT_FOUND, Body::empty()).into_response();
+    }
+    let parent_path = q.parent.as_ref().map(|p| dir.join(p));
+
+    // Held for the life of the stream (moved into `KillOnDrop` below), same discipline as the
+    // receive side's `receives` map — a retried pull for the same volume must not race a send
+    // still in flight for it.
+    let guard = state.receive_lock(&volume).lock_owned().await;
+
+    let mut child = match spawn_send_tokio(&state.btrfs_bin, &snap, parent_path.as_deref(), &[]) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("spawn btrfs send: {e}")).into_response(),
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "btrfs send: no stdout".to_string()).into_response();
+    };
+    let killer = KillOnDrop { stdout, child: Some(child), _guard: guard };
+    (StatusCode::OK, Body::from_stream(tokio_util::io::ReaderStream::new(killer))).into_response()
+}
+
+/// Wraps a streamed `btrfs send`'s stdout so a response body dropped mid-stream (a disconnected
+/// or timed-out puller) kills and reaps the child instead of leaking a root process writing to a
+/// pipe nobody reads any more — the same failure `post_send`'s `kill()` exists to avoid on the
+/// sending side, mirrored here on the receiving-of-the-request-but-sending-the-body side.
+struct KillOnDrop {
+    stdout: tokio::process::ChildStdout,
+    child: Option<tokio::process::Child>,
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl tokio::io::AsyncRead for KillOnDrop {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stdout).poll_read(cx, buf)
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Fire-and-forget: Drop cannot await. A child that already exited cleanly (the normal,
+        // successful-send case) makes `kill`/`wait` here a cheap no-op; a child still writing
+        // when the body was dropped early gets SIGKILL and reaped rather than orphaned.
+        if let Some(mut child) = self.child.take() {
+            tokio::spawn(async move {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            });
+        }
+    }
 }
 
 async fn cleanup_partials(btrfs_bin: &str, dir: &std::path::Path, before: &[String]) {
@@ -862,6 +942,341 @@ fn due_targets(
     Ok((gen, due))
 }
 
+// ---------------------------------------------------------------------------------------------
+// The pull side: this node's commit-model beat, deciding which volumes it must hold a replica of
+// (either replication's rendezvous names it, or it is running one of the volume's worktrees right
+// now) and pulling any `Snapshot` it is missing from a peer that already has it.
+// ---------------------------------------------------------------------------------------------
+
+/// `WS_NODE_DEAD_SECS`, default 600 — how long a node must be observed NotReady before its
+/// `VolumeReplica` rows are reaped. Long enough that a rolling restart or a brief kubelet hiccup
+/// never costs a replica row; the row is cheap to recreate, a wrongly-reaped one is not.
+fn node_dead_secs() -> i64 {
+    std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
+}
+
+/// One pass of the puller — spawned beside `replicate_beat` in `controller.rs`, gated on
+/// `WS_COMMIT_MODEL=1` there. Inert without a peer secret too, same fail-closed rule every dial in
+/// this file follows: no secret, no authenticated GET to another node's root-run `btrfs send`.
+pub async fn pull_beat(ctx: &Arc<Ctx>) {
+    pull_beat_with(ctx, "btrfs").await
+}
+
+/// Split out so tests can point the receive half at a fake `btrfs` — same shape as
+/// `SendTo::btrfs_bin` on the send side.
+async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
+    if std::env::var("WS_COMMIT_MODEL").ok().as_deref() != Some("1") {
+        return;
+    }
+    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
+    if secret.is_empty() {
+        return;
+    }
+
+    // The reaper runs every pass regardless of what follows: a dead node's stale replica rows
+    // must not wait on this node having anything to pull.
+    reap_dead_replicas(ctx).await;
+
+    let candidates = match pool_nodes(&ctx.client).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: listing pool nodes");
+            return;
+        }
+    };
+
+    let http = match peer_http_client() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: building the http client");
+            return;
+        }
+    };
+
+    for id in interesting_volumes(ctx, &candidates).await {
+        pull_volume(ctx, btrfs_bin, &http, &secret, &id).await;
+    }
+}
+
+/// Every volume this node must hold a commit-model replica of: named by replication's rendezvous
+/// (`replicate::targets`, standbys only — the owner already has everything by construction), OR
+/// the volume behind a Workspace/Environment whose pod runs here right now. List errors on the
+/// Workspace/Environment half are warned and skipped — a transient API hiccup must not stop the
+/// replication half from pulling.
+async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => {
+            for v in &list.items {
+                if v.metadata.deletion_timestamp.is_some() {
+                    continue;
+                }
+                let id = v.name_any();
+                let targets = replicate::targets(&id, &v.spec.node_name, candidates, v.spec.replicas as usize);
+                if targets.iter().any(|t| t == &ctx.node) && !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "pull: listing volumes; only worktree-hosted volumes considered"),
+    }
+
+    match Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => {
+            for w in list.items {
+                let running_here = w.status.as_ref().is_some_and(|s| s.node_name == ctx.node);
+                if let (true, Some(v)) = (running_here, w.status.and_then(|s| s.volume_ref)) {
+                    if !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "pull: listing workspaces"),
+    }
+    match Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => {
+            for e in list.items {
+                let running_here = e.status.as_ref().is_some_and(|s| s.node_name == ctx.node);
+                if let (true, Some(v)) = (running_here, e.status.and_then(|s| s.volume_ref)) {
+                    if !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "pull: listing environments"),
+    }
+    out
+}
+
+/// The chain-walk `pull_volume` needs before every GET: `cur`'s nearest ancestor (inclusive) this
+/// node already holds locally, or `None` for "nothing shared yet — a full send". Walks
+/// `SnapshotSpec::parent`, never creation time — same rule the CR's own doc comment states.
+fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (String, String)>, have: &HashSet<String>) -> Option<String> {
+    while let Some(name) = cur {
+        if have.contains(&name) {
+            return Some(name);
+        }
+        cur = by_name.get(&name).map(|(parent, _)| parent.clone()).filter(|p| !p.is_empty());
+    }
+    None
+}
+
+/// Pulls every `Snapshot` this node is missing for `volume`, then rewrites this node's own
+/// `VolumeReplica`. Keep-biased throughout: a `Snapshot`-list error skips the volume with nothing
+/// touched, same as `replica_reconcile`'s lookup-error branch.
+async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
+    let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let ready: Vec<crd::Snapshot> = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
+        Ok(list) => list
+            .items
+            .into_iter()
+            .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(%volume, error = %e, "pull: listing snapshots; keeping everything");
+            return;
+        }
+    };
+
+    let mut have: HashSet<String> = match ctx.engine.local_commits(volume) {
+        Ok(names) => names.into_iter().collect(),
+        Err(e) => {
+            tracing::warn!(%volume, error = %e, "pull: local_commits");
+            return;
+        }
+    };
+
+    // name -> (parent, owner), for the ancestor walk and for the pairs `order_groups` wants.
+    let by_name: HashMap<String, (String, String)> =
+        ready.iter().map(|s| (s.name_any(), (s.spec.parent.clone(), s.spec.owner.clone()))).collect();
+    let pairs: Vec<(String, Option<String>)> = ready
+        .iter()
+        .filter(|s| !have.contains(&s.name_any()))
+        .map(|s| (s.name_any(), if s.spec.parent.is_empty() { None } else { Some(s.spec.parent.clone()) }))
+        .collect();
+    let order = replicate::order_groups(&pairs);
+
+    let replicas: Vec<crd::VolumeReplica> = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => list.items.into_iter().filter(|r| r.spec.volume == volume).collect(),
+        Err(e) => {
+            tracing::warn!(%volume, error = %e, "pull: listing replicas; nothing to pull from");
+            Vec::new()
+        }
+    };
+    // Synced sources first — a Syncing replica may itself be mid-pull and not actually have the
+    // commit yet — falling back to any other replica of the volume (including a Syncing one)
+    // rather than giving up outright.
+    let synced = |r: &&crd::VolumeReplica| r.status.as_ref().is_some_and(|s| s.phase == "Synced");
+    let mut sources: Vec<&str> = replicas.iter().filter(synced).map(|r| r.spec.node.as_str()).collect();
+    sources.extend(replicas.iter().filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
+
+    for name in order {
+        if have.contains(&name) {
+            continue;
+        }
+        let parent = by_name.get(&name).map(|(p, _)| p.clone()).filter(|p| !p.is_empty());
+        let my_parent = nearest_held_ancestor(parent, &by_name, &have);
+
+        let mut pulled = false;
+        for &source in &sources {
+            let addr = match agent_pod_addr(&ctx.client, source).await {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(%volume, %name, source, error = %e, "pull: no peer address; trying next source");
+                    continue;
+                }
+            };
+            match pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, my_parent.as_deref()).await {
+                Ok(()) => {
+                    have.insert(name.clone());
+                    pulled = true;
+                    break;
+                }
+                Err(e) => tracing::warn!(%volume, %name, source, error = %e, "pull: receive failed; trying next source"),
+            }
+        }
+        if !pulled {
+            tracing::warn!(%volume, %name, "pull: no source could supply this commit this pass");
+        }
+    }
+
+    let missing_at_end = ready.iter().any(|s| !have.contains(&s.name_any()));
+    if let Err(e) = write_replica_status(ctx, volume, !missing_at_end).await {
+        tracing::warn!(%volume, error = %e, "pull: writing VolumeReplica status");
+    }
+}
+
+/// One `GET /peer/v1/commit/{volume}/{name}` streamed straight into `btrfs receive
+/// snap_dir/{volume}/`. A failed receive deletes the partial, same before/after diff the push
+/// side's `replicate` handler uses, mirrored here on the pulling node.
+#[allow(clippy::too_many_arguments)]
+async fn pull_one(
+    engine: &Engine,
+    btrfs_bin: &str,
+    http: &reqwest::Client,
+    addr: &str,
+    secret: &str,
+    volume: &str,
+    name: &str,
+    parent: Option<&str>,
+) -> Result<(), String> {
+    let mut url = format!("http://{addr}/peer/v1/commit/{volume}/{name}");
+    if let Some(p) = parent {
+        url = format!("{url}?parent={p}");
+    }
+    let resp = http.get(&url).header("x-peer-secret", secret).timeout(send_timeout()).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GET {url}: status {}", resp.status()));
+    }
+
+    let dir = engine.pool.snap_dir(volume);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let before = subvolume_names(&dir);
+
+    let bin_parts: Vec<&str> = btrfs_bin.split_whitespace().collect();
+    let Some((prog, prefix)) = bin_parts.split_first() else { return Err("empty btrfs_bin".to_string()) };
+    let mut cmd = tokio::process::Command::new(prog);
+    cmd.args(prefix).arg("receive").arg(&dir).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let mut reader = StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other));
+    let copy_result = tokio::io::copy(&mut reader, &mut stdin).await;
+    let _ = stdin.shutdown().await;
+    drop(stdin);
+    let ok = match copy_result {
+        Ok(_) => matches!(child.wait().await, Ok(s) if s.success()),
+        Err(_) => {
+            let _ = child.wait().await;
+            false
+        }
+    };
+
+    if !ok {
+        let after = subvolume_names(&dir);
+        for n in after.iter().filter(|n| !before.contains(n)) {
+            delete_subvolume(btrfs_bin, &dir.join(n)).await;
+        }
+        return Err("btrfs receive failed".to_string());
+    }
+    Ok(())
+}
+
+/// Create-or-update THIS node's own `VolumeReplica` — the sole writer, per the module doc. v1:
+/// `branches` is left empty (the brief allows this — the scheduler's precise per-branch arm is
+/// Task 4's), `phase` is `Synced` iff nothing was missing at the end of this pass.
+async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool) -> Result<(), kube::Error> {
+    let name = crd::replica_name(volume, &ctx.node);
+    let api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
+    let mut obj = match api.get_opt(&name).await? {
+        Some(o) => o,
+        None => {
+            let spec = crd::VolumeReplicaSpec { volume: volume.to_string(), node: ctx.node.clone() };
+            api.create(&PostParams::default(), &crd::VolumeReplica::new(&name, spec)).await?
+        }
+    };
+    let status = crd::VolumeReplicaStatus {
+        phase: if synced { "Synced" } else { "Syncing" }.to_string(),
+        branches: Default::default(),
+        last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    for attempt in 0..2 {
+        match replace_status(&api, &obj, "VolumeReplica", serde_json::to_value(&status).map_err(kube::Error::SerdeError)?).await {
+            Ok(()) => return Ok(()),
+            Err(kube::Error::Api(s)) if s.code == 409 && attempt == 0 => obj = api.get(&name).await?,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Deletes any `VolumeReplica` whose `spec.node` has been observed NotReady for longer than
+/// `WS_NODE_DEAD_SECS` — positive evidence only. A nodes-list error reaps nothing (the whole
+/// listing, not per-row, since a partial list would make an actually-live node look absent). A
+/// node absent from a POSITIVELY-listed set counts as dead; a node present with no readable
+/// `Ready` condition history does not — the API server just hasn't reported one yet.
+async fn reap_dead_replicas(ctx: &Arc<Ctx>) {
+    let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: reaper: listing nodes; reaping nothing");
+            return;
+        }
+    };
+    let replicas = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: reaper: listing replicas");
+            return;
+        }
+    };
+
+    let now = k8s_openapi::jiff::Timestamp::now();
+    let floor = node_dead_secs();
+    let replica_api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
+    for r in replicas {
+        let node = &r.spec.node;
+        let dead = match nodes.iter().find(|n| n.name_any() == *node) {
+            None => true, // absent from a list we DID get: gone
+            Some(n) => n
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
+                .is_some_and(|c| {
+                    c.status != "True" && c.last_transition_time.as_ref().is_some_and(|t| now.as_second() - t.0.as_second() > floor)
+                }),
+        };
+        if dead {
+            let rname = r.name_any();
+            if let Err(e) = replica_api.delete(&rname, &Default::default()).await {
+                tracing::warn!(replica = %rname, error = %e, "pull: reaper: deleting a dead node's replica row");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod sender_tests {
     use super::*;
@@ -1151,5 +1566,147 @@ mod reconcile_tests {
         replica_reconcile(&ctx, &["node-a".to_string(), "node-b".to_string()]).await;
 
         assert!(dir.exists(), "a lookup error must keep everything, not delete it");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The pull side: `pull_beat`, `pull_volume`, `reap_dead_replicas`.
+    // -----------------------------------------------------------------------------------------
+
+    const SNAPSHOTS: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
+    const VOLREPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
+    const NODES: &str = "/api/v1/nodes";
+
+    fn ready_snapshot(name: &str, volume: &str, parent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1",
+            "kind": "Snapshot",
+            "metadata": {"name": name, "uid": "snap-uid"},
+            "spec": {"volume": volume, "owner": "alice", "parent": parent, "pinned": false},
+            "status": {"phase": "ready"},
+        })
+    }
+
+    fn node_json(name: &str, ready: &str, transitioned_at: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": name},
+            "status": {"conditions": [{"type": "Ready", "status": ready, "lastTransitionTime": transitioned_at}]},
+        })
+    }
+
+    fn list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
+    }
+
+    /// `WS_COMMIT_MODEL` unset (or not `"1"`) must make the whole beat inert — no API call at
+    /// all, not even the reaper's node/replica listing.
+    #[tokio::test]
+    async fn pull_beat_is_inert_without_the_commit_model_flag() {
+        std::env::remove_var("WS_COMMIT_MODEL");
+        std::env::set_var("WS_PEER_SECRET", "s3cret");
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", vec![]);
+
+        pull_beat_with(&ctx, "btrfs").await;
+
+        assert!(rec.calls().is_empty(), "inert without WS_COMMIT_MODEL=1: must touch nothing");
+    }
+
+    /// A `Snapshot`-list error must keep every local commit untouched and write no replica
+    /// status — the same keep-biased rule `replica_reconcile`'s lookup-error branch follows.
+    #[tokio::test]
+    async fn pull_volume_keeps_everything_on_a_snapshot_list_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![Route { method: "GET", path: SNAPSHOTS.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, "btrfs", &http, "s3cret", "vol-1").await;
+
+        assert!(rec.calls().iter().all(|c| !c.contains("volumereplicas")), "a snapshot-list error must never reach the replica write");
+    }
+
+    /// Nothing missing (every Ready `Snapshot` is already a local commit): `pull_volume` makes no
+    /// network pull at all and writes its own `VolumeReplica` as `Synced` — v1's branches: this
+    /// task writes `branches: {}` and phase only (see the brief's allowed shortcut), Task 4 fills
+    /// in the per-branch heads.
+    #[tokio::test]
+    async fn a_clean_pull_with_nothing_missing_writes_synced() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-aaaaaaaa")).unwrap();
+
+        let created = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": "vol-1.node-b", "uid": "vr-uid"},
+            "spec": {"volume": "vol-1", "node": "node-b"},
+            "status": {"phase": "Syncing", "branches": {}},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("vol-1-aaaaaaaa", "vol-1", "")]) },
+            not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
+            Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: created.clone() },
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: created },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, "btrfs", &http, "s3cret", "vol-1").await;
+
+        assert!(rec.calls().iter().all(|c| !c.contains("/peer/v1/commit/")), "nothing missing: no GET should ever be issued");
+        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
+        assert_eq!(sent.len(), 1, "exactly one replica status write");
+        assert_eq!(sent[0]["status"]["phase"], "Synced");
+    }
+
+    /// The reaper: a node absent from a list we DID get, or Ready=false past the age floor, is
+    /// reaped; a node Ready=false but young is kept — positive evidence only.
+    #[tokio::test]
+    async fn reaper_deletes_dead_keeps_young_keeps_absent_condition() {
+        let old = "2000-01-01T00:00:00Z";
+        let young = chrono::Utc::now().to_rfc3339();
+        let nodes = list_of("Node", vec![node_json("node-a", "True", old), node_json("node-b", "False", old), node_json("node-c", "False", &young)]);
+
+        let replica = |node: &str| {
+            serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                "metadata": {"name": format!("vol-1.{node}"), "uid": format!("uid-{node}")},
+                "spec": {"volume": "vol-1", "node": node},
+                "status": {"phase": "Synced", "branches": {}},
+            })
+        };
+        let replicas = list_of(
+            "VolumeReplica",
+            vec![replica("node-a"), replica("node-b"), replica("node-c"), replica("node-d")], // node-d: absent from the node list entirely
+        );
+
+        let routes = vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: nodes },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: replicas },
+            Route { method: "DELETE", path: format!("{VOLREPLICAS}/vol-1.node-b"), status: 200, body: serde_json::json!({}) },
+            Route { method: "DELETE", path: format!("{VOLREPLICAS}/vol-1.node-d"), status: 200, body: serde_json::json!({}) },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        reap_dead_replicas(&ctx).await;
+
+        let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes.len(), 2, "{deletes:?}");
+        assert!(deletes.iter().any(|c| c.ends_with("vol-1.node-b")), "old NotReady node reaped");
+        assert!(deletes.iter().any(|c| c.ends_with("vol-1.node-d")), "node absent from the list reaped");
+        assert!(!deletes.iter().any(|c| c.ends_with("vol-1.node-a")), "Ready node kept");
+        assert!(!deletes.iter().any(|c| c.ends_with("vol-1.node-c")), "young NotReady node kept");
+    }
+
+    /// A nodes-list error must reap nothing at all — a partial view of who is alive is worse than
+    /// no view.
+    #[tokio::test]
+    async fn reaper_reaps_nothing_when_the_node_list_errors() {
+        let routes = vec![Route { method: "GET", path: NODES.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+
+        reap_dead_replicas(&ctx).await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a nodes-list error must reap nothing");
     }
 }

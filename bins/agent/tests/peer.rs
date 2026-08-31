@@ -220,3 +220,94 @@ async fn overlapping_receives_for_one_id_serialize_and_the_losers_cleanup_spares
     assert_eq!(remaining, vec!["snap-1"], "the loser's cleanup must not remove the winner's snapshot");
     assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "only the winning receive widens compatibleNodes");
 }
+
+// -------------------------------------------------------------------------------------------
+// GET /peer/v1/commit/{volume}/{name} — the pull side's send.
+// -------------------------------------------------------------------------------------------
+
+/// A fake `btrfs send`: understands `send -q [-p PARENT] PATH`, writes fixed bytes to stdout so a
+/// test can assert the stream actually carried them.
+fn fake_btrfs_send(dir: &std::path::Path) -> String {
+    let path = dir.join("btrfs-send");
+    let script = r#"#!/bin/sh
+if [ "$1" = "send" ]; then
+    printf 'snapshot-bytes'
+    exit 0
+fi
+"#;
+    std::fs::write(&path, script).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn commit_req(path: &str, secret: Option<&str>) -> Request<Body> {
+    let mut req = Request::builder().method("GET").uri(path);
+    if let Some(s) = secret {
+        req = req.header("x-peer-secret", s);
+    }
+    req.body(Body::empty()).unwrap()
+}
+
+/// Auth is checked before anything about the path — same order the module comment on `commit`
+/// documents, and the same rule the receive side already proves.
+#[tokio::test]
+async fn commit_get_refuses_a_wrong_or_missing_secret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fake_btrfs_send(tmp.path());
+    let (state, _rec) = state(tmp.path(), bin, vec![]);
+    let app = router(state);
+
+    for secret in [None, Some("wrong")] {
+        let resp = app.clone().oneshot(commit_req("/peer/v1/commit/vol-1/vol-1-abcd1234", secret)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "secret={secret:?}");
+    }
+}
+
+/// A path segment that fails `valid_segment` (here: a `..` traversal attempt) must be refused
+/// before any filesystem path is built from it, whether it's the volume, the commit name, or the
+/// `parent` query parameter.
+#[tokio::test]
+async fn commit_get_refuses_invalid_segments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fake_btrfs_send(tmp.path());
+    let (state, _rec) = state(tmp.path(), bin, vec![]);
+    let app = router(state);
+
+    for path in ["/peer/v1/commit/..%2f..%2fetc/name", "/peer/v1/commit/vol-1/..%2f..%2fetc"] {
+        let resp = app.clone().oneshot(commit_req(path, Some("s3cret"))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+
+    let resp = app.oneshot(commit_req("/peer/v1/commit/vol-1/vol-1-abcd1234?parent=..%2f..%2fetc", Some("s3cret"))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "invalid parent segment");
+}
+
+/// The commit subvolume is simply absent — the ordinary "nothing here yet" case, not a server
+/// error.
+#[tokio::test]
+async fn commit_get_404s_when_the_commit_subvolume_is_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fake_btrfs_send(tmp.path());
+    let (state, _rec) = state(tmp.path(), bin, vec![]);
+    let app = router(state);
+
+    let resp = app.oneshot(commit_req("/peer/v1/commit/vol-1/vol-1-abcd1234", Some("s3cret"))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// A clean request against an existing commit streams `btrfs send`'s stdout back verbatim.
+#[tokio::test]
+async fn commit_get_streams_the_send_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fake_btrfs_send(tmp.path());
+    std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-abcd1234")).unwrap();
+    let (state, _rec) = state(tmp.path(), bin, vec![]);
+    let app = router(state);
+
+    let resp = app.oneshot(commit_req("/peer/v1/commit/vol-1/vol-1-abcd1234", Some("s3cret"))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"snapshot-bytes");
+}

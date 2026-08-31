@@ -259,6 +259,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     spawn_heartbeat(ctx.clone());
     spawn_home_push(ctx.clone());
     spawn_replicate(ctx.clone());
+    spawn_pull(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
     // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
@@ -616,6 +617,20 @@ fn spawn_replicate(ctx: Arc<Ctx>) {
         loop {
             tick.tick().await;
             crate::peer::replicate_beat(&ctx).await;
+        }
+    });
+}
+
+/// The commit model's puller: its own beat, same interval and tick shape as `spawn_replicate` —
+/// `pull_beat` itself is the inert-until-`WS_COMMIT_MODEL=1` gate, so this always spawns and costs
+/// nothing until the cutover flag is set.
+fn spawn_pull(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(crate::peer::replica_interval());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            crate::peer::pull_beat(&ctx).await;
         }
     });
 }
