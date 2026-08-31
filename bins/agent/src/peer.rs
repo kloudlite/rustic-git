@@ -599,6 +599,10 @@ struct SendTo<'a> {
     /// in `replicate_beat`), a fake script in tests. Same shape as `PeerState::btrfs_bin` on the
     /// receive side; never an env var, since this selects which binary a root process executes.
     btrfs_bin: &'a str,
+    /// The POST's whole-request bound — `send_timeout()` in production, milliseconds in the kill
+    /// test. A field, not a call inside `post_send`: the request-level `.timeout()` OVERRIDES the
+    /// client's own, so a test cannot shorten it any other way without an env seam.
+    send_timeout: std::time::Duration,
 }
 
 /// Streams one `btrfs send` for `id` at `gen` to `target`, retrying once as a full send (no `-p`,
@@ -662,7 +666,7 @@ async fn post_send(to: &SendTo<'_>, snapshot: &FsPath, parent: Option<PathBuf>, 
     });
     let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(stdout));
     let url = format!("http://{}/peer/v1/replicate/{}/{}", to.addr, to.owner, to.id);
-    let resp = to.http.post(&url).header("x-peer-secret", to.secret).timeout(send_timeout()).body(body).send().await;
+    let resp = to.http.post(&url).header("x-peer-secret", to.secret).timeout(to.send_timeout).body(body).send().await;
     // A failed POST (timeout, transport error, non-2xx) means reqwest has already dropped the
     // body stream — nothing is draining `stdout` any more, so `btrfs send` blocks writing to a
     // full, unread pipe and a plain `wait()` would hang the beat right here, one layer below the
@@ -823,7 +827,7 @@ pub async fn replicate_beat(ctx: &Arc<Ctx>) {
                     continue;
                 }
             };
-            let to = SendTo { http: &http, addr: &addr, secret: &secret, owner: &v.spec.owner, id: &id, btrfs_bin: "btrfs" };
+            let to = SendTo { http: &http, addr: &addr, secret: &secret, owner: &v.spec.owner, id: &id, btrfs_bin: "btrfs", send_timeout: send_timeout() };
             match send_to_target(&ctx.engine.pool, &to, gen, clone_of(v).as_deref()).await {
                 Ok(()) => {
                     if let Err(e) = write_gate(&gate, gen) {
@@ -952,15 +956,27 @@ mod sender_tests {
     async fn post_send_kills_a_send_whose_post_failed_instead_of_hanging_the_reap() {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("btrfs");
-        std::fs::write(&bin, "#!/bin/sh\nsleep 300\n").unwrap();
+        // `exec`, so sleep REPLACES the shell and the SIGKILL lands on the process holding the
+        // pipe fds. Without it sh dies, the orphaned sleep keeps stderr open, and the drain
+        // task waits for an EOF that never comes — a hang the real btrfs (spawned directly,
+        // no shell) cannot produce.
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 300\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let bin = bin.to_string_lossy().into_owned();
 
-        let http = peer_http_client().unwrap();
-        // Port 1 refuses the connection immediately on every platform this runs on — the POST
-        // fails fast without a mock server, which is the point: `post_send` must react to that
-        // failure by killing the child, not by waiting out its exit.
-        let to = SendTo { http: &http, addr: "127.0.0.1:1", secret: "s", owner: "alice", id: "v1", btrfs_bin: &bin };
+        // A listener that accepts and never answers, and a 500ms send_timeout on the SendTo —
+        // the request-level timeout, since it OVERRIDES any client-level one. Port-1 "connection
+        // refused" was the first version of this and was not portable (CI's network namespace let
+        // the connect hang and race the test's own bound). This shape instead exercises the exact
+        // production path the fix exists for: a POST that times out mid-request.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let _conn = listener.accept(); // hold it open, never respond
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let http = reqwest::Client::builder().timeout(std::time::Duration::from_millis(500)).build().unwrap();
+        let to = SendTo { http: &http, addr: &addr, secret: "s", owner: "alice", id: "v1", btrfs_bin: &bin, send_timeout: std::time::Duration::from_millis(500) };
         let snap = tmp.path().join("snap");
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), post_send(&to, &snap, None, &[])).await;
