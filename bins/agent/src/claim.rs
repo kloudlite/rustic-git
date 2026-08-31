@@ -55,14 +55,22 @@ async fn commit_placement(ctx: &Arc<Ctx>, volume: Option<&str>) -> Result<Commit
     let Some(volume) = volume else {
         return Ok(CommitPlacement { has_commits: false, my_replica_synced: false });
     };
-    let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
-    let has_commits = !snaps.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await?.items.is_empty();
+    let has_commits = has_commits(ctx, volume).await?;
     let replicas: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
     let my_replica_synced = replicas
         .get_opt(&crd::replica_name(volume, &ctx.node))
         .await?
         .is_some_and(|r| r.status.is_some_and(|s| s.phase == "Synced"));
     Ok(CommitPlacement { has_commits, my_replica_synced })
+}
+
+/// Any `Snapshot` CR for `volume`, Ready or not. Shared by the claim's own bootstrap check and by
+/// `apply_workspace`'s materialize guard (F2): both must agree on "this volume has commits", or a
+/// claim's bootstrap read and the materialize step's guard read could disagree about the same
+/// volume. Errors propagate — never read a listing failure as "bootstrap, nothing here yet".
+pub(crate) async fn has_commits(ctx: &Arc<Ctx>, volume: &str) -> Result<bool, ReconcileErr> {
+    let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    Ok(!snaps.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await?.items.is_empty())
 }
 
 /// The nodes holding a `cloneOf` source's disk, when there is one. A source that has vanished
@@ -141,7 +149,7 @@ async fn decide(
     let src = source_nodes(ctx, storage_source(storage)).await?;
     // Fetched only when the flag is on and there is no cloneOf source: a cloneOf's own arm never
     // needs it, and inert-until-enabled means no extra API traffic while the flag is off.
-    let commit = if src.is_none() && std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1") {
+    let commit = if src.is_none() && ctx.commit_model {
         Some(commit_placement(ctx, volume).await?)
     } else {
         None
@@ -203,7 +211,7 @@ where
     let mut obj = obj.clone();
     for attempt in 0..ATTEMPTS {
         let p = parts(&obj);
-        let Some(status) = decide(
+        let Some(patch) = decide(
             ctx,
             &p.node_name,
             &p.compatible,
@@ -218,6 +226,21 @@ where
         };
         if bound_elsewhere(ctx, p.region, p.owner).await? {
             return Ok(Action::await_change());
+        }
+        // F1: `replace_status` PUTs the WHOLE status subresource, so a write built from ONLY the
+        // 4 fields `decide` cares about would silently erase everything else already there —
+        // `head`, `volumeRef`, `packages`, `podRef`, `durable`. Start from THIS object's current
+        // status (fresh on the first attempt; re-read on a 409 below) and merge just the claim's
+        // own fields onto it, so the claim never touches anything but
+        // phase/nodeName/compatibleNodes/conditions.
+        let mut status = serde_json::to_value(&obj).map_err(|e| ReconcileErr(e.to_string()))?["status"].take();
+        if status.is_null() {
+            status = serde_json::json!({});
+        }
+        if let (Some(dst), Some(src)) = (status.as_object_mut(), patch.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
         }
         // Optimistic, carrying `metadata.resourceVersion`. NOT `patch_status`, which applies FORCED
         // and therefore never conflicts — with a forced apply two agents both "win" and the second

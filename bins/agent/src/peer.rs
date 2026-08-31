@@ -989,7 +989,7 @@ pub async fn pull_beat(ctx: &Arc<Ctx>) {
 /// Split out so tests can point the receive half at a fake `btrfs` — same shape as
 /// `SendTo::btrfs_bin` on the send side.
 async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
-    if std::env::var("WS_COMMIT_MODEL").ok().as_deref() != Some("1") {
+    if !ctx.commit_model {
         return;
     }
     let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
@@ -1752,7 +1752,8 @@ mod reconcile_tests {
     /// all, not even the reaper's node/replica listing.
     #[tokio::test]
     async fn pull_beat_is_inert_without_the_commit_model_flag() {
-        std::env::remove_var("WS_COMMIT_MODEL");
+        // `ctx.commit_model` defaults false here: `test_ctx` never sets `WS_COMMIT_MODEL` in the
+        // process env, so `Ctx::new`'s one-time read at construction sees it unset.
         std::env::set_var("WS_PEER_SECRET", "s3cret");
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", vec![]);

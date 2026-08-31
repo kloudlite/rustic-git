@@ -122,6 +122,11 @@ pub struct Ctx {
     /// A converged parent reconciles on every child event and re-applied ~10 objects each time;
     /// an apply whose body has not changed is skipped. See `ensure` for the ceiling.
     pub applied: Mutex<HashMap<String, (u64, std::time::Instant)>>,
+    /// `WS_COMMIT_MODEL=1`, read ONCE at construction. A field, not a live env read, so every
+    /// commit-model gate in this crate agrees on the same value for the life of the process and a
+    /// test can flip it on `Ctx` directly instead of mutating process-global env — the mutation
+    /// was flaking the suite when tests ran in parallel (F3).
+    pub commit_model: bool,
 }
 
 impl Ctx {
@@ -148,6 +153,7 @@ impl Ctx {
             volumes,
             volume_writer: Mutex::new(Some(volume_writer)),
             applied: Mutex::new(HashMap::new()),
+            commit_model: std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1"),
             wake_volume,
             wake_snapshot,
             wake_workspace,
@@ -2055,12 +2061,34 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
 
     // Commit-model worktree materialization: a workspace just claimed onto this node (or one
     // whose pod was never started here) has no `live/{id}` subvolume yet. `head` is `None` on a
-    // brand-new workspace (bootstrap: an empty worktree) and otherwise whatever this node last
-    // reported — never invented here, only preserved, since `status.head` is written ONLY by the
-    // node that actually ran the checkout. `WORKTREE_EXISTS` converges a race (this pass and an
-    // earlier one both reaching here, or a pod restart finding its own worktree already there)
-    // into a no-op rather than an error.
-    if std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1") {
+    // brand-new workspace (bootstrap: an empty worktree) — Task 4 never WRITES `status.head`
+    // itself, only preserves whatever is already there via `..prev`; the first writers are Task 5
+    // (a commit records the new head) and Task 6 (a clone/restore grafts one on). Until one of
+    // those lands, `head == None` is ambiguous between "genuinely bootstrap" and "this workspace's
+    // own head just has not been recorded yet" — the guard below tells the two apart the same way
+    // the claim itself does, by asking whether the VOLUME has any commits at all.
+    if ctx.commit_model {
+        if prev.head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+            // F2 guard: the volume has commits but this workspace's own `head` is still `None` —
+            // checking out `None` here would hand it an EMPTY worktree next to real history,
+            // which is the never-started-dataless bug in worktree form. Wait for Task 5/6 to
+            // write a real head instead of guessing one; zero-commit volumes never reach this arm
+            // (`has_commits` is false), so bootstrap is untouched.
+            let st = crd::WorkspaceStatus {
+                phase: crd::Phase::Creating,
+                observed_generation: None,
+                volume_ref: Some(id.clone()),
+                conditions: ws_conditions(
+                    &prev,
+                    crd::condition("Ready", false, "HeadUnknown", "volume has commits but this workspace has no recorded head yet", gen),
+                ),
+                ..prev
+            };
+            write_ws_status(w, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
+        // `WORKTREE_EXISTS` converges a race (this pass and an earlier one both reaching here, or
+        // a pod restart finding its own worktree already there) into a no-op rather than an error.
         let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
         let result = tokio::task::spawn_blocking(move || engine.checkout(&vol_id, head.as_deref(), &ws_id))
             .await
