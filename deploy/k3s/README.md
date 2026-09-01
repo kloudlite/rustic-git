@@ -296,8 +296,8 @@ stop) and becomes ONE region-shared NFS export, served by ZeroFS (`deploy/k3s/ze
 SlateDB-backed, single replica on purpose — see its header) and mounted once per node by the
 agent at `{pool}/homes` (`WS_HOMES_EXPORT`, `bins/agent/src/lib.rs`'s `run`). A pod hostPaths
 `{pool}/homes/{owner}` straight onto `/home/kl`; caches/editor-servers/shell-state stay node-local
-(`{pool}/homecache/{owner}`, subPaths `cache`/`vscode-server`/`cursor-server`/`state` —
-`crates/workspaces/src/k8s.rs`'s `HOME_LOCAL_DIRS`). There is no home Volume any more, so the
+(`{pool}/homecache/{owner}`, subPaths `cache`/`vscode-server`/`cursor-server`/`state`, listed in
+`crates/workspaces/src/k8s.rs`'s `workspace_pod`). There is no home Volume any more, so the
 owner→node pin that came from it is also gone: an owner's workspaces can be claimed by any node
 whose `VolumeReplica` is Synced, not just the one that happened to hold their btrfs home.
 
@@ -328,6 +328,11 @@ kubectl apply -f deploy/k3s/agent-daemonset.yaml
 kubectl rollout status ds/rustic-git-agent -n kube-system
 ```
 
+Note the agents roll BEFORE step 3 copies anything, so a workspace pod recreated in this window
+mounts the new, still-empty export: a person may briefly see an empty home. Nothing is lost —
+step 3's `rsync -a` merges the old content in afterwards — but it is worth doing outside a busy
+hour, and worth knowing before the first "my home is gone" message arrives.
+
 **3. Migrate, per owner that has a `home-{owner}` Volume — one owner at a time, same shape as
 every other migration in this file. The two paths below are NEVER typed by hand: the source
 directory name is lowercased and can be truncated (`home_volume_name` → `dns_label`, `crd.rs`),
@@ -347,6 +352,9 @@ for HOME_VOL in $(kubectl get volumes --no-headers | awk '{print $1}' | grep '^h
   # Destination: spec.owner, straight off the Volume — original case, exactly what
   # ensure_shared_home mounts pods onto. Never re-lowercase or re-derive this from $HOME_VOL.
   OWNER=$(kubectl get volume "$HOME_VOL" -o jsonpath='{.spec.owner}')
+  # $OWNER goes into the jsonpath filter unescaped: a handle containing a double quote would
+  # break the expression into one that silently matches nothing rather than erroring, and the
+  # loop would then "migrate" an owner with zero workspaces stopped. Sanity-check WS_IDS below.
   WS_IDS=$(kubectl get workspaces -o jsonpath="{.items[?(@.spec.owner==\"$OWNER\")].metadata.name}")
 
   # Stop every workspace of the owner's — jsonpath, not `-o name` (which prints
@@ -357,7 +365,8 @@ for HOME_VOL in $(kubectl get volumes --no-headers | awk '{print $1}' | grep '^h
 
   # On the node the OwnerBinding pinned (`kubectl get volume $HOME_VOL -o
   # jsonpath='{.status.nodeName}'`), copy the old home's content into the new export, EXCLUDING
-  # the six node-local cache dirs (k8s::HOME_LOCAL_DIRS) — they were nested btrfs subvolumes the
+  # the six node-local cache dirs (k8s::HOME_LOCAL_DIRS, which exists for exactly this list —
+  # it is NOT what the pod mounts) — they were nested btrfs subvolumes the
   # old design never pushed, and copying them across is dead weight the new node-local
   # {pool}/homecache/{owner} rebuilds for free on first use anyway. The old worktree is
   # {pool}/vol/{HOME_VOL}/live/{HOME_VOL} — NOT {pool}/vol/{HOME_VOL}/live, which is the directory

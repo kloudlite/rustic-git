@@ -115,7 +115,6 @@ CLONE1_ID=""
 CLONE_ID=""
 RESTORE_ID=""
 SEED_ID=""
-HOME_RESTORE_ID=""
 OTHER_NODE_WS_ID=""
 
 cleanup() {
@@ -124,7 +123,7 @@ cleanup() {
   # deployments, services, policies), so deleting the four objects is the whole teardown —
   # garbage collection does the rest. The probe namespace is ours, not the controller's.
   [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
-  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$HOME_RESTORE_ID" "$OTHER_NODE_WS_ID"; do
+  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$OTHER_NODE_WS_ID"; do
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1

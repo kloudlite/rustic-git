@@ -212,7 +212,7 @@ async fn delete_subvolume(btrfs_bin: &str, path: &std::path::Path) {
     let _ = tokio::process::Command::new(prog).args(prefix).arg("subvolume").arg("delete").arg(path).status().await;
 }
 
-/// `WS_REPLICA_SECS`, default 300 — same shape as `controller::home_push_interval`.
+/// `WS_REPLICA_SECS`, default 300.
 pub fn replica_interval() -> std::time::Duration {
     std::time::Duration::from_secs(std::env::var("WS_REPLICA_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300))
 }

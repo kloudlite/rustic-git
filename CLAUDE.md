@@ -160,8 +160,8 @@ will happily mount `/` if we ask it to.
 A workspace may be attached to ONE environment (`Workspace.spec.attachedEnvironment`, written only
 by `/v1`), and then resolves that environment's services by bare name. The mechanism is a
 `/etc/resolv.conf` the agent renders per workspace into `{pool}/attach/{ws}/resolv.conf` and every
-pod mounts read-only through a hostPath volume with a
-`subPath` — `dnsConfig` is immutable on a running pod, so the mount is what makes attach and detach
+pod mounts read-only through a hostPath volume of `type: File` — the volume IS that file, so there
+is no `subPath` — `dnsConfig` is immutable on a running pod, so the mount is what makes attach and detach
 take effect without a restart. That file is written IN PLACE and never renamed: the pod holds the
 inode, so a rename would leave it reading the old file forever. Two NetworkPolicies named
 `attach-{ws}` open the path, selecting the workspace POD (siblings share a namespace); the
@@ -211,10 +211,10 @@ the export directory exist (`ensure_shared_home` in `bins/agent/src/controller.r
 started before its node's NFS mount is up would hostPath an empty local directory and silently
 strand the owner's dotfiles, so `apply_workspace` parks a workspace in `Creating`/`HomeNotReady`
 until `ctx.homes_export` is set rather than ever starting one.
-Tool caches and the editors' remote servers (`k8s::HOME_LOCAL_DIRS`) must not live on the shared
+Tool caches and the editors' remote servers must not live on the shared
 export — concurrent pods on different nodes would race the same cache directory and every cache
 hit would cross the network — so they are redirected (`login_env`'s `XDG_CACHE_HOME`,
-`CARGO_HOME`, etc.) into a per-(owner, node) LOCAL cache subvolume, `{pool}/homecache/{owner}`
+`CARGO_TARGET_DIR`, etc.) into a per-(owner, node) LOCAL cache subvolume, `{pool}/homecache/{owner}`
 (`Engine::ensure_homecache`), mounted at `k8s::HOME_CACHE_DIR`. Shell history and
 `~/.local/state` (`k8s::HOME_STATE_DIR`) are local for the same reason — one file, many terminals,
 many nodes — and share that same `homecache` volume via a separate subPath. Cross-region: each
