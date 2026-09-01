@@ -9,7 +9,7 @@
 // so widening the visibility costs nothing internally and is what lets `main()` call
 // `rustic_git_server::{store, App, ...}` directly instead of duplicating these re-exports.
 pub use rustic_git_core::pktline;
-pub use rustic_git_core::{err, require_jwt_secret_from_env, Error, Result};
+pub use rustic_git_core::{err, hex, require_jwt_secret_from_env, Error, Result};
 pub use rustic_git_storage::{auth, cache, config, events, index, ownership, pool, store};
 pub use rustic_git_gitbase::{objects, refs};
 pub use rustic_git_pulls::{directory, merge_worker, pulls};

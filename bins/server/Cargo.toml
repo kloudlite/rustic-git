@@ -13,7 +13,6 @@ name = "rustic-git"        # binary name unchanged
 path = "src/main.rs"
 
 [dependencies]
-hex = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 rustic-git-core = { path = "../../crates/core" }

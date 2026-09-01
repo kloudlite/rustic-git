@@ -8,7 +8,6 @@ license = "SSPL-1.0"
 name = "rustic_git_storage"
 
 [dependencies]
-hex = { workspace = true }
 tracing = { workspace = true }
 rustic-git-core = { path = "../core" }
 tokio = { workspace = true }

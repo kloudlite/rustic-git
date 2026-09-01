@@ -185,7 +185,7 @@ fn rid(prefix: &str) -> String {
     use rand::RngCore;
     let mut b = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut b);
-    format!("{prefix}-{}", hex::encode(b))
+    format!("{prefix}-{}", rustic_git_core::hex(&b))
 }
 
 /// The owner identity for everything workspace/environment/volume-shaped is the USERNAME,

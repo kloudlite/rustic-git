@@ -3,7 +3,7 @@ use rustic_git_server::config::{env, open_store};
 use rustic_git_server::lanes::spawn_lease_tasks;
 use rustic_git_server::listeners;
 use rustic_git_server::store::Store;
-use rustic_git_server::{err, require_jwt_secret_from_env, App, Result};
+use rustic_git_server::{err, hex, require_jwt_secret_from_env, App, Result};
 use std::sync::Arc;
 
 /// Start the server. This node opens whatever repo the balancer sends it and holds it warm
@@ -37,7 +37,7 @@ async fn serve() -> Result<()> {
         use rand::RngCore;
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
-        let secret = hex::encode(b);
+        let secret = hex(&b);
         (
             "rustic-git-0".to_string(),
             secret,

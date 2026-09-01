@@ -11,7 +11,7 @@
 // allocation per refusal for no measurable gain.
 #![allow(clippy::result_large_err)]
 
-pub(crate) use rustic_git_core::{err, jwt, Result};
+pub(crate) use rustic_git_core::{err, hex, jwt, Result};
 pub(crate) use rustic_git_storage::{cache, events, index, ownership, store};
 pub(crate) use rustic_git_pulls::directory;
 // The pure header helpers (`scheme`, `user_names`, `authorize`) live in `storage::auth`; the

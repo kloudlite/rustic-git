@@ -70,7 +70,7 @@ pub struct CliClaims {
 /// 16 random bytes as lowercase hex — big enough that a guess is not a revocation
 /// bypass, small enough to sit comfortably in a token or a revocation-list key.
 fn new_jti() -> String {
-    hex::encode(rand::random::<[u8; 16]>())
+    crate::hex(&rand::random::<[u8; 16]>())
 }
 
 fn now() -> Result<u64> {
