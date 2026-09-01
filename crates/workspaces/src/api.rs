@@ -1595,7 +1595,7 @@ async fn create_commit(
     // `status` on CREATE is stored verbatim (the subresource split only governs UPDATE/PATCH), so
     // this is how the object is born `Working` instead of the schema's `Pending` default —
     // `reconcile_commit` only ever acts on `Working`.
-    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None, ready_at: None });
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())
 }

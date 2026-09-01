@@ -161,7 +161,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &Live) {
             transient: true,
         },
     );
-    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None, ready_at: None });
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     // Owned by the worktree's object: deleting the workspace is the whole delete, and the sync
     // point has no meaning without it.
     snap.metadata.owner_references = Some(vec![live.owner_ref.clone()]);

@@ -1850,7 +1850,7 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, id));
-    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None, ready_at: None });
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     // Same convergence rule as everything else in this cutover: a retry that finds the CR already
     // there (crash between the rename above landing and this create) is not an error.
     match api.create(&PostParams::default(), &snap).await {
@@ -2898,7 +2898,7 @@ where
                     transient: true,
                 },
             );
-            snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None, ready_at: None });
+            snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
             // Owned by the parent so the CR's own events map back to it — that watch is what wakes
             // the `Waiting` arm. NOT a cascade-delete convenience: the CR is deleted explicitly
             // after teardown, and by then it has already outlived its usefulness.

@@ -257,8 +257,6 @@ pub struct SnapshotStatus {
     /// `Working` until the btrfs subvolume is actually cut; `Ready` is the point past which the
     /// object is immutable.
     pub phase: Phase,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
     /// When `phase` became `Ready`, RFC3339. The instant a replica's `lastSyncAt` is compared
     /// against to decide whether it holds THIS cut — `lastTransitionTime` on a condition would do,
     /// but a `Snapshot` has no conditions.
@@ -661,18 +659,6 @@ pub struct OwnerBindingSpec {
     /// region-shared NFS directory now, so a binding is not node-scoped and every node reconciles
     /// every binding.
     pub node_name: String,
-    /// The cap on the owner's per-node btrfs home, in GiB, back when there was one. Retained so
-    /// existing objects keep parsing (and defaulted so older ones do too); read by nothing — the
-    /// NFS home has no qgroup and no `Volume` to copy this onto.
-    #[serde(default = "default_home_quota_gb")]
-    pub home_quota_gb: u64,
-}
-
-/// The default for the retained-but-unread `homeQuotaGb`. Kept only so an object written without
-/// the field still deserializes.
-pub const DEFAULT_HOME_QUOTA_GB: u64 = 2;
-fn default_home_quota_gb() -> u64 {
-    DEFAULT_HOME_QUOTA_GB
 }
 
 /// Two: one active copy plus one standby, the smallest number that survives a single node loss.
@@ -938,17 +924,6 @@ mod tests {
         assert_eq!(back, spec);
     }
 
-    /// The binding is created by whichever agent wins a placement claim, which has no opinion
-    /// about quotas — so an object written without the field must read the default, and every
-    /// binding that exists today (none carry it) must keep parsing.
-    #[test]
-    fn a_binding_without_a_home_quota_reads_the_default() {
-        let b: OwnerBindingSpec =
-            serde_json::from_value(serde_json::json!({"owner": "Alice", "region": "r1", "nodeName": "n"})).unwrap();
-        assert_eq!(b.home_quota_gb, DEFAULT_HOME_QUOTA_GB);
-        assert_eq!(DEFAULT_HOME_QUOTA_GB, 2);
-    }
-
     #[test]
     fn a_volume_without_replicas_reads_the_default_of_two() {
         let v: VolumeSpec = serde_json::from_value(serde_json::json!({
@@ -987,10 +962,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_status_round_trips_and_omits_absent_size() {
-        let st = SnapshotStatus { phase: Phase::Working, size_bytes: None, ready_at: None };
+    fn snapshot_status_round_trips_and_omits_absent_ready_at() {
+        let st = SnapshotStatus { phase: Phase::Working, ready_at: None };
         let v = serde_json::to_value(&st).unwrap();
-        assert!(!v.as_object().unwrap().contains_key("sizeBytes"));
+        assert!(!v.as_object().unwrap().contains_key("readyAt"));
         let back: SnapshotStatus = serde_json::from_value(v).unwrap();
         assert_eq!(back, st);
     }
