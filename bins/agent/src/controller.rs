@@ -259,6 +259,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     heartbeat(&ctx.pool);
     spawn_heartbeat(ctx.clone());
     spawn_pull(ctx.clone());
+    spawn_sync(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
     // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
@@ -521,6 +522,19 @@ fn spawn_pull(ctx: Arc<Ctx>) {
         loop {
             tick.tick().await;
             crate::peer::pull_beat(&ctx).await;
+        }
+    });
+}
+
+/// The sync beat (`sync.rs`), same shape as `spawn_pull`: a plain ticker, because the bytes it
+/// watches change under a running pod without producing any Kubernetes event to reconcile on.
+fn spawn_sync(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(crate::sync::sync_interval());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            crate::sync::sync_beat(&ctx).await;
         }
     });
 }

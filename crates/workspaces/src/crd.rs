@@ -318,7 +318,7 @@ pub fn replica_name(volume: &str, node: &str) -> String {
 
 /// Four random bytes as 8 lowercase hex characters — the same `rand`-backed shape `api::rid` uses
 /// for every other object id in this crate, kept local because a `Snapshot` name is not prefixed.
-fn short_hex() -> String {
+pub fn short_hex() -> String {
     use rand::RngCore;
     let mut b = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut b);

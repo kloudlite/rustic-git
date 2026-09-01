@@ -3067,3 +3067,40 @@ async fn commit_model_restore_in_place_never_calls_the_registry() {
         "commit-model restore must never fetch from the registry: {:?}", rec.calls()
     );
 }
+
+/// The sync beat is keep-biased about not knowing: `Engine::generation` shells out to `btrfs
+/// subvolume show`, which cannot work here, so this asserts the beat WARNS AND CREATES NOTHING on
+/// a generation error — cutting on "we do not know" would cut a redundant sync point every single
+/// pass. The decision itself (has the generation moved?) is a pure function tested in `sync.rs`;
+/// no fake-`generation` seam is worth carrying for a second test of it.
+#[tokio::test]
+async fn the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a",
+                                             "volumeRef": "vol-1", "podRef": "ws-1"}))]
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/environments",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList",
+                                   "metadata": {}, "items": []}),
+            ),
+        ],
+    );
+
+    rustic_git_agent::sync::sync_beat(&ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c == "GET /apis/rustic-git.io/v1alpha1/snapshots"),
+        "the beat must look for this worktree's existing sync point: {:?}", rec.calls()
+    );
+    assert!(
+        rec.sent("POST", SNAPSHOTS_LIST).is_empty(),
+        "an unreadable generation must cut nothing: {:?}", rec.sent("POST", SNAPSHOTS_LIST)
+    );
+}
