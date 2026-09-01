@@ -179,7 +179,25 @@ Known from the survey (verify each with a grep before deleting; if a caller exis
 - `deploy/k3s/agent-daemonset.yaml`: `RUST_BACKTRACE` and `XDG_CACHE_HOME` are set on the agent container and read by nothing there — delete; `NIX_REMOTE` stays only if the nix-daemon sidecar reads it (check `nix-conf.yaml`/the sidecar spec).
 - Reads with no writer — add each to the daemonset with its default and a one-line WHY, so config is discoverable: `WS_NODE_DEAD_SECS=600`, `WS_PEER_SEND_TIMEOUT_SECS`, `WS_SNAPSHOT_KEEP=10`; `WS_RUNTIME_CLASS` is deliberately unset (comment exists) — leave; `WS_PEER_SECRET` and `WS_REGION` come from the Secret — leave.
 - `crates/workspaces/src/k8s.rs` `HOME_LOCAL_DIRS`: sole use is the runbook's rsync exclude list; move the list INTO `deploy/k3s/README.md` verbatim and delete the constant + its doc.
-- Plus every item the whole-repo audit reports (appended to this task when it lands; each with path:line).
+From the whole-repo audit (verified; rulings inline):
+- `delete` the rest of the `agent_token` surface the first bullet names: `WS_AGENT_HEADER`, `list_regions`' `clear()` loop, and its test scaffolding — `crates/workspaces/tests/api_user.rs:445-489` (rotate round-trip), `agent_token` fields at `api_teams.rs:65`, `api_user.rs:200,1080`, `meta_store.rs:15,27,31`. ~120 test lines; each named in the report.
+- `delete` `pub const MERGE_LEASE` and its doc — zero references. [`crates/app/src/lib.rs:595`]
+- `delete` `SnapshotStatus.size_bytes` — constructed `None` at all four sites, never read. [`crates/workspaces/src/crd.rs:256`, `api.rs:1657`, `controller.rs:1809,2788`, `crd.rs:976`]. Regenerate crds.yaml.
+- `delete` `OwnerBindingSpec.home_quota_gb` + `DEFAULT_HOME_QUOTA_GB` + `default_home_quota_gb()` — read by nothing; a structural CRD prunes the stored field on read, so no deser risk. [`crd.rs:653`, `claim.rs:306`]. Regenerate crds.yaml.
+- `delete` dependency `object_store` from `bins/agent/Cargo.toml:34` and `zstd` from `crates/workspaces/Cargo.toml:42` — zero references in either crate's src/tests (verified).
+- `stdlib` `crates/core::hex` is `hex::encode` verbatim; call `hex::encode` at the ~15 sites, delete fn + doc + test. [`crates/core/src/err.rs:38`]
+- `delete` `gpg::emails_of` (alias of `verified_emails`, one caller) — make `verified_emails` pub. [`crates/api/src/gpg.rs:120`, `credentials.rs:335`]
+- `delete` `browse_api::pulls::now_ms` (3-line wrapper around `ownership::now_ms() as i64`) — cast at call sites. [`bins/server/src/browse_api/pulls.rs:37`]
+- `delete` `nix_volume` and `agent_secret_binding` — one-expression wrappers with one call site each; inline. [`crates/workspaces/src/k8s.rs:626`]
+- `shrink` `registry::{routing_key,pool_coords}` and `workspaces::registry::{routing_key,pool_coords}` differ only in `"img"` vs `"vol"`; one pair taking `kind: &str` in `crates/storage`. [`crates/workspaces/src/registry.rs:45`]
+- `shrink` `env_namespace`'s 5-line match to one expression. [`crd.rs:773`]
+- `shrink` the three one-implementation traits `MembershipCheck`/`CliTokenCheck`/`AuthorizedKeys` (all implemented only by `bins/api`'s `Dir`, held as three `Option<Arc<dyn>>`) into one `trait Directory` and one `ApiState` field; one stub per test file instead of three. [`crates/workspaces/src/api.rs:46`]. Ruling: last in the batch — largest blast radius, do it after everything else is green.
+- Ruling — REJECTED: "delete `VolumeReplicaStatus.last_sync_at`". True that nothing reads it today; Task 5's flush gate reads it. Keep.
+- Ruling — REJECTED: "yagni `runtimeclass.yaml` + `install-gvisor.sh`, `WS_RUNTIME_CLASS` unset". The daemonset (`agent-daemonset.yaml:145-152`) documents that unset is deliberate: tenant pods pick gvisor from the node label, and the env var is the operator override. Keep all three.
+- Ruling — the three unset agent knobs (`WS_NODE_DEAD_SECS`, `WS_PEER_SEND_TIMEOUT_SECS`, `WS_SNAPSHOT_KEEP`): the audit says inline the defaults and delete the readers; this plan sets them in the daemonset instead. Two of them are tuned during Task 9's node-death test, so they are operator knobs, not constants. Cost if wrong: three env lines.
+- Verified NOT dead, no action: `RUSTIC_GIT_METRICS_ADDR` (read via `metrics::init`), the web/nginx/build env vars, all test helpers in `tests/common` and per-crate `tests/*.rs`.
+
+Audit's own estimate for its items: −410 lines, −2 deps.
 
 - [ ] **Step 1:** record test counts per touched crate. **Step 2:** delete/rewrite. **Step 3:** gates, `bash -n` on touched scripts, counts reconciled with every disappeared test named. **Step 4: commit** `Delete the object-store era's leftovers`.
 
