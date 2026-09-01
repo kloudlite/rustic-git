@@ -329,35 +329,53 @@ kubectl rollout status ds/rustic-git-agent -n kube-system
 ```
 
 **3. Migrate, per owner that has a `home-{owner}` Volume — one owner at a time, same shape as
-every other migration in this file:**
+every other migration in this file. The two paths below are NEVER typed by hand: the source
+directory name is lowercased and can be truncated (`home_volume_name` → `dns_label`, `crd.rs`),
+the destination is the owner's handle verbatim — original case, never truncated
+(`ensure_shared_home`/`homes_root` in `controller.rs`, called straight off `spec.owner`). For any
+owner whose handle has uppercase, or is long enough to truncate, these are DIFFERENT strings.
+Typing one `<owner>` value consistently (lowercase, since that's the one that makes the source
+directory exist) rsyncs into a sibling directory the pods never mount — the person logs into an
+empty home, silently, and step 5 later deletes the real data. Read both off the cluster instead:**
 
 ```sh
-# Stop every workspace of the owner's first (their home Volume's pod, if the OwnerBinding still
-# has one, and every workspace pod that mounts /home/kl from the old btrfs subvolume):
-kubectl get workspaces -l rustic-git.io/owner=<owner> -o name | xargs -r -n1 -I{} \
-  curl -fsS -X POST "$API_BASE/v1/{}/stop" -H "Authorization: Bearer $ADMIN_TOKEN"
+# Source: the Volume's own name IS the directory name — read it, never reconstruct it. (A
+# truncated long-handle home — dns_label kicks in past 63 chars — still matches this grep, since
+# the "home-" prefix always survives truncation; see step 5's note on the same blind spot.)
+for HOME_VOL in $(kubectl get volumes --no-headers | awk '{print $1}' | grep '^home-'); do
 
-# On the node the OwnerBinding pinned (`kubectl get volume home-<owner> -o
-# jsonpath='{.status.nodeName}'`), copy the old home's content into the new export, EXCLUDING the
-# six node-local cache dirs (k8s::HOME_LOCAL_DIRS) — they were nested btrfs subvolumes the old
-# design never pushed, and copying them across is dead weight the new node-local
-# {pool}/homecache/{owner} rebuilds for free on first use anyway. The old path is
-# {pool}/vol/{volname}/live/{volname}, where {volname} = home_volume_name(owner) =
-# dns_label("home-" + owner.lowercase()) (crates/workspaces/src/crd.rs) — NOT {pool}/vol/{volname}/live,
-# which is the directory the worktree sits inside, not the worktree itself (same trap the commit-model
-# migration above calls out). TRAILING SLASHES MATTER: both paths below end in `/`, which means "copy
-# the CONTENTS of the left directory into the right one" — drop either trailing slash and rsync nests
-# the whole tree one level deeper (.../homes/<owner>/home-<owner>/...) instead of landing it at the
-# mount root.
-sudo rsync -a \
-  --exclude='.cache' --exclude='.npm' --exclude='.cargo/registry' \
-  --exclude='.local/share/pnpm' --exclude='.vscode-server' --exclude='.cursor-server' \
-  /wspool-prod/vol/home-<owner>/live/home-<owner>/ /wspool-prod/homes/<owner>/
+  # Destination: spec.owner, straight off the Volume — original case, exactly what
+  # ensure_shared_home mounts pods onto. Never re-lowercase or re-derive this from $HOME_VOL.
+  OWNER=$(kubectl get volume "$HOME_VOL" -o jsonpath='{.spec.owner}')
+  WS_IDS=$(kubectl get workspaces -o jsonpath="{.items[?(@.spec.owner==\"$OWNER\")].metadata.name}")
 
-# Restart the owner's workspaces; their pods now hostPath the NFS export instead of the old
-# subvolume.
-kubectl get workspaces -l rustic-git.io/owner=<owner> -o name | xargs -r -n1 -I{} \
-  curl -fsS -X POST "$API_BASE/v1/{}/start" -H "Authorization: Bearer $ADMIN_TOKEN"
+  # Stop every workspace of the owner's — jsonpath, not `-o name` (which prints
+  # `workspace.rustic-git.io/<id>`, and a curl built from THAT 404s under `-f`):
+  for id in $WS_IDS; do
+    curl -fsS -X POST "$API_BASE/v1/workspaces/$id/stop" -H "Authorization: Bearer $ADMIN_TOKEN"
+  done
+
+  # On the node the OwnerBinding pinned (`kubectl get volume $HOME_VOL -o
+  # jsonpath='{.status.nodeName}'`), copy the old home's content into the new export, EXCLUDING
+  # the six node-local cache dirs (k8s::HOME_LOCAL_DIRS) — they were nested btrfs subvolumes the
+  # old design never pushed, and copying them across is dead weight the new node-local
+  # {pool}/homecache/{owner} rebuilds for free on first use anyway. The old worktree is
+  # {pool}/vol/{HOME_VOL}/live/{HOME_VOL} — NOT {pool}/vol/{HOME_VOL}/live, which is the directory
+  # the worktree sits inside, not the worktree itself (same trap the commit-model migration above
+  # calls out). TRAILING SLASHES MATTER: both paths below end in `/`, which means "copy the
+  # CONTENTS of the left directory into the right one" — drop either trailing slash and rsync
+  # nests the whole tree one level deeper instead of landing it at the mount root.
+  sudo rsync -a \
+    --exclude='.cache' --exclude='.npm' --exclude='.cargo/registry' \
+    --exclude='.local/share/pnpm' --exclude='.vscode-server' --exclude='.cursor-server' \
+    "/wspool-prod/vol/$HOME_VOL/live/$HOME_VOL/" "/wspool-prod/homes/$OWNER/"
+
+  # Restart the owner's workspaces; their pods now hostPath the NFS export instead of the old
+  # subvolume.
+  for id in $WS_IDS; do
+    curl -fsS -X POST "$API_BASE/v1/workspaces/$id/start" -H "Authorization: Bearer $ADMIN_TOKEN"
+  done
+done
 ```
 
 ```sh
@@ -379,6 +397,10 @@ subvolume on delete, and once that subvolume is gone the pre-migration home cont
 UNRECOVERABLE, there is no second copy anywhere):
 
 ```sh
+# Same `grep '^home-'` step 3 uses to find these — the "home-" prefix survives `dns_label`
+# truncation for any realistic owner handle, but if a home Volume for a very long or unusual
+# handle is ever unaccounted for here, list every Volume and check its ownerReference kind
+# (OwnerBinding) rather than trusting the name pattern alone.
 kubectl get volumes -l rustic-git.io/owner --no-headers | awk '{print $1}' | grep '^home-' \
   | xargs -r -n1 kubectl delete volume
 ```

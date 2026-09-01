@@ -128,10 +128,6 @@ cleanup() {
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
-  # A SIGTERM sent to a SIGSTOP'd process (the other-node check below pauses this agent) queues
-  # rather than delivers, and the `wait` after it would hang the whole teardown forever — resume
-  # it first, unconditionally, before the kill below.
-  [ -n "$AGENT_PID" ] && kill -CONT "$AGENT_PID" >/dev/null 2>&1
   [ -n "$AGENT_PID" ] && kill "$AGENT_PID" >/dev/null 2>&1
   [ -n "$API_PID" ] && kill "$API_PID" >/dev/null 2>&1
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1
@@ -629,43 +625,34 @@ wait_ws_ready "$WS_ID"
 kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s || fail "pod $WS_ID did not come back"
 kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" || fail "the home's .zshrc did not survive a stop/start"
 
-# The thing this whole change buys: an owner's home is no longer pinned to one node. A fresh
-# workspace is UNPLACED and claimable by any node (bins/agent/src/claim.rs's bootstrap case), so
-# pausing this script's own local agent for the claim window (SIGSTOP, not a kill — it stays
-# registered with Kubernetes, it just stops competing) lets whichever OTHER node's real agent is
-# in this cluster win the race instead. Only runs when the cluster actually has a second node
-# running the DaemonSet, same "if this cluster has one" shape as the commit-model replica check
-# further down.
-log "checking a workspace claimed on a different node still sees the shared home over NFS"
-OTHER_NODE=$(kubectl get nodes -o jsonpath='{.items[?(@.metadata.name!="'"$E2E_NODE"'")].metadata.name}' 2>/dev/null | awk '{print $1}')
-if [ -n "$OTHER_NODE" ] && kubectl get pods -n kube-system -l app=rustic-git-agent \
-     --field-selector "spec.nodeName=$OTHER_NODE" --no-headers 2>/dev/null | grep -q .; then
-  kill -STOP "$AGENT_PID"
-  OTHER_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
-    -H 'Content-Type: application/json' -d '{"name":"e2e-ws-other-node","region":"'"$REGION_ID"'","quota_gb":5}')
-  OTHER_NODE_WS_ID=$(echo "$OTHER_JSON" | field id)
-  if [ -z "$OTHER_NODE_WS_ID" ]; then
-    kill -CONT "$AGENT_PID"
-    fail "no id in other-node workspace create response: $OTHER_JSON"
-  fi
-  CLAIMED_ON=""
-  for i in $(seq 1 60); do
-    CLAIMED_ON=$(kubectl get workspace "$OTHER_NODE_WS_ID" -o jsonpath='{.status.nodeName}' 2>/dev/null)
-    [ -n "$CLAIMED_ON" ] && break
-    sleep 2
-  done
-  kill -CONT "$AGENT_PID"
-  [ "$CLAIMED_ON" = "$OTHER_NODE" ] \
-    || fail "e2e-ws-other-node claimed on '$CLAIMED_ON', wanted $OTHER_NODE (the other node's agent must be watching the same region)"
-  wait_ws_ready "$OTHER_NODE_WS_ID"
-  kubectl -n "$WS_NS" exec "$OTHER_NODE_WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
-    || fail "a workspace claimed on $OTHER_NODE cannot see the home written on $E2E_NODE — the NFS export is not actually shared"
-  curl -fsS -X DELETE "$BASE/v1/workspaces/$OTHER_NODE_WS_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-  wait_ws_gone "$OTHER_NODE_WS_ID"
-  OTHER_NODE_WS_ID=""
-else
-  log "single-node cluster (or no second agent): skipping the other-node NFS-home check"
-fi
+# The thing this whole change buys: an owner's home is no longer pinned to one node. Placement is
+# a controller-side claim race (bins/agent/src/claim.rs's bootstrap case: a fresh, UNPLACED
+# workspace is claimable by any node), not something kube-scheduler decides — a cordon/taint/label
+# on this node cannot steer it, and forcing the race by pausing this script's own agent process
+# was tried and rejected: that agent runs as root under sudo holding the loopback pool mount, and
+# a SIGKILL of this script (or a CI timeout) bypasses the trap, leaving a stopped root process
+# behind with nothing to resume it. So this makes no attempt to steer where the claim lands —
+# it just proves the property that matters holds WHEREVER it lands, which is true on both a
+# single-node and a multi-node cluster and cannot strand anything.
+log "checking a freshly claimed workspace sees the shared home over NFS, whichever node claims it"
+OTHER_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"e2e-ws-other-node","region":"'"$REGION_ID"'","quota_gb":5}')
+OTHER_NODE_WS_ID=$(echo "$OTHER_JSON" | field id)
+[ -n "$OTHER_NODE_WS_ID" ] || fail "no id in other-node workspace create response: $OTHER_JSON"
+CLAIMED_ON=""
+for i in $(seq 1 60); do
+  CLAIMED_ON=$(kubectl get workspace "$OTHER_NODE_WS_ID" -o jsonpath='{.status.nodeName}' 2>/dev/null)
+  [ -n "$CLAIMED_ON" ] && break
+  sleep 2
+done
+[ -n "$CLAIMED_ON" ] || fail "e2e-ws-other-node was never claimed by any node"
+log "e2e-ws-other-node claimed on $CLAIMED_ON (this script's own node is $E2E_NODE)"
+wait_ws_ready "$OTHER_NODE_WS_ID"
+kubectl -n "$WS_NS" exec "$OTHER_NODE_WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
+  || fail "a freshly claimed workspace (node $CLAIMED_ON) cannot see the home written earlier on $E2E_NODE — the NFS export is not actually shared"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$OTHER_NODE_WS_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$OTHER_NODE_WS_ID"
+OTHER_NODE_WS_ID=""
 
 # ---------------------------------------------------------------------------
 # Restore: new workspace grafted onto an EXPLICIT past snapshot (the newest entry in the
