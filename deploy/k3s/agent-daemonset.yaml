@@ -61,6 +61,12 @@ spec:
         prometheus.io/port: "9464"
         prometheus.io/path: /metrics
     spec:
+      # `nsenter -t 1` in mount_homes needs to SEE pid 1, so the agent shares the host's pid
+      # namespace. Deliberately NOT hostNetwork: the shared-home mount must live in the node's
+      # network namespace to outlive an agent restart, but the POD must stay in its own, or the
+      # `agent-peer` NetworkPolicy — the only thing restricting the peer listener on 8444 to other
+      # agents — stops applying to it. hostPID buys the first without giving up the second.
+      hostPID: true
       serviceAccountName: rustic-git-agent
       # Only nodes that carry a btrfs pool. The control plane has none and must not run this.
       nodeSelector:

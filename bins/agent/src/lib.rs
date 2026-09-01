@@ -72,16 +72,56 @@ pub(crate) fn check_homes_mounted(mounts: &str, pool: &str) -> Result<(), String
     Err(format!("the shared-home NFS export is not mounted at {target}; refusing to serve a home off the node's rootfs"))
 }
 
+/// Whether an existing mount at `target` still ANSWERS. A mount can be listed in `/proc/mounts`
+/// and be a corpse: the NFS transport lives in the network namespace of whoever called `mount(2)`,
+/// so when the agent pod that made it is deleted, the namespace dies and the mount survives as an
+/// entry that blocks forever on first touch (`hard`). A restarted agent would see it listed, skip
+/// remounting, and then hang before the controller ever starts — with the pod reporting 2/2
+/// Running the whole time. Presence is not liveness; this asks.
+fn mount_answers(target: &str) -> bool {
+    std::process::Command::new("timeout")
+        .args(["5", "stat", "-f", target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
+}
+
+/// `host:/path` with `host` resolved to an address. The mount runs in the HOST's network
+/// namespace (see `mount_homes`), where cluster DNS does not exist — so the Service name has to be
+/// resolved HERE, in the pod, and handed on as an address. A ClusterIP is stable for the life of
+/// the Service; recreating the Service means restarting the agents, which is the same restart the
+/// mount already needs.
+fn resolve_export(export: &str) -> Result<String, String> {
+    use std::net::ToSocketAddrs;
+    let (host, path) = export.split_once(':').ok_or_else(|| format!("{export}: expected host:/path"))?;
+    let addr = (host, 2049)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolving {host}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("{host} resolved to no address"))?;
+    Ok(format!("{}:{path}", addr.ip()))
+}
+
 fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     let target = homes_root(pool);
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    // Idempotent: already mounted is success. /proc/mounts is the authority.
-    let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
     let Some(target_str) = target.to_str() else {
         return Err(format!("{} is not valid UTF-8", target.display()));
     };
+    let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
     if already_mounted(&mounts, target_str) {
-        return Ok(());
+        if mount_answers(target_str) {
+            return Ok(());
+        }
+        // Listed but dead — the previous agent pod's namespace took the transport with it. Lazy
+        // AND forced: lazy detaches the tree even though the workspace pods still hold it open,
+        // forced stops the kernel waiting on a server that will never answer this client again.
+        tracing::warn!(target = %target_str, "shared home is mounted but not answering; unmounting the stale mount before remounting");
+        let _ = std::process::Command::new("nsenter")
+            .args(["-t", "1", "-m", "--", "umount", "-f", "-l", target_str])
+            .status();
     }
     // `port=2049,mountport=2049` are NOT optional and NOT tuning: NFSv3 normally finds mountd by
     // asking rpcbind on port 111, and ZeroFS runs no rpcbind — without both, `mount.nfs` blocks
@@ -93,15 +133,21 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     // nolock: no NLM sideband — append-mode files are node-local by design. r/wsize 1 MiB: the
     // default 128 KiB triples the round trips on the config reads that dominate this mount.
     //
-    // `retry=0` plus the outer `timeout` are the belt and braces for the hang above: retry=0 stops
-    // mount.nfs re-trying a dead server for two minutes, and the timeout means even a wedge that
-    // survives that surfaces as a failed startup — which the DaemonSet restarts and an operator
-    // can see — rather than a silently inert agent.
+    // `retry=0` plus the outer `timeout` are belt and braces: retry=0 stops mount.nfs re-trying a
+    // dead server for two minutes, and the timeout means even a wedge that survives that surfaces
+    // as a failed startup — which the DaemonSet restarts and an operator can see.
     let opts = "vers=3,tcp,port=2049,mountport=2049,nolock,hard,async,rsize=1048576,wsize=1048576,retry=0";
+    // `nsenter -t 1 -n -m`: mount in PID 1's network AND mount namespaces — the host's. The NFS
+    // client's transport then belongs to the node, not to this pod, so it outlives every agent
+    // restart; mounting in the pod's own namespace is what made each restart wedge that node's
+    // home permanently. NOT `hostNetwork: true`, which would achieve the same thing but also take
+    // the agent out of reach of the `agent-peer` NetworkPolicy that is the only thing restricting
+    // the peer listener on 8444 to other agents.
+    let addr_export = resolve_export(export)?;
     let st = std::process::Command::new("timeout")
         .arg("60")
-        .arg("mount")
-        .args(["-t", "nfs", "-o", opts, export])
+        .args(["nsenter", "-t", "1", "-n", "-m", "--", "mount", "-t", "nfs", "-o", opts])
+        .arg(&addr_export)
         .arg(&target)
         .status()
         .map_err(|e| e.to_string())?;
@@ -109,7 +155,7 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "mount {export} at {} failed: {st} (124 = timed out; check the export is reachable on 2049)",
+            "mount {addr_export} (from {export}) at {} failed: {st} (124 = timed out; check the export answers on 2049)",
             target.display()
         ))
     }
