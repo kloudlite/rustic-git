@@ -318,8 +318,10 @@ kubectl -n rustic-git-system create secret generic zerofs-store \
   --from-literal=ZEROFS_CONTAINER=rustic-git \
   --from-literal=ZEROFS_PREFIX=homes \
   --from-literal=ZEROFS_PASSWORD="$(openssl rand -base64 32)"   # RECORD THIS SOMEWHERE DURABLE
-# or edit the stringData in zerofs.yaml directly and apply the whole file — either way, apply the
-# Secret before (or in the same apply as) the Deployment, never after.
+# The Secret is NOT in zerofs.yaml on purpose: a manifest re-applied on every rollout must not
+# carry secret material, or `kubectl apply -f zerofs.yaml` overwrites the real credentials with
+# placeholders and ZeroFS crash-loops on `Invalid Access Key` with nothing in the diff to explain
+# it. Create it here, once, and let the apply below touch only the ConfigMap/Deployment/Service.
 kubectl apply -f deploy/k3s/zerofs.yaml
 kubectl rollout status deploy/zerofs -n rustic-git-system
 

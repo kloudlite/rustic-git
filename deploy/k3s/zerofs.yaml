@@ -14,31 +14,18 @@
 # region until Kubernetes reschedules this pod — accepted, because the alternative (per-node
 # btrfs homes) is what this migration removes. `hard,nolock` on the agent's mount keeps a flapping
 # ZeroFS from corrupting instead of just blocking (see mount_homes's comment).
-apiVersion: v1
-kind: Secret
-metadata:
-  name: zerofs-store
-  namespace: rustic-git-system
-type: Opaque
-stringData:
-  # The region's blob account — the SAME account and container every other tier already writes to
-  # (`RUSTIC_GIT_S3_URL=az://rustic-git`). ZeroFS speaks Azure Blob natively (`azure://`), so there
-  # is no S3 gateway in front of it and no AWS_* credentials anywhere in this file. Copy the values
-  # from the region's existing `rustic-git-storage` Secret rather than minting new ones: one
-  # account key per region, rotated in one place.
-  AZURE_STORAGE_ACCOUNT_NAME: "REPLACE-ME"
-  AZURE_STORAGE_ACCOUNT_KEY: "REPLACE-ME"
-  # Container the homes filesystem lives in, and the path prefix inside it. The prefix is what
-  # keeps this LSM tree out of the way of the registry blobs and repo databases sharing the
-  # container, so it must not be empty.
-  ZEROFS_CONTAINER: "rustic-git"
-  ZEROFS_PREFIX: "homes"
-  # Encrypts extents at rest (XChaCha20-Poly1305, key wrapped via Argon2id). Losing this loses the
-  # filesystem, same as losing a btrfs pool's disk — back it up wherever the region's other
-  # secrets are backed up, and note the cluster itself is NOT such a place.
-  ZEROFS_PASSWORD: "REPLACE-ME"
+# The `zerofs-store` Secret is deliberately NOT in this file. It used to be, carrying REPLACE-ME
+# placeholders — which meant every `kubectl apply -f zerofs.yaml` silently overwrote the real
+# credentials with placeholders and the pod crash-looped on `Invalid Access Key`, with nothing in
+# the diff to suggest the apply had touched them. A manifest that is re-applied on every rollout
+# must not carry secret material at all.
+#
+# Create it once, from the region's EXISTING storage credential (see deploy/k3s/README.md, step 1
+# of "Shared home"); it needs AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_ACCOUNT_KEY,
+# ZEROFS_CONTAINER, ZEROFS_PREFIX and ZEROFS_PASSWORD.
 ---
-# zerofs.toml: TOML with `${VAR}` substitution from the container's env (Secret above). `[cache]`,
+# zerofs.toml: TOML with `${VAR}` substitution from the container's env (the Secret above).
+# `[cache]`,
 # `[storage]`, `[servers]` are required by ZeroFS itself.
 #
 # UNVERIFIED until the first real cluster apply: that ZeroFS expands `${VAR}` in this file at all
@@ -103,10 +90,14 @@ spec:
     spec:
       containers:
         - name: zerofs
-          # Pinned to the latest tagged release as of 2026-09-01 (github.com/Barre/ZeroFS
-          # releases). Never `:latest` — see agent-daemonset.yaml's comment on the same class of
-          # bug (two pods silently on different builds).
-          image: ghcr.io/barre/zerofs:v2.3.2
+          # Pinned to the latest release as of 2026-09-01 (github.com/Barre/ZeroFS). Never
+          # `:latest` — see agent-daemonset.yaml's comment on the same class of bug (two pods
+          # silently on different builds).
+          #
+          # NOTE the tag has NO `v`: upstream's SOURCE tags are `v2.3.2` but the published image
+          # tags are `2.3.2`, and `ghcr.io/barre/zerofs:v2.3.2` 404s. `sha-b66813e` (that
+          # release's commit) is the immutable equivalent if a moved tag ever matters.
+          image: ghcr.io/barre/zerofs:2.3.2
           command: ["zerofs", "run", "-c", "/etc/zerofs/zerofs.toml"]
           envFrom:
             - secretRef:
