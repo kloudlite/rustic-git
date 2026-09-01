@@ -1,6 +1,5 @@
-//! Local btrfs pool: paths, lineage file, and the cross-process lock guarding it.
+//! Local btrfs pool: paths, and the cross-process lock guarding per-volume state.
 
-use crate::model::LineageEntry;
 use std::path::PathBuf;
 
 pub struct Pool {
@@ -11,36 +10,10 @@ impl Pool {
     pub fn new(root: impl Into<PathBuf>) -> Pool {
         Pool { root: root.into() }
     }
-    pub fn recv(&self) -> PathBuf {
-        self.root.join("recv")
-    }
-    /// Replica snapshots, sender side and receiver side both. NOT `recv/`: the janitor keeps
-    /// recv/ entries only when a lineage names them, and a replica is in no lineage.
+    /// Replica snapshots, sender side and receiver side both — the commit model's own transfer
+    /// staging area (`bins/agent/src/peer.rs`), unrelated to the deleted object-store path.
     pub fn repl(&self, name: &str) -> PathBuf {
         self.root.join("repl").join(name)
-    }
-    /// `{pool}/img` — block-layer images: squash's throwaway build image (deleted as soon as its
-    /// bytes are uploaded) and a block-restore's live loop-mount backing file.
-    pub fn img_dir(&self) -> PathBuf {
-        self.root.join("img")
-    }
-    pub fn img(&self, blob: &str) -> PathBuf {
-        self.img_dir().join(format!("{blob}.img"))
-    }
-    /// Local staging area for `push`'s internal snapshot phase: the compressed layer bytes
-    /// (`{blob}.zst`) and a sidecar (`{blob}.json`, `StageMeta`) sit here between staging and
-    /// upload, entirely off the network. `push` deletes both once the bytes are durable in the
-    /// object store (or,
-    /// for a blob already uploaded directly — a squash block layer, an inherited clone
-    /// entry — deletes just the sidecar, since `stage_path` never existed for those).
-    pub fn stage_dir(&self) -> PathBuf {
-        self.root.join("stage")
-    }
-    pub fn stage_path(&self, blob: &str) -> PathBuf {
-        self.stage_dir().join(format!("{blob}.zst"))
-    }
-    pub fn stage_meta_path(&self, blob: &str) -> PathBuf {
-        self.stage_dir().join(format!("{blob}.json"))
     }
     /// `{pool}/vol/{name}` — "vol" not "ws": environments live here too, and it matches the
     /// registry namespace's `vol/{owner}/{id}` naming.
@@ -50,9 +23,9 @@ impl Pool {
     pub fn live(&self, name: &str) -> PathBuf {
         self.voldir(name).join("live")
     }
-    /// `{pool}/vol/{volume}/snap` — commit subvolumes (RO), one per `CommitRecord`, named by
-    /// commit id. Commit model only; coexists with `live()`'s single-subvolume layout until
-    /// Task 7's cutover, so this never touches `live()` or its callers.
+    /// `{pool}/vol/{volume}/snap` — commit subvolumes (RO), one per `Snapshot` CR, named by
+    /// commit id. Coexists with `live()`'s single-subvolume layout on a not-yet-migrated volume
+    /// (`commit::migrate_volume`), so this never touches `live()` or its callers.
     pub fn snap_dir(&self, volume: &str) -> PathBuf {
         self.voldir(volume).join("snap")
     }
@@ -65,30 +38,6 @@ impl Pool {
     pub fn worktree(&self, volume: &str, ws: &str) -> PathBuf {
         self.voldir(volume).join("live").join(ws)
     }
-    /// Where this workspace's snapshots live: inside the image mount for a block-restored
-    /// workspace (its own fs — snapshots cannot cross filesystems), else the shared recv/.
-    pub fn snap_root(&self, name: &str) -> PathBuf {
-        if is_mountpoint(&self.voldir(name)) { self.voldir(name) } else { self.recv() }
-    }
-    pub fn lineage(&self, name: &str) -> Vec<LineageEntry> {
-        std::fs::read_to_string(self.root.join("vol").join(format!("{name}.lineage")))
-            // A torn line is dropped, not fatal: the surviving prefix is still a valid lineage to
-            // send/receive against, and refusing the whole file would strand the volume.
-            .map(|s| s.lines().filter_map(LineageEntry::parse).collect())
-            .unwrap_or_default()
-    }
-    /// tmp+rename, never truncate-in-place: this file's `unpushed` marks are the ONLY record that
-    /// staged data exists, so a half-written `.lineage` reads back as "no entries" and the janitor
-    /// then sweeps the only copy of that data. Returns `Result` rather than unwrapping because the
-    /// caller is usually mid-push on a box that just hit ENOSPC — a panic there takes down every
-    /// other in-flight job on the agent too.
-    pub fn set_lineage(&self, name: &str, l: &[LineageEntry]) -> Result<(), String> {
-        let s: Vec<String> = l.iter().map(LineageEntry::encode).collect();
-        let dst = self.root.join("vol").join(format!("{name}.lineage"));
-        let tmp = self.root.join("vol").join(format!("{name}.lineage.tmp"));
-        std::fs::write(&tmp, s.join("\n")).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &dst).map_err(|e| format!("{}: {e}", dst.display()))
-    }
     /// `{pool}/vol/{name}/.pushed-gen` — the btrfs generation recorded after the timer's last
     /// push of a home. Inside the voldir, next to `live`, and outside the subvolume: it must not
     /// be in the stream, and it must die with the volume (`cleanup_local` removes the voldir).
@@ -100,8 +49,8 @@ impl Pool {
     pub fn pushed_gen(&self, name: &str) -> Option<u64> {
         std::fs::read_to_string(self.pushed_gen_path(name)).ok()?.trim().parse().ok()
     }
-    /// tmp+rename for the same reason as `set_lineage`: a torn number would parse as garbage and
-    /// read as `None`, which is the safe direction, but a tmp file left behind is one to clean.
+    /// tmp+rename, never truncate-in-place: a torn number would parse as garbage and read as
+    /// `None`, which is the safe direction, but a tmp file left behind is one to clean.
     pub fn record_pushed_gen(&self, name: &str, generation: u64) -> Result<(), String> {
         let dst = self.pushed_gen_path(name);
         let tmp = self.voldir(name).join(".pushed-gen.tmp");
@@ -110,45 +59,6 @@ impl Pool {
     }
 }
 
-#[cfg(test)]
-mod lineage_tests {
-    use super::Pool;
-    use crate::model::{LayerKind, LineageEntry};
-
-    fn e(blob: &str, unpushed: bool) -> LineageEntry {
-        LineageEntry { kind: LayerKind::Stream, blob: blob.into(), snap: None, sha256: "sha".into(), unpushed }
-    }
-
-    #[test]
-    fn set_lineage_is_atomic_and_leaves_no_partial_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = Pool::new(tmp.path());
-        std::fs::create_dir_all(pool.root.join("vol")).unwrap();
-
-        pool.set_lineage("v1", &[e("b1", false), e("b2", true)]).unwrap();
-        assert_eq!(pool.lineage("v1").len(), 2);
-
-        // Crash simulation: a stale tmp file from a previous write must neither be read back as
-        // the lineage nor stop the next write from landing.
-        let stale = pool.root.join("vol").join("v1.lineage.tmp");
-        std::fs::write(&stale, b"s:garbage").unwrap();
-        pool.set_lineage("v1", &[e("b1", false), e("b2", true), e("b3", true)]).unwrap();
-
-        let back = pool.lineage("v1");
-        assert_eq!(back.len(), 3, "a stale tmp file must not corrupt the real lineage");
-        assert_eq!(back.iter().filter(|x| x.unpushed).count(), 2, "unpushed marks survive the write");
-        assert!(!stale.exists(), "the tmp file is renamed away, never left behind");
-    }
-
-    #[test]
-    fn set_lineage_returns_err_instead_of_panicking_on_an_unwritable_pool() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = Pool::new(tmp.path());
-        // `vol/` deliberately absent: the ENOSPC shape of the same failure, which used to panic
-        // the whole agent mid-push.
-        assert!(!pool.set_lineage("v1", &[]).unwrap_err().is_empty());
-    }
-}
 
 pub fn is_mountpoint(p: &std::path::Path) -> bool {
     let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
@@ -157,7 +67,7 @@ pub fn is_mountpoint(p: &std::path::Path) -> bool {
 
 /// `/proc/self/mounts` escapes space, tab, newline and backslash in octal — a pool path with a
 /// space in it (a volume id never has one, but a pool root can) otherwise never matches and
-/// `snap_root` silently picks the wrong root.
+/// `is_mountpoint` silently answers false for a real mountpoint.
 fn unescape_mount(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -213,8 +123,8 @@ mod mount_tests {
     }
 }
 
-/// Serialize every lineage read-modify-write for one workspace across processes (push vs the
-/// background squash) — the double-squash came from exactly this race.
+/// Serialize btrfs operations against one volume across processes — a checkout racing a commit
+/// cut, or two reconcile passes landing at once, is exactly the shape of race this closes.
 pub fn ws_lock(pool: &Pool, ws: &str) -> Result<std::fs::File, String> {
     let path = pool.root.join("vol").join(format!("{ws}.lock"));
     let f = std::fs::File::create(&path).map_err(|e| e.to_string())?;

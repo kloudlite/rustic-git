@@ -9,7 +9,6 @@ use rustic_git_agent::controller::{Ctx, Done};
 use rustic_git_workspaces::crd;
 use rustic_git_workspaces::engine::{Engine, Pool};
 use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
-use rustic_git_workspaces::registry_client::RegistryClient;
 use std::sync::Arc;
 
 const VOL_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status";
@@ -82,21 +81,17 @@ fn volume(generation: i64) -> crd::Volume {
 fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
     // Port 1: nothing listens, so every registry read fails — the migration's "skip the history
     // backfill" path, which is what every non-history test wants.
-    ctx_full(pool, routes, "http://127.0.0.1:1", Arc::new(FakeNix::default()))
+    ctx_full(pool, routes, Arc::new(FakeNix::default()))
 }
 
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
 /// test can reach the node's real `/nix` and none of them race each other over it.
-fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, registry: &str, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
     let _ = std::fs::create_dir_all(&profiles);
-    let engine = Engine::new(
-        Pool::new(pool),
-        Arc::new(object_store::memory::InMemory::new()),
-        RegistryClient::new(registry, "unused"),
-    );
+    let engine = Engine::new(Pool::new(pool));
     // Ctx::new reads the pinned default image from the environment, as the agent does.
     std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
     (
@@ -211,35 +206,6 @@ async fn a_reconcile_that_cannot_read_the_pool_deletes_nothing() {
         "the failure is reported as Ready=False: {last}"
     );
     assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "nothing may be deleted: {:?}", rec.calls());
-}
-
-const HOME_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice/status";
-
-/// Keep-biased, on the one failure that matters for a home: a node that has never seen this owner
-/// asks the registry whether a copy exists, and if it cannot ask, it makes NOTHING. An empty home
-/// created "for now" and overwritten by the copy later is the silent loss a person notices a week
-/// on. `RegionUnreachable` is permanent, so the object settles instead of retrying every minute.
-#[tokio::test]
-async fn a_home_that_cannot_reach_the_registry_settles_and_creates_no_subvolume() {
-    let tmp = tempfile::tempdir().unwrap();
-    // Port 1: the `ctx` helper's registry, which nothing listens on.
-    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(HOME_STATUS)]);
-    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).map(|mut v: crd::Volume| { v.status = None; v }).unwrap();
-
-    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    wait_idle(&ctx).await;
-    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent: no retry loop");
-
-    let last = rec.sent("PATCH", HOME_STATUS).last().cloned().expect("a status write");
-    assert_eq!(last["status"]["phase"], "error");
-    assert!(
-        last["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "RegionUnreachable"),
-        "{last}"
-    );
-    assert!(!tmp.path().join("vol/home-alice/live").exists(), "nothing was created empty");
-    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
 }
 
 /// Every phase string the controller writes must deserialize into the enum `/v1` projects it into.
@@ -1439,30 +1405,8 @@ async fn a_failed_volume_child_stops_the_parent_requeueing() {
     assert_eq!(cond["message"], "the pool is full", "the child's own reason, not a guess");
 }
 
-// ── snapshot requests ────────────────────────────────────────────────────
 
-const SNAP_STATUS: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-1/status";
-const VOL_GET: &str = "/apis/rustic-git.io/v1alpha1/volumes/ws-1";
 
-fn snap_json(status: serde_json::Value) -> serde_json::Value {
-    // `phase` is required by the schema and by `SnapshotRequestStatus`, so "no status yet" is
-    // spelled `pending` rather than `{}` — a bare `{}` does not round-trip through the CRD type.
-    let status = if status == serde_json::json!({}) { serde_json::json!({"phase": "pending"}) } else { status };
-    serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-        "metadata": {"name": "snap-1", "uid": "snap-uid-1", "generation": 1,
-                     "finalizers": ["rustic-git.io/snapshot"],
-                     "labels": {"rustic-git.io/owner": "alice", "rustic-git.io/volume": "ws-1"}},
-        // No `nodeName`: a node is a controller-owned fact and the API does not copy facts into
-        // spec. The agent resolves it from the named Volume.
-        "spec": {"volume": "ws-1", "message": "checkpoint"},
-        "status": status,
-    })
-}
-
-fn snapshot(status: serde_json::Value) -> crd::SnapshotRequest {
-    serde_json::from_value(snap_json(status)).unwrap()
-}
 
 /// The Volume this request names, on the node the test's `ctx` is (`node-a`) unless told otherwise.
 fn vol_on(node: &str) -> serde_json::Value {
@@ -1474,141 +1418,10 @@ fn vol_on(node: &str) -> serde_json::Value {
     })
 }
 
-/// A push runs once and says what it produced. The uid-keyed `running` map is the idempotency
-/// guard, exactly as for Volume work — a second reconcile of a request in flight starts nothing.
-#[tokio::test]
-async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
-        ],
-    );
-    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
 
-    // Stand in for the push having already finished: the reconcile that OBSERVES it is what writes
-    // `done`, and which pass that is depends on a thread, not on the reconcile.
-    ctx.running.lock().unwrap().insert(
-        "snap-uid-1".to_string(),
-        (1, tokio::task::spawn_blocking(|| {
-            Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), ..Done::default() })
-        })),
-    );
-    wait_idle(&ctx).await;
 
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
-        .await
-        .unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let sent = rec.sent("PATCH", SNAP_STATUS);
-    let last = sent.last().unwrap();
-    assert_eq!(last["status"]["phase"], "done");
-    assert_eq!(last["status"]["snapshotId"], "layer-9");
-    assert_eq!(last["status"]["observedGeneration"], 1);
-    assert!(last["status"]["at"].as_str().unwrap().contains('T'), "an rfc3339 stamp: {last}");
-    assert!(
-        last["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Ready" && c["status"] == "True"),
-        "{last}"
-    );
-    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
-    // Nothing outside its own object. Two controllers force-applying one Volume status under one
-    // field manager prune each other's fields — the Volume's next pass would delete it anyway.
-    assert!(
-        !rec.calls().iter().any(|c| c.contains("/volumes/ws-1/status")),
-        "the snapshot reconciler must not write the Volume's status: {:?}", rec.calls()
-    );
-}
 
-/// A request whose Volume lives on another node belongs to another agent. Every agent watches every
-/// request (there is no field selector), so "not mine" must be silent — a second agent writing this
-/// object's status is exactly the multi-writer problem the design removes — and it must be answered
-/// from the shared Volume store, never by a GET: the store holds only this node's Volumes, so a
-/// Volume that is not in it is not ours (yet), whatever the API server would say.
-#[tokio::test]
-async fn a_request_for_another_nodes_volume_is_left_alone() {
-    let tmp = tempfile::tempdir().unwrap();
-    // The GET is stubbed so that, were the reconciler still to ask, it would get an answer.
-    let (ctx, rec) = ctx(tmp.path(), vec![rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-b"))]);
 
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(rec.calls().is_empty(), "another node's request costs no API call at all: {:?}", rec.calls());
-}
-
-/// An agent restart loses the `running` map. A request left at `working` therefore has a
-/// `Progressing` condition and no handle, and there is no way to tell "crashed before starting"
-/// from "crashed mid-send" — so it must NOT be re-run: `engine.push_env` would take a fresh
-/// snapshot and register a SECOND commit record for one user push.
-#[tokio::test]
-async fn a_working_request_with_no_handle_fails_instead_of_pushing_twice() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
-        ],
-    );
-    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
-
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
-        .await
-        .unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change(), "a permanent failure is not retried");
-    let last = rec.sent("PATCH", SNAP_STATUS).last().unwrap().clone();
-    assert_eq!(last["status"]["phase"], "error");
-    assert!(
-        last["status"]["conditions"].as_array().unwrap().iter()
-            .any(|c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "AgentRestarted"),
-        "{last}"
-    );
-    assert!(ctx.running.lock().unwrap().is_empty(), "nothing was started");
-    assert!(!tmp.path().join("vol/ws-1").exists(), "and no second push ran");
-}
-
-/// A request is never re-run past `done`. The record is durable and content-addressed; running it
-/// again would push a second commit nobody asked for.
-#[tokio::test]
-async fn a_done_snapshot_request_does_nothing_on_a_second_reconcile() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![]);
-    let r = snapshot(serde_json::json!({"phase": "done", "snapshotId": "layer-9", "at": "2026-08-27T00:00:00Z"}));
-
-    let action = rustic_git_agent::snapshot::apply_snapshot(&r, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(rec.calls().is_empty(), "a finished request writes nothing — not even the Volume read: {:?}", rec.calls());
-    assert!(!tmp.path().join("vol/ws-1").exists(), "and starts nothing");
-}
-
-/// Deleting a request mid-push must WAIT. This is why the request has a finalizer at all: a delete
-/// during `working` would otherwise orphan a btrfs RO snapshot, a stage file, an in-flight blob
-/// upload and a possible `POST /commits` with no object left to record the outcome in — and the
-/// Volume's own finalizer does not cover it, because a SnapshotRequest is not the Volume's child.
-#[tokio::test]
-async fn deleting_a_working_request_waits_for_the_handle() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, _rec) = ctx(tmp.path(), vec![]);
-    ctx.running.lock().unwrap().insert(
-        "snap-uid-1".to_string(),
-        (1, tokio::task::spawn_blocking(|| {
-            std::thread::sleep(std::time::Duration::from_millis(700));
-            Ok(Done { phase: crd::Phase::Done, lineage_tip: None, ..Done::default() })
-        })),
-    );
-    let r = snapshot(serde_json::json!({"phase": "working"}));
-
-    let action = rustic_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
-    assert_eq!(
-        action,
-        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)),
-        "cleanup must requeue while the push is running"
-    );
-    assert!(!ctx.running.lock().unwrap().is_empty(), "nothing was drained by a cleanup that waited");
-
-    wait_idle(&ctx).await;
-    rustic_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
-    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained by cleanup");
-}
 
 /// The Volume controller no longer has a push branch at all: pushing is an object with its own
 /// reconciler, and `volume_work` is materialize-or-nothing.
@@ -1627,11 +1440,9 @@ async fn a_volume_with_a_push_annotation_starts_no_push() {
     assert!(ctx.running.lock().unwrap().is_empty(), "and nothing was started");
 }
 
-// ── the stop-before-teardown snapshot ────────────────────────────────────
 
-const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-env-1";
-const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
-const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
+// Fixture helpers still used by surviving tests below (the object-store push/stop tests that
+// used to sit here are deleted — Task 8).
 
 /// A stopping environment with one service and its own volume, on this node.
 fn stopping_env() -> crd::Environment {
@@ -1660,295 +1471,11 @@ fn stop_req(status: serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
-    let mut routes = vec![
-        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
-        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
-        // The drain that precedes every stop push: scale to zero, and no pod is still writing.
-        Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
-        rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[])),
-        Route {
-            method: "PATCH",
-            path: "/apis/rustic-git.io/v1alpha1/environments/env-1/status".into(),
-            status: 200,
-            body: env_json(serde_json::json!({})),
-        },
-    ];
-    match req {
-        Some(r) => routes.push(rustic_git_workspaces::kube_test::get(STOP_REQ, r)),
-        None => routes.push(Route {
-            method: "GET",
-            path: STOP_REQ.into(),
-            status: 404,
-            // A real 404 body: `get_opt` reads the `Status` to tell "absent" from "broken".
-            body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
-                                     "code": 404, "reason": "NotFound", "message": "not found"}),
-        }),
-    }
-    routes
-}
-
-/// A stop snapshot that FAILED must not let the teardown through. An environment torn down without
-/// a landed push loses its last state for good, so the services stay up and the environment says
-/// why — the operator deletes and recreates the request to retry.
-#[tokio::test]
-async fn a_failed_stop_snapshot_tears_nothing_down() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), stop_routes(Some(stop_req(serde_json::json!({"phase": "error"})))));
-
-    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change(), "a failed push is not retried by us");
-    assert!(
-        !rec.calls().iter().any(|c| c.starts_with("DELETE")),
-        "nothing may be deleted while the push has not landed: {:?}",
-        rec.calls()
-    );
-    let last = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/environments/env-1/status").last().unwrap().clone();
-    assert_eq!(last["status"]["phase"], "running", "the services ARE still up");
-    assert!(
-        last["status"]["conditions"].as_array().unwrap().iter().any(
-            |c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "StopSnapshotFailed"
-        ),
-        "{last}"
-    );
-}
-
-/// The audit's Q-13: an agent that restarted mid-stop left `stop-{env}` at `error/AgentRestarted`,
-/// and with no `/v1` delete for requests that used to park the environment until `kubectl`. That
-/// one error is ours, not the push's, so the request is deleted and a fresh one created in the same
-/// pass — with the services still up, because nothing has landed yet.
-#[tokio::test]
-async fn an_agent_restart_mid_stop_recreates_the_request_instead_of_parking() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = stop_routes(Some(stop_req(serde_json::json!({
-        "phase": "error",
-        "conditions": [{"type": "Ready", "status": "False", "reason": "AgentRestarted",
-                        "message": "the agent restarted while this push was in flight; push again",
-                        "lastTransitionTime": "2026-08-29T00:00:00Z"}],
-    }))));
-    routes.push(Route {
-        method: "DELETE",
-        path: STOP_REQ.into(),
-        status: 200,
-        body: stop_req(serde_json::json!({"phase": "error"})),
-    });
-    routes.push(rustic_git_workspaces::kube_test::post(
-        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
-        stop_req(serde_json::json!({"phase": "pending"})),
-    ));
-    let (ctx, rec) = ctx(tmp.path(), routes);
-
-    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "{:?}", rec.calls());
-    let req = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshotrequests").remove(0);
-    assert_eq!(req["metadata"]["name"], "stop-env-1");
-    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "nothing landed yet: {:?}", rec.calls());
-}
-
-/// A `done` left by a stop that was abandoned for Start (the teardown never ran, so nothing
-/// deleted it) must not let the NEXT stop tear down without pushing what ran since. Its generation
-/// stamp is older than this stop's, so it is replaced.
-#[tokio::test]
-async fn a_landed_request_from_an_earlier_stop_does_not_let_the_next_stop_skip_its_push() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut old = stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}));
-    old["metadata"]["annotations"] = serde_json::json!({"rustic-git.io/stop-generation": "1"});
-    let mut routes = stop_routes(Some(old.clone()));
-    routes.push(Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: old });
-    routes.push(rustic_git_workspaces::kube_test::post(SNAPSHOTS, stop_req(serde_json::json!({"phase": "pending"}))));
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let mut e = stopping_env();
-    e.metadata.generation = Some(3);
-
-    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "{:?}", rec.calls());
-    assert_eq!(rec.sent("POST", SNAPSHOTS)[0]["metadata"]["annotations"]["rustic-git.io/stop-generation"], "3");
-    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "not torn down on a stale push: {:?}", rec.calls());
-}
-
-/// The happy path: a `done` stop snapshot tears the services down AND deletes the request, so the
-/// next stop of this environment creates a fresh one instead of finding this `done` object under
-/// the same fixed name and pushing nothing.
-#[tokio::test]
-async fn a_landed_stop_snapshot_tears_down_and_deletes_its_request() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = stop_routes(Some(stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}))));
-    routes.push(Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
-    routes.push(Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: stop_req(serde_json::json!({"phase": "done"})) });
-    let (ctx, rec) = ctx(tmp.path(), routes);
-
-    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "{:?}", rec.calls());
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "the request must not outlive the stop: {:?}", rec.calls());
-}
-
-/// No request yet: create exactly one, and tear nothing down on this pass.
-#[tokio::test]
-async fn a_stop_with_no_snapshot_request_creates_one_and_waits() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = stop_routes(None);
-    routes.push(rustic_git_workspaces::kube_test::post(
-        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
-        stop_req(serde_json::json!({"phase": "pending"})),
-    ));
-    let (ctx, rec) = ctx(tmp.path(), routes);
-
-    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    let req = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshotrequests").remove(0);
-    assert_eq!(req["metadata"]["name"], "stop-env-1");
-    assert_eq!(req["spec"]["volume"], "env-1");
-    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
-}
-
-/// The stop snapshot is what a restore reads back as the environment's last state, so it must be
-/// taken with no service writing: every StatefulSet goes to zero and its pods are gone BEFORE the
-/// request exists. The StatefulSets are still not deleted — that waits for the push to land.
-#[tokio::test]
-async fn a_stop_scales_the_services_to_zero_before_it_requests_the_push() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = stop_routes(None);
-    routes.push(rustic_git_workspaces::kube_test::post(
-        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
-        stop_req(serde_json::json!({"phase": "pending"})),
-    ));
-    let (ctx, rec) = ctx(tmp.path(), routes);
-
-    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    assert_eq!(rec.sent("PATCH", DEP_PATCH)[0]["spec"]["replicas"], 0);
-    let calls = rec.calls();
-    let scaled = calls.iter().position(|c| c == &format!("PATCH {DEP_PATCH}")).unwrap();
-    let drained = calls.iter().position(|c| c == &format!("GET {POD_LIST}")).unwrap();
-    let requested = calls.iter().position(|c| c == "POST /apis/rustic-git.io/v1alpha1/snapshotrequests").unwrap();
-    assert!(scaled < drained && drained < requested, "scale, drain, then push: {calls:?}");
-    assert!(!calls.iter().any(|c| c.starts_with("DELETE")), "nothing is deleted before the push lands: {calls:?}");
-
-    // A pod still terminating is a process still writing: no request yet, and the status says why.
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = stop_routes(None);
-    routes.retain(|r| r.path != POD_LIST);
-    routes.push(rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[("db-0", "Running")])));
-    let (ctx, rec) = self::ctx(tmp.path(), routes);
-
-    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(!rec.calls().iter().any(|c| c.starts_with("POST")), "no push under a running service: {:?}", rec.calls());
-    assert_eq!(rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap()["status"]["conditions"][0]["reason"], "Draining");
-}
-
-/// A Volume and a SnapshotRequest share no name and no ownerReference — `spec.volume` is the only
-/// link — so the mapper must find requests BY THAT FIELD or a request created before its Volume
-/// waits on the 15s backstop forever instead of being woken.
-#[test]
-fn a_volume_event_wakes_the_requests_that_name_it() {
-    let mine: Arc<crd::SnapshotRequest> = Arc::new(snapshot(serde_json::json!({"phase": "pending"})));
-    let other: Arc<crd::SnapshotRequest> = Arc::new(serde_json::from_value(serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-        "metadata": {"name": "snap-2"}, "spec": {"volume": "ws-2"}, "status": {"phase": "pending"},
-    })).unwrap());
-
-    let woken = rustic_git_agent::controller::requests_naming(&[mine, other.clone()], "ws-1");
-    assert_eq!(woken.len(), 1, "only the request that names this volume");
-    assert_eq!(woken[0].name, "snap-1");
-    // And a volume nothing names wakes nothing — the mapper is not a "reconcile everything" hook.
-    assert!(rustic_git_agent::controller::requests_naming(&[other], "ws-1").is_empty());
-}
-
-/// A push that SUCCEEDED but whose status write failed must not come back as `AgentRestarted`: the
-/// bytes are in the registry and the only record of their snapshot id is the drained handle. The
-/// outcome goes back in the map so the retry writes `done`, not a false permanent failure.
-#[tokio::test]
-async fn a_failed_status_write_replays_the_outcome_instead_of_losing_the_push() {
-    let tmp = tempfile::tempdir().unwrap();
-    let make = ctx;
-    let (ctx, rec) = make(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 500, body: serde_json::json!({}) },
-        ],
-    );
-    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
-    ctx.running.lock().unwrap().insert(
-        "snap-uid-1".to_string(),
-        (1, tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), ..Done::default() }))),
-    );
-    wait_idle(&ctx).await;
-
-    let r = snapshot(serde_json::json!({"phase": "working"}));
-    rustic_git_agent::snapshot::apply_snapshot(&r, &ctx).await.unwrap_err();
-    assert!(!ctx.running.lock().unwrap().is_empty(), "the outcome must survive a failed write");
-    assert_eq!(rec.sent("PATCH", SNAP_STATUS).last().unwrap()["status"]["phase"], "done");
-
-    // The retry, against an API server that is back: `done` with the real snapshot id, never
-    // `AgentRestarted`.
-    let (ctx2, rec2) = make(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
-        ],
-    );
-    ctx2.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
-    let handle = ctx.running.lock().unwrap().remove("snap-uid-1").unwrap();
-    ctx2.running.lock().unwrap().insert("snap-uid-1".to_string(), handle);
-    wait_idle(&ctx2).await;
-    rustic_git_agent::snapshot::apply_snapshot(&r, &ctx2).await.unwrap();
-    let last = rec2.sent("PATCH", SNAP_STATUS).last().unwrap().clone();
-    assert_eq!(last["status"]["phase"], "done");
-    assert_eq!(last["status"]["snapshotId"], "layer-9");
-}
-
-/// An environment already stopped at this generation does NOTHING. The guard matters because the
-/// `stop-{env}` request is deleted after teardown: without it, the missing object reads as "no push
-/// requested yet" and every later event on a stopped environment would push again, forever.
-#[tokio::test]
-async fn an_already_stopped_environment_pushes_nothing_and_deletes_nothing() {
-    let tmp = tempfile::tempdir().unwrap();
-    // Only the two reads the pass makes before the guard; a create or a delete would 404 the mock.
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
-        ],
-    );
-    let mut e = stopping_env();
-    e.status = Some(crd::EnvironmentStatus {
-        phase: crd::Phase::Stopped,
-        observed_generation: Some(1),
-        node_name: "node-a".into(),
-        ..Default::default()
-    });
-
-    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(
-        !rec.calls().iter().any(|c| c.starts_with("POST") || c.starts_with("DELETE")),
-        "a stopped environment must not push again: {:?}",
-        rec.calls()
-    );
-}
-
-const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-home-ws-1";
-const WS_POD_DEL: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
-const SNAPSHOTS: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests";
-
 fn stopping_ws() -> crd::Workspace {
     let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
                                             "volumeRef": "ws-1", "podRef": "ws-alice/ws-1"}));
     o["spec"]["desiredState"] = serde_json::json!("stopped");
     serde_json::from_value(o).unwrap()
-}
-
-fn home_stop_req(status: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-        "metadata": {"name": "stop-home-ws-1", "uid": "stop-home-uid-1"},
-        "spec": {"volume": "home-alice"},
-        "status": status,
-    })
 }
 
 fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
@@ -1960,229 +1487,40 @@ fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
     routes
 }
 
-/// Trigger 2 of the spec: the home is pushed BEFORE the pod goes, through a `stop-home-{ws}`
-/// request owned by the workspace, and nothing is deleted on the pass that creates it.
-#[tokio::test]
-async fn a_stopping_workspace_requests_a_home_push_before_deleting_its_pod() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = ws_stop_routes(None);
-    routes.push(rustic_git_workspaces::kube_test::post(SNAPSHOTS, home_stop_req(serde_json::json!({"phase": "pending"}))));
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+// ── the stop-before-teardown snapshot ────────────────────────────────────
 
-    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    let req = rec.sent("POST", SNAPSHOTS).remove(0);
-    assert_eq!(req["metadata"]["name"], "stop-home-ws-1");
-    assert_eq!(req["spec"]["volume"], "home-alice");
-    assert_eq!(req["metadata"]["ownerReferences"][0]["kind"], "Workspace");
-    assert_eq!(req["metadata"]["labels"][crd::STOP_LABEL], "ws-1", "the label the stop-request watch selects on");
-    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "nothing landed yet: {:?}", rec.calls());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "ready", "still running while the push is in flight");
-    assert!(st["status"]["observedGeneration"].is_null());
-}
+const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-env-1";
+const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
+const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 
-/// Fail-closed: a failed home push keeps the pod. A stop that tore the pod down anyway would be
-/// the one moment the person's dotfiles are lost for good.
-#[tokio::test]
-async fn a_failed_home_push_keeps_the_workspace_pod() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), ws_stop_routes(Some(home_stop_req(serde_json::json!({"phase": "error"})))));
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
 
-    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change(), "woken by the request's own status");
-    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "ready");
-    assert!(
-        st["status"]["conditions"].as_array().unwrap().iter()
-            .any(|c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "StopSnapshotFailed"),
-        "{st}"
-    );
-}
 
-/// The happy path: `done` deletes the pod AND the request, so the next stop creates a fresh one
-/// instead of finding this `done` object under the same fixed name and stopping without a push.
-#[tokio::test]
-async fn a_landed_home_push_deletes_the_pod_and_its_request() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = ws_stop_routes(Some(home_stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}))));
-    routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
-    routes.push(Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: home_stop_req(serde_json::json!({"phase": "done"})) });
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
 
-    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "{:?}", rec.calls());
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_STOP_REQ}")), "the request must not outlive the stop: {:?}", rec.calls());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "stopped");
-    assert_eq!(st["status"]["observedGeneration"], 1);
-}
 
-/// An owner bound before homes existed has no home Volume on this node and nothing to lose: the
-/// stop is the plain pod delete it always was. No request, no wait.
-#[tokio::test]
-async fn a_workspace_without_a_home_here_stops_without_a_push() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = ws_stop_routes(None);
-    routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
-    let (ctx, rec) = ctx(tmp.path(), routes);
 
-    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "{:?}", rec.calls());
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "{:?}", rec.calls());
-}
 
-/// An agent that restarts with this stop pending reconciles the Workspace off its initial list,
-/// possibly before the Volume watch has delivered the home. "Not in the store" must then wait, not
-/// take the no-home branch and delete the pod without a push: the owner's binding exists, so the
-/// home does too.
-#[tokio::test]
-async fn a_stop_before_the_home_is_in_the_store_waits_instead_of_skipping_the_push() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = ws_stop_routes(None);
-    routes.push(ready_binding());
-    let (ctx, rec) = ctx(tmp.path(), routes);
 
-    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "no request without a Volume to name: {:?}", rec.calls());
-    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "the pod stays until the home is pushed: {:?}", rec.calls());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "ready");
-    assert!(st["status"]["observedGeneration"].is_null());
-}
 
-/// A workspace stopped while still Creating never had a pod, so nothing of its ran in the home:
-/// the push would snapshot the same bytes the last one did, for nothing.
-#[tokio::test]
-async fn a_workspace_that_never_had_a_pod_stops_without_a_push() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = ws_stop_routes(None);
-    routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
-    let mut w = stopping_ws();
-    w.status.as_mut().unwrap().pod_ref = None;
 
-    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "{:?}", rec.calls());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "stopped");
-}
 
-/// The recovery from `StopSnapshotFailed` is Start, then Stop again — and the request the failed
-/// stop left behind must not park the next one on its first pass. Its generation stamp says which
-/// stop it belonged to; an older one is deleted and a fresh push requested.
-#[tokio::test]
-async fn a_failed_request_from_an_earlier_stop_is_replaced_not_reread() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut old = home_stop_req(serde_json::json!({"phase": "error"}));
-    old["metadata"]["annotations"] = serde_json::json!({"rustic-git.io/stop-generation": "1"});
-    let mut routes = ws_stop_routes(Some(old.clone()));
-    routes.push(Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: old });
-    routes.push(rustic_git_workspaces::kube_test::post(SNAPSHOTS, home_stop_req(serde_json::json!({"phase": "pending"}))));
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
-    let mut w = stopping_ws();
-    w.metadata.generation = Some(3);
 
-    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_STOP_REQ}")), "{:?}", rec.calls());
-    let req = rec.sent("POST", SNAPSHOTS).remove(0);
-    assert_eq!(req["metadata"]["annotations"]["rustic-git.io/stop-generation"], "3", "stamped for THIS stop");
-    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "nothing landed yet: {:?}", rec.calls());
-}
 
-/// Same guard the environment has, now that the request is deleted after teardown: a workspace
-/// already stopped at this generation must not create a fresh request on every later event.
-#[tokio::test]
-async fn an_already_stopped_workspace_pushes_nothing_again() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![]);
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
-    let mut w = stopping_ws();
-    let mut st = w.status.clone().unwrap();
-    st.phase = crd::Phase::Stopped;
-    st.observed_generation = Some(1);
-    st.pod_ref = None;
-    w.status = Some(st);
 
-    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(rec.calls().is_empty(), "nothing to do: {:?}", rec.calls());
-}
+const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-home-ws-1";
+const WS_POD_DEL: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
 
-/// A restore on a STOPPED environment bumps its generation, which used to fail the stopped guard
-/// and push the just-restored subvolume as a commit nobody asked for. Stopped means torn down
-/// after a landed push; nothing has written since, so there is nothing to push — observe and stop.
-#[tokio::test]
-async fn a_restore_on_a_stopped_environment_pushes_nothing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut vol = env_vol();
-    vol["status"]["restoredTo"] = serde_json::json!("snap-7");
-    vol["status"]["restoreRequestedAt"] = serde_json::json!(WISH_AT);
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
-            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
-        ],
-    );
-    let mut e = stopping_env();
-    e.metadata.generation = Some(2);
-    e.spec.restore = Some(crd::RestoreWish {
-        snapshot_id: "snap-7".into(),
-        volume: "env-1".into(),
-        owner: Some("acme".into()),
-        region: None,
-        requested_at: WISH_AT.into(),
-    });
-    e.status = Some(crd::EnvironmentStatus {
-        phase: crd::Phase::Stopped,
-        observed_generation: Some(1),
-        node_name: "node-a".into(),
-        ..Default::default()
-    });
 
-    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let calls = rec.calls();
-    assert!(!calls.iter().any(|c| c.starts_with("POST") || c.starts_with("DELETE")), "{calls:?}");
-    assert!(!calls.iter().any(|c| c == &format!("GET {STOP_REQ}")), "the stop path never ran: {calls:?}");
-    let last = rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap().clone();
-    assert_eq!(last["status"]["phase"], "stopped");
-    assert_eq!(last["status"]["observedGeneration"], 2, "the restore's generation is observed: {last}");
-}
 
-/// The stop request is owned by the Environment, which is the ONLY link back: an environment parked
-/// at `StopSnapshotFailed` returns `await_change`, so the request's ownerReference is what the
-/// environments controller's `SnapshotRequest` watch maps on to wake it.
-#[tokio::test]
-async fn the_stop_request_is_owned_by_its_environment() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = stop_routes(None);
-    routes.push(rustic_git_workspaces::kube_test::post(
-        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
-        stop_req(serde_json::json!({"phase": "pending"})),
-    ));
-    let (ctx, rec) = ctx(tmp.path(), routes);
 
-    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    let req = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshotrequests").remove(0);
-    let owner = &req["metadata"]["ownerReferences"][0];
-    assert_eq!(owner["kind"], "Environment");
-    assert_eq!(owner["name"], "env-1");
-    assert_eq!(owner["controller"], true, "only a CONTROLLER ref is mapped back: {req}");
-}
+
+
+
+
+
+
+
+
+
 
 const ENV_STATUS_PATH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1/status";
 
@@ -2558,33 +1896,6 @@ async fn a_second_reconcile_of_a_settled_workspace_writes_nothing() {
     assert!(rec.calls().is_empty(), "an already-settled object writes nothing: {:?}", rec.calls());
 }
 
-/// A `done` stop request that is TERMINATING is not a landed push — it is the previous stop's
-/// object on its way out. Reading it as done would tear the environment down without pushing.
-#[tokio::test]
-async fn a_terminating_stop_request_is_treated_as_absent() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut terminating = stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}));
-    terminating["metadata"]["deletionTimestamp"] = serde_json::json!("2026-08-27T00:00:00Z");
-    terminating["metadata"]["finalizers"] = serde_json::json!(["rustic-git.io/snapshot"]);
-    let mut routes = stop_routes(Some(terminating));
-    routes.push(rustic_git_workspaces::kube_test::post(
-        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
-        stop_req(serde_json::json!({"phase": "pending"})),
-    ));
-    let (ctx, rec) = ctx(tmp.path(), routes);
-
-    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
-    assert!(
-        !rec.calls().iter().any(|c| c.starts_with("DELETE")),
-        "nothing may be torn down against a terminating request: {:?}",
-        rec.calls()
-    );
-    assert!(
-        rec.calls().iter().any(|c| c == "POST /apis/rustic-git.io/v1alpha1/snapshotrequests"),
-        "a fresh push is requested instead: {:?}",
-        rec.calls()
-    );
-}
 
 /// Stopping needs neither the disk nor the namespace — only a pod delete. Gated on the Volume, a
 /// workspace whose subvolume failed could never be stopped, so it kept its pod forever.
@@ -2629,7 +1940,7 @@ async fn wake<T>(rx: &mut tokio::sync::mpsc::UnboundedReceiver<T>) -> T {
 async fn a_finished_volume_operation_wakes_its_reconciler() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
-    let (mut vol_wakes, _snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let (mut vol_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
     let v = volume(3);
 
     let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
@@ -2648,34 +1959,6 @@ async fn a_finished_volume_operation_wakes_its_reconciler() {
     assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
 }
 
-/// Same for a push: the wake fires on completion whatever the outcome (here the push fails — no
-/// registry listens in these tests — and the next reconcile writes `error` without waiting a tick).
-#[tokio::test]
-async fn a_finished_push_wakes_its_reconciler() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
-        ],
-    );
-    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
-    let (_vol_wakes, mut snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
-
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-
-    assert_eq!(wake(&mut snap_wakes).await.name, "snap-1");
-
-    wait_idle(&ctx).await;
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
-        .await
-        .unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let sent = rec.sent("PATCH", SNAP_STATUS);
-    assert_eq!(sent.last().unwrap()["status"]["phase"], "error", "{:?}", sent.last());
-    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
-}
 
 /// The success half: a finished operation whose outcome is `Ready` wakes the reconciler AND the
 /// woken pass writes `ready` with the generation it ran for. Stubbed through `wake_on_finish`
@@ -2684,7 +1967,7 @@ async fn a_finished_push_wakes_its_reconciler() {
 async fn a_successful_volume_operation_wakes_and_then_writes_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
-    let (mut vol_wakes, _snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let (mut vol_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
     let v = volume(5);
     let handle = rustic_git_agent::controller::wake_on_finish(
         tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Ready, ..Done::default() })),
@@ -2705,102 +1988,8 @@ async fn a_successful_volume_operation_wakes_and_then_writes_ready() {
     assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
 }
 
-/// Same for a push that lands: the wake arrives and the woken pass writes `done` with the id.
-#[tokio::test]
-async fn a_successful_push_wakes_and_then_writes_done() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
-        ],
-    );
-    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
-    let (_vol_wakes, mut snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
-    let handle = rustic_git_agent::controller::wake_on_finish(
-        tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), ..Done::default() })),
-        ctx.wake_snapshot.clone(),
-        kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new("snap-1"),
-    );
-    ctx.running.lock().unwrap().insert("snap-uid-1".to_string(), (1, handle));
 
-    assert_eq!(wake(&mut snap_wakes).await.name, "snap-1");
 
-    wait_idle(&ctx).await;
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
-        .await
-        .unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let last = rec.sent("PATCH", SNAP_STATUS).last().unwrap().clone();
-    assert_eq!(last["status"]["phase"], "done", "{last}");
-    assert_eq!(last["status"]["snapshotId"], "layer-9");
-    assert_eq!(last["status"]["observedGeneration"], 1);
-    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
-}
-
-/// A snapshot outlives its `SnapshotRequest` — the env-stop request is deleted after teardown, and
-/// nothing keeps a push request forever. Validating a `restoreOf` against a `done` CR therefore
-/// made a deleted environment's snapshots unrestorable while their records sat untouched in the
-/// registry, so the work starts with NO SnapshotRequest present at all and the registry gets to
-/// answer.
-#[tokio::test]
-async fn a_restore_starts_without_any_snapshot_request() {
-    let tmp = tempfile::tempdir().unwrap();
-    // No `snapshotrequests` route is registered: a lookup would fail outright, which is the point.
-    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
-    let mut v = volume(1);
-    v.spec.source = Some(crd::VolumeSource::RestoreOf {
-        volume: "env-gone".into(),
-        snapshot_id: "snap-old".into(),
-        owner: None,
-        region: None,
-    });
-
-    rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
-
-    assert!(
-        ctx.running.lock().unwrap().contains_key("uid-1"),
-        "the restore work must start: {:?}",
-        rec.calls()
-    );
-    assert!(
-        !rec.calls().iter().any(|c| c.contains("snapshotrequests")),
-        "the CR is the push work item, never the snapshot index: {:?}",
-        rec.calls()
-    );
-}
-
-/// A restore that cannot reach its snapshot's region settles: one `phase: error` status write
-/// naming the region, and `await_change` — not a requeue that retries a missing Secret key every
-/// 15 seconds forever. This is the loop half of the 27 Aug hang; the engine half is
-/// `crates/workspaces/tests/engine_ops.rs`.
-#[tokio::test]
-async fn a_restore_from_an_unreachable_region_settles_and_stops_requeueing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
-    let mut v = volume(1);
-    v.spec.source = Some(crd::VolumeSource::RestoreOf {
-        volume: "env-gone".into(),
-        snapshot_id: "snap-old".into(),
-        owner: None,
-        // A region that is not this node's own: a snapshot is restorable only where it was
-        // pushed, so this must fail by name rather than silently read the local container.
-        region: Some("nowhere".into()),
-    });
-
-    rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
-    wait_idle(&ctx).await;
-    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
-
-    assert_eq!(action, kube::runtime::controller::Action::await_change(), "a missing credential is not retryable");
-    let sent = rec.sent("PATCH", VOL_STATUS);
-    let last = sent.last().expect("a status write");
-    assert_eq!(last["status"]["phase"], "error");
-    let cond = &last["status"]["conditions"][0];
-    assert_eq!(cond["reason"], "RegionUnreachable");
-    assert_eq!(cond["status"], "False");
-    assert!(cond["message"].as_str().unwrap().contains("nowhere"), "the condition must name it: {cond}");
-}
 
 
 // ── the packages step ────────────────────────────────────────────────────
@@ -2842,7 +2031,7 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
         ),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ]);
-    let (ctx, rec) = ctx_full(pool, routes, "http://127.0.0.1:1", fake.clone());
+    let (ctx, rec) = ctx_full(pool, routes, fake.clone());
     // The pod mounts the owner's home, so the Running arm waits for it to be Ready here.
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     (ctx, rec, fake)
@@ -3202,7 +2391,7 @@ async fn every_watch_is_scoped_to_this_node_or_label_selected() {
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", list("Workspace")),
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/environments", list("Environment")),
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/ownerbindings", list("OwnerBinding")),
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshotrequests", list("SnapshotRequest")),
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots", list("Snapshot")),
             rustic_git_workspaces::kube_test::get("/api/v1/pods", list("Pod")),
             rustic_git_workspaces::kube_test::get("/apis/apps/v1/statefulsets", list("StatefulSet")),
         ],
@@ -3227,52 +2416,13 @@ async fn every_watch_is_scoped_to_this_node_or_label_selected() {
     for r in of("/apis/apps/v1/statefulsets") {
         assert!(r.contains("labelSelector=rustic-git.io%2Fkind%3Denvironment"), "every StatefulSet in the cluster: {r}");
     }
-    let snaps = of("/apis/rustic-git.io/v1alpha1/snapshotrequests");
+    let snaps = of("/apis/rustic-git.io/v1alpha1/snapshots");
     assert!(
         snaps.iter().any(|r| r.contains("labelSelector=rustic-git.io%2Fstop-of")),
-        "the env controller's request watch is not label-selected: {snaps:?}"
+        "the env controller's stop-push watch is not label-selected: {snaps:?}"
     );
 }
 
-/// The receipts the owning node reclaims: `done`, older than the TTL, its own Volume. Everything
-/// doubtful is kept — a stop request (owned by its environment), one already terminating, one for
-/// a Volume another node holds, one too young.
-#[test]
-fn only_old_done_requests_for_this_nodes_volumes_expire() {
-    let now: k8s_openapi::jiff::Timestamp = "2026-08-29T00:00:00Z".parse().unwrap();
-    let ttl = std::time::Duration::from_secs(7 * 24 * 3600);
-    let mk = |name: &str, volume: &str, status: serde_json::Value| -> serde_json::Value {
-        serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-            "metadata": {"name": name, "creationTimestamp": "2026-01-01T00:00:00Z"},
-            "spec": {"volume": volume}, "status": status,
-        })
-    };
-    let done_at = |at: &str| serde_json::json!({"phase": "done", "snapshotId": "x", "at": at});
-    let mut stop = mk("stop-env-1", "env-1", done_at("2026-01-02T00:00:00Z"));
-    stop["metadata"]["ownerReferences"] =
-        serde_json::json!([{"apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment", "name": "env-1", "uid": "u"}]);
-    let mut going = mk("snap-going", "ws-1", done_at("2026-01-02T00:00:00Z"));
-    going["metadata"]["deletionTimestamp"] = serde_json::json!("2026-08-28T00:00:00Z");
-    let reqs: Vec<Arc<crd::SnapshotRequest>> = [
-        mk("snap-old", "ws-1", done_at("2026-08-01T00:00:00Z")),
-        mk("snap-young", "ws-1", done_at("2026-08-28T00:00:00Z")),
-        mk("snap-pending", "ws-1", serde_json::json!({"phase": "pending"})),
-        mk("snap-error", "ws-1", serde_json::json!({"phase": "error"})),
-        mk("snap-elsewhere", "ws-2", done_at("2026-08-01T00:00:00Z")),
-        // No `at`: a request from before the field existed falls back to its creation time.
-        mk("snap-ancient", "ws-1", serde_json::json!({"phase": "done"})),
-        stop,
-        going,
-    ]
-    .into_iter()
-    .map(|v| Arc::new(serde_json::from_value(v).unwrap()))
-    .collect();
-
-    let mut expired = rustic_git_agent::controller::expired_requests(&reqs, |v| v == "ws-1", now, ttl);
-    expired.sort();
-    assert_eq!(expired, vec!["snap-ancient", "snap-old"]);
-}
 
 /// A converged workspace reconciles on every pod event, and a converged pass must not re-apply
 /// its children — only the pod is read every time, to observe liveness.

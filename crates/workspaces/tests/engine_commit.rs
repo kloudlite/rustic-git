@@ -3,10 +3,7 @@
 //! run for real on the btrfs review VM. Fixture copied from `engine_ops.rs`'s `LoopbackPool`:
 //! integration test files cannot share code across `tests/*.rs`.
 
-use object_store::memory::InMemory;
 use rustic_git_workspaces::engine::{Engine, Pool, have_btrfs};
-use rustic_git_workspaces::registry_client::RegistryClient;
-use std::sync::Arc;
 
 struct LoopbackPool {
     pool: Pool,
@@ -45,9 +42,7 @@ fn run(argv: &[&str]) {
 }
 
 fn engine(pool: Pool) -> Engine {
-    // Neither store nor registry is touched by commit/checkout/local_commits/drop_commit — a
-    // fake in-memory store and an unreachable registry base are enough.
-    Engine::new(pool, Arc::new(InMemory::new()), RegistryClient::new("http://127.0.0.1:1", "unused"))
+    Engine::new(pool)
 }
 
 #[test]

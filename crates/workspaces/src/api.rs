@@ -1161,12 +1161,10 @@ fn not_ready() -> Response {
 #[derive(serde::Deserialize)]
 struct RestoreBody {
     name: String,
+    // The `snapshot_id` alone is a Snapshot CR name (Task 8) — the old registry-scoped `volume`
+    // hint that used to turn a multi-volume scan into one read no longer means anything, since
+    // `find_commit_model_snapshot_for_restore` looks the CR up by name directly.
     snapshot_id: String,
-    /// The volume the snapshot came from, when the client knows it (the Snapshots page always
-    /// does): it turns a scan of every volume's history into one read. Optional because a bare
-    /// id must keep working — it is what a person pastes.
-    #[serde(default)]
-    volume: Option<String>,
 }
 
 /// The owner label a snapshot's volume lives under, the volume, and its record — searched across
@@ -1236,7 +1234,15 @@ async fn restore_ws(
     let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
     check_ws_name(&body.name)?;
-    let (src_owner, volume, record) = find_snapshot(&s, &owner, &body.snapshot_id, body.volume.as_deref()).await?;
+    // Restore-to-new IS a clone at a named commit (Task 8): under the commit model there is no
+    // registry to fetch from any more, so this resolves the request's `snapshot_id` — a `Snapshot`
+    // CR name — straight against the CRD, and the new workspace's source becomes
+    // `CloneOf{volume, commit: Some(id)}`, exactly `Engine::clone_local_ids`/`checkout`'s own
+    // shared-worktree path (Task 6b). `find_commit_model_snapshot_for_restore` is the owner check:
+    // CR exists, Ready, and the caller may read `spec.owner` — anything else is a 404, same as a
+    // missing snapshot, so a caller learns nothing about volumes that are not theirs.
+    let snap = find_commit_model_snapshot_for_restore(&s, &owner, &body.snapshot_id).await?;
+    let volume = snap.spec.volume.clone();
 
     // A live source still knows its own size and settings; a deleted one gets the standard quota.
     let src = my_ws(&s, &owner, &volume).await.ok();
@@ -1257,23 +1263,14 @@ async fn restore_ws(
             owner,
             team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,
-            // The record knows where its bytes are; a deleted workspace cannot be asked.
-            region: src.as_ref().map(|w| w.spec.region.clone()).unwrap_or_else(|| record.region.clone()),
+            // No per-snapshot region under the commit model (single-pool, replica-based; cross-
+            // region restore is out of scope — see the design doc). A live source still knows its
+            // own; a deleted one falls back to the engine's own default region.
+            region: src.as_ref().map(|w| w.spec.region.clone()).unwrap_or_else(|| "default".to_string()),
             image: src.as_ref().map(|w| w.spec.image.clone()).unwrap_or_else(default_ws_image),
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
-                source: Some(VolumeSource::RestoreOf {
-                    volume,
-                    snapshot_id: body.snapshot_id,
-                    // The label the volume was FOUND under, which for a workspace is always the
-                    // person's own — set anyway, so the agent never has to assume.
-                    owner: Some(src_owner),
-                    // The RECORD's region, not the new workspace's: the bytes are wherever they
-                    // were pushed, and the node that materializes them has to be told which
-                    // container to read. A k3s agent cannot see a VM region's blobs otherwise, and
-                    // the fetch that cannot see them never returned an error.
-                    region: Some(record.region.clone()),
-                }),
+                source: Some(VolumeSource::CloneOf { volume, commit: Some(body.snapshot_id) }),
             }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
@@ -1406,9 +1403,6 @@ struct RestoreEnvBody {
     region: Option<String>,
     #[serde(default = "default_env_quota")]
     quota_gb: u64,
-    /// See `RestoreBody::volume`.
-    #[serde(default)]
-    volume: Option<String>,
 }
 
 /// New environment grafted onto an explicit past snapshot — `restore_ws`'s twin, resolving the
@@ -1435,7 +1429,11 @@ async fn restore_env(
     if let Some(r) = &body.region {
         check_region(&s, r).await?;
     }
-    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id, body.volume.as_deref()).await?;
+    // Restore-to-new is a clone at a named commit under the commit model (Task 8) — see
+    // `restore_ws`'s matching comment. `find_commit_model_snapshot_for_restore` is the ownership
+    // check: CR exists, Ready, and the caller may read `spec.owner`.
+    let snap = find_commit_model_snapshot_for_restore(&s, &caller_id, &body.snapshot_id).await?;
+    let (volume, src_owner) = (snap.spec.volume.clone(), snap.spec.owner.clone());
     // Defaults to the label the snapshot was FOUND under, not the caller: restoring a team's
     // environment produces a team environment without the client having to say so. Any OTHER
     // owner is refused even when the caller is a member of it: a snapshot found under team A is
@@ -1445,14 +1443,10 @@ async fn restore_env(
         return Err((StatusCode::FORBIDDEN, "a snapshot restores under its own owner, or under you").into_response());
     }
     let owner = resolve_new_owner(&s, &caller_id, body.owner.or(Some(src_owner.clone()))).await?;
-    // The record's own services, when the caller named none: an environment's push writes them into
-    // its provenance precisely so a restore of a DELETED environment can bring it back running. A
-    // caller-supplied list wins (and is validated above); a record without one restores the data
+    // No per-commit service provenance under the commit model (the object-store `CommitRecord`
+    // that used to carry it is gone) — a caller-supplied list wins; naming none restores the data
     // and no services, which the UI says out loud.
-    let services = match body.services.is_empty() {
-        false => body.services,
-        true => crate::upstream::Provenance::of(&record.state).services.unwrap_or_default(),
-    };
+    let services = body.services;
     let c = kube(&s)?;
     let id = rid("env");
     let e = create_environment(
@@ -1461,18 +1455,12 @@ async fn restore_env(
         crd::EnvironmentSpec {
             owner,
             name: body.name,
-            // Unspecified means "where the bytes already are", which is the one region guaranteed
-            // to exist for this snapshot.
-            region: body.region.unwrap_or_else(|| record.region.clone()),
+            // No per-snapshot region under the commit model (see `restore_ws`'s matching comment).
+            region: body.region.unwrap_or_else(|| "default".to_string()),
             services,
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: clamp_quota(body.quota_gb),
-                source: Some(VolumeSource::RestoreOf {
-                    volume,
-                    snapshot_id: body.snapshot_id,
-                    owner: Some(src_owner),
-                    region: Some(record.region.clone()),
-                }),
+                source: Some(VolumeSource::CloneOf { volume, commit: Some(body.snapshot_id) }),
             }),
             desired_state: DesiredState::Running,
             restore: None,
@@ -2152,6 +2140,21 @@ async fn find_commit_model_snapshot(
     Ok(snap)
 }
 
+/// Same ownership/readiness check as `find_commit_model_snapshot`, for a caller that does not yet
+/// know the volume — restore-to-new (`restore_ws`/`restore_env`), where the snapshot id is all the
+/// client has and `spec.volume` is exactly what this resolves.
+async fn find_commit_model_snapshot_for_restore(s: &ApiState, caller_id: &str, snapshot_id: &str) -> Result<crd::Snapshot, Response> {
+    check_path_segment(snapshot_id)?;
+    let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
+    let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
+    let snap = api.get_opt(snapshot_id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    let ready = snap.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
+    if !owners.contains(&snap.spec.owner) || !ready {
+        return Err(not_found());
+    }
+    Ok(snap)
+}
+
 fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {
     items
         .iter()
@@ -2190,8 +2193,14 @@ async fn volume_history(
     // derived: the record whose chain is this one's chain minus its last blob. An in-place restore
     // followed by a push grafts onto the RESTORED record, which is what makes the history a tree
     // rather than a list — and the page can only draw the branch if the row says where it forks.
+    // `lineage` is opaque JSON now (`registry::CommitRecord`'s doc) — still an array of objects
+    // with a `blob` field on the wire, exactly what `LineageEntry`'s own derive used to produce;
+    // read it back out structurally rather than through the now-deleted type.
     fn chain(r: &crate::registry::CommitRecord) -> Vec<&str> {
-        r.lineage.iter().map(|e| e.blob.as_str()).collect()
+        r.lineage
+            .as_array()
+            .map(|a| a.iter().filter_map(|e| e.get("blob").and_then(|b| b.as_str())).collect())
+            .unwrap_or_default()
     }
     // Chain -> id once, so a thousand pushes is a thousand lookups rather than a million
     // comparisons of whole chains. Newest first, so two records with one chain (a re-push of
@@ -2224,11 +2233,11 @@ async fn volume_refs(
         // registry path already answers with.
         let items = commit_model_snapshots_maybe_empty(&s, &caller_id, &name).await?;
         let tip = items.first().map(|sn| sn.name_any());
-        return Ok(Json(serde_json::json!({crate::registry_client::MAIN_REF: tip})).into_response());
+        return Ok(Json(serde_json::json!({"main": tip})).into_response());
     }
     let (_, records) = volume_owner(&s, &caller_id, &name).await?;
     let tip = records.first().map(|r| r.id.clone());
-    Ok(Json(serde_json::json!({crate::registry_client::MAIN_REF: tip})).into_response())
+    Ok(Json(serde_json::json!({"main": tip})).into_response())
 }
 
 #[cfg(test)]

@@ -29,20 +29,17 @@
 #                                                                       (spec.quotaGb on home-{owner})
 #                                                                       — the TWO spec fields, see
 #                                                                       the policy
-#   snapshotrequests (rustic-git.io)       get,list,watch               Controller; stop_push
-#                                          create                       stop_push (stop-{env},
-#                                                                       stop-home-{ws})
-#                                          patch                        finalizer (metadata)
-#                                          delete                       stop_push (AgentRestarted),
-#                                                                       both stop teardowns;
-#                                                                       spawn_snapshot_gc (old done)
 #   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
 #   snapshots (rustic-git.io)              get,list,watch               pull_beat (missing-commit
 #                                                                       diff against local_commits);
-#                                                                       Controller (cut, retention)
+#                                                                       Controller (cut, retention,
+#                                                                       stop-push watch)
+#                                          create                       home_commit_beat, stop_push
+#                                                                       (stop-{env}, stop-home-{ws})
 #                                          delete                       snapshot::retain (retention
-#                                                                       sweep past WS_SNAPSHOT_KEEP)
+#                                                                       sweep past WS_SNAPSHOT_KEEP);
+#                                                                       stop_push teardown cleanup
 #   volumereplicas (rustic-git.io)         get,list,watch               pull_beat (source selection,
 #                                                                       reaper)
 #                                          create,patch                 write_replica_status (this
@@ -54,10 +51,11 @@
 #                                                                       NotReady past WS_NODE_DEAD_SECS
 #   */status (rustic-git.io, all five)     patch                        patch_status (apply)
 #                                          update                       replace_status (claim CAS)
-#   */finalizers (rustic-git.io, all five) update                       finalizer on volumes and
-#                                                                       snapshotrequests; the parents
-#                                                                       for OwnerReferencesPermission-
-#                                                                       Enforcement on their children
+#   */finalizers (rustic-git.io, all five) update                       finalizer on volumes; the
+#                                                                       parents for OwnerReferences
+#                                                                       PermissionEnforcement on
+#                                                                       their children (Snapshot has
+#                                                                       none — see its module doc)
 #   namespaces                             create,patch                 ensure (server-side apply)
 #   limitranges, services                  create,patch                 ensure (server-side apply)
 #   networkpolicies                        create,patch                 ensure (incl. both halves of
@@ -127,25 +125,22 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
     verbs: ["get", "list", "watch", "create", "patch"]
-  # `delete` is required: the `stop-{env}` request is deleted after teardown, or the NEXT stop of
-  # that environment finds a `done` object under the same fixed name and tears down without pushing,
-  # and the same for `stop-home-{ws}` on a workspace stop.
-  - apiGroups: ["rustic-git.io"]
-    resources: ["snapshotrequests"]
-    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # `ownerbindings` are created by the agent that WINS a placement claim — `claim::ensure_binding`;
   # a losing claimant never creates one, and nothing ever edits or deletes one.
   - apiGroups: ["rustic-git.io"]
     resources: ["ownerbindings"]
     verbs: ["get", "list", "watch", "create"]
-  # `snapshots`: the CR itself is created by `/v1` (Task 6's `/push`), CR-first per the brief — the
-  # agent only cuts the btrfs snapshot and reports status, and `pull_beat` diffs the Ready set
-  # against `local_commits` to decide what to fetch. `delete` is retention: the worktree's own node
-  # deletes CRs beyond `WS_SNAPSHOT_KEEP`, which is what makes every node's pull-beat diff (and this
-  # same reconcile's disk-drop half) converge the subvolume away too.
+  # `snapshots`: mostly created by `/v1` (Task 6's `/push`), CR-first per the brief — the agent
+  # only cuts the btrfs snapshot and reports status, and `pull_beat` diffs the Ready set against
+  # `local_commits` to decide what to fetch. `create` is also `home_commit_beat`'s own beat and
+  # `stop_push`'s fixed-name `stop-{env}`/`stop-home-{ws}` CR (Task 8: the stop-before-teardown
+  # push is a `Snapshot` now, not the deleted `SnapshotRequest`). `delete` is retention (the
+  # worktree's own node drops CRs beyond `WS_SNAPSHOT_KEEP`, converging the subvolume away too)
+  # and `stop_push`'s own teardown cleanup — left behind, the NEXT stop would find the same
+  # fixed-name object already `Ready` and tear down without pushing again.
   - apiGroups: ["rustic-git.io"]
     resources: ["snapshots"]
-    verbs: ["get", "list", "watch", "delete"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   # `volumereplicas`: every node reads every row (source selection walks OTHER nodes' rows, and
   # the reaper reads every node's), but writes only its own — `create`/`patch` for
   # `write_replica_status`'s create-or-update, `delete` for the ONE guarded cross-node exception,
@@ -158,18 +153,18 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources:
       ["volumes/status", "workspaces/status", "environments/status",
-       "snapshotrequests/status", "ownerbindings/status", "volumereplicas/status", "snapshots/status"]
+       "ownerbindings/status", "volumereplicas/status", "snapshots/status"]
     verbs: ["patch", "update"]
   # Finalizers are edited on the main resource, but Kubernetes gates them behind their own verb.
-  # `snapshotrequests/finalizers` is what lets a delete during an in-flight push wait, or it
-  # orphans a btrfs send, a stage file and a blob upload with no object left to record the outcome.
-  # The parents' entries exist for OwnerReferencesPermissionEnforcement: every child this
-  # controller creates carries `blockOwnerDeletion`, and a cluster running that admission plugin
-  # checks the creator may update the OWNER's finalizers.
+  # Snapshot has none (see its module doc: content-addressed btrfs, reclaimed by retention or a
+  # client, never something to wait in flight for). The parents' entries exist for
+  # OwnerReferencesPermissionEnforcement: every child this controller creates carries
+  # `blockOwnerDeletion`, and a cluster running that admission plugin checks the creator may
+  # update the OWNER's finalizers.
   - apiGroups: ["rustic-git.io"]
     resources:
       ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers",
-       "snapshotrequests/finalizers", "ownerbindings/finalizers"]
+       "ownerbindings/finalizers"]
     verbs: ["update"]
   # What `ensure` materializes, by server-side apply: a PATCH, which the apiserver additionally
   # authorizes as `create` when the object does not exist yet — both verbs are the apply. Nothing

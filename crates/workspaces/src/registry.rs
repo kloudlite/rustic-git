@@ -10,7 +10,6 @@
 //! Keyspaces: `commit/{id}` -> a `CommitRecord` (immutable once written — a commit is content-
 //! addressed by its own id, never mutated), `ref/{name}` -> the commit id it currently names.
 
-use crate::model::LineageEntry;
 use rustic_git_core::Result;
 use rustic_git_storage::store::Store;
 use slatedb::object_store::ObjectStoreExt;
@@ -27,7 +26,11 @@ pub struct CommitRecord {
     /// the wire deserializes to `null`, not a missing field error.
     #[serde(default)]
     pub state: serde_json::Value,
-    pub lineage: Vec<LineageEntry>,
+    /// Opaque now that the object-store lineage encoding (`LineageEntry`) is gone: nothing writes
+    /// a new `CommitRecord` any more (the write side, `vol_agent.rs`, is deleted with Task 8), so
+    /// this only ever carries an OLD record back out to a browse-API caller verbatim, never
+    /// interpreted server-side. `serde_json::Value` round-trips whatever shape is already on disk.
+    pub lineage: serde_json::Value,
     /// Where the layer blobs this record names live. Bytes never cross regions; only this label
     /// does.
     pub region: String,

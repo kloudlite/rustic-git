@@ -127,16 +127,14 @@ spec:
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
             - name: RUSTIC_GIT_MONGO_URI
               valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
-            # Workspaces control plane (vol-agent job surface + sweep): Cosmos-backed; absent
-            # secret leaves the routes answering 503 and the feature dark — pods still boot.
+            # Workspaces control plane: cross-cluster Region metadata only (Cosmos-backed); absent
+            # secret leaves the region routes answering 503 and the feature dark — pods still boot.
             - name: COSMOS_ENDPOINT
               valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: endpoint, optional: true } }
             - name: COSMOS_KEY
               valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: key, optional: true } }
             - name: COSMOS_DB
               value: workspaces
-            - name: RUSTIC_GIT_VOL_AGENT_TOKENS
-              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: vol-agent-token, optional: true } }
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
@@ -741,18 +739,9 @@ spec:
     - host: cr.khost.dev
       http:
         paths:
-          # Only registries: `/v2/` (containers) and `/vol-agent/` (the storage registry's
-          # agent surface — per-region-token gated in the handlers, reached by rustic-git-agent
-          # from VMs outside the cluster). The git smart-HTTP surface and /healthz have no
+          # Only the container registry, `/v2/`. The git smart-HTTP surface and /healthz have no
           # business on this hostname; they stay on the app's ingress.
           - path: /v2
-            pathType: Prefix
-            backend:
-              service:
-                name: rustic-git-http
-                port:
-                  number: 80
-          - path: /vol-agent
             pathType: Prefix
             backend:
               service:

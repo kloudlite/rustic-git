@@ -5,24 +5,8 @@
 use crate::gc::RepackExt;
 use crate::registry::store::ImageExt;
 use crate::store::Store;
-use crate::vol_agent::JobsState;
 use crate::Result;
 use std::sync::Arc;
-
-/// Builds this node's `JobsState` for the agent work surface (Task 14): a Cosmos-backed
-/// `MetaStore` when `COSMOS_ENDPOINT` is set (selected by `store::from_env`, shared with
-/// `bins/api` — every server
-/// node constructs its own client against the same Cosmos DB, no ownership coordination needed,
-/// since the workspaces metadata is not a per-repo SlateDB), otherwise `None` — the routes stay
-/// mounted and answer 503 rather than not existing at all. Also spawns the 30s requeue sweep
-/// (moved off `bins/api`, which no longer runs it) when a store is configured.
-pub async fn build_jobs_state() -> Result<Arc<JobsState>> {
-    let store = rustic_git_workspaces::store::from_env().await.map_err(crate::err)?;
-    if store.is_none() {
-        tracing::warn!("COSMOS_ENDPOINT unset: agents can only authenticate with a break-glass token");
-    }
-    Ok(Arc::new(JobsState::new(store)))
-}
 
 // Generated in process. `ssh-key` ships `getrandom::SysRng`, so no `OsRng` — and no second
 // `rand_core` — is needed; the format is the same unencrypted OpenSSH ed25519 key

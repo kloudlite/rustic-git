@@ -3,7 +3,7 @@
 //! Kubernetes client the node controller (`controller.rs`) reconciles with. The work itself is
 //! there, not here — the CRD IS the work item, so there is no queue, no lease and no poll loop.
 
-use rustic_git_workspaces::engine::{blob, Engine, Pool};
+use rustic_git_workspaces::engine::{Engine, Pool};
 use std::sync::Arc;
 
 pub mod binding;
@@ -15,11 +15,10 @@ pub mod peer;
 pub mod snapshot;
 pub mod sshkeys;
 
-/// Env-derived config shared by `run` and the `squash` subcommand — both need the same Engine.
+/// Env-derived config for `run`. `WS_REGISTRY_URL`/`WS_AGENT_TOKEN` are gone with the
+/// object-store registry surface they pointed at (Task 8).
 pub struct Config {
-    pub api_url: String,
     pub region: String,
-    pub agent_token: String,
     pub pool: String,
     /// This node's name, from the downward-API `NODE_NAME`. It is the shard key: the controller
     /// watches only objects whose `spec.nodeName` equals it.
@@ -27,17 +26,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// Base URL for the agent work surface: `WS_REGISTRY_URL` names the SERVER tier, not
-    /// `bins/api`, which is where register/work/done/failed live.
     pub fn from_env() -> Config {
-        let api_url = match std::env::var("WS_REGISTRY_URL") {
-            Ok(v) if !v.is_empty() => v,
-            _ => "http://127.0.0.1:8081".into(),
-        };
         Config {
-            api_url,
             region: std::env::var("WS_REGION").unwrap_or_else(|_| "default".into()),
-            agent_token: std::env::var("WS_AGENT_TOKEN").unwrap_or_default(),
             pool: std::env::var("WS_POOL").unwrap_or_else(|_| "/mnt/wspool".into()),
             // Declared capacity is gone: the kubelet reports node allocatable, and a second
             // hand-maintained copy of it is a second thing that can be wrong.
@@ -46,32 +37,11 @@ impl Config {
     }
 }
 
-/// Build the region's blob store: Azure when `AZURE_ACCOUNT` is set, else the `S3_URL` MinIO
-/// fallback used by tests (`engine::blob` already has both constructors).
-pub fn blob_store() -> Arc<dyn object_store::ObjectStore> {
-    match (std::env::var("AZURE_ACCOUNT"), std::env::var("AZURE_KEY"), std::env::var("AZURE_CONTAINER")) {
-        (Ok(a), Ok(k), Ok(c)) => blob::region_store(&a, &k, &c),
-        _ => blob::s3_store(),
-    }
-}
-
-/// Construct the `Engine` this agent (or the detached `squash` subcommand) operates against.
-/// `registry_url`/`agent_token` point the engine's `RegistryClient` at the same server tier
-/// (and same token) the agent already uses for `register`/`work`/`jobs/*` — `WS_REGISTRY_URL`
-/// serves both surfaces.
-pub fn build_engine(pool: &str, registry_url: &str, agent_token: &str) -> Engine {
-    Engine::new(
-        Pool::new(pool),
-        blob_store(),
-        rustic_git_workspaces::registry_client::RegistryClient::new(registry_url, agent_token),
-    )
-}
-
 /// Boots the node controller: Engine, janitor, Kubernetes client, then reconcile forever.
 pub async fn run(cfg: Config) -> Result<(), String> {
-    let engine = Arc::new(build_engine(&cfg.pool, &cfg.api_url, &cfg.agent_token));
+    let engine = Arc::new(Engine::new(Pool::new(&cfg.pool)));
     let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
-    janitor::spawn_janitor(engine.clone(), cfg.pool.clone(), nix_client.clone());
+    janitor::spawn_janitor(cfg.pool.clone(), nix_client.clone());
     if cfg.node.is_empty() {
         return Err("NODE_NAME is unset: the controller would watch every node's objects".into());
     }
@@ -136,15 +106,3 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 }
 
 
-/// `Engine::push`'s detached `squash <ws-id>` child (`ops.rs`) is spawned with only the
-/// workspace id, no owner — so the id -> owner mapping has to be recoverable locally.
-/// `MetaStore` has no owner-less lookup (Cosmos partitions by owner), so the controller leaves a
-/// breadcrumb on the pool itself, right where the lineage file already lives.
-pub fn owner_file(pool: &str, ws_id: &str) -> std::path::PathBuf {
-    std::path::Path::new(pool).join("vol").join(format!("{ws_id}.owner"))
-}
-
-fn record_owner(pool: &str, id: &str, owner: &str) {
-    let _ = std::fs::create_dir_all(std::path::Path::new(pool).join("vol"));
-    let _ = std::fs::write(owner_file(pool, id), owner);
-}

@@ -77,7 +77,6 @@ pub struct Ctx {
     /// for the rest of the 15s tick because nothing but the clock ever looked at the handle again.
     /// The requeue stays as the backstop — a dropped send costs a tick, never the object.
     pub wake_volume: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::Volume>>,
-    pub wake_snapshot: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>>,
     /// The same, for a finished Nix profile build — without it a workspace waits out the tick with
     /// its pod ungated on a profile that is already on disk.
     pub wake_workspace: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::Workspace>>,
@@ -86,7 +85,6 @@ pub struct Ctx {
     pub wakes: Mutex<
         Option<(
             tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::Volume>>,
-            tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>>,
             tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::Workspace>>,
         )>,
     >,
@@ -143,7 +141,6 @@ impl Ctx {
         // Unbounded on purpose: the only senders are this agent's own finished operations, one
         // wake each, so the queue can never hold more than the operations in flight.
         let (wake_volume, vol_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (wake_snapshot, snap_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_workspace, ws_rx) = tokio::sync::mpsc::unbounded_channel();
         // 256 is the dispatcher's per-subscriber buffer, not a cap on volumes: a subscriber that
         // stops polling stalls the reflector once it fills, and every subscriber here is a
@@ -155,9 +152,8 @@ impl Ctx {
             applied: Mutex::new(HashMap::new()),
             commit_model: std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1"),
             wake_volume,
-            wake_snapshot,
             wake_workspace,
-            wakes: Mutex::new(Some((vol_rx, snap_rx, ws_rx))),
+            wakes: Mutex::new(Some((vol_rx, ws_rx))),
             client,
             engine,
             node,
@@ -270,7 +266,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
     // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
     // be two agents in one process, which is not a thing.
-    let (vol_wakes, snap_wakes, ws_wakes) =
+    let (vol_wakes, ws_wakes) =
         ctx.wakes.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the wake channels are already taken")?;
     // ONE watch on this node's Volumes, shared. The Volume controller reconciles from it, and the
     // three parents that wait on a Volume's status subscribe to it — four watches on the same
@@ -278,7 +274,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let writer =
         ctx.volume_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the volume writer is already taken")?;
     let subscribe = || writer.subscribe().ok_or("the volume store is not shared");
-    let (vol_self, vol_ws, vol_env, vol_snap) = (subscribe()?, subscribe()?, subscribe()?, subscribe()?);
+    let (vol_self, vol_ws, vol_env) = (subscribe()?, subscribe()?, subscribe()?);
     let volume_watch = {
         use kube::runtime::{watcher, WatchStreamExt};
         watcher(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
@@ -327,7 +323,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // parked at `StopSnapshotFailed` would never wake, not even for an operator deleting the
         // failed request.
         .watches(
-            Api::<crd::SnapshotRequest>::all(ctx.client.clone()),
+            Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
             |r| owned_by::<crd::Workspace, _>(&r),
         )
@@ -361,7 +357,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // Selected by the `stop-of` label the stop path stamps, so a node does not stream every
         // user push in the cluster to find the handful of stop requests that are its own.
         .watches(
-            Api::<crd::SnapshotRequest>::all(ctx.client.clone()),
+            Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
             |r| owned_by::<crd::Environment, _>(&r),
         )
@@ -412,32 +408,8 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "ownerbinding reconcile")
             }
         });
-    // No `mine`: the request carries no node (a node is a controller-owned fact and the API does
-    // not copy facts into spec), so ownership is resolved per-object from the named Volume.
-    // ponytail: every agent streams every request — two nodes today, so the fan-out is two. A
-    // `spec.volume`-indexed reflector is the upgrade if the request count ever makes this hot.
-    let snapshots = Controller::new(Api::<crd::SnapshotRequest>::all(ctx.client.clone()), watcher::Config::default());
-    // The controller's OWN reflector store, not a second one: it is already populated by the watch
-    // above, so the mapper below is a synchronous scan of memory with no I/O — which is all a
-    // `watches` mapper is allowed to be.
-    let requests = snapshots.store();
-    spawn_snapshot_gc(ctx.clone(), requests.clone());
-    let snapshots = snapshots
-        .reconcile_on(wake_stream(snap_wakes))
-        // A request created before its Volume is placed waits, and this is what wakes it. `Volume`
-        // and `SnapshotRequest` share no name and no ownerReference — `spec.volume` is the only
-        // link — so the store is what turns one Volume event into the requests that named it.
-        .watches_shared_stream(vol_snap, move |v: Arc<crd::Volume>| requests_naming(&requests.state(), &v.name_any()))
-        .shutdown_on_signal()
-        .run(snapshot::reconcile_snapshot, error_policy, ctx.clone())
-        .for_each(|r| async move {
-            if let Err(e) = r {
-                tracing::warn!(error = %e, "snapshot reconcile")
-            }
-        });
-    // The new `Snapshot` kind: no finalizer (see `snapshot::reconcile_commit`'s module doc), so a
-    // plain watch over every one in the cluster is enough — same fan-out shape as `snapshots`
-    // above, and the same ponytail note applies if the commit count ever makes this hot.
+    // The `Snapshot` kind: no finalizer (see `snapshot::reconcile_commit`'s module doc), so a
+    // plain watch over every one in the cluster is enough.
     let commits = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), watcher::Config::default())
         .shutdown_on_signal()
         .run(|s, c| timed("commit", async move { snapshot::reconcile_commit(s, c).await }), error_policy, ctx.clone())
@@ -462,27 +434,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         workspaces,
         environments,
         bindings,
-        snapshots,
         commits,
         futures::future::OptionFuture::from(claim_ws),
         futures::future::OptionFuture::from(claim_env),
     );
     Ok(())
-}
-
-/// Every request in the store that names this volume, as refs to reconcile.
-///
-/// Split out of the `watches` mapper only so it is testable without a live reflector; the mapper
-/// itself must stay a synchronous scan of memory, which is what this is.
-pub fn requests_naming(
-    requests: &[Arc<crd::SnapshotRequest>],
-    volume: &str,
-) -> Vec<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>> {
-    requests
-        .iter()
-        .filter(|r| r.spec.volume == volume)
-        .map(|r| kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new(&r.name_any()))
-        .collect()
 }
 
 /// Every reconcile error is a requeue with backoff. There is deliberately no branch that concludes
@@ -530,65 +486,8 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
     });
 }
 
-/// A `done` push request is a receipt, and receipts pile up: an hourly-pushing workspace leaves ~9k
-/// objects a year in etcd and in every agent's reflector. Deleting the request deletes no data —
-/// the record is in the registry and the listings read it from there — so the receipt is kept this
-/// long for `kubectl` and then reclaimed by the node that owns the volume.
-pub const SNAPSHOT_REQUEST_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
-
-/// Once an hour, on the OWNING node only (the one whose shared store holds the request's Volume):
-/// two nodes deleting the same object is harmless, but two nodes deciding is the multi-writer
-/// shape the design removes, and "mine" is already answered by the store.
-fn spawn_snapshot_gc(ctx: Arc<Ctx>, requests: kube::runtime::reflector::Store<crd::SnapshotRequest>) {
-    tokio::spawn(async move {
-        let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
-        let mut tick = tokio::time::interval(Duration::from_secs(3600));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let now = k8s_openapi::jiff::Timestamp::now();
-            let mine = |vol: &str| ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(vol)).is_some();
-            for name in expired_requests(&requests.state(), mine, now, SNAPSHOT_REQUEST_TTL) {
-                if let Err(e) = delete_ignoring_404(&api, &name).await {
-                    tracing::warn!(request = %name, error = %e, "snapshot request gc");
-                }
-            }
-        }
-    });
-}
-
-/// The `done` requests older than `ttl` whose Volume `mine` claims. Keep-biased on every doubt: an
-/// unparseable `at`, a request already terminating, or one with an owner (the `stop-{env}`
-/// request, whose teardown deletes it and whose absence means "push again") is left alone.
-pub fn expired_requests(
-    requests: &[Arc<crd::SnapshotRequest>],
-    mine: impl Fn(&str) -> bool,
-    now: k8s_openapi::jiff::Timestamp,
-    ttl: Duration,
-) -> Vec<String> {
-    requests
-        .iter()
-        .filter(|r| r.metadata.deletion_timestamp.is_none() && r.metadata.owner_references.is_none())
-        .filter(|r| r.status.as_ref().is_some_and(|s| s.phase == Phase::Done))
-        .filter(|r| {
-            // `status.at` is when the record landed; `creationTimestamp` is the older fallback for
-            // a request written before `at` existed. Neither readable keeps the object.
-            let at = r
-                .status
-                .as_ref()
-                .and_then(|s| s.at.as_deref())
-                .and_then(|a| a.parse::<k8s_openapi::jiff::Timestamp>().ok())
-                .or_else(|| r.metadata.creation_timestamp.as_ref().map(|t| t.0));
-            at.is_some_and(|at| (now.as_second() - at.as_second()).max(0) as u64 >= ttl.as_secs())
-        })
-        .filter(|r| mine(&r.spec.volume))
-        .map(|r| r.name_any())
-        .collect()
-}
-
-/// What the timer's pushes say in `history`. They bypass `SnapshotRequest` on purpose: they are
-/// the agent's housekeeping, not something anyone asked for, and a request object per five minutes
-/// per person would be noise in the listings.
+/// What the timer's home-commit beat writes as the `Snapshot`'s message — the agent's own
+/// housekeeping, not something anyone asked for.
 pub const HOME_PUSH_MESSAGE: &str = "home: periodic";
 
 /// `WS_HOME_PUSH_SECS`, default 300: how often this node pushes the homes whose disk moved. An
@@ -683,52 +582,14 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
             return;
         }
     };
-    // Commit model: durability for a home moves to the Snapshot CR (Task 7c) — `push_env` is the
-    // OLD model's only writer of home history, and Task 8 deletes it. H3: the migrate half of
-    // `migrate_and_seed_baseline` runs for EVERY ready home on EVERY pass, not just a due one — a
-    // quiescent home would otherwise sit on the old layout indefinitely, leaving two layouts live
-    // on the fleet at once, which is exactly what makes H1's hostPath fix unpredictable to reason
-    // about. Only the CR-cut itself stays behind the generation-moved gate. Flag off, this whole
-    // branch is skipped and the loop below is byte-identical to before the cutover.
-    if ctx.commit_model {
-        let due_ids: std::collections::HashSet<String> = due.iter().map(|v| v.name_any()).collect();
-        rt.block_on(home_commit_beat(ctx, &due_ids));
-        return;
-    }
-    for v in due {
-        let id = v.name_any();
-        // Not under a reconcile-owned operation on this volume (a materialize, a restore): the
-        // `running` map is the single-flight guard for those, and the flock would only make this
-        // beat wait for them anyway. A `SnapshotRequest` push (the stop) is keyed by its own uid
-        // and is serialised by the flock; a beat right behind it pushes an identical tree once.
-        // ponytail: that duplicate is one extra record per stop-then-beat coincidence; comparing
-        // the generation again after the flock is the fix if `history` ever looks noisy.
-        if running_contains(ctx, &v.uid().unwrap_or_default()) {
-            continue;
-        }
-        match rt.block_on(engine.push_env(&v.spec.owner, &id, &serde_json::Value::Null, Some(HOME_PUSH_MESSAGE))) {
-            Ok(out) => {
-                // The SNAPSHOT's generation, not live's read afterwards: a write that lands between
-                // the snapshot and such a read would be folded into the recorded number and never
-                // pushed by the timer — only the stop push would catch it, and a lost node loses
-                // it. The snapshot's own number bounds exactly what it holds.
-                match engine.pushed_generation(&id, &out.layer) {
-                    Ok(g) => {
-                        if let Err(e) = engine.pool.record_pushed_gen(&id, g) {
-                            tracing::warn!(volume = %id, error = %e, "home push: recording the generation");
-                        }
-                    }
-                    Err(e) => tracing::warn!(volume = %id, error = %e, "home push: the snapshot's generation"),
-                }
-                metrics::counter!("home_pushes_total", "result" => "ok").increment(1);
-            }
-            // Logged and retried next beat; the subvolume is untouched (spec: failure modes).
-            Err(e) => {
-                tracing::warn!(volume = %id, error = %e, "home push failed; retrying next beat");
-                metrics::counter!("home_pushes_total", "result" => "error").increment(1);
-            }
-        }
-    }
+    // Durability for a home lives in the Snapshot CR now (Task 7c); the object-store `push_env`
+    // arm this beat used to fall back to is gone (Task 8) — the commit-model beat is the only one
+    // left. H3: the migrate half of `migrate_and_seed_baseline` runs for EVERY ready home on
+    // EVERY pass, not just a due one — a quiescent home must not sit on the old layout forever,
+    // since two layouts on the fleet at once makes `home_volume`'s (k8s.rs) hostPath choice
+    // unpredictable. Only the CR-cut itself stays behind the generation-moved gate.
+    let due_ids: std::collections::HashSet<String> = due.iter().map(|v| v.name_any()).collect();
+    rt.block_on(home_commit_beat(ctx, &due_ids));
 }
 
 /// Every ready home, every pass, under commit_model (Task 7c, H3): the migrate half of
@@ -1007,10 +868,8 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
 /// The engine's named permanent failures, mapped to the condition `reason` a person reads in
 /// `kubectl describe`. Anything else is transient and retried.
 fn permanent_reason(e: &str) -> Option<&'static str> {
-    use rustic_git_workspaces::engine::ops::{FETCH_FAILED, NO_SUCH_RECORD, REGION_UNREACHABLE};
-    // Region first: a cross-region restore with no credentials also cannot fetch, and naming the
-    // missing credentials is the actionable half.
-    [(REGION_UNREACHABLE, "RegionUnreachable"), (NO_SUCH_RECORD, "NoSuchSnapshot"), (FETCH_FAILED, "FetchFailed")]
+    use rustic_git_workspaces::engine::ops::{NO_SUCH_RECORD, RESTORE_OF_GONE};
+    [(RESTORE_OF_GONE, "RestoreMechanismGone"), (NO_SUCH_RECORD, "NoSuchSnapshot")]
         .into_iter()
         .find(|(marker, _)| e.contains(marker))
         .map(|(_, reason)| reason)
@@ -1043,38 +902,32 @@ pub struct Work {
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner, source, materialize, restore, quota_gb, home, commit_model } = w;
-    let (id, owner) = (id.as_str(), owner.as_str());
+    let Work { id, owner: _, source, materialize, restore, quota_gb, home, commit_model } = w;
+    let id = id.as_str();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
         if materialize {
-            // The owner breadcrumb `Engine::push`'s detached `squash` child reads back — written
-            // before anything can push, and re-written on every materialize because a rebuilt node
-            // has the subvolume without the file.
-            crate::record_owner(&engine.pool.root.to_string_lossy(), id, owner);
             if home {
-                // The registry's copy when this node has none, else nothing: a home is never
-                // created from a `source`, and the API never writes one for it.
-                engine.materialize_home(owner, id).await.map_err(|e| e.to_string())?;
+                // A home is never created from a `source`, and the API never writes one for it —
+                // bootstrap an empty subvolume the first time this node sees it. (Pulling another
+                // node's existing history here was the object-store registry's job; gone with
+                // it — a second node starts a person's home empty, same as any other volume.)
+                engine.create_subvol(id).map_err(|e| e.to_string())?;
             } else {
                 match &source {
                     None => engine.create_subvol(id).map_err(|e| e.to_string())?,
                     Some(VolumeSource::CloneOf { volume, .. }) => {
-                        engine.clone_local_ids(owner, volume, id).await.map_err(|e| e.to_string())?
+                        engine.clone_local_ids(volume, id).await.map_err(|e| e.to_string())?
                     }
-                    // `owner` is the SOURCE's registry label and `region` the region the RECORD
-                    // names, both resolved by the API. Neither is the destination's: a member
-                    // restoring a team's environment creates it under the team, and the volume it
-                    // reads lives under the team's label too — using the destination owner for
-                    // both looked up `karthik/env-x` for a snapshot that only exists as
-                    // `acme/env-x` and failed NoSuchSnapshot. `None` (any source written before
-                    // the fields existed) means the destination's own.
-                    Some(VolumeSource::RestoreOf { volume, snapshot_id, owner: src_owner, region }) => {
-                        let src_owner = src_owner.as_deref().unwrap_or(owner);
-                        engine
-                            .restore(src_owner, volume, snapshot_id, id, region.as_deref())
-                            .await
-                            .map_err(|e| e.to_string())?
+                    // `VolumeSource::RestoreOf` is DEAD: "restore into a new workspace/environment"
+                    // is now `CloneOf{volume, commit: Some(id)}` (Task 8, ratified) — `/v1`
+                    // translates a restore request to that at write time and never writes this
+                    // variant any more. The variant itself stays in the enum only so an object
+                    // stored before the cutover still deserializes; any reconcile that finds one
+                    // converges to a fixed, PERMANENT condition rather than attempting a fetch
+                    // that has nowhere to fetch from.
+                    Some(VolumeSource::RestoreOf { .. }) => {
+                        return Err(rustic_git_workspaces::engine::ops::RESTORE_OF_GONE.into());
                     }
                     // Empty, deliberately: a `GitRepo` volume is seeded by the workspace pod's
                     // INIT CONTAINER, inside the workspace, over SSH, as the owner. The agent no
@@ -1083,28 +936,12 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 }
             }
         }
-        // In place, and staged: `restore` materializes into a throwaway id, so a failed fetch
-        // leaves `live` exactly as it was, and `replace_live` keeps the pre-restore bytes as a
-        // local RO snapshot before swapping. Nothing here can lose the current state silently.
+        // In place: the wish names a commit of THIS volume's own history — a checkout swapped
+        // into the worktree that already carries this volume's own id (the API validated Ready +
+        // same-volume before writing it). Never a registry fetch any more (Task 8): the old
+        // staging-id fetch/swap path is gone with it.
         if let Some(w) = &restore {
-            if commit_model {
-                // The wish names a commit of THIS volume's own history — no registry fetch, no
-                // staging id, just a checkout swapped into the worktree that already carries
-                // this volume's own id (the API validated Ready + same-volume before writing it).
-                engine.swap_worktree(&w.volume, id, &w.snapshot_id).map_err(|e| e.to_string())?;
-            } else {
-                let staging = format!("{id}-restoring");
-                let src_owner = w.owner.as_deref().unwrap_or(owner);
-                // Always from nothing: the staging id is deterministic, and `pull_core` treats an
-                // existing `live` as "already converged" — so bytes left by a restore that failed
-                // half-way would be swapped in and labelled as THIS snapshot.
-                engine.discard_staging(&staging).map_err(|e| e.to_string())?;
-                engine
-                    .restore(src_owner, &w.volume, &w.snapshot_id, &staging, w.region.as_deref())
-                    .await
-                    .map_err(|e| e.to_string())?;
-                engine.replace_live(id, &staging).map_err(|e| e.to_string())?;
-            }
+            engine.swap_worktree(&w.volume, id, &w.snapshot_id).map_err(|e| e.to_string())?;
         }
         // After every path that can leave a new `live` behind, same rule as the quota below: a
         // home's caches are nested subvolumes, and a received stream does not carry them.
@@ -2044,17 +1881,6 @@ async fn stop_workspace(
     if home_here {
         match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
             StopPush::Landed => {}
-            StopPush::Failed => {
-                let cond = crd::condition(
-                    "Ready",
-                    false,
-                    "StopSnapshotFailed",
-                    "the home push failed; the pod is kept rather than lose the home's last state",
-                    gen,
-                );
-                wait_status(w, prev, cond, ctx).await?;
-                return Ok(Action::await_change());
-            }
             StopPush::Waiting => {
                 let cond = crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen);
                 wait_status(w, prev, cond, ctx).await?;
@@ -2066,7 +1892,7 @@ async fn stop_workspace(
     if home_here {
         // Served its purpose; left behind, the NEXT stop would find `done` under the same name
         // and stop without pushing at all.
-        delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &request).await?;
+        delete_ignoring_404(&Api::<crd::Snapshot>::all(ctx.client.clone()), &request).await?;
     }
     // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
     // showing "installing packages…" for a workspace that is simply off.
@@ -2722,23 +2548,6 @@ async fn stop_environment(
     // requested.
     match stop_push(&format!("stop-{}", e.name_any()), &e.spec.owner, &vol.name_any(), e, ctx).await? {
         StopPush::Landed => {}
-        StopPush::Failed => {
-            let st = crd::EnvironmentStatus {
-                phase: crd::Phase::Running,
-                observed_generation: None,
-                service_status: vec![],
-                conditions: vec![crd::condition(
-                    "Ready",
-                    false,
-                    "StopSnapshotFailed",
-                    "the stop snapshot failed; the services are kept (scaled to zero) rather than lose their state",
-                    gen,
-                )],
-                ..e.status.clone().unwrap_or_default()
-            };
-            write_env_status(e, st, ctx).await?;
-            return Ok(Action::await_change());
-        }
         StopPush::Waiting => {
             let st = crd::EnvironmentStatus {
                 // Still `running`: the StatefulSets exist (at zero) until the push lands, and
@@ -2762,7 +2571,7 @@ async fn stop_environment(
     // The stop request has served its purpose. Left behind, the NEXT stop of this environment
     // would find a `done` object under the same fixed name and tear down without pushing at
     // all — the exact data loss the wait above exists to prevent.
-    delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &format!("stop-{}", e.name_any()))
+    delete_ignoring_404(&Api::<crd::Snapshot>::all(ctx.client.clone()), &format!("stop-{}", e.name_any()))
         .await?;
     let st = crd::EnvironmentStatus {
         phase: crd::Phase::Stopped,
@@ -3057,7 +2866,9 @@ async fn drain_services(
 /// no status type, and this is the one place the request's lifecycle is decided.
 pub(crate) enum StopPush {
     Landed,
-    Failed,
+    // No `Failed`: `commit_worktree`'s cut is keep-biased and never marks a `Snapshot` `Error` —
+    // it just retries `Working` forever (Task 8; see `stop_push`'s doc). A wedged stop-push is a
+    // `Waiting` that never lands, not a distinct failure state.
     Waiting,
 }
 
@@ -3098,43 +2909,56 @@ async fn stop_push<P>(name: &str, owner: &str, volume: &str, parent: &P, ctx: &A
 where
     P: Resource<DynamicType = ()> + ResourceExt,
 {
-    let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
-    // A request being deleted is ABSENT. The teardown deletes this object, and a `done` one that is
+    let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    // A CR being deleted is ABSENT. The teardown deletes this object, and a `Ready` one that is
     // still terminating (a finalizer holds it) would otherwise read as a landed push for the NEXT
     // stop — tearing that one down without pushing at all.
-    let req = api.get_opt(name).await?.filter(|r| r.metadata.deletion_timestamp.is_none());
-    let mut phase = req.as_ref().map(|r| r.status.as_ref().map(|s| s.phase).unwrap_or(crd::Phase::Pending));
-    let restarted = req
-        .as_ref()
-        .and_then(|r| r.status.as_ref())
-        .is_some_and(|s| s.phase == crd::Phase::Error && s.conditions.iter().any(|c| c.reason == "AgentRestarted"));
+    let cr = api.get_opt(name).await?.filter(|s| s.metadata.deletion_timestamp.is_none());
+    let mut phase = cr.as_ref().map(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending));
     let gen = parent.meta().generation.unwrap_or(0).to_string();
-    let stale = req.as_ref().is_some_and(|r| {
-        matches!(phase, Some(crd::Phase::Done | crd::Phase::Error))
-            && r.annotations().get(STOP_GENERATION).is_some_and(|g| *g != gen)
-    });
-    if restarted || stale {
+    // A `Ready` CR from an EARLIER generation of the parent is stale for the same reason a stale
+    // `SnapshotRequest` used to be: the obvious recovery from a failed stop is Start, which does
+    // not touch this CR, and the NEXT stop must cut a fresh commit rather than read the old one as
+    // already landed. `commit_worktree` is keep-biased and never marks a cut `Error` — it retries
+    // `Working` forever — so there is no `AgentRestarted`/failed-request analogue to recover here;
+    // a wedged cut shows up as `StopPush::Waiting` staying `Progressing` rather than a permanent
+    // `StopSnapshotFailed` condition. See the task-8 report for this as a known behaviour change.
+    let stale =
+        cr.as_ref().is_some_and(|s| phase == Some(crd::Phase::Ready) && s.annotations().get(STOP_GENERATION).is_some_and(|g| *g != gen));
+    if stale {
         delete_ignoring_404(&api, name).await?;
         // Absent now, so this same pass creates the fresh one (a 409 from a still-terminating
         // object is the "same request" case below, and the next pass gets through).
         phase = None;
     }
     match phase {
-        Some(crd::Phase::Done) => Ok(StopPush::Landed),
-        Some(crd::Phase::Error) => Ok(StopPush::Failed),
+        Some(crd::Phase::Ready) => Ok(StopPush::Landed),
         Some(_) => Ok(StopPush::Waiting),
         None => {
-            let mut req = crd::snapshot_request(name, owner, volume, Some("stopping".into()));
-            // Owned by the parent so the request's own events map back to it — that watch is what
-            // wakes the `Failed` arm. NOT a cascade-delete convenience: the request is deleted
-            // explicitly after teardown, and by then it has already outlived its usefulness.
-            req.metadata.owner_references = Some(vec![owner_ref_of_kind(parent)?]);
-            // The label both parent controllers select their request watch by. A view, like every
-            // label here — the ownerReference above is what the mapper actually reads.
-            req.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), parent.name_any());
-            req.metadata.annotations.get_or_insert_with(Default::default).insert(STOP_GENERATION.to_string(), gen);
-            match api.create(&PostParams::default(), &req).await {
-                // Lost the race with our own earlier pass; it is the same request either way.
+            let parent_commit = crate::snapshot::newest_ready_commit(ctx, volume).await?.unwrap_or_default();
+            let mut snap = crd::Snapshot::new(
+                name,
+                crd::SnapshotSpec {
+                    volume: volume.to_string(),
+                    owner: owner.to_string(),
+                    worktree: volume.to_string(),
+                    parent: parent_commit,
+                    message: Some("stopping".to_string()),
+                    pinned: false,
+                },
+            );
+            snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
+            // Owned by the parent so the CR's own events map back to it — that watch is what wakes
+            // the `Waiting` arm. NOT a cascade-delete convenience: the CR is deleted explicitly
+            // after teardown, and by then it has already outlived its usefulness.
+            snap.metadata.owner_references = Some(vec![owner_ref_of_kind(parent)?]);
+            snap.metadata.labels = Some(crd::commit_labels(owner, volume));
+            // The label both parent controllers select their watch by. A view, like every label
+            // here — the ownerReference above is what the mapper actually reads.
+            snap.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), parent.name_any());
+            snap.metadata.annotations.get_or_insert_with(Default::default).insert(STOP_GENERATION.to_string(), gen);
+            match api.create(&PostParams::default(), &snap).await {
+                // Lost the race with our own earlier pass; it is the same CR either way.
                 Ok(_) => {}
                 Err(kube::Error::Api(s)) if s.code == 409 => {}
                 Err(err) => return Err(err.into()),

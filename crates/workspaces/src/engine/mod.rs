@@ -1,33 +1,23 @@
-//! Snapshot engine: workspace = btrfs subvolume, snapshot = RO snapshot, delta = incremental
-//! `btrfs send -p` stream, zstd-compressed, stored in the region's object store.
-//!
-//! Lineage model (ported from the wssnap POC, Azure-tested; see git history): every
-//! layer blob is immutable, named by a UUID; a snapshot record stores the FULL ordered list
-//! of layer entries from the base up to itself, so records are freely deletable and clones
-//! share ancestors' blobs. `model::LineageEntry` carries the `s:{blob}:{sha}` /
-//! `b:{blob}:{snap}:{sha}` encoding via `encode`/`parse`/`snap_name`.
-//!
-//! Object-store layout:
-//!   layers/{uuid}.zst      zstd send stream or zstd block image
-//!   snaps/{uuid}.json      {"lineage": ["s:...", "b:...:...", ...]}
-//!   refs/{ws}              snapshot record uuid
+//! The commit model: a volume's history is local btrfs subvolumes under `snap/`, one per
+//! `Snapshot` CR, replicated peer-to-peer (`bins/agent/src/peer.rs`) — never an object store,
+//! never uploaded anywhere. `commit.rs` holds the commit/checkout primitives; `ops.rs` holds what
+//! predates and still serves both the commit model and the old single-subvolume layout
+//! (subvolume creation, quota, generation reads) plus the one clone path environments still use.
 //!
 //! Pool layout:
-//!   {pool}/vol/{name}/live    RW subvolume; for a block-restored workspace, {pool}/vol/{name}
-//!                            is a loop mount of the image — its own filesystem. "vol" not "ws":
-//!                            environments live here too, matching the registry's vol/{owner}/{id}.
-//!   {pool}/vol/{name}.lineage local ordered entry list for live (outside the mount on purpose)
-//!   {pool}/recv/{snap}       RO snapshots on the shared pool fs — the local layer cache.
-//!   {pool}/img/{blob}.img    decompressed block images backing mounted workspaces.
+//!   {pool}/vol/{name}/live         old layout: the RW subvolume directly, or (commit model,
+//!                                 migrated) a DIRECTORY of worktree subvolumes, one per
+//!                                 workspace checked out against this volume (`Pool::worktree`).
+//!   {pool}/vol/{name}/snap/{name}  commit model: one RO subvolume per commit (`Pool::snap`).
+//!   {pool}/repl/{name}             replica transfer staging (`Pool::repl`).
 //!
 //! Requires root: btrfs subvolume/send/receive/mount need it.
 
-pub mod blob;
 pub mod commit;
 pub mod ops;
 pub mod pool;
 
-pub use ops::{EngErr, Engine, PushOut};
+pub use ops::{is_subvolume, EngErr, Engine};
 pub use pool::{Pool, is_mountpoint, ws_lock};
 
 /// True when `btrfs` is on PATH and this process is root — every subvolume/send/receive/mount

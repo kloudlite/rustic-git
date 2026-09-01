@@ -1576,7 +1576,6 @@ mod reconcile_tests {
     use super::*;
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
     use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
-    use rustic_git_workspaces::registry_client::RegistryClient;
     use std::os::unix::fs::PermissionsExt;
 
     struct NoopNix;
@@ -1595,11 +1594,7 @@ mod reconcile_tests {
 
     fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
         let (client, rec) = mock_client(routes);
-        let engine = Engine::new(
-            EnginePool::new(pool),
-            Arc::new(object_store::memory::InMemory::new()),
-            RegistryClient::new("http://127.0.0.1:1", "unused"),
-        );
+        let engine = Engine::new(EnginePool::new(pool));
         std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
         (
             Arc::new(Ctx::new(

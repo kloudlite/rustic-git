@@ -84,13 +84,11 @@ pub enum VolumeSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commit: Option<String>,
     },
-    /// A pushed commit, named by id, fetched from the registry.
-    ///
-    /// `region` is the region the RECORD names, which is not always the region this node runs in:
-    /// a snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the
-    /// VM region's container. The API resolves it (it holds the region store and the caller's
-    /// authorization); the agent maps it to credentials. Absent means "this node's own region" —
-    /// every record written before this field existed.
+    /// DEAD as of Task 8: restore-to-new is `CloneOf{commit: Some(id)}` now — `/v1` never writes
+    /// this variant any more. Kept ONLY so a pre-cutover stored spec still deserializes; a
+    /// reconcile that finds one converges to a fixed Permanent condition
+    /// (`engine::ops::RESTORE_OF_GONE`) rather than attempting a fetch that has nowhere left to
+    /// fetch from.
     RestoreOf {
         volume: String,
         snapshot_id: String,

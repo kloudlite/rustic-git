@@ -9,10 +9,6 @@ const SECRET: &str = "test-peer-secret";
 /// The node every fleet starts FIRST, which is why it holds the lease: `node()` runs one election
 /// beat before serving, and the first beat on an empty store wins. Nothing else is special about it.
 const LEADER: &str = "rustic-git-0";
-/// The one region every node in these fleets knows, and its agent token.
-const AGENT_REGION: &str = "region-a";
-const AGENT_TOKEN: &str = "tok-a";
-
 /// One node's own Store over a shared object store, so each node has its own pool and the test can
 /// see which node opened a repo. One shared Store would mean one shared pool, and "exactly one
 /// opener" could never fail.
@@ -83,15 +79,11 @@ async fn node(
         .map(|(_, a)| a.clone())
         .expect("node must be in its own fleet");
     let (peer_l, stream_l) = take_reserved(&my_addr);
-    // One `JobsState` for both listeners, as `serve()` wires it: the vol-agent token check runs
-    // on whichever listener the request finally lands on, against the same regions.
-    let jobs = common::jobs_state_with_regions(&[(AGENT_REGION, AGENT_TOKEN)]).await;
     let a2 = app.clone();
-    let j2 = jobs.clone();
-    tokio::spawn(async move { axum::serve(pub_l, rustic_git_server::router::router(a2, j2)).await.unwrap() });
+    tokio::spawn(async move { axum::serve(pub_l, rustic_git_server::router::router(a2)).await.unwrap() });
     let a4 = app.clone();
     tokio::spawn(async move {
-        axum::serve(peer_l, rustic_git_server::router::peer_router(a4, jobs))
+        axum::serve(peer_l, rustic_git_server::router::peer_router(a4))
             .await
             .unwrap()
     });
@@ -1349,54 +1341,6 @@ async fn a_forward_to_a_departed_owner_recovers() {
     blackholed().lock().unwrap().remove(&f[1].1);
     assert_eq!(res.status(), 200, "a forward into a departed owner must recover, not 502");
     assert_eq!(b.store.pool.warm_count(), 1, "B took it over");
-}
-
-/// The vol-agent routes are mounted on the peer listener so a forwarded request has somewhere
-/// to land — and the handler there used to be told the peer secret had already vouched for it.
-/// It had not: the secret proves a NODE forwarded the request, not that an agent sent it, so on
-/// any fleet with more than one node an anonymous write to a non-owner rewrote volume history.
-/// The token is now checked wherever the request finally lands, once.
-#[tokio::test]
-async fn a_forwarded_vol_agent_write_is_still_checked_for_its_agent_token() {
-    let os: Arc<dyn slatedb::object_store::ObjectStore> =
-        Arc::new(slatedb::object_store::memory::InMemory::new());
-    let fleet = fleet(3);
-    let _leader = node(os.clone(), LEADER, &fleet).await;
-    let owner = node(os.clone(), "rustic-git-1", &fleet).await;
-    let other = node(os.clone(), "rustic-git-2", &fleet).await;
-    let c = client().await;
-
-    // One node holds the volume, as the owner does on a real fleet; the seed write lands there
-    // directly, so a request to the other has to forward.
-    owner.app.claim("vol/alice/web").await.unwrap();
-    let record = serde_json::json!([{
-        "id": "c1", "state": {}, "lineage": [], "region": AGENT_REGION,
-        "message": "seed", "created_at": chrono::Utc::now(),
-    }]);
-    let r = c
-        .post(format!("http://{}/vol-agent/alice/web/commits", owner.public))
-        .bearer_auth(AGENT_TOKEN)
-        .json(&record)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
-    assert_eq!(owner.store.pool.warm_count(), 1);
-
-    // No token, via the non-owner: forwarded to the owner's PEER listener — and refused there.
-    let url = format!("http://{}/vol-agent/alice/web/ref", other.public);
-    let body = serde_json::json!({"name": "main", "commit": "c1"});
-    let r = c.post(&url).json(&body).send().await.unwrap();
-    assert_eq!(r.status(), 401, "a forwarded write without a token must be refused");
-    let r = c.post(&url).bearer_auth("not-the-token").json(&body).send().await.unwrap();
-    assert_eq!(r.status(), 401, "a forwarded write with the wrong token must be refused");
-    assert_eq!(other.store.pool.warm_count(), 0, "the non-owner forwarded rather than opening the volume");
-
-    // The real token, via the same non-owner: forwarded and accepted.
-    let r = c.post(&url).bearer_auth(AGENT_TOKEN).json(&body).send().await.unwrap();
-    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
-    assert_eq!(other.store.pool.warm_count(), 0);
-    assert_eq!(owner.store.pool.warm_count(), 1);
 }
 
 /// A browse request must be routed by the repo the BROWSE HANDLER will open, and by nothing else.

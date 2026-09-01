@@ -95,7 +95,6 @@ async fn serve() -> Result<()> {
             tracing::warn!(error = %e, "first election tick");
         }
     }
-    let jobs = rustic_git_server::boot::build_jobs_state().await?;
     store.pool.spawn_sweeper();
     // The lifecycle invariant, both directions: eviction releases the lease before it closes the
     // database, and the renewal task closes any database whose lease we have lost. Single node has
@@ -203,9 +202,9 @@ async fn serve() -> Result<()> {
         }
     };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
-    let http_srv = axum::serve(l.http, rustic_git_server::router::router(a2, jobs.clone()))
+    let http_srv = axum::serve(l.http, rustic_git_server::router::router(a2))
         .with_graceful_shutdown(wait(term_rx.clone()));
-    let peer_srv = axum::serve(l.peer_http, rustic_git_server::router::peer_router(a3, jobs))
+    let peer_srv = axum::serve(l.peer_http, rustic_git_server::router::peer_router(a3))
         .with_graceful_shutdown(wait(term_rx.clone()));
     // Both HTTP servers as ONE select arm: select! returns when its first arm resolves, and if
     // each server were its own arm the first to finish draining would end the select and

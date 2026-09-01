@@ -107,95 +107,6 @@ pub struct PackagesDoc {
     pub message: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LayerKind {
-    Block,
-    Stream,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LineageEntry {
-    pub kind: LayerKind,
-    pub blob: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub snap: Option<String>,
-    pub sha256: String,
-    /// LOCAL-ONLY, crash-recovery internal: true while this entry has been snapshotted+staged
-    /// locally but not yet durable on the registry (blob uploaded, `CommitRecord` registered, ref
-    /// moved) — a window that only exists mid-`push` or after one crashed partway through. The
-    /// local `.lineage` pool file is the only place this state exists — a `CommitRecord` sent to
-    /// the registry never carries it (always false on the wire; `push` clears it locally the
-    /// moment the record lands). Defaults to false so old lineage files and every remote copy
-    /// still parse.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unpushed: bool,
-}
-
-impl LineageEntry {
-    /// Local pool string form, matching the POC `Entry` encoding: `s:{blob}:{sha}` for a
-    /// stream layer, `b:{blob}:{snap}:{sha}` for a block layer, with a trailing `|u` when the
-    /// entry is committed-but-not-pushed (see `unpushed`'s doc). The `|u` is appended, not
-    /// woven into the `:`-separated fields, so a parser written before commit/push existed
-    /// would simply see it as trailing garbage on `sha256` — there is no such parser left, but
-    /// it kept the diff to `parse`/`encode` alone.
-    pub fn encode(&self) -> String {
-        let body = match self.kind {
-            LayerKind::Stream => format!("s:{}:{}", self.blob, self.sha256),
-            LayerKind::Block => format!(
-                "b:{}:{}:{}",
-                self.blob,
-                self.snap.as_deref().unwrap_or(""),
-                self.sha256
-            ),
-        };
-        if self.unpushed { format!("{body}|u") } else { body }
-    }
-
-    /// `None` on a malformed line rather than a panic: the lineage file is plain text on a pool
-    /// that can lose power mid-write, and a torn last line used to take the whole agent down
-    /// through `Pool::lineage`'s `map`.
-    pub fn parse(s: &str) -> Option<LineageEntry> {
-        let (s, unpushed) = match s.strip_suffix("|u") {
-            Some(rest) => (rest, true),
-            None => (s, false),
-        };
-        let p: Vec<&str> = s.split(':').collect();
-        match *p.first()? {
-            "b" if p.len() >= 4 && !p[1].is_empty() && !p[3].is_empty() => Some(LineageEntry {
-                kind: LayerKind::Block,
-                blob: p[1].into(),
-                snap: Some(p[2].into()),
-                sha256: p[3].into(),
-                unpushed,
-            }),
-            // `"s"` explicitly, not a catch-all. `encode` only ever writes `s:` or `b:`, so a line
-            // starting with anything else is corruption — and a catch-all accepted `":::"` as a
-            // stream layer with an empty blob and an empty hash, which is a lineage entry that
-            // names nothing and would send the janitor looking for a blob called "".
-            "s" if p.len() >= 3 && !p[1].is_empty() && !p[2].is_empty() => Some(LineageEntry {
-                kind: LayerKind::Stream,
-                blob: p[1].into(),
-                snap: None,
-                sha256: p[2].into(),
-                unpushed,
-            }),
-            _ => None,
-        }
-    }
-
-    /// Name of the local RO snapshot this entry materializes: the blob id for a stream
-    /// layer, or the contained subvolume name for a block layer (the stream snapshot it
-    /// materializes, so streams chain across the block boundary by received-UUID exactly as
-    /// they would over the wire).
-    pub fn snap_name(&self) -> &str {
-        match self.kind {
-            LayerKind::Stream => &self.blob,
-            LayerKind::Block => self.snap.as_deref().unwrap_or(&self.blob),
-        }
-    }
-}
-
 /// Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —
 /// see the "An environment is a composition" decision in the design doc. Any non-empty `folder`
 /// name must be a single safe segment (see `validate_mount` — anything else escapes the
@@ -410,22 +321,5 @@ mod tests {
         for bad in ["", "data", "./data", "/data:ro", "/data:/etc:ro", "/data\0"] {
             assert!(validate_mount(&m("data", bad)).is_err(), "path {bad:?} must be refused");
         }
-    }
-}
-
-#[cfg(test)]
-mod lineage_parse_tests {
-    use super::LineageEntry;
-
-    #[test]
-    fn parse_survives_a_truncated_line() {
-        // Every shape a power-loss mid-write can leave in the file. None of these may panic.
-        for bad in ["", "b", "b:only-blob", "b:blob:snap", "s:", "s:blob", "|u", ":::"] {
-            assert!(LineageEntry::parse(bad).is_none(), "{bad:?} must parse as None");
-        }
-        let good = "b:blob:snap:sha|u";
-        let e = LineageEntry::parse(good).unwrap();
-        assert!(e.unpushed);
-        assert_eq!(e.encode(), good, "a good line still round-trips");
     }
 }
