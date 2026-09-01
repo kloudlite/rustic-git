@@ -889,7 +889,20 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
             volume_mounts: Some(vec![
                 // Listed before the workspace mount for the reader; the kubelet orders by path
                 // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
-                VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
+                //
+                // `HostToContainer` is load-bearing, not hygiene: this binds a path INSIDE the
+                // node's shared-home NFS mount, and with the default (`None`) the bind is resolved
+                // once at pod start and never again. Replace that mount on the node — a ZeroFS
+                // restart, an agent remount, the stale-mount repair in `mount_homes` — and every
+                // already-running pod keeps pointing at the detached one, where every access fails
+                // "Network is unreachable" until someone recreates the pod. Observed exactly that
+                // way. Propagation lets a running pod follow the node's remount instead.
+                VolumeMount {
+                    name: "home".to_string(),
+                    mount_path: HOME_DIR.to_string(),
+                    mount_propagation: Some("HostToContainer".to_string()),
+                    ..Default::default()
+                },
                 // One `homecache` volume, five subPaths: the janitor reclaims all of it by
                 // deleting a single node-local subvolume, and each subPath is resolved once at
                 // container start so `login_env`'s redirected vars actually land here.
@@ -1890,6 +1903,9 @@ mod tests {
         assert_eq!(home_mount.mount_path, HOME_DIR);
         assert!(home_mount.read_only.is_none(), "dotfiles are written by the person");
         assert!(home_mount.sub_path.is_none());
+        // Without this a node-side remount strands every running pod on the detached mount
+        // ("Network is unreachable" on every path under $HOME) until the pod is recreated.
+        assert_eq!(home_mount.mount_propagation.as_deref(), Some("HostToContainer"));
         let live = mounts.iter().find(|m| m.name == "live").unwrap();
         assert!(live.mount_path.starts_with(&format!("{HOME_DIR}/")), "the workspace is INSIDE the home: {}", live.mount_path);
         assert!(SSH_HOME.starts_with(HOME_DIR));
