@@ -240,6 +240,28 @@ kubectl get volumereplicas                      # Synced on every node the volum
 kubectl get workspace <id> -o jsonpath='{.status.head}'   # a commit name once it's pushed or migrated
 ```
 
+### Old-model artifact cleanup — irreversible, gated on the verify above
+
+Only after EVERY volume shows a Synced VolumeReplica on its replica set and a `status.head`, and a
+few days of real pushes have proven the model (the Azure blobs are the last copies of the OLD
+history — deleting them is the point of no return for restore-from-blob):
+
+```sh
+# on each pooled node (agent pod shell), the old model's pool artifacts:
+rm -rf /wspool-prod/recv /wspool-prod/stage /wspool-prod/img
+rm -f  /wspool-prod/vol/*.lineage /wspool-prod/vol/*.pushed-gen        /wspool-prod/vol/*.replicated-gen-* /wspool-prod/vol/*/.pushed-gen
+# the old peer-replication staging (superseded by snap/ under each volume):
+rm -rf /wspool-prod/repl
+
+# the object store (LAST — nothing reads these after the cutover, and nothing can rebuild them):
+az storage blob delete-batch --account-name <acct> -s <container> --pattern 'layers/*'
+```
+
+The `rustic-git-agent` Secret's `AZURE_*` keys become unused (the env wiring is already gone); the
+keys may stay in the Secret harmlessly or be pruned with the storage account whenever the old
+container is retired.
+
+
 **There is no kill switch any more (Task 8) — this is the sentence that matters.** Before Task 8,
 unsetting `WS_COMMIT_MODEL` (or setting it back to `"0"`) rolled back cleanly ONLY for a volume
 that had never migrated; a volume that HAD migrated (`live` moved from the single old subvolume to
