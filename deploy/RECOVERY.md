@@ -27,7 +27,7 @@ once the clusters serve: `deploy/BACKUPS.md`.
 1. **k3s control plane** (Part B.1–B.3) — first, because the AKS api tier needs its
    ServiceAccount token, and nothing on AKS depends on the region's agents being up.
 2. **AKS tier** (Part A) — Secrets, ingress, roll, Cloudflare.
-3. **Region record + agent token** (Part C) — needs the api tier serving.
+3. **Region record** (Part C) — needs the api tier serving.
 4. **k3s workloads** (Part B.4–B.7) — agent Secret, DaemonSet, gateway, NSG, hardening, backup timer.
 
 A single-cluster loss is the same list minus the surviving half; the cross-cluster items are
@@ -85,7 +85,7 @@ exists in Azure and is copied. A `(cross)` Secret must hold the same value in bo
 | `rustic-git-hostkey` | `host_key` | minted: `ssh-keygen -q -t ed25519 -N '' -f host_key` (the file, not `.pub`). One key fleet-wide — per-pod keys make every pod a different host. **Every user's `known_hosts` entry for `git.khost.dev` changes**; announce it | srv | no |
 | `rustic-git-mongo` | `uri` | portal: `az cosmosdb keys list -n rustic-git-mongo -g <rg> --type connection-strings` | srv, api, worker | no on srv (PRs orphan) |
 | `rustic-git-redis` | `url` | the managed instance's `rediss://` URL with its access key | srv, api, worker | yes — slower, never wrong |
-| `rustic-git-cosmos` | `endpoint`, `key`, `vol-agent-token` | portal: `az cosmosdb show -n rustic-git-cosmos --query documentEndpoint`, `az cosmosdb keys list --type keys`; `vol-agent-token` minted: `openssl rand -hex 32` — the break-glass list `RUSTIC_GIT_VOL_AGENT_TOKENS` on the server tier, distinct from any region's token | srv, api | yes — region routes 503 |
+| `rustic-git-cosmos` | `endpoint`, `key` | portal: `az cosmosdb show -n rustic-git-cosmos --query documentEndpoint`, `az cosmosdb keys list --type keys` | srv, api | yes — region routes 503 |
 | `rustic-git-k3s-kubeconfig` **(cross)** | `config` | a kubeconfig whose user is the k3s `rustic-git-api` ServiceAccount token — B.3 mints it | api | no — /v1 workspace routes 503 |
 | `rustic-git-web` | `auth-secret` (required); `github-id`/`-secret`, `google-id`/`-secret`, `allowed-emails`, `shared-password` (optional) | `auth-secret` minted: `openssl rand -hex 32`; OAuth values from the provider consoles (callback `https://dev.kloudlite.io/api/auth/callback/<provider>`) | web | providers optional |
 | `rustic-git-mail` | `resend-api-key`, `from` | Resend console | web | yes — invites shown as links |
@@ -97,7 +97,7 @@ kubectl -n rustic-git create secret generic rustic-git-peer  --from-literal=secr
 ssh-keygen -q -t ed25519 -N '' -f host_key && kubectl -n rustic-git create secret generic rustic-git-hostkey --from-file=host_key && rm host_key host_key.pub
 kubectl -n rustic-git create secret generic rustic-git-mongo --from-literal=uri='<connection string>'
 kubectl -n rustic-git create secret generic rustic-git-redis --from-literal=url='rediss://:<key>@<host>:10000'
-kubectl -n rustic-git create secret generic rustic-git-cosmos --from-literal=endpoint=<url> --from-literal=key=<key> --from-literal=vol-agent-token=$(openssl rand -hex 32)
+kubectl -n rustic-git create secret generic rustic-git-cosmos --from-literal=endpoint=<url> --from-literal=key=<key>
 kubectl -n rustic-git create secret generic rustic-git-k3s-kubeconfig --from-file=config=<kubeconfig from B.3>
 kubectl -n rustic-git create secret generic rustic-git-web --from-literal=auth-secret=$(openssl rand -hex 32) [--from-literal=github-id=... ...]
 kubectl -n rustic-git create secret generic rustic-git-mail --from-literal=resend-api-key=... --from-literal=from='...'
@@ -186,8 +186,8 @@ ssh azureuser@<node> sudo bash -s -- /dev/disk/azure/scsi1/lun0 < deploy/k3s/for
 ```
 
 Note the pool nodes' new public IPs: they go into `RUSTIC_GIT_AGENT_SOURCES` and the registry
-`limit-whitelist` in `deploy/rustic-git.yaml` (A.3) — the server honours a region's agent token
-only from those addresses.
+`limit-whitelist` in `deploy/rustic-git.yaml` (A.3) — the registry's rate limit is lifted only for
+those addresses.
 
 ### B.2 The control plane — from the backup, or from scratch
 
@@ -263,15 +263,12 @@ in `kube-system/rustic-git-agent`:
 
 | Key | Value |
 | --- | --- |
-| `WS_REGISTRY_URL` | `https://cr.khost.dev` — the SERVER tier, not the api |
 | `WS_REGION` | the region id (`centralindia-k3s`); must equal the gateway ConfigMap's |
-| `WS_AGENT_TOKEN` | the region's token — Part C mints it; use a placeholder until then |
 | `AZURE_ACCOUNT`, `AZURE_KEY`, `AZURE_CONTAINER` | this region's `wslayers*` account (portal) |
 | `WS_RUNTIME_CLASS` | only `gvisor`, only once every pool node has it (comment in `agent-daemonset.yaml`) |
 
 ```sh
-kubectl -n kube-system create secret generic rustic-git-agent --from-literal=WS_REGISTRY_URL=https://cr.khost.dev \
-  --from-literal=WS_REGION=centralindia-k3s --from-literal=WS_AGENT_TOKEN=placeholder \
+kubectl -n kube-system create secret generic rustic-git-agent --from-literal=WS_REGION=centralindia-k3s \
   --from-literal=AZURE_ACCOUNT=... --from-literal=AZURE_KEY=... --from-literal=AZURE_CONTAINER=wslayers-k3s
 kubectl apply -f deploy/k3s/agent-daemonset.yaml
 kubectl -n kube-system rollout status ds/rustic-git-agent
@@ -324,11 +321,10 @@ then the units. Verify: `systemctl list-timers backup-controlplane.timer` and a 
 
 ---
 
-## Part C — the region record and the agent token
+## Part C — the region record
 
 `rustic-git-cosmos` (Core API, db `workspaces`) holds one `Region` row per region and nothing
-else. If the account survived, the row is there and only the token needs rotating; if not,
-re-register. Both go through the api tier (A.3 must be serving) as a workspaces admin
+else. If the account survived, the row is already there; if not, re-register. Both go through the api tier (A.3 must be serving) as a workspaces admin
 (`RUSTIC_GIT_WORKSPACES_ADMINS`):
 
 ```sh
@@ -336,8 +332,6 @@ ADMIN_JWT=<session token of an admin, from the web app's cookie or `kl` login>
 # re-register (only when the row is gone; re-registering an existing id is also how one is retired):
 curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' https://dev.kloudlite.io/v1/regions \
   -d '{"id":"centralindia-k3s","name":"Central India (k3s)","storage_account":"<wslayers account>","blob_container":"wslayers-k3s"}'
-# mint the agent token and install it in the region in one step (replaces the B.5 placeholder):
-ADMIN_JWT=$ADMIN_JWT deploy/k3s/rotate-agent-token.sh centralindia-k3s .local/k3s.yaml
 ```
 
 Verify end to end — this is the only check that exercises both clusters and Cosmos together:
@@ -349,7 +343,7 @@ ID=$(curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: a
 KUBECONFIG=.local/k3s.yaml kubectl wait workspace/$ID --for=condition=Ready --timeout=10m   # claimed, materialized, pod up
 curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
   https://dev.kloudlite.io/v1/workspaces/$ID/push -d '{"message":"recovery check"}'
-KUBECONFIG=.local/k3s.yaml kubectl get snapshots          # the new one reaches phase ready = agent token, wslayers creds and the server's vol/ surface all right
+KUBECONFIG=.local/k3s.yaml kubectl get snapshots          # the new one reaches phase ready = the node claimed it, snapshotted and recorded the commit
 kl ws ssh $ID -- true                                      # the gateway: DNS, NSG, harden-node, the copied jwt Secret
 ```
 
@@ -362,6 +356,5 @@ kl ws ssh $ID -- true                                      # the gateway: DNS, N
   page — move it here without the values.
 - The `known_hosts` change from a re-minted SSH host key has no automation; tell users.
 - The k3s api ServiceAccount token (B.3) expires; nothing warns before it does.
-- Credential rotation for everything except the region agent token is a procedure, not a
-  script — `deploy/BACKUPS.md`, "Rotation". Workload identity would remove the storage key
+- Credential rotation is a procedure, not a script — `deploy/BACKUPS.md`, "Rotation". Workload identity would remove the storage key
   entirely; that migration is described there and not done.

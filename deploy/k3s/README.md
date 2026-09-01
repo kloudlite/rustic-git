@@ -20,7 +20,6 @@ Files, in the order a cluster is built:
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `rustic-git-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
-| `rotate-agent-token.sh` | Mint a new region agent token at the api and install it in the DaemonSet in one step. |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly backup of the SQLite datastore, the cluster identity and a YAML dump of every CRD object to Azure Blob. Restore procedure is in the script's trailing comment. |
 | `backup-controlplane.{service,timer}` | The systemd units that make "hourly" true — see "Control-plane backup" below. |
@@ -461,10 +460,10 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
 
 ## Two things that bite
 
-**The agent Secret is not in this directory.** `rustic-git-agent` in `kube-system` carries the
-region's agent token and the Azure credentials, and it is created by hand because it holds secrets.
-Without it the controller runs but every push fails at the registry. Keys: `WS_REGISTRY_URL`,
-`WS_REGION`, `WS_AGENT_TOKEN`, `AZURE_ACCOUNT`, `AZURE_KEY`, `AZURE_CONTAINER`.
+**The agent Secret is not in this directory.** `rustic-git-agent` in `kube-system` carries
+`WS_REGION` and `WS_PEER_SECRET`, and it is created by hand because it holds a secret. The agent
+holds no registry URL, no agent token and no Azure credential any more: its commit history is the
+`Volume`'s own status.
 
 **A snapshot can only be restored in the region it was pushed in.** A `CommitRecord` names the
 region its blobs live in, and a `restoreOf` source carries that region down to the agent. The

@@ -164,7 +164,6 @@ async fn may_act_on(s: &ApiState, caller: &str, owner: &str) -> bool {
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/regions", post(create_region).get(list_regions))
-        .route("/v1/regions/{id}/rotate-token", post(rotate_region_token))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws).patch(patch_ws_packages))
@@ -200,17 +199,6 @@ fn rid(prefix: &str) -> String {
     let mut b = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut b);
     format!("{prefix}-{}", rustic_git_core::hex(&b))
-}
-
-/// Header carrying the per-region agent token, mirroring `rustic_git_core::peer::PEER_HEADER`'s
-/// naming and constant-time-compare style.
-pub const WS_AGENT_HEADER: &str = "x-rustic-git-ws-agent-token";
-
-fn random_token() -> String {
-    use rand::RngCore;
-    let mut b = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut b);
-    rustic_git_core::hex(&b)
 }
 
 /// The owner identity for everything workspace/environment/volume-shaped is the USERNAME,
@@ -273,38 +261,6 @@ fn active_status() -> String {
     "active".into()
 }
 
-/// Mint a fresh agent token for an existing region, returning it once.
-///
-/// `create_region` deliberately PRESERVES an existing token, so re-registering a region cannot
-/// rotate it — which left a leaked agent token with no way to be revoked short of editing the
-/// store by hand. That is the gap this closes: a token that cannot be rotated is a token that
-/// stays valid forever after it leaks.
-///
-/// The new token is returned in the response and nowhere else, the same contract `create_region`
-/// has for a first mint. Every agent in the region must be updated before or shortly after this
-/// call — the old token stops working the moment it lands.
-async fn rotate_region_token(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Response, Response> {
-    let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
-    let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
-    require_admin(&s, &email)?;
-
-    let mut r = s
-        .store
-        .regions()
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(not_found)?;
-    r.agent_token = random_token();
-    s.store.put_region(&r).await.map_err(store_err)?;
-    Ok((StatusCode::OK, Json(r)).into_response())
-}
-
 async fn create_region(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -315,24 +271,12 @@ async fn create_region(
     let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
     let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
     require_admin(&s, &email)?;
-    // Existing region re-registered without a token yet: generate and persist one now rather
-    // than leaving agents unable to authenticate. Returned once, here, on the create response —
-    // callers must save it (same shape as any bearer secret minted on creation).
-    let agent_token =
-        s.store.regions().await.map_err(store_err)?.into_iter().find(|r| r.id == body.id).and_then(|r| {
-            if r.agent_token.is_empty() {
-                None
-            } else {
-                Some(r.agent_token)
-            }
-        });
     let r = Region {
         id: body.id,
         name: body.name,
         storage_account: body.storage_account,
         blob_container: body.blob_container,
         status: if body.status == "inactive" { "inactive".into() } else { "active".into() },
-        agent_token: agent_token.unwrap_or_else(random_token),
     };
     s.store.put_region(&r).await.map_err(store_err)?;
     Ok((StatusCode::CREATED, Json(r)).into_response())
@@ -343,11 +287,7 @@ async fn list_regions(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     caller(&s, &headers).await?;
-    // The token is a secret, returned once on creation only — never echoed back on list.
-    let mut regions = s.store.regions().await.map_err(store_err)?;
-    for r in &mut regions {
-        r.agent_token.clear();
-    }
+    let regions = s.store.regions().await.map_err(store_err)?;
     Ok(Json(regions).into_response())
 }
 

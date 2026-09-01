@@ -62,7 +62,6 @@ async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
             storage_account: "acct".into(),
             blob_container: "wslayers".into(),
             status: "active".into(),
-            agent_token: "tok".into(),
         })
         .await
         .unwrap();

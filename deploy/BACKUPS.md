@@ -157,7 +157,6 @@ with each store, which is the table any narrowing has to preserve:
 | `rustic-git-storage` | api | read (browse, `/api/{owner}/images`, `_catalog`), write of `auth/`/`index/` keys | account key |
 | `rustic-git-agent` `AZURE_*` (historical — the agent no longer holds Azure credentials at all; see Task 8) | k3s agent | read + write on the region's `wslayers*` (push uploads, restore reads); never delete | account key |
 | `rustic-git-cosmos` | api | read + write on db `workspaces` (`/v1/regions`) | account key |
-| `rustic-git-cosmos` | srv | read of `Region` (agent-token check) | same account key |
 | `rustic-git-mongo` | srv, api, worker | read + write (directory, PRs) | connection string |
 | `rustic-git-jwt`, `rustic-git-peer` | as `deploy/RECOVERY.md` A.2 | symmetric — the same value everywhere by design | minted value |
 
@@ -192,9 +191,8 @@ and the fleet still serves.
 
 ## Rotation
 
-Only the region agent token has a script (`deploy/k3s/rotate-agent-token.sh`). Everything else
-is the procedure below; rotating after an incident is the point, so each one is written to be
-run under pressure. Every symmetric secret is a two-cluster or two-Secret change, and the
+Every credential rotates by the procedure below; rotating after an incident is the point, so each
+one is written to be run under pressure. Every symmetric secret is a two-cluster or two-Secret change, and the
 outage window is the gap between the two halves — do them in one sitting.
 
 | Credential | Procedure | Outage |
@@ -204,8 +202,6 @@ outage window is the gap between the two halves — do them in one sitting.
 | Cosmos keys (both accounts) | `az cosmosdb keys regenerate --key-kind secondary` → patch `rustic-git-cosmos`/`rustic-git-mongo` to the secondary → roll → regenerate primary | none, same reason |
 | `rustic-git-jwt` **(two clusters)** | new value → `kubectl -n rustic-git patch secret rustic-git-jwt` on AKS AND `kubectl -n rustic-git-system patch secret rustic-git-jwt` on k3s → `deploy/roll.sh` → `kubectl -n rustic-git-system rollout restart deploy/rustic-git-gateway`. Every signed-in session and every `docker login` bearer is invalidated: users sign in again, clients `docker login` again | every session, once |
 | `rustic-git-peer` | new value → patch → `deploy/roll.sh`. During the roll, old and new pods cannot forward to each other: 421s until the last pod is on the new value | minutes of misdirected writes |
-| Region agent token | `ADMIN_JWT=... deploy/k3s/rotate-agent-token.sh <region>` — both halves in one command | none |
-| `vol-agent-token` (break-glass list) | patch `rustic-git-cosmos`'s key, roll srv. Nothing holds it but an operator | none |
 | SSH host key | do not, unless compromised: every user's `known_hosts` breaks. If forced: `deploy/RECOVERY.md` A.2, then announce the new fingerprint | every SSH user, once |
 | k3s api ServiceAccount token | `kubectl -n kube-system create token rustic-git-api --duration=8760h` on k3s → rebuild the kubeconfig (`deploy/RECOVERY.md` B.3) → patch `rustic-git-k3s-kubeconfig` → `kubectl -n rustic-git rollout restart deploy/rustic-git-api`. It EXPIRES — put the date somewhere that pages | none |
 | k3s backup key | only if compromised: new key in `/etc/rustic-git/k3s-backup.key` AND the vault, keep the old one in the vault too (older bundles need it) | none |

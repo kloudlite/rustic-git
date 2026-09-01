@@ -10,11 +10,10 @@
 # change to it. CI does not pre-build anything for it — build the binaries on the VM itself
 # (`cargo build --bin rustic-git --bin rustic-git-api --bin rustic-git-agent`). A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
 #
-# Three binaries now, not two: the volume registry (commits/history/ref) lives on the server tier
-# (rustic-git serve — see bins/server/src/vol_agent.rs) and the AGENT is its only client
-# (RUSTIC_GIT_VOL_AGENT_TOKENS gates it there). rustic-git-api holds no registry client at all:
-# GET /v1/volumes/* is a label list of `done` SnapshotRequests, and /v1/workspaces|environments own
-# the CRDs while only /v1/regions is Cosmos-backed. The agent is a
+# Three binaries, and none of them talks to a volume registry: the commit history is the
+# `Volume`'s own `status.snapshots`, so GET /v1/volumes/* reads the CRD and the agent reaches
+# nothing over HTTP. /v1/workspaces|environments own the CRDs; only /v1/regions is
+# Cosmos-backed. The agent is a
 # CONTROLLER now, not a poller: it watches the CRDs, so this script waits on the conditions those
 # controllers write (`kubectl wait --for=condition=Ready`) rather than polling document state.
 #
@@ -174,7 +173,6 @@ sudo chmod 0777 "$MOUNT"
 # ---------------------------------------------------------------------------
 JWT_SECRET="e2e-jwt-secret-$(head -c24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 PEER_SECRET="e2e-peer-secret-$RANDOM"
-VOL_AGENT_TOKEN="e2e-vol-agent-token-$RANDOM$RANDOM"
 SERVER_HTTP_ADDR="127.0.0.1:8180"
 SERVER_PEER_ADDR="127.0.0.1:8181"
 # peer_stream binds PEER_ADDR+1 (8182), so ssh moves clear of it.
@@ -205,11 +203,8 @@ wait_for_listener() {
 }
 
 # ---------------------------------------------------------------------------
-# Start the server tier: this is what now hosts the agent work surface
-# (/vol-agent/{owner}/{name}/{commits,history,ref}) — RUSTIC_GIT_VOL_AGENT_TOKENS is the
-# break-glass shared secret rustic-git-api's RegistryClient presents to read history/refs for
-# GET /v1/volumes/*. Solo mode (no RUSTIC_GIT_PEER_SVC): a single node needs no
-# ownership map.
+# Start the server tier: git, the registry, and the ssh listener the workspace pods clone
+# through. Solo mode (no RUSTIC_GIT_PEER_SVC): a single node needs no ownership map.
 #
 # A file:// store, not mem://, and the api below shares the same one: mem:// is per-PROCESS, and
 # three things here must see one set of credentials — the `admin` subcommands that seed a git repo,
@@ -228,7 +223,6 @@ RUSTIC_GIT_HTTP_ADDR="$SERVER_HTTP_ADDR" \
 RUSTIC_GIT_PEER_ADDR="$SERVER_PEER_ADDR" \
 RUSTIC_GIT_SSH_ADDR="$SERVER_SSH_ADDR" \
 RUSTIC_GIT_HOST_KEY="$TMPD/host_key" \
-RUSTIC_GIT_VOL_AGENT_TOKENS="$VOL_AGENT_TOKEN" \
 COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
 COSMOS_KEY="$COSMOS_KEY" \
 COSMOS_DB="$COSMOS_DB" \
@@ -299,8 +293,7 @@ log "registering region $REGION_ID"
 REGION_JSON=$(curl -fsS -X POST "$BASE/v1/regions" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{\"id\":\"$REGION_ID\",\"name\":\"E2E Region\",\"storage_account\":\"$AZURE_ACCOUNT\",\"blob_container\":\"$AZURE_CONTAINER\"}")
-AGENT_TOKEN=$(echo "$REGION_JSON" | sed -n 's/.*"agent_token":"\([^"]*\)".*/\1/p')
-[ -n "$AGENT_TOKEN" ] || fail "no agent_token in region create response: $REGION_JSON"
+echo "$REGION_JSON" | grep -q "\"$REGION_ID\"" || fail "region create did not echo the region: $REGION_JSON"
 
 # The controller shards on `spec.nodeName`, so it needs to know which node it IS. This must be the
 # node's KUBERNETES name (what `kubectl get nodes` prints), which is the hostname on a default k3s
@@ -326,13 +319,11 @@ NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=
 # (lib.rs's run: unset means "no shared home on this node", fail closed) — the real Service the
 # cluster's own agents point at (deploy/k3s/agent-daemonset.yaml), reachable here because this
 # runs against the real k3s cluster, just with a loopback pool standing in for the node's btrfs.
-log "starting rustic-git-agent against pool $MOUNT as node $E2E_NODE (registry at $SERVER_BASE)"
+log "starting rustic-git-agent against pool $MOUNT as node $E2E_NODE"
 NODE_NAME="$E2E_NODE" \
 WS_GIT_SSH_HOST="$NODE_IP" \
 WS_GIT_SSH_PORT="$SERVER_SSH_PORT" \
-WS_REGISTRY_URL="$SERVER_BASE" \
 WS_REGION="$REGION_ID" \
-WS_AGENT_TOKEN="$AGENT_TOKEN" \
 WS_POOL="$MOUNT" \
 WS_HOMES_EXPORT="zerofs.rustic-git-system.svc:/" \
 WS_SYNC_SECS="5" \

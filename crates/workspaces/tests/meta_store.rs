@@ -5,30 +5,29 @@
 use rustic_git_workspaces::model::Region;
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 
-fn region(id: &str, token: &str) -> Region {
+fn region(id: &str, name: &str) -> Region {
     Region {
         id: id.into(),
-        name: format!("Region {id}"),
+        name: name.into(),
         storage_account: "acct".into(),
         blob_container: "blobs".into(),
         status: "active".into(),
-        agent_token: token.into(),
     }
 }
 
 async fn contract(store: &dyn MetaStore) {
-    store.put_region(&region("r1", "t1")).await.unwrap();
-    store.put_region(&region("r2", "t2")).await.unwrap();
+    store.put_region(&region("r1", "one")).await.unwrap();
+    store.put_region(&region("r2", "two")).await.unwrap();
     // A second put of the same id is an upsert, not a duplicate.
-    store.put_region(&region("r1", "t1-rotated")).await.unwrap();
+    store.put_region(&region("r1", "one-renamed")).await.unwrap();
     let mut all = store.regions().await.unwrap();
     all.sort_by(|a, b| a.id.cmp(&b.id));
     assert_eq!(all.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["r1", "r2"]);
-    assert_eq!(all[0].agent_token, "t1-rotated", "the later put wins");
-    let (got, want) = (&all[1], region("r2", "t2"));
+    assert_eq!(all[0].name, "one-renamed", "the later put wins");
+    let (got, want) = (&all[1], region("r2", "two"));
     assert!(
         got.name == want.name && got.storage_account == want.storage_account && got.blob_container == want.blob_container
-            && got.status == want.status && got.agent_token == want.agent_token,
+            && got.status == want.status,
         "every field round-trips"
     );
 }
