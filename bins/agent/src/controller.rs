@@ -316,10 +316,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // every clone of it) needs a reflector store indexed by `storage.source.cloneOf`, and the
         // mapper is a sync `FnMut` that must not do I/O. Wire the store if that latency is felt.
         .watches_shared_stream(vol_ws, |v: Arc<crd::Volume>| owned_by::<crd::Workspace, _>(&*v))
-        // The `stop-home-{ws}` request the stop path waits on, selected by the same `stop-of`
-        // label the environments use and mapped back by ownerReference — without it a workspace
-        // parked at `StopSnapshotFailed` would never wake, not even for an operator deleting the
-        // failed request.
+        // A workspace no longer creates a stop request of its own (the home is on NFS now, spec
+        // 2026-09-01) — this stays only because an Environment's `stop-{env}` request carries the
+        // same `stop-of` label and this watch is shared plumbing with `owned_by` doing the filter.
         .watches(
             Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
@@ -1885,28 +1884,15 @@ fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Cond
     conds.into_iter().filter(|c| c.type_ != crd::ATTACHED).chain(attached).collect()
 }
 
-/// One in-progress status write for the stop path: keep everything `prev` says, drop
-/// `observedGeneration` (the stop has NOT converged yet) and report `cond`.
-async fn wait_status(
-    w: &crd::Workspace,
-    prev: crd::WorkspaceStatus,
-    cond: Condition,
-    ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
-    let st = crd::WorkspaceStatus { observed_generation: None, conditions: ws_conditions(&prev, cond), ..prev };
-    write_ws_status(w, st, ctx).await
-}
-
-/// Stop the workspace: push the owner's home, then delete the pod — and only in that order.
+/// Stop the workspace: delete the pod. The home is on the shared NFS mount and needs no push
+/// (spec 2026-09-01).
 async fn stop_workspace(
     w: &crd::Workspace,
     prev: crd::WorkspaceStatus,
     gen: i64,
     ctx: &Arc<Ctx>,
 ) -> Result<Action, ReconcileErr> {
-    // Already stopped: nothing to do. Load-bearing now that `stop-home-{ws}` is DELETED after
-    // the teardown — without this the request's absence reads as "no push yet" on every later
-    // event, and a stopped workspace would push its home forever.
+    // Already stopped: nothing to do.
     if prev.phase == crd::Phase::Stopped {
         if prev.observed_generation != Some(gen) {
             let st = crd::WorkspaceStatus { observed_generation: Some(gen), ..prev };
@@ -1918,54 +1904,10 @@ async fn stop_workspace(
     // The Volume child takes the parent's own name, so the pod's name is known without reading
     // (or creating) it.
     let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
-    // The home is pushed BEFORE the pod goes, and the pod goes only once the push has LANDED —
-    // the same fail-closed gate an environment's own subvolume gets, and for the same reason: a
-    // stop that tore the pod down on a failed push is the one moment the person's dotfiles are
-    // lost for good. Only if a pod ever ran: a workspace stopped while still Creating wrote
-    // nothing into the home. The pod is NOT drained first: a running shell's home is exactly
-    // what the five-minute beat already snapshots — this push is the last of those, not a
-    // quiesced one.
-    let home = crd::home_volume_name(&w.spec.owner);
-    let home_here = match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
-        _ if prev.pod_ref.is_none() => false,
-        // "Is there a subvolume with the person's files in it" — the phase is not the question:
-        // a home mid-reconcile (a quota edit) still has everything to lose.
-        Some(v) => v.status.as_ref().is_some_and(|s| s.subvolume_present),
-        // Not in the store is not "no home". An agent restarting with this stop pending
-        // reconciles the Workspace off its initial list, possibly before the Volume watch has
-        // delivered the home — and taking the no-home branch here would delete the pod without
-        // a push, silently. The binding is the fact that decides: it authors the home before it
-        // reports ready, so while it exists the home is on its way and the stop waits. Only an
-        // owner with no binding at all (bound before homes existed, then unbound) has none.
-        None => {
-            if binding::get_binding(ctx, &w.spec.region, &w.spec.owner).await?.is_some() {
-                let cond = crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home volume", gen);
-                wait_status(w, prev, cond, ctx).await?;
-                return Ok(Action::requeue(TICK));
-            }
-            false
-        }
-    };
-    let request = format!("stop-home-{id}");
-    if home_here {
-        match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
-            StopPush::Landed => {}
-            StopPush::Waiting => {
-                let cond = crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen);
-                wait_status(w, prev, cond, ctx).await?;
-                return Ok(Action::requeue(TICK));
-            }
-        }
-    }
     // The workspace's OWN name, never `id` (which is `volume_ref` — the SOURCE volume for a
     // shared-volume clone). Deleting by `id` here would stop the clone by killing its source's
     // pod, taking a running workspace down with it.
     delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &w.name_any()).await?;
-    if home_here {
-        // Served its purpose; left behind, the NEXT stop would find `done` under the same name
-        // and stop without pushing at all.
-        delete_ignoring_404(&Api::<crd::Snapshot>::all(ctx.client.clone()), &request).await?;
-    }
     // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
     // showing "installing packages…" for a workspace that is simply off.
     let conditions = ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen));

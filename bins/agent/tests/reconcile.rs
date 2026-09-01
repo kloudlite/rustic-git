@@ -784,10 +784,9 @@ async fn a_clone_reconcile_adds_the_worktree_finalizer() {
 #[tokio::test]
 async fn an_owned_workspace_reconcile_does_not_add_the_finalizer() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut routes = ws_stop_routes(None);
+    let mut routes = ws_stop_routes();
     routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
     let (ctx, rec) = ctx(tmp.path(), routes);
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     let mut w = stopping_ws();
     w.status.as_mut().unwrap().pod_ref = None;
     assert!(w.spec.storage.as_ref().and_then(|s| s.source.as_ref()).is_none());
@@ -1643,13 +1642,8 @@ fn stopping_ws() -> crd::Workspace {
     serde_json::from_value(o).unwrap()
 }
 
-fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
-    let mut routes = vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }];
-    match req {
-        Some(r) => routes.push(rustic_git_workspaces::kube_test::get(WS_STOP_REQ, r)),
-        None => routes.push(rustic_git_workspaces::kube_test::not_found(WS_STOP_REQ)),
-    }
-    routes
+fn ws_stop_routes() -> Vec<Route> {
+    vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }]
 }
 
 // ── the stop-before-teardown snapshot ────────────────────────────────────
@@ -1671,7 +1665,6 @@ const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 
 
 
-const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-home-ws-1";
 const WS_POD_DEL: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
 
 
@@ -2145,6 +2138,21 @@ async fn a_stopped_workspace_with_a_broken_volume_still_loses_its_pod() {
         rec.calls()
     );
     assert_eq!(rec.sent("PATCH", WS_STATUS).last().unwrap()["status"]["phase"], "stopped");
+}
+
+/// The home is on the shared NFS mount now (spec 2026-09-01): a stop deletes the pod straight
+/// away, with no `stop-home-{ws}` snapshot request gating it.
+#[tokio::test]
+async fn a_stop_deletes_the_pod_without_any_home_push_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+    ]);
+    let w = stopping_ws();
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")));
+    assert!(rec.calls().iter().all(|c| !c.contains("snapshots/stop-home")), "no stop-home gate: {:?}", rec.calls());
 }
 // ── completion wakes the reconciler ──────────────────────────────────────
 
