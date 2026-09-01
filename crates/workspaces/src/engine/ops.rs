@@ -22,6 +22,12 @@ pub const NO_SUCH_RECORD: &str = "commit record not found";
 /// re-issue the restore from the API, which writes the new shape.
 pub const RESTORE_OF_GONE: &str = "restore-to-new via the object-store registry is gone; re-issue the restore";
 
+/// A home whose newest Ready commit is not yet on this node's disk — the replica pull beat (7c)
+/// is behind, not absent; TRANSIENT, requeued at RETRY like any other in-flight condition. Never
+/// bootstrap empty here: an empty worktree checked out next to real history is the never-started-
+/// dataless bug, and it would go on to be committed and replicated as if it were real.
+pub const HOME_AWAITING_SYNC: &str = "home commit not yet replicated to this node";
+
 impl std::fmt::Display for EngErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)

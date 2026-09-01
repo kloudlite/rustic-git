@@ -818,6 +818,19 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                 )
                 .await;
             }
+            // The pull beat is behind, not absent: same shape as the async-resolved
+            // `HomeAwaitingSync` guard above, just discovered inside the blocking task instead
+            // (the target commit named there turned out not to be on disk yet after all — a
+            // race with the beat, not a real error).
+            Err(e) if e == rustic_git_workspaces::engine::ops::HOME_AWAITING_SYNC => {
+                let st = crd::VolumeStatus {
+                    phase: Phase::Working,
+                    conditions: vec![crd::condition("Progressing", true, "HomeAwaitingSync", &e, gen)],
+                    ..v.status.clone().unwrap_or_default()
+                };
+                write_volume_status(v, st, ctx).await?;
+                Ok(Action::requeue(TICK))
+            }
             Err(e) => {
                 let st = crd::VolumeStatus {
                     phase: Phase::Error,
@@ -843,8 +856,42 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let materialize = !observed && restore.is_none();
     let quota_gb = v.spec.quota_gb;
     let home = crd::is_home_volume(v);
+    // A home is never created from a `source` (the API never writes one for it), so on first
+    // materialize it needs its own resolve: bootstrap ONLY when the volume has never been
+    // committed at all. Otherwise it must check out its newest Ready commit — replicated here by
+    // the pull beat (7c), never fetched — same "ask the volume, don't guess" rule the workspace/
+    // environment HeadUnknown guards apply, just resolved here (the async caller) instead of in
+    // the blocking `volume_work`, which has no kube client to ask with.
+    let home_target = if home && materialize {
+        if !crate::claim::has_commits(ctx, &id).await? {
+            None
+        } else {
+            match crate::snapshot::newest_ready_commit(ctx, &id).await? {
+                Some(name) => Some(name),
+                // Commits exist but none is Ready yet (all still Working) — nothing to check out.
+                // Same shape as F2's HeadUnknown: wait rather than bootstrap next to real history.
+                None => {
+                    let st = crd::VolumeStatus {
+                        phase: Phase::Working,
+                        conditions: vec![crd::condition(
+                            "Progressing",
+                            true,
+                            "HomeAwaitingSync",
+                            "home has commits but none are Ready yet",
+                            gen,
+                        )],
+                        ..v.status.clone().unwrap_or_default()
+                    };
+                    write_volume_status(v, st, ctx).await?;
+                    return Ok(Action::requeue(TICK));
+                }
+            }
+        }
+    } else {
+        None
+    };
     let handle = tokio::task::spawn_blocking(move || {
-        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home })
+        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home, home_target })
     });
     let handle = wake_on_finish(
         handle,
@@ -887,20 +934,39 @@ pub struct Work {
     pub restore: Option<crd::RestoreWish>,
     pub quota_gb: u64,
     pub home: bool,
+    /// Resolved by the async caller (`apply_volume`), which has the kube client this blocking
+    /// task doesn't: `None` bootstraps an empty home (never committed anywhere); `Some(name)`
+    /// checks out that commit if it's already on this node's disk, or reports
+    /// `HOME_AWAITING_SYNC` (transient — the pull beat catches up) if it isn't yet.
+    pub home_target: Option<String>,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner: _, source, materialize, restore, quota_gb, home } = w;
+    let Work { id, owner: _, source, materialize, restore, quota_gb, home, home_target } = w;
     let id = id.as_str();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
         if materialize {
             if home {
-                // A home is never created from a `source`, and the API never writes one for it —
-                // bootstrap an empty subvolume the first time this node sees it. (Pulling another
-                // node's existing history here was the object-store registry's job; gone with
-                // it — a second node starts a person's home empty, same as any other volume.)
-                engine.create_subvol(id).map_err(|e| e.to_string())?;
+                match home_target {
+                    // Never committed anywhere — the only genuine bootstrap case.
+                    None => engine.create_subvol(id).map_err(|e| e.to_string())?,
+                    Some(name) => {
+                        let local = engine.local_commits(id).map_err(|e| e.to_string())?;
+                        if local.iter().any(|n| n == &name) {
+                            // `WORKTREE_EXISTS` converges a replayed pass (this materialize
+                            // already checked out once) into a no-op, same as every other
+                            // checkout call site.
+                            match engine.checkout(id, Some(&name), id) {
+                                Ok(()) => {}
+                                Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
+                                Err(e) => return Err(e.0),
+                            }
+                        } else {
+                            return Err(rustic_git_workspaces::engine::ops::HOME_AWAITING_SYNC.to_string());
+                        }
+                    }
+                }
             } else {
                 match &source {
                     None => engine.create_subvol(id).map_err(|e| e.to_string())?,
