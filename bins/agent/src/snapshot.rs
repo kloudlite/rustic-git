@@ -68,7 +68,13 @@ async fn worktree_node(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<O
 pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     // `Ready` is immutable (module doc on `SnapshotSpec`), and anything but `Working` has either
     // already been cut or is a transient shape nothing here produces — no-op either way.
-    let phase = s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending);
+    // A commit CR with NO status yet is one that has just been created and never cut: `status` is
+    // a SUBRESOURCE, so the status block a creator puts in the object literal is dropped by the
+    // API server on create, and every commit is therefore born status-less. Defaulting that to
+    // anything but `Working` makes the controller `await_change()` a CR nothing will ever touch
+    // again — every push, every migration baseline and every home beat hanging forever, which is
+    // exactly what shipped. Missing status means "not cut yet", which is `Working`.
+    let phase = s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Working);
     if phase != crd::Phase::Working {
         return Ok(Action::await_change());
     }
@@ -716,5 +722,41 @@ mod commit_tests {
         retain(&ctx, "vol-1", "c11").await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a list error must delete nothing: {:?}", rec.calls());
+    }
+
+    /// A commit CR is created WITHOUT status — `status` is a SUBRESOURCE, so the block a creator
+    /// puts in the object literal is dropped by the API server. The reconcile must read that as
+    /// `Working` and cut it; any other default stalls every push and migration baseline forever.
+    #[tokio::test]
+    async fn a_commit_with_no_status_at_all_is_still_cut() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![
+            Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-a", "vol-1", None) },
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                "status": {"phase": "ready"},
+            })},
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_status_json("node-a", "vol-1", Some("vol-1-a")) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![]) },
+            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        // The shape the API server actually stores on create: no status at all.
+        let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working)).clone();
+        s.status = None;
+        let action = reconcile_commit(std::sync::Arc::new(s), ctx).await.unwrap();
+        // The cut itself needs btrfs, which this box has not got — it fails and takes the
+        // keep-biased retry. That is fine: what this pins is that the reconcile ENGAGED at all.
+        // Before the fix a status-less CR returned `await_change()` immediately and was never
+        // looked at again, which is the production hang; a requeue proves it is being worked.
+        assert_ne!(
+            action,
+            kube::runtime::controller::Action::await_change(),
+            "a status-less commit must not be ignored — it is a commit that has never been cut"
+        );
+        let _ = &rec;
     }
 }
