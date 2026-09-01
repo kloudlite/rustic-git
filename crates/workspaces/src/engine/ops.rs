@@ -22,12 +22,6 @@ pub const NO_SUCH_RECORD: &str = "commit record not found";
 /// re-issue the restore from the API, which writes the new shape.
 pub const RESTORE_OF_GONE: &str = "restore-to-new via the object-store registry is gone; re-issue the restore";
 
-/// A home whose newest Ready commit is not yet on this node's disk — the replica pull beat (7c)
-/// is behind, not absent; TRANSIENT, requeued at RETRY like any other in-flight condition. Never
-/// bootstrap empty here: an empty worktree checked out next to real history is the never-started-
-/// dataless bug, and it would go on to be committed and replicated as if it were real.
-pub const HOME_AWAITING_SYNC: &str = "home commit not yet replicated to this node";
-
 impl std::fmt::Display for EngErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -69,22 +63,19 @@ pub fn is_subvolume(path: &std::path::Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.ino() == 256)
 }
 
-/// The `Generation:` line of `btrfs subvolume show`. Split from the command so the parse has a test
-/// that runs where btrfs does not.
-pub fn parse_generation(subvolume_show: &str) -> Option<u64> {
-    subvolume_show
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("Generation:"))
-        .and_then(|g| g.trim().parse().ok())
-}
-
 pub struct Engine {
     pub pool: Pool,
+    /// Sampled once at construction, not re-probed per call: a degradation (no btrfs on PATH, not
+    /// root) is a fact about this process's whole lifetime, not a per-reconcile coin flip, and a
+    /// field makes it a state `ensure_homecache` reads rather than a probe it could answer
+    /// differently between its own existence check and its create call.
+    has_btrfs: bool,
 }
 
 impl Engine {
     pub fn new(pool: Pool) -> Engine {
-        Engine { pool }
+        let has_btrfs = super::have_btrfs();
+        Engine { pool, has_btrfs }
     }
 
     /// Bare `{pool}/vol/{id}/live` subvolume creation — shared by `init` (a workspace) and
@@ -96,6 +87,50 @@ impl Engine {
         // and recreate — that would be data loss dressed up as convergence.
         if !self.pool.live(id).exists() {
             run(&["btrfs", "subvolume", "create", self.pool.live(id).to_str().unwrap()])?;
+        }
+        Ok(())
+    }
+
+    /// `{pool}/homecache/{owner}`: the node-local half of the shared-home split (spec
+    /// 2026-09-01) — caches (editor servers, package manager state) that must never leave this
+    /// node and are disposable by contract, so no qgroup limit here (unlike `set_quota`, which
+    /// caps volumes that ARE the tenant's durable data). A btrfs subvolume, not a plain dir, so
+    /// deleting it later is one `btrfs subvolume delete` instead of a `rm -rf` racing writers.
+    pub fn ensure_homecache(&self, owner: &str, uid: u32) -> Result<(), EngErr> {
+        let root = self.pool.root.join("homecache").join(owner);
+        std::fs::create_dir_all(root.parent().unwrap()).map_err(EngErr::io)?;
+        // ponytail: the agent is root-only and btrfs is always present in production (it's a
+        // privileged DaemonSet, see CLAUDE.md); a dev/test pool gets a plain directory instead of
+        // a subvolume so the reconcile loop converges without either — this function's real
+        // subvolume path is exercised by `engine_ops.rs`'s btrfs-gated test. Loud, not silent: a
+        // production node that ever took this branch (btrfs missing from PATH, a bad image) needs
+        // to show up in logs, because the `is_subvolume` guard below is itself skipped in that
+        // state and would otherwise let a plain dir sit there unnoticed.
+        if !root.exists() {
+            if self.has_btrfs {
+                run(&["btrfs", "subvolume", "create", root.to_str().unwrap()])?;
+            } else {
+                tracing::warn!(path = %root.display(), "no btrfs/root: homecache is a plain directory, not a subvolume");
+                std::fs::create_dir(&root).map_err(EngErr::io)?;
+            }
+        } else if self.has_btrfs && !is_subvolume(&root) {
+            // Only reachable once btrfs/root come back after a node ran this reconcile without
+            // them (the branch above just warned and left a plain dir) — self-heal is a `rm -rf`,
+            // never an automatic convert, because the cache is disposable by contract but this
+            // function does not know if it is mid-write.
+            return Err(EngErr::other(format!(
+                "{}: exists but is not a btrfs subvolume (left by a reconcile without btrfs/root); \
+                 disposable by contract — rm -rf it and this reconcile will recreate it",
+                root.display()
+            )));
+        }
+        let chown_ok = unsafe { libc::geteuid() } == 0;
+        for d in ["cache", "vscode-server", "cursor-server", "state"] {
+            let p = root.join(d);
+            std::fs::create_dir_all(&p).map_err(EngErr::io)?;
+            if chown_ok {
+                std::os::unix::fs::chown(&p, Some(uid), Some(uid)).map_err(EngErr::io)?;
+            }
         }
         Ok(())
     }
@@ -166,82 +201,9 @@ impl Engine {
         Ok(run(&["btrfs", "qgroup", "limit", &limit, path.to_str().unwrap()]).err().map(|e| e.0))
     }
 
-    /// The nested subvolumes that keep a home's caches out of every push and out of its quota
-    /// (`k8s::HOME_LOCAL_DIRS`). Run after every path that leaves a new `live` behind — because a
-    /// received/cloned tree carries no trace of them: without this `.cache` comes back as nothing
-    /// at all and the next `npm install` writes it INTO the home.
-    ///
-    /// Keep-biased: an entry that already exists — as a subvolume, or as a plain directory the
-    /// person made themselves — is left exactly as it is. Every directory made here is chowned to
-    /// the owner, parents included: root-made `~/.cargo` is a `mkdir ~/.cargo/x: Permission denied`
-    /// for the person the home belongs to.
-    pub fn ensure_home_dirs(&self, id: &str, uid: u32) -> Result<(), EngErr> {
-        // Same mixed-layout decision as `set_quota`: a migrated home's real $HOME is the
-        // worktree (`Pool::worktree`), and `live` names the directory OF worktrees, not the
-        // subvolume any more — creating the caches under `live` itself would put plain
-        // directories INSIDE the snapshotted worktree tree, so every commit/send would carry
-        // them and `homeQuotaGb` would count them. A not-yet-migrated home is still the old
-        // single subvolume at `live`, so that stays the target there.
-        let old_live = self.pool.live(id);
-        let live = if is_subvolume(&old_live) { old_live } else { self.pool.worktree(id, id) };
-        for rel in crate::k8s::HOME_LOCAL_DIRS {
-            let p = live.join(rel);
-            if p.exists() {
-                continue;
-            }
-            let mut made = Vec::new();
-            let mut d = p.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| live.clone());
-            while d != live && !d.exists() {
-                made.push(d.clone());
-                d = d.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| live.clone());
-            }
-            for d in made.iter().rev() {
-                std::fs::create_dir(d).map_err(EngErr::io)?;
-                std::os::unix::fs::chown(d, Some(uid), Some(uid)).map_err(EngErr::io)?;
-            }
-            run(&["btrfs", "subvolume", "create", p.to_str().unwrap()])?;
-            std::os::unix::fs::chown(&p, Some(uid), Some(uid)).map_err(EngErr::io)?;
-        }
-        Ok(())
-    }
-
-    /// The btrfs generation of `id`'s live subvolume: a counter the filesystem bumps on every
-    /// committed transaction that touched it, so "has anything changed since the last push" is one
-    /// `subvolume show` rather than a walk of the tree.
-    pub fn generation(&self, id: &str) -> Result<u64, EngErr> {
-        self.generation_of(&self.pool.live(id))
-    }
-
-    /// The generation of a commit's own snapshot — `layer` is the commit name under `snap/`.
-    /// This, not the live subvolume read after the cut, is what the home beat records: the
-    /// snapshot holds everything committed up to its own transaction, so "live is past it" is
-    /// exactly "something changed since the commit", whether the snapshot's transaction moved the
-    /// live generation (it does when the root item is rewritten) or not. Reading live afterwards
-    /// folds any write that landed between the snapshot and the read into the recorded number.
-    pub fn pushed_generation(&self, id: &str, layer: &str) -> Result<u64, EngErr> {
-        self.generation_of(&self.pool.snap(id, layer))
-    }
-
-    fn generation_of(&self, subvol: &std::path::Path) -> Result<u64, EngErr> {
-        let out = std::process::Command::new("btrfs")
-            .args(["subvolume", "show", subvol.to_str().unwrap()])
-            .output()
-            .map_err(EngErr::io)?;
-        if !out.status.success() {
-            return Err(EngErr::other(format!(
-                "btrfs subvolume show {}: {}",
-                subvol.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        parse_generation(&String::from_utf8_lossy(&out.stdout))
-            .ok_or_else(|| EngErr::other(format!("btrfs subvolume show {}: no Generation line", subvol.display())))
-    }
-
-    /// Commit the pool's open transaction. `generation`/`pushed_generation` read the COMMITTED
-    /// number, and btrfs commits on its own only every ~30s — so a beat that reads without this
-    /// can miss a write made just before it. `commit::commit_worktree` calls this before every
-    /// snapshot for the same reason. One call per beat, not per home.
+    /// Commit the pool's open transaction. `generation` reads the COMMITTED number, and btrfs
+    /// commits on its own only every ~30s — so a read without this can miss a write made just
+    /// before it. `commit::commit_worktree` calls this before every snapshot for the same reason.
     pub fn sync_pool(&self) -> Result<(), EngErr> {
         run(&["btrfs", "filesystem", "sync", self.pool.root.to_str().unwrap()])
     }
@@ -276,11 +238,33 @@ mod tests {
         Engine::new(Pool::new(root))
     }
 
+    /// The degradation path: forced via the private field rather than gated on the real
+    /// `have_btrfs()`, so this runs (and proves the fallback works) on every machine, not just a
+    /// btrfs box — the real subvolume path is `engine_ops.rs`'s `have_btrfs()`-gated test.
     #[test]
-    fn the_generation_is_read_off_subvolume_show() {
-        let out = "vol/home-alice/live\n\tName: \t\t\tlive\n\tUUID: \t\t\t1234\n\tCreation time: \t\t2026-08-29 10:00:00 +0000\n\tSubvolume ID: \t\t257\n\tGeneration: \t\t4711\n\tGen at creation: \t7\n\tFlags: \t\t\t-\n";
-        assert_eq!(super::parse_generation(out), Some(4711));
-        assert_eq!(super::parse_generation("nothing here"), None);
+    fn ensure_homecache_falls_back_to_a_plain_dir_without_btrfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut e = engine(tmp.path());
+        e.has_btrfs = false;
+        e.ensure_homecache("alice", 12345).unwrap();
+        let root = e.pool.root.join("homecache/alice");
+        assert!(root.is_dir());
+        for d in ["cache", "vscode-server", "cursor-server", "state"] {
+            assert!(root.join(d).is_dir(), "{d}");
+        }
+    }
+
+    /// The self-heal case the review flagged: a plain dir left by a degraded reconcile must not
+    /// wedge forever once btrfs/root come back — the error has to name the fix.
+    #[test]
+    fn ensure_homecache_names_the_remedy_once_a_plain_dir_meets_real_btrfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut e = engine(tmp.path());
+        e.has_btrfs = false;
+        e.ensure_homecache("alice", 12345).unwrap(); // leaves a plain dir, as above
+        e.has_btrfs = true; // the node's btrfs/root came back
+        let err = e.ensure_homecache("alice", 12345).unwrap_err();
+        assert!(err.0.contains("rm -rf"), "{}", err.0);
     }
 
     #[test]

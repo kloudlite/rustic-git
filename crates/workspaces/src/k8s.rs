@@ -239,16 +239,24 @@ const SEED_DIR: &str = "/workspace";
 /// Everything under here except `workspaces/` is the same in every workspace the person opens
 /// on this node.
 pub const HOME_DIR: &str = "/home/kl";
-/// What inside a home is a nested subvolume rather than a directory: package caches. btrfs `send`
-/// skips a nested subvolume and the home's qgroup does not count it, so these never upload and
-/// never eat the quota. ONE list, read by the create path and the restore path in the engine — two
-/// lists would drift and a cache would come back as a plain directory that the next push carries.
-/// A person who wants something else excluded runs `btrfs subvolume create` themselves; that is the
-/// documented escape hatch, not a UI. The editors' remote servers are here too: the default image
-/// exists to run VS Code's, which is 300 MB+ per version and would otherwise be most of the 2 GB
-/// quota and of every five-minute push, and it re-downloads itself on a fresh node anyway.
+/// The paths a MIGRATION must not copy out of an old per-node btrfs home into the shared NFS
+/// export: the six directories the old design kept as nested subvolumes (package caches, the
+/// editors' remote servers) and never pushed. They are dead weight on the export — the node-local
+/// `homecache` volume rebuilds every one of them for free on first use — so this is the rsync
+/// exclusion list in `deploy/k3s/README.md`'s migration step, and nothing else.
+///
+/// It does NOT describe what the pod mounts: the running layout redirects caches by ENV VAR
+/// (`login_env` -> `HOME_CACHE_DIR`) and mounts four hardcoded `homecache` subPaths, which are
+/// deliberately not these paths. Cross-check `workspace_pod`, never this list, for that.
 pub const HOME_LOCAL_DIRS: [&str; 6] =
     [".cache", ".npm", ".cargo/registry", ".local/share/pnpm", ".vscode-server", ".cursor-server"];
+/// Where the node-local cache volume lands inside the home: tool caches redirected here (via
+/// `login_env`) never touch the NFS-backed home, so a cold cache never blocks on network I/O and a
+/// warm one never crosses it either.
+pub const HOME_CACHE_DIR: &str = "/home/kl/.local-cache";
+/// Shell state (history) that must survive a pod restart but has no business on shared NFS —
+/// every terminal on every node would otherwise interleave writes to the same file.
+pub const HOME_STATE_DIR: &str = "/home/kl/.local/state";
 pub const SSH_UID: i64 = 1000;
 const SSH_HOME: &str = "/home/kl/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
@@ -315,6 +323,30 @@ fn login_env(name: &str) -> Vec<EnvVar> {
         var("ZDOTDIR", format!("{HOME_DIR}/.config/zsh")),
         var("MANPATH", format!("{}/share/man:", crate::packages::PROFILE_LINK)),
         var("XDG_DATA_DIRS", format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)),
+        // Every tool cache redirected off the shared NFS home and onto the node-local `homecache`
+        // volume — left pointed at the home, each of these turns a cache hit into network I/O and
+        // (worse) lets concurrent pods on different nodes race the same cache directory.
+        var("XDG_CACHE_HOME", format!("{HOME_CACHE_DIR}/xdg")),
+        var("npm_config_cache", format!("{HOME_CACHE_DIR}/npm")),
+        var("PNPM_STORE_DIR", format!("{HOME_CACHE_DIR}/pnpm")),
+        var("BUN_INSTALL_CACHE_DIR", format!("{HOME_CACHE_DIR}/bun")),
+        // NOT CARGO_HOME: it holds `credentials.toml` and `config.toml` — configs, which is the
+        // half of the home that must survive. Cargo has no separate knob for its registry cache,
+        // so that part is kept off the export by a `homecache` mount at `~/.cargo/registry`
+        // instead (see `workspace_pod`), and only the build output is redirected by env.
+        var("CARGO_TARGET_DIR", format!("{HOME_CACHE_DIR}/cargo-target")),
+        var("RUSTUP_HOME", format!("{HOME_CACHE_DIR}/rustup")),
+        // GOMODCACHE only, never GOPATH: GOPATH also holds `src/` and `bin/`, which are the
+        // person's own files, and the module cache is the only large rebuildable part of it.
+        var("GOMODCACHE", format!("{HOME_CACHE_DIR}/gomod")),
+        var("GRADLE_USER_HOME", format!("{HOME_CACHE_DIR}/gradle")),
+        var("UV_CACHE_DIR", format!("{HOME_CACHE_DIR}/uv")),
+        var("PIP_CACHE_DIR", format!("{HOME_CACHE_DIR}/pip")),
+        var("DENO_DIR", format!("{HOME_CACHE_DIR}/deno")),
+        var("PLAYWRIGHT_BROWSERS_PATH", format!("{HOME_CACHE_DIR}/playwright")),
+        // History is per-node write traffic on every keystroke; keeping it off NFS is why it gets
+        // its own var instead of riding HOME_CACHE_DIR — it isn't a cache, it's state worth keeping.
+        var("HISTFILE", format!("{HOME_STATE_DIR}/shell_history")),
     ]
 }
 
@@ -342,8 +374,15 @@ fn login_env(name: &str) -> Vec<EnvVar> {
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
 ///
-/// Root touches exactly ONE path under the home: `chown $H`, and `$H` is a mountpoint, which
-/// cannot be a symlink. Everything below it — the mkdirs, the rc seeds — runs as `kl` via `su`,
+/// Root chowns only mountpoints and the directories the kubelet made to hold them, never a path
+/// the person could have replaced: `$H`, `$H/workspaces`, and `~/.cargo` with `~/.cargo/registry`.
+/// The last two are the exception and exist because the kubelet creates the missing PARENT of a
+/// subPath mount as root:root 0755 — leaving `CARGO_HOME` on the shared home (which is the point:
+/// `credentials.toml` and `config.toml` must survive) but unwritable, and the mount point itself
+/// root-owned so cargo cannot fill the cache either. `.vscode-server`/`.cursor-server` need no
+/// such fix: they are leaf mount points with no root-owned parent, and the editors recreate them.
+/// A mountpoint cannot be a symlink, and `-h` covers the parent in case the kubelet followed a
+/// planted one rather than creating it. Everything else below `$H` — the mkdirs, the rc seeds — runs as `kl` via `su`,
 /// because the home is now persistent and the person owns every byte of it between starts:
 /// `mv ~/.config x; ln -s /etc ~/.config` would otherwise make the next start `chown` and write
 /// through `/etc` as root, and the container keeps CHOWN/DAC_OVERRIDE on a writable rootfs. The
@@ -361,6 +400,7 @@ fn prelude(name: &str) -> String {
         "set -e\n\
          H=/home/{SSH_USER}\n\
          chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
+         chown -h {SSH_UID}:{SSH_UID} $H/.cargo $H/.cargo/registry\n\
          mkdir -p /etc/fish/conf.d\n\
          printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
@@ -663,13 +703,19 @@ fn hardened() -> SecurityContext {
     }
 }
 
-/// The owner's persistent home. `home_id` is `crd::home_volume_name(owner)` — always via the
-/// function, never formatted here. A home is a Volume with exactly one worktree, named after
-/// itself (Task 7c) — same split `live_worktree_volume` uses for a workspace's own `live` mount
-/// (named "home" here instead, so it cannot collide with the pod's actual "live" volume), or a
-/// migrated home's dotfiles go missing under the old-layout directory path (H1).
-fn home_volume(pool: &str, home_id: &str) -> Volume {
-    host_dir("home", worktree_path(pool, home_id, home_id))
+/// The owner's persistent home: one region-shared NFS export, `{pool}/homes/{owner}`, so every
+/// node the owner lands on sees the same dotfiles and history — no per-node btrfs subvolume, no
+/// materialize-on-first-landing.
+fn home_volume(pool: &str, owner: &str) -> Volume {
+    host_dir("home", format!("{pool}/homes/{owner}"))
+}
+
+/// The owner's node-local cache: editor servers, package-manager caches and shell state that are
+/// large, ephemeral and would otherwise cross the network on every read — kept off the shared NFS
+/// home and pinned to one node's btrfs, ONE volume with subPaths per use (see the mounts below) so
+/// the janitor deletes a single subvolume to reclaim it all.
+fn homecache_volume(pool: &str, owner: &str) -> Volume {
+    host_dir("homecache", format!("{pool}/homecache/{owner}"))
 }
 
 /// An emptyDir for `WORKSPACES_DIR`. Per pod on purpose — see the mount's comment.
@@ -844,6 +890,17 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
                 // Listed before the workspace mount for the reader; the kubelet orders by path
                 // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
                 VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
+                // One `homecache` volume, five subPaths: the janitor reclaims all of it by
+                // deleting a single node-local subvolume, and each subPath is resolved once at
+                // container start so `login_env`'s redirected vars actually land here.
+                VolumeMount { name: "homecache".to_string(), mount_path: HOME_CACHE_DIR.to_string(), sub_path: Some("cache".to_string()), ..Default::default() },
+                // Cargo's registry cache, mounted rather than redirected: `CARGO_HOME` stays on
+                // the shared home so `credentials.toml` survives, and cargo offers no env var for
+                // the cache alone — so the cache subtree is what moves node-local.
+                VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.cargo/registry".to_string(), sub_path: Some("cargo-registry".to_string()), ..Default::default() },
+                VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.vscode-server".to_string(), sub_path: Some("vscode-server".to_string()), ..Default::default() },
+                VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.cursor-server".to_string(), sub_path: Some("cursor-server".to_string()), ..Default::default() },
+                VolumeMount { name: "homecache".to_string(), mount_path: HOME_STATE_DIR.to_string(), sub_path: Some("state".to_string()), ..Default::default() },
                 // This pod's own `~/workspaces`, over the shared home: the workspace's mount point
                 // is made inside it, so it never appears in the home and no sibling pod lists it.
                 VolumeMount { name: "workspaces".to_string(), mount_path: WORKSPACES_DIR.to_string(), ..Default::default() },
@@ -883,7 +940,8 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
         // the key.
         volumes: Some({
             let mut v = vec![
-                home_volume(ctx.pool, &crate::crd::home_volume_name(&spec.owner)),
+                home_volume(ctx.pool, &spec.owner),
+                homecache_volume(ctx.pool, &spec.owner),
                 workspaces_volume(),
                 live_worktree_volume(ctx.pool, id, ws_id),
                 nix_volume(),
@@ -1826,8 +1884,7 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
-        let home_id = crate::crd::home_volume_name(&ws_spec().owner);
-        assert_eq!(home.host_path.as_ref().unwrap().path, worktree_path(ctx().pool, &home_id, &home_id));
+        assert_eq!(home.host_path.as_ref().unwrap().path, format!("{}/homes/{}", ctx().pool, ws_spec().owner));
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         let home_mount = mounts.iter().find(|m| m.name == "home").expect("home mount");
         assert_eq!(home_mount.mount_path, HOME_DIR);
@@ -1867,11 +1924,41 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_pods_home_mount_is_the_worktree_path() {
-        let s = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).spec.unwrap();
-        let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
-        let home_id = crate::crd::home_volume_name(&ws_spec().owner);
-        assert_eq!(home.host_path.as_ref().unwrap().path, worktree_path(ctx().pool, &home_id, &home_id));
+    fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
+        let pod = workspace_pod(&ws_spec(), "vol-1", "ws-1", &ctx(), None);
+        let s = pod.spec.unwrap();
+        let vols = s.volumes.unwrap();
+        let path = |n: &str| vols.iter().find(|v| v.name == n).unwrap().host_path.as_ref().unwrap().path.clone();
+        assert_eq!(path("home"), format!("{}/homes/{}", ctx().pool, ws_spec().owner));
+        assert_eq!(path("homecache"), format!("{}/homecache/{}", ctx().pool, ws_spec().owner));
+        let mounts = s.containers[0].volume_mounts.clone().unwrap();
+        let sub = |mp: &str| mounts.iter().find(|m| m.mount_path == mp).map(|m| (m.name.clone(), m.sub_path.clone()));
+        assert_eq!(sub(HOME_CACHE_DIR), Some(("homecache".into(), Some("cache".into()))));
+        assert_eq!(sub("/home/kl/.cargo/registry"), Some(("homecache".into(), Some("cargo-registry".into()))));
+        assert_eq!(sub("/home/kl/.vscode-server"), Some(("homecache".into(), Some("vscode-server".into()))));
+        assert_eq!(sub("/home/kl/.cursor-server"), Some(("homecache".into(), Some("cursor-server".into()))));
+        assert_eq!(sub(HOME_STATE_DIR), Some(("homecache".into(), Some("state".into()))));
+    }
+
+    #[test]
+    fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
+        let env = login_env("ws-1");
+        let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
+        assert_eq!(get("XDG_CACHE_HOME"), format!("{HOME_CACHE_DIR}/xdg"));
+        assert_eq!(get("HISTFILE"), format!("{HOME_STATE_DIR}/shell_history"));
+        for (var, sub) in [
+            ("npm_config_cache", "npm"), ("PNPM_STORE_DIR", "pnpm"), ("BUN_INSTALL_CACHE_DIR", "bun"),
+            ("CARGO_TARGET_DIR", "cargo-target"), ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"),
+            ("GRADLE_USER_HOME", "gradle"), ("UV_CACHE_DIR", "uv"), ("PIP_CACHE_DIR", "pip"),
+            ("DENO_DIR", "deno"), ("PLAYWRIGHT_BROWSERS_PATH", "playwright"),
+        ] {
+            assert_eq!(get(var), format!("{HOME_CACHE_DIR}/{sub}"), "{var}");
+        }
+        // The configs half of the author's rule: cargo credentials and a person's GOPATH/src stay
+        // on the shared home, so neither var may be redirected onto the disposable volume.
+        for var in ["CARGO_HOME", "GOPATH"] {
+            assert!(env.iter().all(|e| e.name != var), "{var} must stay on the shared home");
+        }
     }
 
     /// Four things have to line up for `ssh kl@workspace` to work, and each fails silently on
@@ -1940,16 +2027,23 @@ mod tests {
         // from chown is a pod that never starts.
         assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
         // Root's part ends where `su` begins. Below `$H` the person owns the tree between starts,
-        // so a root `chown`/`mkdir`/redirect there follows whatever symlink they planted — `$H`
-        // itself is a mountpoint and is the one path root may touch.
+        // so a root `chown`/`mkdir`/redirect there follows whatever symlink they planted. The
+        // closed list below — not a prefix, so a new path cannot be smuggled onto an existing
+        // line — is every path root may touch: mountpoints and the `.cargo` parent the kubelet
+        // makes root-owned for one. Adding to it is the moment to re-read `prelude`'s doc comment.
+        const ROOT_CHOWNS: [&str; 2] =
+            ["chown 1000:1000 $H $H/workspaces", "chown -h 1000:1000 $H/.cargo $H/.cargo/registry"];
         let su_at = prelude.lines().position(|l| l.starts_with("su kl -s /bin/sh <<'SEED'")).expect("seed runs as kl");
         let root: Vec<&str> = prelude.lines().take(su_at).collect();
-        assert!(root.contains(&"chown 1000:1000 $H $H/workspaces"), "{root:?}");
+        // Both must actually be there: dropping the second leaves `~/.cargo` unwritable by kl.
+        for want in ROOT_CHOWNS {
+            assert!(root.contains(&want), "{root:?}");
+        }
         for l in &root {
             // Root writes only to /etc (the container's own filesystem); nothing under $H.
-            assert!(!l.contains("$H/") || l.starts_with("chown 1000:1000 $H"), "root must not write under $H: {l}");
+            assert!(!l.contains("$H/") || ROOT_CHOWNS.contains(l), "root must not write under $H: {l}");
             assert!(!l.contains("> /home"), "root must not write under the home: {l}");
-            assert!(!l.starts_with("chown") || *l == "chown 1000:1000 $H $H/workspaces", "root chown below the mountpoints: {l}");
+            assert!(!l.starts_with("chown") || ROOT_CHOWNS.contains(l), "root chown below the mountpoints: {l}");
         }
         let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
         assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");

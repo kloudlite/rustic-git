@@ -39,7 +39,7 @@ pub fn spawn_janitor(pool: String, nix: Arc<dyn nix::Nix>) {
                 // best effort — a wrong number costs an early or late GC, never data.
                 // ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix
                 // filesystem is the cheaper signal once /nix is its own mount.
-                (nix_store_bytes(std::path::Path::new("/nix/store")), profiles)
+                (dir_bytes(std::path::Path::new("/nix/store")), profiles)
             })
             .await;
             // Never collect behind a beat that swept index entries: the sweep unlinks GC roots,
@@ -62,6 +62,7 @@ pub fn spawn_janitor(pool: String, nix: Arc<dyn nix::Nix>) {
 
 /// One sweep of the pool: (attach dirs reclaimed, profile index entries reclaimed).
 fn janitor_beat(pool: &str) -> (usize, usize) {
+    warn_oversized_homes(std::path::Path::new(pool));
     let attach = janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE);
     let profiles = janitor_sweep_profiles(std::path::Path::new(nix::PROFILES_DIR), SWEEP_MIN_AGE);
     (attach, profiles)
@@ -163,21 +164,55 @@ fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration) ->
     swept
 }
 
+/// A shared home holds configs — dotfiles, keys, shell config — and nothing else: it is on the
+/// region's NFS export, and therefore on S3, and it has no quota (the per-home btrfs qgroup went
+/// away with the per-node home volume). This warning is its ONLY replacement, so the number is a
+/// tripwire, not a limit: configs never come near 100 MB, and a home that does means a tool cache
+/// escaped `login_env`'s redirection onto the node-local `homecache` volume and is now paying
+/// network I/O and object-store bytes for something disposable.
+///
+/// Warns only — the janitor never deletes anything inside a person's home.
+/// ponytail: a full recursive walk of every home each beat; if homes ever get big enough for that
+/// to cost real IO, keep per-owner sizes from `btrfs qgroup`/`du --max-depth=1` instead.
+fn warn_oversized_homes(pool: &std::path::Path) {
+    for (owner, bytes) in oversized_homes(pool) {
+        tracing::warn!(%owner, bytes, "agent: shared home far exceeds what configs need; a cache has escaped HOME_CACHE_DIR");
+    }
+}
+
+/// The `(owner, bytes)` pairs `warn_oversized_homes` reports — split out so the threshold is
+/// testable on a plain tmpdir, no NFS and no btrfs.
+fn oversized_homes(pool: &std::path::Path) -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(crate::homes_root(pool.to_string_lossy().as_ref())) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let bytes = dir_bytes(&e.path());
+            (bytes > HOME_WARN_BYTES).then(|| (e.file_name().to_string_lossy().into_owned(), bytes))
+        })
+        .collect()
+}
+
+/// See `warn_oversized_homes`: a tripwire on a home holding something other than configs.
+const HOME_WARN_BYTES: u64 = 100 * 1024 * 1024;
+
 /// The store size past which the janitor triggers a `nix-collect-garbage` sweep.
 const NIX_GC_HIGH_BYTES: u64 = 60 * 1024 * 1024 * 1024;
 
 /// Recursive size of `root`, best effort: an unreadable entry is skipped rather than failing the
-/// whole scan, since a wrong number only costs an early or late GC, never data. Uses
+/// whole scan, since a wrong number only costs an early or late GC or a missed warning, never
+/// data. Uses
 /// `DirEntry::file_type` (an `lstat`, not a `stat`) so it never follows a symlink — `/nix/store`
 /// is full of symlinks between store paths, and following them would double-count shared files
 /// and could cycle forever on a symlink back up the tree.
-fn nix_store_bytes(root: &std::path::Path) -> u64 {
+fn dir_bytes(root: &std::path::Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else { return 0 };
     let mut total = 0u64;
     for entry in entries.flatten() {
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
-            total += nix_store_bytes(&entry.path());
+            total += dir_bytes(&entry.path());
         } else if ft.is_file() {
             total += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
@@ -356,6 +391,23 @@ mod janitor_tests {
         assert!(dir.exists());
     }
 
+    /// The sole replacement for the deleted per-home quota: a home holding more than configs is
+    /// a cache that escaped the env redirection onto the node-local volume, and now costs NFS and
+    /// S3 bytes. Warn-only, so the check is the list it warns from.
+    #[test]
+    fn the_home_size_alarm_fires_only_past_the_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let homes = tmp.path().join("homes");
+        std::fs::create_dir_all(homes.join("alice")).unwrap();
+        std::fs::create_dir_all(homes.join("bob")).unwrap();
+        std::fs::write(homes.join("alice").join("gitconfig"), b"[user]").unwrap();
+        std::fs::write(homes.join("bob").join("blob"), vec![0u8; HOME_WARN_BYTES as usize + 1]).unwrap();
+
+        let over = oversized_homes(tmp.path());
+        assert_eq!(over.len(), 1, "{over:?}");
+        assert_eq!(over[0].0, "bob");
+    }
+
     /// An entry no workspace's `current` resolves to, older than the bound, is reclaimable.
     #[test]
     fn the_profile_sweep_removes_old_unreferenced_entries() {
@@ -451,6 +503,6 @@ mod nix_gc_tests {
         // A symlink back up at the root — following it would double-count `f` and, on a deeper
         // tree, cycle forever.
         std::os::unix::fs::symlink(root, nested.join("up")).unwrap();
-        assert_eq!(nix_store_bytes(root), 100);
+        assert_eq!(dir_bytes(root), 100);
     }
 }

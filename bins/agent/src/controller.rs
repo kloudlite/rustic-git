@@ -99,6 +99,10 @@ pub struct Ctx {
     /// (`rustic-git.io/session`, `rustic-git.io/env`). A second, hand-maintained copy of a label
     /// the scheduler already reads is a second thing that can be wrong — see `k8s::placement`.
     pub roles: Vec<String>,
+    /// `WS_HOMES_EXPORT`: `None` means this node has no shared-home NFS mount, and every
+    /// workspace reconcile parks on `HomeNotReady` rather than starting a pod that would hostPath
+    /// an empty local dir in the home's place.
+    pub homes_export: Option<String>,
     /// The one Nix client, behind a trait so the reconciler is tested with a fake instead of a
     /// real daemon and store.
     pub nix: Arc<dyn crate::nix::Nix>,
@@ -124,7 +128,7 @@ pub struct Ctx {
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, homes_export: Option<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
         // Required, not defaulted: a workspace that names no image runs THIS, and an agent that
         // silently fell back to `:latest` would move every workspace on its next restart.
         let default_image = std::env::var("WS_DEFAULT_IMAGE").ok().filter(|v| !v.is_empty())
@@ -160,6 +164,7 @@ impl Ctx {
             running: Mutex::new(HashMap::new()),
             region,
             roles,
+            homes_export,
             nix,
             profiles_dir,
             profile_builds: Mutex::new(HashMap::new()),
@@ -253,7 +258,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Before the watches: a node with nothing to do must still be able to prove it is alive.
     heartbeat(&ctx.pool);
     spawn_heartbeat(ctx.clone());
-    spawn_home_push(ctx.clone());
     spawn_pull(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
@@ -311,10 +315,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // every clone of it) needs a reflector store indexed by `storage.source.cloneOf`, and the
         // mapper is a sync `FnMut` that must not do I/O. Wire the store if that latency is felt.
         .watches_shared_stream(vol_ws, |v: Arc<crd::Volume>| owned_by::<crd::Workspace, _>(&*v))
-        // The `stop-home-{ws}` request the stop path waits on, selected by the same `stop-of`
-        // label the environments use and mapped back by ownerReference — without it a workspace
-        // parked at `StopSnapshotFailed` would never wake, not even for an operator deleting the
-        // failed request.
+        // A workspace no longer creates a stop request of its own (the home is on NFS now, spec
+        // 2026-09-01) — this stays only because an Environment's `stop-{env}` request carries the
+        // same `stop-of` label and this watch is shared plumbing with `owned_by` doing the filter.
         .watches(
             Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
@@ -327,7 +330,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "workspace reconcile")
             }
         });
-    let mine_bindings = mine.clone();
     // Label-selected like the pods: every StatefulSet in the cluster is not this controller's.
     let env_sets = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
     let env_pods = env_sets.clone();
@@ -380,11 +382,16 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             })
     });
-    let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), mine_bindings)
+    // NOT `mine`: a binding is no longer node-scoped (the home is on shared NFS), and the
+    // namespaces it ensures must exist on whichever node the claim picks. Every node reconciles
+    // every binding; every object it writes is a forced server-side apply, so concurrent
+    // reconcilers converge on the same result rather than fighting.
+    let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), watcher::Config::default())
         // A new Workspace of this owner may need a new TEAM namespace, so the binding reconciles
         // on it. Mapped by `spec.owner`, not by ownerReference: the binding is not the Workspace's
-        // parent, it is the thing that makes its namespace exist. Only the ones placed HERE: the
-        // claim binds an owner's workspaces to the binding's node, so one elsewhere is never ours.
+        // parent, it is the thing that makes its namespace exist. Only the ones placed HERE,
+        // because `teams_in_use` builds the namespace set from this node's workspaces — a
+        // workspace elsewhere wakes ITS node's copy of this same reconciler.
         .watches(Api::<crd::Workspace>::all(ctx.client.clone()), placed, {
             let region = ctx.region.clone();
             move |w: crd::Workspace| {
@@ -479,44 +486,6 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
     });
 }
 
-/// What the timer's home-commit beat writes as the `Snapshot`'s message — the agent's own
-/// housekeeping, not something anyone asked for.
-pub const HOME_PUSH_MESSAGE: &str = "home: periodic";
-
-/// `WS_HOME_PUSH_SECS`, default 300: how often this node pushes the homes whose disk moved. An
-/// unchanged home costs one `subvolume show` per beat.
-pub fn home_push_interval() -> Duration {
-    Duration::from_secs(std::env::var("WS_HOME_PUSH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300))
-}
-
-/// The homes on this node due for a push, decided from two per-volume numbers so the decision is
-/// testable without a filesystem: `generation` is what btrfs says now (`None`: the subvolume is
-/// absent or unreadable — skipped, never pushed blind), `pushed` is the generation of the last
-/// push's own snapshot (`None`: never pushed — so a home that exists gets its first record on the
-/// next beat). Strictly PAST it, not merely different: the snapshot's transaction can leave the
-/// live number at or behind the snapshot's, and neither of those is a change to push.
-pub fn homes_to_push(
-    volumes: &[Arc<crd::Volume>],
-    generation: impl Fn(&str) -> Option<u64>,
-    pushed: impl Fn(&str) -> Option<u64>,
-) -> Vec<Arc<crd::Volume>> {
-    volumes
-        .iter()
-        .filter(|v| crd::is_home_volume(v) && volume_is_ready(v) && v.metadata.deletion_timestamp.is_none())
-        .filter(|v| {
-            let id = v.name_any();
-            match (generation(&id), pushed(&id)) {
-                (None, _) => false,
-                (Some(now), Some(then)) => now > then,
-                (Some(_), None) => true,
-            }
-        })
-        .cloned()
-        .collect()
-}
-
-/// The timer (spec: "Replication, trigger 1"). Every home is pushed from the agent's own beat and
-/// nothing else: inside a region there is one node per person, so no two nodes ever push one home.
 /// The commit model's puller: its own beat, so a slow pull never delays a reconcile.
 fn spawn_pull(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
@@ -527,112 +496,6 @@ fn spawn_pull(ctx: Arc<Ctx>) {
             crate::peer::pull_beat(&ctx).await;
         }
     });
-}
-
-fn spawn_home_push(ctx: Arc<Ctx>) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(home_push_interval());
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let ctx = ctx.clone();
-            // Its own OS thread: `push_env` blocks on the volume's `flock`, and `subvolume show`
-            // is a process per home. Same rule as every btrfs operation in this file.
-            if let Err(e) = tokio::task::spawn_blocking(move || home_push_beat(&ctx)).await {
-                tracing::warn!(error = %e, "home push beat panicked; skipping it");
-            }
-        }
-    });
-}
-
-fn home_push_beat(ctx: &Arc<Ctx>) {
-    let engine = &ctx.engine;
-    if let Err(e) = engine.sync_pool() {
-        tracing::warn!(error = %e, "home push: btrfs sync; skipping the beat");
-        return;
-    }
-    let due = homes_to_push(&ctx.volumes.state(), |id| engine.generation(id).ok(), |id| engine.pool.pushed_gen(id));
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::warn!(error = %e, "home push: runtime");
-            return;
-        }
-    };
-    // Durability for a home lives in the Snapshot CR now (Task 7c); the object-store `push_env`
-    // arm this beat used to fall back to is gone (Task 8) — the commit-model beat is the only one
-    // left. H3: the migrate half of `migrate_and_seed_baseline` runs for EVERY ready home on
-    // EVERY pass, not just a due one — a quiescent home must not sit on the old layout forever,
-    // since two layouts on the fleet at once makes `home_volume`'s (k8s.rs) hostPath choice
-    // unpredictable. Only the CR-cut itself stays behind the generation-moved gate.
-    let due_ids: std::collections::HashSet<String> = due.iter().map(|v| v.name_any()).collect();
-    rt.block_on(home_commit_beat(ctx, &due_ids));
-}
-
-/// Every ready home, every pass (Task 7c, H3): the migrate half of
-/// `migrate_and_seed_baseline` runs for ALL of them unconditionally — a quiescent home must not
-/// sit on the old layout forever, since two layouts on the fleet at once makes `home_volume`'s
-/// (k8s.rs) hostPath choice unpredictable. Only the CR-cut is gated on `due` (generation moved).
-/// Split out from `home_push_beat` so it is testable without `sync_pool`'s real `btrfs` call.
-pub async fn home_commit_beat(ctx: &Arc<Ctx>, due: &std::collections::HashSet<String>) {
-    for v in ctx.volumes.state().iter().filter(|v| crd::is_home_volume(v) && volume_is_ready(v) && v.metadata.deletion_timestamp.is_none()) {
-        let id = v.name_any();
-        if running_contains(ctx, &v.uid().unwrap_or_default()) {
-            continue;
-        }
-        if due.contains(&id) {
-            home_commit_beat_one(ctx, v, &id).await;
-        } else if let Err(e) = migrate_and_seed_baseline(ctx, &id, &v.spec.owner).await {
-            tracing::warn!(volume = %id, error = %e.0, "home commit beat: migrating layout");
-        }
-    }
-}
-
-/// The commit-model home beat body (Task 7c): CR-first, same discipline `migrate_and_seed_baseline`
-/// already uses for a checkout — this never touches btrfs directly, `reconcile_commit`'s Home arm
-/// does that once the CR lands. `Engine::migrate_volume` runs first (idempotent past the one time
-/// it actually moves anything) so an old-layout home gets its baseline commit before ever taking a
-/// periodic one; if it just migrated, THAT baseline is this pass's whole job — creating a periodic
-/// Snapshot in the same pass would give the chain two no-parent roots (the baseline and this one),
-/// which `newest_ready_commit`'s "not anyone's parent" tip search cannot then tell apart.
-pub async fn home_commit_beat_one(ctx: &Arc<Ctx>, v: &crd::Volume, id: &str) {
-    match migrate_and_seed_baseline(ctx, id, &v.spec.owner).await {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => {
-            tracing::warn!(volume = %id, error = %e.0, "home commit beat: migrating layout");
-            return;
-        }
-    }
-    let parent = match crate::snapshot::newest_ready_commit(ctx, id).await {
-        Ok(p) => p.unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(volume = %id, error = %e.0, "home commit beat: finding the newest commit");
-            return;
-        }
-    };
-    let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
-    let name = crd::snapshot_name(id);
-    let mut snap = crd::Snapshot::new(
-        &name,
-        crd::SnapshotSpec {
-            volume: id.to_string(),
-            owner: v.spec.owner.clone(),
-            worktree: id.to_string(),
-            parent,
-            message: Some(HOME_PUSH_MESSAGE.to_string()),
-            pinned: false,
-        },
-    );
-    snap.metadata.labels = Some(crd::commit_labels(&v.spec.owner, id));
-    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
-    // Same convergence rule as `migrate_and_seed_baseline`: a 409 means an earlier pass (or a
-    // crash-retry of this one) already created it, not an error.
-    match api.create(&PostParams::default(), &snap).await {
-        Ok(_) => {}
-        Err(kube::Error::Api(ae)) if ae.code == 409 => {}
-        Err(e) => tracing::warn!(volume = %id, error = %e, "home commit beat: creating the snapshot CR"),
-    }
 }
 
 /// Wrap a blocking operation's handle so that finishing also wakes the reconciler.
@@ -812,19 +675,6 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                 )
                 .await;
             }
-            // The pull beat is behind, not absent: same shape as the async-resolved
-            // `HomeAwaitingSync` guard above, just discovered inside the blocking task instead
-            // (the target commit named there turned out not to be on disk yet after all — a
-            // race with the beat, not a real error).
-            Err(e) if e == rustic_git_workspaces::engine::ops::HOME_AWAITING_SYNC => {
-                let st = crd::VolumeStatus {
-                    phase: Phase::Working,
-                    conditions: vec![crd::condition("Progressing", true, "HomeAwaitingSync", &e, gen)],
-                    ..v.status.clone().unwrap_or_default()
-                };
-                write_volume_status(v, st, ctx).await?;
-                Ok(Action::requeue(TICK))
-            }
             Err(e) => {
                 let st = crd::VolumeStatus {
                     phase: Phase::Error,
@@ -849,43 +699,8 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     // materialize in the same pass would fetch a lineage this volume is about to stop having.
     let materialize = !observed && restore.is_none();
     let quota_gb = v.spec.quota_gb;
-    let home = crd::is_home_volume(v);
-    // A home is never created from a `source` (the API never writes one for it), so on first
-    // materialize it needs its own resolve: bootstrap ONLY when the volume has never been
-    // committed at all. Otherwise it must check out its newest Ready commit — replicated here by
-    // the pull beat (7c), never fetched — same "ask the volume, don't guess" rule the workspace/
-    // environment HeadUnknown guards apply, just resolved here (the async caller) instead of in
-    // the blocking `volume_work`, which has no kube client to ask with.
-    let home_target = if home && materialize {
-        if !crate::claim::has_commits(ctx, &id).await? {
-            None
-        } else {
-            match crate::snapshot::newest_ready_commit(ctx, &id).await? {
-                Some(name) => Some(name),
-                // Commits exist but none is Ready yet (all still Working) — nothing to check out.
-                // Same shape as F2's HeadUnknown: wait rather than bootstrap next to real history.
-                None => {
-                    let st = crd::VolumeStatus {
-                        phase: Phase::Working,
-                        conditions: vec![crd::condition(
-                            "Progressing",
-                            true,
-                            "HomeAwaitingSync",
-                            "home has commits but none are Ready yet",
-                            gen,
-                        )],
-                        ..v.status.clone().unwrap_or_default()
-                    };
-                    write_volume_status(v, st, ctx).await?;
-                    return Ok(Action::requeue(TICK));
-                }
-            }
-        }
-    } else {
-        None
-    };
     let handle = tokio::task::spawn_blocking(move || {
-        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home, home_target })
+        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb })
     });
     let handle = wake_on_finish(
         handle,
@@ -927,51 +742,14 @@ pub struct Work {
     /// down) and by `apply_volume` (not already restored).
     pub restore: Option<crd::RestoreWish>,
     pub quota_gb: u64,
-    pub home: bool,
-    /// Resolved by the async caller (`apply_volume`), which has the kube client this blocking
-    /// task doesn't: `None` bootstraps an empty home (never committed anywhere); `Some(name)`
-    /// checks out that commit if it's already on this node's disk, or reports
-    /// `HOME_AWAITING_SYNC` (transient — the pull beat catches up) if it isn't yet.
-    pub home_target: Option<String>,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner: _, source, materialize, restore, quota_gb, home, home_target } = w;
+    let Work { id, owner: _, source, materialize, restore, quota_gb } = w;
     let id = id.as_str();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
         if materialize {
-            if home {
-                match home_target {
-                    // Never committed anywhere — the only genuine bootstrap case. `checkout`
-                    // with no source name bootstraps an empty WORKTREE (the native layout), not
-                    // `create_subvol`'s old single-subvolume `live` — the pod mounts
-                    // `live/{home}` (hostPath type Directory) and a `live` that isn't yet a
-                    // directory of worktrees FailedMounts until the home beat migrates it.
-                    None => {
-                        match engine.checkout(id, None, id) {
-                            Ok(()) => {}
-                            Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
-                            Err(e) => return Err(e.0),
-                        }
-                    }
-                    Some(name) => {
-                        let local = engine.local_commits(id).map_err(|e| e.to_string())?;
-                        if local.iter().any(|n| n == &name) {
-                            // `WORKTREE_EXISTS` converges a replayed pass (this materialize
-                            // already checked out once) into a no-op, same as every other
-                            // checkout call site.
-                            match engine.checkout(id, Some(&name), id) {
-                                Ok(()) => {}
-                                Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
-                                Err(e) => return Err(e.0),
-                            }
-                        } else {
-                            return Err(rustic_git_workspaces::engine::ops::HOME_AWAITING_SYNC.to_string());
-                        }
-                    }
-                }
-            } else {
                 match &source {
                     None => engine.create_subvol(id).map_err(|e| e.to_string())?,
                     Some(VolumeSource::CloneOf { volume, .. }) => {
@@ -998,7 +776,6 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                     // longer holds a credential that could clone on the user's behalf.
                     Some(VolumeSource::GitRepo { .. }) => engine.create_subvol(id).map_err(|e| e.to_string())?,
                 }
-            }
         }
         // In place: the wish names a commit of THIS volume's own history — a checkout swapped
         // into the worktree that already carries this volume's own id (the API validated Ready +
@@ -1006,11 +783,6 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         // staging-id fetch/swap path is gone with it.
         if let Some(w) = &restore {
             engine.swap_worktree(&w.volume, id, &w.snapshot_id).map_err(|e| e.to_string())?;
-        }
-        // After every path that can leave a new `live` behind, same rule as the quota below: a
-        // home's caches are nested subvolumes, and a received stream does not carry them.
-        if home {
-            engine.ensure_home_dirs(id, rustic_git_workspaces::k8s::SSH_UID as u32).map_err(|e| e.to_string())?;
         }
         // After EVERY path that can leave a new `live` behind — create, clone, restore — and on a
         // plain quota edit too (a spec change is a new generation, which is a materialize pass
@@ -1261,8 +1033,7 @@ where
 /// A parent's child takes the PARENT's name: the id is already the registry key, the host path
 /// segment and the URL segment, and an ownerReference — not a name — is what makes it a child.
 /// That ownerReference is also the whole delete story: `DELETE workspace` reclaims the disk with no
-/// ordering logic anywhere in the API. The one child that is NOT named after its parent is an
-/// owner's home (`crd::home_volume_name`), whose parent is the binding — hence `id` is a parameter.
+/// ordering logic anywhere in the API.
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_child_volume<P>(
     id: &str,
@@ -1880,28 +1651,15 @@ fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Cond
     conds.into_iter().filter(|c| c.type_ != crd::ATTACHED).chain(attached).collect()
 }
 
-/// One in-progress status write for the stop path: keep everything `prev` says, drop
-/// `observedGeneration` (the stop has NOT converged yet) and report `cond`.
-async fn wait_status(
-    w: &crd::Workspace,
-    prev: crd::WorkspaceStatus,
-    cond: Condition,
-    ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
-    let st = crd::WorkspaceStatus { observed_generation: None, conditions: ws_conditions(&prev, cond), ..prev };
-    write_ws_status(w, st, ctx).await
-}
-
-/// Stop the workspace: push the owner's home, then delete the pod — and only in that order.
+/// Stop the workspace: delete the pod. The home is on the shared NFS mount and needs no push
+/// (spec 2026-09-01).
 async fn stop_workspace(
     w: &crd::Workspace,
     prev: crd::WorkspaceStatus,
     gen: i64,
     ctx: &Arc<Ctx>,
 ) -> Result<Action, ReconcileErr> {
-    // Already stopped: nothing to do. Load-bearing now that `stop-home-{ws}` is DELETED after
-    // the teardown — without this the request's absence reads as "no push yet" on every later
-    // event, and a stopped workspace would push its home forever.
+    // Already stopped: nothing to do.
     if prev.phase == crd::Phase::Stopped {
         if prev.observed_generation != Some(gen) {
             let st = crd::WorkspaceStatus { observed_generation: Some(gen), ..prev };
@@ -1913,54 +1671,10 @@ async fn stop_workspace(
     // The Volume child takes the parent's own name, so the pod's name is known without reading
     // (or creating) it.
     let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
-    // The home is pushed BEFORE the pod goes, and the pod goes only once the push has LANDED —
-    // the same fail-closed gate an environment's own subvolume gets, and for the same reason: a
-    // stop that tore the pod down on a failed push is the one moment the person's dotfiles are
-    // lost for good. Only if a pod ever ran: a workspace stopped while still Creating wrote
-    // nothing into the home. The pod is NOT drained first: a running shell's home is exactly
-    // what the five-minute beat already snapshots — this push is the last of those, not a
-    // quiesced one.
-    let home = crd::home_volume_name(&w.spec.owner);
-    let home_here = match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
-        _ if prev.pod_ref.is_none() => false,
-        // "Is there a subvolume with the person's files in it" — the phase is not the question:
-        // a home mid-reconcile (a quota edit) still has everything to lose.
-        Some(v) => v.status.as_ref().is_some_and(|s| s.subvolume_present),
-        // Not in the store is not "no home". An agent restarting with this stop pending
-        // reconciles the Workspace off its initial list, possibly before the Volume watch has
-        // delivered the home — and taking the no-home branch here would delete the pod without
-        // a push, silently. The binding is the fact that decides: it authors the home before it
-        // reports ready, so while it exists the home is on its way and the stop waits. Only an
-        // owner with no binding at all (bound before homes existed, then unbound) has none.
-        None => {
-            if binding::get_binding(ctx, &w.spec.region, &w.spec.owner).await?.is_some() {
-                let cond = crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home volume", gen);
-                wait_status(w, prev, cond, ctx).await?;
-                return Ok(Action::requeue(TICK));
-            }
-            false
-        }
-    };
-    let request = format!("stop-home-{id}");
-    if home_here {
-        match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
-            StopPush::Landed => {}
-            StopPush::Waiting => {
-                let cond = crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen);
-                wait_status(w, prev, cond, ctx).await?;
-                return Ok(Action::requeue(TICK));
-            }
-        }
-    }
     // The workspace's OWN name, never `id` (which is `volume_ref` — the SOURCE volume for a
     // shared-volume clone). Deleting by `id` here would stop the clone by killing its source's
     // pod, taking a running workspace down with it.
     delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &w.name_any()).await?;
-    if home_here {
-        // Served its purpose; left behind, the NEXT stop would find `done` under the same name
-        // and stop without pushing at all.
-        delete_ignoring_404(&Api::<crd::Snapshot>::all(ctx.client.clone()), &request).await?;
-    }
     // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
     // showing "installing packages…" for a workspace that is simply off.
     let conditions = ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen));
@@ -2075,6 +1789,31 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
     }
 }
 
+/// `{pool}/homes/{owner}`: on the shared-home NFS mount (`mount_homes` in `lib.rs` puts the export
+/// there at agent startup), so materializing an owner's home is plain `mkdir` + `chown` — no
+/// subvolume, no snapshot, nothing btrfs-specific. Idempotent; safe on every reconcile.
+///
+/// Re-verifies the export is still mounted first (`check_homes_mounted`) — mkdir under a vanished
+/// mount point would build the person an empty home on the node's rootfs and report it Ready.
+fn ensure_shared_home(pool: &str, owner: &str, uid: u32) -> Result<(), String> {
+    // Root-gated for the same reason the chown below is: in production the agent is privileged and
+    // `/proc/mounts` tells the truth, while a dev/test pool is an ordinary directory nobody ever
+    // mounted — checking there would refuse every reconcile.
+    if unsafe { libc::geteuid() } == 0 {
+        let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
+        crate::check_homes_mounted(&mounts, pool)?;
+    }
+    let dir = crate::homes_root(pool).join(owner);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Only root may chown to an arbitrary uid; the agent always runs privileged in production
+    // (DaemonSet, see CLAUDE.md), so this only ever no-ops in a dev/test environment, letting the
+    // reconcile loop under test exercise the surrounding logic without needing root itself.
+    if unsafe { libc::geteuid() } == 0 {
+        std::os::unix::fs::chown(&dir, Some(uid), Some(uid)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
@@ -2137,48 +1876,28 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    // The home the pod mounts must be READY, not merely present: kubelet is happy the instant the
-    // hostPath directory exists, and `materialize_home` snapshots `live` into place before the nested cache
-    // subvolumes and the qgroup exist — a pod started in that window makes `.npm` a plain
-    // directory that keep-biased `ensure_home_dirs` never converts, pushed forever. The binding
-    // reported ready only after authoring the home, so "not in the store" is watch latency, and
-    // a home whose own reconcile settled in Error (the region unreachable) is permanent here too:
-    // no pod can run on a home that will not exist.
-    let home = crd::home_volume_name(&w.spec.owner);
-    match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
-        Some(v) if volume_is_ready(&v) => {}
-        Some(v) if v.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Error) => {
-            let prev = prev.clone();
-            return settle(
-                Outcome::Permanent(format!("home volume {home} failed; see its status"), "HomeNotReady"),
-                w,
-                "Workspace",
-                gen,
-                move |cond| {
-                    serde_json::json!({
-                        "phase": crd::Phase::Error,
-                        "nodeName": prev.node_name,
-                        "compatibleNodes": prev.compatible_nodes,
-                        "volumeRef": prev.volume_ref,
-                        "conditions": ws_conditions(&prev, cond),
-                    })
-                },
-                ctx,
-            )
-            .await;
-        }
-        _ => {
-            let st = crd::WorkspaceStatus {
-                phase: crd::Phase::Creating,
-                observed_generation: None,
-                volume_ref: Some(id),
-                conditions: ws_conditions(&prev, crd::condition("Ready", false, "HomeNotReady", "waiting for the home volume", gen)),
-                ..prev
-            };
-            write_ws_status(w, st, ctx).await?;
-            return Ok(Action::requeue(TICK));
-        }
+    // The shared home replaces the home Volume (spec 2026-09-01): the agent makes the two mount
+    // sources exist before kubelet needs them. `{pool}/homes/{owner}` is NFS — mkdir is the whole
+    // materialize. The cache subvolume is local and disposable. Both idempotent, so every reconcile
+    // may call them. No WS_HOMES_EXPORT on this node: park, fail closed — a pod started anyway
+    // would hostPath an empty local dir and the person's dotfiles would silently not be theirs.
+    if ctx.homes_export.is_none() {
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            volume_ref: Some(id),
+            conditions: ws_conditions(&prev, crd::condition("Ready", false, "HomeNotReady", "this node has no shared-home mount (WS_HOMES_EXPORT)", gen)),
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
     }
+    ensure_shared_home(&ctx.pool, &w.spec.owner, k8s::SSH_UID as u32).map_err(ReconcileErr)?;
+    let (engine, owner) = (ctx.engine.clone(), w.spec.owner.clone());
+    tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .map_err(|e| ReconcileErr(e.0))?;
 
     // Commit-model worktree materialization: a workspace just claimed onto this node (or one
     // whose pod was never started here) has no `live/{id}` subvolume yet. `head` is `None` on a

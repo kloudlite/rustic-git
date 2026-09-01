@@ -10,16 +10,10 @@
 #    labels, the finalizer on the children) and ONE spec field: `restore_gate` copies the
 #    Environment's restore wish into `Volume.spec.restoreTo` once the services are down — the
 #    child is the agent's own object, authored by it, and the wish is desired state by nature (the
-#    API cannot write the child; see `crd::RestoreWish`) — and, since the persistent home,
-#    `Volume.spec.quotaGb` on a Volume an `OwnerBinding` owns: `binding::ensure_home` copies the
-#    binding's `homeQuotaGb` down; the ownerReference is what scopes it, so a workspace's volume
-#    quota stays `/v1`'s. That key is one the agent could itself plant — metadata is not checked
-#    here, and it holds `*/finalizers update` (for `blockOwnerDeletion`) — so the exception is
-#    honest about what it is: not a fence, but no new power either. The agent already sets every
-#    Volume's INITIAL quota (it authors them all), already applies the qgroup limit that is the
-#    real cap, and can already end any Volume by writing an ownerReference the garbage collector
-#    will honour. Restricting it further by name (`home-*`) would fence nothing more, since the
-#    agent names them too. Everything else in spec is `/v1`'s, and
+#    API cannot write the child; see `crd::RestoreWish`). There used to be a second exception —
+#    `Volume.spec.quotaGb` on a Volume an `OwnerBinding` owns, for the per-node btrfs home's
+#    quota — and it is gone with the home itself: the shared NFS home has no Volume and no qgroup,
+#    so no agent writes that field any more. Everything else in spec is `/v1`'s, and
 #    this is what refuses the agent a write to it: "RBAC, not convention" is this file plus the
 #    `/status` subresource split.
 apiVersion: admissionregistration.k8s.io/v1
@@ -43,13 +37,10 @@ spec:
     - expression: >-
         object.kind == 'Volume'
           ? (object.spec.all(k, k == 'restoreTo'
-                                || (k == 'quotaGb'
-                                    && has(object.metadata.ownerReferences)
-                                    && object.metadata.ownerReferences.exists(r, r.kind == 'OwnerBinding'))
                                 || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
              && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
           : object.spec == oldObject.spec
-      message: "rustic-git-agent writes status, not spec (the exceptions: Volume.spec.restoreTo, and Volume.spec.quotaGb on an OwnerBinding's home volume)"
+      message: "rustic-git-agent writes status, not spec (the one exception: Volume.spec.restoreTo)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

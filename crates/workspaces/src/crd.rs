@@ -11,7 +11,7 @@
 //! * `status = "…"` emits the `/status` subresource. Without it a status write folds into spec, and
 //!   the RBAC split that stops a controller editing its own desired state becomes decorative. The
 //!   split is half of that guarantee: the agent still holds `patch` on the main resources (for
-//!   labels, finalizers, `VolumeSpec::restore_to` and a home volume's `quota_gb`), and it is the
+//!   labels, finalizers and `VolumeSpec::restore_to`), and it is the
 //!   ValidatingAdmissionPolicy in
 //!   `deploy/k3s/agent-admission.yaml` that refuses it any other spec change.
 //! * `selectable = "…nodeName"` emits `selectableFields`, which is what lets a controller watch
@@ -151,10 +151,10 @@ pub struct VolumeSpec {
     #[serde(default)]
     pub team: String,
     /// Copied ONCE from the parent's `status.nodeName` when the parent's controller creates this
-    /// child (`ensure_child_volume`) — the node whose claim won, which honours the owner's
-    /// `OwnerBinding` when one exists. A pod's affinity is derived from this and never chosen
-    /// independently — two places allowed to name a node is two places that can disagree about
-    /// where the data is.
+    /// child (`ensure_child_volume`) — the node whose `VolumeReplica` claim won (Synced decides
+    /// placement now; there is no owner→node pin). A pod's affinity is derived from this and never
+    /// chosen independently — two places allowed to name a node is two places that can disagree
+    /// about where the data is.
     pub node_name: String,
     pub region: String,
     pub quota_gb: u64,
@@ -641,19 +641,20 @@ pub struct EnvironmentStatus {
 pub struct OwnerBindingSpec {
     pub owner: String,
     pub region: String,
+    /// The node the owner used to be pinned to. Still stamped by `claim::ensure_binding` and still
+    /// required by the schema so every existing object parses — but read by NOTHING: the home is a
+    /// region-shared NFS directory now, so a binding is not node-scoped and every node reconciles
+    /// every binding.
     pub node_name: String,
-    /// The cap on the owner's persistent home on this node, in GiB, copied into the home
-    /// `Volume`'s `quotaGb` by the binding reconciler. Defaulted rather than required because the
-    /// binding is created by whichever agent wins a placement claim (`claim::ensure_binding`),
-    /// which has no opinion about quotas, and because every binding written before this field
-    /// existed must keep parsing. An operator raises it with kubectl; the reconciler propagates.
+    /// The cap on the owner's per-node btrfs home, in GiB, back when there was one. Retained so
+    /// existing objects keep parsing (and defaulted so older ones do too); read by nothing — the
+    /// NFS home has no qgroup and no `Volume` to copy this onto.
     #[serde(default = "default_home_quota_gb")]
     pub home_quota_gb: u64,
 }
 
-/// Two gigabytes: dotfiles, shell history, editor state and a few tool configs. Caches are
-/// nested subvolumes outside the quota (`k8s::HOME_LOCAL_DIRS`), so this is not where `node_modules`
-/// goes and does not need to be sized for it.
+/// The default for the retained-but-unread `homeQuotaGb`. Kept only so an object written without
+/// the field still deserializes.
 pub const DEFAULT_HOME_QUOTA_GB: u64 = 2;
 fn default_home_quota_gb() -> u64 {
     DEFAULT_HOME_QUOTA_GB
@@ -717,22 +718,6 @@ pub fn binding_name(region: &str, owner: &str) -> String {
 /// distinct for distinct pairs.
 fn pair_tail(a: &str, b: &str) -> String {
     hex_prefix(&format!("{a}/{b}"), 6)
-}
-
-/// The home `Volume`'s name — and, through the ordinary `(owner, id)` keyspace, its registry name
-/// `vol/{owner}/home-{owner}`. Nothing special-cases it: `GET /v1/volumes/home-{owner}/history`
-/// answers like any volume's. Lowercased like every object name here, because a handle can carry
-/// capitals and an object name cannot. Workspace ids are `ws-{hex}` and environments `env-{hex}`
-/// (`api::rid`), so the `home-` prefix cannot collide with either.
-pub fn home_volume_name(owner: &str) -> String {
-    dns_label(&format!("home-{}", owner.to_lowercase()))
-}
-
-/// Whether a Volume is an owner's home: a child of an `OwnerBinding` rather than of a Workspace
-/// or Environment. Read off the ownerReference, never the name — the name is a convention, the
-/// reference is what garbage collection and the reconcilers actually act on.
-pub fn is_home_volume(v: &Volume) -> bool {
-    v.metadata.owner_references.as_ref().is_some_and(|refs| refs.iter().any(|r| r.kind == "OwnerBinding"))
 }
 
 fn hex_prefix(raw: &str, bytes: usize) -> String {
@@ -947,21 +932,6 @@ mod tests {
             serde_json::from_value(serde_json::json!({"owner": "Alice", "region": "r1", "nodeName": "n"})).unwrap();
         assert_eq!(b.home_quota_gb, DEFAULT_HOME_QUOTA_GB);
         assert_eq!(DEFAULT_HOME_QUOTA_GB, 2);
-    }
-
-    #[test]
-    fn the_home_volume_is_named_from_the_lowercased_owner() {
-        assert_eq!(home_volume_name("Alice"), "home-alice");
-        let mut v = Volume::new("home-alice", VolumeSpec {
-            owner: "alice".into(), team: String::new(), node_name: "n".into(), region: "r1".into(),
-            quota_gb: 2, replicas: DEFAULT_REPLICAS, source: None, restore_to: None,
-        });
-        assert!(!is_home_volume(&v), "a name is a convention, not the link");
-        v.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-            api_version: "rustic-git.io/v1alpha1".into(), kind: "OwnerBinding".into(), name: "r1-alice".into(),
-            uid: "u".into(), controller: Some(true), block_owner_deletion: Some(true),
-        }]);
-        assert!(is_home_volume(&v));
     }
 
     #[test]

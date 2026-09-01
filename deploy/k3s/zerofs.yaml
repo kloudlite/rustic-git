@@ -1,0 +1,158 @@
+# The region's shared-home NFS export: ZeroFS serves one S3-backed filesystem over NFSv3, and
+# every pool node's agent mounts it at `{pool}/homes` (bins/agent/src/lib.rs, mount_homes). This
+# replaces the old per-node btrfs home volume with one region-shared store.
+#
+# Namespace `rustic-git-system` already exists (created by gateway.yaml) — not redeclared here.
+#
+# SINGLE REPLICA ON PURPOSE. ZeroFS's metadata tree is SlateDB underneath (LSM tree on the object
+# store), and SlateDB is single-writer with epoch fencing — the exact invariant the repo databases
+# already run on (see this repo's README, "The one invariant everything hangs off"). A second
+# ZeroFS replica pointed at the same bucket prefix does not load-balance; it fences the first one's
+# writer and both start failing writes. Scale this by raising resources, never replicas>1.
+#
+# Availability ruling (from the shared-home spec): a down ZeroFS hangs every `/home/kl` in the
+# region until Kubernetes reschedules this pod — accepted, because the alternative (per-node
+# btrfs homes) is what this migration removes. `hard,nolock` on the agent's mount keeps a flapping
+# ZeroFS from corrupting instead of just blocking (see mount_homes's comment).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zerofs-store
+  namespace: rustic-git-system
+type: Opaque
+stringData:
+  # The region's blob account — the SAME account and container every other tier already writes to
+  # (`RUSTIC_GIT_S3_URL=az://rustic-git`). ZeroFS speaks Azure Blob natively (`azure://`), so there
+  # is no S3 gateway in front of it and no AWS_* credentials anywhere in this file. Copy the values
+  # from the region's existing `rustic-git-storage` Secret rather than minting new ones: one
+  # account key per region, rotated in one place.
+  AZURE_STORAGE_ACCOUNT_NAME: "REPLACE-ME"
+  AZURE_STORAGE_ACCOUNT_KEY: "REPLACE-ME"
+  # Container the homes filesystem lives in, and the path prefix inside it. The prefix is what
+  # keeps this LSM tree out of the way of the registry blobs and repo databases sharing the
+  # container, so it must not be empty.
+  ZEROFS_CONTAINER: "rustic-git"
+  ZEROFS_PREFIX: "homes"
+  # Encrypts extents at rest (XChaCha20-Poly1305, key wrapped via Argon2id). Losing this loses the
+  # filesystem, same as losing a btrfs pool's disk — back it up wherever the region's other
+  # secrets are backed up, and note the cluster itself is NOT such a place.
+  ZEROFS_PASSWORD: "REPLACE-ME"
+---
+# zerofs.toml: TOML with `${VAR}` substitution from the container's env (Secret above). `[cache]`,
+# `[storage]`, `[servers]` are required by ZeroFS itself.
+#
+# UNVERIFIED until the first real cluster apply: that ZeroFS expands `${VAR}` in this file at all
+# (rather than wanting the values inline or as flags). The BACKEND is settled — upstream documents
+# `azure://container/path` with an `[azure]` section taking `storage_account_name`/
+# `storage_account_key`, and documents env substitution for exactly these keys. If the pod
+# crash-loops on config, read its logs and check the
+# upstream README's config example before assuming the Secret values are wrong.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zerofs-config
+  namespace: rustic-git-system
+data:
+  zerofs.toml: |
+    [cache]
+    dir = "/var/cache/zerofs"
+    disk_size_gb = 10.0
+    memory_size_gb = 1.0
+
+    [storage]
+    # Azure Blob, not S3: this platform's object storage IS the blob account every other tier
+    # already writes to (`RUSTIC_GIT_S3_URL=az://rustic-git`), so ZeroFS points at the same
+    # account. `azure://{container}/{prefix}` — the prefix keeps the homes LSM tree in its own
+    # keyspace inside a container the rest of the platform also uses, so no container has to be
+    # created by hand and nothing here can collide with registry blobs or repo databases.
+    url = "azure://${ZEROFS_CONTAINER}/${ZEROFS_PREFIX}"
+    # NOT optional and NOT rotatable: every extent is encrypted with a key derived from this, so
+    # losing it loses every home in the region. It lives in the `zerofs-store` Secret beside the
+    # storage credentials — back BOTH up somewhere the cluster's own loss cannot take with it.
+    encryption_password = "${ZEROFS_PASSWORD}"
+
+    [azure]
+    storage_account_name = "${AZURE_STORAGE_ACCOUNT_NAME}"
+    storage_account_key = "${AZURE_STORAGE_ACCOUNT_KEY}"
+
+    [servers.nfs]
+    addresses = ["0.0.0.0:2049"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zerofs
+  namespace: rustic-git-system
+  labels:
+    app: zerofs
+spec:
+  replicas: 1 # see header: SlateDB single-writer, never raise this
+  # Recreate, not the default RollingUpdate: a rolling update surges a SECOND pod against the same
+  # SlateDB prefix before the old one terminates, and that is the exact two-writer fencing the
+  # header forbids — `replicas: 1` does not prevent surge. A brief outage on every edit is the
+  # price, and the availability ruling above already accepts it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: zerofs
+  template:
+    metadata:
+      labels:
+        app: zerofs
+    spec:
+      containers:
+        - name: zerofs
+          # Pinned to the latest tagged release as of 2026-09-01 (github.com/Barre/ZeroFS
+          # releases). Never `:latest` — see agent-daemonset.yaml's comment on the same class of
+          # bug (two pods silently on different builds).
+          image: ghcr.io/barre/zerofs:v2.3.2
+          command: ["zerofs", "run", "-c", "/etc/zerofs/zerofs.toml"]
+          envFrom:
+            - secretRef:
+                name: zerofs-store
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          ports:
+            - name: nfs
+              containerPort: 2049
+              protocol: TCP
+          # The Service must not route to a pod that has not opened its SlateDB yet (a cold start
+          # replays the LSM tree): an agent's `mount` would get a connection refused and the whole
+          # node's homes would fail to mount. A TCP accept on 2049 is exactly "NFS is serving".
+          readinessProbe:
+            tcpSocket:
+              port: 2049
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/zerofs
+              readOnly: true
+            # The container runs as uid 1001 and needs this writable — see upstream README.
+            - name: cache
+              mountPath: /var/cache/zerofs
+      volumes:
+        - name: config
+          configMap:
+            name: zerofs-config
+        # Cache, not the durable copy — the durable copy is the S3 bucket above. Losing this
+        # volume on a reschedule costs a cold cache, not data.
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zerofs
+  namespace: rustic-git-system
+spec:
+  selector:
+    app: zerofs
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP

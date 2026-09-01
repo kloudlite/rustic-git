@@ -33,25 +33,6 @@ impl Pool {
     pub fn worktree(&self, volume: &str, ws: &str) -> PathBuf {
         self.voldir(volume).join("live").join(ws)
     }
-    /// `{pool}/vol/{name}/.pushed-gen` — the btrfs generation recorded after the timer's last
-    /// push of a home. Inside the voldir, next to `live`, and outside the subvolume: it must not
-    /// be in the stream, and it must die with the volume (`cleanup_local` removes the voldir).
-    pub fn pushed_gen_path(&self, name: &str) -> PathBuf {
-        self.voldir(name).join(".pushed-gen")
-    }
-    /// `None` is "never pushed, or unreadable" — both push, because an extra push is cheap and a
-    /// skipped one is a home whose last hour is on one disk.
-    pub fn pushed_gen(&self, name: &str) -> Option<u64> {
-        std::fs::read_to_string(self.pushed_gen_path(name)).ok()?.trim().parse().ok()
-    }
-    /// tmp+rename, never truncate-in-place: a torn number would parse as garbage and read as
-    /// `None`, which is the safe direction, but a tmp file left behind is one to clean.
-    pub fn record_pushed_gen(&self, name: &str, generation: u64) -> Result<(), String> {
-        let dst = self.pushed_gen_path(name);
-        let tmp = self.voldir(name).join(".pushed-gen.tmp");
-        std::fs::write(&tmp, generation.to_string()).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &dst).map_err(|e| format!("{}: {e}", dst.display()))
-    }
 }
 
 

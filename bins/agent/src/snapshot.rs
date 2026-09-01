@@ -34,18 +34,10 @@ fn snapshot_keep() -> usize {
 /// exists and still points at `volume` — a stale or foreign `spec.worktree` cuts nothing rather
 /// than snapshotting the wrong disk.
 ///
-/// A home has no Workspace/Environment at all (Task 7c: homes join the commit model) — its
-/// Volume names the cutting node directly (`spec.nodeName`, the same field every pod affinity
-/// already trusts), and it has exactly one worktree, named after the volume's own id. Checked
-/// FIRST and unconditionally: a home Volume never has a same-named Workspace/Environment to
-/// confuse this with (workspace/environment ids are minted `ws-`/`env-`, `home_volume_name`
-/// is not), so there is no ambiguity to resolve.
+/// A home lives on shared NFS now (Task 5: the home push/commit beats are gone), so a Snapshot
+/// naming a home volume no longer resolves to anything here — it falls through to the
+/// Workspace/Environment lookups below, both of which miss, and the caller requeues.
 async fn worktree_node(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<(&'static str, String)>, ReconcileErr> {
-    if let Some(v) = Api::<crd::Volume>::all(ctx.client.clone()).get_opt(volume).await? {
-        if crd::is_home_volume(&v) {
-            return Ok(Some(("Home", v.spec.node_name.clone())));
-        }
-    }
     if let Some(w) = Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(worktree).await? {
         if let Some(s) = &w.status {
             if s.volume_ref.as_deref() == Some(volume) {
@@ -113,35 +105,15 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     )
     .await?;
 
-    if kind == "Home" {
-        // No Workspace/Environment status to advance — a home's "head" is read back by walking
-        // the chain for its own no-parent Ready tip (`newest_ready_commit`), not written anywhere.
-        // Record the cut's own generation so the periodic beat's `homes_to_push` (unchanged: it
-        // already compares live-vs-recorded generation, the SAME numbers the old `push_env` beat
-        // used) knows this commit covers up to here — `pushed_generation` reads the just-cut RO
-        // snapshot itself, never live re-read after, for the same race reason the old beat noted.
-        let (engine, vol, cut) = (ctx.engine.clone(), s.spec.volume.clone(), name.clone());
-        match tokio::task::spawn_blocking(move || engine.pushed_generation(&vol, &cut)).await {
-            Ok(Ok(g)) => {
-                if let Err(e) = ctx.engine.pool.record_pushed_gen(&s.spec.volume, g) {
-                    tracing::warn!(volume = %s.spec.volume, error = %e, "commit: recording the home's pushed generation");
-                }
-            }
-            Ok(Err(e)) => tracing::warn!(volume = %s.spec.volume, error = %e.0, "commit: reading the home's cut generation"),
-            Err(e) => tracing::warn!(volume = %s.spec.volume, error = %e, "commit: generation task panicked"),
-        }
-    } else {
-        advance_head(&ctx, kind, &s.spec.worktree, &name).await?;
-    }
+    advance_head(&ctx, kind, &s.spec.worktree, &name).await?;
     retain(&ctx, &s.spec.volume, &name).await;
 
     Ok(Action::await_change())
 }
 
-/// A home's own newest Ready commit — the Ready snapshot on `volume` that no other Ready
-/// snapshot names as its parent. A home never branches and has exactly one worktree, so this is
-/// unambiguous; it stands in for the `status.head` a Workspace/Environment would have, since a
-/// home has neither.
+/// A volume's newest Ready commit — the Ready snapshot on `volume` that no other Ready snapshot
+/// names as its parent. Used to pick the parent for a stop-push snapshot when the caller has no
+/// `status.head` of its own to read (see the single call site).
 pub(crate) async fn newest_ready_commit(ctx: &Arc<Ctx>, volume: &str) -> Result<Option<String>, ReconcileErr> {
     let list = Api::<crd::Snapshot>::all(ctx.client.clone())
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
@@ -209,18 +181,6 @@ async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections
         if let Some(VolumeSource::CloneOf { commit: Some(c), .. }) = e.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
             if c.starts_with(&prefix) {
                 heads.insert(c.clone());
-            }
-        }
-    }
-    // A home has no Workspace/Environment status to read a head off — pin its own newest Ready
-    // commit explicitly, the same way a head is pinned above, so it survives retention even at
-    // `WS_SNAPSHOT_KEEP=1` and even though `retain`'s own `skip(keep)` already protects chain[0]
-    // (the just-cut tip) as a side effect of `keep`'s `.max(1)` floor — this is the durable,
-    // config-independent guarantee the brief calls for, not a hope that a floor never moves.
-    if let Some(v) = Api::<crd::Volume>::all(ctx.client.clone()).get_opt(volume).await? {
-        if crd::is_home_volume(&v) {
-            if let Some(tip) = newest_ready_commit(ctx, volume).await? {
-                heads.insert(tip);
             }
         }
     }
@@ -312,6 +272,7 @@ mod commit_tests {
             pool.to_string_lossy().into(),
             "r1".into(),
             vec![],
+            Some("test:/".into()),
             Arc::new(NoopNix),
             pool.join("profiles"),
         );
@@ -339,18 +300,6 @@ mod commit_tests {
         })
     }
 
-    /// A home Volume: `ownerReferences[0].kind == "OwnerBinding"` is the whole test `is_home_volume`
-    /// reads, per its own doc comment — a name is a convention, never the link.
-    fn home_vol_json(name: &str, node: &str) -> serde_json::Value {
-        serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": name, "uid": format!("{name}-uid"), "generation": 1,
-                         "ownerReferences": [{"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
-                                              "name": "r1-alice", "uid": "ob-uid", "controller": true, "blockOwnerDeletion": true}]},
-            "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 2},
-            "status": {"phase": "ready", "subvolumePresent": true},
-        })
-    }
 
     const WS_GET: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
     const WS_STATUS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status";
@@ -438,56 +387,14 @@ mod commit_tests {
         assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "nothing written for an unresolved worktree");
     }
 
-    /// Task 7c: a home has no Workspace/Environment — the Snapshot's volume names the cutting
-    /// node directly through `Volume.spec.nodeName`, and the worktree is the volume's own id. The
-    /// CR goes `Ready` and nothing is written to any Workspace/Environment status (there is none).
-    #[tokio::test]
-    async fn a_home_snapshot_cuts_on_the_volumes_own_node() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("vol/home-alice/snap/home-alice-a")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("vol/home-alice/live/home-alice")).unwrap();
-        let routes = vec![
-            Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumes/home-alice".into(), status: 200, body: home_vol_json("home-alice", "node-a") },
-            Route {
-                method: "PATCH",
-                path: "/apis/rustic-git.io/v1alpha1/snapshots/home-alice-a/status".into(),
-                status: 200,
-                body: serde_json::json!({
-                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-                    "metadata": {"name": "home-alice-a", "uid": "home-alice-a-uid"},
-                    "spec": {"volume": "home-alice", "owner": "alice", "worktree": "home-alice", "parent": "", "pinned": false},
-                    "status": {"phase": "ready"},
-                }),
-            },
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![]) },
-            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("home-alice-a", "home-alice", "home-alice", "", false, crd::Phase::Working);
-
-        let action = reconcile_commit(s, ctx).await.unwrap();
-        assert_eq!(action, kube::runtime::controller::Action::await_change());
-
-        let snap_sent = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/snapshots/home-alice-a/status");
-        assert_eq!(snap_sent.len(), 1);
-        assert_eq!(snap_sent[0]["status"]["phase"], "ready");
-        assert!(
-            rec.calls().iter().all(|c| !c.starts_with("PATCH /apis/rustic-git.io/v1alpha1/workspaces")
-                && !c.starts_with("PATCH /apis/rustic-git.io/v1alpha1/environments")),
-            "a home has no Workspace/Environment status to advance: {:?}", rec.calls()
-        );
-    }
-
-    /// A non-home Snapshot must still resolve via the Workspace/Environment path — the home check
-    /// runs first and unconditionally, so this proves it does not swallow the ordinary case.
+    /// A non-home Snapshot must still resolve via the Workspace/Environment path.
     #[tokio::test]
     async fn a_non_home_snapshot_still_resolves_via_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-a")).unwrap();
         std::fs::create_dir_all(tmp.path().join("vol/vol-1/live/ws-1")).unwrap();
         let routes = vec![
-            // Not a home: `is_home_volume` is false with no ownerReferences at all.
+            // A plain workspace volume, no home Volume kind involved.
             Route {
                 method: "GET",
                 path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(),
@@ -543,40 +450,6 @@ mod commit_tests {
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK));
         assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "nothing written for an unknown volume");
-    }
-
-    /// A home has no Workspace/Environment `status.head` to fold into `worktree_heads` — this
-    /// proves the added home arm names its own newest Ready commit (the one no other Ready
-    /// commit calls its parent) anyway, so retention's protected set is never empty for a home
-    /// no matter how a config change (`WS_SNAPSHOT_KEEP=1`, say) shrinks the ordinary keep-window
-    /// floor.
-    #[tokio::test]
-    async fn worktree_heads_protects_a_homes_newest_ready_commit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let older = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "home-alice-old", "uid": "old-uid"},
-            "spec": {"volume": "home-alice", "owner": "alice", "worktree": "home-alice", "parent": "", "pinned": false},
-            "status": {"phase": "ready"},
-        });
-        let tip = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "home-alice-tip", "uid": "tip-uid"},
-            "spec": {"volume": "home-alice", "owner": "alice", "worktree": "home-alice", "parent": "home-alice-old", "pinned": false},
-            "status": {"phase": "ready"},
-        });
-        let routes = vec![
-            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumes/home-alice".into(), status: 200, body: home_vol_json("home-alice", "node-a") },
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![older, tip]) },
-        ];
-        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", routes);
-
-        let heads = worktree_heads(&ctx, "home-alice").await.unwrap();
-
-        assert!(heads.contains("home-alice-tip"), "the home's newest Ready commit must be in the protected set: {heads:?}");
-        assert!(!heads.contains("home-alice-old"), "only the tip is the newest, not the whole chain");
     }
 
     /// A chain of 13 commits, `WS_SNAPSHOT_KEEP=10`: the tail beyond the keep window is `c2, c1,

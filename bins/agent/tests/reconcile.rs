@@ -86,7 +86,17 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
 /// test can reach the node's real `/nix` and none of them race each other over it.
-fn ctx_full(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+    ctx_with_homes_export(pool, routes, nix, Some("test:/".into()))
+}
+
+/// The `WS_HOMES_EXPORT`-unset variant: a node with no shared-home mount, which every workspace
+/// reconcile must park on rather than start a pod against.
+fn ctx_without_homes_export(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    ctx_with_homes_export(pool, routes, Arc::new(FakeNix::default()), None)
+}
+
+fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
     // Every reconcile now unconditionally may ask "does this volume have commits yet"
     // (`claim::commit_placement`/`has_commits`, the checkout/migrate step) — a call no test fixture
     // needed before the commit model became the only model (Task 8). Appended AFTER the caller's
@@ -112,6 +122,7 @@ fn ctx_full(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>) -
             pool.to_string_lossy().into(),
             "r1".into(),
             vec!["session".into(), "env".into()],
+            homes_export,
             nix,
             profiles,
         )),
@@ -403,28 +414,43 @@ async fn an_unplaced_workspace_is_claimed_with_one_optimistic_status_write() {
 }
 
 
-/// An owner's namespaces are built only on the node their `OwnerBinding` names, so a fresh object
-/// claimed anywhere else creates pods into a namespace that never exists. The binding, when there
-/// is one, decides — `compatibleNodes` being empty is not a licence.
+/// The owner→node pin is gone: the home is a directory on a region-shared NFS mount every node
+/// serves, so a binding naming another node no longer says anything about where this object's data
+/// is. Placement is `may_claim` alone — and the binding, which still ensures namespaces, is now
+/// reconciled on every node.
 #[tokio::test]
-async fn a_workspace_whose_owner_is_bound_to_another_node_is_not_claimed() {
+async fn a_binding_on_another_node_no_longer_blocks_a_claim() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
-        vec![rustic_git_workspaces::kube_test::get(
-            format!("/apis/rustic-git.io/v1alpha1/ownerbindings/{}", crd::binding_name("r1", "alice")),
-            serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
-                               "metadata": {"name": "r1-alice"},
-                               "spec": {"owner": "alice", "region": "r1", "nodeName": "node-b"}}),
-        )],
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                format!("/apis/rustic-git.io/v1alpha1/ownerbindings/{}", crd::binding_name("r1", "alice")),
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                                   "metadata": {"name": "r1-alice"},
+                                   "spec": {"owner": "alice", "region": "r1", "nodeName": "node-b"}}),
+            ),
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
     );
 
     rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
-    assert!(
-        !rec.calls().iter().any(|c| c.starts_with("PUT") || c.starts_with("POST")),
-        "bound elsewhere: this node writes nothing: {:?}",
-        rec.calls()
-    );
+
+    let sent = rec.sent("PUT", WS_STATUS);
+    assert_eq!(sent.len(), 1, "a binding elsewhere no longer defers the claim: {:?}", rec.calls());
+    assert_eq!(sent[0]["status"]["nodeName"], "node-a");
+}
+
+/// A node that cannot serve homes must not claim at all: `apply_workspace` would park the object
+/// at `HomeNotReady` forever, and nothing ever un-places a live node's claim.
+#[tokio::test]
+async fn a_node_without_a_homes_export_does_not_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx_without_homes_export(tmp.path(), vec![]);
+
+    rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert!(rec.calls().is_empty(), "no claim without a shared home: {:?}", rec.calls());
 }
 
 /// An already-placed object is not re-claimed; a stop keeps `status.nodeName` precisely so a later
@@ -447,8 +473,8 @@ async fn an_already_placed_workspace_is_left_alone() {
 /// a peer that only widened `compatibleNodes` does not scare this node off a claim it may still
 /// make. Here the peer really did place it, so the re-read decides "leave it alone".
 ///
-/// The loser must also not create the OwnerBinding: that would bind an owner to a node that did
-/// not win, and every later workspace of theirs would follow it.
+/// The loser must also not create the OwnerBinding: only the node whose claim actually won should
+/// ever write it, or two nodes race to author the owner's one binding object.
 #[tokio::test]
 async fn a_claim_that_loses_the_race_re_reads_and_binds_nothing() {
     let tmp = tempfile::tempdir().unwrap();
@@ -773,10 +799,9 @@ async fn a_clone_reconcile_adds_the_worktree_finalizer() {
 #[tokio::test]
 async fn an_owned_workspace_reconcile_does_not_add_the_finalizer() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut routes = ws_stop_routes(None);
+    let mut routes = ws_stop_routes();
     routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
     let (ctx, rec) = ctx(tmp.path(), routes);
-    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     let mut w = stopping_ws();
     w.status.as_mut().unwrap().pod_ref = None;
     assert!(w.spec.storage.as_ref().and_then(|s| s.source.as_ref()).is_none());
@@ -950,7 +975,6 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
         ]
         .into_iter()
-        .chain(home_routes())
         .chain(ns_routes("ws-alice"))
         .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
         .collect(),
@@ -1001,8 +1025,7 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
         tmp.path(),
         vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list)]
             .into_iter()
-            .chain(home_routes())
-            .chain(ns_routes("ws-alice"))
+                .chain(ns_routes("ws-alice"))
             .collect(),
     );
     // What the FIRST reconcile left behind, with an older `lastTransitionTime` than `now`.
@@ -1023,8 +1046,6 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
     );
 }
 
-const HOME_VOL_GET: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice";
-const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
 
 fn home_vol_json(quota: u64) -> serde_json::Value {
     serde_json::json!({
@@ -1036,249 +1057,6 @@ fn home_vol_json(quota: u64) -> serde_json::Value {
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": quota},
         "status": {"phase": "ready", "subvolumePresent": true},
     })
-}
-
-const HOME_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice/status";
-
-/// `ensure_home_dirs` always shells to real `btrfs` for any `HOME_LOCAL_DIRS` entry missing under
-/// the home's worktree — pre-creating all of them as plain directories is the same convergence
-/// trick as everywhere else in this file, applied to the one step that isn't a single
-/// checkout/create call.
-fn skip_ensure_home_dirs(pool: &std::path::Path, id: &str) {
-    // `ensure_home_dirs` now targets the WORKTREE path (`{pool}/vol/{id}/live/{id}`), the pod's
-    // real $HOME on a migrated home, not the old single-subvolume `Pool::live` path — see final
-    // fix item 1. Pre-create there so the fake `live` this file seeds (a plain directory, not a
-    // real subvolume) reads as already-satisfied.
-    for rel in rustic_git_workspaces::k8s::HOME_LOCAL_DIRS {
-        std::fs::create_dir_all(pool.join("vol").join(id).join("live").join(id).join(rel)).unwrap();
-    }
-}
-
-/// A home whose newest Ready commit is already on this node's disk (the pull beat, 7c, is caught
-/// up) checks it out — never bootstraps an empty worktree next to real history (the never-
-/// started-dataless bug this guard exists to prevent).
-#[tokio::test]
-async fn a_home_with_a_local_ready_commit_checks_it_out_instead_of_bootstrapping() {
-    let tmp = tempfile::tempdir().unwrap();
-    // `local_commits` is a plain directory listing of `snap/`, so a bare `create_dir_all` is
-    // enough to make the commit look local; pre-seeding the WORKTREE destination lets `checkout`
-    // converge through `WORKTREE_EXISTS` without a real `btrfs` binary, the same trick every
-    // other commit-model test in this file uses.
-    std::fs::create_dir_all(tmp.path().join("vol/home-alice/snap/home-alice-a")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("vol/home-alice/live/home-alice")).unwrap();
-    skip_ensure_home_dirs(tmp.path(), "home-alice");
-    // Two identical copies: `has_commits` and `newest_ready_commit` are each their own GET to
-    // this path, and `ctx_full` appends its own (empty-list) fallback route after whatever a
-    // test supplies — without a second copy here, the second of the two calls would land on
-    // that fallback and see no items instead of this test's snapshot.
-    let routes = vec![
-        patch_ok(HOME_STATUS),
-        Route {
-            method: "GET",
-            path: SNAPSHOTS_LIST.into(),
-            status: 200,
-            body: commit_list_of("Snapshot", vec![snapshot_cr("home-alice-a", "home-alice")]),
-        },
-        Route {
-            method: "GET",
-            path: SNAPSHOTS_LIST.into(),
-            status: 200,
-            body: commit_list_of("Snapshot", vec![snapshot_cr("home-alice-a", "home-alice")]),
-        },
-    ];
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let vol: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
-
-    rustic_git_agent::controller::apply_volume(&vol, &ctx).await.unwrap();
-    wait_idle(&ctx).await;
-    let action = rustic_git_agent::controller::apply_volume(&vol, &ctx).await.unwrap();
-
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let last = rec.sent("PATCH", HOME_STATUS).last().cloned().expect("a status write");
-    assert_eq!(last["status"]["phase"], "ready", "{last}");
-}
-
-/// The commit is Ready in the CR but the pull beat hasn't synced it to this node's disk yet
-/// (nothing under `snap/`) — this must requeue and create nothing, never bootstrap an empty
-/// worktree that would then get committed and replicated as if it were the home's real history.
-#[tokio::test]
-async fn a_home_with_a_ready_commit_not_yet_local_awaits_the_pull_beat() {
-    let tmp = tempfile::tempdir().unwrap();
-    // Two identical copies — see the comment on the previous test: `has_commits` and
-    // `newest_ready_commit` each make their own GET, and without a second copy the second call
-    // lands on `ctx_full`'s own empty-list fallback instead of this test's snapshot.
-    let routes = vec![
-        patch_ok(HOME_STATUS),
-        Route {
-            method: "GET",
-            path: SNAPSHOTS_LIST.into(),
-            status: 200,
-            body: commit_list_of("Snapshot", vec![snapshot_cr("home-alice-a", "home-alice")]),
-        },
-        Route {
-            method: "GET",
-            path: SNAPSHOTS_LIST.into(),
-            status: 200,
-            body: commit_list_of("Snapshot", vec![snapshot_cr("home-alice-a", "home-alice")]),
-        },
-    ];
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let vol: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
-
-    rustic_git_agent::controller::apply_volume(&vol, &ctx).await.unwrap();
-    wait_idle(&ctx).await;
-    let action = rustic_git_agent::controller::apply_volume(&vol, &ctx).await.unwrap();
-
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    let last = rec.sent("PATCH", HOME_STATUS).last().cloned().expect("a status write");
-    assert_eq!(last["status"]["phase"], "working", "{last}");
-    assert_eq!(last["status"]["conditions"][0]["reason"], "HomeAwaitingSync", "{last}");
-    assert!(!tmp.path().join("vol/home-alice/live/home-alice").exists(), "no bootstrap worktree either");
-}
-
-/// The only genuine bootstrap case: the volume has never been committed anywhere at all.
-#[tokio::test]
-async fn a_home_with_no_commits_at_all_bootstraps_empty() {
-    let tmp = tempfile::tempdir().unwrap();
-    // Bootstraps via `checkout(id, None, id)` now (final fix item 3) — the WORKTREE path
-    // (`vol/{id}/live/{id}`), never the old single-subvolume `create_subvol` path, so a
-    // pre-existing worktree dir converges through `WORKTREE_EXISTS` without a real `btrfs`
-    // binary, same trick every other commit-model test in this file uses.
-    std::fs::create_dir_all(tmp.path().join("vol/home-alice/live/home-alice")).unwrap();
-    skip_ensure_home_dirs(tmp.path(), "home-alice");
-    let routes = vec![
-        patch_ok(HOME_STATUS),
-        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
-    ];
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let vol: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
-
-    rustic_git_agent::controller::apply_volume(&vol, &ctx).await.unwrap();
-    wait_idle(&ctx).await;
-    let action = rustic_git_agent::controller::apply_volume(&vol, &ctx).await.unwrap();
-
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let last = rec.sent("PATCH", HOME_STATUS).last().cloned().expect("a status write");
-    assert_eq!(last["status"]["phase"], "ready", "{last}");
-}
-
-/// Keep-biased: a `Snapshot`-list error must propagate, never be misread as "zero commits" —
-/// that would bootstrap an empty home next to history the list call simply failed to see.
-#[tokio::test]
-async fn a_home_commit_list_error_propagates_and_creates_nothing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let routes =
-        vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let vol: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
-
-    let result = rustic_git_agent::controller::apply_volume(&vol, &ctx).await;
-
-    assert!(result.is_err(), "a commit-list error must not resolve to bootstrap or checkout");
-    assert!(!tmp.path().join("vol/home-alice/live").exists(), "nothing created on a list error");
-    assert!(rec.sent("PATCH", HOME_STATUS).is_empty(), "no status written on a list error either");
-}
-
-/// The routes the binding's home authoring takes in the personal namespace.
-fn home_routes() -> Vec<Route> {
-    vec![
-        rustic_git_workspaces::kube_test::not_found(HOME_VOL_GET),
-        rustic_git_workspaces::kube_test::post(VOLUMES, home_vol_json(2)),
-    ]
-}
-
-/// The home is authored next to the namespace, by the one reconciler that owns "this owner is on
-/// this node": a child Volume with the binding as owner (so deleting the binding is the whole
-/// delete) — the btrfs subvolume every workspace pod of this owner mounts via `hostPath` now.
-#[tokio::test]
-async fn a_binding_creates_the_owners_home_volume() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws_list = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
-        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
-    });
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
-            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-        ]
-        .into_iter()
-        .chain(home_routes())
-        .chain(ns_routes("ws-alice"))
-        .collect(),
-    );
-    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
-
-    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
-
-    let vol = rec.sent("POST", VOLUMES);
-    assert_eq!(vol.len(), 1, "{:?}", rec.calls());
-    assert_eq!(vol[0]["metadata"]["name"], "home-alice");
-    assert_eq!(vol[0]["spec"]["owner"], "alice");
-    assert_eq!(vol[0]["spec"]["team"], "");
-    assert_eq!(vol[0]["spec"]["nodeName"], "node-a", "the binding's node, never chosen here");
-    assert_eq!(vol[0]["spec"]["quotaGb"], 2, "the binding's default home quota");
-    assert!(vol[0]["spec"].get("source").is_none(), "an empty home; the first materialization decides whether to pull");
-    assert_eq!(vol[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
-    assert_eq!(vol[0]["metadata"]["labels"]["rustic-git.io/kind"], "home");
-    assert!(
-        rec.sent("PATCH", &binding_status()).iter().any(|s| s["status"]["conditions"].as_array().unwrap()
-            .iter().any(|c| c["type"] == "NamespaceReady" && c["status"] == "True")),
-        "the namespace is still reported ready: the home is not a gate"
-    );
-}
-
-/// The binding carries the wish and the Volume is the agent's own object, so a changed quota is
-/// copied down as ONE spec field — the second the admission policy allows by name, next to
-/// `restoreTo`. `set_quota` then runs on the Volume's next pass, because a spec edit is a new
-/// generation. An unchanged quota writes nothing.
-#[tokio::test]
-async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws_list = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
-        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
-    });
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
-            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-            rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
-            Route { method: "PATCH", path: HOME_VOL_GET.into(), status: 200, body: home_vol_json(5) },
-        ]
-        .into_iter()
-        .chain(ns_routes("ws-alice"))
-        .collect(),
-    );
-    let mut b = binding_json();
-    b["spec"]["homeQuotaGb"] = serde_json::json!(5);
-    let b: crd::OwnerBinding = serde_json::from_value(b).unwrap();
-
-    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
-
-    let patch = rec.sent("PATCH", HOME_VOL_GET);
-    assert_eq!(patch.len(), 1, "{:?}", rec.calls());
-    assert_eq!(patch[0], serde_json::json!({"spec": {"quotaGb": 5}}), "quotaGb and nothing else");
-
-    // Same quota as the Volume already has: no spec write at all. (`ctx` the binding shadows
-    // `ctx` the helper above, hence the path and the new names.)
-    let (ctx2, rec2) = self::ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", serde_json::json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
-            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-            rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
-        ]
-        .into_iter()
-        .chain(ns_routes("ws-alice"))
-        .collect(),
-    );
-    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
-    rustic_git_agent::binding::apply_binding(&b, &ctx2).await.unwrap();
-    assert!(rec2.sent("PATCH", HOME_VOL_GET).is_empty(), "{:?}", rec2.calls());
 }
 
 // ── the workspace reconciler and its volume child ────────────────────────
@@ -1562,18 +1340,6 @@ async fn a_failed_volume_child_stops_the_parent_requeueing() {
 
 
 
-/// The Volume this request names, on the node the test's `ctx` is (`node-a`) unless told otherwise.
-fn vol_on(node: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
-        "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 20},
-        "status": {"phase": "ready", "subvolumePresent": true}
-    })
-}
-
-
-
 
 
 
@@ -1632,13 +1398,8 @@ fn stopping_ws() -> crd::Workspace {
     serde_json::from_value(o).unwrap()
 }
 
-fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
-    let mut routes = vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }];
-    match req {
-        Some(r) => routes.push(rustic_git_workspaces::kube_test::get(WS_STOP_REQ, r)),
-        None => routes.push(rustic_git_workspaces::kube_test::not_found(WS_STOP_REQ)),
-    }
-    routes
+fn ws_stop_routes() -> Vec<Route> {
+    vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }]
 }
 
 // ── the stop-before-teardown snapshot ────────────────────────────────────
@@ -1660,7 +1421,6 @@ const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 
 
 
-const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-home-ws-1";
 const WS_POD_DEL: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
 
 
@@ -2134,6 +1894,21 @@ async fn a_stopped_workspace_with_a_broken_volume_still_loses_its_pod() {
         rec.calls()
     );
     assert_eq!(rec.sent("PATCH", WS_STATUS).last().unwrap()["status"]["phase"], "stopped");
+}
+
+/// The home is on the shared NFS mount now (spec 2026-09-01): a stop deletes the pod straight
+/// away, with no `stop-home-{ws}` snapshot request gating it.
+#[tokio::test]
+async fn a_stop_deletes_the_pod_without_any_home_push_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+    ]);
+    let w = stopping_ws();
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")));
+    assert!(rec.calls().iter().all(|c| !c.contains("snapshots/stop-home")), "no stop-home gate: {:?}", rec.calls());
 }
 // ── completion wakes the reconciler ──────────────────────────────────────
 
@@ -2670,163 +2445,34 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     assert_eq!(converged.len(), 2, "never saw two converged passes: {:?}", rec.calls());
 }
 
-/// The pod mounts the home, and kubelet starts it as soon as the hostPath exists — which is before
-/// the nested cache subvolumes and the qgroup do. So the Workspace waits on the home Volume's
-/// STATUS, and says so, rather than letting a pod make `.npm` a plain directory that is pushed
-/// forever.
+/// The shared home replaces the home Volume (spec 2026-09-01): a node with no `WS_HOMES_EXPORT`
+/// has nowhere to mount an owner's home, so it must park the workspace rather than start a pod
+/// that would hostPath an empty local dir in the home's place.
 #[tokio::test]
-async fn a_workspace_whose_home_is_not_ready_creates_no_pod_and_says_why() {
+async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a_pod() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
-    let mut home = home_vol_json(2);
-    home["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
-    ctx.remember_volume(serde_json::from_value(home).unwrap());
-    let ws = ready_workspace("ws-1", vec![]);
+    // resolve_volume and the namespace-ready check both run before the homes-export gate, so
+    // this fixture still needs a Ready Volume and a Ready binding to reach it — same shapes as
+    // `ws_ctx_with_ssh`'s, minus the SSH/pod routes the homes-export gate never lets it reach.
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true}
+    });
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+        ready_binding(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx_without_homes_export(tmp.path(), routes);
+    let w = ready_workspace("ws-1", vec![]);
 
-    let action = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "creating");
-    assert!(st["status"]["observedGeneration"].is_null());
-    assert!(
-        st["status"]["conditions"].as_array().unwrap().iter()
-            .any(|c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "HomeNotReady"),
-        "{st}"
-    );
-
-    // A home whose own reconcile settled in Error (the registry unreachable) will not appear by
-    // waiting: the workspace settles too, with the same reason, and stops requeueing.
-    let mut home = home_vol_json(2);
-    home["status"] = serde_json::json!({"phase": "error", "subvolumePresent": false});
-    ctx.remember_volume(serde_json::from_value(home).unwrap());
-    let action = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "error");
-    assert!(st["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "HomeNotReady"), "{st}");
-    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
-}
-
-/// The timer's decision, with the two numbers it reads faked: only homes, only ready ones, only
-/// those whose disk moved since the recorded push — and a home whose generation cannot be read is
-/// skipped rather than pushed blind.
-#[test]
-fn only_changed_ready_homes_are_pushed_by_the_timer() {
-    let home = |name: &str, ready: bool| -> Arc<crd::Volume> {
-        let mut v = home_vol_json(2);
-        v["metadata"]["name"] = serde_json::json!(name);
-        if !ready {
-            v["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
-        }
-        Arc::new(serde_json::from_value(v).unwrap())
-    };
-    let ws: Arc<crd::Volume> = Arc::new(serde_json::from_value(vol_on("node-a")).unwrap());
-    let volumes = vec![
-        home("home-moved", true),
-        home("home-same", true),
-        // Live at or BEHIND the recorded snapshot generation is not a change: the snapshot's own
-        // transaction can leave the two numbers apart with nothing new on disk.
-        home("home-behind", true),
-        home("home-new", true),
-        home("home-unreadable", true),
-        home("home-working", false),
-        ws,
-    ];
-    let generation = |id: &str| match id {
-        "home-moved" => Some(11),
-        "home-same" => Some(10),
-        "home-behind" => Some(9),
-        "home-new" => Some(3),
-        "home-working" => Some(9),
-        "ws-1" => Some(99),
-        _ => None,
-    };
-    let pushed = |id: &str| match id {
-        "home-moved" | "home-same" | "home-behind" => Some(10),
-        "home-working" => Some(9),
-        _ => None,
-    };
-    let mut due: Vec<String> = rustic_git_agent::controller::homes_to_push(&volumes, generation, pushed)
-        .iter()
-        .map(|v| v.metadata.name.clone().unwrap())
-        .collect();
-    due.sort();
-    assert_eq!(due, vec!["home-moved", "home-new"]);
-    assert_eq!(rustic_git_agent::controller::HOME_PUSH_MESSAGE, "home: periodic");
-}
-
-// ── commit-model home beat (Task 7c) ─────────────────────────────────────────
-//
-// `homes_to_push` above (unchanged) is still the "generation unmoved creates nothing" gate: the
-// beat loop only ever calls `home_commit_beat_one` for a due home, and the flag-off arm still
-// calls `engine.push_env` exactly as `only_changed_ready_homes_are_pushed_by_the_timer` and every
-// pre-existing test in this file already prove — none of them changed.
-
-/// A due home with no prior commits: `migrate_volume` finds nothing to migrate (a plain tempdir
-/// `live` is never a real btrfs subvolume, same reason `commit_model_checkout_converges_...`'s doc
-/// comment gives), so the beat proceeds straight to a CR-first Snapshot with an empty parent —
-/// "no snapshots yet" is exactly this case.
-#[tokio::test]
-async fn home_commit_beat_creates_a_root_snapshot_when_none_exist() {
-    let tmp = tempfile::tempdir().unwrap();
-    let routes = vec![
-        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
-        rustic_git_workspaces::kube_test::post(SNAPSHOTS_LIST, snapshot_cr("home-alice-x", "home-alice")),
-    ];
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
-
-    rustic_git_agent::controller::home_commit_beat_one(&ctx, &v, "home-alice").await;
-
-    let sent = rec.sent("POST", SNAPSHOTS_LIST);
-    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    assert_eq!(sent[0]["spec"]["volume"], "home-alice");
-    assert_eq!(sent[0]["spec"]["worktree"], "home-alice", "a home's one worktree is named after itself");
-    assert_eq!(sent[0]["spec"]["parent"], "", "no Ready commits yet: the new CR is a root");
-    assert_eq!(sent[0]["spec"]["message"], "home: periodic");
-    assert_eq!(sent[0]["status"]["phase"], "working", "CR-first: Working before the cut, same as a normal push");
-}
-
-/// A due home with an existing Ready commit: the new CR chains onto it, so the home's history is
-/// one growing chain and not a fresh root every beat.
-#[tokio::test]
-async fn home_commit_beat_chains_the_new_snapshot_onto_the_newest_ready_one() {
-    let tmp = tempfile::tempdir().unwrap();
-    let prior = snapshot_cr("home-alice-old", "home-alice");
-    let routes = vec![
-        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![prior]) },
-        rustic_git_workspaces::kube_test::post(SNAPSHOTS_LIST, snapshot_cr("home-alice-new", "home-alice")),
-    ];
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
-
-    rustic_git_agent::controller::home_commit_beat_one(&ctx, &v, "home-alice").await;
-
-    let sent = rec.sent("POST", SNAPSHOTS_LIST);
-    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    assert_eq!(sent[0]["spec"]["parent"], "home-alice-old", "chains onto the existing chain's tip");
-}
-
-/// H3: a quiescent home (generation unmoved, so `homes_to_push` leaves it out of `due`) must
-/// still get `migrate_and_seed_baseline`'s migrate half run every pass — otherwise a home that
-/// never writes again sits on the old layout forever. `migrate_volume` is filesystem-only (no
-/// btrfs shelled to) and creates the volume's `voldir` unconditionally as its very first step, so
-/// that directory existing afterward is the observable proof migrate ran, with no real btrfs
-/// needed. No CR is created either way: an unmoved generation is still "nothing to cut".
-#[tokio::test]
-async fn home_commit_beat_migrates_a_quiescent_home_even_when_not_due() {
-    let tmp = tempfile::tempdir().unwrap();
-    let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) }];
-    let (ctx, rec) = ctx(tmp.path(), routes);
-    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
-    ctx.remember_volume(v);
-
-    // `due` is empty: the home is deliberately excluded (the quiescent case H3 is about).
-    rustic_git_agent::controller::home_commit_beat(&ctx, &std::collections::HashSet::new()).await;
-
-    assert!(tmp.path().join("vol/home-alice").is_dir(), "migrate_volume's voldir create must have run even though the home was not due");
-    assert!(rec.sent("POST", SNAPSHOTS_LIST).is_empty(), "an unmoved generation must not cut a CR: {:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "HomeNotReady");
+    assert!(rec.calls().iter().all(|c| !c.contains("/pods")), "no pod while unmounted: {:?}", rec.calls());
 }
 
 // ── attachment ───────────────────────────────────────────────────────────

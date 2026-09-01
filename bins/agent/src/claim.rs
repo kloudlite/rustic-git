@@ -151,6 +151,13 @@ async fn decide(
         // placement step at all.
         return Ok(None);
     }
+    // A node with no `WS_HOMES_EXPORT` cannot serve `/home/kl` at all, and nothing ever un-places a
+    // live node's claim — so claiming here parks the object at `HomeNotReady` permanently instead
+    // of leaving it for a node that can serve it. Refusing keeps it visibly unplaced, which a peer
+    // picks up on its own unplaced watch.
+    if ctx.homes_export.is_none() {
+        return Ok(None);
+    }
     let src = source_nodes(ctx, storage_source(storage)).await?;
     // Fetched only when there is no `cloneOf` source: a cloneOf's own arm never needs it.
     let commit = if src.is_none() { Some(commit_placement(ctx, volume).await?) } else { None };
@@ -163,16 +170,6 @@ async fn decide(
         "compatibleNodes": with_me(compatible, &ctx.node),
         "conditions": [crd::condition("Placed", true, "Claimed", &format!("claimed by {}", ctx.node), gen)],
     })))
-}
-
-/// Whether `{region, owner}` is already bound to a node that is not this one. An owner's
-/// namespaces are built on the bound node and nowhere else (`binding.rs` lists only that node's
-/// workspaces), so a fresh object claimed anywhere else would create pods into a namespace that
-/// never exists — 404 forever. Checked only once `decide` says claim, so an object this node has no
-/// business with (placed, or outside `compatibleNodes`) still costs no API read.
-async fn bound_elsewhere(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<bool, ReconcileErr> {
-    let api: Api<OwnerBinding> = Api::all(ctx.client.clone());
-    Ok(api.get_opt(&binding_name(region, owner)).await?.is_some_and(|b| b.spec.node_name != ctx.node))
 }
 
 /// One optimistic attempt, then — on 409 — one re-read and one more.
@@ -224,9 +221,6 @@ where
         else {
             return Ok(Action::await_change());
         };
-        if bound_elsewhere(ctx, p.region, p.owner).await? {
-            return Ok(Action::await_change());
-        }
         // F1: `replace_status` PUTs the WHOLE status subresource, so a write built from ONLY the
         // 4 fields `decide` cares about would silently erase everything else already there —
         // `head`, `volumeRef`, `packages`, `podRef`, `durable`. Start from THIS object's current
@@ -247,8 +241,9 @@ where
         // silently overwrites the first, which is the whole failure this write exists to prevent.
         match replace_status(&api, &obj, kind, status).await {
             Ok(()) => {
-                // Only the WINNER binds. Binding an owner to a node that lost would send every
-                // later workspace of theirs to the wrong pool.
+                // Only the WINNER binds — not for placement any more (the binding is not
+                // node-scoped since the home moved to shared NFS), but because the binding is what
+                // makes this owner's namespaces exist, and a loser has nothing to create them for.
                 let (region, owner) = (p.region.to_string(), p.owner.to_string());
                 ensure_binding(ctx, &region, &owner).await?;
                 return Ok(Action::await_change());

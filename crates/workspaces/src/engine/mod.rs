@@ -2,7 +2,7 @@
 //! `Snapshot` CR, replicated peer-to-peer (`bins/agent/src/peer.rs`) — never an object store,
 //! never uploaded anywhere. `commit.rs` holds the commit/checkout primitives; `ops.rs` holds what
 //! predates and still serves both the commit model and the old single-subvolume layout
-//! (subvolume creation, quota, generation reads) plus the one clone path environments still use.
+//! (subvolume creation, quota) plus the one clone path environments still use.
 //!
 //! Pool layout:
 //!   {pool}/vol/{name}/live         old layout: the RW subvolume directly, or (commit model,

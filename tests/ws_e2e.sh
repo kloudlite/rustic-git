@@ -72,6 +72,10 @@ kubectl -n rustic-git-system rollout status deployment/rustic-git-gateway --time
   echo "SKIP: AZURE_ACCOUNT/AZURE_KEY/AZURE_CONTAINER not set" >&2
   exit 77
 }
+kubectl -n rustic-git-system get deploy zerofs >/dev/null 2>&1 || {
+  echo "SKIP: zerofs Deployment not in rustic-git-system (not applied — see deploy/k3s/zerofs.yaml)" >&2
+  exit 77
+}
 
 SERVER_BIN="${WS_E2E_SERVER_BIN:-target/debug/rustic-git}"
 API_BIN="${WS_E2E_API_BIN:-target/debug/rustic-git-api}"
@@ -111,7 +115,7 @@ CLONE1_ID=""
 CLONE_ID=""
 RESTORE_ID=""
 SEED_ID=""
-HOME_RESTORE_ID=""
+OTHER_NODE_WS_ID=""
 
 cleanup() {
   set +e
@@ -119,7 +123,7 @@ cleanup() {
   # deployments, services, policies), so deleting the four objects is the whole teardown —
   # garbage collection does the rest. The probe namespace is ours, not the controller's.
   [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
-  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$HOME_RESTORE_ID"; do
+  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$OTHER_NODE_WS_ID"; do
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -318,9 +322,10 @@ fi
 NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 [ -n "$NODE_IP" ] || fail "node $E2E_NODE has no InternalIP; the seeding init container has nothing to clone from"
 
-# The home push timer is pushed past the run: the persistent-home phase proves that STOPPING a
-# workspace pushes its home, by counting history rows before and after — a timer beat landing in
-# between would make that assertion pass with no stop push at all.
+# Without this the agent never mounts {pool}/homes and every workspace parks on HomeNotReady
+# (lib.rs's run: unset means "no shared home on this node", fail closed) — the real Service the
+# cluster's own agents point at (deploy/k3s/agent-daemonset.yaml), reachable here because this
+# runs against the real k3s cluster, just with a loopback pool standing in for the node's btrfs.
 log "starting rustic-git-agent against pool $MOUNT as node $E2E_NODE (registry at $SERVER_BASE)"
 NODE_NAME="$E2E_NODE" \
 WS_GIT_SSH_HOST="$NODE_IP" \
@@ -329,7 +334,7 @@ WS_REGISTRY_URL="$SERVER_BASE" \
 WS_REGION="$REGION_ID" \
 WS_AGENT_TOKEN="$AGENT_TOKEN" \
 WS_POOL="$MOUNT" \
-WS_HOME_PUSH_SECS=3600 \
+WS_HOMES_EXPORT="zerofs.rustic-git-system.svc:/" \
 HOSTNAME="ws-e2e-agent" \
 COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
 COSMOS_KEY="$COSMOS_KEY" \
@@ -594,73 +599,59 @@ fi
 kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"
 
 # ---------------------------------------------------------------------------
-# Persistent home: everything under /home/kl except ~/workspaces/<name> is ONE btrfs subvolume per
-# person per node (`home-{owner}`), mounted into every workspace pod of theirs, pushed on a timer
-# and on every workspace stop. Two pods on one node see the same file at once — a local fact, no
-# push involved — and the stop is what makes the registry copy. Both WS_ID and CLONE_ID are on
-# this node (the binding pins the owner here), which is what makes the second read non-vacuous.
-# zsh reads `$ZDOTDIR/.zshrc`, not `~/.zshrc` — the prelude seeds the former, so that is the file
-# a person actually edits and the one whose survival matters.
+# Persistent home: one region-shared NFS export (ZeroFS, deploy/k3s/zerofs.yaml), not a per-node
+# btrfs subvolume any more. There is no home Volume, no OwnerBinding-owned CR, no push/pull and no
+# per-owner node pin — every pod hostPaths the SAME export at /home/kl, so a write is visible from
+# any node the instant it lands, and an owner's workspaces can now be claimed by any node whose
+# VolumeReplica is Synced rather than only the one node that used to hold their btrfs home (see
+# deploy/k3s/README.md, "Shared home"). zsh reads `$ZDOTDIR/.zshrc`, not `~/.zshrc` — the prelude
+# seeds the former, so that is the file a person actually edits and the one whose survival matters.
 # ---------------------------------------------------------------------------
-HOME_VOL="home-$(echo "$USER_NAME" | tr '[:upper:]' '[:lower:]')"
 ZSHRC=/home/kl/.config/zsh/.zshrc
-log "checking the home volume is Ready, owned by the binding, and carries its nested cache subvolumes"
-kubectl wait --for=condition=Ready "volume/$HOME_VOL" --timeout=120s || fail "home volume $HOME_VOL never became Ready"
-kubectl get "volume/$HOME_VOL" -o jsonpath='{.metadata.ownerReferences[0].kind}' | grep -q OwnerBinding \
-  || fail "the home volume is not owned by the OwnerBinding"
-# No home PVC to check Bound any more. The equivalent property — that /home/kl really is the
-# shared home subvolume and not a per-pod directory — is proven below, by writing .zshrc in one
-# workspace and reading it from a second one on the same node.
-for d in .cache .npm .cargo/registry .local/share/pnpm .vscode-server .cursor-server; do
-  sudo test -d "$(live_dir "$HOME_VOL")/$d" || fail "home is missing its nested subvolume $d"
-done
-# inode 256 is a subvolume root; a plain directory the prelude might have made is not.
-[ "$(sudo stat -c %i "$(live_dir "$HOME_VOL")/.cache")" = "256" ] || fail ".cache is a plain directory, not a nested subvolume"
-
-log "writing $ZSHRC in one workspace and reading it from the other"
+log "writing $ZSHRC in one workspace and reading it from another pod, with no push in between"
 kubectl -n "$WS_NS" exec "$WS_ID" -- sh -c "echo 'export WS_E2E_HOME=1' >> $ZSHRC" \
   || fail "could not append to $ZSHRC in $WS_ID"
 kubectl -n "$WS_NS" exec "$CLONE_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
-  || fail "a second workspace on the same node does not see the home's .zshrc"
-# As the login user, not root: the nested subvolumes are made by the agent (root) and chowned.
-kubectl -n "$WS_NS" exec "$WS_ID" -- su kl -s /bin/sh -c 'touch /home/kl/.cache/e2e && touch /home/kl/.cargo/registry/e2e' \
-  || fail "the nested cache subvolumes are not writable by kl"
+  || fail "a second workspace pod does not see the shared NFS home's .zshrc"
 
-log "stopping the workspace: the home is pushed before the pod goes"
-# No `-f`: a home that has never been pushed has no history, and `/v1/volumes/{name}/history`
-# resolves a volume THROUGH its history, so before the first push it is a 404 — which counts as 0.
-HOME_BEFORE=$(id_count "$(curl -sS "$BASE/v1/volumes/$HOME_VOL/history" -H "Authorization: Bearer $USER_TOKEN")")
+log "stopping and restarting the workspace: the home lives on the export, not the pod"
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 kubectl wait --for=jsonpath='{.status.phase}'=stopped "workspace/$WS_ID" --timeout=300s \
   || fail "workspace $WS_ID never reached phase=stopped"
-HOME_AFTER=$(id_count "$(curl -fsS "$BASE/v1/volumes/$HOME_VOL/history" -H "Authorization: Bearer $USER_TOKEN")")
-[ "$HOME_AFTER" -gt "$HOME_BEFORE" ] || fail "stopping a workspace did not push its home ($HOME_BEFORE -> $HOME_AFTER)"
-kubectl get "snapshotrequest/stop-home-$WS_ID" >/dev/null 2>&1 && fail "the stop-home request outlived the stop"
 kubectl -n "$WS_NS" get "pod/$WS_ID" >/dev/null 2>&1 && fail "the pod is still there after the stop"
-
-log "starting the workspace again: the rc line survives the pod, and the cache did not travel"
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/start" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_ws_ready "$WS_ID"
 kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s || fail "pod $WS_ID did not come back"
 kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" || fail "the home's .zshrc did not survive a stop/start"
-# The push carried the rc file and not the cache: a nested subvolume is never in the send stream.
-# Proven off the registry copy by restoring the newest home snapshot into a scratch workspace —
-# `restore_ws` resolves its source by (owner, name) through the registry, so a home is a source
-# like any other volume.
-HOME_SNAP=$(curl -fsS "$BASE/v1/volumes/$HOME_VOL/history" -H "Authorization: Bearer $USER_TOKEN" \
-  | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-[ -n "$HOME_SNAP" ] || fail "no snapshot id in $HOME_VOL history"
-HOME_RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/restore" -H "Authorization: Bearer $USER_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"e2e-home-restore","snapshot_id":"'"$HOME_SNAP"'","src_workspace":"'"$HOME_VOL"'"}')
-HOME_RESTORE_ID=$(echo "$HOME_RESTORE_JSON" | field id)
-[ -n "$HOME_RESTORE_ID" ] || fail "no id in home restore response: $HOME_RESTORE_JSON"
-wait_ws_ready "$HOME_RESTORE_ID"
-sudo grep -q 'WS_E2E_HOME=1' "$(live_dir "$HOME_RESTORE_ID")/.config/zsh/.zshrc" || fail "the pushed home does not carry .zshrc"
-sudo test -e "$(live_dir "$HOME_RESTORE_ID")/.cache/e2e" && fail "the pushed home carried the .cache contents"
-curl -fsS -X DELETE "$BASE/v1/workspaces/$HOME_RESTORE_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-wait_ws_gone "$HOME_RESTORE_ID"
-HOME_RESTORE_ID=""
+
+# The thing this whole change buys: an owner's home is no longer pinned to one node. Placement is
+# a controller-side claim race (bins/agent/src/claim.rs's bootstrap case: a fresh, UNPLACED
+# workspace is claimable by any node), not something kube-scheduler decides — a cordon/taint/label
+# on this node cannot steer it, and forcing the race by pausing this script's own agent process
+# was tried and rejected: that agent runs as root under sudo holding the loopback pool mount, and
+# a SIGKILL of this script (or a CI timeout) bypasses the trap, leaving a stopped root process
+# behind with nothing to resume it. So this makes no attempt to steer where the claim lands —
+# it just proves the property that matters holds WHEREVER it lands, which is true on both a
+# single-node and a multi-node cluster and cannot strand anything.
+log "checking a freshly claimed workspace sees the shared home over NFS, whichever node claims it"
+OTHER_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"e2e-ws-other-node","region":"'"$REGION_ID"'","quota_gb":5}')
+OTHER_NODE_WS_ID=$(echo "$OTHER_JSON" | field id)
+[ -n "$OTHER_NODE_WS_ID" ] || fail "no id in other-node workspace create response: $OTHER_JSON"
+CLAIMED_ON=""
+for i in $(seq 1 60); do
+  CLAIMED_ON=$(kubectl get workspace "$OTHER_NODE_WS_ID" -o jsonpath='{.status.nodeName}' 2>/dev/null)
+  [ -n "$CLAIMED_ON" ] && break
+  sleep 2
+done
+[ -n "$CLAIMED_ON" ] || fail "e2e-ws-other-node was never claimed by any node"
+log "e2e-ws-other-node claimed on $CLAIMED_ON (this script's own node is $E2E_NODE)"
+wait_ws_ready "$OTHER_NODE_WS_ID"
+kubectl -n "$WS_NS" exec "$OTHER_NODE_WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
+  || fail "a freshly claimed workspace (node $CLAIMED_ON) cannot see the home written earlier on $E2E_NODE — the NFS export is not actually shared"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$OTHER_NODE_WS_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$OTHER_NODE_WS_ID"
+OTHER_NODE_WS_ID=""
 
 # ---------------------------------------------------------------------------
 # Restore: new workspace grafted onto an EXPLICIT past snapshot (the newest entry in the

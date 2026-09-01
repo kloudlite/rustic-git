@@ -1,17 +1,24 @@
-//! The per-owner shared objects, owned by exactly one reconciler.
+//! The owner's NAMESPACES, ensured by exactly one reconciler.
 //!
 //! They used to be re-ensured by the workspace reconciler AND the environment reconciler on every
 //! pass — two writers for one object, which is how a namespace ends up recreated by whichever ran
-//! last. An `OwnerBinding` says "this owner's work lives on this node", so it is the natural owner
-//! of "this owner has namespaces on this node".
+//! last. An `OwnerBinding` is that one writer: the object that says "this owner has namespaces,
+//! LimitRanges, NetworkPolicies and RoleBindings", and nothing else.
+//!
+//! It is NOT node-scoped. It used to be — the owner's home was a btrfs subvolume on one node, so
+//! the binding pinned every workspace of theirs to it. The home is a directory on a region-shared
+//! NFS mount now, so every node reconciles every binding (the objects below are all
+//! server-side-applied, which is convergent under concurrent appliers) and placement is the
+//! claim's own business. `spec.nodeName` survives only so existing objects still parse; nothing
+//! reads it.
 //!
 //! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
 
-use crate::controller::{conditions_eq, ensure, ensure_child_volume, patch_status, settle, Ctx, Outcome, ReconcileErr};
+use crate::controller::{conditions_eq, ensure, patch_status, settle, Ctx, Outcome, ReconcileErr};
 use k8s_openapi::api::core::v1::{LimitRange, Namespace};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use kube::api::{Api, ListParams};
 use kube::runtime::controller::Action;
 use kube::{Resource, ResourceExt};
 use rustic_git_workspaces::crd::{self, binding_name, ws_namespace};
@@ -73,30 +80,6 @@ async fn write_binding_status(b: &crd::OwnerBinding, ctx: &Arc<Ctx>, gen: i64) -
     .await
 }
 
-/// The owner's home on this node: one child `Volume` (`home-{owner}`), the btrfs subvolume every
-/// workspace pod of theirs mounts at `HOME_DIR` via `hostPath` now.
-///
-/// Authored HERE and not by the workspace reconciler for the same reason the namespace is: the
-/// home is shared by every workspace of this owner on this node, so a per-workspace owner would
-/// garbage-collect it with the first workspace deleted.
-async fn ensure_home(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
-    let owner = &b.spec.owner;
-    let id = crd::home_volume_name(owner);
-    let storage = crd::WorkspaceStorage { quota_gb: b.spec.home_quota_gb, source: None };
-    let vol = ensure_child_volume(&id, b, owner, "", &b.spec.region, &storage, &b.spec.node_name, "home", ctx).await?;
-    if vol.spec.quota_gb != b.spec.home_quota_gb {
-        // The ONE spec field this reconciler writes on its child, allowed by name in
-        // agent-admission.yaml for Volumes an OwnerBinding owns: the binding carries the wish, the
-        // Volume is the agent's own object, and the qgroup limit follows on the Volume's next pass
-        // because a spec change is a new generation. A merge patch of that field alone — never a
-        // re-apply of the whole spec, which would revert anything else.
-        let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-        let patch = serde_json::json!({"spec": {"quotaGb": b.spec.home_quota_gb}});
-        api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
-    }
-    Ok(())
-}
-
 pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let gen = b.meta().generation.unwrap_or(0);
     let Some(owner_ref) = b.controller_owner_ref(&()) else {
@@ -148,7 +131,6 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         ensure(&bindings, &k8s::agent_secret_binding(&ns, owner, &owner_ref), ctx).await?;
         namespaces.push(ns);
     }
-    ensure_home(b, ctx).await?;
     write_binding_status(b, ctx, gen).await?;
     Ok(Action::await_change())
 }
@@ -161,9 +143,7 @@ pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Resul
         .is_some_and(|s| s.conditions.iter().any(|c| c.type_ == NAMESPACE_READY && c.status == "True")))
 }
 
-/// The owner's binding in this region, if any. Its existence is what a workspace stop reads when
-/// the home is not in the Volume store: a binding authors the home, so while one exists the home
-/// is coming and a stop without a push would be wrong.
+/// The owner's binding in this region, if any.
 pub async fn get_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<Option<crd::OwnerBinding>, ReconcileErr> {
     let api: Api<crd::OwnerBinding> = Api::all(ctx.client.clone());
     Ok(api.get_opt(&binding_name(region, owner)).await?)
