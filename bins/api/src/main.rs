@@ -15,32 +15,26 @@ use rustic_git_core::{require_jwt_secret_from_env, Result};
 use rustic_git_storage::config::{env, install_crypto_provider, open_store};
 use std::sync::Arc;
 
-/// The mongo-backed `Directory` wearing the three one-method traits the workspaces api asks for:
-/// team membership, the CLI-token revocation list (a token works only while its row stands, the
-/// same rule `crates/api`'s `user_identity` enforces), and the owner's `authorized_keys` for the
+/// The mongo-backed `Directory` wearing the workspaces api's own `Directory` trait: team
+/// membership, the CLI-token revocation list (a token works only while its row stands, the same
+/// rule `crates/api`'s `user_identity` enforces), and the owner's `authorized_keys` for the
 /// Secret every workspace's sshd reads. Kept here rather than in either crate so
 /// `rustic-git-workspaces` never needs a dependency on `rustic-git-pulls` just for these lookups.
 struct Dir(Arc<rustic_git_pulls::directory::Directory>);
 
 #[async_trait::async_trait]
-impl rustic_git_workspaces::api::MembershipCheck for Dir {
+impl rustic_git_workspaces::api::Directory for Dir {
     async fn teams_for(&self, user: &str) -> Vec<String> {
         self.0.slugs_for(user).await.unwrap_or_default()
     }
-}
 
-#[async_trait::async_trait]
-impl rustic_git_workspaces::api::CliTokenCheck for Dir {
     async fn is_live(&self, jti: &str) -> bool {
         matches!(
             self.0.credential(jti).await,
             Ok(Some(c)) if c.kind == rustic_git_pulls::directory::CredentialKind::CliToken
         )
     }
-}
 
-#[async_trait::async_trait]
-impl rustic_git_workspaces::api::AuthorizedKeys for Dir {
     async fn for_owner(&self, owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         let authorized_keys = rustic_git_api::authorized_keys_for(&self.0, owner)
             .await
@@ -134,10 +128,7 @@ async fn run() -> Result<()> {
             // So a new workspace comes up with the owner's platform-issued git key already mounted.
             state = state.with_keys(store.clone());
             if let Some(dir) = directory.clone() {
-                let dir = Arc::new(Dir(dir));
-                state = state.with_membership(dir.clone());
-                state = state.with_cli_tokens(dir.clone());
-                state = state.with_authorized_keys(dir);
+                state = state.with_directory(Arc::new(Dir(dir)));
             }
             // Snapshots live on the server tier, not in the cluster: a snapshot outlives the
             // workspace it was taken of, so the volume routes read the browse tier's
