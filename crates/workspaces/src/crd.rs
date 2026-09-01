@@ -41,15 +41,7 @@ pub const AGENT_FIELD_MANAGER: &str = "rustic-git-agent";
 /// controller has actually reclaimed the bytes — otherwise the record of what to reclaim is gone
 /// before the reclaim happens.
 pub const SUBVOLUME_FINALIZER: &str = "rustic-git.io/subvolume";
-/// Held while a `SnapshotRequest` may have work in flight.
-///
-/// Same reason `Volume` has one, and the reason the earlier "a plain delete, no finalizer" was
-/// wrong: that is true of a FINISHED request and false of a working one. A delete during
-/// `phase: working` leaves a btrfs RO snapshot, a stage file, an in-flight blob upload and a
-/// possible `POST /commits` with no object left to record the outcome in — and the Volume's own
-/// finalizer does not cover it, because a SnapshotRequest is deliberately not the Volume's child.
-pub const SNAPSHOT_FINALIZER: &str = "rustic-git.io/snapshot";
-/// Held on a Workspace only under `WS_COMMIT_MODEL=1` (Task 7a's F5 fix). A workspace that is a
+/// Held on a shared-volume clone workspace. A workspace that is a
 /// shared-volume clone (`spec.storage.source` is `CloneOf { commit: Some(_), .. }`) checks out a
 /// worktree under the SOURCE volume's `live/`, not its own — it owns no `Volume` child, so
 /// nothing's ownerReference GC ever reclaims that worktree. This finalizer is what makes the
@@ -667,70 +659,8 @@ pub struct OwnerBindingStatus {
     pub conditions: Vec<Condition>,
 }
 
-/// One push, as an object: the request the user made and, in status, what it produced.
-///
-/// A CR rather than the annotation it replaces, because a push is a wish WITH AN OUTCOME and an
-/// annotation has nowhere to put the outcome — the old design smuggled it into
-/// `Volume.status.lastPush.at` by echoing the request's timestamp back.
-///
-/// Deliberately NOT owned by the Volume: a snapshot outlives a deleted workspace, because the
-/// record it names still exists on the server tier. Deleting this object deletes no data — which
-/// is why the owning node reclaims a `done` one after `controller::SNAPSHOT_REQUEST_TTL`, and why
-/// nothing user-facing reads these as the list of snapshots.
-/// ponytail: no snapshot (record) deletion or retention yet; the GC sweep for blobs is unchanged.
-#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[kube(
-    group = "rustic-git.io",
-    version = "v1alpha1",
-    kind = "SnapshotRequest",
-    plural = "snapshotrequests",
-    shortname = "snap",
-    status = "SnapshotRequestStatus",
-    // NO `selectable`, deliberately. A node is a controller-owned fact and the API does not copy
-    // facts into spec: the node this runs on is the named Volume's `spec.nodeName`, which moves
-    // under node retirement and would go stale the instant it was copied here. Every agent watches
-    // every request and acts only on the ones whose Volume is its own.
-    // ponytail: every agent sees every request — two nodes today, so the fan-out is two. A
-    // `spec.volume`-indexed reflector is the upgrade if the request count ever makes this hot.
-    printcolumn = r#"{"name":"Volume","type":"string","jsonPath":".spec.volume"}"#,
-    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
-    printcolumn = r#"{"name":"Snapshot","type":"string","jsonPath":".status.snapshotId"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
-    derive = "PartialEq"
-)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotRequestSpec {
-    /// The `Volume` to snapshot, by name. The whole spec: everything else about a push is either a
-    /// fact a controller owns (the node) or an outcome (the record id).
-    pub volume: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotRequestStatus {
-    /// `pending` | `working` | `done` | `error`. A request is never re-run past `done`.
-    pub phase: Phase,
-    /// Mostly a "seen it" marker — the spec is immutable in practice, and `phase != done` is the
-    /// real idempotency guard. Present because every status in this group carries one, and a
-    /// reader who has to check per kind will eventually check wrong.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_generation: Option<i64>,
-    /// The registry commit record's id — the snapshot itself.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_tip: Option<String>,
-    /// RFC 3339, when the record landed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<Condition>,
-}
-
-/// The label a `SnapshotRequest` carries so `/v1/volumes/{id}/history` is one indexed list call
-/// rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
+/// The label a commit-model `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
+/// call rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
 /// authorization.
 pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
 
@@ -749,22 +679,6 @@ pub fn commit_labels(owner: &str, volume: &str) -> std::collections::BTreeMap<St
 /// watch only those instead of every push in the cluster. Also a view: the ownerReference is the
 /// link the mapper reads, and this label exists only because a watch cannot select on one.
 pub const STOP_LABEL: &str = "rustic-git.io/stop-of";
-
-/// A push, ready to `create`. Created and never patched: a request is immutable and its outcome
-/// lives in its own status, so a second push is a second OBJECT rather than a timestamp moving
-/// forward on a shared one — which is what the annotation it replaces could not express.
-///
-/// The finalizer is set at creation because the work can start on the very first reconcile; adding
-/// it later leaves a window where a delete during `working` orphans an in-flight `btrfs send`.
-pub fn snapshot_request(name: &str, owner: &str, volume: &str, message: Option<String>) -> SnapshotRequest {
-    let mut r = SnapshotRequest::new(name, SnapshotRequestSpec { volume: volume.to_string(), message });
-    r.metadata.finalizers = Some(vec![SNAPSHOT_FINALIZER.to_string()]);
-    r.metadata.labels = Some(std::collections::BTreeMap::from([
-        ("rustic-git.io/owner".to_string(), owner.to_string()),
-        (VOLUME_LABEL.to_string(), volume.to_string()),
-    ]));
-    r
-}
 
 /// Has the Volume already granted this exact wish?
 ///
@@ -871,7 +785,6 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Workspace::crd(),
         Environment::crd(),
         OwnerBinding::crd(),
-        SnapshotRequest::crd(),
         Snapshot::crd(),
         VolumeReplica::crd(),
     ]

@@ -979,9 +979,9 @@ fn node_dead_secs() -> i64 {
     std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
 }
 
-/// One pass of the puller — spawned beside `replicate_beat` in `controller.rs`, gated on
-/// `WS_COMMIT_MODEL=1` there. Inert without a peer secret too, same fail-closed rule every dial in
-/// this file follows: no secret, no authenticated GET to another node's root-run `btrfs send`.
+/// One pass of the puller — spawned beside `replicate_beat` in `controller.rs`. Inert without a
+/// peer secret, same fail-closed rule every dial in this file follows: no secret, no
+/// authenticated GET to another node's root-run `btrfs send`.
 pub async fn pull_beat(ctx: &Arc<Ctx>) {
     pull_beat_with(ctx, "btrfs").await
 }
@@ -989,9 +989,6 @@ pub async fn pull_beat(ctx: &Arc<Ctx>) {
 /// Split out so tests can point the receive half at a fake `btrfs` — same shape as
 /// `SendTo::btrfs_bin` on the send side.
 async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
-    if !ctx.commit_model {
-        return;
-    }
     let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
     if secret.is_empty() {
         return;
@@ -1766,21 +1763,6 @@ mod reconcile_tests {
 
     fn list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
-    }
-
-    /// `WS_COMMIT_MODEL` unset (or not `"1"`) must make the whole beat inert — no API call at
-    /// all, not even the reaper's node/replica listing.
-    #[tokio::test]
-    async fn pull_beat_is_inert_without_the_commit_model_flag() {
-        // `ctx.commit_model` defaults false here: `test_ctx` never sets `WS_COMMIT_MODEL` in the
-        // process env, so `Ctx::new`'s one-time read at construction sees it unset.
-        std::env::set_var("WS_PEER_SECRET", "s3cret");
-        let tmp = tempfile::tempdir().unwrap();
-        let (ctx, rec) = test_ctx(tmp.path(), "node-b", vec![]);
-
-        pull_beat_with(&ctx, "btrfs").await;
-
-        assert!(rec.calls().is_empty(), "inert without WS_COMMIT_MODEL=1: must touch nothing");
     }
 
     /// A `Snapshot`-list error must keep every local commit untouched and write no replica

@@ -188,8 +188,13 @@ until every node has run release 1.
 The 2026-09-01 change: `push` stops uploading a whole-tree delta to the object store and starts
 cutting a local btrfs commit (a `Snapshot` CR, `snap/{name}` under the volume) that replicates to
 other nodes as `VolumeReplica` rows — `crates/workspaces/src/engine/commit.rs`'s module doc and
-`crates/workspaces/src/crd.rs`'s `Snapshot`/`VolumeReplica` kinds are the design. `WS_COMMIT_MODEL=1`
-gates every bit of it; the code default stays OFF, so this is a yaml flip, not a code deploy.
+`crates/workspaces/src/crd.rs`'s `Snapshot`/`VolumeReplica` kinds are the design. This was gated
+behind `WS_COMMIT_MODEL=1` through the cutover; as of Task 8 the flag and the object-store path it
+guarded are both deleted outright — the commit model is the only model, unconditionally, in every
+build from here on. **The kill switch described below is therefore gone too: past this point,
+rollback to the object-store push path is a VERSION rollback (redeploy an older image), not a
+config flip** — there is no runtime toggle to catch a bad rollout, so verify a commit-model change
+on a canary node before rolling the fleet.
 
 Order:
 
@@ -198,12 +203,11 @@ Order:
 #    watches filter on. Already applied on dev; harmless to re-apply.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
-# 2. Roll the agent with WS_COMMIT_MODEL=1 (already the default in agent-daemonset.yaml as of
-#    this task — repin the image tag to the SHA CI built, then apply and wait).
+# 2. Roll the agent (repin the image tag to the SHA CI built, then apply and wait).
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml
 KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/rustic-git-agent -n kube-system
 
-# 3. Then the API tier (rustic-git.yaml, same WS_COMMIT_MODEL=1) — deploy/roll.sh applies it.
+# 3. Then the API tier (rustic-git.yaml) — deploy/roll.sh applies it.
 deploy/roll.sh
 kubectl rollout status deploy/rustic-git-api -n rustic-git
 ```
@@ -236,18 +240,19 @@ kubectl get volumereplicas                      # Synced on every node the volum
 kubectl get workspace <id> -o jsonpath='{.status.head}'   # a commit name once it's pushed or migrated
 ```
 
-**The kill switch is one-directional once anything has migrated — this is the sentence that
-matters.** Unsetting `WS_COMMIT_MODEL` (or setting it back to `"0"`) and rolling back is a clean,
-safe rollback ONLY for a volume that has never been claimed under the flag — nothing on its disk
-changed, and old code still finds `live` as the single subvolume it expects. For a volume that HAS
-migrated, `live` is now a DIRECTORY (`live/{id}`), and old code mounts `{pool}/vol/{id}/live`
-verbatim — it would mount the directory *containing* the worktree, not the worktree itself, which
-is wrong data, not a clean failure. Past that point, rollback is forward-only: either accept the
-commit model for volumes that have already moved (turn the flag back on), or manually undo the
-migration per volume with the exact inverse of `Engine::migrate_volume`:
+**There is no kill switch any more (Task 8) — this is the sentence that matters.** Before Task 8,
+unsetting `WS_COMMIT_MODEL` (or setting it back to `"0"`) rolled back cleanly ONLY for a volume
+that had never migrated; a volume that HAD migrated (`live` moved from the single old subvolume to
+the `live/{id}` worktree directory) could not roll back at all without manually undoing the move —
+old code mounting `{pool}/vol/{id}/live` verbatim on a migrated volume mounts the directory
+*containing* the worktree, not the worktree itself, which is wrong data, not a clean failure. That
+whole flag-off code path is deleted now, so there is nothing left to flip back to: every volume is
+on the commit-model layout (migrated lazily, the first time it's claimed on a node, same as
+before), and the ONLY way back is a version rollback to a pre-Task-8 image, which then needs the
+exact inverse of `Engine::migrate_volume` run by hand on any volume that has since migrated:
 
 ```sh
-# On the node holding the volume, with its pod stopped and WS_COMMIT_MODEL off for this volume:
+# On the node holding the volume, with its pod stopped, running a pre-Task-8 image:
 mv {pool}/vol/{id}/live/{id} {pool}/vol/{id}/live-migrating
 rmdir {pool}/vol/{id}/live
 mv {pool}/vol/{id}/live-migrating {pool}/vol/{id}/live

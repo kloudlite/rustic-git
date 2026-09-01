@@ -197,13 +197,6 @@ spec:
             # listener only starts when WS_PEER_SECRET (below) is non-empty — see peer.rs.
             - name: WS_PEER_ADDR
               value: 0.0.0.0:8444
-            # Cutover (Task 7b): the commit model is now the default. Volumes claimed under this
-            # flag migrate their layout lazily, one at a time, the first time they're claimed on a
-            # node (`migrate_and_seed_baseline` in controller.rs) — nothing on the pool is touched
-            # until then. Unsetting this (or setting "0") is the kill switch, but see the cutover
-            # runbook in README.md: it's a clean rollback only BEFORE any volume has migrated.
-            - name: WS_COMMIT_MODEL
-              value: "1"
           envFrom:
             # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its

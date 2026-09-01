@@ -104,22 +104,22 @@ impl Engine {
     /// line existed has none. That is not the volume's fault, so it is not an `Err` — the caller
     /// surfaces it as a condition and the volume stays usable, unenforced, until an operator
     /// enables quotas on the pool. Level-triggered: the next reconcile re-applies.
-    /// `commit_model`: btrfs qgroups are per-SUBVOLUME, and under the commit model `live` is a
-    /// directory of worktree subvolumes (`Pool::worktree`), not one subvolume — there is no
-    /// single tree to limit any more. RULING (Task 7a, the spec's open quota question): apply the
-    /// volume's `quota_gb` to EACH worktree subvolume individually, same number per tree. Not
-    /// billing-exact for shared extents across worktrees of the same volume (CoW shares don't
-    /// double-count in a qgroup's exclusive counter anyway, so this undercounts if anything), but
-    /// it caps runaway growth from any one worktree, which is what the limit is for.
-    pub fn set_quota(&self, id: &str, quota_gb: u64, commit_model: bool) -> Result<Option<String>, EngErr> {
+    /// btrfs qgroups are per-SUBVOLUME, and `live` is a directory of worktree subvolumes
+    /// (`Pool::worktree`) once a volume is migrated, not one subvolume — there is no single tree
+    /// to limit any more. RULING (Task 7a, the spec's open quota question): apply the volume's
+    /// `quota_gb` to EACH worktree subvolume individually, same number per tree. Not billing-exact
+    /// for shared extents across worktrees of the same volume (CoW shares don't double-count in a
+    /// qgroup's exclusive counter anyway, so this undercounts if anything), but it caps runaway
+    /// growth from any one worktree, which is what the limit is for.
+    pub fn set_quota(&self, id: &str, quota_gb: u64) -> Result<Option<String>, EngErr> {
         let live = self.pool.live(id);
-        // Mixed-state pool: a volume can be commit_model-eligible but not yet MIGRATED — `live`
-        // is still the old single subvolume, not a directory of worktrees. Descending into it as
-        // a worktree directory would `read_dir` straight into the user's own files and qgroup-
-        // limit each one, which fails (a plain file/dir is not a subvolume) into "unenforced" —
-        // silently uncapping the volume. The layout is decided by what's actually on disk, not by
-        // the flag alone: `is_subvolume` is the same "root inode 256" check btrfs itself uses.
-        if commit_model && !is_subvolume(&live) {
+        // Mixed-state pool: a volume can be not yet MIGRATED — `live` is still the old single
+        // subvolume, not a directory of worktrees. Descending into it as a worktree directory
+        // would `read_dir` straight into the user's own files and qgroup-limit each one, which
+        // fails (a plain file/dir is not a subvolume) into "unenforced" — silently uncapping the
+        // volume. The layout is decided by what's actually on disk: `is_subvolume` is the same
+        // "root inode 256" check btrfs itself uses.
+        if !is_subvolume(&live) {
             return self.set_quota_worktrees(id, quota_gb);
         }
         if !live.exists() {

@@ -12,8 +12,7 @@
 #                                                                       re-read; check_source
 #                                          patch                        heal_labels (metadata.labels
 #                                                                       ONLY — see the admission
-#                                                                       policy); workspaces only,
-#                                                                       under WS_COMMIT_MODEL=1:
+#                                                                       policy); workspaces only:
 #                                                                       reconcile_workspace's
 #                                                                       finalizer (metadata.
 #                                                                       finalizers) on a shared-

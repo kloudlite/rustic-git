@@ -31,12 +31,12 @@ struct CommitPlacement {
 /// `cloneOf` is the exception the spec calls out: the new object holds nothing, but a local clone
 /// needs the SOURCE's disk, so the source's memory decides.
 ///
-/// `commit` is `Some` only under `WS_COMMIT_MODEL=1` (and only once a `cloneOf` source has not
-/// already decided it): rulings A+B from the task brief replace the `compatibleNodes` check
-/// entirely in that case — a volume with no commits yet is the bootstrap case, claimable by any
-/// node; once it has commits, only a node whose `VolumeReplica` reports `Synced` may claim (which
-/// also means a volume with commits but no Synced replica anywhere is left unplaced, on purpose —
-/// every node's own `decide` reaches this same `false`).
+/// `commit` is `Some` once a `cloneOf` source has not already decided it: rulings A+B from the
+/// task brief replace the `compatibleNodes` check entirely in that case — a volume with no
+/// commits yet is the bootstrap case, claimable by any node; once it has commits, only a node
+/// whose `VolumeReplica` reports `Synced` may claim (which also means a volume with commits but
+/// no Synced replica anywhere is left unplaced, on purpose — every node's own `decide` reaches
+/// this same `false`).
 fn may_claim(me: &str, compatible: &[String], source_compatible: Option<&[String]>, commit: Option<&CommitPlacement>) -> bool {
     if let Some(src) = source_compatible {
         return src.iter().any(|n| n == me);
@@ -160,13 +160,8 @@ async fn decide(
         return Ok(None);
     }
     let src = source_nodes(ctx, storage_source(storage)).await?;
-    // Fetched only when the flag is on and there is no cloneOf source: a cloneOf's own arm never
-    // needs it, and inert-until-enabled means no extra API traffic while the flag is off.
-    let commit = if src.is_none() && ctx.commit_model {
-        Some(commit_placement(ctx, volume).await?)
-    } else {
-        None
-    };
+    // Fetched only when there is no `cloneOf` source: a cloneOf's own arm never needs it.
+    let commit = if src.is_none() { Some(commit_placement(ctx, volume).await?) } else { None };
     if !may_claim(&ctx.node, compatible, src.as_deref(), commit.as_ref()) {
         return Ok(None);
     }

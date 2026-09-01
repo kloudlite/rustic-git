@@ -86,7 +86,17 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
 /// test can reach the node's real `/nix` and none of them race each other over it.
-fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+fn ctx_full(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+    // Every reconcile now unconditionally may ask "does this volume have commits yet"
+    // (`claim::commit_placement`/`has_commits`, the checkout/migrate step) — a call no test fixture
+    // needed before the commit model became the only model (Task 8). Appended AFTER the caller's
+    // own routes, so a test that mocks its own `/snapshots` response (exact history, retention,
+    // …) still hits that one first; this is only the default "nothing here yet" answer for every
+    // test that never cared about snapshots at all.
+    routes.push(rustic_git_workspaces::kube_test::get(
+        "/apis/rustic-git.io/v1alpha1/snapshots",
+        serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": []}),
+    ));
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
@@ -366,17 +376,6 @@ async fn an_unplaced_workspace_is_claimed_with_one_optimistic_status_write() {
     );
 }
 
-/// `compatibleNodes` is the memory: a node not listed must leave the object alone so a listed one
-/// can take it. Nothing today writes more than one entry, and nothing may assume that.
-#[tokio::test]
-async fn a_node_outside_compatible_nodes_does_not_claim() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![]);
-    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "compatibleNodes": ["node-b"]}));
-
-    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
-    assert!(rec.calls().is_empty(), "a node that does not hold the disk writes nothing: {:?}", rec.calls());
-}
 
 /// An owner's namespaces are built only on the node their `OwnerBinding` names, so a fresh object
 /// claimed anywhere else creates pods into a namespace that never exists. The binding, when there
@@ -507,7 +506,7 @@ async fn a_clone_is_claimed_only_where_its_source_lives() {
     );
 }
 
-// ── commit-model placement (WS_COMMIT_MODEL=1) ──────────────────────────────
+// ── commit-model placement ──────────────────────────────────────────────
 
 const SNAPSHOTS_LIST: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
 
@@ -533,14 +532,6 @@ fn volume_replica(volume: &str, node: &str, phase: &str) -> serde_json::Value {
     })
 }
 
-/// F3: `commit_model` lives on `Ctx`, not process env — flipping a global for the life of a test
-/// leaked across the parallel suite and flaked it. `Arc::get_mut` is sound here because this runs
-/// the instant after `Arc::new` inside `ctx()`, before any clone exists.
-fn commit_model_on(mut ctx: std::sync::Arc<rustic_git_agent::controller::Ctx>) -> std::sync::Arc<rustic_git_agent::controller::Ctx> {
-    std::sync::Arc::get_mut(&mut ctx).expect("sole owner right after ctx()").commit_model = true;
-    ctx
-}
-
 /// A workspace whose volume already has commits and whose replica on THIS node reports Synced is
 /// claimed exactly like the old `compatibleNodes` arm — ruling A.
 #[tokio::test]
@@ -558,7 +549,6 @@ async fn commit_model_a_synced_replica_claims_a_workspace_with_commits() {
             binding_route(),
         ],
     );
-    let ctx = commit_model_on(ctx);
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
 
     rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
@@ -580,7 +570,6 @@ async fn commit_model_a_syncing_replica_does_not_claim_a_workspace_with_commits(
             )),
         ],
     );
-    let ctx = commit_model_on(ctx);
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
 
     rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
@@ -600,7 +589,6 @@ async fn commit_model_a_zero_commit_volume_is_claimable_as_bootstrap() {
             binding_route(),
         ],
     );
-    let ctx = commit_model_on(ctx);
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
 
     rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
@@ -619,7 +607,6 @@ async fn commit_model_a_workspace_with_no_volume_yet_is_claimable_as_bootstrap()
             binding_route(),
         ],
     );
-    let ctx = commit_model_on(ctx);
 
     rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
     assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1);
@@ -664,7 +651,6 @@ async fn f4_a_snapshot_list_error_claims_nothing() {
         tmp.path(),
         vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }],
     );
-    let ctx = commit_model_on(ctx);
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
 
     let result = rustic_git_agent::claim::claim_workspace(&w, &ctx).await;
@@ -690,7 +676,6 @@ async fn f4_a_volume_replica_get_error_claims_nothing() {
             },
         ],
     );
-    let ctx = commit_model_on(ctx);
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
 
     let result = rustic_git_agent::claim::claim_workspace(&w, &ctx).await;
@@ -713,7 +698,10 @@ async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
         body: commit_list_of("Snapshot", vec![snapshot_cr("ws-1-a", "ws-1")]),
     });
     let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
+    // `ws_ctx_with_ssh` pre-seeds an empty worktree so tests that expect a normal checkout don't
+    // need real btrfs; THIS test's whole point is that no checkout may happen at all, so undo
+    // that seeding before exercising it.
+    std::fs::remove_dir_all(tmp.path().join("vol/ws-1/live/ws-1")).unwrap();
 
     let action = rustic_git_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
 
@@ -746,7 +734,6 @@ async fn a_clone_reconcile_adds_the_worktree_finalizer() {
     let tmp = tempfile::tempdir().unwrap();
     let route = Route { method: "PATCH", path: WS_CLONE_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-src"})) };
     let (ctx, rec) = ctx(tmp.path(), vec![route]);
-    let ctx = commit_model_on(ctx);
 
     rustic_git_agent::controller::reconcile_workspace(Arc::new(clone_workspace()), ctx).await.unwrap();
 
@@ -764,7 +751,6 @@ async fn an_owned_workspace_reconcile_does_not_add_the_finalizer() {
     routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
     let (ctx, rec) = ctx(tmp.path(), routes);
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
-    let ctx = commit_model_on(ctx);
     let mut w = stopping_ws();
     w.status.as_mut().unwrap().pod_ref = None;
     assert!(w.spec.storage.as_ref().and_then(|s| s.source.as_ref()).is_none());
@@ -787,7 +773,6 @@ async fn a_deleting_clones_reconcile_drops_its_worktree_then_removes_the_finaliz
     std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
     let route = Route { method: "PATCH", path: WS_CLONE_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-src"})) };
     let (ctx, rec) = ctx(tmp.path(), vec![route]);
-    let ctx = commit_model_on(ctx);
     let mut w = clone_workspace();
     w.metadata.finalizers = Some(vec![crd::WORKTREE_FINALIZER.to_string()]);
     w.metadata.deletion_timestamp =
@@ -798,16 +783,16 @@ async fn a_deleting_clones_reconcile_drops_its_worktree_then_removes_the_finaliz
     assert_eq!(rec.sent("PATCH", WS_CLONE_OBJ).len(), 1, "the finalizer-remove patch");
 }
 
-/// (iv) Flag OFF, but the object still carries a finalizer left by an earlier commit_model pass
-/// (a rollback) and is deleting: `reconcile_workspace` must still enter the wrapper — the guard is
-/// "nothing to add AND nothing to remove", not "flag off" alone — run the no-op Cleanup arm, and
-/// remove the finalizer, or the object is stranded in Terminating forever.
+/// (iv) A non-clone workspace that still carries a finalizer left by an earlier pass (a rollback,
+/// or a respec away from `cloneOf`) and is deleting: `reconcile_workspace` must still enter the
+/// wrapper — the guard is "nothing to add AND nothing to remove", not "not a clone" alone — run
+/// the no-op-on-disk Cleanup arm (`cleanup_workspace_worktree` skips anything that isn't a shared
+/// clone), and remove the finalizer, or the object is stranded in Terminating forever.
 #[tokio::test]
-async fn a_flag_off_reconcile_of_an_already_finalized_deleting_workspace_removes_it() {
+async fn a_reconcile_of_an_already_finalized_deleting_non_clone_workspace_removes_it() {
     let tmp = tempfile::tempdir().unwrap();
     let route = Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) };
     let (ctx, rec) = ctx(tmp.path(), vec![route]);
-    // commit_model deliberately left OFF.
     let mut w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"}));
     w.metadata.finalizers = Some(vec![crd::WORKTREE_FINALIZER.to_string()]);
     w.metadata.deletion_timestamp =
@@ -815,7 +800,7 @@ async fn a_flag_off_reconcile_of_an_already_finalized_deleting_workspace_removes
 
     rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
 
-    assert_eq!(rec.sent("PATCH", WS_1_OBJ).len(), 1, "the finalizer-remove patch, even with the flag off");
+    assert_eq!(rec.sent("PATCH", WS_1_OBJ).len(), 1, "the finalizer-remove patch");
 }
 
 fn env_json(status: serde_json::Value) -> serde_json::Value {
@@ -1328,7 +1313,6 @@ fn test_pod_ctx() -> rustic_git_workspaces::k8s::PodContext<'static> {
             block_owner_deletion: Some(true),
         },
         runtime_class: None,
-        commit_model: false,
     }
 }
 
@@ -1345,6 +1329,9 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
                  "source": {"gitRepo": {"repo": "https://evil.example.com/x", "branch": "main"}}},
         "status": {"phase": "ready", "subvolumePresent": true}
     });
+    // The commit-model checkout step runs before this gate is ever reached; pre-seed an empty
+    // worktree so it converges on `WORKTREE_EXISTS` instead of shelling to a real `btrfs`.
+    std::fs::create_dir_all(tmp.path().join("vol/ws-1/live/ws-1")).unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
@@ -2031,6 +2018,10 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
         ),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ]);
+    // The commit-model checkout step is unconditional now (Task 8): pre-seed an empty worktree
+    // so `Engine::checkout` converges on `WORKTREE_EXISTS` instead of shelling out to a real
+    // `btrfs subvolume create` this test environment doesn't have.
+    std::fs::create_dir_all(pool.join("vol/ws-1/live/ws-1")).unwrap();
     let (ctx, rec) = ctx_full(pool, routes, fake.clone());
     // The pod mounts the owner's home, so the Running arm waits for it to be Ready here.
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
@@ -2560,7 +2551,6 @@ async fn home_commit_beat_creates_a_root_snapshot_when_none_exist() {
         rustic_git_workspaces::kube_test::post(SNAPSHOTS_LIST, snapshot_cr("home-alice-x", "home-alice")),
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
 
     rustic_git_agent::controller::home_commit_beat_one(&ctx, &v, "home-alice").await;
@@ -2585,7 +2575,6 @@ async fn home_commit_beat_chains_the_new_snapshot_onto_the_newest_ready_one() {
         rustic_git_workspaces::kube_test::post(SNAPSHOTS_LIST, snapshot_cr("home-alice-new", "home-alice")),
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
 
     rustic_git_agent::controller::home_commit_beat_one(&ctx, &v, "home-alice").await;
@@ -2606,7 +2595,6 @@ async fn home_commit_beat_migrates_a_quiescent_home_even_when_not_due() {
     let tmp = tempfile::tempdir().unwrap();
     let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) }];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
     ctx.remember_volume(v);
 
@@ -2994,7 +2982,7 @@ async fn a_workspace_gets_its_pod_once_ready() {
     );
 }
 
-/// `WS_COMMIT_MODEL=1`: a workspace whose `live/{id}` worktree already exists on this node (a
+/// A workspace whose `live/{id}` worktree already exists on this node (a
 /// re-reconcile after an earlier pass materialized it, or a pod restarting on the same disk)
 /// converges through `WORKTREE_EXISTS` rather than erroring — the pass still reaches the pod, so
 /// materialization never blocks a workspace whose worktree is already there. Real btrfs is not
@@ -3007,7 +2995,6 @@ async fn commit_model_checkout_converges_on_an_existing_worktree() {
     let mut routes = ssh_routes();
     routes.push(Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) });
     let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
 
     apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
 
@@ -3017,7 +3004,7 @@ async fn commit_model_checkout_converges_on_an_existing_worktree() {
     );
 }
 
-/// `WS_COMMIT_MODEL=1`, the environment side of the same bootstrap: Task 4 wired the checkout arm
+/// The environment side of the same bootstrap: Task 4 wired the checkout arm
 /// into `apply_workspace` only and left the Environment path to this task (`run_environment`'s
 /// twin block, added beside `apply_workspace`'s). Same convergence trick as the workspace test
 /// above — the `live/{id}` worktree already exists, so `Engine::checkout` converges through
@@ -3034,7 +3021,6 @@ async fn commit_model_environment_bootstrap_materializes_its_worktree() {
         Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
 
     // The pass runs past the Namespace `ensure` call and then fails on the next unmocked route
@@ -3118,7 +3104,6 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     let w = cloned_workspace("ws-src-aaaaaaaa", None);
 
@@ -3149,7 +3134,6 @@ async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     let w = cloned_workspace("ws-src-gone", None);
 
@@ -3175,7 +3159,6 @@ async fn commit_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     let w = cloned_workspace("ws-src-aaaaaaaa", Some("ws-1-own-commit"));
 
     let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
@@ -3186,10 +3169,10 @@ async fn commit_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
     assert!(rec.sent("PATCH", WS_STATUS).iter().all(|s| s["status"]["head"] != "ws-src-aaaaaaaa"));
 }
 
-/// Restore-in-place under the flag never touches the registry (`get_history`/`restore`'s HTTP
-/// calls) — the checkout-swap branch (`Engine::swap_worktree`) is entirely local. Real btrfs is
-/// unavailable in this test environment, so the swap itself errors past the point this asserts;
-/// the point is which BRANCH ran; `volume_work`'s `commit_model` flag is what decides it.
+/// Restore-in-place never touches the registry (the old `get_history`/`restore` HTTP calls, gone
+/// with the object-store subsystem) — the checkout-swap (`Engine::swap_worktree`) is entirely
+/// local. Real btrfs is unavailable in this test environment, so the swap itself errors past the
+/// point this asserts; the point is that nothing here ever reaches for a network call.
 #[tokio::test]
 async fn commit_model_restore_in_place_never_calls_the_registry() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3204,7 +3187,6 @@ async fn commit_model_restore_in_place_never_calls_the_registry() {
         Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/env-1/status".into(), status: 200, body: vol.clone() },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let ctx = commit_model_on(ctx);
     let v: crd::Volume = serde_json::from_value(vol).unwrap();
 
     let _ = rustic_git_agent::controller::apply_volume(&v, &ctx).await;

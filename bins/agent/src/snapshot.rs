@@ -64,12 +64,8 @@ async fn worktree_node(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<O
     Ok(None)
 }
 
-/// The reconciler for the new `Snapshot` kind, gated on `ctx.commit_model` — inert until Task
-/// 7's cutover, same as every other commit-model arm.
+/// The reconciler for the `Snapshot` kind.
 pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    if !ctx.commit_model {
-        return Ok(Action::await_change());
-    }
     // `Ready` is immutable (module doc on `SnapshotSpec`), and anything but `Working` has either
     // already been cut or is a transient shape nothing here produces — no-op either way.
     let phase = s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending);
@@ -299,14 +295,10 @@ mod commit_tests {
         }
     }
 
-    /// `commit_model` on, unconditionally — every test in this module is exercising the new
-    /// `Snapshot` kind, so there is no "flag off" case to cover here (that lives beside the
-    /// checkout guard in `bins/agent/tests/reconcile.rs`).
     fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
         let (client, rec) = mock_client(routes);
         let engine = Engine::new(EnginePool::new(pool));
         std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
-        std::env::set_var("WS_COMMIT_MODEL", "1");
         let ctx = Ctx::new(
             client,
             Arc::new(engine),

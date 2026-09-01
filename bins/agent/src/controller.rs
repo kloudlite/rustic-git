@@ -120,11 +120,6 @@ pub struct Ctx {
     /// A converged parent reconciles on every child event and re-applied ~10 objects each time;
     /// an apply whose body has not changed is skipped. See `ensure` for the ceiling.
     pub applied: Mutex<HashMap<String, (u64, std::time::Instant)>>,
-    /// `WS_COMMIT_MODEL=1`, read ONCE at construction. A field, not a live env read, so every
-    /// commit-model gate in this crate agrees on the same value for the life of the process and a
-    /// test can flip it on `Ctx` directly instead of mutating process-global env — the mutation
-    /// was flaking the suite when tests ran in parallel (F3).
-    pub commit_model: bool,
 }
 
 impl Ctx {
@@ -150,7 +145,6 @@ impl Ctx {
             volumes,
             volume_writer: Mutex::new(Some(volume_writer)),
             applied: Mutex::new(HashMap::new()),
-            commit_model: std::env::var("WS_COMMIT_MODEL").ok().as_deref() == Some("1"),
             wake_volume,
             wake_workspace,
             wakes: Mutex::new(Some((vol_rx, ws_rx))),
@@ -538,9 +532,7 @@ fn spawn_replicate(ctx: Arc<Ctx>) {
     });
 }
 
-/// The commit model's puller: its own beat, same interval and tick shape as `spawn_replicate` —
-/// `pull_beat` itself is the inert-until-`WS_COMMIT_MODEL=1` gate, so this always spawns and costs
-/// nothing until the cutover flag is set.
+/// The commit model's puller: its own beat, same interval and tick shape as `spawn_replicate`.
 fn spawn_pull(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(crate::peer::replica_interval());
@@ -592,7 +584,7 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
     rt.block_on(home_commit_beat(ctx, &due_ids));
 }
 
-/// Every ready home, every pass, under commit_model (Task 7c, H3): the migrate half of
+/// Every ready home, every pass (Task 7c, H3): the migrate half of
 /// `migrate_and_seed_baseline` runs for ALL of them unconditionally — a quiescent home must not
 /// sit on the old layout forever, since two layouts on the fleet at once makes `home_volume`'s
 /// (k8s.rs) hostPath choice unpredictable. Only the CR-cut is gated on `due` (generation moved).
@@ -851,9 +843,8 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let materialize = !observed && restore.is_none();
     let quota_gb = v.spec.quota_gb;
     let home = crd::is_home_volume(v);
-    let commit_model = ctx.commit_model;
     let handle = tokio::task::spawn_blocking(move || {
-        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home, commit_model })
+        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home })
     });
     let handle = wake_on_finish(
         handle,
@@ -896,13 +887,10 @@ pub struct Work {
     pub restore: Option<crd::RestoreWish>,
     pub quota_gb: u64,
     pub home: bool,
-    /// Whether an in-place restore is a checkout-swap (this volume's own worktree, from a local
-    /// `Snapshot` CR) rather than a registry fetch — see `swap_worktree`.
-    pub commit_model: bool,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner: _, source, materialize, restore, quota_gb, home, commit_model } = w;
+    let Work { id, owner: _, source, materialize, restore, quota_gb, home } = w;
     let id = id.as_str();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
@@ -952,7 +940,7 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         // plain quota edit too (a spec change is a new generation, which is a materialize pass
         // that finds `live` already there). Per subvolume, so a restore's fresh `live` would
         // otherwise come up uncapped.
-        let quota_unenforced = engine.set_quota(id, quota_gb, commit_model).map_err(|e| e.to_string())?;
+        let quota_unenforced = engine.set_quota(id, quota_gb).map_err(|e| e.to_string())?;
         Ok(Done {
             phase: Phase::Ready,
             lineage_tip: None,
@@ -1364,7 +1352,7 @@ where
     // this reads the Volume itself, which is what placement (`claim::source_nodes`) already
     // pinned this parent's node to.
     let shared = match &s.source {
-        Some(VolumeSource::CloneOf { volume, commit: Some(_) }) if ctx.commit_model => {
+        Some(VolumeSource::CloneOf { volume, commit: Some(_) }) => {
             let vols: Api<crd::Volume> = Api::all(ctx.client.clone());
             Some(vols.get_opt(volume).await?)
         }
@@ -1926,25 +1914,17 @@ fn has_worktree_finalizer(w: &crd::Workspace) -> bool {
     w.metadata.finalizers.as_ref().is_some_and(|fs| fs.iter().any(|f| f == crd::WORKTREE_FINALIZER))
 }
 
-/// `WORKTREE_FINALIZER` is added ONLY to a shared-volume clone, and only under commit_model — an
-/// owned workspace, or any workspace with the flag off, never grows one. But a finalizer already
-/// present (added by an earlier commit_model pass, now rolled back, or a clone whose spec no
-/// longer reads as one) must still be REMOVABLE with the flag off or the clone-ness gone: a
-/// short-circuit that skipped the wrapper whenever `!commit_model` would strand every such
-/// object in Terminating forever the moment someone deletes it after a rollback. So the guard is
-/// "nothing to add AND nothing to remove", not just "flag off".
+/// `WORKTREE_FINALIZER` is added ONLY to a shared-volume clone — an owned workspace never grows
+/// one. A finalizer already present from before this workspace's spec stopped reading as a
+/// shared clone (a rollback, or a respec) must still be REMOVABLE: the guard is "nothing to add
+/// AND nothing to remove", not just "not a clone".
 pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    let should_carry = ctx.commit_model && is_shared_clone(&w);
-    if !should_carry && !has_worktree_finalizer(&w) {
+    if !is_shared_clone(&w) && !has_worktree_finalizer(&w) {
         return apply_workspace(&w, &ctx).await;
     }
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    let commit_model = ctx.commit_model;
     finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {
         match event {
-            // Flag off: never touch the disk, just let the combinator strip the leftover
-            // marker so the object can finish deleting.
-            FinalizerEvent::Cleanup(_) if !commit_model => Ok(Action::await_change()),
             FinalizerEvent::Cleanup(w) => cleanup_workspace_worktree(&w, &ctx).await,
             FinalizerEvent::Apply(w) => apply_workspace(&w, &ctx).await,
         }
@@ -1954,8 +1934,7 @@ pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Resul
 }
 
 /// F5: drop a shared-volume clone's worktree on delete — the only thing that ever reclaims it
-/// (see `is_shared_clone`'s doc comment). Called from `reconcile_workspace`'s finalizer only when
-/// commit_model is on, so this never runs for the flag-off no-op cleanup.
+/// (see `is_shared_clone`'s doc comment).
 pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     if is_shared_clone(w) {
         // `volumeRef` names the SOURCE volume (see `resolve_volume`'s `shared` arm); the worktree
@@ -1971,7 +1950,7 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
     Ok(Action::await_change())
 }
 
-/// Cutover, Task 7b: a volume claimed on this node under `WS_COMMIT_MODEL=1` may still be on the
+/// Task 7b: a volume claimed on this node may still be on the
 /// OLD layout (`live` itself is the single RW subvolume, pre-dating this whole feature) — the
 /// pod that's about to mount it needs `live/{volume}` instead. `Engine::migrate_volume` does the
 /// physical rename and returns `true` only the one time it actually moved anything; that's the
@@ -2130,96 +2109,94 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // those lands, `head == None` is ambiguous between "genuinely bootstrap" and "this workspace's
     // own head just has not been recorded yet" — the guard below tells the two apart the same way
     // the claim itself does, by asking whether the VOLUME has any commits at all.
-    if ctx.commit_model {
-        // Lazy per-volume migration, before anything mounts (the pod must be recreated to pick up
-        // the new path, same as the hostpath cutover) — a no-op every pass after the first.
-        migrate_and_seed_baseline(ctx, &id, &w.spec.owner).await?;
-        // A clone pinned to a commit already knows its head — grafted by the API at clone time,
-        // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
-        // the source's real history, even on the very first pass.
-        let clone_commit = w
-            .spec
-            .storage
-            .as_ref()
-            .and_then(|s| s.source.as_ref())
-            .and_then(|src| match src {
-                VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
-                _ => None,
-            });
-        let effective_head = prev.head.clone().or_else(|| clone_commit.map(str::to_string));
-        if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
-            // F2 guard: the volume has commits but this workspace's own `head` is still `None` —
-            // checking out `None` here would hand it an EMPTY worktree next to real history,
-            // which is the never-started-dataless bug in worktree form. Wait for Task 5/6 to
-            // write a real head instead of guessing one; zero-commit volumes never reach this arm
-            // (`has_commits` is false), so bootstrap is untouched.
-            let st = crd::WorkspaceStatus {
-                phase: crd::Phase::Creating,
-                observed_generation: None,
-                volume_ref: Some(id.clone()),
-                conditions: ws_conditions(
-                    &prev,
-                    crd::condition("Ready", false, "HeadUnknown", "volume has commits but this workspace has no recorded head yet", gen),
-                ),
-                ..prev
-            };
-            write_ws_status(w, st, ctx).await?;
-            return Ok(Action::requeue(TICK));
+    // Lazy per-volume migration, before anything mounts (the pod must be recreated to pick up
+    // the new path, same as the hostpath cutover) — a no-op every pass after the first.
+    migrate_and_seed_baseline(ctx, &id, &w.spec.owner).await?;
+    // A clone pinned to a commit already knows its head — grafted by the API at clone time,
+    // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
+    // the source's real history, even on the very first pass.
+    let clone_commit = w
+        .spec
+        .storage
+        .as_ref()
+        .and_then(|s| s.source.as_ref())
+        .and_then(|src| match src {
+            VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
+            _ => None,
+        });
+    let effective_head = prev.head.clone().or_else(|| clone_commit.map(str::to_string));
+    if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+        // F2 guard: the volume has commits but this workspace's own `head` is still `None` —
+        // checking out `None` here would hand it an EMPTY worktree next to real history,
+        // which is the never-started-dataless bug in worktree form. Wait for Task 5/6 to
+        // write a real head instead of guessing one; zero-commit volumes never reach this arm
+        // (`has_commits` is false), so bootstrap is untouched.
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            volume_ref: Some(id.clone()),
+            conditions: ws_conditions(
+                &prev,
+                crd::condition("Ready", false, "HeadUnknown", "volume has commits but this workspace has no recorded head yet", gen),
+            ),
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
+    // A clone naming a commit that retention has since swept is wrong forever, not
+    // transient: retrying at TICK would spin on the same missing snapshot until someone
+    // notices, so this settles Permanent with its own reason distinct from a bad clone
+    // SOURCE (`NoSuchSource`, settled earlier in `resolve_volume`/`check_source`).
+    if let Some(commit) = clone_commit {
+        if prev.head.is_none() && !crate::claim::commit_ready(ctx, &id, commit).await? {
+            let prev = prev.clone();
+            let vref = id.clone();
+            return settle(
+                Outcome::Permanent(format!("clone commit {commit} is not a ready snapshot of volume {id}"), "NoSuchCommit"),
+                w,
+                "Workspace",
+                gen,
+                move |cond| {
+                    serde_json::json!({
+                        "phase": crd::Phase::Error,
+                        "volumeRef": vref,
+                        "conditions": ws_conditions(&prev, cond),
+                    })
+                },
+                ctx,
+            )
+            .await;
         }
-        // A clone naming a commit that retention has since swept is wrong forever, not
-        // transient: retrying at TICK would spin on the same missing snapshot until someone
-        // notices, so this settles Permanent with its own reason distinct from a bad clone
-        // SOURCE (`NoSuchSource`, settled earlier in `resolve_volume`/`check_source`).
+    }
+    // `WORKTREE_EXISTS` converges a race (this pass and an earlier one both reaching here, or
+    // a pod restart finding its own worktree already there) into a no-op rather than an error.
+    // The worktree name is the WORKSPACE's own id, never the volume's — the two differ for a
+    // shared-volume clone, whose `id` (`volumeRef`) names the SOURCE's volume.
+    let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), w.name_any(), effective_head.clone());
+    let quota_gb = vol.spec.quota_gb;
+    let result = tokio::task::spawn_blocking(move || {
+        engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
+        // Quota the worktree the instant it exists — waiting for the volume's next reconcile
+        // pass would leave a freshly checked-out worktree briefly unquota'd.
+        engine.set_quota_worktree(&vol_id, &ws_id, quota_gb)?;
+        Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
+    })
+    .await
+    .map_err(|e| ReconcileErr(e.to_string()))?;
+    match result {
+        Ok(()) => {}
+        Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
+        Err(e) => return Err(ReconcileErr(e.0)),
+    }
+    // First graft: this pass checked out the clone's commit, and nothing else will ever write
+    // it as `head` (a clone never gets Task 5's push-time `advance_head` unless it pushes
+    // itself) — the preserve pattern, same as `snapshot::advance_head`.
+    if prev.head.is_none() {
         if let Some(commit) = clone_commit {
-            if prev.head.is_none() && !crate::claim::commit_ready(ctx, &id, commit).await? {
-                let prev = prev.clone();
-                let vref = id.clone();
-                return settle(
-                    Outcome::Permanent(format!("clone commit {commit} is not a ready snapshot of volume {id}"), "NoSuchCommit"),
-                    w,
-                    "Workspace",
-                    gen,
-                    move |cond| {
-                        serde_json::json!({
-                            "phase": crd::Phase::Error,
-                            "volumeRef": vref,
-                            "conditions": ws_conditions(&prev, cond),
-                        })
-                    },
-                    ctx,
-                )
-                .await;
-            }
-        }
-        // `WORKTREE_EXISTS` converges a race (this pass and an earlier one both reaching here, or
-        // a pod restart finding its own worktree already there) into a no-op rather than an error.
-        // The worktree name is the WORKSPACE's own id, never the volume's — the two differ for a
-        // shared-volume clone, whose `id` (`volumeRef`) names the SOURCE's volume.
-        let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), w.name_any(), effective_head.clone());
-        let quota_gb = vol.spec.quota_gb;
-        let result = tokio::task::spawn_blocking(move || {
-            engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
-            // Quota the worktree the instant it exists — waiting for the volume's next reconcile
-            // pass would leave a freshly checked-out worktree briefly unquota'd.
-            engine.set_quota_worktree(&vol_id, &ws_id, quota_gb)?;
-            Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
-        })
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?;
-        match result {
-            Ok(()) => {}
-            Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
-            Err(e) => return Err(ReconcileErr(e.0)),
-        }
-        // First graft: this pass checked out the clone's commit, and nothing else will ever write
-        // it as `head` (a clone never gets Task 5's push-time `advance_head` unless it pushes
-        // itself) — the preserve pattern, same as `snapshot::advance_head`.
-        if prev.head.is_none() {
-            if let Some(commit) = clone_commit {
-                let prev2 = prev.clone();
-                write_ws_status(w, crd::WorkspaceStatus { head: Some(commit.to_string()), ..prev2 }, ctx).await?;
-                prev.head = Some(commit.to_string());
-            }
+            let prev2 = prev.clone();
+            write_ws_status(w, crd::WorkspaceStatus { head: Some(commit.to_string()), ..prev2 }, ctx).await?;
+            prev.head = Some(commit.to_string());
         }
     }
 
@@ -2231,7 +2208,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         owner_ref: owner_ref.clone(),
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
-        commit_model: ctx.commit_model,
     };
     // Resolve the attachment before writing anything: a missing or cross-region environment is
     // reported and treated as unattached, never as a half-applied grant.
@@ -2604,34 +2580,32 @@ async fn run_environment(
     // HeadUnknown guard: an environment claimed onto this node for a volume with commits but no
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
     // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
-    if ctx.commit_model {
-        migrate_and_seed_baseline(ctx, &id, &e.spec.owner).await?;
-        if prev.head.is_none() && crate::claim::has_commits(ctx, &id).await? {
-            let st = crd::EnvironmentStatus {
-                phase: crd::Phase::Creating,
-                observed_generation: None,
-                conditions: vec![crd::condition(
-                    "Ready", false, "HeadUnknown", "volume has commits but this environment has no recorded head yet", gen,
-                )],
-                ..prev.clone()
-            };
-            write_env_status(e, st, ctx).await?;
-            return Ok(Action::requeue(TICK));
-        }
-        let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
-        let quota_gb = vol.spec.quota_gb;
-        let result = tokio::task::spawn_blocking(move || {
-            engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
-            engine.set_quota_worktree(&vol_id, &ws_id, quota_gb)?;
-            Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
-        })
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?;
-        match result {
-            Ok(()) => {}
-            Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
-            Err(e) => return Err(ReconcileErr(e.0)),
-        }
+    migrate_and_seed_baseline(ctx, &id, &e.spec.owner).await?;
+    if prev.head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+        let st = crd::EnvironmentStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            conditions: vec![crd::condition(
+                "Ready", false, "HeadUnknown", "volume has commits but this environment has no recorded head yet", gen,
+            )],
+            ..prev.clone()
+        };
+        write_env_status(e, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
+    let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
+    let quota_gb = vol.spec.quota_gb;
+    let result = tokio::task::spawn_blocking(move || {
+        engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
+        engine.set_quota_worktree(&vol_id, &ws_id, quota_gb)?;
+        Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
+    })
+    .await
+    .map_err(|e| ReconcileErr(e.to_string()))?;
+    match result {
+        Ok(()) => {}
+        Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
+        Err(e) => return Err(ReconcileErr(e.0)),
     }
 
     ensure(
@@ -2667,7 +2641,6 @@ async fn run_environment(
         owner_ref: owner_ref.clone(),
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
-        commit_model: ctx.commit_model,
     };
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
     // security check, not a formality: `create_dir_all` on an unvalidated folder is itself the
@@ -2790,7 +2763,7 @@ async fn restore_gate(
         // head — written once, on the first pass that observes the grant (every later pass finds
         // `head` already equal and no-ops). Preserve pattern: merge onto whatever this environment
         // currently reports, never blank `podRef`/`serviceStatus`/anything else already there.
-        if ctx.commit_model && e.status.as_ref().and_then(|s| s.head.as_deref()) != Some(wish.snapshot_id.as_str()) {
+        if e.status.as_ref().and_then(|s| s.head.as_deref()) != Some(wish.snapshot_id.as_str()) {
             let prev = e.status.clone().unwrap_or_default();
             write_env_status(e, crd::EnvironmentStatus { head: Some(wish.snapshot_id.clone()), ..prev }, ctx).await?;
         }

@@ -29,24 +29,19 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
     //
     // Which PATH is selectable is now the load-bearing part: placement is a fact the controllers
     // establish, so a parent's node lives in status, while a controller-written child's stays in
-    // spec. `SnapshotRequest` has NO selector at all — it names no node, and every agent watches
-    // every request, acting only when the named Volume is its own.
+    // spec.
     for crd in all_crds() {
         let v = &crd.spec.versions[0];
         assert!(v.subresources.as_ref().is_some_and(|s| s.status.is_some()), "{}", crd.spec.names.kind);
         let want: &[&str] = match crd.spec.names.kind.as_str() {
             "OwnerBinding" | "Volume" => &[".spec.nodeName"],
             "Workspace" | "Environment" => &[".status.nodeName"],
-            "SnapshotRequest" => &[],
             "Snapshot" => &[".spec.volume"],
             "VolumeReplica" => &[".spec.node", ".status.phase"],
             other => panic!("unknown kind {other}"),
         };
         if want.is_empty() {
-            assert!(
-                v.selectable_fields.is_none(),
-                "SnapshotRequest must have no selectableFields: it copies no node into spec"
-            );
+            assert!(v.selectable_fields.is_none(), "{} must have no selectableFields", crd.spec.names.kind);
         } else {
             let sel = v.selectable_fields.as_ref().expect("selectableFields");
             for path in want {
@@ -58,12 +53,13 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
     }
 }
 
-/// The seven kinds, so a kind added to the group without a CRD entry cannot ship: `all_crds` is
+/// The six kinds, so a kind added to the group without a CRD entry cannot ship: `all_crds` is
 /// what generates the manifest AND what the agent's startup precondition check reads.
+/// `SnapshotRequest` — the object-store push request — is gone (Task 8).
 #[test]
-fn all_seven_kinds_are_generated() {
+fn all_six_kinds_are_generated() {
     let kinds: Vec<String> = all_crds().into_iter().map(|c| c.spec.names.kind).collect();
-    for k in ["Volume", "Workspace", "Environment", "OwnerBinding", "SnapshotRequest", "Snapshot", "VolumeReplica"] {
+    for k in ["Volume", "Workspace", "Environment", "OwnerBinding", "Snapshot", "VolumeReplica"] {
         assert!(kinds.iter().any(|g| g == k), "{k} missing from all_crds(): {kinds:?}");
     }
 }
@@ -134,7 +130,7 @@ fn the_legacy_spec_pointers_are_pruned_and_storage_is_optional() {
 }
 
 /// `lastPush` is gone and NOTHING replaces it on the Volume. "The latest snapshot" is a query over
-/// SnapshotRequests by volume label — two controllers force-applying one status object under one
+/// `Snapshot` CRs by volume label — two controllers force-applying one status object under one
 /// field manager prune each other's fields, which is what a second writer here would be.
 #[test]
 fn the_volume_status_has_no_push_pointer() {

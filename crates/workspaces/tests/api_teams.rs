@@ -112,7 +112,7 @@ async fn member_can_create_a_team_environment_owned_by_the_team() {
 #[tokio::test]
 async fn a_team_environment_is_listed_for_its_members() {
     let routes = vec![
-        get(format!("{API}/snapshotrequests"), list_of("SnapshotRequest", vec![])),
+        get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
         get(format!("{API}/environments"), list_of("Environment", vec![env_obj("env-1", "acme", NODE)])),
     ];
     let s = server(true, routes).await;

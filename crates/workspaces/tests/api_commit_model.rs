@@ -1,9 +1,4 @@
-//! `/v1` push/history/refs served from the new commit model (`WS_COMMIT_MODEL=1`).
-//!
-//! A separate test BINARY on purpose: `ApiState::commit_model` is read once from the process
-//! environment at construction (mirrors `Ctx.commit_model` on the agent), and `cargo test` gives
-//! every `tests/*.rs` file its own process — so setting `WS_COMMIT_MODEL=1` here can never race
-//! `api_user.rs`'s flag-off assertions running in parallel in a shared process.
+//! `/v1` push/history/refs served from the commit model — the only model there is (Task 8).
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
@@ -70,12 +65,10 @@ fn token(jwt: &Jwt, username: &str) -> String {
 }
 
 async fn server(routes: Vec<Route>) -> Server {
-    std::env::set_var("WS_COMMIT_MODEL", "1");
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new()).with_kube(client);
-    assert!(state.commit_model, "WS_COMMIT_MODEL=1 must be read at construction");
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));

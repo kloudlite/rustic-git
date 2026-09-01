@@ -184,36 +184,6 @@ async fn a_record_without_provenance_falls_back_to_the_volume_id() {
     assert_eq!(env["deleted"], true);
 }
 
-/// History is the server tier's answer verbatim, and needs no live parent to be readable.
-#[tokio::test]
-async fn history_reads_without_a_live_workspace() {
-    let up = upstream(
-        vec![("karthik", json!([{"name": "ws-gone", "latest_ms": 1i64}]))],
-        vec![(
-            "karthik/ws-gone",
-            json!([
-                record("c2", "2026-08-27T10:00:00Z", None, Value::Null),
-                record("c1", "2026-08-27T09:00:00Z", Some("first"), Value::Null),
-            ]),
-        )],
-    )
-    .await;
-    let s = server(vec![], up).await;
-    let tok = token(&s.jwt, "karthik");
-
-    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-gone/history").await;
-    assert_eq!(status, 200, "{body}");
-    let records = body.as_array().unwrap();
-    assert_eq!(records.len(), 2);
-    assert_eq!(records[0]["id"], "c2", "newest first");
-    assert_eq!(records[1]["message"], "first");
-
-    // And "main" is the newest, the same convention `engine::ops` relies on.
-    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-gone/refs").await;
-    assert_eq!(status, 200);
-    assert_eq!(body["main"], "c2");
-}
-
 /// The server tier refuses a volume that is not the named owner's, and this tier only ever asks as
 /// owners it has verified the caller for — so someone else's volume is a 404 either way.
 #[tokio::test]

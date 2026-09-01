@@ -235,66 +235,6 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
     assert_eq!(w["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
 }
 
-/// A clone no longer copies a node from the source: locality is the claim's job, via the source's
-/// `status.compatibleNodes`.
-#[tokio::test]
-async fn clone_asks_for_a_clone_source_and_names_no_node() {
-    let mut src = placed_ws("ws-src", "karthik");
-    src["status"]["nodeName"] = json!("node-z");
-    src["status"]["compatibleNodes"] = json!(["node-z"]);
-    let s = server(vec![
-        no_workspaces(),
-        get(format!("{API}/workspaces/ws-src"), src),
-        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
-    let tok = token(&s.jwt, "karthik");
-    let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-src/clone", s.base))
-        .bearer_auth(&tok)
-        .json(&json!({"name": "copy"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
-    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
-    assert_eq!(w["spec"]["storage"]["source"]["cloneOf"]["volume"], "ws-src");
-    assert_eq!(w["spec"]["storage"]["quotaGb"], 20, "the copy inherits the source's quota");
-    assert!(w["spec"].get("nodeName").is_none(), "{w}");
-    assert!(!s.rec.calls().iter().any(|c| c.contains("/volumes")), "a clone reads no Volume");
-}
-
-/// A release-1 source has no `spec.storage`, and 0 is not a default anywhere — it would size the
-/// btrfs qgroup straight to zero. The size of a legacy source lives on its Volume, which is the
-/// object the controller sizes the disk from.
-#[tokio::test]
-async fn cloning_a_legacy_source_takes_the_quota_off_its_volume() {
-    let mut src = placed_ws("ws-src", "karthik");
-    src["spec"].as_object_mut().unwrap().remove("storage");
-    let mut vol = vol_obj("ws-src", "karthik");
-    vol["spec"]["quotaGb"] = json!(55);
-    let s = server(vec![
-        no_workspaces(),
-        get(format!("{API}/workspaces/ws-src"), src),
-        get(format!("{API}/volumes/ws-src"), vol),
-        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
-    let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-src/clone", s.base))
-        .bearer_auth(token(&s.jwt, "karthik"))
-        .json(&json!({"name": "copy"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
-    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
-    assert_eq!(w["spec"]["storage"]["quotaGb"], 55, "never 0: {w}");
-}
-
-
-
-
 
 
 /// An unnamed restore is refused before anything is written, the same as a create.
@@ -609,24 +549,26 @@ async fn agent_routes_are_gone_from_the_api_router() {
 
 // ── push ─────────────────────────────────────────────────────────────────
 
-/// A created `SnapshotRequest` as the API server echoes it back.
+/// A created `Snapshot` as the API server echoes it back.
 fn snap_obj() -> serde_json::Value {
     json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-        "metadata": {"name": "snap-1"},
-        "spec": {"volume": "ws-1"},
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "ws-1-abcdef01"},
+        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": "", "pinned": false},
+        "status": {"phase": "working"},
     })
 }
 
-/// Push is still the one mutating verb; the OBJECT is the work item now — a `SnapshotRequest` with
-/// somewhere to put the outcome, which the annotation it replaces did not have. The volume it names
-/// is the subvolume that gets pushed, and the owner is read off that volume, never off the caller.
+/// Push is still the one mutating verb; the OBJECT is the work item now — a `Snapshot` CR, created
+/// `Working` so the agent can act on the very first reconcile pass. The volume it names is the
+/// subvolume that gets committed, and the owner is read off that volume, never off the caller.
 #[tokio::test]
-async fn push_creates_a_snapshot_request_for_the_volume_with_its_message() {
+async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
-        Route { method: "POST", path: format!("{API}/snapshotrequests"), status: 201, body: snap_obj() },
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -640,14 +582,13 @@ async fn push_creates_a_snapshot_request_for_the_volume_with_its_message() {
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
-    let req = s.rec.sent("POST", &format!("{API}/snapshotrequests")).remove(0);
+    let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
     assert_eq!(req["spec"]["volume"], "ws-1");
+    assert_eq!(req["spec"]["worktree"], "ws-1");
     assert_eq!(req["spec"]["message"], "checkpoint");
     assert_eq!(req["metadata"]["labels"]["rustic-git.io/volume"], "ws-1");
     assert_eq!(req["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
-    // Set at creation: the work can start on the very first reconcile, and adding the finalizer
-    // afterwards leaves a window where a delete orphans an in-flight `btrfs send`.
-    assert_eq!(req["metadata"]["finalizers"][0], "rustic-git.io/snapshot");
+    assert_eq!(req["status"]["phase"], "working");
 }
 
 #[tokio::test]
@@ -655,7 +596,8 @@ async fn push_with_no_body_omits_the_message() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
-        Route { method: "POST", path: format!("{API}/snapshotrequests"), status: 201, body: snap_obj() },
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -667,7 +609,7 @@ async fn push_with_no_body_omits_the_message() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
-    let req = s.rec.sent("POST", &format!("{API}/snapshotrequests")).remove(0);
+    let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
     assert!(req["spec"].get("message").is_none());
 }
 
@@ -676,7 +618,8 @@ async fn env_push_targets_the_environments_own_volume() {
     let routes = vec![
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
         get(format!("{API}/volumes/env-1"), vol_obj("env-1", "karthik")),
-        Route { method: "POST", path: format!("{API}/snapshotrequests"), status: 201, body: snap_obj() },
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -689,7 +632,7 @@ async fn env_push_targets_the_environments_own_volume() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
-    let req = s.rec.sent("POST", &format!("{API}/snapshotrequests")).remove(0);
+    let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
     assert_eq!(req["spec"]["volume"], "env-1");
     assert_eq!(req["spec"]["message"], "snap");
 }
@@ -751,8 +694,8 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
     // No route for the Secret GET: the mock 404s it, which is exactly "the namespace has no key".
     let routes = vec![
         get(format!("{API}/workspaces"), list),
-        get(format!("{API}/snapshotrequests"), json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {}, "items": []
+        get(format!("{API}/snapshots"), json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []
         })),
         Route {
             method: "PATCH",
@@ -898,7 +841,7 @@ async fn a_cli_token_is_a_caller_until_it_is_revoked() {
     let routes = || {
         vec![
             get(format!("{API}/workspaces"), ws.clone()),
-            get(format!("{API}/snapshotrequests"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "items": []})),
+            get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         ]
     };
     let live = server_with_cli(routes(), true).await;

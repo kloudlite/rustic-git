@@ -67,11 +67,6 @@ pub struct PodContext<'a> {
     pub runtime_class: Option<&'a str>,
     /// The tagged image behind `model::DEFAULT_WS_IMAGE`, from the agent's `WS_DEFAULT_IMAGE`.
     pub default_image: &'a str,
-    /// `WS_COMMIT_MODEL=1` (`Ctx.commit_model`, read once at construction — see `controller.rs`).
-    /// Selects which layout the `live` mount's hostPath points at: the old single-subvolume
-    /// `Pool::live` or the new per-worktree `Pool::worktree` (`{pool}/vol/{volume}/live/{ws}`).
-    /// A parameter, never an env read in here — see the module doc.
-    pub commit_model: bool,
 }
 
 pub(crate) fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
@@ -558,9 +553,6 @@ fn secret_binding(
 /// The host Nix store, mounted read-only via `hostPath` into every workspace pod.
 pub const NIX_ROOT: &str = "/nix";
 
-/// The host path backing a volume's live subvolume.
-pub fn live_path(pool: &str, id: &str) -> String { format!("{pool}/vol/{id}/live") }
-
 /// The agent-owned directory holding one rendered `resolv.conf` per workspace. Outside any user
 /// volume on purpose: it is platform state, so it is never in a snapshot and never pushed.
 pub fn attach_root(pool: &str) -> String {
@@ -676,9 +668,8 @@ fn hardened() -> SecurityContext {
 /// itself (Task 7c) — same split `live_worktree_volume` uses for a workspace's own `live` mount
 /// (named "home" here instead, so it cannot collide with the pod's actual "live" volume), or a
 /// migrated home's dotfiles go missing under the old-layout directory path (H1).
-fn home_volume(pool: &str, home_id: &str, commit_model: bool) -> Volume {
-    let path = if commit_model { worktree_path(pool, home_id, home_id) } else { live_path(pool, home_id) };
-    host_dir("home", path)
+fn home_volume(pool: &str, home_id: &str) -> Volume {
+    host_dir("home", worktree_path(pool, home_id, home_id))
 }
 
 /// An emptyDir for `WORKSPACES_DIR`. Per pod on purpose — see the mount's comment.
@@ -693,15 +684,10 @@ fn worktree_path(pool: &str, volume: &str, ws: &str) -> String {
     format!("{pool}/vol/{volume}/live/{ws}")
 }
 
-/// The pod's `live` mount: the old single-subvolume path, or under commit_model the WORKTREE path
-/// — `volume` and `ws` differ for a shared-volume clone, so both are threaded in rather than
-/// reusing the pod's own id.
-fn live_worktree_volume(pool: &str, volume: &str, ws: &str, commit_model: bool) -> Volume {
-    if commit_model {
-        host_dir("live", worktree_path(pool, volume, ws))
-    } else {
-        host_dir("live", live_path(pool, volume))
-    }
+/// The pod's `live` mount: the WORKTREE path — `volume` and `ws` differ for a shared-volume
+/// clone, so both are threaded in rather than reusing the pod's own id.
+fn live_worktree_volume(pool: &str, volume: &str, ws: &str) -> Volume {
+    host_dir("live", worktree_path(pool, volume, ws))
 }
 
 /// Keep the pod on its role's nodes and on the node holding its subvolume, and tolerate that
@@ -825,8 +811,7 @@ pub fn git_init_container(
 }
 
 /// The workspace's one pod.
-/// `id` names the pod (and, pre-commit-model, its volume — the two were always the same subvolume
-/// then). `ws_id` is the WORKSPACE's own id, only ever different from `id` under commit_model for
+/// `id` names the pod. `ws_id` is the WORKSPACE's own id, only ever different from `id` for
 /// a shared-volume clone (`id` is `volumeRef`, the source volume; `ws_id` is this workspace's own
 /// worktree name) — see `Pool::worktree`.
 pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodContext, init: Option<Container>) -> Pod {
@@ -897,9 +882,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
         // the key.
         volumes: Some({
             let mut v = vec![
-                home_volume(ctx.pool, &crate::crd::home_volume_name(&spec.owner), ctx.commit_model),
+                home_volume(ctx.pool, &crate::crd::home_volume_name(&spec.owner)),
                 workspaces_volume(),
-                live_worktree_volume(ctx.pool, id, ws_id, ctx.commit_model),
+                live_worktree_volume(ctx.pool, id, ws_id),
                 nix_volume(),
                 attach_volume(ctx.pool, id),
                 user_key_volume(init.is_some()),
@@ -1020,7 +1005,7 @@ pub fn service_statefulset(
         // An environment's worktree is checked out under its OWN id (`run_environment` checks out
         // `(volume=id, ws=id)` — an environment never shares its volume the way a workspace clone
         // can), so volume and ws are the same id here.
-        volumes: Some(vec![live_worktree_volume(ctx.pool, env_id, env_id, ctx.commit_model)]),
+        volumes: Some(vec![live_worktree_volume(ctx.pool, env_id, env_id)]),
         // An environment's services are the likeliest place a private image appears — they are
         // whatever the user named, not our default.
         image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
@@ -1421,33 +1406,21 @@ mod tests {
             vols.iter().find(|v| v.name == n).unwrap_or_else(|| panic!("no {n} volume"))
                 .host_path.as_ref().unwrap().path.clone()
         };
-        assert_eq!(path("live"), live_path(ctx().pool, "ws-1"));
+        assert_eq!(path("live"), format!("{}/vol/ws-1/live/ws-1", ctx().pool));
         assert_eq!(path("nix"), NIX_ROOT);
         assert_eq!(path("attach"), attach_file(ctx().pool, "ws-1"));
     }
 
-    /// Task 7a: under commit_model the `live` mount is the WORKTREE path, not the old
-    /// single-subvolume one — and `id` (volumeRef) vs `ws_id` (this workspace's own id) matter:
-    /// a shared-volume clone's worktree lives under the SOURCE volume's `live/`, named by the
-    /// clone's own id.
+    /// Task 7a: the `live` mount is the WORKTREE path, not the old single-subvolume one — and
+    /// `id` (volumeRef) vs `ws_id` (this workspace's own id) matter: a shared-volume clone's
+    /// worktree lives under the SOURCE volume's `live/`, named by the clone's own id.
     #[test]
-    fn a_workspace_pods_live_mount_is_the_worktree_path_under_commit_model() {
-        let commit_ctx = PodContext { commit_model: true, ..ctx() };
-        let p = workspace_pod(&ws_spec(), "vol-1", "ws-1", &commit_ctx, None);
+    fn a_workspace_pods_live_mount_is_the_worktree_path() {
+        let p = workspace_pod(&ws_spec(), "vol-1", "ws-1", &ctx(), None);
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let live = vols.iter().find(|v| v.name == "live").unwrap();
         assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/vol-1/live/ws-1", ctx().pool));
         assert_eq!(live.host_path.as_ref().unwrap().type_.as_deref(), Some("Directory"));
-    }
-
-    /// Flag off must stay byte-identical even when `id` and `ws_id` differ (they never do in
-    /// practice pre-commit_model, but the builder must not silently start using `ws_id` anyway).
-    #[test]
-    fn a_workspace_pods_live_mount_ignores_ws_id_when_commit_model_is_off() {
-        let p = workspace_pod(&ws_spec(), "vol-1", "ws-1", &ctx(), None);
-        let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
-        let live = vols.iter().find(|v| v.name == "live").unwrap();
-        assert_eq!(live.host_path.as_ref().unwrap().path, live_path(ctx().pool, "vol-1"));
     }
 
     /// Placement is the pod's own now that no PV carries node affinity, and it is ADDED to the
@@ -1477,16 +1450,15 @@ mod tests {
     /// Task 7a: an environment's worktree is checked out under its OWN id (volume == ws, see
     /// `run_environment`), so `env_id` alone determines the path.
     #[test]
-    fn the_service_pods_live_mount_is_the_worktree_path_under_commit_model() {
-        let commit_ctx = PodContext { commit_model: true, ..ctx() };
-        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &commit_ctx).unwrap();
+    fn the_service_pods_live_mount_is_the_worktree_path() {
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
         let vols = d.spec.unwrap().template.spec.unwrap().volumes.unwrap();
         let live = vols.iter().find(|v| v.name == "live").unwrap();
         assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/env-1/live/env-1", ctx().pool));
     }
 
     fn ctx() -> PodContext<'static> {
-        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef", commit_model: false }
+        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef" }
     }
 
     fn svc(folder: &str, path: &str) -> model::Service {
@@ -1616,7 +1588,7 @@ mod tests {
         );
 
         // Unset means the host kernel, not a broken pod.
-        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef", commit_model: false };
+        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef" };
         assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None).spec.unwrap().runtime_class_name.is_none());
     }
 
@@ -1848,7 +1820,8 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
-        assert_eq!(home.host_path.as_ref().unwrap().path, live_path(ctx().pool, &crate::crd::home_volume_name(&ws_spec().owner)));
+        let home_id = crate::crd::home_volume_name(&ws_spec().owner);
+        assert_eq!(home.host_path.as_ref().unwrap().path, worktree_path(ctx().pool, &home_id, &home_id));
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         let home_mount = mounts.iter().find(|m| m.name == "home").expect("home mount");
         assert_eq!(home_mount.mount_path, HOME_DIR);
@@ -1864,21 +1837,16 @@ mod tests {
         assert!(s.volumes.as_ref().unwrap().iter().any(|v| v.name == "home"));
     }
 
-    /// H1: under commit_model the home's hostPath must be its WORKTREE path
-    /// (`{pool}/vol/{home}/live/{home}`), same split `live_worktree_volume` already gives the
-    /// workspace's own mount — not the old-layout directory, which after a migration holds the
-    /// worktree ONE level down and would hide dotfiles / snapshot nothing new.
+    /// H1: the home's hostPath must be its WORKTREE path (`{pool}/vol/{home}/live/{home}`), same
+    /// split `live_worktree_volume` already gives the workspace's own mount — not the old-layout
+    /// directory, which after a migration holds the worktree ONE level down and would hide
+    /// dotfiles / snapshot nothing new.
     #[test]
-    fn a_workspace_pods_home_mount_is_the_worktree_path_under_commit_model() {
-        let commit_ctx = PodContext { commit_model: true, ..ctx() };
-        let s = workspace_pod(&ws_spec(), "ws-1", "ws-1", &commit_ctx, None).spec.unwrap();
+    fn a_workspace_pods_home_mount_is_the_worktree_path() {
+        let s = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).spec.unwrap();
         let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
         let home_id = crate::crd::home_volume_name(&ws_spec().owner);
-        assert_eq!(
-            home.host_path.as_ref().unwrap().path,
-            worktree_path(commit_ctx.pool, &home_id, &home_id),
-            "commit_model must use the worktree path, not the old live_path"
-        );
+        assert_eq!(home.host_path.as_ref().unwrap().path, worktree_path(ctx().pool, &home_id, &home_id));
     }
 
     /// Four things have to line up for `ssh kl@workspace` to work, and each fails silently on
