@@ -130,7 +130,7 @@ pub(crate) fn run(argv: &[&str]) -> Result<(), EngErr> {
 /// contain" without shelling out to `btrfs subvolume show` (which errors on a non-subvolume path
 /// anyway, making it no cheaper). A path that doesn't exist reads as "not a subvolume", not an
 /// error: the caller's existence check runs separately.
-fn is_subvolume(path: &std::path::Path) -> bool {
+pub(crate) fn is_subvolume(path: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|m| m.ino() == 256)
 }

@@ -923,5 +923,59 @@ for i in $(seq 1 30); do
   [ "$i" -eq 30 ] && fail "env volume history is still empty after stop: $ENV_HISTORY"
 done
 
+# ---------------------------------------------------------------------------
+# Task 7b: the commit model itself, minimal — gated on the CLUSTER actually running with
+# WS_COMMIT_MODEL=1 (the DaemonSet's own env, not this script's), so the same run still exercises
+# the old-model assertions above unchanged when the flag is off. Reuses $WS_ID: it has already
+# been pushed once above, so under commit_model that push is a Snapshot CR, not a SnapshotRequest.
+# ---------------------------------------------------------------------------
+AGENT_COMMIT_MODEL=$(kubectl get daemonset rustic-git-agent -n kube-system \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="WS_COMMIT_MODEL")].value}' 2>/dev/null || true)
+if [ "$AGENT_COMMIT_MODEL" = "1" ]; then
+  log "commit model: push landed as a Ready Snapshot CR"
+  SNAP_NAME=""
+  for i in $(seq 1 30); do
+    SNAP_NAME=$(kubectl get snapshots -l "rustic-git.io/volume=$WS_ID" \
+      -o jsonpath='{.items[?(@.status.phase=="Ready")].metadata.name}' 2>/dev/null | awk '{print $1}')
+    [ -n "$SNAP_NAME" ] && break
+    sleep 2
+  done
+  [ -n "$SNAP_NAME" ] || fail "no Ready Snapshot CR for volume $WS_ID after push"
+
+  log "commit model: clone from head"
+  CM_CLONE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/clone" -H "Authorization: Bearer $USER_TOKEN" \
+    -H 'Content-Type: application/json' -d '{"name":"e2e-ws-cm-clone"}')
+  CM_CLONE_ID=$(echo "$CM_CLONE_JSON" | field id)
+  [ -n "$CM_CLONE_ID" ] || fail "no id in commit-model clone response: $CM_CLONE_JSON"
+  wait_ws_ready "$CM_CLONE_ID"
+
+  log "commit model: restore to a named commit"
+  CM_RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/restore" -H "Authorization: Bearer $USER_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"e2e-ws-cm-restore","snapshot_id":"'"$SNAP_NAME"'","src_workspace":"'"$WS_ID"'"}')
+  CM_RESTORE_ID=$(echo "$CM_RESTORE_JSON" | field id)
+  [ -n "$CM_RESTORE_ID" ] || fail "no id in commit-model restore response: $CM_RESTORE_JSON"
+  wait_ws_ready "$CM_RESTORE_ID"
+
+  log "commit model: a replica appears on a second node, if this cluster has one"
+  SECOND_NODE=$(kubectl get nodes -o jsonpath='{.items[?(@.metadata.name!="'"$E2E_NODE"'")].metadata.name}' 2>/dev/null | awk '{print $1}')
+  if [ -n "$SECOND_NODE" ]; then
+    REPLICA_SYNCED=""
+    for i in $(seq 1 60); do
+      REPLICA_SYNCED=$(kubectl get volumereplicas -l "rustic-git.io/volume=$WS_ID" \
+        -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null | tr ' ' '\n' | grep -vx "$E2E_NODE" | head -1)
+      [ -n "$REPLICA_SYNCED" ] && break
+      sleep 2
+    done
+    [ -n "$REPLICA_SYNCED" ] || fail "no Synced VolumeReplica for $WS_ID on a node other than $E2E_NODE"
+  else
+    log "single-node cluster: skipping the second-node replica check"
+  fi
+
+  echo "OK (commit model): push -> Ready Snapshot, clone from head, restore to a named commit, replica on a second node all passed"
+else
+  log "WS_COMMIT_MODEL is not 1 on the rustic-git-agent DaemonSet: skipping the commit-model section"
+fi
+
 echo
 echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history) all passed"

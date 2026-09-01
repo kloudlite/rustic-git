@@ -266,3 +266,75 @@ fn swap_worktree_restores_old_content_and_leaves_no_staging_or_backup() {
     let entries: Vec<_> = std::fs::read_dir(e.pool.voldir(volume).join("live")).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(entries, vec![std::ffi::OsString::from(ws)], "only the swapped-in worktree remains: {entries:?}");
 }
+
+/// Task 7b: an old-layout volume (`live` itself is the RW subvolume) moves to the commit model's
+/// `live/{volume}` worktree layout, and the content survives the move untouched.
+#[test]
+fn migrate_volume_moves_old_layout_live_into_a_worktree() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
+        return;
+    }
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+    let volume = "v1";
+
+    // Old layout: `live` created directly as a subvolume (create_subvol's shape), not via
+    // checkout() — this is exactly what every pre-cutover volume looks like on disk.
+    e.create_subvol(volume).unwrap();
+    std::fs::write(e.pool.live(volume).join("marker.txt"), b"pre-model content").unwrap();
+
+    assert!(e.migrate_volume(volume).unwrap(), "the first call must perform the move");
+
+    let live = e.pool.live(volume);
+    assert!(live.is_dir(), "live must now be a plain directory, not the subvolume itself");
+    let wt = e.pool.worktree(volume, volume);
+    assert_eq!(std::fs::read(wt.join("marker.txt")).unwrap(), b"pre-model content", "content must survive the layout move");
+}
+
+/// Idempotent: a volume already on the new layout (or already migrated) is left alone, and a
+/// second call reports nothing-to-do.
+#[test]
+fn migrate_volume_is_idempotent() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
+        return;
+    }
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+    let volume = "v1";
+
+    e.create_subvol(volume).unwrap();
+    assert!(e.migrate_volume(volume).unwrap());
+    assert!(!e.migrate_volume(volume).unwrap(), "a second call must be a no-op");
+
+    // A volume that was always commit-model-native (checkout(), never create_subvol()) migrates
+    // to nothing too — there is no old-layout subvolume to move.
+    e.checkout("v2", None, "v2").unwrap();
+    assert!(!e.migrate_volume("v2").unwrap(), "a native commit-model volume has nothing to migrate");
+}
+
+/// Crash recovery: a partial migration (the first rename landed, the second didn't) is completed
+/// by the next call rather than re-touching the already-renamed subvolume.
+#[test]
+fn migrate_volume_recovers_from_a_partial_rename() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
+        return;
+    }
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+    let volume = "v1";
+
+    e.create_subvol(volume).unwrap();
+    std::fs::write(e.pool.live(volume).join("marker.txt"), b"pre-model content").unwrap();
+
+    // Simulate the crash point: `live` renamed to `live-migrating`, no `live` dir made yet.
+    let staging = e.pool.voldir(volume).join("live-migrating");
+    std::fs::rename(e.pool.live(volume), &staging).unwrap();
+
+    assert!(e.migrate_volume(volume).unwrap(), "recovery from a partial rename still counts as performing the move");
+    assert!(!staging.exists(), "the staging subvolume must not be left behind");
+    let wt = e.pool.worktree(volume, volume);
+    assert_eq!(std::fs::read(wt.join("marker.txt")).unwrap(), b"pre-model content");
+}

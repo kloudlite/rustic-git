@@ -5,7 +5,7 @@
 //! task brief) so a retry after a crash finds the CR and can redo the snapshot; this module only
 //! ever touches btrfs.
 
-use crate::engine::ops::{EngErr, run};
+use crate::engine::ops::{EngErr, is_subvolume, run};
 use crate::engine::{Engine, ws_lock};
 
 /// A checkout that would land on an existing worktree path — the caller treats "already there"
@@ -153,5 +153,52 @@ impl Engine {
             return Ok(());
         }
         run(&["btrfs", "subvolume", "delete", path.to_str().unwrap()])
+    }
+
+    /// Move a pre-commit-model volume from the old layout — `{pool}/vol/{volume}/live` IS the
+    /// single RW subvolume — to the commit model's `{pool}/vol/{volume}/live/{volume}` (`live/`
+    /// a directory of worktrees). Old-layout workspaces have no separate worktree id, so the
+    /// worktree this leaves behind is named after the volume itself — the pre-model workspace and
+    /// its volume already shared one id (see `Pool::live`/`Pool::worktree`).
+    ///
+    /// Idempotent and crash-safe: returns `Ok(true)` only when THIS call performed the rename
+    /// (the caller uses that to decide whether a migration commit still needs cutting), `Ok(false)`
+    /// when the volume is already on the new layout (or never had a `live` at all — nothing here
+    /// migrates). A crash between the two renames leaves `live-migrating` behind with no `live`
+    /// directory yet; the next call finds that and finishes the second rename rather than
+    /// re-touching the first (`std::fs::rename` of a subvolume into a fresh directory on the same
+    /// filesystem is a plain metadata operation, not a copy — legal and atomic).
+    pub fn migrate_volume(&self, volume: &str) -> Result<bool, EngErr> {
+        // Same rule as `checkout`'s own opening line: `vol/` (and this volume's own voldir) may
+        // not exist yet — a volume with no `live` at all has nothing to migrate, but `ws_lock`'s
+        // lock file still needs somewhere to be created before it can even answer that.
+        std::fs::create_dir_all(self.pool.voldir(volume)).map_err(EngErr::io)?;
+        let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
+        let live = self.pool.live(volume);
+        let staging = self.pool.voldir(volume).join("live-migrating");
+        let dst = self.pool.worktree(volume, volume);
+
+        if dst.exists() {
+            // Either a prior call already finished this migration, or the volume was created
+            // commit-model-native to begin with (checkout() makes exactly this path). Either way
+            // there is nothing left to move.
+            return Ok(false);
+        }
+        if staging.exists() {
+            // Recovered mid-migration: the first rename landed, the second didn't.
+            std::fs::create_dir_all(&live).map_err(EngErr::io)?;
+            std::fs::rename(&staging, &dst).map_err(EngErr::io)?;
+            return Ok(true);
+        }
+        if !is_subvolume(&live) {
+            // No old-layout subvolume to move — a volume that never had a `live` at all (nothing
+            // to migrate), or a `live` directory with no `{volume}`-named worktree under it (not
+            // this function's problem to invent one).
+            return Ok(false);
+        }
+        std::fs::rename(&live, &staging).map_err(EngErr::io)?;
+        std::fs::create_dir_all(&live).map_err(EngErr::io)?;
+        std::fs::rename(&staging, &dst).map_err(EngErr::io)?;
+        Ok(true)
     }
 }

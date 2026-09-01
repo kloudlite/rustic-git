@@ -2067,6 +2067,51 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
     Ok(Action::await_change())
 }
 
+/// Cutover, Task 7b: a volume claimed on this node under `WS_COMMIT_MODEL=1` may still be on the
+/// OLD layout (`live` itself is the single RW subvolume, pre-dating this whole feature) — the
+/// pod that's about to mount it needs `live/{volume}` instead. `Engine::migrate_volume` does the
+/// physical rename and returns `true` only the one time it actually moved anything; that's the
+/// signal to mint the migration-baseline `Snapshot` CR (CR-first, same shape `create_commit` in
+/// `api.rs` uses for a normal push) — the EXISTING `reconcile_commit`/`advance_head` machinery
+/// then cuts it, marks it Ready and writes `status.head`, so this function only ever needs to run
+/// once per volume, not re-implement any of that.
+///
+/// A worktree named after the volume's own id is exactly what a pre-model workspace already is
+/// (workspace id == volume id, module doc in `commit.rs`) and exactly what `checkout`'s
+/// `WORKTREE_EXISTS` guard converges on right below this call — so the caller needs no branch for
+/// "just migrated" vs. "always was commit-model-native".
+async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Result<(), ReconcileErr> {
+    let (engine, vol_id) = (ctx.engine.clone(), id.to_string());
+    let migrated = tokio::task::spawn_blocking(move || engine.migrate_volume(&vol_id))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .map_err(|e| ReconcileErr(e.0))?;
+    if !migrated {
+        return Ok(());
+    }
+    let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let name = crd::snapshot_name(id);
+    let mut snap = crd::Snapshot::new(
+        &name,
+        crd::SnapshotSpec {
+            volume: id.to_string(),
+            owner: owner.to_string(),
+            worktree: id.to_string(),
+            parent: String::new(),
+            message: Some("migration baseline".to_string()),
+            pinned: false,
+        },
+    );
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
+    // Same convergence rule as everything else in this cutover: a retry that finds the CR already
+    // there (crash between the rename above landing and this create) is not an error.
+    match api.create(&PostParams::default(), &snap).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
+        Err(e) => Err(ReconcileErr(e.to_string())),
+    }
+}
+
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
@@ -2181,6 +2226,9 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // own head just has not been recorded yet" — the guard below tells the two apart the same way
     // the claim itself does, by asking whether the VOLUME has any commits at all.
     if ctx.commit_model {
+        // Lazy per-volume migration, before anything mounts (the pod must be recreated to pick up
+        // the new path, same as the hostpath cutover) — a no-op every pass after the first.
+        migrate_and_seed_baseline(ctx, &id, &w.spec.owner).await?;
         // A clone pinned to a commit already knows its head — grafted by the API at clone time,
         // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
         // the source's real history, even on the very first pass.
@@ -2669,6 +2717,7 @@ async fn run_environment(
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
     // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
     if ctx.commit_model {
+        migrate_and_seed_baseline(ctx, &id, &e.spec.owner).await?;
         if prev.head.is_none() && crate::claim::has_commits(ctx, &id).await? {
             let st = crd::EnvironmentStatus {
                 phase: crd::Phase::Creating,

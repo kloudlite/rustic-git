@@ -456,6 +456,13 @@ spec:
             # cluster syncing its own desired state, and this Secret goes away with it.
             - name: KUBECONFIG
               value: /etc/rustic-git/k3s/config
+            # Cutover (Task 7b): matches the agent's own WS_COMMIT_MODEL default in
+            # deploy/k3s/agent-daemonset.yaml — a push now creates a `Snapshot` CR
+            # (`api.rs::create_commit`) instead of the old `SnapshotRequest`. Kill switch is the
+            # same one-sentence caveat as the agent's: safe to unset only before any volume has
+            # migrated its layout (see deploy/k3s/README.md's cutover runbook).
+            - name: WS_COMMIT_MODEL
+              value: "1"
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5

@@ -183,6 +183,70 @@ Release 1 is reversible: the CRD still carries `spec.nodeName`/`spec.volumeRef`,
 ignores the new status fields. Release 2 drops those fields and cannot be rolled back, so it waits
 until every node has run release 1.
 
+## Release: the commit model
+
+The 2026-09-01 change: `push` stops uploading a whole-tree delta to the object store and starts
+cutting a local btrfs commit (a `Snapshot` CR, `snap/{name}` under the volume) that replicates to
+other nodes as `VolumeReplica` rows — `crates/workspaces/src/engine/commit.rs`'s module doc and
+`crates/workspaces/src/crd.rs`'s `Snapshot`/`VolumeReplica` kinds are the design. `WS_COMMIT_MODEL=1`
+gates every bit of it; the code default stays OFF, so this is a yaml flip, not a code deploy.
+
+Order:
+
+```sh
+# 1. CRDs first — the new kinds (Snapshot, VolumeReplica) and the selectableFields the agent's
+#    watches filter on. Already applied on dev; harmless to re-apply.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
+
+# 2. Roll the agent with WS_COMMIT_MODEL=1 (already the default in agent-daemonset.yaml as of
+#    this task — repin the image tag to the SHA CI built, then apply and wait).
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml
+KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/rustic-git-agent -n kube-system
+
+# 3. Then the API tier (rustic-git.yaml, same WS_COMMIT_MODEL=1) — deploy/roll.sh applies it.
+deploy/roll.sh
+kubectl rollout status deploy/rustic-git-api -n rustic-git
+```
+
+**Every existing volume's pod restarts once, lazily, on its own schedule — not all at once.**
+There is no bulk migration step: an old-layout volume (`{pool}/vol/{id}/live` is itself the RW
+subvolume) is migrated the first time it's CLAIMED on a node under the flag
+(`migrate_and_seed_baseline` in `bins/agent/src/controller.rs`, calling
+`Engine::migrate_volume`), which moves `live` to a directory holding one worktree,
+`live/{id}` — and the pod that was mounting the OLD path has to be recreated to pick up the new
+one, exactly like the hostpath cutover above. A running workspace does not restart on its own; it
+keeps running against its already-open subvolume until something else recycles the pod (a
+reschedule, `kubectl delete pod`, a node drain). Nothing forces every volume to migrate at once,
+and nothing needs to.
+
+Verify:
+
+```sh
+kubectl get snapshots                          # Ready rows appear as workspaces push
+kubectl get volumereplicas                      # Synced on every node the volume replicates to
+kubectl get workspace <id> -o jsonpath='{.status.head}'   # a commit name once it's pushed or migrated
+```
+
+**The kill switch is one-directional once anything has migrated — this is the sentence that
+matters.** Unsetting `WS_COMMIT_MODEL` (or setting it back to `"0"`) and rolling back is a clean,
+safe rollback ONLY for a volume that has never been claimed under the flag — nothing on its disk
+changed, and old code still finds `live` as the single subvolume it expects. For a volume that HAS
+migrated, `live` is now a DIRECTORY (`live/{id}`), and old code mounts `{pool}/vol/{id}/live`
+verbatim — it would mount the directory *containing* the worktree, not the worktree itself, which
+is wrong data, not a clean failure. Past that point, rollback is forward-only: either accept the
+commit model for volumes that have already moved (turn the flag back on), or manually undo the
+migration per volume with the exact inverse of `Engine::migrate_volume`:
+
+```sh
+# On the node holding the volume, with its pod stopped and WS_COMMIT_MODEL off for this volume:
+mv {pool}/vol/{id}/live/{id} {pool}/vol/{id}/live-migrating
+rmdir {pool}/vol/{id}/live
+mv {pool}/vol/{id}/live-migrating {pool}/vol/{id}/live
+```
+
+There is no bulk "undo everything" command, deliberately — the same one-volume-at-a-time shape as
+the forward migration.
+
 ## Gateway
 
 The workspace SSH gateway runs on the pool nodes themselves (`session-0`, `env-0`) behind
