@@ -346,6 +346,12 @@ fn set_quota_picks_the_arm_by_the_layout_actually_on_disk() {
     }
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
+    // The fixture's fresh filesystem has qgroups OFF (like a pool where `btrfs quota enable` was
+    // never run) — `qgroup limit` then reports unenforced by design, which is set_quota's
+    // Ok(Some(..)) arm, not its clean arm. Enable quotas so the assertions below prove the limit
+    // actually APPLIES per layout, which is the arm-selection property this test pins.
+    let st = std::process::Command::new("btrfs").args(["quota", "enable"]).arg(&lb.mount).status().unwrap();
+    assert!(st.success(), "btrfs quota enable failed on the loopback pool");
 
     // Old layout: `live` is the subvolume itself.
     e.create_subvol("v1").unwrap();
