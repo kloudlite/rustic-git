@@ -2302,7 +2302,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         },
     };
     let env_ns = env.as_ref().map(|(ns, _)| ns.clone());
-    write_resolv_conf(&ctx.pool, &id, &ns, env_ns.as_deref())?;
+    // Per-WORKSPACE, like the pod that mounts it: `id` is the shared VOLUME for a clone, and
+    // writing this file under the volume's name leaves every clone's pod stuck FailedMount on a
+    // resolv.conf that does not exist under its own name.
+    write_resolv_conf(&ctx.pool, &w.name_any(), &ns, env_ns.as_deref())?;
     let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
     match &env {
         Some((env_ns, e)) => {
@@ -2355,7 +2358,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             return Ok(action);
         }
         // Same rule as the profile: the pod mounts this, so it exists first or sshd dies on boot.
-        ensure_ssh(w, &id, &ns, &owner_ref, &mut prev, ctx).await?;
+        // Same rule: the host key is this WORKSPACE's identity (pinned in the user's known_hosts),
+        // and the pod mounts `ws-ssh-{workspace}`. Keying it by the shared volume would give every
+        // clone of one volume the same host key AND leave the pod's secret mount unresolvable.
+        ensure_ssh(w, &w.name_any(), &ns, &owner_ref, &mut prev, ctx).await?;
     }
 
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
