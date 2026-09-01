@@ -83,17 +83,35 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     if already_mounted(&mounts, target_str) {
         return Ok(());
     }
-    // hard,nointr: a flapping ZeroFS must block, not corrupt (spec ruling). vers=3: ZeroFS
-    // serves NFSv3. nolock: no NLM sideband — append-mode files are node-local by design.
-    let st = std::process::Command::new("mount")
-        .args(["-t", "nfs", "-o", "vers=3,hard,nolock,tcp", export])
+    // `port=2049,mountport=2049` are NOT optional and NOT tuning: NFSv3 normally finds mountd by
+    // asking rpcbind on port 111, and ZeroFS runs no rpcbind — without both, `mount.nfs` blocks
+    // forever on a portmapper that will never answer, and because this runs before the controller
+    // starts the agent then sits at 2/2 Running doing nothing at all. Upstream's README documents
+    // exactly this option set.
+    //
+    // hard: a flapping ZeroFS must block, not corrupt (spec ruling). vers=3: ZeroFS serves NFSv3.
+    // nolock: no NLM sideband — append-mode files are node-local by design. r/wsize 1 MiB: the
+    // default 128 KiB triples the round trips on the config reads that dominate this mount.
+    //
+    // `retry=0` plus the outer `timeout` are the belt and braces for the hang above: retry=0 stops
+    // mount.nfs re-trying a dead server for two minutes, and the timeout means even a wedge that
+    // survives that surfaces as a failed startup — which the DaemonSet restarts and an operator
+    // can see — rather than a silently inert agent.
+    let opts = "vers=3,tcp,port=2049,mountport=2049,nolock,hard,async,rsize=1048576,wsize=1048576,retry=0";
+    let st = std::process::Command::new("timeout")
+        .arg("60")
+        .arg("mount")
+        .args(["-t", "nfs", "-o", opts, export])
         .arg(&target)
         .status()
         .map_err(|e| e.to_string())?;
     if st.success() {
         Ok(())
     } else {
-        Err(format!("mount {export} at {} failed: {st}", target.display()))
+        Err(format!(
+            "mount {export} at {} failed: {st} (124 = timed out; check the export is reachable on 2049)",
+            target.display()
+        ))
     }
 }
 

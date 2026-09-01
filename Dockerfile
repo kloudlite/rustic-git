@@ -62,8 +62,13 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # here. Without it the agent's shared-home mount fails with "bad option; ... you might need a
 # /sbin/mount.<type> helper program" and, because that mount is fail-closed, the agent refuses to
 # start at all rather than serving anyone an empty home.
+# netbase: /etc/protocols and /etc/services. `--no-install-recommends` leaves them out, and
+# without /etc/protocols mount.nfs cannot resolve `proto=tcp` ("Failed to find 'tcp' protocol"),
+# silently abandons the v3 negotiation it was told to use, and asks the server for v4 instead —
+# which ZeroFS rejects as "Invalid NFS Version number 4 != 3" and the client reports, uselessly,
+# as "Protocol not supported". Two lost deploys came from that chain; keep this package.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      btrfs-progs util-linux ca-certificates git openssh-client nfs-common \
+      btrfs-progs util-linux ca-certificates git openssh-client nfs-common netbase \
     && rm -rf /var/lib/apt/lists/*
 ARG PROFILE=release
 COPY target/${PROFILE}/rustic-git-agent /usr/local/bin/rustic-git-agent
