@@ -115,15 +115,24 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     Ok(Action::await_change())
 }
 
-/// A volume's newest Ready commit — the Ready snapshot on `volume` that no other Ready snapshot
-/// names as its parent. Used to pick the parent for a stop-push snapshot when the caller has no
-/// `status.head` of its own to read (see the single call site).
+/// A volume's newest Ready COMMIT — the Ready, non-transient snapshot on `volume` that no other
+/// Ready non-transient snapshot names as its parent. Used to pick the parent for a stop-push
+/// snapshot when the caller has no `status.head` of its own to read (see the single call site).
+///
+/// Transients are excluded from both the candidate set and the `parents` set: a live worktree's
+/// newest sync point is, by definition, one no other Ready snapshot names as parent (its
+/// successor doesn't exist yet), so without this filter it would win the "no children" test and
+/// get spliced into a commit's `parent` chain — exactly the thing `spec.transient`'s doc comment
+/// forbids.
 pub(crate) async fn newest_ready_commit(ctx: &Arc<Ctx>, volume: &str) -> Result<Option<String>, ReconcileErr> {
     let list = Api::<crd::Snapshot>::all(ctx.client.clone())
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
         .await?;
-    let ready: Vec<crd::Snapshot> =
-        list.items.into_iter().filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)).collect();
+    let ready: Vec<crd::Snapshot> = list
+        .items
+        .into_iter()
+        .filter(|s| !s.spec.transient && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
+        .collect();
     let parents: std::collections::HashSet<&str> = ready.iter().map(|s| s.spec.parent.as_str()).filter(|p| !p.is_empty()).collect();
     Ok(ready.iter().find(|s| !parents.contains(s.name_any().as_str())).map(|s| s.name_any()))
 }
@@ -226,6 +235,9 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     // of `ready` above, so it is never considered) — never a `Working` cut caught mid-flight.
     if ready.get(head).is_some_and(|s| s.spec.transient) {
         let worktree = ready[head].spec.worktree.clone();
+        // A replica mid-receive of the older transient just deleted here fails that one pull and
+        // self-heals on its next: the beat re-lists and re-sends against whatever `Ready` transient
+        // is current then, so a delete racing an in-flight send is a retry, not data loss.
         for (name, s) in &ready {
             if name != head && s.spec.transient && s.spec.worktree == worktree {
                 if let Err(e) = snap_api.delete(name, &Default::default()).await {
@@ -668,7 +680,7 @@ mod commit_tests {
         assert_eq!(action, kube::runtime::controller::Action::await_change());
 
         assert_eq!(rec.sent("PATCH", SNAP_STATUS).len(), 1, "the cut still goes Ready");
-        assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH") || c.contains(SNAP_STATUS)), "no head write for a transient: {:?}", rec.calls());
+        assert!(rec.sent("PATCH", WS_STATUS).is_empty(), "no head write for a transient: {:?}", rec.calls());
     }
 
     /// One sync point per worktree: cutting a new `Ready` transient deletes the previous `Ready`
@@ -736,6 +748,32 @@ mod commit_tests {
         retain(&ctx, "vol-1", "sync-ws-1-b").await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a still-Working previous transient must survive: {:?}", rec.calls());
+    }
+
+    /// `newest_ready_commit` picks the stop-push parent — a transient must never win that even
+    /// though it passes the "no Ready snapshot names it as parent" test (its successor doesn't
+    /// exist yet): a Ready commit `vol-1-a` plus a Ready transient `sync-ws-1-x` with no parent
+    /// must still resolve to the commit.
+    #[tokio::test]
+    async fn newest_ready_commit_skips_a_ready_transient() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commit = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "vol-1-a", "uid": "a-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": false},
+            "status": {"phase": "ready"},
+        });
+        let transient = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "sync-ws-1-x", "uid": "x-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![commit, transient]) }];
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        let picked = newest_ready_commit(&ctx, "vol-1").await.unwrap();
+        assert_eq!(picked.as_deref(), Some("vol-1-a"), "a transient must never be picked as the stop-push parent");
     }
 
     /// A commit CR is created WITHOUT status — `status` is a SUBRESOURCE, so the block a creator
