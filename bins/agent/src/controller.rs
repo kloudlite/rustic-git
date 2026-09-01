@@ -99,6 +99,10 @@ pub struct Ctx {
     /// (`rustic-git.io/session`, `rustic-git.io/env`). A second, hand-maintained copy of a label
     /// the scheduler already reads is a second thing that can be wrong — see `k8s::placement`.
     pub roles: Vec<String>,
+    /// `WS_HOMES_EXPORT`: `None` means this node has no shared-home NFS mount, and every
+    /// workspace reconcile parks on `HomeNotReady` rather than starting a pod that would hostPath
+    /// an empty local dir in the home's place.
+    pub homes_export: Option<String>,
     /// The one Nix client, behind a trait so the reconciler is tested with a fake instead of a
     /// real daemon and store.
     pub nix: Arc<dyn crate::nix::Nix>,
@@ -124,7 +128,7 @@ pub struct Ctx {
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, homes_export: Option<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
         // Required, not defaulted: a workspace that names no image runs THIS, and an agent that
         // silently fell back to `:latest` would move every workspace on its next restart.
         let default_image = std::env::var("WS_DEFAULT_IMAGE").ok().filter(|v| !v.is_empty())
@@ -160,6 +164,7 @@ impl Ctx {
             running: Mutex::new(HashMap::new()),
             region,
             roles,
+            homes_export,
             nix,
             profiles_dir,
             profile_builds: Mutex::new(HashMap::new()),
@@ -2075,6 +2080,21 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
     }
 }
 
+/// `{pool}/homes/{owner}`: on the shared-home NFS mount (`mount_homes` in `lib.rs` puts the export
+/// there at agent startup), so materializing an owner's home is plain `mkdir` + `chown` — no
+/// subvolume, no snapshot, nothing btrfs-specific. Idempotent; safe on every reconcile.
+fn ensure_shared_home(pool: &str, owner: &str, uid: u32) -> Result<(), String> {
+    let dir = crate::homes_root(pool).join(owner);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Only root may chown to an arbitrary uid; the agent always runs privileged in production
+    // (DaemonSet, see CLAUDE.md), so this only ever no-ops in a dev/test environment, letting the
+    // reconcile loop under test exercise the surrounding logic without needing root itself.
+    if unsafe { libc::geteuid() } == 0 {
+        std::os::unix::fs::chown(&dir, Some(uid), Some(uid)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
@@ -2137,48 +2157,28 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    // The home the pod mounts must be READY, not merely present: kubelet is happy the instant the
-    // hostPath directory exists, and `materialize_home` snapshots `live` into place before the nested cache
-    // subvolumes and the qgroup exist — a pod started in that window makes `.npm` a plain
-    // directory that keep-biased `ensure_home_dirs` never converts, pushed forever. The binding
-    // reported ready only after authoring the home, so "not in the store" is watch latency, and
-    // a home whose own reconcile settled in Error (the region unreachable) is permanent here too:
-    // no pod can run on a home that will not exist.
-    let home = crd::home_volume_name(&w.spec.owner);
-    match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
-        Some(v) if volume_is_ready(&v) => {}
-        Some(v) if v.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Error) => {
-            let prev = prev.clone();
-            return settle(
-                Outcome::Permanent(format!("home volume {home} failed; see its status"), "HomeNotReady"),
-                w,
-                "Workspace",
-                gen,
-                move |cond| {
-                    serde_json::json!({
-                        "phase": crd::Phase::Error,
-                        "nodeName": prev.node_name,
-                        "compatibleNodes": prev.compatible_nodes,
-                        "volumeRef": prev.volume_ref,
-                        "conditions": ws_conditions(&prev, cond),
-                    })
-                },
-                ctx,
-            )
-            .await;
-        }
-        _ => {
-            let st = crd::WorkspaceStatus {
-                phase: crd::Phase::Creating,
-                observed_generation: None,
-                volume_ref: Some(id),
-                conditions: ws_conditions(&prev, crd::condition("Ready", false, "HomeNotReady", "waiting for the home volume", gen)),
-                ..prev
-            };
-            write_ws_status(w, st, ctx).await?;
-            return Ok(Action::requeue(TICK));
-        }
+    // The shared home replaces the home Volume (spec 2026-09-01): the agent makes the two mount
+    // sources exist before kubelet needs them. `{pool}/homes/{owner}` is NFS — mkdir is the whole
+    // materialize. The cache subvolume is local and disposable. Both idempotent, so every reconcile
+    // may call them. No WS_HOMES_EXPORT on this node: park, fail closed — a pod started anyway
+    // would hostPath an empty local dir and the person's dotfiles would silently not be theirs.
+    if ctx.homes_export.is_none() {
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            volume_ref: Some(id),
+            conditions: ws_conditions(&prev, crd::condition("Ready", false, "HomeNotReady", "this node has no shared-home mount (WS_HOMES_EXPORT)", gen)),
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
     }
+    ensure_shared_home(&ctx.pool, &w.spec.owner, k8s::SSH_UID as u32).map_err(ReconcileErr)?;
+    let (engine, owner) = (ctx.engine.clone(), w.spec.owner.clone());
+    tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .map_err(|e| ReconcileErr(e.0))?;
 
     // Commit-model worktree materialization: a workspace just claimed onto this node (or one
     // whose pod was never started here) has no `live/{id}` subvolume yet. `head` is `None` on a

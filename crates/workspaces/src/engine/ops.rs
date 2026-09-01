@@ -100,6 +100,38 @@ impl Engine {
         Ok(())
     }
 
+    /// `{pool}/homecache/{owner}`: the node-local half of the shared-home split (spec
+    /// 2026-09-01) — caches (editor servers, package manager state) that must never leave this
+    /// node and are disposable by contract, so no qgroup limit here (unlike `set_quota`, which
+    /// caps volumes that ARE the tenant's durable data). A btrfs subvolume, not a plain dir, so
+    /// deleting it later is one `btrfs subvolume delete` instead of a `rm -rf` racing writers.
+    pub fn ensure_homecache(&self, owner: &str, uid: u32) -> Result<(), EngErr> {
+        let root = self.pool.root.join("homecache").join(owner);
+        std::fs::create_dir_all(root.parent().unwrap()).map_err(EngErr::io)?;
+        // ponytail: the agent is root-only and btrfs is always present in production (it's a
+        // privileged DaemonSet, see CLAUDE.md); a dev/test pool gets a plain directory instead of
+        // a subvolume so the reconcile loop converges without either — this function's real
+        // subvolume path is exercised by `engine_ops.rs`'s btrfs-gated test.
+        if !root.exists() {
+            if super::have_btrfs() {
+                run(&["btrfs", "subvolume", "create", root.to_str().unwrap()])?;
+            } else {
+                std::fs::create_dir(&root).map_err(EngErr::io)?;
+            }
+        } else if super::have_btrfs() && !is_subvolume(&root) {
+            return Err(EngErr::other(format!("{}: exists but is not a btrfs subvolume", root.display())));
+        }
+        let chown_ok = unsafe { libc::geteuid() } == 0;
+        for d in ["cache", "vscode-server", "cursor-server", "state"] {
+            let p = root.join(d);
+            std::fs::create_dir_all(&p).map_err(EngErr::io)?;
+            if chown_ok {
+                std::os::unix::fs::chown(&p, Some(uid), Some(uid)).map_err(EngErr::io)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Cap `id`'s live subvolume at `quota_gb` with a btrfs qgroup limit — the only thing that
     /// stops one tenant writing the whole pool to ENOSPC and taking every sibling down with it.
     /// Per SUBVOLUME, so it has to be re-applied whenever `live` is a new subvolume, not only at

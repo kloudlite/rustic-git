@@ -312,6 +312,7 @@ mod commit_tests {
             pool.to_string_lossy().into(),
             "r1".into(),
             vec![],
+            Some("test:/".into()),
             Arc::new(NoopNix),
             pool.join("profiles"),
         );

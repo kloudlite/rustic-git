@@ -86,7 +86,17 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
 /// test can reach the node's real `/nix` and none of them race each other over it.
-fn ctx_full(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+    ctx_with_homes_export(pool, routes, nix, Some("test:/".into()))
+}
+
+/// The `WS_HOMES_EXPORT`-unset variant: a node with no shared-home mount, which every workspace
+/// reconcile must park on rather than start a pod against.
+fn ctx_without_homes_export(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    ctx_with_homes_export(pool, routes, Arc::new(FakeNix::default()), None)
+}
+
+fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
     // Every reconcile now unconditionally may ask "does this volume have commits yet"
     // (`claim::commit_placement`/`has_commits`, the checkout/migrate step) — a call no test fixture
     // needed before the commit model became the only model (Task 8). Appended AFTER the caller's
@@ -112,6 +122,7 @@ fn ctx_full(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>) -
             pool.to_string_lossy().into(),
             "r1".into(),
             vec!["session".into(), "env".into()],
+            homes_export,
             nix,
             profiles,
         )),
@@ -2670,42 +2681,34 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     assert_eq!(converged.len(), 2, "never saw two converged passes: {:?}", rec.calls());
 }
 
-/// The pod mounts the home, and kubelet starts it as soon as the hostPath exists — which is before
-/// the nested cache subvolumes and the qgroup do. So the Workspace waits on the home Volume's
-/// STATUS, and says so, rather than letting a pod make `.npm` a plain directory that is pushed
-/// forever.
+/// The shared home replaces the home Volume (spec 2026-09-01): a node with no `WS_HOMES_EXPORT`
+/// has nowhere to mount an owner's home, so it must park the workspace rather than start a pod
+/// that would hostPath an empty local dir in the home's place.
 #[tokio::test]
-async fn a_workspace_whose_home_is_not_ready_creates_no_pod_and_says_why() {
+async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a_pod() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
-    let mut home = home_vol_json(2);
-    home["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
-    ctx.remember_volume(serde_json::from_value(home).unwrap());
-    let ws = ready_workspace("ws-1", vec![]);
+    // resolve_volume and the namespace-ready check both run before the homes-export gate, so
+    // this fixture still needs a Ready Volume and a Ready binding to reach it — same shapes as
+    // `ws_ctx_with_ssh`'s, minus the SSH/pod routes the homes-export gate never lets it reach.
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true}
+    });
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+        ready_binding(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx_without_homes_export(tmp.path(), routes);
+    let w = ready_workspace("ws-1", vec![]);
 
-    let action = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "creating");
-    assert!(st["status"]["observedGeneration"].is_null());
-    assert!(
-        st["status"]["conditions"].as_array().unwrap().iter()
-            .any(|c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "HomeNotReady"),
-        "{st}"
-    );
-
-    // A home whose own reconcile settled in Error (the registry unreachable) will not appear by
-    // waiting: the workspace settles too, with the same reason, and stops requeueing.
-    let mut home = home_vol_json(2);
-    home["status"] = serde_json::json!({"phase": "error", "subvolumePresent": false});
-    ctx.remember_volume(serde_json::from_value(home).unwrap());
-    let action = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
-    assert_eq!(st["status"]["phase"], "error");
-    assert!(st["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "HomeNotReady"), "{st}");
-    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "HomeNotReady");
+    assert!(rec.calls().iter().all(|c| !c.contains("/pods")), "no pod while unmounted: {:?}", rec.calls());
 }
 
 /// The timer's decision, with the two numbers it reads faked: only homes, only ready ones, only
