@@ -239,17 +239,15 @@ const SEED_DIR: &str = "/workspace";
 /// Everything under here except `workspaces/` is the same in every workspace the person opens
 /// on this node.
 pub const HOME_DIR: &str = "/home/kl";
-/// What inside a home is a node-local mount rather than the shared NFS home: package caches.
-/// The home itself now lives on one region-shared ZeroFS export (no more per-node btrfs
-/// subvolume, no push/pull), so anything mounted over it locally never crosses the network and
-/// never touches another node's copy — these are subPaths into `{pool}/homecache/{owner}`, a
-/// local btrfs subvolume the agent creates alongside the mount, not paths inside the export.
-/// ONE list, read by every place that mounts the home — two lists would drift and a cache would
-/// come back as a plain directory synced through NFS like everything else. A person who wants
-/// something else excluded runs `btrfs subvolume create` themselves; that is the documented
-/// escape hatch, not a UI. The editors' remote servers are here too: the default image exists to
-/// run VS Code's, which is 300 MB+ per version and would otherwise cross the NFS export on every
-/// use, and it re-downloads itself on a fresh node anyway.
+/// The paths a MIGRATION must not copy out of an old per-node btrfs home into the shared NFS
+/// export: the six directories the old design kept as nested subvolumes (package caches, the
+/// editors' remote servers) and never pushed. They are dead weight on the export — the node-local
+/// `homecache` volume rebuilds every one of them for free on first use — so this is the rsync
+/// exclusion list in `deploy/k3s/README.md`'s migration step, and nothing else.
+///
+/// It does NOT describe what the pod mounts: the running layout redirects caches by ENV VAR
+/// (`login_env` -> `HOME_CACHE_DIR`) and mounts four hardcoded `homecache` subPaths, which are
+/// deliberately not these paths. Cross-check `workspace_pod`, never this list, for that.
 pub const HOME_LOCAL_DIRS: [&str; 6] =
     [".cache", ".npm", ".cargo/registry", ".local/share/pnpm", ".vscode-server", ".cursor-server"];
 /// Where the node-local cache volume lands inside the home: tool caches redirected here (via
@@ -332,10 +330,15 @@ fn login_env(name: &str) -> Vec<EnvVar> {
         var("npm_config_cache", format!("{HOME_CACHE_DIR}/npm")),
         var("PNPM_STORE_DIR", format!("{HOME_CACHE_DIR}/pnpm")),
         var("BUN_INSTALL_CACHE_DIR", format!("{HOME_CACHE_DIR}/bun")),
-        var("CARGO_HOME", format!("{HOME_CACHE_DIR}/cargo")),
+        // NOT CARGO_HOME: it holds `credentials.toml` and `config.toml` — configs, which is the
+        // half of the home that must survive. Cargo has no separate knob for its registry cache,
+        // so that part is kept off the export by a `homecache` mount at `~/.cargo/registry`
+        // instead (see `workspace_pod`), and only the build output is redirected by env.
+        var("CARGO_TARGET_DIR", format!("{HOME_CACHE_DIR}/cargo-target")),
         var("RUSTUP_HOME", format!("{HOME_CACHE_DIR}/rustup")),
+        // GOMODCACHE only, never GOPATH: GOPATH also holds `src/` and `bin/`, which are the
+        // person's own files, and the module cache is the only large rebuildable part of it.
         var("GOMODCACHE", format!("{HOME_CACHE_DIR}/gomod")),
-        var("GOPATH", format!("{HOME_CACHE_DIR}/go")),
         var("GRADLE_USER_HOME", format!("{HOME_CACHE_DIR}/gradle")),
         var("UV_CACHE_DIR", format!("{HOME_CACHE_DIR}/uv")),
         var("PIP_CACHE_DIR", format!("{HOME_CACHE_DIR}/pip")),
@@ -879,10 +882,14 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
                 // Listed before the workspace mount for the reader; the kubelet orders by path
                 // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
                 VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
-                // One `homecache` volume, four subPaths: the janitor reclaims all of it by
+                // One `homecache` volume, five subPaths: the janitor reclaims all of it by
                 // deleting a single node-local subvolume, and each subPath is resolved once at
                 // container start so `login_env`'s redirected vars actually land here.
                 VolumeMount { name: "homecache".to_string(), mount_path: HOME_CACHE_DIR.to_string(), sub_path: Some("cache".to_string()), ..Default::default() },
+                // Cargo's registry cache, mounted rather than redirected: `CARGO_HOME` stays on
+                // the shared home so `credentials.toml` survives, and cargo offers no env var for
+                // the cache alone — so the cache subtree is what moves node-local.
+                VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.cargo/registry".to_string(), sub_path: Some("cargo-registry".to_string()), ..Default::default() },
                 VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.vscode-server".to_string(), sub_path: Some("vscode-server".to_string()), ..Default::default() },
                 VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.cursor-server".to_string(), sub_path: Some("cursor-server".to_string()), ..Default::default() },
                 VolumeMount { name: "homecache".to_string(), mount_path: HOME_STATE_DIR.to_string(), sub_path: Some("state".to_string()), ..Default::default() },
@@ -1919,6 +1926,7 @@ mod tests {
         let mounts = s.containers[0].volume_mounts.clone().unwrap();
         let sub = |mp: &str| mounts.iter().find(|m| m.mount_path == mp).map(|m| (m.name.clone(), m.sub_path.clone()));
         assert_eq!(sub(HOME_CACHE_DIR), Some(("homecache".into(), Some("cache".into()))));
+        assert_eq!(sub("/home/kl/.cargo/registry"), Some(("homecache".into(), Some("cargo-registry".into()))));
         assert_eq!(sub("/home/kl/.vscode-server"), Some(("homecache".into(), Some("vscode-server".into()))));
         assert_eq!(sub("/home/kl/.cursor-server"), Some(("homecache".into(), Some("cursor-server".into()))));
         assert_eq!(sub(HOME_STATE_DIR), Some(("homecache".into(), Some("state".into()))));
@@ -1932,11 +1940,16 @@ mod tests {
         assert_eq!(get("HISTFILE"), format!("{HOME_STATE_DIR}/shell_history"));
         for (var, sub) in [
             ("npm_config_cache", "npm"), ("PNPM_STORE_DIR", "pnpm"), ("BUN_INSTALL_CACHE_DIR", "bun"),
-            ("CARGO_HOME", "cargo"), ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"), ("GOPATH", "go"),
+            ("CARGO_TARGET_DIR", "cargo-target"), ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"),
             ("GRADLE_USER_HOME", "gradle"), ("UV_CACHE_DIR", "uv"), ("PIP_CACHE_DIR", "pip"),
             ("DENO_DIR", "deno"), ("PLAYWRIGHT_BROWSERS_PATH", "playwright"),
         ] {
             assert_eq!(get(var), format!("{HOME_CACHE_DIR}/{sub}"), "{var}");
+        }
+        // The configs half of the author's rule: cargo credentials and a person's GOPATH/src stay
+        // on the shared home, so neither var may be redirected onto the disposable volume.
+        for var in ["CARGO_HOME", "GOPATH"] {
+            assert!(env.iter().all(|e| e.name != var), "{var} must stay on the shared home");
         }
     }
 
