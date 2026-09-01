@@ -10,11 +10,6 @@ impl Pool {
     pub fn new(root: impl Into<PathBuf>) -> Pool {
         Pool { root: root.into() }
     }
-    /// Replica snapshots, sender side and receiver side both — the commit model's own transfer
-    /// staging area (`bins/agent/src/peer.rs`), unrelated to the deleted object-store path.
-    pub fn repl(&self, name: &str) -> PathBuf {
-        self.root.join("repl").join(name)
-    }
     /// `{pool}/vol/{name}` — "vol" not "ws": environments live here too, and it matches the
     /// registry namespace's `vol/{owner}/{id}` naming.
     pub fn voldir(&self, name: &str) -> PathBuf {

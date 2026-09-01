@@ -254,7 +254,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     heartbeat(&ctx.pool);
     spawn_heartbeat(ctx.clone());
     spawn_home_push(ctx.clone());
-    spawn_replicate(ctx.clone());
     spawn_pull(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
@@ -518,21 +517,7 @@ pub fn homes_to_push(
 
 /// The timer (spec: "Replication, trigger 1"). Every home is pushed from the agent's own beat and
 /// nothing else: inside a region there is one node per person, so no two nodes ever push one home.
-/// The sender half of replication (spec: "Replication, trigger 1"'s sibling for standby copies):
-/// its own beat, same shape as `spawn_home_push`, so a slow send never delays a reconcile and a
-/// reconcile never waits on a send.
-fn spawn_replicate(ctx: Arc<Ctx>) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(crate::peer::replica_interval());
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            crate::peer::replicate_beat(&ctx).await;
-        }
-    });
-}
-
-/// The commit model's puller: its own beat, same interval and tick shape as `spawn_replicate`.
+/// The commit model's puller: its own beat, so a slow pull never delays a reconcile.
 fn spawn_pull(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(crate::peer::replica_interval());

@@ -126,14 +126,6 @@ pub(crate) fn with_me(existing: &[String], me: &str) -> Vec<String> {
     out
 }
 
-/// The mirror of `with_me`: a node that no longer holds a replica removes itself from
-/// `compatibleNodes` — the deselected half of the rendezvous, computed by the standby itself
-/// since every node runs the same deterministic `replicate::targets` math. A no-op, not an error,
-/// when the name is already absent (the common case on a retry after a 409).
-pub(crate) fn without_me(existing: &[String], me: &str) -> Vec<String> {
-    existing.iter().filter(|n| n.as_str() != me).cloned().collect()
-}
-
 /// A pre-migration object: it names its node in the DEPRECATED `spec.nodeName` and has never had a
 /// `status.nodeName`, so it matches the unplaced watch while already being placed. Claiming it here
 /// would hand it to whichever agent saw it first, ignoring the node its subvolume is actually on.

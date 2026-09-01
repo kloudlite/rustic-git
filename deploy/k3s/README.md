@@ -346,19 +346,18 @@ off first (`kubectl label node <node> rustic-git.io/pool-`) and put it back afte
 
 ## Replication
 
-Volume/Workspace/Environment standbys, off by default. Bring it up:
+Volume standbys, pull-based: every node's agent decides which commits it must hold (replication's
+rendezvous names it, or it runs one of the volume's worktrees) and GETs them from a peer that
+already has them. Bring it up:
 
 1. Add `WS_PEER_SECRET` to the `rustic-git-agent` Secret (same one as `WS_REGION` etc. above) —
    any shared string, compared in constant time on every peer request. Unset, the peer listener
-   never starts and the sender beat never runs: fail-closed, not fail-open.
+   never starts and the puller never dials: fail-closed, not fail-open.
 2. Apply `agent-peer.yaml` (already in the fresh-cluster command above) so the listener's port
    8444 is reachable only from other `app: rustic-git-agent` pods — without it, every pod in the
    cluster, workspace pods included, can already reach an agent pod's IP directly.
-3. Raise `WS_REPLICA_COUNT` in `agent-daemonset.yaml` above `1` (and roll) once the secret is
-   live on every node.
 
-Rollout order between these three is unconstrained: `WS_REPLICA_COUNT` defaults to `1` (no
-standby, no listener call, no snapshot), and the listener itself is fail-closed without its
+How many copies a volume gets is `Volume.spec.replicas`, per volume — there is no cluster-wide
+knob. Rollout order is unconstrained: the listener and the puller are both fail-closed without the
 secret, so an agent that rolls ahead of its peers, or ahead of the Secret, or ahead of
-`agent-peer.yaml`, just keeps running with replication off rather than sending or receiving
-anything unsafe.
+`agent-peer.yaml`, just keeps running with replication idle rather than moving anything unsafe.
