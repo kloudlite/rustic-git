@@ -31,7 +31,6 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-object_store = { workspace = true }
 sha2 = { workspace = true }
 # The replica-receive listener (`peer.rs`); already in the tree via crates/workspaces.
 axum = { workspace = true }
