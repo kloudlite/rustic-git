@@ -176,7 +176,14 @@ impl Engine {
     /// the owner, parents included: root-made `~/.cargo` is a `mkdir ~/.cargo/x: Permission denied`
     /// for the person the home belongs to.
     pub fn ensure_home_dirs(&self, id: &str, uid: u32) -> Result<(), EngErr> {
-        let live = self.pool.live(id);
+        // Same mixed-layout decision as `set_quota`: a migrated home's real $HOME is the
+        // worktree (`Pool::worktree`), and `live` names the directory OF worktrees, not the
+        // subvolume any more — creating the caches under `live` itself would put plain
+        // directories INSIDE the snapshotted worktree tree, so every commit/send would carry
+        // them and `homeQuotaGb` would count them. A not-yet-migrated home is still the old
+        // single subvolume at `live`, so that stays the target there.
+        let old_live = self.pool.live(id);
+        let live = if is_subvolume(&old_live) { old_live } else { self.pool.worktree(id, id) };
         for rel in crate::k8s::HOME_LOCAL_DIRS {
             let p = live.join(rel);
             if p.exists() {

@@ -257,6 +257,10 @@ rm -rf /wspool-prod/repl
 az storage blob delete-batch --account-name <acct> -s <container> --pattern 'layers/*'
 ```
 
+The `bins/server/src/browse_api/volumes.rs` browse surface stays up through all of the above: it
+is frozen (nothing writes it any more) but the Snapshots page still reads it, and it keeps showing
+old-model history for a volume until that volume's rows age out or the surface itself is retired.
+
 The `rustic-git-agent` Secret's `AZURE_*` keys become unused (the env wiring is already gone); the
 keys may stay in the Secret harmlessly or be pruned with the storage account whenever the old
 container is retired.

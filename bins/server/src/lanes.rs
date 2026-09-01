@@ -117,7 +117,8 @@ where
 
 /// What a warm pool key is, for the lanes. The pool holds three namespaces under one keyspace —
 /// `owner/name` (a git repo), `img/owner/name` (an image) and `vol/owner/id` (a workspace
-/// volume, owned by the `vol_agent` surface) — and a lane that only strips `img/` reads a warm
+/// volume — the commit model's pre-cutover write side, `vol_agent`, is deleted; nothing writes
+/// this namespace any more, see `browse_api::volumes`) — and a lane that only strips `img/` reads a warm
 /// volume as a git repo owned by `vol`: the marker lane then publishes `index/*/repo/vol/...`
 /// every pass and the pull lanes scan a volume database for `pull/` rows. Volumes have neither
 /// a listing marker nor pull requests, so they are `None` here and every lane skips them.

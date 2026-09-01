@@ -1,13 +1,12 @@
 //! Volume browse routes: the owner-scoped volume list and one volume's snapshot history.
 //!
-//! These are the USER-facing read side of the `vol/{owner}/{name}` registry. The agent-facing
-//! write side lives in `crate::vol_agent` and authenticates a region's agent token; that surface is
-//! deliberately not reused here, because a per-region shared secret is not an authorization answer
-//! for "may this person see these snapshots".
-//!
-//! A snapshot outlives the workspace it was taken of, so this is the only index of them that
-//! survives the parent's deletion — which is exactly why the Snapshots page reads it rather than
-//! enumerating live `Workspace`/`Environment` objects in the cluster.
+//! FROZEN (ruled: keep, don't delete). This was the USER-facing read side of the pre-cutover
+//! `vol/{owner}/{name}` object-store registry; the agent-facing write side that used to fill it
+//! (`vol_agent`) is deleted along with the object-store subsystem the commit model replaced.
+//! Nothing writes this surface any more — the commit model's history lives in `Snapshot` CRs,
+//! read through `/v1` — but old rows already written here still answer, so the Snapshots page
+//! keeps reading it rather than going blank for pre-cutover volumes. Retire it once no
+//! pre-cutover history is left to serve (see `deploy/k3s/README.md`'s cleanup section).
 
 use super::hidden;
 use crate::router::internal;

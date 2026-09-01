@@ -194,7 +194,7 @@ pub struct VolumeStatus {
     #[serde(default)]
     pub subvolume_present: bool,
     // No `lastSnapshot` and no `lastPush`: "the newest snapshot of this volume" is a query over
-    // `SnapshotRequest`s by the `rustic-git.io/volume` label. A second controller writing this
+    // `Snapshot` CRs by the `rustic-git.io/volume` label. A second controller writing this
     // status object would prune the first one's fields — `patch_status` applies FORCED under one
     // `AGENT_FIELD_MANAGER`, and server-side apply removes fields a manager previously owned and no
     // longer sets, so the Volume reconciler's very next pass would delete whatever the snapshot
@@ -208,8 +208,8 @@ pub struct VolumeStatus {
 ///
 /// Never patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the
 /// only two things that ever remove one are an explicit delete and GC, same discipline as a
-/// registry blob. Distinct from `SnapshotRequest` (the older, still-live push-as-annotation kind
-/// this replaces): both exist until the cutover task deletes the old one.
+/// registry blob. Replaces the older `SnapshotRequest` push-as-annotation kind, which the cutover
+/// task has since deleted — this is the only push record left.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "rustic-git.io",
@@ -387,7 +387,8 @@ pub enum Phase {
     Stopped,
     /// A btrfs operation is in flight.
     Working,
-    /// A `SnapshotRequest` whose record is in the registry. Never re-run past this.
+    /// Historical: a pre-cutover `SnapshotRequest` whose record was in the registry, never
+    /// re-run past this. The kind is gone; the variant stays for CRs written before the cutover.
     Done,
     Error,
 }

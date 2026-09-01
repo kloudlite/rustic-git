@@ -949,8 +949,18 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         if materialize {
             if home {
                 match home_target {
-                    // Never committed anywhere — the only genuine bootstrap case.
-                    None => engine.create_subvol(id).map_err(|e| e.to_string())?,
+                    // Never committed anywhere — the only genuine bootstrap case. `checkout`
+                    // with no source name bootstraps an empty WORKTREE (the native layout), not
+                    // `create_subvol`'s old single-subvolume `live` — the pod mounts
+                    // `live/{home}` (hostPath type Directory) and a `live` that isn't yet a
+                    // directory of worktrees FailedMounts until the home beat migrates it.
+                    None => {
+                        match engine.checkout(id, None, id) {
+                            Ok(()) => {}
+                            Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
+                            Err(e) => return Err(e.0),
+                        }
+                    }
                     Some(name) => {
                         let local = engine.local_commits(id).map_err(|e| e.to_string())?;
                         if local.iter().any(|n| n == &name) {

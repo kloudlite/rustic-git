@@ -1277,7 +1277,7 @@
                 "description": "Auto-generated derived type for SnapshotSpec via `CustomResource`",
                 "properties": {
                   "spec": {
-                    "description": "One immutable commit: a btrfs RO snapshot, recorded as a CR before the snapshot is cut so a\nretry finds the object and continues rather than orphaning a subvolume.\n\nNever patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the\nonly two things that ever remove one are an explicit delete and GC, same discipline as a\nregistry blob. Distinct from `SnapshotRequest` (the older, still-live push-as-annotation kind\nthis replaces): both exist until the cutover task deletes the old one.",
+                    "description": "One immutable commit: a btrfs RO snapshot, recorded as a CR before the snapshot is cut so a\nretry finds the object and continues rather than orphaning a subvolume.\n\nNever patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the\nonly two things that ever remove one are an explicit delete and GC, same discipline as a\nregistry blob. Replaces the older `SnapshotRequest` push-as-annotation kind, which the cutover\ntask has since deleted — this is the only push record left.",
                     "properties": {
                       "message": {
                         "nullable": true,

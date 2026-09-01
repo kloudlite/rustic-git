@@ -333,3 +333,26 @@ fn migrate_volume_recovers_from_a_partial_rename() {
     let wt = e.pool.worktree(volume, volume);
     assert_eq!(std::fs::read(wt.join("marker.txt")).unwrap(), b"pre-model content");
 }
+
+/// Task 7a's ruling: `set_quota` picks its arm by what's actually on disk (`is_subvolume`), not
+/// by a migration flag. An old-layout volume (`live` itself is the RW subvolume) gets the
+/// single-target arm; a migrated volume (`live` is a directory of worktrees) gets the limit
+/// applied to each worktree individually.
+#[test]
+fn set_quota_picks_the_arm_by_the_layout_actually_on_disk() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
+        return;
+    }
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+
+    // Old layout: `live` is the subvolume itself.
+    e.create_subvol("v1").unwrap();
+    assert!(e.set_quota("v1", 1).unwrap().is_none(), "old-layout quota must apply cleanly");
+
+    // Migrated layout: `live` is a directory of per-worktree subvolumes.
+    e.checkout("v2", None, "ws1").unwrap();
+    e.checkout("v2", None, "ws2").unwrap();
+    assert!(e.set_quota("v2", 1).unwrap().is_none(), "migrated-layout quota must apply to every worktree");
+}

@@ -1015,14 +1015,16 @@ fn home_vol_json(quota: u64) -> serde_json::Value {
 const HOME_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice/status";
 
 /// `ensure_home_dirs` always shells to real `btrfs` for any `HOME_LOCAL_DIRS` entry missing under
-/// `live/{id}` — pre-creating all of them as plain directories is the same convergence trick as
-/// everywhere else in this file, applied to the one step that isn't a single checkout/create call.
+/// the home's worktree — pre-creating all of them as plain directories is the same convergence
+/// trick as everywhere else in this file, applied to the one step that isn't a single
+/// checkout/create call.
 fn skip_ensure_home_dirs(pool: &std::path::Path, id: &str) {
-    // `ensure_home_dirs` still checks the OLD single-subvolume `Pool::live` path
-    // (`{pool}/vol/{id}/live`), not the worktree path — pre-create there, matching the code as
-    // it stands today (a pre-existing gap, not something this fix touches).
+    // `ensure_home_dirs` now targets the WORKTREE path (`{pool}/vol/{id}/live/{id}`), the pod's
+    // real $HOME on a migrated home, not the old single-subvolume `Pool::live` path — see final
+    // fix item 1. Pre-create there so the fake `live` this file seeds (a plain directory, not a
+    // real subvolume) reads as already-satisfied.
     for rel in rustic_git_workspaces::k8s::HOME_LOCAL_DIRS {
-        std::fs::create_dir_all(pool.join("vol").join(id).join("live").join(rel)).unwrap();
+        std::fs::create_dir_all(pool.join("vol").join(id).join("live").join(id).join(rel)).unwrap();
     }
 }
 
@@ -1112,9 +1114,11 @@ async fn a_home_with_a_ready_commit_not_yet_local_awaits_the_pull_beat() {
 #[tokio::test]
 async fn a_home_with_no_commits_at_all_bootstraps_empty() {
     let tmp = tempfile::tempdir().unwrap();
-    // The old single-subvolume path `create_subvol` checks — not the worktree path — so this
-    // converges without a real `btrfs` binary, same trick as `create_subvol`'s own doc comment.
-    std::fs::create_dir_all(tmp.path().join("vol/home-alice/live")).unwrap();
+    // Bootstraps via `checkout(id, None, id)` now (final fix item 3) — the WORKTREE path
+    // (`vol/{id}/live/{id}`), never the old single-subvolume `create_subvol` path, so a
+    // pre-existing worktree dir converges through `WORKTREE_EXISTS` without a real `btrfs`
+    // binary, same trick every other commit-model test in this file uses.
+    std::fs::create_dir_all(tmp.path().join("vol/home-alice/live/home-alice")).unwrap();
     skip_ensure_home_dirs(tmp.path(), "home-alice");
     let routes = vec![
         patch_ok(HOME_STATUS),
