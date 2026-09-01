@@ -1803,6 +1803,7 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
             parent: String::new(),
             message: Some("migration baseline".to_string()),
             pinned: false,
+            transient: false,
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, id));
@@ -2783,6 +2784,7 @@ where
                     parent: parent_commit,
                     message: Some("stopping".to_string()),
                     pinned: false,
+                    transient: false,
                 },
             );
             snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });

@@ -244,6 +244,11 @@ pub struct SnapshotSpec {
     /// Keeps this commit out of any future retention sweep. Never cleared by a controller.
     #[serde(default)]
     pub pinned: bool,
+    /// A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a
+    /// replica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and
+    /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this.
+    #[serde(default)]
+    pub transient: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -963,7 +968,7 @@ mod tests {
     #[test]
     fn snapshot_spec_round_trips_with_empty_parent_and_no_message() {
         let spec = SnapshotSpec {
-            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false,
+            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false, transient: false,
         };
         let v = serde_json::to_value(&spec).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));

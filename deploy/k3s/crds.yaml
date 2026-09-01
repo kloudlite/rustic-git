@@ -1306,6 +1306,11 @@
                         "description": "Keeps this commit out of any future retention sweep. Never cleared by a controller.",
                         "type": "boolean"
                       },
+                      "transient": {
+                        "default": false,
+                        "description": "A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a\nreplica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and\nretained ONE per worktree — see `snapshot::retain`. `push` never sets this.",
+                        "type": "boolean"
+                      },
                       "volume": {
                         "type": "string"
                       },

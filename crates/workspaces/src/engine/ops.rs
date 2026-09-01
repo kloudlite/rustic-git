@@ -63,6 +63,15 @@ pub fn is_subvolume(path: &std::path::Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.ino() == 256)
 }
 
+/// The `Generation:` line of `btrfs subvolume show`. Split from the command so the parse has a test
+/// that runs where btrfs does not.
+pub fn parse_generation(subvolume_show: &str) -> Option<u64> {
+    subvolume_show
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Generation:"))
+        .and_then(|g| g.trim().parse().ok())
+}
+
 pub struct Engine {
     pub pool: Pool,
     /// Sampled once at construction, not re-probed per call: a degradation (no btrfs on PATH, not
@@ -208,6 +217,31 @@ impl Engine {
         run(&["btrfs", "filesystem", "sync", self.pool.root.to_str().unwrap()])
     }
 
+    /// The btrfs generation of a worktree subvolume: a counter the filesystem bumps on every
+    /// committed transaction that touched it, so "has anything changed since the last sync point"
+    /// is one `subvolume show` rather than a walk of the tree. Reads the WORKTREE path
+    /// (`pool.worktree`), not `pool.live(id)` — under the commit model `live` is a directory of
+    /// per-worktree subvolumes, not a subvolume itself.
+    pub fn generation(&self, volume: &str, ws: &str) -> Result<u64, EngErr> {
+        self.generation_of(&self.pool.worktree(volume, ws))
+    }
+
+    fn generation_of(&self, subvol: &std::path::Path) -> Result<u64, EngErr> {
+        let out = std::process::Command::new("btrfs")
+            .args(["subvolume", "show", subvol.to_str().unwrap()])
+            .output()
+            .map_err(EngErr::io)?;
+        if !out.status.success() {
+            return Err(EngErr::other(format!(
+                "btrfs subvolume show {}: {}",
+                subvol.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        parse_generation(&String::from_utf8_lossy(&out.stdout))
+            .ok_or_else(|| EngErr::other(format!("btrfs subvolume show {}: no Generation line", subvol.display())))
+    }
+
     /// LOCAL-FIRST clone: snapshot `src_id`'s current live subvolume straight into `dst_id`'s —
     /// no registry, no lineage, works even on a source that was never pushed/committed at all.
     /// The one caller left is `clone_env` (`api.rs`), which deliberately still copies bytes into a
@@ -265,6 +299,13 @@ mod tests {
         e.has_btrfs = true; // the node's btrfs/root came back
         let err = e.ensure_homecache("alice", 12345).unwrap_err();
         assert!(err.0.contains("rm -rf"), "{}", err.0);
+    }
+
+    #[test]
+    fn parse_generation_reads_the_generation_line() {
+        let show = "vol/ws-1/live/ws-1\n\tName: ws-1\n\tGeneration: 10197\n\tGen at creation: 4\n";
+        assert_eq!(parse_generation(show), Some(10197));
+        assert_eq!(parse_generation("no such line"), None);
     }
 
     #[test]

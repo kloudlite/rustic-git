@@ -1648,6 +1648,7 @@ async fn create_commit(
             parent: parent.unwrap_or_default(),
             message,
             pinned: false,
+            transient: false,
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, volume));
