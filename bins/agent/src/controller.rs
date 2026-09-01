@@ -2855,13 +2855,36 @@ async fn restore_gate(
         st.and_then(|s| s.restored_to.as_deref()),
         st.and_then(|s| s.restore_requested_at.as_deref()),
     ) {
-        // Commit model: the wish IS a commit, so a freshly granted one is this environment's new
-        // head — written once, on the first pass that observes the grant (every later pass finds
-        // `head` already equal and no-ops). Preserve pattern: merge onto whatever this environment
-        // currently reports, never blank `podRef`/`serviceStatus`/anything else already there.
-        if e.status.as_ref().and_then(|s| s.head.as_deref()) != Some(wish.snapshot_id.as_str()) {
+        // Commit model: the wish IS a commit, so a freshly granted one INITIALIZES this
+        // environment's head — once, against the recorded wish, never against `head` itself.
+        // Comparing `head` to the wish is what shipped, and it silently undid every push: a push
+        // advances `head` to the new commit, the next pass sees `head != wish` and stamps it back,
+        // so an environment that was ever restored could never move past its restore point. The
+        // wish stays in the spec forever (a controller does not edit desired state), so "have I
+        // applied this one?" has to be a fact this environment records, exactly as the `Volume`
+        // records it. A genuinely new restore is a new `requestedAt`, which fails this same
+        // comparison and is applied in its turn.
+        //
+        // Preserve pattern: merge onto whatever this environment currently reports, never blank
+        // `podRef`/`serviceStatus`/anything else already there.
+        let applied = crd::wish_granted(
+            wish,
+            e.status.as_ref().and_then(|s| s.restored_to.as_deref()),
+            e.status.as_ref().and_then(|s| s.restore_requested_at.as_deref()),
+        );
+        if !applied {
             let prev = e.status.clone().unwrap_or_default();
-            write_env_status(e, crd::EnvironmentStatus { head: Some(wish.snapshot_id.clone()), ..prev }, ctx).await?;
+            write_env_status(
+                e,
+                crd::EnvironmentStatus {
+                    head: Some(wish.snapshot_id.clone()),
+                    restored_to: Some(wish.snapshot_id.clone()),
+                    restore_requested_at: Some(wish.requested_at.clone()),
+                    ..prev
+                },
+                ctx,
+            )
+            .await?;
         }
         return Ok(None);
     }
@@ -3065,6 +3088,11 @@ pub(crate) async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentS
             // See `write_ws_status`'s twin comment: without these, a head-only advance is a no-op.
             && a.head == b.head
             && a.durable == b.durable
+            // Same rule: the pass that re-applies a restore of the snapshot `head` already names
+            // changes only these two, and without them here it would never be recorded — leaving
+            // `restore_gate` re-applying that wish forever.
+            && a.restored_to == b.restored_to
+            && a.restore_requested_at == b.restore_requested_at
             && conditions_eq(&a.conditions, &b.conditions)
     })
     .await

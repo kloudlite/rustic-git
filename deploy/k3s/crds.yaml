@@ -1037,6 +1037,15 @@
                         ],
                         "type": "string"
                       },
+                      "restoreRequestedAt": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "restoredTo": {
+                        "description": "The `spec.restore` wish this environment has already applied, recorded as the same PAIR the\n`Volume` records (`restoredTo` + `restoreRequestedAt`) and for the same reason: restoring\nthe same snapshot twice is a legitimate ask, so the id alone cannot tell a fresh wish from\na granted one.\n\nIt exists because a granted wish stays in the spec forever — a controller does not edit the\nuser's desired state. Without a record of having applied it, `restore_gate` re-derives\n`head` from the wish on EVERY pass, which silently undoes every push: the commit\nreconciler advances `head`, the next reconcile stamps it back to the restore point, and the\nenvironment's history can never move past the snapshot it was last restored to.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "serviceStatus": {
                         "items": {
                           "properties": {

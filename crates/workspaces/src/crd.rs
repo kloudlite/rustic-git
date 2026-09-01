@@ -603,6 +603,20 @@ pub struct EnvironmentStatus {
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<String>,
+    /// The `spec.restore` wish this environment has already applied, recorded as the same PAIR the
+    /// `Volume` records (`restoredTo` + `restoreRequestedAt`) and for the same reason: restoring
+    /// the same snapshot twice is a legitimate ask, so the id alone cannot tell a fresh wish from
+    /// a granted one.
+    ///
+    /// It exists because a granted wish stays in the spec forever — a controller does not edit the
+    /// user's desired state. Without a record of having applied it, `restore_gate` re-derives
+    /// `head` from the wish on EVERY pass, which silently undoes every push: the commit
+    /// reconciler advances `head`, the next reconcile stamps it back to the restore point, and the
+    /// environment's history can never move past the snapshot it was last restored to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_requested_at: Option<String>,
 }
 
 /// Which node an owner's work lands on. One object per `{region, owner}`.

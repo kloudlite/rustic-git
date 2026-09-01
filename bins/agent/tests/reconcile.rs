@@ -1907,6 +1907,63 @@ async fn a_matching_restored_to_neither_scales_down_nor_re_wishes() {
     assert!(!calls.iter().any(|c| c == &format!("GET {POD_LIST}")), "the gate never ran: {calls:?}");
 }
 
+/// A granted wish stays in `spec.restore` forever, so the gate meets it on every pass. It may
+/// INITIALIZE `head` — once — and must never re-derive it afterwards: a push advances `head` to a
+/// new commit, and a gate that compared `head` against the wish would stamp it straight back, so
+/// an environment that was ever restored could never move past its restore point. What shipped
+/// did exactly that.
+#[tokio::test]
+async fn a_granted_wish_never_drags_head_back_off_a_pushed_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut e, vol) = restoring_env(Some("snap-7"));
+    // The state after a push: the wish was applied and recorded long ago, and `head` has since
+    // moved on to a commit the commit reconciler cut.
+    let mut st = e.status.clone().unwrap_or_default();
+    st.head = Some("env-1-aaaaaaaa".into());
+    st.restored_to = Some("snap-7".into());
+    st.restore_requested_at = Some(WISH_AT.into());
+    e.status = Some(st);
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+
+    // As in the sibling test above, the converge past the gate needs a namespace this mock does
+    // not answer for; what is under test is every status write before that point.
+    let _ = rustic_git_agent::controller::apply_environment(&e, &ctx).await;
+    for w in rec.sent("PATCH", ENV_STATUS_PATH) {
+        let head = w["status"]["head"].as_str();
+        assert_ne!(head, Some("snap-7"), "the granted wish must not drag `head` back: {w}");
+    }
+}
+
+/// The other half: a wish this environment has NOT recorded is applied — `head` is initialized to
+/// the restore point and the wish is recorded, so the pass above can tell "applied" from "fresh".
+#[tokio::test]
+async fn a_freshly_granted_wish_initializes_head_and_is_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (e, vol) = restoring_env(Some("snap-7"));
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+
+    let _ = rustic_git_agent::controller::apply_environment(&e, &ctx).await;
+    let sent = rec.sent("PATCH", ENV_STATUS_PATH);
+    let first = sent.first().expect("the grant writes status");
+    assert_eq!(first["status"]["head"], "snap-7");
+    assert_eq!(first["status"]["restoredTo"], "snap-7");
+    assert_eq!(first["status"]["restoreRequestedAt"], WISH_AT);
+}
+
 /// A finished pod is not a writer. `Succeeded`/`Failed` pods are never collected on their own, so
 /// counting every pod in the namespace waits for something that will not happen — the restore hangs
 /// behind a job that ended days ago.
