@@ -1343,6 +1343,11 @@
                         ],
                         "type": "string"
                       },
+                      "readyAt": {
+                        "description": "When `phase` became `Ready`, RFC3339. The instant a replica's `lastSyncAt` is compared\nagainst to decide whether it holds THIS cut — `lastTransitionTime` on a condition would do,\nbut a `Snapshot` has no conditions.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "sizeBytes": {
                         "format": "uint64",
                         "minimum": 0.0,

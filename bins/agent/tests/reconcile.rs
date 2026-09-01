@@ -107,6 +107,26 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
         "/apis/rustic-git.io/v1alpha1/snapshots",
         serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": []}),
     ));
+    // Likewise the stop's flush gate: a workspace stop now waits until another node holds its
+    // final sync point, so the default answer for every test that is not ABOUT the flush is
+    // "already cut, already replicated". Appended last, so a flush test's own routes win.
+    routes.push(rustic_git_workspaces::kube_test::get(
+        WS_STOP_REQ,
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                           "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid"},
+                           "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
+                           "status": {"phase": "ready", "readyAt": rfc3339_ago(30)}}),
+    ));
+    routes.push(rustic_git_workspaces::kube_test::get(
+        REPLICAS,
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList",
+                           "metadata": {"resourceVersion": "1"},
+                           "items": [{"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                                      "metadata": {"name": "ws-1.node-b", "uid": "vr-b"},
+                                      "spec": {"volume": "ws-1", "node": "node-b"},
+                                      "status": {"phase": "Synced", "branches": {}, "lastSyncAt": rfc3339_ago(1)}}]}),
+    ));
+    routes.push(Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
@@ -1461,7 +1481,7 @@ fn stop_commit(status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": "stop-env-1", "uid": "stop-uid-1"},
-        "spec": {"volume": "env-1"},
+        "spec": {"volume": "env-1", "owner": "acme", "worktree": "env-1", "transient": true},
         "status": status,
     })
 }
@@ -1482,6 +1502,176 @@ fn ws_stop_routes() -> Vec<Route> {
 const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-env-1";
 const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
 const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
+const REPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
+const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1";
+
+/// `WS_STOP_FLUSH_TIMEOUT_SECS` is process-global, so every test that sets it takes this lock —
+/// the flush tests otherwise read each other's value depending on scheduling.
+static FLUSH_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Sets the timeout for the guard's lifetime and restores the default (unset) on drop.
+struct FlushTimeout(std::sync::MutexGuard<'static, ()>);
+
+impl FlushTimeout {
+    fn set(secs: &str) -> Self {
+        let g = FLUSH_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("WS_STOP_FLUSH_TIMEOUT_SECS", secs);
+        FlushTimeout(g)
+    }
+}
+
+impl Drop for FlushTimeout {
+    fn drop(&mut self) {
+        std::env::remove_var("WS_STOP_FLUSH_TIMEOUT_SECS");
+    }
+}
+
+fn rfc3339_ago(secs: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
+}
+
+/// A `VolumeReplicaList` as the flush gate lists it.
+fn replica_list(rows: &[(&str, &str, Option<&str>)]) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList",
+        "metadata": {"resourceVersion": "1"},
+        "items": rows.iter().map(|(node, phase, last)| serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": crd::replica_name("env-1", node), "uid": format!("vr-{node}")},
+            "spec": {"volume": "env-1", "node": node},
+            "status": {"phase": phase, "branches": {}, "lastSyncAt": last},
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Everything a stopping environment touches before the flush gate: the drain, and the volume.
+fn env_flush_routes(stop: serde_json::Value, replicas: serde_json::Value) -> Vec<Route> {
+    vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+        Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[])),
+        rustic_git_workspaces::kube_test::get(STOP_REQ, stop),
+        rustic_git_workspaces::kube_test::get(REPLICAS, replicas),
+        Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+    ]
+}
+
+/// Ready is not landed. The whole point of the final sync point is that another node holds it, so
+/// a cut only this node has leaves the services up — tearing down here would strand the last
+/// minutes of work on one disk.
+#[tokio::test]
+async fn a_stop_waits_for_a_replica_to_hold_the_flush() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(5)}));
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replica_list(&[("node-a", "Synced", Some(&rfc3339_ago(1)))])));
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "only this node holds it: {:?}", rec.calls());
+    assert_eq!(rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap()["status"]["conditions"][0]["reason"], "PushBeforeStop");
+}
+
+/// Another node reporting `Synced` at or after the cut became Ready is the landing signal.
+#[tokio::test]
+async fn a_stop_proceeds_once_another_replica_is_synced_after_the_cut() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(30)}));
+    // An offset other than Z on purpose: these two stamps are parsed as instants, never compared
+    // as strings — lexically this one sorts BEFORE the `readyAt` above.
+    let replicas = replica_list(&[
+        ("node-a", "Synced", Some(&rfc3339_ago(60))),
+        ("node-b", "Synced", Some(&(chrono::Utc::now() - chrono::Duration::seconds(1)).with_timezone(&chrono::FixedOffset::east_opt(5 * 3600).unwrap()).to_rfc3339())),
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replicas));
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "replicated: teardown proceeds: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "Stopped");
+}
+
+/// A stop that can never be replicated must still finish — a workspace nobody can stop is worse
+/// than one whose last sync point lives on a single node — but it says so.
+#[tokio::test]
+async fn a_stop_tears_down_after_the_flush_timeout_with_a_condition() {
+    let _env = FlushTimeout::set("0");
+    let tmp = tempfile::tempdir().unwrap();
+    let ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(5)}));
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replica_list(&[("node-a", "Synced", Some(&rfc3339_ago(1)))])));
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "past the bound: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "stopped");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "FlushUnreplicated");
+}
+
+/// The workspace half of the same gate: the pod is what keeps the worktree changing, so the cut
+/// happens first and the delete waits on it landing.
+#[tokio::test]
+async fn a_workspace_stop_cuts_a_sync_point_before_deleting_the_pod() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx1, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::not_found(WS_STOP_REQ),
+            rustic_git_workspaces::kube_test::post(
+                "/apis/rustic-git.io/v1alpha1/snapshots",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                                   "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid"},
+                                   "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true}}),
+            ),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        ],
+    );
+
+    rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx1).await.unwrap();
+    let cut = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots");
+    assert_eq!(cut.len(), 1, "one sync point: {:?}", rec.calls());
+    assert_eq!(cut[0]["spec"]["transient"], true, "a sync point, not a commit a user sees");
+    assert_eq!(cut[0]["spec"]["worktree"], "ws-1", "the PARENT's name, not the volume's");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "no delete before it lands: {:?}", rec.calls());
+
+    // Second pass: the cut is Ready and node-b holds it.
+    drop(rec);
+    let tmp2 = tempfile::tempdir().unwrap();
+    let replicas = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList", "metadata": {"resourceVersion": "1"},
+        "items": [{"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                   "metadata": {"name": crd::replica_name("ws-1", "node-b"), "uid": "vr-b"},
+                   "spec": {"volume": "ws-1", "node": "node-b"},
+                   "status": {"phase": "Synced", "branches": {}, "lastSyncAt": rfc3339_ago(1)}}],
+    });
+    let (ctx2, rec) = ctx(
+        tmp2.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                WS_STOP_REQ,
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                                   "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid"},
+                                   "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
+                                   "status": {"phase": "ready", "readyAt": rfc3339_ago(30)}}),
+            ),
+            rustic_git_workspaces::kube_test::get(REPLICAS, replicas),
+            Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+            Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx2).await.unwrap();
+    let calls = rec.calls();
+    assert!(calls.iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "landed: the pod goes: {calls:?}");
+    assert_eq!(rec.sent("PATCH", WS_STATUS).last().unwrap()["status"]["phase"], "stopped");
+}
 
 
 

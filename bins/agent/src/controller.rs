@@ -12,7 +12,7 @@
 //! `WsClone`'s `&dyn Fn` stop/start hooks (no `+Send` bound in `engine::ops.rs`, out of scope to
 //! change here) — they never have to cross an actual cross-thread `.await` boundary.
 
-use crate::{binding, claim, snapshot};
+use crate::{binding, claim, snapshot, sync};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, Service};
@@ -1692,8 +1692,9 @@ fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Cond
     conds.into_iter().filter(|c| c.type_ != crd::ATTACHED).chain(attached).collect()
 }
 
-/// Stop the workspace: delete the pod. The home is on the shared NFS mount and needs no push
-/// (spec 2026-09-01).
+/// Stop the workspace: cut a final sync point, wait until a replica holds it, then delete the pod.
+/// The home is on the shared NFS mount and needs no push of its own (spec 2026-09-01) — this gate
+/// is about the WORKTREE, whose last minute of work exists nowhere else until it is replicated.
 async fn stop_workspace(
     w: &crd::Workspace,
     prev: crd::WorkspaceStatus,
@@ -1715,10 +1716,26 @@ async fn stop_workspace(
     // The workspace's OWN name, never `id` (which is `volume_ref` — the SOURCE volume for a
     // shared-volume clone). Deleting by `id` here would stop the clone by killing its source's
     // pod, taking a running workspace down with it.
+    // Flush before the pod goes: once it is deleted the worktree stops changing, but nothing has
+    // carried its bytes off this node, and a node that then dies takes them with it.
+    let replicated = match stop_push(&format!("stop-{}", w.name_any()), &w.spec.owner, &id, &w.name_any(), w, ctx).await? {
+        StopPush::Landed { replicated } => replicated,
+        StopPush::Waiting => {
+            let conditions =
+                ws_conditions(&prev, crd::condition("Progressing", true, "FlushBeforeStop", "waiting for the final sync point", gen));
+            // Deliberately NOT `phase: stopped`: the pod is still up, and observed_generation stays
+            // unset so the already-stopped guard above does not swallow the next pass.
+            let st = crd::WorkspaceStatus { observed_generation: None, conditions, ..prev };
+            write_ws_status(w, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
+    };
     delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &w.name_any()).await?;
+    // The request has served its purpose; left behind, the next stop would read it as landed.
+    delete_ignoring_404(&Api::<crd::Snapshot>::all(ctx.client.clone()), &format!("stop-{}", w.name_any())).await?;
     // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
     // showing "installing packages…" for a workspace that is simply off.
-    let conditions = ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen));
+    let conditions = ws_conditions(&prev, stopped_condition(replicated, gen));
     let st = crd::WorkspaceStatus {
         phase: crd::Phase::Stopped,
         observed_generation: Some(gen),
@@ -1821,7 +1838,7 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, id));
-    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None, ready_at: None });
     // Same convergence rule as everything else in this cutover: a retry that finds the CR already
     // there (crash between the rename above landing and this create) is not an error.
     match api.create(&PostParams::default(), &snap).await {
@@ -2393,8 +2410,10 @@ async fn stop_environment(
     // every mounted volume atomically; an env torn down without it loses its last state for
     // good, which is why the deletes below are gated on the push having landed, not merely
     // requested.
-    match stop_push(&format!("stop-{}", e.name_any()), &e.spec.owner, &vol.name_any(), e, ctx).await? {
-        StopPush::Landed => {}
+    // The worktree is the environment's own name — the same string the sync beat cuts under, so
+    // the stop's sync point extends that chain rather than starting a second one.
+    let replicated = match stop_push(&format!("stop-{}", e.name_any()), &e.spec.owner, &vol.name_any(), &e.name_any(), e, ctx).await? {
+        StopPush::Landed { replicated } => replicated,
         StopPush::Waiting => {
             let st = crd::EnvironmentStatus {
                 // Still `running`: the StatefulSets exist (at zero) until the push lands, and
@@ -2410,7 +2429,7 @@ async fn stop_environment(
             write_env_status(e, st, ctx).await?;
             return Ok(Action::requeue(TICK));
         }
-    }
+    };
     for svc in &e.spec.services {
         forget_applied(ctx, "StatefulSet", ns, &svc.name);
         delete_ignoring_404(deployments, &svc.name).await?;
@@ -2425,11 +2444,21 @@ async fn stop_environment(
         observed_generation: Some(gen),
         volume_ref: Some(id),
         service_status: vec![],
-        conditions: vec![crd::condition("Ready", true, "Stopped", "pushed and stopped", gen)],
+        conditions: vec![stopped_condition(replicated, gen)],
         ..prev
     };
     write_env_status(e, st, ctx).await?;
     Ok(Action::await_change())
+}
+
+/// The stop's own Ready condition. `FlushUnreplicated` is the record that this parent's last
+/// seconds of work exist on exactly one node — the only place a reader can learn it.
+fn stopped_condition(replicated: bool, gen: i64) -> Condition {
+    if replicated {
+        crd::condition("Ready", true, "Stopped", "pushed and stopped", gen)
+    } else {
+        crd::condition("Ready", true, "FlushUnreplicated", "stopped without a replica holding the final sync point", gen)
+    }
 }
 
 /// Converge the environment's namespace, storage and services against spec, and report what the
@@ -2746,7 +2775,10 @@ async fn drain_services(
 /// (including "just created it"). The caller writes ITS OWN status — the two parent kinds share
 /// no status type, and this is the one place the request's lifecycle is decided.
 pub(crate) enum StopPush {
-    Landed,
+    /// `replicated` is false when the flush timed out without any other node holding the final
+    /// sync point — the teardown proceeds anyway (a stop that never finishes is worse than one
+    /// whose last seconds live on one node), but the caller must say so in its condition.
+    Landed { replicated: bool },
     // No `Failed`: `commit_worktree`'s cut is keep-biased and never marks a `Snapshot` `Error` —
     // it just retries `Working` forever (Task 8; see `stop_push`'s doc). A wedged stop-push is a
     // `Waiting` that never lands, not a distinct failure state.
@@ -2786,7 +2818,14 @@ const STOP_GENERATION: &str = "rustic-git.io/stop-generation";
 /// without pushing what ran since. The parent's generation at creation is stamped on the request
 /// (`STOP_GENERATION`); Start and Stop each bump it. A request without the stamp — from before it
 /// existed — is taken as current, so a rollout does not restart a push in flight.
-async fn stop_push<P>(name: &str, owner: &str, volume: &str, parent: &P, ctx: &Arc<Ctx>) -> Result<StopPush, ReconcileErr>
+async fn stop_push<P>(
+    name: &str,
+    owner: &str,
+    volume: &str,
+    worktree: &str,
+    parent: &P,
+    ctx: &Arc<Ctx>,
+) -> Result<StopPush, ReconcileErr>
 where
     P: Resource<DynamicType = ()> + ResourceExt,
 {
@@ -2813,23 +2852,29 @@ where
         phase = None;
     }
     match phase {
-        Some(crd::Phase::Ready) => Ok(StopPush::Landed),
+        Some(crd::Phase::Ready) => {
+            let ready_at = cr.as_ref().and_then(|s| s.status.as_ref()).and_then(|st| st.ready_at.clone());
+            flush_gate(volume, ready_at.as_deref(), ctx).await
+        }
         Some(_) => Ok(StopPush::Waiting),
         None => {
-            let parent_commit = crate::snapshot::newest_ready_commit(ctx, volume).await?.unwrap_or_default();
+            // A sync point, not a commit: a stop is the last moment the worktree's bytes can be
+            // replicated, and a `push` here would put a commit nobody asked for on the history the
+            // user sees. Its parent is this node's newest sync point so the puller sends a delta.
+            let parent_sync = crate::snapshot::latest_transient(ctx, volume, worktree).await?.unwrap_or_default();
             let mut snap = crd::Snapshot::new(
                 name,
                 crd::SnapshotSpec {
                     volume: volume.to_string(),
                     owner: owner.to_string(),
-                    worktree: volume.to_string(),
-                    parent: parent_commit,
+                    worktree: worktree.to_string(),
+                    parent: parent_sync,
                     message: Some("stopping".to_string()),
                     pinned: false,
-                    transient: false,
+                    transient: true,
                 },
             );
-            snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
+            snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None, ready_at: None });
             // Owned by the parent so the CR's own events map back to it — that watch is what wakes
             // the `Waiting` arm. NOT a cascade-delete convenience: the CR is deleted explicitly
             // after teardown, and by then it has already outlived its usefulness.
@@ -2839,6 +2884,19 @@ where
             // here — the ownerReference above is what the mapper actually reads.
             snap.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), parent.name_any());
             snap.metadata.annotations.get_or_insert_with(Default::default).insert(STOP_GENERATION.to_string(), gen);
+            // The same stamp the sync beat writes, read the same way. Without it the beat sees a
+            // sync point it did not cut, reads its generation as 0, and cuts one redundant
+            // transient after every single stop.
+            let (engine, vol, wt) = (ctx.engine.clone(), volume.to_string(), worktree.to_string());
+            match tokio::task::spawn_blocking(move || engine.generation(&vol, &wt)).await {
+                Ok(Ok(g)) => {
+                    snap.metadata.annotations.get_or_insert_with(Default::default).insert(sync::SYNCED_GENERATION.to_string(), g.to_string());
+                }
+                // Keep-biased, as the beat is: an unreadable generation costs one extra sync point
+                // later, while failing the stop costs the teardown.
+                Ok(Err(e)) => tracing::warn!(worktree = %worktree, error = %e.0, "stop: reading the worktree generation"),
+                Err(e) => tracing::warn!(worktree = %worktree, error = %e, "stop: generation task panicked"),
+            }
             match api.create(&PostParams::default(), &snap).await {
                 // Lost the race with our own earlier pass; it is the same CR either way.
                 Ok(_) => {}
@@ -2848,6 +2906,51 @@ where
             Ok(StopPush::Waiting)
         }
     }
+}
+
+/// `WS_STOP_FLUSH_TIMEOUT_SECS`, default 600. Read at call time, not cached: it is a bound on how
+/// long a person waits for a stop, and the only reason it is configurable at all is that a slow
+/// link makes the right number a property of the cluster.
+pub fn flush_timeout() -> Duration {
+    Duration::from_secs(std::env::var("WS_STOP_FLUSH_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600))
+}
+
+/// Ready is not landed: the point of the final sync point is that ANOTHER node holds it, so the
+/// gate waits until some replica reports `Synced` at or after the cut became Ready.
+///
+/// Bounded, because the alternative is a workspace that can never be stopped when replication is
+/// broken. Past `flush_timeout()` the teardown proceeds with `replicated: false`.
+async fn flush_gate(volume: &str, ready_at: Option<&str>, ctx: &Arc<Ctx>) -> Result<StopPush, ReconcileErr> {
+    // A cut from before `readyAt` existed gives nothing to compare a `lastSyncAt` against, and
+    // waiting on a comparison that can never be made would park the stop forever.
+    let Some(ready) = ready_at.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) else {
+        return Ok(StopPush::Landed { replicated: false });
+    };
+    let list = Api::<crd::VolumeReplica>::all(ctx.client.clone())
+        .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await?;
+    // Parsed, never string-compared: two nodes may stamp the same instant with different offsets.
+    let replicated = list.items.iter().any(|r| {
+        r.spec.node != ctx.node
+            && r.status.as_ref().is_some_and(|st| {
+                st.phase == "Synced"
+                    && st
+                        .last_sync_at
+                        .as_deref()
+                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                        .is_some_and(|t| t >= ready)
+            })
+    });
+    if replicated {
+        return Ok(StopPush::Landed { replicated: true });
+    }
+    // A negative age (a replica's clock ahead of ours) is zero elapsed, not a timeout.
+    let waited = chrono::Utc::now().signed_duration_since(ready).to_std().unwrap_or_default();
+    if waited >= flush_timeout() {
+        tracing::warn!(volume = %volume, "stop: no replica holds the final sync point; tearing down anyway");
+        return Ok(StopPush::Landed { replicated: false });
+    }
+    Ok(StopPush::Waiting)
 }
 
 /// Every declared volume is a folder inside the env's ONE subvolume — mkdir -p each before a pod

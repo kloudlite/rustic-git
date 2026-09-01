@@ -259,6 +259,11 @@ pub struct SnapshotStatus {
     pub phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
+    /// When `phase` became `Ready`, RFC3339. The instant a replica's `lastSyncAt` is compared
+    /// against to decide whether it holds THIS cut — `lastTransitionTime` on a condition would do,
+    /// but a `Snapshot` has no conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<String>,
 }
 
 /// One node's copy of a volume's commit history — the per-node replica state the commit model
@@ -978,7 +983,7 @@ mod tests {
 
     #[test]
     fn snapshot_status_round_trips_and_omits_absent_size() {
-        let st = SnapshotStatus { phase: Phase::Working, size_bytes: None };
+        let st = SnapshotStatus { phase: Phase::Working, size_bytes: None, ready_at: None };
         let v = serde_json::to_value(&st).unwrap();
         assert!(!v.as_object().unwrap().contains_key("sizeBytes"));
         let back: SnapshotStatus = serde_json::from_value(v).unwrap();
