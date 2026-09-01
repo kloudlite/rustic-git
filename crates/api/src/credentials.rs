@@ -471,7 +471,7 @@ pub(crate) async fn cli_code(
         d => d.chars().take(60).collect(),
     };
     let code = random_code();
-    let poll = crate::hex(&rand::random::<[u8; 16]>());
+    let poll = hex::encode(&rand::random::<[u8; 16]>());
     // A row, not memory: the api has more than one replica, and the browser that approves this
     // code is routed independently of the CLI that asked for it.
     // The per-address bucket on this route (`ratelimit`, sized to `CLI_CODE_TTL`) is what caps

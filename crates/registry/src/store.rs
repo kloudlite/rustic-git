@@ -87,8 +87,8 @@ impl Hasher {
     pub fn finish(self) -> Digest {
         use sha2::Digest as _;
         let (algo, hex) = match self {
-            Hasher::S256(h) => ("sha256", crate::hex(&h.finalize())),
-            Hasher::S512(h) => ("sha512", crate::hex(&h.finalize())),
+            Hasher::S256(h) => ("sha256", hex::encode(&h.finalize())),
+            Hasher::S512(h) => ("sha512", hex::encode(&h.finalize())),
         };
         Digest { algo: algo.into(), hex }
     }

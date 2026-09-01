@@ -32,13 +32,6 @@ pub fn require_jwt_secret_from_env() -> Result<()> {
     require_jwt_secret(var("RUSTIC_GIT_PEER_SVC").trim(), var("RUSTIC_GIT_JWT_SECRET").trim())
 }
 
-/// Lowercase hex, the encoding every digest, fingerprint and token id in this crate uses on the
-/// wire. One definition so a future change (or a faster one) happens in one place. `pub` rather
-/// than `pub(crate)` only because `main.rs` is a separate crate and mints the peer secret with it.
-pub fn hex(bytes: &[u8]) -> String {
-    hex::encode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,9 +44,4 @@ mod tests {
         assert!(require_jwt_secret("rustic-git-peer", "s3cret").is_ok());
     }
 
-    #[test]
-    fn hex_is_lowercase_and_two_chars_per_byte() {
-        assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
-        assert_eq!(hex(&[]), "");
-    }
 }

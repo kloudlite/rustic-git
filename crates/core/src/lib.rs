@@ -6,4 +6,4 @@ pub mod log;
 pub mod metrics;
 pub mod peer;
 pub mod pktline;
-pub use err::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
+pub use err::{err, require_jwt_secret, require_jwt_secret_from_env, Error, Result};

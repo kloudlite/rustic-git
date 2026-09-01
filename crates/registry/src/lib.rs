@@ -9,7 +9,7 @@
 // allocation per refusal for no measurable gain.
 #![allow(clippy::result_large_err)]
 
-pub(crate) use rustic_git_core::{err, hex, jwt, httpx::Trusted};
+pub(crate) use rustic_git_core::{err, jwt, httpx::Trusted};
 pub(crate) use rustic_git_core::httpx as httpauth;
 pub(crate) use rustic_git_storage::store as dbstore;
 pub(crate) use rustic_git_storage::{index, ownership, pool};

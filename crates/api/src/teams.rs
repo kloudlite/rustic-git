@@ -585,7 +585,7 @@ pub(crate) struct IssuedInvite {
 const INVITE_TTL_DAYS: i64 = 7;
 
 fn invite_id(token: &str) -> String {
-    rustic_git_core::hex(&sha2::Sha256::digest(token.as_bytes()))
+    hex::encode(&sha2::Sha256::digest(token.as_bytes()))
 }
 
 pub(crate) async fn create_invite(
@@ -613,7 +613,7 @@ pub(crate) async fn create_invite(
         use rand::RngCore;
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
-        rustic_git_core::hex(&b)
+        hex::encode(&b)
     };
     let now = mongodb::bson::DateTime::now();
     let invite = Invite {
@@ -865,7 +865,7 @@ pub(crate) async fn create_signin_link(
         use rand::RngCore;
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
-        rustic_git_core::hex(&b)
+        hex::encode(&b)
     };
     let now = mongodb::bson::DateTime::now();
     let link = crate::directory::SignInLink {

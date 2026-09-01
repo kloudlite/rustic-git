@@ -8,6 +8,7 @@ license = "SSPL-1.0"
 name = "rustic_git_api"
 
 [dependencies]
+hex = { workspace = true }
 tracing = { workspace = true }
 rustic-git-core = { path = "../core" }
 rustic-git-storage = { path = "../storage" }

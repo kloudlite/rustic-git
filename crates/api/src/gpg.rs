@@ -10,7 +10,8 @@
 //! fingerprint: verification needs the material, and the answer to "whose is
 //! this?" is a walk from subkey to primary.
 
-use crate::{hex, Result};
+use crate::Result;
+use hex::encode as hex;
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 
 /// Why a signature is or is not good.

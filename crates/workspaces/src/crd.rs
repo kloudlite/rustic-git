@@ -330,7 +330,7 @@ pub fn short_hex() -> String {
     use rand::RngCore;
     let mut b = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut b);
-    rustic_git_core::hex(&b)
+    hex::encode(&b)
 }
 
 /// Requests and limits for a workspace pod, as plain strings in Kubernetes quantity form.
