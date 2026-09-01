@@ -105,7 +105,11 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     )
     .await?;
 
-    advance_head(&ctx, kind, &s.spec.worktree, &name).await?;
+    // A transient (sync point) never advances the worktree's head — it replicates a live
+    // worktree continuously without ever becoming a commit the user sees or clones from.
+    if !s.spec.transient {
+        advance_head(&ctx, kind, &s.spec.worktree, &name).await?;
+    }
     retain(&ctx, &s.spec.volume, &name).await;
 
     Ok(Action::await_change())
@@ -205,12 +209,38 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
             return;
         }
     };
-    let by_name: std::collections::HashMap<String, crd::Snapshot> = list
+    let ready: std::collections::HashMap<String, crd::Snapshot> = list
         .items
         .into_iter()
         .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
         .map(|s| (s.name_any(), s))
         .collect();
+
+    // A transient cut isn't a chain member at all (Task 3: it never carries `spec.parent` into a
+    // commit's ancestry and never advances a head), so it gets its own pass: one sync point per
+    // worktree, full stop. Order matters — the newer transient's `spec.parent` names the OLDER
+    // one as its btrfs send parent (Task 2), so deleting the older one before the newer reaches
+    // `Ready` would delete a still-needed send parent out from under a `Working` cut. Since this
+    // function only runs after `patch_status(Ready)` for `head` itself, any OTHER transient still
+    // seen here is either already `Ready` (safe to delete) or not yet `Ready` at all (filtered out
+    // of `ready` above, so it is never considered) — never a `Working` cut caught mid-flight.
+    if ready.get(head).is_some_and(|s| s.spec.transient) {
+        let worktree = ready[head].spec.worktree.clone();
+        for (name, s) in &ready {
+            if name != head && s.spec.transient && s.spec.worktree == worktree {
+                if let Err(e) = snap_api.delete(name, &Default::default()).await {
+                    tracing::warn!(%volume, snapshot = %name, error = %e, "retention: delete failed; left for the next pass");
+                }
+            }
+        }
+        return;
+    }
+
+    // Commit chain walk: transients are never chain members and must never be treated as one —
+    // filtered out here so a transient sharing a worktree can't be mistaken for this chain's
+    // parent, and is never a delete candidate on the commit path.
+    let by_name: std::collections::HashMap<String, crd::Snapshot> =
+        ready.into_iter().filter(|(_, s)| !s.spec.transient).collect();
     let heads = match worktree_heads(ctx, volume).await {
         Ok(h) => h,
         Err(e) => {
@@ -279,11 +309,11 @@ mod commit_tests {
         (Arc::new(ctx), rec)
     }
 
-    fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, pinned: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
+    fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, pinned: bool, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
         let v = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": name, "uid": format!("{name}-uid"), "generation": 1},
-            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "pinned": pinned},
+            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "pinned": pinned, "transient": transient},
             "status": {"phase": phase},
         });
         Arc::new(serde_json::from_value(v).unwrap())
@@ -341,7 +371,7 @@ mod commit_tests {
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -364,7 +394,7 @@ mod commit_tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-b", "vol-1", None) }];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -380,7 +410,7 @@ mod commit_tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![not_found(WS_GET), not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1")];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK), "must requeue, not await a watch that never fires");
@@ -424,7 +454,7 @@ mod commit_tests {
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -445,7 +475,7 @@ mod commit_tests {
             not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1"),
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, crd::Phase::Working);
+        let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK));
@@ -597,6 +627,117 @@ mod commit_tests {
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a list error must delete nothing: {:?}", rec.calls());
     }
 
+    /// A transient (sync point) cut must never advance the worktree's head — it replicates a live
+    /// worktree continuously and is never a commit the user checks out or clones from. No
+    /// `WS_STATUS` route is registered at all, so a wrongly-issued write 404s and the reconcile
+    /// itself would fail; the recorder assertion is the belt.
+    #[tokio::test]
+    async fn a_transient_cut_does_not_advance_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-a")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/live/ws-1")).unwrap();
+        let routes = vec![
+            Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-a", "vol-1", None) },
+            Route {
+                method: "PATCH",
+                path: SNAP_STATUS.into(),
+                status: 200,
+                body: serde_json::json!({
+                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                    "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+                    "status": {"phase": "ready"},
+                }),
+            },
+            Route {
+                method: "GET",
+                path: SNAPSHOTS_LIST.into(),
+                status: 200,
+                body: list_of("Snapshot", vec![serde_json::json!({
+                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                    "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+                    "status": {"phase": "ready"},
+                })]),
+            },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Working);
+
+        let action = reconcile_commit(s, ctx).await.unwrap();
+        assert_eq!(action, kube::runtime::controller::Action::await_change());
+
+        assert_eq!(rec.sent("PATCH", SNAP_STATUS).len(), 1, "the cut still goes Ready");
+        assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH") || c.contains(SNAP_STATUS)), "no head write for a transient: {:?}", rec.calls());
+    }
+
+    /// One sync point per worktree: cutting a new `Ready` transient deletes the previous `Ready`
+    /// transient of the SAME worktree only — a sibling worktree's own transient is untouched.
+    #[tokio::test]
+    async fn a_new_ready_transient_deletes_the_previous_one_for_its_worktree_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "sync-ws-1-a", "uid": "a-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        });
+        let new = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "sync-ws-1-b", "uid": "b-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        });
+        let other = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "sync-ws-2-c", "uid": "c-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-2", "parent": "", "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![old, new, other]) },
+            Route {
+                method: "DELETE",
+                path: format!("{SNAPSHOTS_LIST}/sync-ws-1-a"),
+                status: 200,
+                body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}),
+            },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        retain(&ctx, "vol-1", "sync-ws-1-b").await;
+
+        let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "only the same worktree's older transient is deleted: {deletes:?}");
+    }
+
+    /// The previous transient is the btrfs send parent of a still-`Working` new one — deleting it
+    /// before the new one reaches `Ready` would pull the send parent out from under an in-flight
+    /// cut. A `Working` snapshot is filtered out of the `Ready` set entirely, so retention never
+    /// even considers it here.
+    #[tokio::test]
+    async fn a_working_previous_transient_is_never_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "sync-ws-1-a", "uid": "a-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "status": {"phase": "working"},
+        });
+        let new = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "sync-ws-1-b", "uid": "b-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![old, new]) }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        retain(&ctx, "vol-1", "sync-ws-1-b").await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a still-Working previous transient must survive: {:?}", rec.calls());
+    }
+
     /// A commit CR is created WITHOUT status — `status` is a SUBRESOURCE, so the block a creator
     /// puts in the object literal is dropped by the API server. The reconcile must read that as
     /// `Working` and cut it; any other default stalls every push and migration baseline forever.
@@ -618,7 +759,7 @@ mod commit_tests {
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         // The shape the API server actually stores on create: no status at all.
-        let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working)).clone();
+        let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working)).clone();
         s.status = None;
         let action = reconcile_commit(std::sync::Arc::new(s), ctx).await.unwrap();
         // The cut itself needs btrfs, which this box has not got — it fails and takes the
