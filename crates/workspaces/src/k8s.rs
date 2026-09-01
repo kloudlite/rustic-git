@@ -811,8 +811,9 @@ pub fn git_init_container(
 }
 
 /// The workspace's one pod.
-/// `id` names the pod. `ws_id` is the WORKSPACE's own id, only ever different from `id` for
-/// a shared-volume clone (`id` is `volumeRef`, the source volume; `ws_id` is this workspace's own
+/// `ws_id` names the pod and every per-workspace resource on it. `id` is the VOLUME (`volumeRef`)
+/// and is used only for the worktree path's root — the two differ for a shared-volume clone
+/// (`id` is the source volume; `ws_id` is this workspace's own
 /// worktree name) — see `Pool::worktree`.
 pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodContext, init: Option<Container>) -> Pod {
     // ssh is a feature of the DEFAULT image only: a user image brings its own entrypoint, and we
@@ -860,7 +861,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
                 // The store and THIS workspace's profile only — `/nix` itself holds every other
                 // workspace's profile and the daemon socket, so the pod never sees its root.
                 VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
-                VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/rustic/profiles/{id}")), read_only: Some(true), ..Default::default() },
+                VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/rustic/profiles/{ws_id}")), read_only: Some(true), ..Default::default() },
                 // Mounting over `/etc/resolv.conf` is the only way to change a live pod's DNS —
                 // `dnsConfig` is immutable once it is running. The volume IS the file now, so no
                 // subPath: the agent rewrites it in place and the pod sees the change.
@@ -886,11 +887,11 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
                 workspaces_volume(),
                 live_worktree_volume(ctx.pool, id, ws_id),
                 nix_volume(),
-                attach_volume(ctx.pool, id),
+                attach_volume(ctx.pool, ws_id),
                 user_key_volume(init.is_some()),
             ];
             if default_image {
-                v.extend([ws_ssh_volume(id), authorized_keys_volume()]);
+                v.extend([ws_ssh_volume(ws_id), authorized_keys_volume()]);
             }
             v
         }),
@@ -907,8 +908,13 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
         ..Default::default()
     };
     placement(&mut pod_spec, "session", ctx.node_name);
+    // `ws_id`, never `id`: for a shared-volume clone `id` is the SOURCE volume, so naming the pod
+    // after it makes every clone of one volume claim the same pod name — the clone then adopts its
+    // source's running pod, its `podRef` points at another workspace's shell, and the gateway
+    // dials THAT on an ssh to the clone. The pod, its ssh host key, its resolv.conf and its
+    // profile are all per-WORKSPACE facts; only the worktree's path root is per-volume.
     let mut m = meta(
-        id,
+        ws_id,
         Some(&crate::crd::ws_namespace(&spec.owner, &spec.team)),
         &spec.owner,
         "workspace",
@@ -917,7 +923,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
     // Which workspace this pod IS. Siblings share the namespace, so an attachment grant that named
     // only the namespace would reach all of them; this label is what keeps it to one.
     if let Some(l) = m.labels.as_mut() {
-        l.insert(WORKSPACE_LABEL.to_string(), id.to_string());
+        l.insert(WORKSPACE_LABEL.to_string(), ws_id.to_string());
     }
     Pod { metadata: m, spec: Some(pod_spec), ..Default::default() }
 }
@@ -1841,6 +1847,25 @@ mod tests {
     /// split `live_worktree_volume` already gives the workspace's own mount — not the old-layout
     /// directory, which after a migration holds the worktree ONE level down and would hide
     /// dotfiles / snapshot nothing new.
+    /// A shared-volume clone's pod is named after the WORKSPACE, not the volume it shares. Naming
+    /// it after the volume made every clone claim its source's pod name: the clone adopted the
+    /// source's running pod, its `podRef` pointed at another workspace's shell (the gateway dials
+    /// `podRef`), and stopping the clone deleted the source's pod.
+    #[test]
+    fn a_clones_pod_is_named_after_the_workspace_not_the_shared_volume() {
+        let p = workspace_pod(&ws_spec(), "vol-1", "ws-clone", &ctx(), None);
+        assert_eq!(p.metadata.name.as_deref(), Some("ws-clone"), "the pod is this workspace's");
+        assert_eq!(
+            p.metadata.labels.as_ref().unwrap().get(WORKSPACE_LABEL).map(String::as_str),
+            Some("ws-clone"),
+            "the workspace label names the workspace the pod IS"
+        );
+        let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        let path = |n: &str| vols.iter().find(|v| v.name == n).unwrap().host_path.as_ref().unwrap().path.clone();
+        assert!(path("live").ends_with("/vol-1/live/ws-clone"), "worktree: volume root, workspace leaf");
+        assert!(path("attach").contains("/attach/ws-clone/"), "resolv.conf is per workspace");
+    }
+
     #[test]
     fn a_workspace_pods_home_mount_is_the_worktree_path() {
         let s = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).spec.unwrap();

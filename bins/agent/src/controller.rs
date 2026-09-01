@@ -1952,7 +1952,10 @@ async fn stop_workspace(
             }
         }
     }
-    delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &id).await?;
+    // The workspace's OWN name, never `id` (which is `volume_ref` — the SOURCE volume for a
+    // shared-volume clone). Deleting by `id` here would stop the clone by killing its source's
+    // pod, taking a running workspace down with it.
+    delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &w.name_any()).await?;
     if home_here {
         // Served its purpose; left behind, the NEXT stop would find `done` under the same name
         // and stop without pushing at all.
@@ -2361,7 +2364,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // wrote and both policies it applied resolve nothing at all. Reporting `Attached=True` there is
     // a lie the user cannot see through, so the live pod decides. An absent pod is not a refusal:
     // the one created below carries the mount.
-    if env_ns.is_some() && !pod_carries_the_attach_mount(&pods, &id).await? {
+    if env_ns.is_some() && !pod_carries_the_attach_mount(&pods, &w.name_any()).await? {
         attached = Some(crd::condition(
             crd::ATTACHED,
             false,
@@ -2408,12 +2411,17 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
             // from the apply made a broken workspace indistinguishable from a working one.
-            if !pod_is_ready(&pods, &id).await? {
+            // The pod is named after the WORKSPACE (`k8s::workspace_pod`'s doc): for a shared-volume
+            // clone `id` is the source VOLUME, and reading readiness or reporting `podRef` by `id`
+            // would point this workspace at its source's pod — the gateway dials `podRef`, so an
+            // ssh to the clone would land in the source's shell.
+            let pod_name = w.name_any();
+            if !pod_is_ready(&pods, &pod_name).await? {
                 let st = crd::WorkspaceStatus {
                     phase: crd::Phase::Creating,
                     observed_generation: None,
                     volume_ref: Some(id.clone()),
-                    pod_ref: Some(format!("{ns}/{id}")),
+                    pod_ref: Some(format!("{ns}/{pod_name}")),
                     conditions: with_attached(
                         ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
                         attached.clone(),
@@ -2427,7 +2435,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // `/v1` projection, which spells the running state `Ready`. An unknown phase does not
             // error — it falls back to `Creating`, so a healthy workspace showed "Creating" in the
             // UI forever. `phase_names_the_doc_enum` pins the vocabulary.
-            (crd::Phase::Ready, Some(format!("{ns}/{id}")))
+            (crd::Phase::Ready, Some(format!("{ns}/{pod_name}")))
         }
         // Handled at the top of this function, before the Volume and namespace gates — stopping IS
         // deleting the pod, and it must not depend on either being healthy.
