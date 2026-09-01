@@ -1,0 +1,124 @@
+# The region's shared-home NFS export: ZeroFS serves one S3-backed filesystem over NFSv3, and
+# every pool node's agent mounts it at `{pool}/homes` (bins/agent/src/lib.rs, mount_homes). This
+# replaces the old per-node btrfs home volume with one region-shared store.
+#
+# Namespace `rustic-git-system` already exists (created by gateway.yaml) — not redeclared here.
+#
+# SINGLE REPLICA ON PURPOSE. ZeroFS's metadata tree is SlateDB underneath (LSM tree on the object
+# store), and SlateDB is single-writer with epoch fencing — the exact invariant the repo databases
+# already run on (see this repo's README, "The one invariant everything hangs off"). A second
+# ZeroFS replica pointed at the same bucket prefix does not load-balance; it fences the first one's
+# writer and both start failing writes. Scale this by raising resources, never replicas>1.
+#
+# Availability ruling (from the shared-home spec): a down ZeroFS hangs every `/home/kl` in the
+# region until Kubernetes reschedules this pod — accepted, because the alternative (per-node
+# btrfs homes) is what this migration removes. `hard,nolock` on the agent's mount keeps a flapping
+# ZeroFS from corrupting instead of just blocking (see mount_homes's comment).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zerofs-store
+  namespace: rustic-git-system
+type: Opaque
+stringData:
+  # The region's blob account, reached through its S3-compatible gateway (Azure Blob has no
+  # native S3 API; this is Azurite-style or a real S3-compat front for it — whichever the region's
+  # blob account offers, per provision-azure.sh). Values are placeholders: fill in per region,
+  # the same way rustic-git-agent's AZURE_ACCOUNT/KEY/CONTAINER are.
+  AWS_ACCESS_KEY_ID: "REPLACE-ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE-ME"
+  AWS_ENDPOINT_URL: "REPLACE-ME"
+  # Bucket the homes filesystem lives in, and the path prefix inside it — kept as two vars so the
+  # bucket can be shared with other ZeroFS-style consumers without their prefixes colliding.
+  ZEROFS_BUCKET: "REPLACE-ME"
+  SLATEDB_PREFIX: "homes"
+  # Encrypts extents at rest (XChaCha20-Poly1305, key wrapped via Argon2id). Losing this loses the
+  # filesystem, same as losing a btrfs pool's disk — back it up wherever the region's other
+  # secrets are backed up.
+  ZEROFS_PASSWORD: "REPLACE-ME"
+---
+# zerofs.toml: TOML with `${VAR}` substitution from the container's env (Secret above). `[cache]`,
+# `[storage]`, `[servers]` are required by ZeroFS itself.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zerofs-config
+  namespace: rustic-git-system
+data:
+  zerofs.toml: |
+    [cache]
+    dir = "/var/cache/zerofs"
+    disk_size_gb = 10.0
+    memory_size_gb = 1.0
+
+    [storage]
+    url = "s3://${ZEROFS_BUCKET}/${SLATEDB_PREFIX}"
+    encryption_password = "${ZEROFS_PASSWORD}"
+
+    [servers.nfs]
+    addresses = ["0.0.0.0:2049"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zerofs
+  namespace: rustic-git-system
+  labels:
+    app: zerofs
+spec:
+  replicas: 1 # see header: SlateDB single-writer, never raise this
+  selector:
+    matchLabels:
+      app: zerofs
+  template:
+    metadata:
+      labels:
+        app: zerofs
+    spec:
+      containers:
+        - name: zerofs
+          # Pinned to the latest tagged release as of 2026-09-01 (github.com/Barre/ZeroFS
+          # releases). Never `:latest` — see agent-daemonset.yaml's comment on the same class of
+          # bug (two pods silently on different builds).
+          image: ghcr.io/barre/zerofs:v2.3.2
+          command: ["zerofs", "run", "-c", "/etc/zerofs/zerofs.toml"]
+          envFrom:
+            - secretRef:
+                name: zerofs-store
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          ports:
+            - name: nfs
+              containerPort: 2049
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/zerofs
+              readOnly: true
+            # The container runs as uid 1001 and needs this writable — see upstream README.
+            - name: cache
+              mountPath: /var/cache/zerofs
+      volumes:
+        - name: config
+          configMap:
+            name: zerofs-config
+        # Cache, not the durable copy — the durable copy is the S3 bucket above. Losing this
+        # volume on a reschedule costs a cold cache, not data.
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zerofs
+  namespace: rustic-git-system
+spec:
+  selector:
+    app: zerofs
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP

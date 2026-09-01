@@ -23,6 +23,10 @@ pub struct Config {
     /// This node's name, from the downward-API `NODE_NAME`. It is the shard key: the controller
     /// watches only objects whose `spec.nodeName` equals it.
     pub node: String,
+    /// `WS_HOMES_EXPORT`, e.g. `zerofs.rustic-git-system.svc:/` — the region's shared-home NFS
+    /// export. Unset means no shared home on this node: workspace reconciles that need it park on
+    /// HomeNotReady (fail closed, same shape as WS_PEER_SECRET gating the peer listener).
+    pub homes_export: Option<String>,
 }
 
 impl Config {
@@ -33,13 +37,55 @@ impl Config {
             // Declared capacity is gone: the kubelet reports node allocatable, and a second
             // hand-maintained copy of it is a second thing that can be wrong.
             node: std::env::var("NODE_NAME").unwrap_or_default(),
+            homes_export: std::env::var("WS_HOMES_EXPORT").ok().filter(|v| !v.is_empty()),
         }
+    }
+}
+
+/// `{pool}/homes` — where the region's shared-home export is mounted, one mount per node.
+pub fn homes_root(pool: &str) -> std::path::PathBuf {
+    std::path::Path::new(pool).join("homes")
+}
+
+/// True when `target` already appears as a mount point's column-2 entry in `/proc/mounts`'s
+/// contents. Split out from `mount_homes` so the parse decision is testable without root or NFS.
+fn already_mounted(mounts: &str, target: &str) -> bool {
+    mounts.lines().any(|l| l.split_whitespace().nth(1) == Some(target))
+}
+
+fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
+    let target = homes_root(pool);
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    // Idempotent: already mounted is success. /proc/mounts is the authority.
+    let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
+    let Some(target_str) = target.to_str() else {
+        return Err(format!("{} is not valid UTF-8", target.display()));
+    };
+    if already_mounted(&mounts, target_str) {
+        return Ok(());
+    }
+    // hard,nointr: a flapping ZeroFS must block, not corrupt (spec ruling). vers=3: ZeroFS
+    // serves NFSv3. nolock: no NLM sideband — append-mode files are node-local by design.
+    let st = std::process::Command::new("mount")
+        .args(["-t", "nfs", "-o", "vers=3,hard,nolock,tcp", export])
+        .arg(&target)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if st.success() {
+        Ok(())
+    } else {
+        Err(format!("mount {export} at {} failed: {st}", target.display()))
     }
 }
 
 /// Boots the node controller: Engine, janitor, Kubernetes client, then reconcile forever.
 pub async fn run(cfg: Config) -> Result<(), String> {
     let engine = Arc::new(Engine::new(Pool::new(&cfg.pool)));
+    // Fail closed like the pin/CRD checks below: a shared home the agent claims to serve but
+    // cannot actually reach is worse than the DaemonSet restart loop this causes.
+    if let Some(export) = &cfg.homes_export {
+        mount_homes(&cfg.pool, export)?;
+    }
     let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
     janitor::spawn_janitor(cfg.pool.clone(), nix_client.clone());
     if cfg.node.is_empty() {
@@ -106,3 +152,15 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::already_mounted;
+
+    #[test]
+    fn already_mounted_matches_the_target_column_exactly() {
+        let mounts = "zerofs:/ /wspool-prod/homes nfs rw 0 0\nother /wspool-prod/homes2 nfs rw 0 0\n";
+        assert!(already_mounted(mounts, "/wspool-prod/homes"));
+        assert!(!already_mounted(mounts, "/wspool-prod/home"));
+    }
+}
