@@ -324,7 +324,7 @@ pub(crate) async fn add_key(
 
     // Parsed before anything is written, so a malformed key is a 400 rather than a row
     // describing a key the fleet never accepted. Parsing an OpenPGP key runs the self-signature
-    // checks (real RSA/EdDSA maths) inside `gpg::parse_key`/`emails_of`, so it goes to a blocking
+    // checks (real RSA/EdDSA maths) inside `gpg::parse_key`/`verified_emails`, so it goes to a blocking
     // thread rather than tying up the async executor; done once here and reused for both the
     // fingerprints and the default name, rather than parsing the armour twice.
     let (fingerprint, fingerprints, gpg_email) = if is_gpg {
@@ -332,7 +332,7 @@ pub(crate) async fn add_key(
         let parsed = tokio::task::spawn_blocking(move || {
             let key = crate::gpg::parse_key(&armoured)?;
             let fps = crate::gpg::fingerprints_of(&key);
-            let email = crate::gpg::emails_of(&key).into_iter().next();
+            let email = crate::gpg::verified_emails(&key).into_iter().next();
             crate::Result::Ok((fps, email))
         })
         .await;

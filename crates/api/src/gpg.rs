@@ -118,11 +118,7 @@ pub fn fingerprints_of(key: &SignedPublicKey) -> Vec<String> {
 /// A user id is free text the holder controls, so only one whose SELF-SIGNATURE
 /// verifies against the primary key is trusted: without that check a third party
 /// could staple someone else's address onto a key and have us vouch for it.
-pub fn emails_of(key: &SignedPublicKey) -> Vec<String> {
-    verified_emails(key)
-}
-
-fn verified_emails(key: &SignedPublicKey) -> Vec<String> {
+pub fn verified_emails(key: &SignedPublicKey) -> Vec<String> {
     key.details
         .users
         .iter()

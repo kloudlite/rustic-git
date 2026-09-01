@@ -773,10 +773,7 @@ fn dns_label(raw: &str) -> String {
 /// a namespace that says what it is.
 pub fn env_namespace(id: &str) -> String {
     let id = id.to_lowercase();
-    match id.strip_prefix("env-") {
-        Some(rest) => format!("env-{rest}"),
-        None => format!("env-{id}"),
-    }
+    format!("env-{}", id.strip_prefix("env-").unwrap_or(&id))
 }
 
 /// Every CRD this repo owns, for YAML generation and for a startup precondition check.

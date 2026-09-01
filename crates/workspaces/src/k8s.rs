@@ -621,12 +621,6 @@ fn host_dir(name: &str, path: String) -> Volume {
     }
 }
 
-/// The store, read-only. Mounted at its root because the profile lives under it too; the
-/// individual mounts below pick the two subdirectories the pod may see.
-fn nix_volume() -> Volume {
-    host_dir("nix", NIX_ROOT.to_string())
-}
-
 /// This workspace's rendered `resolv.conf`. A FILE, and mounted as one: the agent rewrites it in
 /// place precisely because the pod holds the inode.
 fn attach_volume(pool: &str, ws_id: &str) -> Volume {
@@ -957,7 +951,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
                 homecache_volume(ctx.pool, &spec.owner),
                 workspaces_volume(),
                 live_worktree_volume(ctx.pool, id, ws_id),
-                nix_volume(),
+                // The store, read-only, at its root because the profile lives under it too; the
+                // mounts pick the two subdirectories the pod may see.
+                host_dir("nix", NIX_ROOT.to_string()),
                 attach_volume(ctx.pool, ws_id),
                 user_key_volume(init.is_some()),
             ];
