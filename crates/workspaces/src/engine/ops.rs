@@ -262,16 +262,6 @@ impl Engine {
         self.generation_of(&self.pool.live(id))
     }
 
-    /// The generation of a commit's own snapshot — `layer` is the commit name under `snap/`.
-    /// This, not the live subvolume read after the cut, is what the home beat records: the
-    /// snapshot holds everything committed up to its own transaction, so "live is past it" is
-    /// exactly "something changed since the commit", whether the snapshot's transaction moved the
-    /// live generation (it does when the root item is rewritten) or not. Reading live afterwards
-    /// folds any write that landed between the snapshot and the read into the recorded number.
-    pub fn pushed_generation(&self, id: &str, layer: &str) -> Result<u64, EngErr> {
-        self.generation_of(&self.pool.snap(id, layer))
-    }
-
     fn generation_of(&self, subvol: &std::path::Path) -> Result<u64, EngErr> {
         let out = std::process::Command::new("btrfs")
             .args(["subvolume", "show", subvol.to_str().unwrap()])
@@ -288,10 +278,9 @@ impl Engine {
             .ok_or_else(|| EngErr::other(format!("btrfs subvolume show {}: no Generation line", subvol.display())))
     }
 
-    /// Commit the pool's open transaction. `generation`/`pushed_generation` read the COMMITTED
-    /// number, and btrfs commits on its own only every ~30s — so a beat that reads without this
-    /// can miss a write made just before it. `commit::commit_worktree` calls this before every
-    /// snapshot for the same reason. One call per beat, not per home.
+    /// Commit the pool's open transaction. `generation` reads the COMMITTED number, and btrfs
+    /// commits on its own only every ~30s — so a read without this can miss a write made just
+    /// before it. `commit::commit_worktree` calls this before every snapshot for the same reason.
     pub fn sync_pool(&self) -> Result<(), EngErr> {
         run(&["btrfs", "filesystem", "sync", self.pool.root.to_str().unwrap()])
     }

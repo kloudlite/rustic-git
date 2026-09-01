@@ -258,7 +258,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Before the watches: a node with nothing to do must still be able to prove it is alive.
     heartbeat(&ctx.pool);
     spawn_heartbeat(ctx.clone());
-    spawn_home_push(ctx.clone());
     spawn_pull(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
@@ -483,44 +482,6 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
     });
 }
 
-/// What the timer's home-commit beat writes as the `Snapshot`'s message — the agent's own
-/// housekeeping, not something anyone asked for.
-pub const HOME_PUSH_MESSAGE: &str = "home: periodic";
-
-/// `WS_HOME_PUSH_SECS`, default 300: how often this node pushes the homes whose disk moved. An
-/// unchanged home costs one `subvolume show` per beat.
-pub fn home_push_interval() -> Duration {
-    Duration::from_secs(std::env::var("WS_HOME_PUSH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300))
-}
-
-/// The homes on this node due for a push, decided from two per-volume numbers so the decision is
-/// testable without a filesystem: `generation` is what btrfs says now (`None`: the subvolume is
-/// absent or unreadable — skipped, never pushed blind), `pushed` is the generation of the last
-/// push's own snapshot (`None`: never pushed — so a home that exists gets its first record on the
-/// next beat). Strictly PAST it, not merely different: the snapshot's transaction can leave the
-/// live number at or behind the snapshot's, and neither of those is a change to push.
-pub fn homes_to_push(
-    volumes: &[Arc<crd::Volume>],
-    generation: impl Fn(&str) -> Option<u64>,
-    pushed: impl Fn(&str) -> Option<u64>,
-) -> Vec<Arc<crd::Volume>> {
-    volumes
-        .iter()
-        .filter(|v| crd::is_home_volume(v) && volume_is_ready(v) && v.metadata.deletion_timestamp.is_none())
-        .filter(|v| {
-            let id = v.name_any();
-            match (generation(&id), pushed(&id)) {
-                (None, _) => false,
-                (Some(now), Some(then)) => now > then,
-                (Some(_), None) => true,
-            }
-        })
-        .cloned()
-        .collect()
-}
-
-/// The timer (spec: "Replication, trigger 1"). Every home is pushed from the agent's own beat and
-/// nothing else: inside a region there is one node per person, so no two nodes ever push one home.
 /// The commit model's puller: its own beat, so a slow pull never delays a reconcile.
 fn spawn_pull(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
@@ -531,112 +492,6 @@ fn spawn_pull(ctx: Arc<Ctx>) {
             crate::peer::pull_beat(&ctx).await;
         }
     });
-}
-
-fn spawn_home_push(ctx: Arc<Ctx>) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(home_push_interval());
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let ctx = ctx.clone();
-            // Its own OS thread: `push_env` blocks on the volume's `flock`, and `subvolume show`
-            // is a process per home. Same rule as every btrfs operation in this file.
-            if let Err(e) = tokio::task::spawn_blocking(move || home_push_beat(&ctx)).await {
-                tracing::warn!(error = %e, "home push beat panicked; skipping it");
-            }
-        }
-    });
-}
-
-fn home_push_beat(ctx: &Arc<Ctx>) {
-    let engine = &ctx.engine;
-    if let Err(e) = engine.sync_pool() {
-        tracing::warn!(error = %e, "home push: btrfs sync; skipping the beat");
-        return;
-    }
-    let due = homes_to_push(&ctx.volumes.state(), |id| engine.generation(id).ok(), |id| engine.pool.pushed_gen(id));
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::warn!(error = %e, "home push: runtime");
-            return;
-        }
-    };
-    // Durability for a home lives in the Snapshot CR now (Task 7c); the object-store `push_env`
-    // arm this beat used to fall back to is gone (Task 8) — the commit-model beat is the only one
-    // left. H3: the migrate half of `migrate_and_seed_baseline` runs for EVERY ready home on
-    // EVERY pass, not just a due one — a quiescent home must not sit on the old layout forever,
-    // since two layouts on the fleet at once makes `home_volume`'s (k8s.rs) hostPath choice
-    // unpredictable. Only the CR-cut itself stays behind the generation-moved gate.
-    let due_ids: std::collections::HashSet<String> = due.iter().map(|v| v.name_any()).collect();
-    rt.block_on(home_commit_beat(ctx, &due_ids));
-}
-
-/// Every ready home, every pass (Task 7c, H3): the migrate half of
-/// `migrate_and_seed_baseline` runs for ALL of them unconditionally — a quiescent home must not
-/// sit on the old layout forever, since two layouts on the fleet at once makes `home_volume`'s
-/// (k8s.rs) hostPath choice unpredictable. Only the CR-cut is gated on `due` (generation moved).
-/// Split out from `home_push_beat` so it is testable without `sync_pool`'s real `btrfs` call.
-pub async fn home_commit_beat(ctx: &Arc<Ctx>, due: &std::collections::HashSet<String>) {
-    for v in ctx.volumes.state().iter().filter(|v| crd::is_home_volume(v) && volume_is_ready(v) && v.metadata.deletion_timestamp.is_none()) {
-        let id = v.name_any();
-        if running_contains(ctx, &v.uid().unwrap_or_default()) {
-            continue;
-        }
-        if due.contains(&id) {
-            home_commit_beat_one(ctx, v, &id).await;
-        } else if let Err(e) = migrate_and_seed_baseline(ctx, &id, &v.spec.owner).await {
-            tracing::warn!(volume = %id, error = %e.0, "home commit beat: migrating layout");
-        }
-    }
-}
-
-/// The commit-model home beat body (Task 7c): CR-first, same discipline `migrate_and_seed_baseline`
-/// already uses for a checkout — this never touches btrfs directly, `reconcile_commit`'s Home arm
-/// does that once the CR lands. `Engine::migrate_volume` runs first (idempotent past the one time
-/// it actually moves anything) so an old-layout home gets its baseline commit before ever taking a
-/// periodic one; if it just migrated, THAT baseline is this pass's whole job — creating a periodic
-/// Snapshot in the same pass would give the chain two no-parent roots (the baseline and this one),
-/// which `newest_ready_commit`'s "not anyone's parent" tip search cannot then tell apart.
-pub async fn home_commit_beat_one(ctx: &Arc<Ctx>, v: &crd::Volume, id: &str) {
-    match migrate_and_seed_baseline(ctx, id, &v.spec.owner).await {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => {
-            tracing::warn!(volume = %id, error = %e.0, "home commit beat: migrating layout");
-            return;
-        }
-    }
-    let parent = match crate::snapshot::newest_ready_commit(ctx, id).await {
-        Ok(p) => p.unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(volume = %id, error = %e.0, "home commit beat: finding the newest commit");
-            return;
-        }
-    };
-    let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
-    let name = crd::snapshot_name(id);
-    let mut snap = crd::Snapshot::new(
-        &name,
-        crd::SnapshotSpec {
-            volume: id.to_string(),
-            owner: v.spec.owner.clone(),
-            worktree: id.to_string(),
-            parent,
-            message: Some(HOME_PUSH_MESSAGE.to_string()),
-            pinned: false,
-        },
-    );
-    snap.metadata.labels = Some(crd::commit_labels(&v.spec.owner, id));
-    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
-    // Same convergence rule as `migrate_and_seed_baseline`: a 409 means an earlier pass (or a
-    // crash-retry of this one) already created it, not an error.
-    match api.create(&PostParams::default(), &snap).await {
-        Ok(_) => {}
-        Err(kube::Error::Api(ae)) if ae.code == 409 => {}
-        Err(e) => tracing::warn!(volume = %id, error = %e, "home commit beat: creating the snapshot CR"),
-    }
 }
 
 /// Wrap a blocking operation's handle so that finishing also wakes the reconciler.
