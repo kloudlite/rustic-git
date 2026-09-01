@@ -96,10 +96,14 @@ spec:
   node: session-0
 status:
   phase: Synced                             # Synced | Syncing — nothing else
-  branches:                                 # newest commit of each branch this node holds
-    ws-2ad6c7af85a3a609: repo-2ad-c9f41a2b
   lastSyncAt: "2026-09-01T04:10:22Z"
 ```
+
+AS SHIPPED: a `branches` map (newest commit per branch this node holds) was designed for a
+finer-grained scheduling arm but is NOT populated — `write_replica_status` writes phase-only, and
+the claim predicate is Synced-only. The field name stays reserved; reintroduce it only together
+with the scheduler arm that reads it. Only the `rustic-git.io/volume` label is stamped on a
+replica row.
 
 Dropped from earlier drafts, deliberately: `behind` (derivable from `branches` against the
 Snapshot list — display sugar that can skew), `worktrees` (the same fact as
@@ -237,23 +241,28 @@ The deletion table removes the home-push beat — which is today the ONLY durabi
 (they were excluded from replication v1). Removing it without a replacement would leave every
 owner's dotfiles, shell history and editor state with no copy anywhere. So homes join the model
 as ordinary volumes: one repository per owner's home, one worktree per node the owner works on,
-committed and pulled exactly like everything else. Nothing about homes is special-cased beyond
-what already exists (`crd::home_volume_name`, the nested cache subvolumes that never travel in a
-send — both unchanged).
+committed and pulled exactly like everything else. AS SHIPPED, homes carry four small
+special-cases beyond `crd::home_volume_name` and the nested cache subvolumes: a Snapshot of a home
+resolves its cutting node from `Volume.spec.nodeName` (no Workspace/Environment exists to route
+through); the home beat cuts commits on generation movement; retention pins a home's newest
+commit; and a home materializing on a node that has the CRs but not yet the bytes requeues
+(`HomeAwaitingSync`) rather than bootstrapping empty.
 
 ### Verbs in this model
 
 | verb | meaning |
 |---|---|
 | snapshot | commit the worktree; `main` and `heads/{ws}` advance |
-| restore | move `heads/{ws}` to an older commit and re-materialize the tree — a checkout |
+| restore | in place: the RestoreWish names a commit; the agent checkout-swaps the worktree. Into a NEW workspace: `CloneOf{volume, commit}` — `VolumeSource::RestoreOf` is dead (kept deserializable only; reconciles to a Permanent re-issue condition) |
 | clone | a new worktree at a named commit; no new repository, no copy |
 | history | walk `spec.parent` from a ref |
 
 ### Open, needing a decision
 
-- **Quota granularity.** Per repository (worktrees share extents, so this is the honest number) or
-  per worktree (what users expect to be charged)? The spec assumes per repository.
+- **Quota granularity: DECIDED — per worktree.** Each worktree subvolume carries the volume's
+  `quotaGb` as its own qgroup limit. Not billing-exact for shared extents, but shared CoW extents
+  do not inflate the exclusive counter, and capping runaway growth is what the limit is for
+  (ruling at `ops.rs`'s set_quota).
 - **Placement granularity.** `Volume.spec.nodeName` becomes plural — a repo lives on several
   nodes — and placement moves to the Workspace. That is a schema change beyond this document.
 
@@ -284,7 +293,9 @@ time). Policy, per volume, defaulting cluster-wide:
 - **never delete the snapshot `latestSnapshot` names**, even if it falls outside the keep window:
   it is the only fully-replicated recovery point, and evicting it would leave the volume with a
   history but no durable floor
-- delete the rest, oldest first, and only once every node in `status.nodes` has dropped it
+- delete the rest, oldest first. AS SHIPPED the CR is deleted FIRST and each node's reconcile
+  converges its disk afterwards (drop is Ok-on-absent everywhere), rather than a
+  wait-for-every-node handshake — same outcome, no coordination.
 
 Deletion is a `Snapshot` CR delete; the owning node and each replica node remove their local
 subvolume on reconcile and narrow `status.nodes`. A snapshot no node holds is a `Snapshot` whose
