@@ -111,10 +111,9 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     Ok(Action::await_change())
 }
 
-/// A home's own newest Ready commit — the Ready snapshot on `volume` that no other Ready
-/// snapshot names as its parent. A home never branches and has exactly one worktree, so this is
-/// unambiguous; it stands in for the `status.head` a Workspace/Environment would have, since a
-/// home has neither.
+/// A volume's newest Ready commit — the Ready snapshot on `volume` that no other Ready snapshot
+/// names as its parent. Used to pick the parent for a stop-push snapshot when the caller has no
+/// `status.head` of its own to read (see the single call site).
 pub(crate) async fn newest_ready_commit(ctx: &Arc<Ctx>, volume: &str) -> Result<Option<String>, ReconcileErr> {
     let list = Api::<crd::Snapshot>::all(ctx.client.clone())
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))

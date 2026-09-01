@@ -22,12 +22,6 @@ pub const NO_SUCH_RECORD: &str = "commit record not found";
 /// re-issue the restore from the API, which writes the new shape.
 pub const RESTORE_OF_GONE: &str = "restore-to-new via the object-store registry is gone; re-issue the restore";
 
-/// A home whose newest Ready commit is not yet on this node's disk — the replica pull beat (7c)
-/// is behind, not absent; TRANSIENT, requeued at RETRY like any other in-flight condition. Never
-/// bootstrap empty here: an empty worktree checked out next to real history is the never-started-
-/// dataless bug, and it would go on to be committed and replicated as if it were real.
-pub const HOME_AWAITING_SYNC: &str = "home commit not yet replicated to this node";
-
 impl std::fmt::Display for EngErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -67,15 +61,6 @@ pub(crate) fn run(argv: &[&str]) -> Result<(), EngErr> {
 pub fn is_subvolume(path: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|m| m.ino() == 256)
-}
-
-/// The `Generation:` line of `btrfs subvolume show`. Split from the command so the parse has a test
-/// that runs where btrfs does not.
-pub fn parse_generation(subvolume_show: &str) -> Option<u64> {
-    subvolume_show
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("Generation:"))
-        .and_then(|g| g.trim().parse().ok())
 }
 
 pub struct Engine {
@@ -216,68 +201,6 @@ impl Engine {
         Ok(run(&["btrfs", "qgroup", "limit", &limit, path.to_str().unwrap()]).err().map(|e| e.0))
     }
 
-    /// The nested subvolumes that keep a home's caches out of every push and out of its quota
-    /// (`k8s::HOME_LOCAL_DIRS`). Run after every path that leaves a new `live` behind — because a
-    /// received/cloned tree carries no trace of them: without this `.cache` comes back as nothing
-    /// at all and the next `npm install` writes it INTO the home.
-    ///
-    /// Keep-biased: an entry that already exists — as a subvolume, or as a plain directory the
-    /// person made themselves — is left exactly as it is. Every directory made here is chowned to
-    /// the owner, parents included: root-made `~/.cargo` is a `mkdir ~/.cargo/x: Permission denied`
-    /// for the person the home belongs to.
-    pub fn ensure_home_dirs(&self, id: &str, uid: u32) -> Result<(), EngErr> {
-        // Same mixed-layout decision as `set_quota`: a migrated home's real $HOME is the
-        // worktree (`Pool::worktree`), and `live` names the directory OF worktrees, not the
-        // subvolume any more — creating the caches under `live` itself would put plain
-        // directories INSIDE the snapshotted worktree tree, so every commit/send would carry
-        // them and `homeQuotaGb` would count them. A not-yet-migrated home is still the old
-        // single subvolume at `live`, so that stays the target there.
-        let old_live = self.pool.live(id);
-        let live = if is_subvolume(&old_live) { old_live } else { self.pool.worktree(id, id) };
-        for rel in crate::k8s::HOME_LOCAL_DIRS {
-            let p = live.join(rel);
-            if p.exists() {
-                continue;
-            }
-            let mut made = Vec::new();
-            let mut d = p.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| live.clone());
-            while d != live && !d.exists() {
-                made.push(d.clone());
-                d = d.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| live.clone());
-            }
-            for d in made.iter().rev() {
-                std::fs::create_dir(d).map_err(EngErr::io)?;
-                std::os::unix::fs::chown(d, Some(uid), Some(uid)).map_err(EngErr::io)?;
-            }
-            run(&["btrfs", "subvolume", "create", p.to_str().unwrap()])?;
-            std::os::unix::fs::chown(&p, Some(uid), Some(uid)).map_err(EngErr::io)?;
-        }
-        Ok(())
-    }
-
-    /// The btrfs generation of `id`'s live subvolume: a counter the filesystem bumps on every
-    /// committed transaction that touched it, so "has anything changed since the last push" is one
-    /// `subvolume show` rather than a walk of the tree.
-    pub fn generation(&self, id: &str) -> Result<u64, EngErr> {
-        self.generation_of(&self.pool.live(id))
-    }
-
-    fn generation_of(&self, subvol: &std::path::Path) -> Result<u64, EngErr> {
-        let out = std::process::Command::new("btrfs")
-            .args(["subvolume", "show", subvol.to_str().unwrap()])
-            .output()
-            .map_err(EngErr::io)?;
-        if !out.status.success() {
-            return Err(EngErr::other(format!(
-                "btrfs subvolume show {}: {}",
-                subvol.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        parse_generation(&String::from_utf8_lossy(&out.stdout))
-            .ok_or_else(|| EngErr::other(format!("btrfs subvolume show {}: no Generation line", subvol.display())))
-    }
-
     /// Commit the pool's open transaction. `generation` reads the COMMITTED number, and btrfs
     /// commits on its own only every ~30s — so a read without this can miss a write made just
     /// before it. `commit::commit_worktree` calls this before every snapshot for the same reason.
@@ -313,13 +236,6 @@ mod tests {
 
     fn engine(root: &std::path::Path) -> Engine {
         Engine::new(Pool::new(root))
-    }
-
-    #[test]
-    fn the_generation_is_read_off_subvolume_show() {
-        let out = "vol/home-alice/live\n\tName: \t\t\tlive\n\tUUID: \t\t\t1234\n\tCreation time: \t\t2026-08-29 10:00:00 +0000\n\tSubvolume ID: \t\t257\n\tGeneration: \t\t4711\n\tGen at creation: \t7\n\tFlags: \t\t\t-\n";
-        assert_eq!(super::parse_generation(out), Some(4711));
-        assert_eq!(super::parse_generation("nothing here"), None);
     }
 
     /// The degradation path: forced via the private field rather than gated on the real
