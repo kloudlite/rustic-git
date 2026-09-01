@@ -123,9 +123,9 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
         // AND forced: lazy detaches the tree even though the workspace pods still hold it open,
         // forced stops the kernel waiting on a server that will never answer this client again.
         tracing::warn!(target = %target_str, "shared home is mounted but not answering; unmounting the stale mount before remounting");
-        let _ = std::process::Command::new("nsenter")
-            .args(["-t", "1", "-m", "--", "umount", "-f", "-l", target_str])
-            .status();
+        // In this pod's own mount namespace: `Bidirectional` propagation carries the detach out
+        // to the node, and the host filesystem has no umount.nfs helper to reach anyway.
+        let _ = std::process::Command::new("umount").args(["-f", "-l", target_str]).status();
     }
     // Safe only now: either nothing was mounted here, or the corpse above has been detached, so
     // the path is a plain directory the kernel can answer for.
@@ -144,16 +144,18 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     // dead server for two minutes, and the timeout means even a wedge that survives that surfaces
     // as a failed startup — which the DaemonSet restarts and an operator can see.
     let opts = "vers=3,tcp,port=2049,mountport=2049,nolock,hard,async,rsize=1048576,wsize=1048576,retry=0";
-    // `nsenter -t 1 -n -m`: mount in PID 1's network AND mount namespaces — the host's. The NFS
-    // client's transport then belongs to the node, not to this pod, so it outlives every agent
-    // restart; mounting in the pod's own namespace is what made each restart wedge that node's
-    // home permanently. NOT `hostNetwork: true`, which would achieve the same thing but also take
-    // the agent out of reach of the `agent-peer` NetworkPolicy that is the only thing restricting
-    // the peer listener on 8444 to other agents.
+    // `nsenter -t 1 -n` — pid 1's NETWORK namespace only, deliberately not `-m`. The transport is
+    // the part that has to outlive this pod: created in the node's netns it survives every agent
+    // restart, whereas one created in the pod's netns dies with the pod and leaves a mount that
+    // blocks forever on `hard`. The MOUNT namespace stays the container's on purpose — `-m` would
+    // switch to the host's filesystem, where `/sbin/mount.nfs` does not exist (it ships in this
+    // image, not on the node), and `Bidirectional` propagation publishes the mount to the node
+    // regardless. NOT `hostNetwork: true`, which would also fix the lifetime but take the agent
+    // out of reach of the `agent-peer` NetworkPolicy restricting the peer listener on 8444.
     let addr_export = resolve_export(export)?;
     let st = std::process::Command::new("timeout")
         .arg("60")
-        .args(["nsenter", "-t", "1", "-n", "-m", "--", "mount", "-t", "nfs", "-o", opts])
+        .args(["nsenter", "-t", "1", "-n", "--", "mount", "-t", "nfs", "-o", opts])
         .arg(&addr_export)
         .arg(&target)
         .status()
