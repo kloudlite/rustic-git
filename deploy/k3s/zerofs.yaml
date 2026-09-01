@@ -21,29 +21,31 @@ metadata:
   namespace: rustic-git-system
 type: Opaque
 stringData:
-  # The region's blob account, reached through its S3-compatible gateway (Azure Blob has no
-  # native S3 API; this is Azurite-style or a real S3-compat front for it — whichever the region's
-  # blob account offers, per provision-azure.sh). Values are placeholders: fill in per region,
-  # the same way rustic-git-agent's AZURE_ACCOUNT/KEY/CONTAINER are.
-  AWS_ACCESS_KEY_ID: "REPLACE-ME"
-  AWS_SECRET_ACCESS_KEY: "REPLACE-ME"
-  AWS_ENDPOINT_URL: "REPLACE-ME"
-  # Bucket the homes filesystem lives in, and the path prefix inside it — kept as two vars so the
-  # bucket can be shared with other ZeroFS-style consumers without their prefixes colliding.
-  ZEROFS_BUCKET: "REPLACE-ME"
-  SLATEDB_PREFIX: "homes"
+  # The region's blob account — the SAME account and container every other tier already writes to
+  # (`RUSTIC_GIT_S3_URL=az://rustic-git`). ZeroFS speaks Azure Blob natively (`azure://`), so there
+  # is no S3 gateway in front of it and no AWS_* credentials anywhere in this file. Copy the values
+  # from the region's existing `rustic-git-storage` Secret rather than minting new ones: one
+  # account key per region, rotated in one place.
+  AZURE_STORAGE_ACCOUNT_NAME: "REPLACE-ME"
+  AZURE_STORAGE_ACCOUNT_KEY: "REPLACE-ME"
+  # Container the homes filesystem lives in, and the path prefix inside it. The prefix is what
+  # keeps this LSM tree out of the way of the registry blobs and repo databases sharing the
+  # container, so it must not be empty.
+  ZEROFS_CONTAINER: "rustic-git"
+  ZEROFS_PREFIX: "homes"
   # Encrypts extents at rest (XChaCha20-Poly1305, key wrapped via Argon2id). Losing this loses the
   # filesystem, same as losing a btrfs pool's disk — back it up wherever the region's other
-  # secrets are backed up.
+  # secrets are backed up, and note the cluster itself is NOT such a place.
   ZEROFS_PASSWORD: "REPLACE-ME"
 ---
 # zerofs.toml: TOML with `${VAR}` substitution from the container's env (Secret above). `[cache]`,
 # `[storage]`, `[servers]` are required by ZeroFS itself.
 #
-# UNVERIFIED until the first real cluster apply: both that ZeroFS expands `${VAR}` in this file at
-# all (rather than wanting the values inline or as flags), and that it picks the S3 credentials up
-# from AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_ENDPOINT_URL in the environment. This is the
-# runbook's biggest unknown — if the pod crash-loops on config, read its logs and check the
+# UNVERIFIED until the first real cluster apply: that ZeroFS expands `${VAR}` in this file at all
+# (rather than wanting the values inline or as flags). The BACKEND is settled — upstream documents
+# `azure://container/path` with an `[azure]` section taking `storage_account_name`/
+# `storage_account_key`, and documents env substitution for exactly these keys. If the pod
+# crash-loops on config, read its logs and check the
 # upstream README's config example before assuming the Secret values are wrong.
 apiVersion: v1
 kind: ConfigMap
@@ -58,8 +60,20 @@ data:
     memory_size_gb = 1.0
 
     [storage]
-    url = "s3://${ZEROFS_BUCKET}/${SLATEDB_PREFIX}"
+    # Azure Blob, not S3: this platform's object storage IS the blob account every other tier
+    # already writes to (`RUSTIC_GIT_S3_URL=az://rustic-git`), so ZeroFS points at the same
+    # account. `azure://{container}/{prefix}` — the prefix keeps the homes LSM tree in its own
+    # keyspace inside a container the rest of the platform also uses, so no container has to be
+    # created by hand and nothing here can collide with registry blobs or repo databases.
+    url = "azure://${ZEROFS_CONTAINER}/${ZEROFS_PREFIX}"
+    # NOT optional and NOT rotatable: every extent is encrypted with a key derived from this, so
+    # losing it loses every home in the region. It lives in the `zerofs-store` Secret beside the
+    # storage credentials — back BOTH up somewhere the cluster's own loss cannot take with it.
     encryption_password = "${ZEROFS_PASSWORD}"
+
+    [azure]
+    storage_account_name = "${AZURE_STORAGE_ACCOUNT_NAME}"
+    storage_account_key = "${AZURE_STORAGE_ACCOUNT_KEY}"
 
     [servers.nfs]
     addresses = ["0.0.0.0:2049"]

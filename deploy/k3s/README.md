@@ -304,17 +304,20 @@ whose `VolumeReplica` is Synced, not just the one that happened to hold their bt
 Order:
 
 ```sh
-# 1. Real credentials before anything else — zerofs.yaml ships REPLACE-ME placeholders for the
-#    region's S3-compatible blob endpoint and the at-rest encryption password. Losing the password
-#    loses the filesystem, same as losing a btrfs pool's disk; back it up wherever the region's
-#    other secrets are backed up before applying.
+# 1. Real credentials before anything else. ZeroFS speaks Azure Blob NATIVELY (`azure://`) — there
+#    is no S3 gateway and no AWS_* anywhere — so it points at the SAME account and container every
+#    other tier already writes to. Reuse the region's existing storage credential rather than
+#    minting a second one; only the encryption password is new, and losing it loses every home in
+#    the region (extents are encrypted with a key derived from it). Back the password up wherever
+#    the region's other secrets are backed up — the cluster itself is not such a place.
+ACC=$(kubectl -n rustic-git get secret rustic-git-storage -o jsonpath='{.data.account}' | base64 -d)
+KEY=$(kubectl -n rustic-git get secret rustic-git-storage -o jsonpath='{.data.key}' | base64 -d)
 kubectl -n rustic-git-system create secret generic zerofs-store \
-  --from-literal=AWS_ACCESS_KEY_ID=... \
-  --from-literal=AWS_SECRET_ACCESS_KEY=... \
-  --from-literal=AWS_ENDPOINT_URL=... \
-  --from-literal=ZEROFS_BUCKET=... \
-  --from-literal=SLATEDB_PREFIX=homes \
-  --from-literal=ZEROFS_PASSWORD=...
+  --from-literal=AZURE_STORAGE_ACCOUNT_NAME="$ACC" \
+  --from-literal=AZURE_STORAGE_ACCOUNT_KEY="$KEY" \
+  --from-literal=ZEROFS_CONTAINER=rustic-git \
+  --from-literal=ZEROFS_PREFIX=homes \
+  --from-literal=ZEROFS_PASSWORD="$(openssl rand -base64 32)"   # RECORD THIS SOMEWHERE DURABLE
 # or edit the stringData in zerofs.yaml directly and apply the whole file — either way, apply the
 # Secret before (or in the same apply as) the Deployment, never after.
 kubectl apply -f deploy/k3s/zerofs.yaml
