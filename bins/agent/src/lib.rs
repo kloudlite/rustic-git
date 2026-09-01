@@ -106,10 +106,14 @@ fn resolve_export(export: &str) -> Result<String, String> {
 
 fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     let target = homes_root(pool);
-    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
     let Some(target_str) = target.to_str() else {
         return Err(format!("{} is not valid UTF-8", target.display()));
     };
+    // The stale-mount repair MUST come before `create_dir_all`: on a node carrying a wedged mount
+    // every syscall against this path is already answered by a dead NFS client, and `create_dir_all`
+    // fails EEXIST (mkdir says it exists, the stat that would confirm it is a directory cannot get
+    // an answer). Creating the directory first is what made the agent die with a bare
+    // "File exists (os error 17)" and never reach the repair that would have fixed it.
     let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
     if already_mounted(&mounts, target_str) {
         if mount_answers(target_str) {
@@ -123,6 +127,9 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
             .args(["-t", "1", "-m", "--", "umount", "-f", "-l", target_str])
             .status();
     }
+    // Safe only now: either nothing was mounted here, or the corpse above has been detached, so
+    // the path is a plain directory the kernel can answer for.
+    std::fs::create_dir_all(&target).map_err(|e| format!("creating {}: {e}", target.display()))?;
     // `port=2049,mountport=2049` are NOT optional and NOT tuning: NFSv3 normally finds mountd by
     // asking rpcbind on port 111, and ZeroFS runs no rpcbind — without both, `mount.nfs` blocks
     // forever on a portmapper that will never answer, and because this runs before the controller
