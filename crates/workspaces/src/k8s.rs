@@ -374,8 +374,15 @@ fn login_env(name: &str) -> Vec<EnvVar> {
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
 ///
-/// Root touches exactly ONE path under the home: `chown $H`, and `$H` is a mountpoint, which
-/// cannot be a symlink. Everything below it — the mkdirs, the rc seeds — runs as `kl` via `su`,
+/// Root chowns only mountpoints and the directories the kubelet made to hold them, never a path
+/// the person could have replaced: `$H`, `$H/workspaces`, and `~/.cargo` with `~/.cargo/registry`.
+/// The last two are the exception and exist because the kubelet creates the missing PARENT of a
+/// subPath mount as root:root 0755 — leaving `CARGO_HOME` on the shared home (which is the point:
+/// `credentials.toml` and `config.toml` must survive) but unwritable, and the mount point itself
+/// root-owned so cargo cannot fill the cache either. `.vscode-server`/`.cursor-server` need no
+/// such fix: they are leaf mount points with no root-owned parent, and the editors recreate them.
+/// A mountpoint cannot be a symlink, and `-h` covers the parent in case the kubelet followed a
+/// planted one rather than creating it. Everything else below `$H` — the mkdirs, the rc seeds — runs as `kl` via `su`,
 /// because the home is now persistent and the person owns every byte of it between starts:
 /// `mv ~/.config x; ln -s /etc ~/.config` would otherwise make the next start `chown` and write
 /// through `/etc` as root, and the container keeps CHOWN/DAC_OVERRIDE on a writable rootfs. The
@@ -393,6 +400,7 @@ fn prelude(name: &str) -> String {
         "set -e\n\
          H=/home/{SSH_USER}\n\
          chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
+         chown -h {SSH_UID}:{SSH_UID} $H/.cargo $H/.cargo/registry\n\
          mkdir -p /etc/fish/conf.d\n\
          printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
@@ -2019,16 +2027,23 @@ mod tests {
         // from chown is a pod that never starts.
         assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
         // Root's part ends where `su` begins. Below `$H` the person owns the tree between starts,
-        // so a root `chown`/`mkdir`/redirect there follows whatever symlink they planted — `$H`
-        // itself is a mountpoint and is the one path root may touch.
+        // so a root `chown`/`mkdir`/redirect there follows whatever symlink they planted. The
+        // closed list below — not a prefix, so a new path cannot be smuggled onto an existing
+        // line — is every path root may touch: mountpoints and the `.cargo` parent the kubelet
+        // makes root-owned for one. Adding to it is the moment to re-read `prelude`'s doc comment.
+        const ROOT_CHOWNS: [&str; 2] =
+            ["chown 1000:1000 $H $H/workspaces", "chown -h 1000:1000 $H/.cargo $H/.cargo/registry"];
         let su_at = prelude.lines().position(|l| l.starts_with("su kl -s /bin/sh <<'SEED'")).expect("seed runs as kl");
         let root: Vec<&str> = prelude.lines().take(su_at).collect();
-        assert!(root.contains(&"chown 1000:1000 $H $H/workspaces"), "{root:?}");
+        // Both must actually be there: dropping the second leaves `~/.cargo` unwritable by kl.
+        for want in ROOT_CHOWNS {
+            assert!(root.contains(&want), "{root:?}");
+        }
         for l in &root {
             // Root writes only to /etc (the container's own filesystem); nothing under $H.
-            assert!(!l.contains("$H/") || l.starts_with("chown 1000:1000 $H"), "root must not write under $H: {l}");
+            assert!(!l.contains("$H/") || ROOT_CHOWNS.contains(l), "root must not write under $H: {l}");
             assert!(!l.contains("> /home"), "root must not write under the home: {l}");
-            assert!(!l.starts_with("chown") || *l == "chown 1000:1000 $H $H/workspaces", "root chown below the mountpoints: {l}");
+            assert!(!l.starts_with("chown") || ROOT_CHOWNS.contains(l), "root chown below the mountpoints: {l}");
         }
         let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
         assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");
