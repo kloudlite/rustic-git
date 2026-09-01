@@ -2309,16 +2309,19 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
     match &env {
         Some((env_ns, e)) => {
-            ensure(&policies, &k8s::attach_egress(&ns, &id, env_ns, &w.spec.owner, &pod_ctx.owner_ref), ctx).await?;
+            ensure(&policies, &k8s::attach_egress(&ns, &w.name_any(), env_ns, &w.spec.owner, &pod_ctx.owner_ref), ctx).await?;
             // The environment-side half cannot be owned by this Workspace: an ownerReference may
             // not cross namespaces. It is owned by the ENVIRONMENT instead, so deleting the
             // environment collects it, and a detach deletes it by name.
             let env_ref = owner_ref_of_kind(e)?;
             let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), env_ns);
-            ensure(&in_env, &k8s::attach_ingress(env_ns, &ns, &id, &w.spec.owner, &env_ref), ctx).await?;
+            // `ws_id`: these policies select the workspace POD by `WORKSPACE_LABEL`, which names
+            // the workspace, and siblings share the namespace — keyed by the shared volume a
+            // clone's grant would select its source's pod instead of its own.
+            ensure(&in_env, &k8s::attach_ingress(env_ns, &ns, &w.name_any(), &w.spec.owner, &env_ref), ctx).await?;
         }
         // Detach is this same pass with the field cleared, so the workspace-side half goes by name.
-        None => delete_ignoring_404(&policies, &k8s::attach_policy_name(&id)).await?,
+        None => delete_ignoring_404(&policies, &k8s::attach_policy_name(&w.name_any())).await?,
     }
     // The environment-side half lives in a namespace this spec no longer names, so a detach — or a
     // re-attach to a DIFFERENT environment — would strand it there until that environment is
@@ -2339,7 +2342,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         .filter(|was| now != Some(was.as_str()));
     if let Some(was) = was {
         let old: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &crd::env_namespace(&was));
-        delete_ignoring_404(&old, &k8s::attach_policy_name(&id)).await?;
+        delete_ignoring_404(&old, &k8s::attach_policy_name(&w.name_any())).await?;
     }
     let mut attached = match (&env_ns, &refusal) {
         // The message is the BARE environment id and must stay that: the next pass parses it back
@@ -2354,7 +2357,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // Before the pod, never after: a container started on a stale profile is a workspace whose
     // tools silently disagree with its spec.
     if w.spec.desired_state == DesiredState::Running {
-        if let Some(action) = ensure_profile(w, &id, gen, &mut prev, ctx).await? {
+        // Per-WORKSPACE, matching the pod's `var/rustic/profiles/{workspace}` subPath: packages are
+        // `spec.packages` of THIS workspace, and two clones of one volume may ask for different
+        // ones. Keyed by the shared volume, a clone mounts a profile that was never built for it.
+        if let Some(action) = ensure_profile(w, &w.name_any(), gen, &mut prev, ctx).await? {
             return Ok(action);
         }
         // Same rule as the profile: the pod mounts this, so it exists first or sshd dies on boot.
