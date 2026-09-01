@@ -78,9 +78,14 @@ pub(crate) fn check_homes_mounted(mounts: &str, pool: &str) -> Result<(), String
 /// entry that blocks forever on first touch (`hard`). A restarted agent would see it listed, skip
 /// remounting, and then hang before the controller ever starts — with the pod reporting 2/2
 /// Running the whole time. Presence is not liveness; this asks.
+///
+/// `-s KILL`, because `timeout`'s default SIGTERM is exactly the signal a process wedged on a
+/// `hard` NFS mount ignores: it sleeps uninterruptibly and only SIGKILL breaks an NFS wait. With
+/// the default, `timeout` would send TERM and then wait forever for a child that never dies —
+/// hanging on the very corpse this probe exists to detect.
 fn mount_answers(target: &str) -> bool {
     std::process::Command::new("timeout")
-        .args(["5", "stat", "-f", target])
+        .args(["-s", "KILL", "5", "stat", "-f", target])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -95,13 +100,20 @@ fn mount_answers(target: &str) -> bool {
 /// mount already needs.
 fn resolve_export(export: &str) -> Result<String, String> {
     use std::net::ToSocketAddrs;
-    let (host, path) = export.split_once(':').ok_or_else(|| format!("{export}: expected host:/path"))?;
+    // `rsplit_once`: the path always starts at the LAST colon, so an IPv6 host (`fd00::1:/`)
+    // keeps its own colons.
+    let (host, path) = export.rsplit_once(':').ok_or_else(|| format!("{export}: expected host:/path"))?;
+    let host = host.trim_matches(|c| c == '[' || c == ']');
     let addr = (host, 2049)
         .to_socket_addrs()
         .map_err(|e| format!("resolving {host}: {e}"))?
         .next()
         .ok_or_else(|| format!("{host} resolved to no address"))?;
-    Ok(format!("{}:{path}", addr.ip()))
+    // A dual-stack resolver can answer AAAA first; mount.nfs needs a v6 address bracketed.
+    Ok(match addr.ip() {
+        std::net::IpAddr::V6(v6) => format!("[{v6}]:{path}"),
+        std::net::IpAddr::V4(v4) => format!("{v4}:{path}"),
+    })
 }
 
 fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
@@ -125,7 +137,15 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
         tracing::warn!(target = %target_str, "shared home is mounted but not answering; unmounting the stale mount before remounting");
         // In this pod's own mount namespace: `Bidirectional` propagation carries the detach out
         // to the node, and the host filesystem has no umount.nfs helper to reach anyway.
-        let _ = std::process::Command::new("umount").args(["-f", "-l", target_str]).status();
+        let st = std::process::Command::new("umount")
+            .args(["-f", "-l", target_str])
+            .status()
+            .map_err(|e| format!("running umount: {e}"))?;
+        if !st.success() {
+            // Never mount over an undetached corpse, and never let `create_dir_all` below turn
+            // this into the bare "File exists" that hid the real cause once already.
+            return Err(format!("unmounting the stale shared home at {target_str} failed: {st}"));
+        }
     }
     // Safe only now: either nothing was mounted here, or the corpse above has been detached, so
     // the path is a plain directory the kernel can answer for.
@@ -153,8 +173,10 @@ fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     // regardless. NOT `hostNetwork: true`, which would also fix the lifetime but take the agent
     // out of reach of the `agent-peer` NetworkPolicy restricting the peer listener on 8444.
     let addr_export = resolve_export(export)?;
+    // `-s KILL` for the same reason as `mount_answers`: a mount.nfs stuck inside the mount
+    // syscall ignores SIGTERM.
     let st = std::process::Command::new("timeout")
-        .arg("60")
+        .args(["-s", "KILL", "60"])
         .args(["nsenter", "-t", "1", "-n", "--", "mount", "-t", "nfs", "-o", opts])
         .arg(&addr_export)
         .arg(&target)
@@ -247,7 +269,7 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{already_mounted, check_homes_mounted};
+    use super::{already_mounted, check_homes_mounted, resolve_export};
 
     /// The mount-liveness hole: with the export gone, `ensure_shared_home` would otherwise mkdir
     /// on the node's rootfs and hand the pod a silently empty home.
@@ -257,6 +279,17 @@ mod tests {
         assert!(check_homes_mounted(mounts, "/wspool-prod").is_ok());
         let err = check_homes_mounted("/dev/sda1 / ext4 rw 0 0\n", "/wspool-prod").unwrap_err();
         assert!(err.contains("not mounted"), "{err}");
+    }
+
+    /// Literal addresses only — `to_socket_addrs` on a literal never touches DNS, so this pins the
+    /// parsing (last-colon split, v6 brackets) without a resolver in the test.
+    #[test]
+    fn resolve_export_splits_at_the_last_colon_and_brackets_ipv6() {
+        assert_eq!(resolve_export("10.43.1.2:/").unwrap(), "10.43.1.2:/");
+        assert_eq!(resolve_export("10.43.1.2:/homes").unwrap(), "10.43.1.2:/homes");
+        assert_eq!(resolve_export("fd00::1:/").unwrap(), "[fd00::1]:/");
+        assert_eq!(resolve_export("[fd00::1]:/homes").unwrap(), "[fd00::1]:/homes");
+        assert!(resolve_export("no-colon").is_err());
     }
 
     #[test]
