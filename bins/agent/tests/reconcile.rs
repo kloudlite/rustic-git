@@ -767,18 +767,11 @@ async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
     assert!(!tmp.path().join("vol/ws-1/live/ws-1").exists(), "no bootstrap worktree either");
 }
 
-/// Re-host: a node that has never run this worktree starts from the newest SYNC POINT, not from
-/// `status.head` — the sync beat replicated it after the last commit, so the loss window on a node
-/// death is one `WS_SYNC_SECS`.
-///
-/// Which snapshot was picked is proved by which failure `Engine::checkout` produces, and that is
-/// deterministic without btrfs: only the HEAD commit's `snap/` dir exists here, so choosing the
-/// head would get past the existence check and die shelling out to `btrfs`, while choosing the
-/// (absent) transient dies on `NO_SUCH_RECORD` first. The exact-equality assertion is what tells
-/// the two apart.
-#[tokio::test]
-async fn a_workspace_starting_on_a_new_node_checks_out_its_latest_sync_point_over_its_head() {
-    let tmp = tempfile::tempdir().unwrap();
+/// The re-host fixture: a placed workspace whose `status.head` is `ws-1-aaaaaaaa`, no worktree on
+/// this pool (that is what makes it a re-host), and a snapshot listing of that head plus two sync
+/// points — ordered so a pick by listing order, or a last-one-wins pick, lands on the wrong object.
+/// `present` names the `snap/` dirs this node actually holds.
+async fn rehost_outcome(tmp: &std::path::Path, present: &[&str]) -> String {
     let transient = |name: &str, generation: &str| {
         let mut s = snapshot_cr(name, "ws-1");
         s["spec"]["transient"] = true.into();
@@ -790,27 +783,57 @@ async fn a_workspace_starting_on_a_new_node_checks_out_its_latest_sync_point_ove
         method: "GET",
         path: SNAPSHOTS_LIST.into(),
         status: 200,
-        // The head commit, then the NEWEST sync point, then an older one — ordered so that a pick
-        // by listing order, or a last-one-wins pick, would land on the wrong object.
         body: commit_list_of(
             "Snapshot",
             vec![snapshot_cr("ws-1-aaaaaaaa", "ws-1"), transient("sync-ws-1-bbbbbbbb", "9"), transient("sync-ws-1-cccccccc", "4")],
         ),
     });
-    let (ctx, _rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
-    // No worktree on this pool — that is what makes this a re-host — but the head commit IS here.
-    std::fs::remove_dir_all(tmp.path().join("vol/ws-1/live/ws-1")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("vol/ws-1/snap/ws-1-aaaaaaaa")).unwrap();
+    let (ctx, _rec, _fake) = ws_ctx_with_ssh(tmp, routes);
+    std::fs::remove_dir_all(tmp.join("vol/ws-1/live/ws-1")).unwrap();
+    for name in present {
+        std::fs::create_dir_all(tmp.join("vol/ws-1/snap").join(name)).unwrap();
+    }
     let mut w = ready_workspace("ws-1", vec![]);
     w.status.as_mut().unwrap().head = Some("ws-1-aaaaaaaa".into());
+    // Which snapshot the checkout was asked for is read off WHICH failure comes back, and that is
+    // sharp on any platform: a source that is not on the pool fails `NO_SUCH_RECORD` before any
+    // shell-out, and a source that IS there gets past that check — succeeding on a btrfs node and
+    // dying in `spawn btrfs` on one without, but never as `NO_SUCH_RECORD`.
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.err().map(|e| e.0).unwrap_or_default()
+}
 
-    let err = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap_err();
+/// Re-host: a node that has never run this worktree starts from the newest SYNC POINT, not from
+/// `status.head` — the sync beat replicated it after the last commit, so the loss window on a node
+/// death is one `WS_SYNC_SECS`. Only the gen-9 sync point is on the pool, and the head commit is
+/// NOT, so picking the head (or the older gen-4 point) is a `NO_SUCH_RECORD`.
+#[tokio::test]
+async fn a_workspace_starting_on_a_new_node_checks_out_its_latest_sync_point_over_its_head() {
+    let tmp = tempfile::tempdir().unwrap();
 
-    assert_eq!(
-        err.0,
+    let outcome = rehost_outcome(tmp.path(), &["sync-ws-1-bbbbbbbb"]).await;
+
+    assert_ne!(
+        outcome,
         rustic_git_workspaces::engine::ops::NO_SUCH_RECORD,
-        "the checkout must have been asked for the sync point (absent here), not the head commit (present): {}",
-        err.0
+        "the checkout must have been asked for the local sync point, not the absent head commit"
+    );
+}
+
+/// The other half, and the reason `latest_transient` intersects with `local_commits`: a replica one
+/// pull cycle behind sees a `Ready` transient whose subvolume has not landed here yet. Checking
+/// that out is a PERMANENT `NO_SUCH_RECORD` with no fallback, where `head` — which this node DOES
+/// hold — would have started the worktree perfectly well. Neither sync point is on the pool here,
+/// so a sharp fall back to the head is the only acceptable outcome.
+#[tokio::test]
+async fn a_sync_point_this_node_has_not_pulled_yet_falls_back_to_the_head() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let outcome = rehost_outcome(tmp.path(), &["ws-1-aaaaaaaa"]).await;
+
+    assert_ne!(
+        outcome,
+        rustic_git_workspaces::engine::ops::NO_SUCH_RECORD,
+        "an unpulled sync point must not be checked out; the local head must be"
     );
 }
 

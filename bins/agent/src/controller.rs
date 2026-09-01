@@ -2456,6 +2456,10 @@ async fn run_environment(
     // from the newest sync point rather than the last commit, so a node death costs one
     // `WS_SYNC_SECS` of edits. Resolved before the guard below — a transient is a Snapshot CR, so
     // `has_commits` sees it too.
+    // `e.name_any()`, not `id`: `spec.worktree` on a Snapshot is what `sync.rs`'s
+    // `live_worktrees` wrote there, which is the Environment's own name. They are the same string
+    // for every environment today — the volume is named after the environment — and this arm is
+    // simply keyed on the field that actually names the worktree.
     let synced = if ctx.engine.pool.worktree(&id, &id).exists() {
         None
     } else {

@@ -144,14 +144,22 @@ pub(crate) async fn newest_ready_commit(ctx: &Arc<Ctx>, volume: &str) -> Result<
 /// replicated, and it is the only ordering that survives clock skew between nodes. A transient cut
 /// by the stop path carries no annotation at all — read as generation 0, so it loses to any
 /// annotated one but still wins over nothing.
+///
+/// Candidates are intersected with what this node actually HOLDS (`local_commits`, a plain listing
+/// of `snap/`). A replica one pull cycle behind sees a `Ready` transient whose subvolume has not
+/// landed here, and checking that out fails `NO_SUCH_RECORD` — a PERMANENT error, where falling
+/// back to `head` would have started the worktree perfectly well. Not local is simply not a
+/// candidate, so the fallback chain in the caller does the rest.
 pub(crate) async fn latest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<String>, ReconcileErr> {
+    let local: std::collections::HashSet<String> =
+        ctx.engine.local_commits(volume).map_err(|e| ReconcileErr(e.0))?.into_iter().collect();
     let list = Api::<crd::Snapshot>::all(ctx.client.clone())
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
         .await?;
     let mut best: Option<(u64, String)> = None;
     for s in list.items {
         let ready = s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
-        if !s.spec.transient || s.spec.worktree != worktree || !ready {
+        if !s.spec.transient || s.spec.worktree != worktree || !ready || !local.contains(&s.name_any()) {
             continue;
         }
         let gen = s.annotations().get(crate::sync::SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok()).unwrap_or(0);
@@ -803,7 +811,10 @@ mod commit_tests {
 
     /// `latest_transient` orders by the `SYNCED_GENERATION` annotation, never by listing order:
     /// a commit and a `Working` transient are both ignored, an unannotated transient (the stop
-    /// path cuts one) reads as generation 0 and loses, and the highest generation wins.
+    /// path cuts one) reads as generation 0 and loses, and the highest generation wins — but only
+    /// among transients whose subvolume is actually ON THIS POOL: `sync-ws-1-newest` has the
+    /// highest generation of all and is deliberately absent from `snap/`, standing in for a replica
+    /// one pull cycle behind, and must lose to the highest LOCAL one.
     #[tokio::test]
     async fn latest_transient_picks_the_highest_synced_generation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -826,7 +837,12 @@ mod commit_tests {
             snap("sync-ws-1-lo", "ws-1", true, "ready", Some("4")),
             snap("sync-ws-1-working", "ws-1", true, "working", Some("99")),
             snap("sync-ws-2-other", "ws-2", true, "ready", Some("99")),
+            snap("sync-ws-1-newest", "ws-1", true, "ready", Some("99")),
         ];
+        // Everything the pool holds — note `sync-ws-1-newest` is NOT here.
+        for name in ["vol-1-commit", "sync-ws-1-none", "sync-ws-1-hi", "sync-ws-1-lo", "sync-ws-1-working", "sync-ws-2-other"] {
+            std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap").join(name)).unwrap();
+        }
         let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) }];
         let (ctx, _rec) = test_ctx(tmp.path(), "node-a", routes);
 
