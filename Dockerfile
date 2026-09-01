@@ -58,8 +58,12 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # git: a workspace can be seeded from a platform repository, which the controller clones into the
 # fresh subvolume (`VolumeSource::GitRepo`).
 # openssh-client: ssh-keygen makes each workspace's SSH host key.
+# nfs-common: `mount -t nfs` is not built into mount(8) — it execs /sbin/mount.nfs, which ships
+# here. Without it the agent's shared-home mount fails with "bad option; ... you might need a
+# /sbin/mount.<type> helper program" and, because that mount is fail-closed, the agent refuses to
+# start at all rather than serving anyone an empty home.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      btrfs-progs util-linux ca-certificates git openssh-client \
+      btrfs-progs util-linux ca-certificates git openssh-client nfs-common \
     && rm -rf /var/lib/apt/lists/*
 ARG PROFILE=release
 COPY target/${PROFILE}/rustic-git-agent /usr/local/bin/rustic-git-agent
