@@ -191,15 +191,23 @@ user-facing) is local-first when the source is materialized on the same pool
 (`Engine::clone_local_snapshot`, which works even on a source that has never pushed at all,
 running or not); its registry-history fallback (`inherit`) always grafts onto the source's last
 PUSHED history. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
-an explicit past **snapshot** — a PUSHED commit record, named by id. The agent
+an explicit past **snapshot** — a PUSHED commit record, named by id. Between pushes, a background
+sync beat (`WS_SYNC_SECS`, `bins/agent/src/sync.rs`) cuts a TRANSIENT `Snapshot` — never a parent,
+never advancing `status.head` — from each running worktree whose btrfs generation has moved, so a
+peer node's replica always has something recent to fetch; retain keeps exactly one Ready transient
+per worktree, and a node re-hosting a worktree checks out the newest one it holds locally before
+falling back to `status.head`. The agent
 (`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
 it watches its own node's objects and converges them (`bins/agent/src/controller.rs`), and its
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It still
 reaches the SERVER tier (`WS_REGISTRY_URL`, not `bins/api`) for the `vol/{owner}/{id}` registry
 surface — commit records and ref moves — and that is the only thing it calls over HTTP.
-Stopping an environment always pushes its own subvolume first, and the Deployment deletes are
-gated on the push having LANDED rather than merely been requested (`apply_environment`'s
-`DesiredState::Stopped` arm) — the one place push happens without an explicit `/push` call.
+Stopping a workspace or environment cuts a `stop-{ws}`/`stop-{env}` sync point (skipped if the pod
+never ran) and waits for another node's `VolumeReplica` to report `Synced` at or after that
+listing, bounded by `WS_STOP_FLUSH_TIMEOUT_SECS`; the Deployment deletes for an environment are
+gated on that wait, not on a full push (`apply_environment`'s `DesiredState::Stopped` arm). A stop
+that times out tears down anyway with condition reason `FlushUnreplicated` — it never blocks a
+stop forever on a replica that doesn't show up.
 
 **Every person has one persistent home per region, not per node** — `/home/kl` in every workspace
 pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS export served by ZeroFS, mounted by

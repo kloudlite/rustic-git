@@ -498,3 +498,17 @@ How many copies a volume gets is `Volume.spec.replicas`, per volume — there is
 knob. Rollout order is unconstrained: the listener and the puller are both fail-closed without the
 secret, so an agent that rolls ahead of its peers, or ahead of the Secret, or ahead of
 `agent-peer.yaml`, just keeps running with replication idle rather than moving anything unsafe.
+
+### Sync points
+
+`kubectl get snapshots` shows more than commits: `sync-{worktree}-{8hex}` is a transient, cut by
+the sync beat from a running worktree's moved btrfs generation so a peer has something recent to
+pull between pushes; `stop-{ws}`/`stop-{env}` is the same mechanism cutting one last transient on
+the way down. There is at most one Ready transient per worktree at a time — retain deletes the
+previous one only once the new one is Ready, so seeing two Ready together is a brief overlap, not
+a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks; `WS_STOP_FLUSH_TIMEOUT_SECS`
+(default 600) is how long a stop waits for a peer's `VolumeReplica` to pick up the stop transient
+before giving up. Condition reason `FlushUnreplicated` on a stopped workspace or environment means
+exactly that: nothing synced the final transient in time, so the stop went through unreplicated —
+check whether the volume has any peers at all (`spec.replicas`) and whether replication is even
+enabled (`WS_PEER_SECRET`, above) before assuming the timeout is too short.

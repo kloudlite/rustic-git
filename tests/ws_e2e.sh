@@ -335,6 +335,7 @@ WS_REGION="$REGION_ID" \
 WS_AGENT_TOKEN="$AGENT_TOKEN" \
 WS_POOL="$MOUNT" \
 WS_HOMES_EXPORT="zerofs.rustic-git-system.svc:/" \
+WS_SYNC_SECS="5" \
 HOSTNAME="ws-e2e-agent" \
 COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
 COSMOS_KEY="$COSMOS_KEY" \
@@ -408,6 +409,43 @@ sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 [ -f "$(live_dir "$WS_ID")/hello.txt" ] || fail "write into live did not land"
 kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/workspaces/e2e-ws/hello.txt \
   || fail "workspace pod $WS_ID does not see the host's write into its live hostPath"
+
+# ---------------------------------------------------------------------------
+# Sync points: the beat (WS_SYNC_SECS, set to 5 above for this run) cuts a transient snapshot
+# from a running worktree's moved generation, retaining exactly one per worktree. Two writes a
+# beat apart should leave exactly one Ready transient, and it must not be the first one.
+# ---------------------------------------------------------------------------
+ready_transients() {
+  # jsonpath filters on phase=="Ready" only (no && support); the name prefix and spec.transient
+  # check are done in awk against the paired field this prints alongside each name.
+  kubectl get snapshots -l "rustic-git.io/volume=$WS_ID" \
+    -o jsonpath='{range .items[?(@.status.phase=="Ready")]}{.metadata.name}{" "}{.spec.transient}{"\n"}{end}' \
+    2>/dev/null | awk -v p="^sync-$WS_ID-" '$1 ~ p && $2 == "true" {print $1}'
+}
+
+log "sync points: writing into the live subvolume and waiting for a Ready sync-$WS_ID-* transient"
+sudo bash -c "printf 'sync one' > '$(live_dir "$WS_ID")/sync1.txt'"
+SYNC1=""
+for i in $(seq 1 60); do
+  SYNC1=$(ready_transients | head -1)
+  [ -n "$SYNC1" ] && break
+  sleep 2
+done
+[ -n "$SYNC1" ] || fail "no Ready transient sync-$WS_ID-* appeared after writing into the live subvolume"
+
+log "sync points: writing again and waiting for the previous transient to be retained away"
+sudo bash -c "printf 'sync two' > '$(live_dir "$WS_ID")/sync2.txt'"
+SYNC2=""
+COUNT=0
+for i in $(seq 1 60); do
+  LIST=$(ready_transients)
+  COUNT=$(printf '%s\n' "$LIST" | grep -c .)
+  SYNC2=$(printf '%s\n' "$LIST" | head -1)
+  [ "$COUNT" -eq 1 ] && [ "$SYNC2" != "$SYNC1" ] && break
+  sleep 2
+done
+[ "$COUNT" -eq 1 ] || fail "expected exactly one Ready transient for $WS_ID, found $COUNT: $LIST"
+[ "$SYNC2" != "$SYNC1" ] || fail "the previous transient $SYNC1 is still around; retain did not delete it"
 
 # ---------------------------------------------------------------------------
 # Push: the one mutating verb — snapshot + upload the layer, POST its CommitRecord, move the
