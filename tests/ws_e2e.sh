@@ -10,9 +10,9 @@
 # change to it. CI does not pre-build anything for it — build the binaries on the VM itself
 # (`cargo build --bin rustic-git --bin rustic-git-api --bin rustic-git-agent`). A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
 #
-# Three binaries, and none of them talks to a volume registry: the commit history is the
-# `Volume`'s own `status.snapshots`, so GET /v1/volumes/* reads the CRD and the agent reaches
-# nothing over HTTP. /v1/workspaces|environments own the CRDs; only /v1/regions is
+# Three binaries, and none of them talks to a volume registry: the commit history is the chain of
+# Ready `Snapshot` CRs, so GET /v1/volumes/* reads the CRDs (`Volume.status.head` names the tip)
+# and the agent reaches nothing over HTTP. /v1/workspaces|environments own the CRDs; only /v1/regions is
 # Cosmos-backed. The agent is a
 # CONTROLLER now, not a poller: it watches the CRDs, so this script waits on the conditions those
 # controllers write (`kubectl wait --for=condition=Ready`) rather than polling document state.
@@ -439,9 +439,10 @@ done
 [ "$SYNC2" != "$SYNC1" ] || fail "the previous transient $SYNC1 is still around; retain did not delete it"
 
 # ---------------------------------------------------------------------------
-# Push: the one mutating verb — snapshot + upload the layer, POST its CommitRecord, move the
-# registry ref, all in one call. This is the only step that reaches the server tier's
-# /vol-agent/{owner}/{name}/commits — history must grow by exactly one after it.
+# Push: the one mutating verb — `/v1` writes a `Snapshot` CR and the owning node cuts it (btrfs
+# snapshot + upload) and marks it Ready, which moves `Volume.status.head`. Nothing is POSTed
+# anywhere: /v1/volumes/{id}/history reads the chain of Ready `Snapshot` CRs back, so history must
+# grow by exactly one after this.
 # ---------------------------------------------------------------------------
 log "pushing workspace"
 # Workspace CREATION already pushed one record (init = create + push of the empty subvolume),

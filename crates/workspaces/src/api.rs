@@ -53,7 +53,10 @@ pub struct OwnerMaterial {
 /// adapter in `bins/api`.
 ///
 /// Every method defaults to the UNWIRED answer, so a test stub implements only the lookups its
-/// case exercises and the rest behave exactly as a missing directory does.
+/// case exercises. That is NOT the same as a missing directory: `teams_for`'s default returns an
+/// empty Vec, which `resolve_new_owner` reads as "asked and answered", so a partial stub gets a
+/// 403 "not a member" where no directory at all gets a 503. Only test stubs are partial —
+/// production wires the full `Dir` adapter in `bins/api`.
 #[async_trait::async_trait]
 pub trait Directory: Send + Sync {
     /// Every team slug `user` belongs to. Called once per request, no cache —

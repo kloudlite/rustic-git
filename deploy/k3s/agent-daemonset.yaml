@@ -162,10 +162,10 @@ spec:
             # Pinned, so seeding works whatever image the workspace itself runs.
             - name: WS_GIT_INIT_IMAGE
               value: alpine/git:2.45.2
-            # `WS_REGION` comes from the `rustic-git-agent` Secret alongside the token it was minted
-            # with: the two must name the same region record, or the first push stamps the volume with
-            # one region and the ref move is refused for the other (seen 27 Aug as `ref move: 401`).
-            # Never set it inline here — an explicit env silently overrides `envFrom`.
+            # `WS_REGION` comes from the `rustic-git-agent` Secret: it names the region whose blob
+            # container this node reads and writes, and is half of an `OwnerBinding`'s identity
+            # (controller.rs). A node pointed at the wrong region cannot see snapshots pushed by its
+            # neighbours. Never set it inline here — an explicit env silently overrides `envFrom`.
             - name: RUST_BACKTRACE
               value: "1"
             # The nixpkgs every profile on this node is built against. Rolling it rebuilds every
@@ -223,7 +223,7 @@ spec:
             - name: WS_SNAPSHOT_KEEP
               value: "10"
           envFrom:
-            # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
+            # `WS_REGION` (which region's blob container this node uses) and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its
             # dev fallbacks, which is why this is a Secret and not inline.
             #
