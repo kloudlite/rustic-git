@@ -975,6 +975,12 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                     // stored before the cutover still deserializes; any reconcile that finds one
                     // converges to a fixed, PERMANENT condition rather than attempting a fetch
                     // that has nowhere to fetch from.
+                    // Already on disk means there is nothing to restore: this volume was
+                    // materialized before the cutover and its data is right there. Only a
+                    // never-materialized one has to fail, and permanently. Without this, any
+                    // re-run of the materialize pass (a status reset, a rebuilt node) turns a
+                    // healthy legacy volume into a permanent error while its pod keeps serving.
+                    Some(VolumeSource::RestoreOf { .. }) if engine.pool.voldir(id).exists() => {}
                     Some(VolumeSource::RestoreOf { .. }) => {
                         return Err(rustic_git_workspaces::engine::ops::RESTORE_OF_GONE.into());
                     }
