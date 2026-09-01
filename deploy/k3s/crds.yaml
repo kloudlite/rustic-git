@@ -1455,6 +1455,7 @@
                         "type": "object"
                       },
                       "lastSyncAt": {
+                        "description": "The instant the pull pass that produced this row LISTED the volume's snapshots — never the\ninstant the row was written. A pass takes minutes; anything that turned Ready after the\nlisting was invisible to it, so a write-time stamp would claim a commit this replica\nprovably does not hold. A stop's flush gate compares this against the stop transient's\n`readyAt`, and that comparison is only sound with the listing instant.",
                         "nullable": true,
                         "type": "string"
                       },

@@ -304,6 +304,11 @@ pub struct VolumeReplicaStatus {
     /// `head`/`durable` claim against this replica.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branches: BTreeMap<String, String>,
+    /// The instant the pull pass that produced this row LISTED the volume's snapshots — never the
+    /// instant the row was written. A pass takes minutes; anything that turned Ready after the
+    /// listing was invisible to it, so a write-time stamp would claim a commit this replica
+    /// provably does not hold. A stop's flush gate compares this against the stop transient's
+    /// `readyAt`, and that comparison is only sound with the listing instant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<String>,
 }

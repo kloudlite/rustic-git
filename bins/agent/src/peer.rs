@@ -412,6 +412,10 @@ fn retired(have: &HashSet<String>, existing: &HashSet<String>) -> Vec<String> {
 /// touched, same as `replica_reconcile`'s lookup-error branch.
 async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    // Taken BEFORE the listing, and stamped as this pass's `lastSyncAt` at the end. See
+    // `VolumeReplicaStatus::last_sync_at`: a pass that finished at T proves nothing about a
+    // commit that turned Ready after its listing, and a stop's flush gate reads exactly that.
+    let listed_at = chrono::Utc::now().to_rfc3339();
     // One list, all phases: the Ready subset drives the pull below, and the FULL name set is what
     // tells a deleted CR from a Working one, below — a `Snapshot` has no finalizer (see
     // `snapshot::reconcile_commit`'s module doc), so this diff against `local_commits` is the only
@@ -515,7 +519,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
     }
 
     let missing_at_end = ready.iter().any(|s| !have.contains(&s.name_any()));
-    if let Err(e) = write_replica_status(ctx, volume, !missing_at_end).await {
+    if let Err(e) = write_replica_status(ctx, volume, !missing_at_end, &listed_at).await {
         tracing::warn!(%volume, error = %e, "pull: writing VolumeReplica status");
     }
 }
@@ -583,7 +587,7 @@ async fn pull_one(
 /// Create-or-update THIS node's own `VolumeReplica` — the sole writer, per the module doc. v1:
 /// `branches` is left empty (the brief allows this — the scheduler's precise per-branch arm is
 /// Task 4's), `phase` is `Synced` iff nothing was missing at the end of this pass.
-async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool) -> Result<(), kube::Error> {
+async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool, listed_at: &str) -> Result<(), kube::Error> {
     let name = crd::replica_name(volume, &ctx.node);
     let api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
     let mut obj = match api.get_opt(&name).await? {
@@ -600,7 +604,7 @@ async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool) -> Res
     let status = crd::VolumeReplicaStatus {
         phase: if synced { "Synced" } else { "Syncing" }.to_string(),
         branches: Default::default(),
-        last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
+        last_sync_at: Some(listed_at.to_string()),
     };
     for attempt in 0..2 {
         match replace_status(&api, &obj, "VolumeReplica", serde_json::to_value(&status).map_err(kube::Error::SerdeError)?).await {
@@ -759,7 +763,7 @@ async fn unclaim_kind<K>(
 mod reconcile_tests {
     use super::*;
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
+    use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
     use std::os::unix::fs::PermissionsExt;
 
     struct NoopNix;
@@ -866,11 +870,38 @@ mod reconcile_tests {
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
 
-        write_replica_status(&ctx, "vol-1", true).await.unwrap();
+        write_replica_status(&ctx, "vol-1", true, "2026-09-02T00:00:00+00:00").await.unwrap();
 
         let created = rec.sent("POST", VOLREPLICAS);
         assert_eq!(created.len(), 1, "{:?}", rec.calls());
         assert_eq!(created[0]["metadata"]["labels"]["rustic-git.io/volume"], "vol-1");
+    }
+
+    /// `lastSyncAt` is the instant its pass LISTED, handed in by `pull_volume` — never `now()` at
+    /// write time. A pass that lists at T and finishes at T+5min knows nothing about a snapshot
+    /// that turned Ready at T+1min, and a stop's flush gate reads this stamp as proof that it did.
+    /// This pins the plumbing: whatever `pull_volume` measured is what lands on the row.
+    #[tokio::test]
+    async fn write_replica_status_stamps_the_listing_instant_not_the_write_instant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = crd::replica_name("vol-1", "node-b");
+        let listed_at = "2026-09-02T00:00:00+00:00";
+        let row = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": name, "uid": "vr-uid"},
+            "spec": {"volume": "vol-1", "node": "node-b"},
+        });
+        let routes = vec![
+            get(format!("{VOLREPLICAS}/{name}"), row.clone()),
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/{name}/status"), status: 200, body: row },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+
+        write_replica_status(&ctx, "vol-1", true, listed_at).await.unwrap();
+
+        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/{name}/status"));
+        assert_eq!(sent.len(), 1, "{:?}", rec.calls());
+        assert_eq!(sent[0]["status"]["lastSyncAt"], listed_at);
     }
 
     /// Nothing missing (every Ready `Snapshot` is already a local commit): `pull_volume` makes no

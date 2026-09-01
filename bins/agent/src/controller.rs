@@ -1718,16 +1718,28 @@ async fn stop_workspace(
     // pod, taking a running workspace down with it.
     // Flush before the pod goes: once it is deleted the worktree stops changing, but nothing has
     // carried its bytes off this node, and a node that then dies takes them with it.
-    let replicated = match stop_push(&format!("stop-{}", w.name_any()), &w.spec.owner, &id, &w.name_any(), w, ctx).await? {
-        StopPush::Landed { replicated } => replicated,
-        StopPush::Waiting => {
-            let conditions =
-                ws_conditions(&prev, crd::condition("Progressing", true, "FlushBeforeStop", "waiting for the final sync point", gen));
-            // Deliberately NOT `phase: stopped`: the pod is still up, and observed_generation stays
-            // unset so the already-stopped guard above does not swallow the next pass.
-            let st = crd::WorkspaceStatus { observed_generation: None, conditions, ..prev };
-            write_ws_status(w, st, ctx).await?;
-            return Ok(Action::requeue(TICK));
+    //
+    // Nothing ran, nothing to flush: with no pod there is no writer, so the worktree holds exactly
+    // what its last commit or sync point already does, and cutting one here would gate a stop on
+    // replicating bytes no one produced. An environment has no equivalent signal — its
+    // StatefulSets are scaled to zero by `drain_services` on the way in, so "no pods now" says
+    // nothing about whether any ran — and keeps its unconditional flush.
+    let replicated = if prev.pod_ref.is_none() {
+        true
+    } else {
+        match stop_push(&format!("stop-{}", w.name_any()), &w.spec.owner, &id, &w.name_any(), w, ctx).await? {
+            StopPush::Landed { replicated } => replicated,
+            StopPush::Waiting => {
+                let conditions = ws_conditions(
+                    &prev,
+                    crd::condition("Progressing", true, "FlushBeforeStop", "waiting for the final sync point", gen),
+                );
+                // Deliberately NOT `phase: stopped`: the pod is still up, and observed_generation
+                // stays unset so the already-stopped guard above does not swallow the next pass.
+                let st = crd::WorkspaceStatus { observed_generation: None, conditions, ..prev };
+                write_ws_status(w, st, ctx).await?;
+                return Ok(Action::requeue(TICK));
+            }
         }
     };
     delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &w.name_any()).await?;
@@ -2423,7 +2435,7 @@ async fn stop_environment(
                 phase: crd::Phase::Running,
                 observed_generation: None,
                 service_status: vec![],
-                conditions: vec![crd::condition("Progressing", true, "PushBeforeStop", "waiting for the volume's push", gen)],
+                conditions: vec![crd::condition("Progressing", true, "FlushBeforeStop", "waiting for the final sync point", gen)],
                 ..e.status.clone().unwrap_or_default()
             };
             write_env_status(e, st, ctx).await?;
@@ -2854,7 +2866,19 @@ where
     match phase {
         Some(crd::Phase::Ready) => {
             let ready_at = cr.as_ref().and_then(|s| s.status.as_ref()).and_then(|st| st.ready_at.clone());
-            flush_gate(volume, ready_at.as_deref(), ctx).await
+            match flush_gate(volume, ready_at.as_deref(), ctx).await? {
+                StopPush::Waiting if flush_expired(cr.as_ref()) => {
+                    tracing::warn!(%volume, "stop: no replica holds the final sync point; tearing down anyway");
+                    Ok(StopPush::Landed { replicated: false })
+                }
+                other => Ok(other),
+            }
+        }
+        // Still being cut — bounded by the same clock, so a wedged `commit_worktree` cannot park
+        // the teardown forever.
+        Some(_) if flush_expired(cr.as_ref()) => {
+            tracing::warn!(%volume, "stop: the final sync point never became Ready; tearing down anyway");
+            Ok(StopPush::Landed { replicated: false })
         }
         Some(_) => Ok(StopPush::Waiting),
         None => {
@@ -2915,11 +2939,21 @@ pub fn flush_timeout() -> Duration {
     Duration::from_secs(std::env::var("WS_STOP_FLUSH_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600))
 }
 
+/// The whole wait's bound, measured from the stop request's OWN creation rather than from the
+/// cut's `readyAt`. `readyAt` only exists once the cut succeeded, and `commit_worktree` is
+/// keep-biased — a worktree whose cut can never succeed retries `Working` forever — so a bound on
+/// the replicated leg alone would let a broken worktree park its parent's teardown for good.
+/// A request with no `creationTimestamp` (only a fixture) never expires.
+fn flush_expired(cr: Option<&crd::Snapshot>) -> bool {
+    let Some(created) = cr.and_then(|s| s.metadata.creation_timestamp.as_ref()) else { return false };
+    // Whole seconds via jiff (what `k8s_openapi::Time` wraps): a bound measured in minutes has no
+    // use for sub-second precision, and a negative age (clock skew) is zero elapsed.
+    let age = k8s_openapi::jiff::Timestamp::now().as_second() - created.0.as_second();
+    age.max(0) as u64 >= flush_timeout().as_secs()
+}
+
 /// Ready is not landed: the point of the final sync point is that ANOTHER node holds it, so the
 /// gate waits until some replica reports `Synced` at or after the cut became Ready.
-///
-/// Bounded, because the alternative is a workspace that can never be stopped when replication is
-/// broken. Past `flush_timeout()` the teardown proceeds with `replicated: false`.
 async fn flush_gate(volume: &str, ready_at: Option<&str>, ctx: &Arc<Ctx>) -> Result<StopPush, ReconcileErr> {
     // A cut from before `readyAt` existed gives nothing to compare a `lastSyncAt` against, and
     // waiting on a comparison that can never be made would park the stop forever.
@@ -2929,7 +2963,10 @@ async fn flush_gate(volume: &str, ready_at: Option<&str>, ctx: &Arc<Ctx>) -> Res
     let list = Api::<crd::VolumeReplica>::all(ctx.client.clone())
         .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
         .await?;
-    // Parsed, never string-compared: two nodes may stamp the same instant with different offsets.
+    // `lastSyncAt` is the instant that pass LISTED the volume's snapshots, not when it wrote its
+    // row (see `VolumeReplicaStatus::last_sync_at`) — which is the only reason `>= readyAt` proves
+    // the replica's listing actually saw this cut. Parsed, never string-compared: two nodes may
+    // stamp the same instant with different offsets.
     let replicated = list.items.iter().any(|r| {
         r.spec.node != ctx.node
             && r.status.as_ref().is_some_and(|st| {
@@ -2941,16 +2978,7 @@ async fn flush_gate(volume: &str, ready_at: Option<&str>, ctx: &Arc<Ctx>) -> Res
                         .is_some_and(|t| t >= ready)
             })
     });
-    if replicated {
-        return Ok(StopPush::Landed { replicated: true });
-    }
-    // A negative age (a replica's clock ahead of ours) is zero elapsed, not a timeout.
-    let waited = chrono::Utc::now().signed_duration_since(ready).to_std().unwrap_or_default();
-    if waited >= flush_timeout() {
-        tracing::warn!(volume = %volume, "stop: no replica holds the final sync point; tearing down anyway");
-        return Ok(StopPush::Landed { replicated: false });
-    }
-    Ok(StopPush::Waiting)
+    Ok(if replicated { StopPush::Landed { replicated: true } } else { StopPush::Waiting })
 }
 
 /// Every declared volume is a folder inside the env's ONE subvolume — mkdir -p each before a pod
