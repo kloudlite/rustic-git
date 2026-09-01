@@ -950,6 +950,14 @@ mod reconcile_tests {
         assert!(retired(&have, &have).is_empty(), "nothing missing: nothing retired");
     }
 
+    // These two tests each spin up a real peer server on the fixed `:8444` production port
+    // (`agent_pod_addr` hard-codes it, so there's no way around binding it for real) — serialized
+    // so they never race each other for the port when the harness runs them concurrently.
+    fn peer_port_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     /// An incremental receive whose `-p` the source never had (this node's nearest held ancestor
     /// is not necessarily one the SOURCE holds too) must not lose the commit forever: after the
     /// first attempt fails, `pull_one` is retried against the SAME source with no parent at all
@@ -957,6 +965,7 @@ mod reconcile_tests {
     /// the source's own `-p` failure surfacing as an incomplete stream) and succeeds call 2.
     #[tokio::test]
     async fn an_incremental_pull_that_fails_falls_back_to_a_full_pull_from_the_same_source() {
+        let _port_guard = peer_port_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         // I already hold "vol-1-parent" locally — so `my_parent` is `Some`, and the first GET
         // carries `?parent=vol-1-parent`.
@@ -1210,5 +1219,142 @@ fi
         unclaim_dead_nodes(&ctx).await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("PUT")), "a nodes-list error must clear nothing: {:?}", rec.calls());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Task 6: a transient (sync point) is just another `Snapshot` to the pull beat — no separate
+    // code path exists for it, so these prove the existing plumbing already replicates one.
+    // -----------------------------------------------------------------------------------------
+
+    fn ready_transient(name: &str, volume: &str, parent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1",
+            "kind": "Snapshot",
+            "metadata": {"name": name, "uid": "snap-uid-transient"},
+            "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        })
+    }
+
+    /// A transient is addressed, pulled, and counted toward `Synced` exactly like a commit: same
+    /// `GET /peer/v1/commit/{volume}/{name}` shape (its name just happens to start with `sync-`),
+    /// same replica-status write at the end of the pass. No code change should be needed for this
+    /// to pass — that is the point of Task 6.
+    #[tokio::test]
+    async fn a_ready_transient_is_pulled_and_counts_toward_synced() {
+        let _port_guard = peer_port_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join("btrfs");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+if [ "$1" = "receive" ]; then
+    cat >/dev/null
+    mkdir -p "$2/sync-ws-1-x"
+    exit 0
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = bin.to_string_lossy().into_owned();
+
+        let send_bin = bin_dir.join("btrfs-send");
+        std::fs::write(&send_bin, "#!/bin/sh\nprintf 'bytes'\nexit 0\n").unwrap();
+        std::fs::set_permissions(&send_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let send_bin = send_bin.to_string_lossy().into_owned();
+        let source_pool = tmp.path().join("source-pool");
+        std::fs::create_dir_all(source_pool.join("vol/vol-1/snap/sync-ws-1-x")).unwrap();
+        let (client, _rec) = mock_client(vec![]);
+        let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin);
+        // Captures every request path the real peer server sees, so we can prove the transient is
+        // fetched over `/peer/v1/commit/{volume}/{name}` — the exact same endpoint a real commit
+        // uses — rather than trusting the on-disk result alone.
+        let seen_paths: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen_paths2 = seen_paths.clone();
+        let app = router(peer_state).layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let seen_paths = seen_paths2.clone();
+            async move {
+                seen_paths.lock().unwrap().push(req.uri().to_string());
+                next.run(req).await
+            }
+        }));
+        let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(tokio_listener, app).await;
+        });
+
+        let pod = serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "agent-a"},
+            "status": {"podIP": "127.0.0.1"},
+        });
+        let routes = vec![
+            // One already-local commit alongside the missing transient: proves the transient is
+            // just another item on the same list, not a special case that only fires when it's
+            // the sole entry.
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("vol-1-aaaaaaaa", "vol-1", ""), ready_transient("sync-ws-1-x", "vol-1", "")]) },
+            Route {
+                method: "GET",
+                path: VOLREPLICAS.into(),
+                status: 200,
+                body: list_of(
+                    "VolumeReplica",
+                    vec![serde_json::json!({
+                        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                        "metadata": {"name": "vol-1.node-a", "uid": "uid-a"},
+                        "spec": {"volume": "vol-1", "node": "node-a"},
+                        "status": {"phase": "Synced", "branches": {}},
+                    })],
+                ),
+            },
+            Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
+            not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
+            Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
+                "spec": {"volume": "vol-1", "node": "node-b"},
+                "status": {"phase": "Syncing", "branches": {}},
+            }) },
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
+                "spec": {"volume": "vol-1", "node": "node-b"},
+                "status": {"phase": "Synced", "branches": {}},
+            }) },
+        ];
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-aaaaaaaa")).unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, &bin, &http, "s3cret", "vol-1").await;
+
+        assert!(tmp.path().join("vol/vol-1/snap/sync-ws-1-x").exists(), "the transient must land on disk like any other commit");
+        let paths = seen_paths.lock().unwrap().clone();
+        assert!(
+            paths.iter().any(|p| p.contains("/peer/v1/commit/vol-1/sync-ws-1-")),
+            "the transient is fetched over the same commit endpoint as a real commit: {paths:?}"
+        );
+        let created = rec.sent("POST", VOLREPLICAS);
+        assert_eq!(created.len(), 1, "the replica row is created fresh (Syncing, per the mocked response) before the final status write");
+        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["status"]["phase"], "Synced", "and lands Synced once the transient is pulled");
+    }
+
+    /// A transient's `Snapshot` CR being gone is exactly the same "retired" case a deleted commit
+    /// is — `pull_volume` diffs local names against the full CR list regardless of `transient`,
+    /// so a local sync point whose CR disappeared is dropped the same way.
+    #[tokio::test]
+    async fn a_deleted_transient_is_dropped_from_every_replica() {
+        let have: HashSet<String> = ["vol-1-aaaaaaaa".into(), "sync-ws-1-a".into()].into_iter().collect();
+        // "sync-ws-1-a" is local but absent from the CR list entirely — its Snapshot was deleted.
+        let existing: HashSet<String> = ["vol-1-aaaaaaaa".into()].into_iter().collect();
+        assert_eq!(retired(&have, &existing), vec!["sync-ws-1-a".to_string()]);
     }
 }
