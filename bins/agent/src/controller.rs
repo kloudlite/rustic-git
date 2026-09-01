@@ -722,9 +722,18 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     // trusts the other to have checked.
     let restore = v.spec.restore_to.clone().filter(|w| !crd::wish_granted(w, restored_to.as_deref(), restored_at.as_deref()));
 
+    // A pass that stamped `observedGeneration` and then lost its process before writing the
+    // terminal status (an agent roll mid-operation) leaves `Working` behind with nothing left to
+    // re-run it: `observed` is true, so step 1 below would `await_change` forever and the volume
+    // stays Working while its data is perfectly fine. Falling through re-runs the pass, which
+    // ends in the terminal write the lost one never made. `observed` itself stays TRUE on
+    // purpose — it is what keeps `materialize` off, so this recovery re-applies the quota and
+    // reports, and never re-runs a create or a clone against a volume that already exists.
+    let stranded = v.status.as_ref().is_some_and(|s| s.phase == Phase::Working) && !running_contains(ctx, &uid);
+
     // 1. Nothing asked for. Pushing is a `SnapshotRequest` with its own reconciler now, so a
     //    materialized volume at its current generation has nothing left for this pass to do.
-    if observed && !running_contains(ctx, &uid) {
+    if observed && !stranded && !running_contains(ctx, &uid) {
         return Ok(Action::await_change());
     }
 

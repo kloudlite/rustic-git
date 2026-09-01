@@ -185,6 +185,32 @@ async fn a_finished_operation_writes_observed_generation_and_stops_requeueing() 
     assert_eq!(rec.sent("PATCH", VOL_STATUS).len(), 1, "an unchanged status must not be rewritten");
 }
 
+/// An agent that rolls mid-operation loses the handle but keeps the `observedGeneration` its
+/// pass already stamped: the object is left `Working` with nothing running. The next reconcile
+/// must re-run the pass rather than treat the generation as done, or the volume stays `Working`
+/// forever while its data is perfectly healthy.
+#[tokio::test]
+async fn a_working_volume_with_nothing_running_is_re_run_not_left_stranded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let mut v = volume(7);
+    v.status = Some(rustic_git_workspaces::crd::VolumeStatus {
+        phase: rustic_git_workspaces::crd::Phase::Working,
+        observed_generation: Some(7),
+        subvolume_present: true,
+        ..Default::default()
+    });
+
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    assert_ne!(
+        action,
+        kube::runtime::controller::Action::await_change(),
+        "a stranded Working volume must be picked back up, not awaited forever"
+    );
+    assert!(!ctx.running.lock().unwrap().is_empty(), "the recovery pass must actually start work");
+    wait_idle(&ctx).await;
+}
+
 /// Keep-biased: an API error or an unreadable pool means requeue with backoff, never "reality
 /// doesn't match, so remove it". Same discipline as crates/registry/src/gc.rs.
 #[tokio::test]
