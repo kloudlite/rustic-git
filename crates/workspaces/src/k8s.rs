@@ -239,14 +239,17 @@ const SEED_DIR: &str = "/workspace";
 /// Everything under here except `workspaces/` is the same in every workspace the person opens
 /// on this node.
 pub const HOME_DIR: &str = "/home/kl";
-/// What inside a home is a nested subvolume rather than a directory: package caches. btrfs `send`
-/// skips a nested subvolume and the home's qgroup does not count it, so these never upload and
-/// never eat the quota. ONE list, read by the create path and the restore path in the engine — two
-/// lists would drift and a cache would come back as a plain directory that the next push carries.
-/// A person who wants something else excluded runs `btrfs subvolume create` themselves; that is the
-/// documented escape hatch, not a UI. The editors' remote servers are here too: the default image
-/// exists to run VS Code's, which is 300 MB+ per version and would otherwise be most of the 2 GB
-/// quota and of every five-minute push, and it re-downloads itself on a fresh node anyway.
+/// What inside a home is a node-local mount rather than the shared NFS home: package caches.
+/// The home itself now lives on one region-shared ZeroFS export (no more per-node btrfs
+/// subvolume, no push/pull), so anything mounted over it locally never crosses the network and
+/// never touches another node's copy — these are subPaths into `{pool}/homecache/{owner}`, a
+/// local btrfs subvolume the agent creates alongside the mount, not paths inside the export.
+/// ONE list, read by every place that mounts the home — two lists would drift and a cache would
+/// come back as a plain directory synced through NFS like everything else. A person who wants
+/// something else excluded runs `btrfs subvolume create` themselves; that is the documented
+/// escape hatch, not a UI. The editors' remote servers are here too: the default image exists to
+/// run VS Code's, which is 300 MB+ per version and would otherwise cross the NFS export on every
+/// use, and it re-downloads itself on a fresh node anyway.
 pub const HOME_LOCAL_DIRS: [&str; 6] =
     [".cache", ".npm", ".cargo/registry", ".local/share/pnpm", ".vscode-server", ".cursor-server"];
 /// Where the node-local cache volume lands inside the home: tool caches redirected here (via

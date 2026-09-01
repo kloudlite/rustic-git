@@ -15,6 +15,7 @@ Files, in the order a cluster is built:
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins its Secrets/RoleBindings/Namespaces to `ws-*`/`env-*`. Apply with `agent-rbac.yaml`, always. |
 | `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
+| `zerofs.yaml` | The region's shared-home NFS export (ZeroFS, single replica — see its header). Apply before rolling agents with `WS_HOMES_EXPORT` set; see "Shared home" below. |
 | `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods. No Service — discovery is by pod IP from the API. See "Replication" below. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
@@ -286,6 +287,106 @@ mv {pool}/vol/{id}/live-migrating {pool}/vol/{id}/live
 
 There is no bulk "undo everything" command, deliberately — the same one-volume-at-a-time shape as
 the forward migration.
+
+## Release: shared home on ZeroFS
+
+The 2026-09-01 change after the commit model: `/home/kl` stops being ONE btrfs subvolume per
+owner per node (`home-{owner}`, migrated lazily like a workspace, pushed on a timer and on every
+stop) and becomes ONE region-shared NFS export, served by ZeroFS (`deploy/k3s/zerofs.yaml`,
+SlateDB-backed, single replica on purpose — see its header) and mounted once per node by the
+agent at `{pool}/homes` (`WS_HOMES_EXPORT`, `bins/agent/src/lib.rs`'s `run`). A pod hostPaths
+`{pool}/homes/{owner}` straight onto `/home/kl`; caches/editor-servers/shell-state stay node-local
+(`{pool}/homecache/{owner}`, subPaths `cache`/`vscode-server`/`cursor-server`/`state` —
+`crates/workspaces/src/k8s.rs`'s `HOME_LOCAL_DIRS`). There is no home Volume any more, so the
+owner→node pin that came from it is also gone: an owner's workspaces can be claimed by any node
+whose `VolumeReplica` is Synced, not just the one that happened to hold their btrfs home.
+
+Order:
+
+```sh
+# 1. Real credentials before anything else — zerofs.yaml ships REPLACE-ME placeholders for the
+#    region's S3-compatible blob endpoint and the at-rest encryption password. Losing the password
+#    loses the filesystem, same as losing a btrfs pool's disk; back it up wherever the region's
+#    other secrets are backed up before applying.
+kubectl -n rustic-git-system create secret generic zerofs-store \
+  --from-literal=AWS_ACCESS_KEY_ID=... \
+  --from-literal=AWS_SECRET_ACCESS_KEY=... \
+  --from-literal=AWS_ENDPOINT_URL=... \
+  --from-literal=ZEROFS_BUCKET=... \
+  --from-literal=SLATEDB_PREFIX=homes \
+  --from-literal=ZEROFS_PASSWORD=...
+# or edit the stringData in zerofs.yaml directly and apply the whole file — either way, apply the
+# Secret before (or in the same apply as) the Deployment, never after.
+kubectl apply -f deploy/k3s/zerofs.yaml
+kubectl rollout status deploy/zerofs -n rustic-git-system
+
+# 2. Add WS_HOMES_EXPORT to the agent DaemonSet (deploy/k3s/agent-daemonset.yaml already carries
+#    it, pointed at the Service above) and roll the agents. Each one mounts {pool}/homes at
+#    startup, before the controller starts — a failed mount fails agent startup on purpose (the
+#    DaemonSet restart-loops rather than a node silently serving an empty home).
+kubectl apply -f deploy/k3s/agent-daemonset.yaml
+kubectl rollout status ds/rustic-git-agent -n kube-system
+```
+
+**3. Migrate, per owner that has a `home-{owner}` Volume — one owner at a time, same shape as
+every other migration in this file:**
+
+```sh
+# Stop every workspace of the owner's first (their home Volume's pod, if the OwnerBinding still
+# has one, and every workspace pod that mounts /home/kl from the old btrfs subvolume):
+kubectl get workspaces -l rustic-git.io/owner=<owner> -o name | xargs -r -n1 -I{} \
+  curl -fsS -X POST "$API_BASE/v1/{}/stop" -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# On the node the OwnerBinding pinned (`kubectl get volume home-<owner> -o
+# jsonpath='{.status.nodeName}'`), copy the old home's content into the new export, EXCLUDING the
+# six node-local cache dirs (k8s::HOME_LOCAL_DIRS) — they were nested btrfs subvolumes the old
+# design never pushed, and copying them across is dead weight the new node-local
+# {pool}/homecache/{owner} rebuilds for free on first use anyway. The old path is
+# {pool}/vol/{volname}/live/{volname}, where {volname} = home_volume_name(owner) =
+# dns_label("home-" + owner.lowercase()) (crates/workspaces/src/crd.rs) — NOT {pool}/vol/{volname}/live,
+# which is the directory the worktree sits inside, not the worktree itself (same trap the commit-model
+# migration above calls out). TRAILING SLASHES MATTER: both paths below end in `/`, which means "copy
+# the CONTENTS of the left directory into the right one" — drop either trailing slash and rsync nests
+# the whole tree one level deeper (.../homes/<owner>/home-<owner>/...) instead of landing it at the
+# mount root.
+sudo rsync -a \
+  --exclude='.cache' --exclude='.npm' --exclude='.cargo/registry' \
+  --exclude='.local/share/pnpm' --exclude='.vscode-server' --exclude='.cursor-server' \
+  /wspool-prod/vol/home-<owner>/live/home-<owner>/ /wspool-prod/homes/<owner>/
+
+# Restart the owner's workspaces; their pods now hostPath the NFS export instead of the old
+# subvolume.
+kubectl get workspaces -l rustic-git.io/owner=<owner> -o name | xargs -r -n1 -I{} \
+  curl -fsS -X POST "$API_BASE/v1/{}/start" -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+```sh
+# 4. The narrowed admission policy — the agent no longer writes Volume.spec.quotaGb (there is no
+#    home Volume, no qgroup, left for it to write it onto), so the ONE spec field it may still
+#    touch is Volume.spec.restoreTo. Apply once every owner that needs to keep running through the
+#    migration has been moved (an agent running the old policy alongside a rolled-forward agent
+#    binary is harmless either order, but the policy is what makes the RBAC table true, so don't
+#    leave it stale for long):
+kubectl apply -f deploy/k3s/agent-admission.yaml
+```
+
+**5. Days later, irreversible — delete each `home-{owner}` Volume CR, same warning shape as the
+old-model artifact cleanup above:**
+
+Only after EVERY migrated owner has been running on the shared export for a few days with no
+regressions reported (this is the point of no return — the Volume's finalizer reclaims its btrfs
+subvolume on delete, and once that subvolume is gone the pre-migration home content is
+UNRECOVERABLE, there is no second copy anywhere):
+
+```sh
+kubectl get volumes -l rustic-git.io/owner --no-headers | awk '{print $1}' | grep '^home-' \
+  | xargs -r -n1 kubectl delete volume
+```
+
+The home-Volume-specific code (`is_home_volume`, `home_volume_name`, the OwnerBinding's
+`ensure_home`) is already gone from the binary that ships this migration — nothing after step 2
+above ever creates a `home-*` Volume again, which is why this step is cleanup of what earlier
+owners accumulate, not a code change.
 
 ## Gateway
 
