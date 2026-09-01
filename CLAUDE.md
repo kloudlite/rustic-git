@@ -160,7 +160,7 @@ will happily mount `/` if we ask it to.
 A workspace may be attached to ONE environment (`Workspace.spec.attachedEnvironment`, written only
 by `/v1`), and then resolves that environment's services by bare name. The mechanism is a
 `/etc/resolv.conf` the agent renders per workspace into `{pool}/attach/{ws}/resolv.conf` and every
-pod mounts read-only through one per-namespace `local` PV (`attach-{ns}`/`attach`) with a
+pod mounts read-only through a hostPath volume with a
 `subPath` — `dnsConfig` is immutable on a running pod, so the mount is what makes attach and detach
 take effect without a restart. That file is written IN PLACE and never renamed: the pod holds the
 inode, so a rename would leave it reading the old file forever. Two NetworkPolicies named
@@ -201,33 +201,24 @@ Stopping an environment always pushes its own subvolume first, and the Deploymen
 gated on the push having LANDED rather than merely been requested (`apply_environment`'s
 `DesiredState::Stopped` arm) — the one place push happens without an explicit `/push` call.
 
-**Every person has one persistent home per node** — `/home/kl` in every workspace pod of theirs
-is the SAME btrfs subvolume, `{pool}/vol/home-{owner}/live`, with `~/workspaces/<name>` (the
-workspace's own subvolume) mounted inside it. It is a child `Volume` named
-`crd::home_volume_name(owner)` authored by the OwnerBinding reconciler (`bins/agent/src/binding.rs`,
-`ensure_home`) with the binding as owner, plus a local PV `home-{ns}` and a PVC `home` in each of
-the owner's namespaces; registry name `vol/{owner}/{home_volume_name}` — `home-{owner}` lowercased
-and `dns_label`-ed, so a long handle yields a truncated name; always go through the function,
-never format the string. Nothing else is special-cased. Caches (`k8s::HOME_LOCAL_DIRS`, the
-editors' remote servers included) are NESTED subvolumes — `btrfs send` skips them and the qgroup
-does not count them — made by `Engine::ensure_home_dirs` on the Volume reconcile after every
-materialize, which is the only path that gives a home a new `live`: a home is never restored in
-place (a restore of a home snapshot lands in a NEW workspace, whose caches are then its own). Two
-pushes, both `Engine::push_env`: the agent beat every `WS_HOME_PUSH_SECS` (default 300, message
-`home: periodic`, no `SnapshotRequest`) pushes homes whose btrfs generation moved past
-`{voldir}/.pushed-gen` (the generation of the last push's own RO snapshot, never of `live` read
-afterwards), and a workspace stop creates `stop-home-{ws}` and deletes the pod only once it is
-`done` — fail-closed like `stop-{env}`: a home not yet in the Volume store waits while the owner's
-binding exists, and only an owner with no binding at all stops without a push. A pod is created
-only on a Ready home (`HomeNotReady` otherwise), and a stop request from an earlier generation of
-its parent (the `stop-generation` annotation) is replaced, never re-read, so a failed stop is
-recovered by Start then Stop. First materialization on a node with no subvolume pulls the
-registry's `main` if there is history (`Engine::materialize_home`); an unreachable registry is
-`RegionUnreachable`, permanent, and creates nothing. `homeQuotaGb` on the binding (default 2) is
-copied onto the home Volume's `quotaGb` — the SECOND spec field the agent may write, allowed by
-ownerReference kind in `agent-admission.yaml` — and enforced by the same qgroup limit as every
-volume. Home history rows carry `live_state: null` — there is no workspace to be "of". Cross-region:
-each region has its own copy and nothing syncs them.
+**Every person has one persistent home per region, not per node** — `/home/kl` in every workspace
+pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS export served by ZeroFS, mounted by
+every node at `{pool}/homes` (`mount_homes` in `bins/agent/src/lib.rs`, `WS_HOMES_EXPORT`). There
+is no home `Volume` CR, no owner→node pin, no push beat, no history and no quota — all deliberately
+dropped: an NFS directory has no qgroup to enforce one and no per-commit history to keep. Making
+the export directory exist (`ensure_shared_home` in `bins/agent/src/controller.rs`, plain
+`mkdir`+`chown`, safe on every reconcile) is the whole "materialize a home" story now. A pod
+started before its node's NFS mount is up would hostPath an empty local directory and silently
+strand the owner's dotfiles, so `apply_workspace` parks a workspace in `Creating`/`HomeNotReady`
+until `ctx.homes_export` is set rather than ever starting one.
+Tool caches and the editors' remote servers (`k8s::HOME_LOCAL_DIRS`) must not live on the shared
+export — concurrent pods on different nodes would race the same cache directory and every cache
+hit would cross the network — so they are redirected (`login_env`'s `XDG_CACHE_HOME`,
+`CARGO_HOME`, etc.) into a per-(owner, node) LOCAL cache subvolume, `{pool}/homecache/{owner}`
+(`Engine::ensure_homecache`), mounted at `k8s::HOME_CACHE_DIR`. Shell history and
+`~/.local/state` (`k8s::HOME_STATE_DIR`) are local for the same reason — one file, many terminals,
+many nodes — and share that same `homecache` volume via a separate subPath. Cross-region: each
+region has its own export and nothing syncs them.
 
 A profile is keyed by `packages::hash(pin, base + spec.packages)` and indexed per node at
 `{PROFILES_DIR}/by-inputs/{hash}` → the store path, so a second workspace or a clone with the same

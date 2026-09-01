@@ -128,13 +128,13 @@ async fn a_volume_whose_parent_was_deleted_is_still_listed() {
     assert_eq!(gone["display_name"], "api-scratch", "from the newest record's provenance");
     assert_eq!(gone["latest_ms"], 1_700_000_001_000i64);
 
-    // The person's home has no Workspace behind it and never will; it is alive as long as they
-    // are, and its own kind keeps it off the workspace page rather than on it as "source deleted".
+    // The home is a plain NFS directory now, not a Volume — there is no synthetic "home" row and
+    // no `kind = "home"` any more; a record named `home-*` with no live parent lists like any
+    // other deleted volume.
+    assert!(rows.iter().all(|v| v["kind"] != "home"), "{body}");
     let home = rows.iter().find(|v| v["name"] == "home-karthik").unwrap();
-    assert_eq!(home["deleted"], false, "{home}");
-    assert_eq!(home["kind"], "home");
-    let (_, body) = get_json(&s, &tok, "/v1/volumes?kind=workspace").await;
-    assert!(body.as_array().unwrap().iter().all(|v| v["name"] != "home-karthik"), "{body}");
+    assert_eq!(home["deleted"], true, "{home}");
+    assert_eq!(home["kind"], "workspace");
 }
 
 /// A volume with no provenance anywhere — pushed before it was written, or backfilled — falls back

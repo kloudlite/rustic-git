@@ -1033,8 +1033,7 @@ where
 /// A parent's child takes the PARENT's name: the id is already the registry key, the host path
 /// segment and the URL segment, and an ownerReference — not a name — is what makes it a child.
 /// That ownerReference is also the whole delete story: `DELETE workspace` reclaims the disk with no
-/// ordering logic anywhere in the API. The one child that is NOT named after its parent is an
-/// owner's home (`crd::home_volume_name`), whose parent is the binding — hence `id` is a parameter.
+/// ordering logic anywhere in the API.
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_child_volume<P>(
     id: &str,

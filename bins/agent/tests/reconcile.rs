@@ -462,8 +462,8 @@ async fn an_already_placed_workspace_is_left_alone() {
 /// a peer that only widened `compatibleNodes` does not scare this node off a claim it may still
 /// make. Here the peer really did place it, so the re-read decides "leave it alone".
 ///
-/// The loser must also not create the OwnerBinding: that would bind an owner to a node that did
-/// not win, and every later workspace of theirs would follow it.
+/// The loser must also not create the OwnerBinding: only the node whose claim actually won should
+/// ever write it, or two nodes race to author the owner's one binding object.
 #[tokio::test]
 async fn a_claim_that_loses_the_race_re_reads_and_binds_nothing() {
     let tmp = tempfile::tempdir().unwrap();

@@ -394,7 +394,7 @@ mod commit_tests {
         std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-a")).unwrap();
         std::fs::create_dir_all(tmp.path().join("vol/vol-1/live/ws-1")).unwrap();
         let routes = vec![
-            // Not a home: `is_home_volume` is false with no ownerReferences at all.
+            // A plain workspace volume, no home Volume kind involved.
             Route {
                 method: "GET",
                 path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(),
