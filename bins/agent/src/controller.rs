@@ -683,6 +683,18 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
             return;
         }
     };
+    // Commit model: durability for a home moves to the Snapshot CR (Task 7c) — `push_env` is the
+    // OLD model's only writer of home history, and Task 8 deletes it. H3: the migrate half of
+    // `migrate_and_seed_baseline` runs for EVERY ready home on EVERY pass, not just a due one — a
+    // quiescent home would otherwise sit on the old layout indefinitely, leaving two layouts live
+    // on the fleet at once, which is exactly what makes H1's hostPath fix unpredictable to reason
+    // about. Only the CR-cut itself stays behind the generation-moved gate. Flag off, this whole
+    // branch is skipped and the loop below is byte-identical to before the cutover.
+    if ctx.commit_model {
+        let due_ids: std::collections::HashSet<String> = due.iter().map(|v| v.name_any()).collect();
+        rt.block_on(home_commit_beat(ctx, &due_ids));
+        return;
+    }
     for v in due {
         let id = v.name_any();
         // Not under a reconcile-owned operation on this volume (a materialize, a restore): the
@@ -692,13 +704,6 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
         // ponytail: that duplicate is one extra record per stop-then-beat coincidence; comparing
         // the generation again after the flock is the fix if `history` ever looks noisy.
         if running_contains(ctx, &v.uid().unwrap_or_default()) {
-            continue;
-        }
-        // Commit model: durability for a home moves to the Snapshot CR (Task 7c) — `push_env` is
-        // the OLD model's only writer of home history, and Task 8 deletes it. Flag off, this arm
-        // never runs and the rest of the loop is byte-identical to before the cutover.
-        if ctx.commit_model {
-            rt.block_on(home_commit_beat_one(ctx, &v, &id));
             continue;
         }
         match rt.block_on(engine.push_env(&v.spec.owner, &id, &serde_json::Value::Null, Some(HOME_PUSH_MESSAGE))) {
@@ -722,6 +727,25 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
                 tracing::warn!(volume = %id, error = %e, "home push failed; retrying next beat");
                 metrics::counter!("home_pushes_total", "result" => "error").increment(1);
             }
+        }
+    }
+}
+
+/// Every ready home, every pass, under commit_model (Task 7c, H3): the migrate half of
+/// `migrate_and_seed_baseline` runs for ALL of them unconditionally — a quiescent home must not
+/// sit on the old layout forever, since two layouts on the fleet at once makes `home_volume`'s
+/// (k8s.rs) hostPath choice unpredictable. Only the CR-cut is gated on `due` (generation moved).
+/// Split out from `home_push_beat` so it is testable without `sync_pool`'s real `btrfs` call.
+pub async fn home_commit_beat(ctx: &Arc<Ctx>, due: &std::collections::HashSet<String>) {
+    for v in ctx.volumes.state().iter().filter(|v| crd::is_home_volume(v) && volume_is_ready(v) && v.metadata.deletion_timestamp.is_none()) {
+        let id = v.name_any();
+        if running_contains(ctx, &v.uid().unwrap_or_default()) {
+            continue;
+        }
+        if due.contains(&id) {
+            home_commit_beat_one(ctx, v, &id).await;
+        } else if let Err(e) = migrate_and_seed_baseline(ctx, &id, &v.spec.owner).await {
+            tracing::warn!(volume = %id, error = %e.0, "home commit beat: migrating layout");
         }
     }
 }
@@ -762,6 +786,7 @@ pub async fn home_commit_beat_one(ctx: &Arc<Ctx>, v: &crd::Volume, id: &str) {
             pinned: false,
         },
     );
+    snap.metadata.labels = Some(crd::commit_labels(&v.spec.owner, id));
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
     // Same convergence rule as `migrate_and_seed_baseline`: a 409 means an earlier pass (or a
     // crash-retry of this one) already created it, not an error.
@@ -2155,6 +2180,7 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
             pinned: false,
         },
     );
+    snap.metadata.labels = Some(crd::commit_labels(owner, id));
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
     // Same convergence rule as everything else in this cutover: a retry that finds the CR already
     // there (crash between the rename above landing and this create) is not an error.
@@ -3167,6 +3193,13 @@ const APPLY_RESYNC: Duration = Duration::from_secs(600);
 /// ponytail: the memory is per-process and time-bounded, not watch-driven — a child deleted by
 /// hand comes back on the next apply after `APPLY_RESYNC`, not on its delete event. Any path that
 /// changes a child OUTSIDE `ensure` (a scale, a delete) must `forget_applied` it first.
+/// H4: a Pod's `volumes[].hostPath` is immutable, so once a home (or any volume) migrates to the
+/// commit model's worktree layout mid-flight (H1/H3: the home beat now migrates every ready home
+/// on every pass, whether or not its pod has been recreated yet), re-applying that pod's spec here
+/// with the NEW path 422s against the still-running pod's OLD one — until something deletes the
+/// pod so a fresh Apply can create it with the new hostPath. Not auto-deleted here on purpose: see
+/// `deploy/k3s/README.md`'s commit-model cutover section for the explicit
+/// `kubectl delete pods -l rustic-git.io/kind=...` step that closes this window operator-side.
 pub(crate) async fn ensure<K>(api: &Api<K>, obj: &K, ctx: &Ctx) -> Result<(), ReconcileErr>
 where
     K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,

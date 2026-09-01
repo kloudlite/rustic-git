@@ -1283,7 +1283,11 @@ async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool) -> Res
         Some(o) => o,
         None => {
             let spec = crd::VolumeReplicaSpec { volume: volume.to_string(), node: ctx.node.clone() };
-            api.create(&PostParams::default(), &crd::VolumeReplica::new(&name, spec)).await?
+            let mut r = crd::VolumeReplica::new(&name, spec);
+            // H2: owner is unknown here (only the volume id is), so only `rustic-git.io/volume`
+            // is stamped — the e2e (`tests/ws_e2e.sh`) selects on exactly that.
+            r.metadata.labels = Some(std::collections::BTreeMap::from([(crd::VOLUME_LABEL.to_string(), volume.to_string())]));
+            api.create(&PostParams::default(), &r).await?
         }
     };
     let status = crd::VolumeReplicaStatus {
@@ -1796,6 +1800,36 @@ mod reconcile_tests {
         pull_volume(&ctx, "btrfs", &http, "s3cret", "vol-1").await;
 
         assert!(rec.calls().iter().all(|c| !c.contains("volumereplicas")), "a snapshot-list error must never reach the replica write");
+    }
+
+    /// H2: creating this node's `VolumeReplica` for the first time stamps `rustic-git.io/volume`
+    /// — the e2e (`tests/ws_e2e.sh`) selects replicas by exactly that label, and nothing else in
+    /// this codebase writes a `VolumeReplica`.
+    #[tokio::test]
+    async fn write_replica_status_stamps_the_volume_label_on_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = crd::replica_name("vol-1", "node-b");
+        let routes = vec![
+            not_found(format!("{VOLREPLICAS}/{name}")),
+            Route {
+                method: "POST",
+                path: VOLREPLICAS.into(),
+                status: 201,
+                body: serde_json::json!({
+                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                    "metadata": {"name": name, "uid": "vr-uid"},
+                    "spec": {"volume": "vol-1", "node": "node-b"},
+                }),
+            },
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/{name}/status"), status: 200, body: serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica", "metadata": {"name": name}, "spec": {"volume": "vol-1", "node": "node-b"}, "status": {"phase": "Synced", "branches": {}}}) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+
+        write_replica_status(&ctx, "vol-1", true).await.unwrap();
+
+        let created = rec.sent("POST", VOLREPLICAS);
+        assert_eq!(created.len(), 1, "{:?}", rec.calls());
+        assert_eq!(created[0]["metadata"]["labels"]["rustic-git.io/volume"], "vol-1");
     }
 
     /// Nothing missing (every Ready `Snapshot` is already a local commit): `pull_volume` makes no

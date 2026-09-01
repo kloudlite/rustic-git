@@ -111,6 +111,10 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     assert_eq!(req["spec"]["message"], "checkpoint");
     assert_eq!(req["spec"]["owner"], "karthik");
     assert_eq!(req["status"]["phase"], "working");
+    // H2: the label is a VIEW of `spec.volume`/`spec.owner` — the e2e's `-l rustic-git.io/volume=`
+    // selects on exactly this, and nothing else stamps it.
+    assert_eq!(req["metadata"]["labels"]["rustic-git.io/volume"], "ws-1");
+    assert_eq!(req["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
     assert!(!s.rec.calls().iter().any(|c| c.contains("snapshotrequests")), "no SnapshotRequest under the flag");
 }
 

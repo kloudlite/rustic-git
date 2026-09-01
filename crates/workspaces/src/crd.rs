@@ -736,6 +736,17 @@ pub struct SnapshotRequestStatus {
 /// authorization.
 pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
 
+/// Labels every `Snapshot`/`VolumeReplica` create site stamps: `spec.volume`/`spec.owner` restated
+/// as labels so a watch or a list (the e2e's `-l rustic-git.io/volume=...`, `/v1`'s own reads) can
+/// select on them — a label cannot be queried out of an arbitrary spec field. A VIEW, same rule as
+/// every other label in this file: `spec` stays the truth, this is never read for authorization.
+pub fn commit_labels(owner: &str, volume: &str) -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([
+        ("rustic-git.io/owner".to_string(), owner.to_string()),
+        (VOLUME_LABEL.to_string(), volume.to_string()),
+    ])
+}
+
 /// Names the Environment a `stop-{env}` request belongs to, so the environments controller can
 /// watch only those instead of every push in the cluster. Also a view: the ownerReference is the
 /// link the mapper reads, and this label exists only because a watch cannot select on one.

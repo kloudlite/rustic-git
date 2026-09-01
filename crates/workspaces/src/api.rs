@@ -1759,6 +1759,7 @@ async fn create_commit(
             pinned: false,
         },
     );
+    snap.metadata.labels = Some(crd::commit_labels(owner, volume));
     // `status` on CREATE is stored verbatim (the subresource split only governs UPDATE/PATCH), so
     // this is how the object is born `Working` instead of the schema's `Pending` default —
     // `reconcile_commit` only ever acts on `Working`.

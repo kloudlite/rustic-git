@@ -672,9 +672,13 @@ fn hardened() -> SecurityContext {
 }
 
 /// The owner's persistent home. `home_id` is `crd::home_volume_name(owner)` — always via the
-/// function, never formatted here.
-fn home_volume(pool: &str, home_id: &str) -> Volume {
-    host_dir("home", live_path(pool, home_id))
+/// function, never formatted here. A home is a Volume with exactly one worktree, named after
+/// itself (Task 7c) — same split `live_worktree_volume` uses for a workspace's own `live` mount
+/// (named "home" here instead, so it cannot collide with the pod's actual "live" volume), or a
+/// migrated home's dotfiles go missing under the old-layout directory path (H1).
+fn home_volume(pool: &str, home_id: &str, commit_model: bool) -> Volume {
+    let path = if commit_model { worktree_path(pool, home_id, home_id) } else { live_path(pool, home_id) };
+    host_dir("home", path)
 }
 
 /// An emptyDir for `WORKSPACES_DIR`. Per pod on purpose — see the mount's comment.
@@ -893,7 +897,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
         // the key.
         volumes: Some({
             let mut v = vec![
-                home_volume(ctx.pool, &crate::crd::home_volume_name(&spec.owner)),
+                home_volume(ctx.pool, &crate::crd::home_volume_name(&spec.owner), ctx.commit_model),
                 workspaces_volume(),
                 live_worktree_volume(ctx.pool, id, ws_id, ctx.commit_model),
                 nix_volume(),
@@ -1858,6 +1862,23 @@ mod tests {
         custom.image = "ghcr.io/someone/theirs:1".into();
         let s = workspace_pod(&custom, "ws-1", "ws-1", &ctx(), None).spec.unwrap();
         assert!(s.volumes.as_ref().unwrap().iter().any(|v| v.name == "home"));
+    }
+
+    /// H1: under commit_model the home's hostPath must be its WORKTREE path
+    /// (`{pool}/vol/{home}/live/{home}`), same split `live_worktree_volume` already gives the
+    /// workspace's own mount — not the old-layout directory, which after a migration holds the
+    /// worktree ONE level down and would hide dotfiles / snapshot nothing new.
+    #[test]
+    fn a_workspace_pods_home_mount_is_the_worktree_path_under_commit_model() {
+        let commit_ctx = PodContext { commit_model: true, ..ctx() };
+        let s = workspace_pod(&ws_spec(), "ws-1", "ws-1", &commit_ctx, None).spec.unwrap();
+        let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
+        let home_id = crate::crd::home_volume_name(&ws_spec().owner);
+        assert_eq!(
+            home.host_path.as_ref().unwrap().path,
+            worktree_path(commit_ctx.pool, &home_id, &home_id),
+            "commit_model must use the worktree path, not the old live_path"
+        );
     }
 
     /// Four things have to line up for `ssh kl@workspace` to work, and each fails silently on

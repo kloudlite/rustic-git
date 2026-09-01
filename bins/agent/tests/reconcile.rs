@@ -3445,6 +3445,28 @@ async fn home_commit_beat_chains_the_new_snapshot_onto_the_newest_ready_one() {
     assert_eq!(sent[0]["spec"]["parent"], "home-alice-old", "chains onto the existing chain's tip");
 }
 
+/// H3: a quiescent home (generation unmoved, so `homes_to_push` leaves it out of `due`) must
+/// still get `migrate_and_seed_baseline`'s migrate half run every pass — otherwise a home that
+/// never writes again sits on the old layout forever. `migrate_volume` is filesystem-only (no
+/// btrfs shelled to) and creates the volume's `voldir` unconditionally as its very first step, so
+/// that directory existing afterward is the observable proof migrate ran, with no real btrfs
+/// needed. No CR is created either way: an unmoved generation is still "nothing to cut".
+#[tokio::test]
+async fn home_commit_beat_migrates_a_quiescent_home_even_when_not_due() {
+    let tmp = tempfile::tempdir().unwrap();
+    let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) }];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
+    ctx.remember_volume(v);
+
+    // `due` is empty: the home is deliberately excluded (the quiescent case H3 is about).
+    rustic_git_agent::controller::home_commit_beat(&ctx, &std::collections::HashSet::new()).await;
+
+    assert!(tmp.path().join("vol/home-alice").is_dir(), "migrate_volume's voldir create must have run even though the home was not due");
+    assert!(rec.sent("POST", SNAPSHOTS_LIST).is_empty(), "an unmoved generation must not cut a CR: {:?}", rec.calls());
+}
+
 // ── attachment ───────────────────────────────────────────────────────────
 
 /// The workspace-side objects an attachment adds, on top of `ws_ctx_with_nix`'s: the shared attach

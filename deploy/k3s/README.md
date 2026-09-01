@@ -208,16 +208,25 @@ deploy/roll.sh
 kubectl rollout status deploy/rustic-git-api -n rustic-git
 ```
 
-**Every existing volume's pod restarts once, lazily, on its own schedule — not all at once.**
-There is no bulk migration step: an old-layout volume (`{pool}/vol/{id}/live` is itself the RW
-subvolume) is migrated the first time it's CLAIMED on a node under the flag
-(`migrate_and_seed_baseline` in `bins/agent/src/controller.rs`, calling
-`Engine::migrate_volume`), which moves `live` to a directory holding one worktree,
-`live/{id}` — and the pod that was mounting the OLD path has to be recreated to pick up the new
-one, exactly like the hostpath cutover above. A running workspace does not restart on its own; it
-keeps running against its already-open subvolume until something else recycles the pod (a
-reschedule, `kubectl delete pod`, a node drain). Nothing forces every volume to migrate at once,
-and nothing needs to.
+**Every existing volume's pod restarts once — and, for homes, force it explicitly.** There is no
+bulk migration step: an old-layout volume (`{pool}/vol/{id}/live` is itself the RW subvolume) is
+migrated the first time it's CLAIMED on a node under the flag (`migrate_and_seed_baseline` in
+`bins/agent/src/controller.rs`, calling `Engine::migrate_volume`), which moves `live` to a
+directory holding one worktree, `live/{id}` — and the pod that was mounting the OLD path has to be
+recreated to pick up the new one, exactly like the hostpath cutover above. A workspace/environment
+volume migrates lazily, the first time it's claimed, so its pod restarting on its own schedule is
+enough. **A home does not wait for a claim: the home beat migrates every ready home on every pass
+(H3), so its already-running pod's hostPath (`home_volume` in `crates/workspaces/src/k8s.rs`) goes
+stale on the FIRST post-rollout beat** — `ensure`'s Server-Side Apply then 422s against that pod's
+immutable `hostPath` until it's deleted. Same step as the hostpath cutover's Step 3, run right
+after step 2 above:
+
+    kubectl delete pods -A -l rustic-git.io/kind=workspace
+    kubectl delete pods -A -l rustic-git.io/kind=environment
+
+Nothing forces every volume to migrate at once, and nothing needs to — the delete above just
+closes the 422 window for homes; a workspace/environment volume's own pod recreates on whatever
+schedule already recycles it.
 
 Verify:
 
