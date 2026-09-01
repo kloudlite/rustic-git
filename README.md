@@ -39,7 +39,7 @@ flowchart TB
   end
 
   subgraph k3s[k3s workload cluster]
-    APIS[(kube-apiserver<br/>CRDs: Workspace, Environment,<br/>Volume, OwnerBinding, SnapshotRequest)]
+    APIS[(kube-apiserver<br/>CRDs: Workspace, Environment,<br/>Volume, OwnerBinding, Snapshot, VolumeReplica)]
     AG[rustic-git-agent<br/>DaemonSet, privileged,<br/>nodes labelled rustic-git.io/pool]
     POOL[(btrfs pool /wspool-prod<br/>subvolumes, snapshots)]
     PODS[Workspace pods / Environment<br/>Deployments in ws-owner, env-id]
@@ -49,7 +49,6 @@ flowchart TB
   end
 
   API -- "writes spec via KUBECONFIG" --> APIS
-  AG -- "vol-agent commits/ref/history" --> SRV
 
   OS[(Object store<br/>Azure Blob / S3 / file://<br/>SlateDB per repo, image, volume;<br/>packs, registry blobs+manifests,<br/>index markers, auth records)]
   COS[(Cosmos DB<br/>Mongo API: users, teams,<br/>members, invites<br/>Core API: Region metadata)]
@@ -83,9 +82,9 @@ flowchart TB
 | Server tier | `rustic-git` (`bins/server`, args `serve`) | AKS, StatefulSet `rustic-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases; the ownership map, on whichever pod holds the lease at `cluster/leader` | Object store, Redis, Cosmos (Mongo URI; workspaces Cosmos optional), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
 | Read/team API | `rustic-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos, Redis cache, k3s API server (mounted KUBECONFIG) | None for repos — writes CR **spec** and Cosmos `Region` |
 | Merge worker | `rustic-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
-| Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot push, per-owner home volumes and their pushes | k3s API (watch/status), server tier `/vol-agent/...`, Azure Blob (or S3/MinIO) | CR **status** only; snapshot bytes it uploads |
+| Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot push, per-owner home volumes and their pushes | k3s API (watch/status), peer agents (btrfs send over HTTP), Azure Blob (or S3/MinIO) | CR **status** only; snapshot bytes it uploads |
 | Web app | `rustic-git-web` (`web/apps/web`, Next.js app router) | AKS Deployment, 2 replicas, :3000, `/api/health` probe | Browser UI, Auth.js session | `rustic-git-api` only (server-side), Resend, OAuth providers | None — no DB connection, no signing key |
-| CRDs (5) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment` (API-written), `Volume`, `OwnerBinding` (controller-written children), `SnapshotRequest` (the push work item only) | — | The truth for workspaces, environments and volumes; **not** for snapshots, whose index and records both live on the server tier |
+| CRDs (6) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment` (API-written), `Volume`, `OwnerBinding`, `Snapshot`, `VolumeReplica` (controller-written children) | — | The truth for workspaces, environments, volumes and snapshots alike |
 | SlateDB per repo / image / volume | `crates/storage`, `crates/gitbase` | inside the server tier process, backed by the object store | `repo/{owner}/{name}`, `repo/img/{owner}/{name}`, `repo/vol/{owner}/{id}` | object store | Everything per-repo/image/volume; exactly one opener |
 | Object store | Azure Blob `az://rustic-git` (prod), `s3://`, `file://`, `mem://` | external | packs, SlateDB files, `blobs/{owner}/{algo}/{hex}`, `manifests/{owner}/{name}/{algo}/{hex}`, `index/{public,private}/...` markers, `auth/...` records | — | Bytes; credentials live here as plain keys so any node can authenticate |
 | Cosmos DB | Mongo API (`RUSTIC_GIT_MONGO_URI`, db `kloudlite`) + Core API (`COSMOS_*`, db `workspaces`) | external, Azure | Directory (users, teams, memberships, invites) and cross-cluster `Region` metadata | api tier (writer), server tier (pull migration read) | Directory; `Region` only. Where a CRD and Cosmos could disagree, the CRD wins |
@@ -103,11 +102,10 @@ flowchart TB
 | --- | --- | --- | --- | --- |
 | Object store (Azure Blob / S3) | every byte: SlateDB, packs, registry blobs, index markers, auth records | server, api, worker | `RUSTIC_GIT_S3_URL` + `AZURE_STORAGE_ACCOUNT_NAME`/`_KEY` (Secret `rustic-git-storage`), or AWS env | Nothing works |
 | Cosmos DB (Mongo API) | directory: users, teams, invites; server tier's pull-request migration read | api (writer), server | `RUSTIC_GIT_MONGO_URI`, `RUSTIC_GIT_MONGO_DB` (Secret `rustic-git-mongo`) | api: team routes report unavailable, browse reads keep working. server: **not** optional — pod must not start without it, or pull requests get orphaned |
-| Cosmos DB (Core API, db `workspaces`) | cross-cluster `Region` metadata; vol-agent surface config | api, server | `COSMOS_ENDPOINT`, `COSMOS_KEY`, `COSMOS_DB` (Secret `rustic-git-cosmos`, optional) | Workspace routes 503, feature dark; pods still boot |
+| Cosmos DB (Core API, db `workspaces`) | cross-cluster `Region` metadata | api, server | `COSMOS_ENDPOINT`, `COSMOS_KEY`, `COSMOS_DB` (Secret `rustic-git-cosmos`, optional) | Workspace routes 503, feature dark; pods still boot |
 | Redis | `events` nudge stream + api read cache | server, api, worker | `RUSTIC_GIT_REDIS_URL` (Secret `rustic-git-redis`, optional) | No data loss: merges fall back to the owner's periodic lanes, the feed's PR half goes quiet (only `repo_created` survives), cache disabled (reads still correct) |
 | Per-region Azure Blob | snapshot streams / block images | agent | `AZURE_ACCOUNT`, `AZURE_KEY`, `AZURE_CONTAINER` (Secret `rustic-git-agent`), else `S3_URL` MinIO fallback | Push/restore of workspace state fails; running workspaces keep running |
 | k3s API server | the CRDs = truth for workspaces | api (spec), agent (status) | `KUBECONFIG` mounted secret on api; ServiceAccount `rustic-git-agent` on the agent | No workspaces or environments at all |
-| Server tier `/vol-agent` | volume commit records and ref moves | agent | `WS_REGISTRY_URL` + `WS_AGENT_TOKEN` (`RUSTIC_GIT_VOL_AGENT_TOKENS` on the server) | Snapshots upload but nothing records them; a token authorizes its own region only |
 | Peer secret | node-to-node and api→server authentication | server, api, worker, web (once, at sign-in) | `RUSTIC_GIT_PEER_SECRET` (Secret `rustic-git-peer`) | Fleet cannot forward; api cannot read |
 | JWT signing key | registry bearer tokens + user tokens, fleet-wide | server, api | `RUSTIC_GIT_JWT_SECRET` (Secret `rustic-git-jwt`) | Pods fail closed in fleet mode; per-pod random keys would 401 every push after a successful login |
 | Cloudflare | TLS, WAF, rate limiting for the app host | web ingress | — | Origin exposed unfiltered; SSH (2222/22) never traversed it anyway |
@@ -135,8 +133,8 @@ cluster, nothing here reads it.
   leader is replaced within about 15 s with no operator.
 - **Manifest bytes are stored and returned verbatim**; only an explicit `DELETE` or the keep-biased
   GC sweep (`crates/registry/src/gc.rs`) ever removes a blob.
-- **The CRDs are the truth** for `Workspace`, `Environment`, `Volume`, `SnapshotRequest`,
-  `OwnerBinding`. `/v1` writes spec, controllers write status through `/status`, and RBAC plus a
+- **The CRDs are the truth** for `Workspace`, `Environment`, `Volume`, `Snapshot`,
+  `VolumeReplica`, `OwnerBinding`. `/v1` writes spec, controllers write status through `/status`, and RBAC plus a
   ValidatingAdmissionPolicy (`deploy/k3s/agent-{rbac,admission}.yaml`) — not convention — keeps a
   controller out of desired state. Every `/v1` read is a projection of a CR.
 - **Snapshot bytes and their commit records live on the server tier / region blob store**, not in
@@ -193,20 +191,18 @@ against the 2 GB home quota. Regions do not sync homes with each other.
 
 **Push a snapshot.** `push` is the one mutating verb and has no separate commit step: the agent
 stages a read-only btrfs snapshot locally, uploads the send stream to the region's Azure Blob
-container under `blobs/{owner}/{algo}/{hex}`, POSTs a commit record and moves the `main` ref via
-`/vol-agent/{owner}/{id}/{commits,ref}` on the server tier — routed like any other repo, so only the
-node holding `repo/vol/{owner}/{id}` writes it. A push that dies mid-flight leaves the stage files
-and an internal `unpushed` mark, so a retry resumes rather than re-snapshotting. The commit record
-carries the source's kind and name in its `state`, because the record outlives the workspace and is
-the only thing left that can say what the snapshot was of.
+container under `blobs/{owner}/{algo}/{hex}`, marks the `Snapshot` `Ready` and advances the
+`Volume`'s `status.head` — one guarded write on the node that already claimed the volume, so no
+second writer exists to race. A push that dies mid-flight leaves the stage files and an internal
+`unpushed` mark, so a retry resumes rather than re-snapshotting. The `Snapshot` carries the
+source's kind and name, because it outlives the workspace and is the only thing left that can say
+what the snapshot was of.
 
-**Browse snapshots.** The server tier is both the index and the record: `GET /api/{owner}/volumes`
-lists an owner's volumes from the object store alone (no volume database is opened, so any node can
-answer), and `GET /api/{owner}/{name}/volumehistory` reads one volume's commits on the node that
-owns it. `/v1/volumes`, `/history`, `/refs` and `restore` on `bins/api` are projections of those
-reads over the peer credentials. Nothing user-facing reads a `SnapshotRequest`: a snapshot is a
-point in time and outlives the workspace it was taken of, so a listing built from live workspaces —
-or from a request that has since been collected — would lose it.
+**Browse snapshots.** `/v1/volumes`, `/history` and `/refs` on `bins/api` read the chain of
+`Ready` `Snapshot`s back from the k3s API — a snapshot is a point in time and outlives the
+workspace it was taken of, so its own object, not the workspace, is what a listing is built from.
+The server tier's `GET /api/{owner}/volumes` and `/api/{owner}/{name}/volumehistory` still read the
+PRE-cutover records out of `repo/vol/{owner}/{id}`; nothing writes there any more.
 
 **Stop an environment.** `desiredState: Stopped` is `replicas: 0`, so the stop survives a node
 reboot. The controller pushes the environment's own subvolume first and gates the Deployment
@@ -232,8 +228,8 @@ NetworkPolicies open the path; detaching, or attaching elsewhere, removes them.
 | `crates/registry` | OCI Distribution v1.1 registry, auth, GC sweep |
 | `crates/api` | the read/browse API served by `bins/api` |
 | `crates/app` | shared server application state and lanes |
-| `crates/workspaces` | CRDs, `/v1` routes, Cosmos `Region` store, snapshot engine, registry client |
-| `bins/server` | `rustic-git` — git + registry + vol-agent, routing, ownership |
+| `crates/workspaces` | CRDs, `/v1` routes, Cosmos `Region` store, snapshot engine |
+| `bins/server` | `rustic-git` — git + registry, routing, ownership |
 | `bins/api` | `rustic-git-api` — `/v1` and browse, cannot open a repo for writing |
 | `bins/worker` | `rustic-git-worker` — merges and blob GC |
 | `bins/agent` | `rustic-git-agent` — privileged node controller, btrfs |

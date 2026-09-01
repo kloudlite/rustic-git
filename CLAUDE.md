@@ -127,10 +127,9 @@ merge commits — gix-pack drops all-but-last-parent additions on a merge
 
 `crates/workspaces` + `bins/agent` (`rustic-git-agent`) + `bins/api` (`rustic-git-api`) add a
 second, unrelated control plane: btrfs-backed dev workspaces and multi-service environments,
-separate from git storage — but sharing the registry namespace with container images: a
-workspace/environment's pushed state lives as `vol/{owner}/{id}` in the SAME
-`bins/server/src/vol_agent.rs` surface that owns `img/{owner}/{name}`, addressed by the server
-tier (`rustic-git`), not `bins/api`.
+separate from git storage, and separate from the registry too: a workspace/environment's pushed
+state is a `Snapshot` CR plus its blobs in the region's Azure container. Nothing about it goes
+through the server tier.
 
 **Kubernetes is the reconcile substrate, and the CRDs are the source of truth.**
 `crates/workspaces/src/crd.rs` defines `Volume`/`Workspace`/`Environment` in
@@ -177,9 +176,9 @@ Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. S
 region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
 
 Four verbs, no separate commit step: `push` is the single mutating verb — `/v1` writes a
-`SnapshotRequest` and the owning node fulfils it: snapshot + upload + register + move the `main`
-ref, atomically, with an optional message (`GET /v1/volumes/{name}/history|refs` on `bins/api`
-reads the result back as a label list of `done` SnapshotRequests, not from the registry). A
+`Snapshot` CR naming the volume's current head as its parent and the owning node fulfils it:
+snapshot + upload + mark `Ready` + advance `status.head`, with an optional message
+(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads the chain of `Ready` `Snapshot`s back). A
 workspace created with `repo`/`branch` is seeded by an init container that clones it over SSH with
 the owner's platform key, inside the workspace pod itself — no credential Secret is minted for it.
 There is no user-facing un-pushed state; internally
@@ -199,9 +198,8 @@ per worktree, and a node re-hosting a worktree checks out the newest one it hold
 falling back to `status.head`. The agent
 (`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
 it watches its own node's objects and converges them (`bins/agent/src/controller.rs`), and its
-identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It still
-reaches the SERVER tier (`WS_REGISTRY_URL`, not `bins/api`) for the `vol/{owner}/{id}` registry
-surface — commit records and ref moves — and that is the only thing it calls over HTTP.
+identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
+to the k3s API and to Azure Blob, and to no HTTP service of ours at all.
 Stopping a workspace or environment cuts a `stop-{ws}`/`stop-{env}` sync point (skipped if the pod
 never ran) and waits for another node's `VolumeReplica` to report `Synced` at or after that
 listing, bounded by `WS_STOP_FLUSH_TIMEOUT_SECS`; the Deployment deletes for an environment are

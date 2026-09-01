@@ -239,17 +239,6 @@ const SEED_DIR: &str = "/workspace";
 /// Everything under here except `workspaces/` is the same in every workspace the person opens
 /// on this node.
 pub const HOME_DIR: &str = "/home/kl";
-/// The paths a MIGRATION must not copy out of an old per-node btrfs home into the shared NFS
-/// export: the six directories the old design kept as nested subvolumes (package caches, the
-/// editors' remote servers) and never pushed. They are dead weight on the export — the node-local
-/// `homecache` volume rebuilds every one of them for free on first use — so this is the rsync
-/// exclusion list in `deploy/k3s/README.md`'s migration step, and nothing else.
-///
-/// It does NOT describe what the pod mounts: the running layout redirects caches by ENV VAR
-/// (`login_env` -> `HOME_CACHE_DIR`) and mounts four hardcoded `homecache` subPaths, which are
-/// deliberately not these paths. Cross-check `workspace_pod`, never this list, for that.
-pub const HOME_LOCAL_DIRS: [&str; 6] =
-    [".cache", ".npm", ".cargo/registry", ".local/share/pnpm", ".vscode-server", ".cursor-server"];
 /// Where the node-local cache volume lands inside the home: tool caches redirected here (via
 /// `login_env`) never touch the NFS-backed home, so a cold cache never blocks on network I/O and a
 /// warm one never crosses it either.

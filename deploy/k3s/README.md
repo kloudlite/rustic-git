@@ -369,9 +369,10 @@ for HOME_VOL in $(kubectl get volumes --no-headers | awk '{print $1}' | grep '^h
 
   # On the node the OwnerBinding pinned (`kubectl get volume $HOME_VOL -o
   # jsonpath='{.status.nodeName}'`), copy the old home's content into the new export, EXCLUDING
-  # the six node-local cache dirs (k8s::HOME_LOCAL_DIRS, which exists for exactly this list —
-  # it is NOT what the pod mounts) — they were nested btrfs subvolumes the
-  # old design never pushed, and copying them across is dead weight the new node-local
+  # the six node-local cache dirs listed on the rsync below (they are NOT what the pod mounts —
+  # the running layout redirects caches by env var, `login_env` -> HOME_CACHE_DIR, onto four
+  # hardcoded homecache subPaths; cross-check `workspace_pod` for that) — they were nested
+  # btrfs subvolumes the old design never pushed, and copying them across is dead weight the new node-local
   # {pool}/homecache/{owner} rebuilds for free on first use anyway. The old worktree is
   # {pool}/vol/{HOME_VOL}/live/{HOME_VOL} — NOT {pool}/vol/{HOME_VOL}/live, which is the directory
   # the worktree sits inside, not the worktree itself (same trap the commit-model migration above

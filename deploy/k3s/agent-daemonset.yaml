@@ -168,11 +168,6 @@ spec:
             # Never set it inline here — an explicit env silently overrides `envFrom`.
             - name: RUST_BACKTRACE
               value: "1"
-            # The store client and the daemon it talks to are two containers sharing one host
-            # /nix; NIX_REMOTE=daemon is what points the agent's `nix` at the socket instead of
-            # trying (and failing, unprivileged) to open the store itself.
-            - name: NIX_REMOTE
-              value: daemon
             # The nixpkgs every profile on this node is built against. Rolling it rebuilds every
             # workspace's profile on its next pass (a cache download, not a compile).
             - name: WS_NIXPKGS
@@ -215,6 +210,18 @@ spec:
             # listener only starts when WS_PEER_SECRET (below) is non-empty — see peer.rs.
             - name: WS_PEER_ADDR
               value: 0.0.0.0:8444
+            # How long another node must be observed NotReady before this one reaps its
+            # VolumeReplica rows and takes over — positive evidence only (peer.rs).
+            - name: WS_NODE_DEAD_SECS
+              value: "600"
+            # Ceiling on one btrfs send to a peer; the escape hatch for a stream that hangs rather
+            # than fails, so the beat moves on to the next source (peer.rs).
+            - name: WS_PEER_SEND_TIMEOUT_SECS
+              value: "3600"
+            # How many Ready commits of a chain survive the post-push sweep; the rest are pruned
+            # unless pinned (snapshot.rs). Floors at 1 whatever is set here.
+            - name: WS_SNAPSHOT_KEEP
+              value: "10"
           envFrom:
             # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its
