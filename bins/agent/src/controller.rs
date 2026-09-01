@@ -330,7 +330,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "workspace reconcile")
             }
         });
-    let mine_bindings = mine.clone();
     // Label-selected like the pods: every StatefulSet in the cluster is not this controller's.
     let env_sets = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
     let env_pods = env_sets.clone();
@@ -383,11 +382,16 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             })
     });
-    let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), mine_bindings)
+    // NOT `mine`: a binding is no longer node-scoped (the home is on shared NFS), and the
+    // namespaces it ensures must exist on whichever node the claim picks. Every node reconciles
+    // every binding; every object it writes is a forced server-side apply, so concurrent
+    // reconcilers converge on the same result rather than fighting.
+    let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), watcher::Config::default())
         // A new Workspace of this owner may need a new TEAM namespace, so the binding reconciles
         // on it. Mapped by `spec.owner`, not by ownerReference: the binding is not the Workspace's
-        // parent, it is the thing that makes its namespace exist. Only the ones placed HERE: the
-        // claim binds an owner's workspaces to the binding's node, so one elsewhere is never ours.
+        // parent, it is the thing that makes its namespace exist. Only the ones placed HERE,
+        // because `teams_in_use` builds the namespace set from this node's workspaces — a
+        // workspace elsewhere wakes ITS node's copy of this same reconciler.
         .watches(Api::<crd::Workspace>::all(ctx.client.clone()), placed, {
             let region = ctx.region.clone();
             move |w: crd::Workspace| {

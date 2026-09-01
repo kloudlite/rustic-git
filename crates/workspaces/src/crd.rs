@@ -641,19 +641,20 @@ pub struct EnvironmentStatus {
 pub struct OwnerBindingSpec {
     pub owner: String,
     pub region: String,
+    /// The node the owner used to be pinned to. Still stamped by `claim::ensure_binding` and still
+    /// required by the schema so every existing object parses — but read by NOTHING: the home is a
+    /// region-shared NFS directory now, so a binding is not node-scoped and every node reconciles
+    /// every binding.
     pub node_name: String,
-    /// The cap on the owner's persistent home on this node, in GiB, copied into the home
-    /// `Volume`'s `quotaGb` by the binding reconciler. Defaulted rather than required because the
-    /// binding is created by whichever agent wins a placement claim (`claim::ensure_binding`),
-    /// which has no opinion about quotas, and because every binding written before this field
-    /// existed must keep parsing. An operator raises it with kubectl; the reconciler propagates.
+    /// The cap on the owner's per-node btrfs home, in GiB, back when there was one. Retained so
+    /// existing objects keep parsing (and defaulted so older ones do too); read by nothing — the
+    /// NFS home has no qgroup and no `Volume` to copy this onto.
     #[serde(default = "default_home_quota_gb")]
     pub home_quota_gb: u64,
 }
 
-/// Two gigabytes: dotfiles, shell history, editor state and a few tool configs. Caches are
-/// nested subvolumes outside the quota (`k8s::HOME_LOCAL_DIRS`), so this is not where `node_modules`
-/// goes and does not need to be sized for it.
+/// The default for the retained-but-unread `homeQuotaGb`. Kept only so an object written without
+/// the field still deserializes.
 pub const DEFAULT_HOME_QUOTA_GB: u64 = 2;
 fn default_home_quota_gb() -> u64 {
     DEFAULT_HOME_QUOTA_GB

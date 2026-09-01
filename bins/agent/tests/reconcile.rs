@@ -414,28 +414,32 @@ async fn an_unplaced_workspace_is_claimed_with_one_optimistic_status_write() {
 }
 
 
-/// An owner's namespaces are built only on the node their `OwnerBinding` names, so a fresh object
-/// claimed anywhere else creates pods into a namespace that never exists. The binding, when there
-/// is one, decides — `compatibleNodes` being empty is not a licence.
+/// The owner→node pin is gone: the home is a directory on a region-shared NFS mount every node
+/// serves, so a binding naming another node no longer says anything about where this object's data
+/// is. Placement is `may_claim` alone — and the binding, which still ensures namespaces, is now
+/// reconciled on every node.
 #[tokio::test]
-async fn a_workspace_whose_owner_is_bound_to_another_node_is_not_claimed() {
+async fn a_binding_on_another_node_no_longer_blocks_a_claim() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
-        vec![rustic_git_workspaces::kube_test::get(
-            format!("/apis/rustic-git.io/v1alpha1/ownerbindings/{}", crd::binding_name("r1", "alice")),
-            serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
-                               "metadata": {"name": "r1-alice"},
-                               "spec": {"owner": "alice", "region": "r1", "nodeName": "node-b"}}),
-        )],
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                format!("/apis/rustic-git.io/v1alpha1/ownerbindings/{}", crd::binding_name("r1", "alice")),
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                                   "metadata": {"name": "r1-alice"},
+                                   "spec": {"owner": "alice", "region": "r1", "nodeName": "node-b"}}),
+            ),
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
     );
 
     rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
-    assert!(
-        !rec.calls().iter().any(|c| c.starts_with("PUT") || c.starts_with("POST")),
-        "bound elsewhere: this node writes nothing: {:?}",
-        rec.calls()
-    );
+
+    let sent = rec.sent("PUT", WS_STATUS);
+    assert_eq!(sent.len(), 1, "a binding elsewhere no longer defers the claim: {:?}", rec.calls());
+    assert_eq!(sent[0]["status"]["nodeName"], "node-a");
 }
 
 /// An already-placed object is not re-claimed; a stop keeps `status.nodeName` precisely so a later
@@ -960,7 +964,6 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
         ]
         .into_iter()
-        .chain(home_routes())
         .chain(ns_routes("ws-alice"))
         .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
         .collect(),
@@ -1011,8 +1014,7 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
         tmp.path(),
         vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list)]
             .into_iter()
-            .chain(home_routes())
-            .chain(ns_routes("ws-alice"))
+                .chain(ns_routes("ws-alice"))
             .collect(),
     );
     // What the FIRST reconcile left behind, with an older `lastTransitionTime` than `now`.
@@ -1033,8 +1035,6 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
     );
 }
 
-const HOME_VOL_GET: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice";
-const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
 
 fn home_vol_json(quota: u64) -> serde_json::Value {
     serde_json::json!({
@@ -1046,108 +1046,6 @@ fn home_vol_json(quota: u64) -> serde_json::Value {
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": quota},
         "status": {"phase": "ready", "subvolumePresent": true},
     })
-}
-
-/// The routes the binding's home authoring takes in the personal namespace.
-fn home_routes() -> Vec<Route> {
-    vec![
-        rustic_git_workspaces::kube_test::not_found(HOME_VOL_GET),
-        rustic_git_workspaces::kube_test::post(VOLUMES, home_vol_json(2)),
-    ]
-}
-
-/// The home is authored next to the namespace, by the one reconciler that owns "this owner is on
-/// this node": a child Volume with the binding as owner (so deleting the binding is the whole
-/// delete) — the btrfs subvolume every workspace pod of this owner mounts via `hostPath` now.
-#[tokio::test]
-async fn a_binding_creates_the_owners_home_volume() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws_list = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
-        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
-    });
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
-            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-        ]
-        .into_iter()
-        .chain(home_routes())
-        .chain(ns_routes("ws-alice"))
-        .collect(),
-    );
-    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
-
-    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
-
-    let vol = rec.sent("POST", VOLUMES);
-    assert_eq!(vol.len(), 1, "{:?}", rec.calls());
-    assert_eq!(vol[0]["metadata"]["name"], "home-alice");
-    assert_eq!(vol[0]["spec"]["owner"], "alice");
-    assert_eq!(vol[0]["spec"]["team"], "");
-    assert_eq!(vol[0]["spec"]["nodeName"], "node-a", "the binding's node, never chosen here");
-    assert_eq!(vol[0]["spec"]["quotaGb"], 2, "the binding's default home quota");
-    assert!(vol[0]["spec"].get("source").is_none(), "an empty home; the first materialization decides whether to pull");
-    assert_eq!(vol[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
-    assert_eq!(vol[0]["metadata"]["labels"]["rustic-git.io/kind"], "home");
-    assert!(
-        rec.sent("PATCH", &binding_status()).iter().any(|s| s["status"]["conditions"].as_array().unwrap()
-            .iter().any(|c| c["type"] == "NamespaceReady" && c["status"] == "True")),
-        "the namespace is still reported ready: the home is not a gate"
-    );
-}
-
-/// The binding carries the wish and the Volume is the agent's own object, so a changed quota is
-/// copied down as ONE spec field — the second the admission policy allows by name, next to
-/// `restoreTo`. `set_quota` then runs on the Volume's next pass, because a spec edit is a new
-/// generation. An unchanged quota writes nothing.
-#[tokio::test]
-async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws_list = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
-        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
-    });
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
-            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-            rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
-            Route { method: "PATCH", path: HOME_VOL_GET.into(), status: 200, body: home_vol_json(5) },
-        ]
-        .into_iter()
-        .chain(ns_routes("ws-alice"))
-        .collect(),
-    );
-    let mut b = binding_json();
-    b["spec"]["homeQuotaGb"] = serde_json::json!(5);
-    let b: crd::OwnerBinding = serde_json::from_value(b).unwrap();
-
-    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
-
-    let patch = rec.sent("PATCH", HOME_VOL_GET);
-    assert_eq!(patch.len(), 1, "{:?}", rec.calls());
-    assert_eq!(patch[0], serde_json::json!({"spec": {"quotaGb": 5}}), "quotaGb and nothing else");
-
-    // Same quota as the Volume already has: no spec write at all. (`ctx` the binding shadows
-    // `ctx` the helper above, hence the path and the new names.)
-    let (ctx2, rec2) = self::ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", serde_json::json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
-            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-            rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
-        ]
-        .into_iter()
-        .chain(ns_routes("ws-alice"))
-        .collect(),
-    );
-    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
-    rustic_git_agent::binding::apply_binding(&b, &ctx2).await.unwrap();
-    assert!(rec2.sent("PATCH", HOME_VOL_GET).is_empty(), "{:?}", rec2.calls());
 }
 
 // ── the workspace reconciler and its volume child ────────────────────────

@@ -1147,12 +1147,13 @@
                     "properties": {
                       "homeQuotaGb": {
                         "default": 2,
-                        "description": "The cap on the owner's persistent home on this node, in GiB, copied into the home\n`Volume`'s `quotaGb` by the binding reconciler. Defaulted rather than required because the\nbinding is created by whichever agent wins a placement claim (`claim::ensure_binding`),\nwhich has no opinion about quotas, and because every binding written before this field\nexisted must keep parsing. An operator raises it with kubectl; the reconciler propagates.",
+                        "description": "The cap on the owner's per-node btrfs home, in GiB, back when there was one. Retained so\nexisting objects keep parsing (and defaulted so older ones do too); read by nothing — the\nNFS home has no qgroup and no `Volume` to copy this onto.",
                         "format": "uint64",
                         "minimum": 0.0,
                         "type": "integer"
                       },
                       "nodeName": {
+                        "description": "The node the owner used to be pinned to. Still stamped by `claim::ensure_binding` and still\nrequired by the schema so every existing object parses — but read by NOTHING: the home is a\nregion-shared NFS directory now, so a binding is not node-scoped and every node reconciles\nevery binding.",
                         "type": "string"
                       },
                       "owner": {
