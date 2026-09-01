@@ -137,6 +137,31 @@ pub(crate) async fn newest_ready_commit(ctx: &Arc<Ctx>, volume: &str) -> Result<
     Ok(ready.iter().find(|s| !parents.contains(s.name_any().as_str())).map(|s| s.name_any()))
 }
 
+/// The newest sync point of `(volume, worktree)`: the `Ready` transient carrying the highest
+/// `SYNCED_GENERATION` annotation, or `None` if this worktree has none.
+///
+/// Generation, not creation time: the annotation is the btrfs generation the sync beat actually
+/// replicated, and it is the only ordering that survives clock skew between nodes. A transient cut
+/// by the stop path carries no annotation at all — read as generation 0, so it loses to any
+/// annotated one but still wins over nothing.
+pub(crate) async fn latest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<String>, ReconcileErr> {
+    let list = Api::<crd::Snapshot>::all(ctx.client.clone())
+        .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await?;
+    let mut best: Option<(u64, String)> = None;
+    for s in list.items {
+        let ready = s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
+        if !s.spec.transient || s.spec.worktree != worktree || !ready {
+            continue;
+        }
+        let gen = s.annotations().get(crate::sync::SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok()).unwrap_or(0);
+        if best.as_ref().is_none_or(|(b, _)| gen >= *b) {
+            best = Some((gen, s.name_any()));
+        }
+    }
+    Ok(best.map(|(_, name)| name))
+}
+
 /// `status.head = name` on the worktree's own Workspace/Environment — a guarded status write,
 /// F1's preserve pattern: GET the object fresh, merge `head` onto its CURRENT status, and write
 /// the whole thing back, so this write (which owns only `head`) never prunes `volumeRef`,
@@ -774,6 +799,39 @@ mod commit_tests {
 
         let picked = newest_ready_commit(&ctx, "vol-1").await.unwrap();
         assert_eq!(picked.as_deref(), Some("vol-1-a"), "a transient must never be picked as the stop-push parent");
+    }
+
+    /// `latest_transient` orders by the `SYNCED_GENERATION` annotation, never by listing order:
+    /// a commit and a `Working` transient are both ignored, an unannotated transient (the stop
+    /// path cuts one) reads as generation 0 and loses, and the highest generation wins.
+    #[tokio::test]
+    async fn latest_transient_picks_the_highest_synced_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap = |name: &str, worktree: &str, transient: bool, phase: &str, gen: Option<&str>| {
+            let mut v = serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": name, "uid": format!("{name}-uid")},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "pinned": false, "transient": transient},
+                "status": {"phase": phase},
+            });
+            if let Some(g) = gen {
+                v["metadata"]["annotations"] = serde_json::json!({crate::sync::SYNCED_GENERATION: g});
+            }
+            v
+        };
+        let items = vec![
+            snap("vol-1-commit", "ws-1", false, "ready", None),
+            snap("sync-ws-1-none", "ws-1", true, "ready", None),
+            snap("sync-ws-1-hi", "ws-1", true, "ready", Some("9")),
+            snap("sync-ws-1-lo", "ws-1", true, "ready", Some("4")),
+            snap("sync-ws-1-working", "ws-1", true, "working", Some("99")),
+            snap("sync-ws-2-other", "ws-2", true, "ready", Some("99")),
+        ];
+        let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) }];
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        assert_eq!(latest_transient(&ctx, "vol-1", "ws-1").await.unwrap().as_deref(), Some("sync-ws-1-hi"));
+        assert_eq!(latest_transient(&ctx, "vol-1", "ws-3").await.unwrap(), None, "a worktree with no sync point resolves to nothing");
     }
 
     /// A commit CR is created WITHOUT status — `status` is a SUBRESOURCE, so the block a creator

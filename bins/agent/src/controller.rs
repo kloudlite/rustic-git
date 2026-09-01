@@ -1964,7 +1964,21 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
             _ => None,
         });
-    let effective_head = prev.head.clone().or_else(|| clone_commit.map(str::to_string));
+    // Re-host: a node that has never run this worktree checks out its LATEST SYNC POINT in
+    // preference to `head`, because the sync beat replicated it after the last commit — the
+    // data-loss window on a node death is one `WS_SYNC_SECS`, not everything since the last push.
+    // Only when there is no worktree here yet: a live worktree is never swapped under a running
+    // pod, whatever the sync points say.
+    //
+    // Resolved BEFORE the `HeadUnknown` guard below: a transient IS a Snapshot CR, so `has_commits`
+    // is true when a sync point is all this volume has, and parking there would strand a workspace
+    // that has perfectly good state to start from.
+    let synced = if ctx.engine.pool.worktree(&id, &w.name_any()).exists() {
+        None
+    } else {
+        crate::snapshot::latest_transient(ctx, &id, &w.name_any()).await?
+    };
+    let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
     if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
         // F2 guard: the volume has commits but this workspace's own `head` is still `None` —
         // checking out `None` here would hand it an EMPTY worktree next to real history,
@@ -2438,7 +2452,17 @@ async fn run_environment(
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
     // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
     migrate_and_seed_baseline(ctx, &id, &e.spec.owner).await?;
-    if prev.head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+    // `apply_workspace`'s re-host arm, same rule: a node that has never run this worktree starts
+    // from the newest sync point rather than the last commit, so a node death costs one
+    // `WS_SYNC_SECS` of edits. Resolved before the guard below — a transient is a Snapshot CR, so
+    // `has_commits` sees it too.
+    let synced = if ctx.engine.pool.worktree(&id, &id).exists() {
+        None
+    } else {
+        crate::snapshot::latest_transient(ctx, &id, &e.name_any()).await?
+    };
+    let effective_head = synced.or_else(|| prev.head.clone());
+    if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
         let st = crd::EnvironmentStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,
@@ -2450,7 +2474,7 @@ async fn run_environment(
         write_env_status(e, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
+    let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), effective_head);
     let quota_gb = vol.spec.quota_gb;
     let result = tokio::task::spawn_blocking(move || {
         engine.checkout(&vol_id, head.as_deref(), &ws_id)?;

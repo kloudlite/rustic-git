@@ -743,12 +743,17 @@ async fn f4_a_volume_replica_get_error_claims_nothing() {
 async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = ssh_routes();
-    routes.push(Route {
-        method: "GET",
-        path: SNAPSHOTS_LIST.into(),
-        status: 200,
-        body: commit_list_of("Snapshot", vec![snapshot_cr("ws-1-a", "ws-1")]),
-    });
+    // TWICE: a re-host pass lists snapshots once for `latest_transient` and once for
+    // `has_commits`, and this mock walks a path's routes in order — with one route the second
+    // listing would fall through to the empty default and read as a zero-commit bootstrap.
+    for _ in 0..2 {
+        routes.push(Route {
+            method: "GET",
+            path: SNAPSHOTS_LIST.into(),
+            status: 200,
+            body: commit_list_of("Snapshot", vec![snapshot_cr("ws-1-a", "ws-1")]),
+        });
+    }
     let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
     // `ws_ctx_with_ssh` pre-seeds an empty worktree so tests that expect a normal checkout don't
     // need real btrfs; THIS test's whole point is that no checkout may happen at all, so undo
@@ -760,6 +765,53 @@ async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)), "waits for T5/T6 to record a head");
     assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "no pod without a resolved head: {:?}", rec.calls());
     assert!(!tmp.path().join("vol/ws-1/live/ws-1").exists(), "no bootstrap worktree either");
+}
+
+/// Re-host: a node that has never run this worktree starts from the newest SYNC POINT, not from
+/// `status.head` — the sync beat replicated it after the last commit, so the loss window on a node
+/// death is one `WS_SYNC_SECS`.
+///
+/// Which snapshot was picked is proved by which failure `Engine::checkout` produces, and that is
+/// deterministic without btrfs: only the HEAD commit's `snap/` dir exists here, so choosing the
+/// head would get past the existence check and die shelling out to `btrfs`, while choosing the
+/// (absent) transient dies on `NO_SUCH_RECORD` first. The exact-equality assertion is what tells
+/// the two apart.
+#[tokio::test]
+async fn a_workspace_starting_on_a_new_node_checks_out_its_latest_sync_point_over_its_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    let transient = |name: &str, generation: &str| {
+        let mut s = snapshot_cr(name, "ws-1");
+        s["spec"]["transient"] = true.into();
+        s["metadata"]["annotations"] = serde_json::json!({"rustic-git.io/synced-generation": generation});
+        s
+    };
+    let mut routes = ssh_routes();
+    routes.push(Route {
+        method: "GET",
+        path: SNAPSHOTS_LIST.into(),
+        status: 200,
+        // The head commit, then the NEWEST sync point, then an older one — ordered so that a pick
+        // by listing order, or a last-one-wins pick, would land on the wrong object.
+        body: commit_list_of(
+            "Snapshot",
+            vec![snapshot_cr("ws-1-aaaaaaaa", "ws-1"), transient("sync-ws-1-bbbbbbbb", "9"), transient("sync-ws-1-cccccccc", "4")],
+        ),
+    });
+    let (ctx, _rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
+    // No worktree on this pool — that is what makes this a re-host — but the head commit IS here.
+    std::fs::remove_dir_all(tmp.path().join("vol/ws-1/live/ws-1")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/ws-1/snap/ws-1-aaaaaaaa")).unwrap();
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.status.as_mut().unwrap().head = Some("ws-1-aaaaaaaa".into());
+
+    let err = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap_err();
+
+    assert_eq!(
+        err.0,
+        rustic_git_workspaces::engine::ops::NO_SUCH_RECORD,
+        "the checkout must have been asked for the sync point (absent here), not the head commit (present): {}",
+        err.0
+    );
 }
 
 const WS_CLONE_OBJ: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-clone";
