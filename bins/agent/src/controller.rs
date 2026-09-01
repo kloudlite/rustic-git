@@ -428,17 +428,44 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             })
     });
-    tokio::join!(
-        volume_watch,
-        volumes,
-        workspaces,
-        environments,
-        bindings,
-        commits,
-        futures::future::OptionFuture::from(claim_ws),
-        futures::future::OptionFuture::from(claim_env),
-    );
+    let everything = async {
+        tokio::join!(
+            volume_watch,
+            volumes,
+            workspaces,
+            environments,
+            bindings,
+            commits,
+            futures::future::OptionFuture::from(claim_ws),
+            futures::future::OptionFuture::from(claim_env),
+        );
+    };
+    // The controllers stop on SIGTERM (`shutdown_on_signal`), but `volume_watch` is a bare watch
+    // stream with no such hook and never ends — so the `join!` above never resolved, `run` never
+    // returned, and every agent restart sat through the full 120 s grace period before the
+    // kubelet SIGKILLed it (exit 137, observed on every delete). Race the join against the same
+    // signal instead: on SIGTERM give the controllers a bounded window to drain their in-flight
+    // reconciles, then return so the process exits on its own. Nothing here needs a clean stop —
+    // every reconcile is idempotent by design and re-runs on the next boot.
+    tokio::pin!(everything);
+    tokio::select! {
+        _ = &mut everything => {}
+        _ = shutdown_signal() => {
+            tracing::info!("shutdown signal; draining in-flight reconciles");
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(20), &mut everything).await;
+        }
+    }
     Ok(())
+}
+
+/// SIGTERM (the kubelet) or SIGINT (a terminal). Tokio multiplexes signal listeners, so this
+/// coexists with the handlers `shutdown_on_signal` installs on each controller.
+async fn shutdown_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
 }
 
 /// Every reconcile error is a requeue with backoff. There is deliberately no branch that concludes
