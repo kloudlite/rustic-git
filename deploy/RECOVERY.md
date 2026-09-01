@@ -349,7 +349,7 @@ ID=$(curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: a
 KUBECONFIG=.local/k3s.yaml kubectl wait workspace/$ID --for=condition=Ready --timeout=10m   # claimed, materialized, pod up
 curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
   https://dev.kloudlite.io/v1/workspaces/$ID/push -d '{"message":"recovery check"}'
-KUBECONFIG=.local/k3s.yaml kubectl get snapshotrequests   # the new one reaches phase done = agent token, wslayers creds and the server's vol/ surface all right
+KUBECONFIG=.local/k3s.yaml kubectl get snapshots          # the new one reaches phase ready = agent token, wslayers creds and the server's vol/ surface all right
 kl ws ssh $ID -- true                                      # the gateway: DNS, NSG, harden-node, the copied jwt Secret
 ```
 

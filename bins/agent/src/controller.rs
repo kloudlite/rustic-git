@@ -66,10 +66,10 @@ pub struct Ctx {
     /// `WS_DEFAULT_IMAGE`: the tagged platform image behind `model::DEFAULT_WS_IMAGE`.
     pub default_image: String,
     /// In-flight long btrfs operations, keyed by the uid of the object that asked for them (a
-    /// `Volume` being materialized, or a `SnapshotRequest` being pushed). THE idempotency guard,
+    /// `Volume` being materialized, or a `Snapshot` being cut). THE idempotency guard,
     /// and a local in-memory check rather than a distributed lease because exactly one agent ever
     /// reconciles a given object: for a `Volume` that is the `spec.nodeName` field selector on the
-    /// watch, and for a `SnapshotRequest` — which names no node — it is `snapshot::my_volume`,
+    /// watch, and for a `Snapshot` — which names no node — it is `snapshot::my_volume`,
     /// which acts only when the named Volume's `spec.nodeName` is this one.
     pub running: Mutex<InFlight>,
     /// A finished operation wakes its own reconciler instead of waiting out the `TICK` requeue: a
@@ -731,7 +731,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     // reports, and never re-runs a create or a clone against a volume that already exists.
     let stranded = v.status.as_ref().is_some_and(|s| s.phase == Phase::Working) && !running_contains(ctx, &uid);
 
-    // 1. Nothing asked for. Pushing is a `SnapshotRequest` with its own reconciler now, so a
+    // 1. Nothing asked for. Pushing is a `Snapshot` with its own reconciler now, so a
     //    materialized volume at its current generation has nothing left for this pass to do.
     if observed && !stranded && !running_contains(ctx, &uid) {
         return Ok(Action::await_change());
@@ -1324,7 +1324,7 @@ pub(crate) fn volume_is_ready(v: &crd::Volume) -> bool {
 /// The source references that can be wrong forever, checked ONCE before a Volume is created.
 ///
 /// These never get better by being retried: a `cloneOf` naming a workspace that does not exist, a
-/// `restoreOf` whose snapshot id no `done` SnapshotRequest carries. Without this branch each of
+/// `restoreOf` whose snapshot id no `Ready` `Snapshot` carries. Without this branch each of
 /// them requeues at `RETRY` forever, and the log line is indistinguishable from a registry outage.
 async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(), Outcome> {
     match source {
@@ -1343,7 +1343,7 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
                 Err(e) => Err(e.into()),
             }
         }
-        // Deliberately unchecked here. A snapshot outlives its SnapshotRequest -- the env-stop
+        // Deliberately unchecked here. A snapshot outlives its stop commit -- the env-stop
         // request is deleted after teardown, and nothing keeps a push request forever -- so
         // validating against a `done` CR made a deleted environment's snapshots unrestorable while
         // their records sat in the registry untouched. The registry is the source of truth, and
@@ -2956,12 +2956,12 @@ const STOP_GENERATION: &str = "rustic-git.io/stop-generation";
 /// Only `Landed` proceeds. `Failed` leaves the parent running with `Ready=False` and nothing torn
 /// down: a parent torn down without a landed push loses its last state for good, so a push that
 /// failed must stop the teardown rather than wave it through. `await_change` is safe there because
-/// both parent controllers watch `SnapshotRequest` and map it back by ownerReference — the parent
+/// both parent controllers watch `Snapshot` and map it back by ownerReference — the parent
 /// is woken by the request's own status moving, and by an operator deleting it and letting the
 /// `None` arm below create a fresh one.
 ///
 /// The one `error` this retries itself is `AgentRestarted`: the push did not FAIL, the process
-/// holding its handle died, and `/v1` has no delete for SnapshotRequests — so left alone, the
+/// holding its handle died, and `/v1` has no delete for a stop commit — so left alone, the
 /// fixed-name request parks the parent until someone finds `kubectl`. A re-run is safe there: the
 /// engine's `unpushed` stage mark makes a retried push resume, not re-snapshot. A real
 /// `PushFailed` still parks, because a btrfs send that failed once fails the same way at TICK.
@@ -2986,7 +2986,7 @@ where
     let mut phase = cr.as_ref().map(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending));
     let gen = parent.meta().generation.unwrap_or(0).to_string();
     // A `Ready` CR from an EARLIER generation of the parent is stale for the same reason a stale
-    // `SnapshotRequest` used to be: the obvious recovery from a failed stop is Start, which does
+    // the old `SnapshotRequest` used to be: the obvious recovery from a failed stop is Start, which does
     // not touch this CR, and the NEXT stop must cut a fresh commit rather than read the old one as
     // already landed. `commit_worktree` is keep-biased and never marks a cut `Error` — it retries
     // `Working` forever — so there is no `AgentRestarted`/failed-request analogue to recover here;

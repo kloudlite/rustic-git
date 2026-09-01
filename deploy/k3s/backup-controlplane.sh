@@ -53,7 +53,7 @@ tar -czf "$WORK/identity.tgz" -C "$SRC" tls token cred 2>/dev/null || \
 # server that is down must not stop the database from being uploaded — but the run still fails at
 # the end (exit code below), so the unit and the snitch both show it.
 crd_ok=0
-k3s kubectl get volumes,workspaces,environments,snapshotrequests,ownerbindings -A -o yaml \
+k3s kubectl get volumes,workspaces,environments,snapshots,volumereplicas,ownerbindings -A -o yaml \
   > "$WORK/objects.yaml" 2> "$WORK/objects.err" \
   || { crd_ok=1; echo "CRD dump failed: $(cat "$WORK/objects.err")" >&2; : > "$WORK/objects.yaml"; }
 tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz objects.yaml

@@ -1616,9 +1616,9 @@ fn env_vol() -> serde_json::Value {
     })
 }
 
-fn stop_req(status: serde_json::Value) -> serde_json::Value {
+fn stop_commit(status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": "stop-env-1", "uid": "stop-uid-1"},
         "spec": {"volume": "env-1"},
         "status": status,
@@ -1643,7 +1643,7 @@ fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
 
 // ── the stop-before-teardown snapshot ────────────────────────────────────
 
-const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-env-1";
+const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-env-1";
 const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
 const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 
@@ -1660,7 +1660,7 @@ const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 
 
 
-const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-home-ws-1";
+const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-home-ws-1";
 const WS_POD_DEL: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
 
 
@@ -1768,9 +1768,9 @@ async fn an_environment_whose_only_delta_is_its_volume_ref_still_writes_status()
         vec![
             Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
-            rustic_git_workspaces::kube_test::get(STOP_REQ, stop_req(serde_json::json!({"phase": "done"}))),
+            rustic_git_workspaces::kube_test::get(STOP_REQ, stop_commit(serde_json::json!({"phase": "done"}))),
             Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
-            Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: stop_req(serde_json::json!({"phase": "done"})) },
+            Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: stop_commit(serde_json::json!({"phase": "done"})) },
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         ],
     );

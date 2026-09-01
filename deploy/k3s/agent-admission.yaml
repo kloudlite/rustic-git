@@ -35,7 +35,7 @@ spec:
       - apiGroups: ["rustic-git.io"]
         apiVersions: ["*"]
         operations: ["UPDATE"]
-        resources: ["workspaces", "environments", "volumes", "snapshotrequests", "ownerbindings"]
+        resources: ["workspaces", "environments", "volumes", "ownerbindings"]
   matchConditions:
     - name: from-the-agent
       expression: "request.userInfo.username == 'system:serviceaccount:kube-system:rustic-git-agent'"

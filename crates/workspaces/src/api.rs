@@ -424,9 +424,8 @@ fn env_volume(e: &crd::Environment) -> Option<&str> {
 /// Every volume of `owner` that has ever landed a snapshot.
 ///
 /// From the SERVER tier's volume index — the same listing the Snapshots page reads — because that
-/// is the record: a `done` SnapshotRequest is a receipt the owning node reclaims after
-/// `SNAPSHOT_REQUEST_TTL`, and a listing that read the receipts went blind on a volume a week after
-/// its last push. It is a QUERY rather than a Volume status field because a field would need a
+/// is the record: a push receipt is reclaimed by the owning node in time, and a listing that read
+/// the receipts went blind on a volume a week after its last push. It is a QUERY rather than a Volume status field because a field would need a
 /// second controller writing the Volume's status — `patch_status` force-applies under one field
 /// manager, so the Volume reconciler's next pass would prune it.
 ///
@@ -1715,8 +1714,7 @@ async fn restore_env_in_place(
 // A snapshot is a point in time and outlives the workspace it was taken of, so none of these reads
 // may hang off a live Workspace/Environment. The index and the records both live on the SERVER
 // tier (`vol/{owner}/{name}`); the cluster is consulted only to answer "is the parent still
-// around?", which is a display detail, never an authorization one. `SnapshotRequest` is the push
-// WORK ITEM and nothing here reads it — a request that has been garbage-collected costs nothing.
+// around?", which is a display detail, never an authorization one.
 
 #[derive(serde::Serialize)]
 struct VolumeSummary {

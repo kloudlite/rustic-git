@@ -18,11 +18,12 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # A push. No `watch`: nothing in the API watches — every read is a one-shot list on a
-  # request. `create` and `delete` but deliberately NO `/status`: the outcome of a push is the
-  # agent's to write, and an API that could write it could report a snapshot that never happened.
+  # A push, and the history/refs listings behind it. No `watch`: nothing in the API watches —
+  # every read is a one-shot list on a request. `create` and `delete` but deliberately NO
+  # `/status`: the outcome of a push is the agent's to write, and an API that could write it
+  # could report a commit that never happened.
   - apiGroups: ["rustic-git.io"]
-    resources: ["snapshotrequests"]
+    resources: ["snapshots"]
     verbs: ["get", "list", "create", "delete"]
   # Read-only, for projections. `create` went to the agent (a controller owns the children it
   # authors) and `delete` went with it — the API's delete handler is now one call to the Workspace,
