@@ -442,6 +442,17 @@ async fn a_binding_on_another_node_no_longer_blocks_a_claim() {
     assert_eq!(sent[0]["status"]["nodeName"], "node-a");
 }
 
+/// A node that cannot serve homes must not claim at all: `apply_workspace` would park the object
+/// at `HomeNotReady` forever, and nothing ever un-places a live node's claim.
+#[tokio::test]
+async fn a_node_without_a_homes_export_does_not_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx_without_homes_export(tmp.path(), vec![]);
+
+    rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert!(rec.calls().is_empty(), "no claim without a shared home: {:?}", rec.calls());
+}
+
 /// An already-placed object is not re-claimed; a stop keeps `status.nodeName` precisely so a later
 /// start reconciles on the same node with no placement step.
 #[tokio::test]

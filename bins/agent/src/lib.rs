@@ -53,6 +53,25 @@ fn already_mounted(mounts: &str, target: &str) -> bool {
     mounts.lines().any(|l| l.split_whitespace().nth(1) == Some(target))
 }
 
+/// Refuses a `{pool}/homes` that is not a mount point, given `/proc/mounts`'s contents.
+///
+/// `mount_homes` runs ONCE, at agent boot, and everything after it assumes the export is still
+/// there — silently wrong after an operator `umount`, an ESTALE from a re-created ZeroFS, or a
+/// mount that never established. `create_dir_all` under a missing mount point then manufactures a
+/// directory on the node's rootfs and the pod gets an EMPTY home, reported Ready; the hostPath
+/// `type: Directory` guard cannot catch it, because the agent made the directory first. So every
+/// materialize re-checks.
+pub(crate) fn check_homes_mounted(mounts: &str, pool: &str) -> Result<(), String> {
+    let target = homes_root(pool);
+    let Some(target) = target.to_str() else {
+        return Err(format!("{} is not valid UTF-8", target.display()));
+    };
+    if already_mounted(mounts, target) {
+        return Ok(());
+    }
+    Err(format!("the shared-home NFS export is not mounted at {target}; refusing to serve a home off the node's rootfs"))
+}
+
 fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     let target = homes_root(pool);
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
@@ -155,7 +174,17 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::already_mounted;
+    use super::{already_mounted, check_homes_mounted};
+
+    /// The mount-liveness hole: with the export gone, `ensure_shared_home` would otherwise mkdir
+    /// on the node's rootfs and hand the pod a silently empty home.
+    #[test]
+    fn a_homes_root_that_is_not_a_mount_point_is_refused() {
+        let mounts = "zerofs:/ /wspool-prod/homes nfs rw 0 0\n";
+        assert!(check_homes_mounted(mounts, "/wspool-prod").is_ok());
+        let err = check_homes_mounted("/dev/sda1 / ext4 rw 0 0\n", "/wspool-prod").unwrap_err();
+        assert!(err.contains("not mounted"), "{err}");
+    }
 
     #[test]
     fn already_mounted_matches_the_target_column_exactly() {

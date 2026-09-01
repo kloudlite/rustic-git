@@ -39,6 +39,12 @@ stringData:
 ---
 # zerofs.toml: TOML with `${VAR}` substitution from the container's env (Secret above). `[cache]`,
 # `[storage]`, `[servers]` are required by ZeroFS itself.
+#
+# UNVERIFIED until the first real cluster apply: both that ZeroFS expands `${VAR}` in this file at
+# all (rather than wanting the values inline or as flags), and that it picks the S3 credentials up
+# from AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_ENDPOINT_URL in the environment. This is the
+# runbook's biggest unknown — if the pod crash-loops on config, read its logs and check the
+# upstream README's config example before assuming the Secret values are wrong.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -67,6 +73,12 @@ metadata:
     app: zerofs
 spec:
   replicas: 1 # see header: SlateDB single-writer, never raise this
+  # Recreate, not the default RollingUpdate: a rolling update surges a SECOND pod against the same
+  # SlateDB prefix before the old one terminates, and that is the exact two-writer fencing the
+  # header forbids — `replicas: 1` does not prevent surge. A brief outage on every edit is the
+  # price, and the availability ruling above already accepts it.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: zerofs
@@ -93,6 +105,14 @@ spec:
             - name: nfs
               containerPort: 2049
               protocol: TCP
+          # The Service must not route to a pod that has not opened its SlateDB yet (a cold start
+          # replays the LSM tree): an agent's `mount` would get a connection refused and the whole
+          # node's homes would fail to mount. A TCP accept on 2049 is exactly "NFS is serving".
+          readinessProbe:
+            tcpSocket:
+              port: 2049
+            initialDelaySeconds: 5
+            periodSeconds: 10
           volumeMounts:
             - name: config
               mountPath: /etc/zerofs

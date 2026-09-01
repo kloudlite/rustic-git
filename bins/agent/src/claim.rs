@@ -151,6 +151,13 @@ async fn decide(
         // placement step at all.
         return Ok(None);
     }
+    // A node with no `WS_HOMES_EXPORT` cannot serve `/home/kl` at all, and nothing ever un-places a
+    // live node's claim — so claiming here parks the object at `HomeNotReady` permanently instead
+    // of leaving it for a node that can serve it. Refusing keeps it visibly unplaced, which a peer
+    // picks up on its own unplaced watch.
+    if ctx.homes_export.is_none() {
+        return Ok(None);
+    }
     let src = source_nodes(ctx, storage_source(storage)).await?;
     // Fetched only when there is no `cloneOf` source: a cloneOf's own arm never needs it.
     let commit = if src.is_none() { Some(commit_placement(ctx, volume).await?) } else { None };

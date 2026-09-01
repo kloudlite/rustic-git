@@ -1792,7 +1792,17 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
 /// `{pool}/homes/{owner}`: on the shared-home NFS mount (`mount_homes` in `lib.rs` puts the export
 /// there at agent startup), so materializing an owner's home is plain `mkdir` + `chown` — no
 /// subvolume, no snapshot, nothing btrfs-specific. Idempotent; safe on every reconcile.
+///
+/// Re-verifies the export is still mounted first (`check_homes_mounted`) — mkdir under a vanished
+/// mount point would build the person an empty home on the node's rootfs and report it Ready.
 fn ensure_shared_home(pool: &str, owner: &str, uid: u32) -> Result<(), String> {
+    // Root-gated for the same reason the chown below is: in production the agent is privileged and
+    // `/proc/mounts` tells the truth, while a dev/test pool is an ordinary directory nobody ever
+    // mounted — checking there would refuse every reconcile.
+    if unsafe { libc::geteuid() } == 0 {
+        let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
+        crate::check_homes_mounted(&mounts, pool)?;
+    }
     let dir = crate::homes_root(pool).join(owner);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     // Only root may chown to an arbitrary uid; the agent always runs privileged in production
