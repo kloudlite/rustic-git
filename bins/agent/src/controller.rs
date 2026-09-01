@@ -694,6 +694,13 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
         if running_contains(ctx, &v.uid().unwrap_or_default()) {
             continue;
         }
+        // Commit model: durability for a home moves to the Snapshot CR (Task 7c) — `push_env` is
+        // the OLD model's only writer of home history, and Task 8 deletes it. Flag off, this arm
+        // never runs and the rest of the loop is byte-identical to before the cutover.
+        if ctx.commit_model {
+            rt.block_on(home_commit_beat_one(ctx, &v, &id));
+            continue;
+        }
         match rt.block_on(engine.push_env(&v.spec.owner, &id, &serde_json::Value::Null, Some(HOME_PUSH_MESSAGE))) {
             Ok(out) => {
                 // The SNAPSHOT's generation, not live's read afterwards: a write that lands between
@@ -716,6 +723,52 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
                 metrics::counter!("home_pushes_total", "result" => "error").increment(1);
             }
         }
+    }
+}
+
+/// The commit-model home beat body (Task 7c): CR-first, same discipline `migrate_and_seed_baseline`
+/// already uses for a checkout — this never touches btrfs directly, `reconcile_commit`'s Home arm
+/// does that once the CR lands. `Engine::migrate_volume` runs first (idempotent past the one time
+/// it actually moves anything) so an old-layout home gets its baseline commit before ever taking a
+/// periodic one; if it just migrated, THAT baseline is this pass's whole job — creating a periodic
+/// Snapshot in the same pass would give the chain two no-parent roots (the baseline and this one),
+/// which `newest_ready_commit`'s "not anyone's parent" tip search cannot then tell apart.
+pub async fn home_commit_beat_one(ctx: &Arc<Ctx>, v: &crd::Volume, id: &str) {
+    match migrate_and_seed_baseline(ctx, id, &v.spec.owner).await {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(volume = %id, error = %e.0, "home commit beat: migrating layout");
+            return;
+        }
+    }
+    let parent = match crate::snapshot::newest_ready_commit(ctx, id).await {
+        Ok(p) => p.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(volume = %id, error = %e.0, "home commit beat: finding the newest commit");
+            return;
+        }
+    };
+    let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let name = crd::snapshot_name(id);
+    let mut snap = crd::Snapshot::new(
+        &name,
+        crd::SnapshotSpec {
+            volume: id.to_string(),
+            owner: v.spec.owner.clone(),
+            worktree: id.to_string(),
+            parent,
+            message: Some(HOME_PUSH_MESSAGE.to_string()),
+            pinned: false,
+        },
+    );
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
+    // Same convergence rule as `migrate_and_seed_baseline`: a 409 means an earlier pass (or a
+    // crash-retry of this one) already created it, not an error.
+    match api.create(&PostParams::default(), &snap).await {
+        Ok(_) => {}
+        Err(kube::Error::Api(ae)) if ae.code == 409 => {}
+        Err(e) => tracing::warn!(volume = %id, error = %e, "home commit beat: creating the snapshot CR"),
     }
 }
 
@@ -2080,14 +2133,14 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 /// (workspace id == volume id, module doc in `commit.rs`) and exactly what `checkout`'s
 /// `WORKTREE_EXISTS` guard converges on right below this call — so the caller needs no branch for
 /// "just migrated" vs. "always was commit-model-native".
-async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Result<(), ReconcileErr> {
+async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Result<bool, ReconcileErr> {
     let (engine, vol_id) = (ctx.engine.clone(), id.to_string());
     let migrated = tokio::task::spawn_blocking(move || engine.migrate_volume(&vol_id))
         .await
         .map_err(|e| ReconcileErr(e.to_string()))?
         .map_err(|e| ReconcileErr(e.0))?;
     if !migrated {
-        return Ok(());
+        return Ok(false);
     }
     let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let name = crd::snapshot_name(id);
@@ -2106,8 +2159,8 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
     // Same convergence rule as everything else in this cutover: a retry that finds the CR already
     // there (crash between the rename above landing and this create) is not an error.
     match api.create(&PostParams::default(), &snap).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(true),
         Err(e) => Err(ReconcileErr(e.to_string())),
     }
 }

@@ -3391,6 +3391,60 @@ fn only_changed_ready_homes_are_pushed_by_the_timer() {
     assert_eq!(rustic_git_agent::controller::HOME_PUSH_MESSAGE, "home: periodic");
 }
 
+// ── commit-model home beat (Task 7c) ─────────────────────────────────────────
+//
+// `homes_to_push` above (unchanged) is still the "generation unmoved creates nothing" gate: the
+// beat loop only ever calls `home_commit_beat_one` for a due home, and the flag-off arm still
+// calls `engine.push_env` exactly as `only_changed_ready_homes_are_pushed_by_the_timer` and every
+// pre-existing test in this file already prove — none of them changed.
+
+/// A due home with no prior commits: `migrate_volume` finds nothing to migrate (a plain tempdir
+/// `live` is never a real btrfs subvolume, same reason `commit_model_checkout_converges_...`'s doc
+/// comment gives), so the beat proceeds straight to a CR-first Snapshot with an empty parent —
+/// "no snapshots yet" is exactly this case.
+#[tokio::test]
+async fn home_commit_beat_creates_a_root_snapshot_when_none_exist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let routes = vec![
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
+        rustic_git_workspaces::kube_test::post(SNAPSHOTS_LIST, snapshot_cr("home-alice-x", "home-alice")),
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
+
+    rustic_git_agent::controller::home_commit_beat_one(&ctx, &v, "home-alice").await;
+
+    let sent = rec.sent("POST", SNAPSHOTS_LIST);
+    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
+    assert_eq!(sent[0]["spec"]["volume"], "home-alice");
+    assert_eq!(sent[0]["spec"]["worktree"], "home-alice", "a home's one worktree is named after itself");
+    assert_eq!(sent[0]["spec"]["parent"], "", "no Ready commits yet: the new CR is a root");
+    assert_eq!(sent[0]["spec"]["message"], "home: periodic");
+    assert_eq!(sent[0]["status"]["phase"], "working", "CR-first: Working before the cut, same as a normal push");
+}
+
+/// A due home with an existing Ready commit: the new CR chains onto it, so the home's history is
+/// one growing chain and not a fresh root every beat.
+#[tokio::test]
+async fn home_commit_beat_chains_the_new_snapshot_onto_the_newest_ready_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prior = snapshot_cr("home-alice-old", "home-alice");
+    let routes = vec![
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![prior]) },
+        rustic_git_workspaces::kube_test::post(SNAPSHOTS_LIST, snapshot_cr("home-alice-new", "home-alice")),
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).unwrap();
+
+    rustic_git_agent::controller::home_commit_beat_one(&ctx, &v, "home-alice").await;
+
+    let sent = rec.sent("POST", SNAPSHOTS_LIST);
+    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
+    assert_eq!(sent[0]["spec"]["parent"], "home-alice-old", "chains onto the existing chain's tip");
+}
+
 // ── attachment ───────────────────────────────────────────────────────────
 
 /// The workspace-side objects an attachment adds, on top of `ws_ctx_with_nix`'s: the shared attach
