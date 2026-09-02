@@ -460,7 +460,11 @@ pub(crate) enum Resolved {
     Ready(Box<crd::Volume>),
     /// Not usable yet (or ever). The parent writes `phase` + `cond` into ITS OWN status struct —
     /// the two status types share no trait — and returns `action`.
-    Wait { volume_ref: Option<String>, phase: crd::Phase, cond: Condition, action: Action },
+    ///
+    /// `unplace` is set only by the mismatch-against-a-live-owner branch: the parent must blank
+    /// its own `status.nodeName` so the real owner's next claim is unopposed, instead of leaving
+    /// a pin that names a node whose reconcile already gave up on this parent.
+    Wait { volume_ref: Option<String>, phase: crd::Phase, cond: Condition, action: Action, unplace: bool },
     /// `settle` already wrote the status; the parent just returns.
     Settled(Action),
 }
@@ -543,6 +547,7 @@ where
                 phase: crd::Phase::Creating,
                 cond: crd::condition("Ready", false, "SourceVolumeNotReady", "waiting for the clone source's volume", gen),
                 action: Action::requeue(TICK),
+                unplace: false,
             });
         }
         None => {
@@ -566,15 +571,42 @@ where
             phase: crd::Phase::Creating,
             cond: crd::condition("Ready", false, "VolumeTakeover", "taking ownership of the released volume", gen),
             action: Action::requeue(std::time::Duration::from_secs(5)),
+            unplace: false,
         });
     }
     if vol.spec.node_name != node_name {
         let why = format!("status.nodeName {node_name} disagrees with volume {id}'s node {}", vol.spec.node_name);
+        // The owner is alive and is somebody else: I lost the takeover CAS (two up-to-date nodes
+        // raced for a released volume, and exactly one won). Clear MY OWN claim and requeue, so
+        // the winner's reconcile picks the parent up. Without this the loser sits in `error`
+        // forever holding a `status.nodeName` nobody will ever clear — the object is neither
+        // placed nor unplaced, so no claim watch matches it.
+        //
+        // Only for a LIVE owner. A dead owner's volume is released by the per-volume sweep and by
+        // nothing else: it is the only code that knows whether a Running sibling still pins it. A
+        // failed Node read keeps today's refuse-and-wait — un-placing on a maybe-dead owner would
+        // be a second thing allowed to release a volume.
+        let owner_node = Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&vol.spec.node_name).await;
+        let alive = match &owner_node {
+            Ok(n) => !crate::peer::unplaceable(n.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+            Err(_) => false,
+        };
+        if alive {
+            tracing::info!(volume = %id, owner = %vol.spec.node_name, "lost the volume; un-placing myself so the owner reclaims it");
+            return Ok(Resolved::Wait {
+                volume_ref: None,
+                phase: crd::Phase::Pending,
+                cond: crd::condition("Placed", false, "NodeMismatch", &why, gen),
+                action: Action::requeue(std::time::Duration::from_secs(5)),
+                unplace: true,
+            });
+        }
         return Ok(Resolved::Wait {
             volume_ref: None,
             phase: crd::Phase::Error,
             cond: crd::condition("Degraded", true, "NodeMismatch", &why, gen),
             action: Action::await_change(),
+            unplace: false,
         });
     }
     if !volume_is_ready(&vol) {
@@ -600,6 +632,7 @@ where
                 gen,
             ),
             action: if failed.is_some() { Action::await_change() } else { Action::requeue(TICK) },
+            unplace: false,
         });
     }
     Ok(Resolved::Ready(Box::new(vol)))

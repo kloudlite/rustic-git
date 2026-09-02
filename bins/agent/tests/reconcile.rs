@@ -1319,6 +1319,74 @@ async fn a_placed_workspace_creates_its_volume_child_on_its_own_node() {
     assert_eq!(refs[0]["controller"], true);
 }
 
+/// Two up-to-date nodes race for a released volume: the CAS picks one, and the LOSER has to
+/// notice. Today it writes `Degraded/NodeMismatch` and sits in `error` forever, holding a
+/// `status.nodeName` that contradicts the volume — so the winner's own sweep never sees it as
+/// unplaced and nothing ever starts it. Clearing my own claim is the whole fix.
+#[tokio::test]
+async fn a_mismatch_against_a_live_owner_un_places_me() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/volumes/ws-1",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                                   "metadata": {"name": "ws-1", "uid": "uid-1"},
+                                   "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 20}}),
+            ),
+            rustic_git_workspaces::kube_test::get(
+                "/api/v1/nodes/node-b",
+                serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-b"},
+                                   "status": {"conditions": [{"type": "Ready", "status": "True",
+                                                              "lastTransitionTime": rfc3339_ago(60)}]}}),
+            ),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-1"}));
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["status"]["nodeName"], "", "I un-place myself so the real owner reclaims it");
+    assert_ne!(action, kube::runtime::controller::Action::await_change(), "and come back rather than awaiting a change I just caused");
+}
+
+/// When the owner is DEAD the arm stays exactly as it was: refuse and wait. Un-placing here would
+/// be a second thing allowed to release a volume, and the per-volume sweep is the only one — it
+/// is the thing that knows whether a running sibling still pins it.
+#[tokio::test]
+async fn a_mismatch_against_a_dead_owner_still_refuses_and_waits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/volumes/ws-1",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                                   "metadata": {"name": "ws-1", "uid": "uid-1"},
+                                   "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 20}}),
+            ),
+            rustic_git_workspaces::kube_test::get(
+                "/api/v1/nodes/node-b",
+                serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-b"},
+                                   "status": {"conditions": [{"type": "Ready", "status": "False",
+                                                              "lastTransitionTime": rfc3339_ago(2000)}]}}),
+            ),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-1"}));
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(sent[0]["status"]["nodeName"], "node-a", "a dead owner's volume is the sweep's to release, not mine");
+    assert_eq!(sent[0]["status"]["conditions"][0]["reason"], "NodeMismatch");
+}
+
 /// `heal_labels` is what makes an object written by any other path (a restored backup, kubectl)
 /// listable: the labels are a view of `spec.owner`, and a reconcile re-stamps them from it. Seeded
 /// with a label naming the wrong owner, the FIRST thing the pass does is patch it back.
