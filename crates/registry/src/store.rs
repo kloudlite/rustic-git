@@ -215,15 +215,54 @@ pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest
     if db.get(BLOB_ROWS_BACKFILLED).await?.is_some() {
         return Ok(false);
     }
+    // One walk per image, not one per concurrent stranger: the first pull of a pre-rows image
+    // used to LIST and GET every manifest inside the blob request, and N simultaneous first
+    // pulls each did the whole walk before any of them wrote the mark.
+    let lock = store.keyed_lock(&format!("blobrows/{owner}/{name}"));
+    let _guard = lock.lock().await;
+    // Re-read under the lock: whoever held it before us may have just finished the walk.
+    if db.get(BLOB_ROWS_BACKFILLED).await?.is_some() {
+        return has_blob_row(&db, d).await;
+    }
+    backfill_blob_rows(store, owner, name, &db).await?;
+    db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
+    has_blob_row(&db, d).await
+}
+
+/// The walk itself: every manifest of the image, the blob rows it implies.
+///
+/// Bounded exactly as `gc::referenced` is, and for the same reason — an image with hundreds of
+/// manifests was hundreds of serial round trips. A manifest this cannot READ or PARSE names
+/// nothing and is skipped: under-granting is the safe failure for authorization, unlike the
+/// sweep, where the same manifest must abort. Propagating the store's error here answered a
+/// pull with a 500 where the honest answer is a 404.
+async fn backfill_blob_rows(store: &Store, owner: &str, name: &str, db: &Db) -> Result<()> {
     use slatedb::object_store::ObjectStore;
     let prefix = OsPath::from(format!("manifests/{owner}/{name}"));
     let mut listing = store.os.list(Some(&prefix));
+    let mut paths = vec![];
     while let Some(m) = futures::StreamExt::next(&mut listing).await {
-        let loc = m?.location;
+        paths.push(m?.location);
+    }
+    let mut fetched = futures::StreamExt::buffered(
+        futures::StreamExt::map(futures::stream::iter(paths), |p| async move {
+            let bytes = match store.os.get(&p).await {
+                Ok(r) => r.bytes().await,
+                Err(e) => Err(e),
+            };
+            (p, bytes)
+        }),
+        16,
+    );
+    while let Some((loc, bytes)) = futures::StreamExt::next(&mut fetched).await {
         let Some(via) = crate::gc::digest_from_path(&loc) else { continue };
-        let bytes = store.os.get(&loc).await?.bytes().await?;
-        // Unparseable bytes name nothing: under-granting is the safe failure for authorization,
-        // unlike the sweep where the same manifest must abort.
+        let bytes = match bytes {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(owner = %owner, name = %name, manifest = %loc, error = %e, "blob rows: skipping unreadable manifest");
+                continue;
+            }
+        };
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             tracing::warn!(owner = %owner, name = %name, manifest = %loc, "blob rows: skipping unparseable manifest");
             continue;
@@ -237,8 +276,7 @@ pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest
             db.write(b).await?;
         }
     }
-    db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
-    has_blob_row(&db, d).await
+    Ok(())
 }
 
 /// `(count, newest_ms)` for the image's manifests, kept in the image's own single-writer database

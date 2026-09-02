@@ -103,3 +103,133 @@ async fn object_store_prefix_listing_is_segment_wise() {
     }
     assert_eq!(hits, vec!["repo/img/acme/nginx/a".to_string()], "prefix leaked into a sibling");
 }
+
+/// An object store that answers one nominated key with a transient error, so the backfill's
+/// failure direction can be exercised at all. Everything else delegates.
+#[derive(Debug)]
+struct FailsOneGet {
+    inner: std::sync::Arc<slatedb::object_store::memory::InMemory>,
+    bad: slatedb::object_store::path::Path,
+}
+
+impl std::fmt::Display for FailsOneGet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FailsOneGet")
+    }
+}
+
+#[async_trait::async_trait]
+impl slatedb::object_store::ObjectStore for FailsOneGet {
+    async fn put_opts(
+        &self,
+        l: &slatedb::object_store::path::Path,
+        p: slatedb::object_store::PutPayload,
+        o: slatedb::object_store::PutOptions,
+    ) -> slatedb::object_store::Result<slatedb::object_store::PutResult> {
+        self.inner.put_opts(l, p, o).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        l: &slatedb::object_store::path::Path,
+        o: slatedb::object_store::PutMultipartOptions,
+    ) -> slatedb::object_store::Result<Box<dyn slatedb::object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(l, o).await
+    }
+    async fn get_opts(
+        &self,
+        l: &slatedb::object_store::path::Path,
+        o: slatedb::object_store::GetOptions,
+    ) -> slatedb::object_store::Result<slatedb::object_store::GetResult> {
+        if *l == self.bad {
+            return Err(slatedb::object_store::Error::Generic {
+                store: "FailsOneGet",
+                source: "injected transient failure".into(),
+            });
+        }
+        self.inner.get_opts(l, o).await
+    }
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<'static, slatedb::object_store::Result<slatedb::object_store::path::Path>>,
+    ) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<slatedb::object_store::path::Path>> {
+        self.inner.delete_stream(locations)
+    }
+    fn list(
+        &self,
+        p: Option<&slatedb::object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<slatedb::object_store::ObjectMeta>> {
+        self.inner.list(p)
+    }
+    async fn list_with_delimiter(
+        &self,
+        p: Option<&slatedb::object_store::path::Path>,
+    ) -> slatedb::object_store::Result<slatedb::object_store::ListResult> {
+        self.inner.list_with_delimiter(p).await
+    }
+    async fn copy_opts(
+        &self,
+        from: &slatedb::object_store::path::Path,
+        to: &slatedb::object_store::path::Path,
+        o: slatedb::object_store::CopyOptions,
+    ) -> slatedb::object_store::Result<()> {
+        self.inner.copy_opts(from, to, o).await
+    }
+}
+
+/// A pre-rows image whose manifest cannot be read must answer "this image does not hold that
+/// blob" — a 404 for the puller — not propagate the store's error into a 500. Under-granting is
+/// the safe failure for authorization; a fault is not an answer.
+#[tokio::test]
+async fn an_unreadable_manifest_reads_as_not_held_not_as_a_fault() {
+    use slatedb::object_store::{ObjectStoreExt, PutPayload};
+
+    let layer = Digest::of(b"layer");
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "layers": [{"digest": layer.to_string(), "size": 5}]
+    })
+    .to_string()
+    .into_bytes();
+    let md = Digest::of(&manifest);
+    let loc = rustic_git_registry::store::manifest_path("acme", "nginx", &md);
+
+    let inner = std::sync::Arc::new(slatedb::object_store::memory::InMemory::new());
+    inner.put(&loc, PutPayload::from(manifest)).await.unwrap();
+    let os = std::sync::Arc::new(FailsOneGet { inner, bad: loc.clone() });
+    let tmp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(
+        rustic_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
+    );
+
+    let held = rustic_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await;
+    assert!(!held.unwrap(), "an unreadable manifest names nothing; it is not a 500");
+}
+
+/// The walk happens once. A second call must answer from rows alone — proven by taking the
+/// manifest object away and asking again for a blob it named.
+#[tokio::test]
+async fn the_backfill_marks_itself_done_and_does_not_walk_twice() {
+    use slatedb::object_store::{ObjectStoreExt, PutPayload};
+    let e = common::env().await;
+    let layer = Digest::of(b"layer");
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "layers": [{"digest": layer.to_string(), "size": 5}]
+    })
+    .to_string()
+    .into_bytes();
+    let md = Digest::of(&manifest);
+    let loc = rustic_git_registry::store::manifest_path("acme", "nginx", &md);
+    e.store.os.put(&loc, PutPayload::from(manifest)).await.unwrap();
+
+    assert!(rustic_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
+        .await
+        .unwrap());
+    e.store.os.delete(&loc).await.unwrap();
+    assert!(
+        rustic_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
+            .await
+            .unwrap(),
+        "the row survives the manifest; the walk must not run a second time"
+    );
+}
