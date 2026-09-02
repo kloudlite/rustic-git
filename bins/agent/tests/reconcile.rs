@@ -1515,13 +1515,16 @@ const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1";
 static FLUSH_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Sets the timeout for the guard's lifetime and restores the default (unset) on drop.
-struct FlushTimeout(std::sync::MutexGuard<'static, ()>);
+struct FlushTimeout {
+    // Held, never read: the guard IS the serialization.
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
 
 impl FlushTimeout {
     fn set(secs: &str) -> Self {
         let g = FLUSH_ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("WS_STOP_FLUSH_TIMEOUT_SECS", secs);
-        FlushTimeout(g)
+        FlushTimeout { _guard: g }
     }
 }
 

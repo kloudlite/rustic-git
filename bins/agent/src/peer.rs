@@ -986,9 +986,11 @@ mod reconcile_tests {
     // These two tests each spin up a real peer server on the fixed `:8444` production port
     // (`agent_pod_addr` hard-codes it, so there's no way around binding it for real) — serialized
     // so they never race each other for the port when the harness runs them concurrently.
-    fn peer_port_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    // An async mutex on purpose: the guard is held across the test's awaits (that is the point —
+    // the fixed port stays taken for the whole body), and a std guard across an await is a lint.
+    fn peer_port_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
     /// An incremental receive whose `-p` the source never had (this node's nearest held ancestor
@@ -998,7 +1000,7 @@ mod reconcile_tests {
     /// the source's own `-p` failure surfacing as an incomplete stream) and succeeds call 2.
     #[tokio::test]
     async fn an_incremental_pull_that_fails_falls_back_to_a_full_pull_from_the_same_source() {
-        let _port_guard = peer_port_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _port_guard = peer_port_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
         // I already hold "vol-1-parent" locally — so `my_parent` is `Some`, and the first GET
         // carries `?parent=vol-1-parent`.
@@ -1275,7 +1277,7 @@ fi
     /// to pass — that is the point of Task 6.
     #[tokio::test]
     async fn a_ready_transient_is_pulled_and_counts_toward_synced() {
-        let _port_guard = peer_port_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _port_guard = peer_port_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
 
         let bin_dir = tmp.path().join("bin");
