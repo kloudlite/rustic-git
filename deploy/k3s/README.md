@@ -794,6 +794,10 @@ The 2026-09-03 change drops four CRD fields that Tasks 1–11 of the stop/interr
 work left with zero readers: `WorkspaceStatus.compatibleNodes` and `EnvironmentStatus.compatibleNodes`
 (placement already reads the replica rows' `branches` instead), `WorkspaceStatus.durable` and
 `EnvironmentStatus.durable`, `VolumeReplicaStatus.lastSyncAt`, and `OwnerBinding.spec.nodeName`.
-`kubectl apply -f deploy/k3s/crds.yaml` for this change is safe in EITHER order relative to the
-agent roll: an old agent that still writes `compatibleNodes` just has it pruned by the new schema,
-and a new agent never sets any of the four in the first place — nothing reads them either way.
+
+**CRDs FIRST, then the agent** — the same order as "Order" above, and here it is load-bearing for
+exactly one of the fields. `OwnerBinding.spec.nodeName` was REQUIRED in the old schema and the new
+agent never sets it, so an agent rolled ahead of the CRDs gets a 422 on every `ensure_binding`
+create and every workspace on that node parks in `NamespaceNotReady`. The other three
+(`compatibleNodes`, `durable`, `lastSyncAt`) are genuinely order-free: they were optional, an old
+agent that still writes one just has it pruned by the new schema, and nothing reads any of them.
