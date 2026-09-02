@@ -57,7 +57,7 @@
 #                                                                       PermissionEnforcement on
 #                                                                       their children (Snapshot has
 #                                                                       none — see its module doc)
-#   namespaces                             create,patch                 ensure (server-side apply)
+#   namespaces                             get,create,patch             ensure (server-side apply); get for the per-node gate
 #   limitranges, services                  create,patch                 ensure (server-side apply)
 #   networkpolicies                        create,patch                 ensure (incl. both halves of
 #                                                                       an attachment grant)
@@ -177,8 +177,15 @@ rules:
   # in THIS rule is ever deleted by the agent — an ownerReference does that — so no `delete`, and
   # nothing is read back, so no `get`.
   - apiGroups: [""]
-    resources: ["namespaces", "services", "limitranges"]
+    resources: ["services", "limitranges"]
     verbs: ["create", "patch"]
+  # Namespaces are the one thing read back: `namespace_ready` GETs the workspace's own namespace
+  # so a node that has never seen a team is gated on the namespace's existence, not on a
+  # cluster-scoped condition another node wrote. `get`, never `list` — the agent has no reason to
+  # enumerate namespaces it did not make.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create", "patch"]
   # NetworkPolicies are the exception to the "nothing here is ever deleted" rule above: an
   # attachment grant is removed by NAME on detach, because its workspace outlives it. A denied
   # delete comes back 403, not 404, so a missing verb here does not degrade — it aborts every
