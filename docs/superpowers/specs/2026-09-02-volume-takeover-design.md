@@ -46,9 +46,22 @@ Four moves, all on paths that already exist.
    "interesting", and pulls from any survivor with a Synced row — the existing source
    selection. When the OWNER is the dead node, `targets` is asked for `replicas` standbys
    instead of `replicas - 1` (the owner no longer counts as a copy), so the live copy count is
-   `replicas` either way. When the node returns it is a candidate again, the hash flips back,
-   and the extra copy on the third machine is retired by `pull_volume`'s existing
-   "not a target any more" pass — the same churn a node join causes today, no new mechanism.
+   `replicas` either way. When the node returns it is a candidate again and the hash flips back — which is the
+   same event as a node JOINING, handled next.
+
+0b. **Copies spread onto a new node and leave the node they left.** Rendezvous already gives a
+   new pool node its share (about `1/N` of every volume's standby slots) the moment it carries
+   the pool label: it finds those volumes interesting and pulls them. What is missing is the
+   other half — the node whose slot moved keeps its subvolume and its `VolumeReplica` row
+   forever, and that stale `Synced` row still lets it claim and still satisfies a stop's flush
+   gate. So `pull_beat` gains a **retire pass**: for every volume this node holds locally
+   (`{pool}/vol/{id}` exists) where it is not the owner, not a rendezvous target and not
+   hosting a worktree, it deletes its own `VolumeReplica` row and the local subvolumes
+   (`janitor::cleanup_local`). Keep-biased on purpose: retire ONLY when every current target
+   already reports `Synced` — a copy is never dropped before its replacement exists, so a
+   volume never has fewer live copies during a spread than it had before. A node that has
+   just joined and is still pulling therefore keeps the old copy alive until it catches up;
+   the old copy goes on the beat after.
 
 1. **The dead-node sweep heals only what is stopped.** `unclaim_dead_nodes` (pull beat,
    `WS_NODE_DEAD_SECS`, default 600, same `node_is_dead` test) changes in two ways:
@@ -131,5 +144,6 @@ RBAC is already sufficient: the agent has `patch` on `volumes`.
 - The `NodeMismatch` guard for a non-empty owner. Two places naming a node still refuse rather
   than pick.
 - `replicate::targets` itself, the pull protocol, source selection, sync points, commits, homes.
+- Where PODS run is still first-Synced-claimant-wins; spreading owners across nodes at claim time is a separate change, not in this spec.
 - `may_claim`: a healed third node has a Synced row and is therefore claimable — that is the
   point.

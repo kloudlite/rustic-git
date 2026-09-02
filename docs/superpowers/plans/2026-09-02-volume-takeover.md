@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - Replica candidates for `replicate::targets` are LIVE pool nodes only; a dead owner does not count as a copy.
+- A local copy is retired ONLY when this node is not owner, not target, not hosting, AND every current target reports `Synced`.
 - The agent writes spec on a Volume ONLY for `restoreTo` and `nodeName`; `nodeName` may change only `owned -> ""` (sweep) or `"" -> me` (takeover). Never `owned -> other`.
 - Takeover uses a JSON patch whose first op is `{"op":"test","path":"/spec/nodeName","value":""}`. No read-modify-write.
 - Every sweep and takeover is keep-biased: a list error clears nothing; a patch error takes nothing.
@@ -105,6 +106,89 @@ fn standby_count(owner_alive: bool, replicas: u32) -> usize {
 ```bash
 git add bins/agent/src/peer.rs
 git commit -m "Place replicas over live nodes only so a dead node's copies heal elsewhere"
+```
+
+### Task 0b: Retire a copy whose rendezvous slot moved to another node
+
+**Files:**
+- Modify: `bins/agent/src/peer.rs` (`pull_beat_with`; new `retire_pass`; tests)
+- Modify: `bins/agent/src/janitor.rs` (`cleanup_local` is already `pub`)
+
+**Interfaces:**
+- Consumes: `replicate::targets`, `standby_count`, `janitor::cleanup_local`, `crd::replica_name(volume, node)`, `engine.pool.voldir(id)`.
+- Produces: `fn should_retire(me: &str, owner: &str, targets: &[String], hosted: bool, synced: &HashSet<String>) -> bool`; `async fn retire_pass(ctx, live: &[String])`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+    #[test]
+    fn should_retire_only_an_unwanted_copy_whose_replacements_are_synced() {
+        let t = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let synced = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        assert!(!should_retire("b", "b", &t(&["c"]), false, &synced(&["c"])), "owner never retires");
+        assert!(!should_retire("b", "a", &t(&["b"]), false, &synced(&["b"])), "still a target");
+        assert!(!should_retire("b", "a", &t(&["c"]), true, &synced(&["c"])), "hosting a worktree here");
+        assert!(!should_retire("b", "a", &t(&["c"]), false, &synced(&[])), "replacement not synced yet: keep");
+        assert!(!should_retire("b", "", &t(&["c"]), false, &synced(&["c"])), "unowned (dead owner): keep until taken");
+        assert!(should_retire("b", "a", &t(&["c"]), false, &synced(&["c"])));
+    }
+```
+
+And one harness test: node-b holds `v1` locally (create `engine.pool.voldir("v1")` under the test pool), Volume `v1` owned by node-a with `replicas: 2`, live `[a, b, c]` where `targets("v1","a",live,2) == ["c"]` (pick a volume id that hashes so; assert that in the test with `replicate::targets` first), a `VolumeReplica` row for `c` in `Synced`, no Workspace hosted on b: after `retire_pass`, the recorder saw `DELETE /apis/rustic-git.io/v1alpha1/volumereplicas/{replica_name("v1","node-b")}` and `voldir("v1")` is gone. Second harness test: same but `c`'s row `Syncing` — no DELETE, directory stays.
+
+- [ ] **Step 2: Run, expect failure** — `cargo test -p rustic-git-agent should_retire retire_pass` — FAIL.
+
+- [ ] **Step 3: Implement**
+
+```rust
+/// A copy whose rendezvous slot moved (a node joined, or a dead one came back) is not just
+/// wasted disk: its stale Synced row still wins claims and satisfies stop's flush gate with
+/// data that is no longer being pulled. It goes only once every CURRENT target is Synced, so a
+/// spread never passes through a moment with fewer live copies than before. An unowned volume
+/// is a dead node's mid-takeover: keep everything until someone owns it again.
+fn should_retire(me: &str, owner: &str, targets: &[String], hosted: bool, synced: &HashSet<String>) -> bool {
+    !owner.is_empty() && owner != me && !hosted && !targets.iter().any(|t| t == me) && targets.iter().all(|t| synced.contains(t))
+}
+
+async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
+    let vols = match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items, Err(e) => { tracing::warn!(error = %e, "pull: retire: listing volumes; retiring nothing"); return; }
+    };
+    let rows = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items, Err(e) => { tracing::warn!(error = %e, "pull: retire: listing replicas; retiring nothing"); return; }
+    };
+    let hosted = hosted_volumes(ctx).await; // status.volumeRef of every Workspace/Environment with status.nodeName == me; on a list error return — retire nothing
+    for v in vols {
+        let id = v.name_any();
+        if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() { continue; }
+        let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
+        let targets = replicate::targets(&id, &v.spec.node_name, live, standby_count(owner_alive, v.spec.replicas));
+        let synced: HashSet<String> = rows.iter()
+            .filter(|r| r.spec.volume == id && r.status.as_ref().is_some_and(|s| s.phase == "Synced"))
+            .map(|r| r.spec.node.clone()).collect();
+        if !should_retire(&ctx.node, &v.spec.node_name, &targets, hosted.contains(&id), &synced) { continue; }
+        let rname = crd::replica_name(&id, &ctx.node);
+        if let Err(e) = Api::<crd::VolumeReplica>::all(ctx.client.clone()).delete(&rname, &Default::default()).await {
+            if !matches!(&e, kube::Error::Api(s) if s.code == 404) {
+                tracing::warn!(volume = %id, error = %e, "pull: retire: deleting my replica row; keeping the copy");
+                continue; // row first, copy second: a copy without a row is harmless, a row without a copy is a lie
+            }
+        }
+        janitor::cleanup_local(&ctx.engine, &id);
+        tracing::info!(volume = %id, "pull: retire: slot moved elsewhere, copy dropped");
+    }
+}
+```
+
+`hosted_volumes` lists Workspaces and Environments field-selected on `status.nodeName={me}` (the same selector `sync.rs` uses) and collects their `status.volumeRef.name`. Call `retire_pass(ctx, &live).await` at the end of `pull_beat_with`, after the pull loop, so a new target's pull runs before anyone retires.
+
+- [ ] **Step 4: Run tests and clippy** — PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add bins/agent/src/peer.rs
+git commit -m "Retire a replica copy once its rendezvous slot has moved and settled"
 ```
 
 ### Task 1: `Phase::Unavailable` and the admission rule
@@ -438,7 +522,7 @@ git commit -m "Drop a lost volume's stale worktrees on the node that lost it"
 - Modify: `crates/workspaces/src/api.rs` (`stop_ws` ~line 900 and the environment stop handler): when the object's status carries a `NodeDead` condition, the 2xx response body includes `"warning": "node {n} is down; edits after the last sync point are only on that node and will not follow the move"` — read the node from `status.nodeName`. One test in the api test module: a stopped workspace with a `NodeDead` condition answers with that warning, one without does not.
 - Modify: `CLAUDE.md` ("Workspaces and environments": one sentence after the `status.nodeName` claim sentence)
 - Modify: `deploy/k3s/README.md` (a "Node death" subsection: what the sweep does, the 600 s floor, the partition caveat, and how to read `Unavailable`)
-- Modify: `tests/ws_e2e.sh` (after the cross-node sync-point assertions; needs THREE agent nodes, else skip with a log line: cordon+drain is not available in the harness, so simulate by scaling the agent DaemonSet off one node with a nodeSelector label, wait `WS_NODE_DEAD_SECS`, assert within two pull beats that a `VolumeReplica` row for the volume appears on the third node and reaches `Synced`; assert a RUNNING workspace's Volume goes `Unavailable` but keeps `nodeName` and the workspace carries `NodeDead`; then stop the workspace through the API, assert the response carries the warning, the pin clears, the workspace re-claims on the other node and its Volume `spec.nodeName` equals the new `status.nodeName`)
+- Modify: `tests/ws_e2e.sh` (after the cross-node sync-point assertions; needs THREE agent nodes, else skip with a log line. Node JOIN first: with `replicas: 2` and one node's pool label removed at the start, add the label back, assert within three pull beats that the standby slot that rendezvous assigns to it (compute with the same hash in a tiny `cargo run --example` or by reading agent logs for `slot moved elsewhere`) has a `Synced` row there and that the previous standby's row and `{pool}/vol/{id}` are gone. Then node DEATH: cordon+drain is not available in the harness, so simulate by scaling the agent DaemonSet off one node with a nodeSelector label, wait `WS_NODE_DEAD_SECS`, assert within two pull beats that a `VolumeReplica` row for the volume appears on the third node and reaches `Synced`; assert a RUNNING workspace's Volume goes `Unavailable` but keeps `nodeName` and the workspace carries `NodeDead`; then stop the workspace through the API, assert the response carries the warning, the pin clears, the workspace re-claims on the other node and its Volume `spec.nodeName` equals the new `status.nodeName`)
 
 - [ ] **Step 1: CLAUDE.md sentence**
 
@@ -455,6 +539,6 @@ git commit -m "Document volume takeover and assert it end to end"
 
 ## Self-review
 
-- Spec coverage: replica healing (Task 0), sweep with the Running/Stopped split (Task 2), takeover + guard (Task 3), returning node (Task 4), `Unavailable` + admission (Task 1), stop warning + docs/caveats (Task 5). replicas:1 return-path is Task 3's takeover arm plus Task 4's empty-owner keep rule.
+- Spec coverage: replica healing (Task 0), spread on join with retire (Task 0b), sweep with the Running/Stopped split (Task 2), takeover + guard (Task 3), returning node (Task 4), `Unavailable` + admission (Task 1), stop warning + docs/caveats (Task 5). replicas:1 return-path is Task 3's takeover arm plus Task 4's empty-owner keep rule.
 - The stop handler already writes `desiredState: Stopped`; nothing new fires the move — the next sweep beat does.
 - Names: `take_volume`, `release_dead_volumes`, `drop_stale_worktrees`, `Phase::Unavailable` consistent across tasks.
