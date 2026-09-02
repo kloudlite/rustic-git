@@ -15,20 +15,38 @@ written once, at create, and nothing ever moves it. So today:
 - Nothing tells an operator (or the API) that the volume is unusable; `kubectl get volumes`
   shows the phase it had when the node died.
 
-The rule the owner of this repo gave: **if the node is unavailable, the volume is unavailable** —
-and an unavailable volume has no owner, so a healthy node that holds a Synced copy may take it.
+The rules the owner of this repo gave: **if the node is unavailable, the volume is unavailable**;
+and **never re-host a RUNNING worktree on its own** — a person who finds their workspace open on
+another node minus the last minutes of edits has been hurt worse than one who finds it down. The
+survivors hold the latest sync point, not the live tree; only the person can decide that the
+difference is acceptable. Automatic healing is therefore limited to what has nothing to lose.
 
 ## Decision
 
 Three moves, all on paths that already exist.
 
-1. **The dead-node sweep covers Volumes.** `unclaim_dead_nodes` (pull beat, `WS_NODE_DEAD_SECS`,
-   default 600, same `node_is_dead` test) gains a Volume arm: for every Volume whose
-   `spec.nodeName` names a dead node, clear `spec.nodeName` to `""` and write status
-   `phase: Unavailable` with condition `Available=False/NodeDead`. Clearing the owner is a
-   **spec** write — the one new exception to "the agent writes status, not spec", beside
-   `restoreTo`. The sweep is idempotent and runs on every node; two nodes clearing the same
-   pin converge on the same result.
+1. **The dead-node sweep heals only what is stopped.** `unclaim_dead_nodes` (pull beat,
+   `WS_NODE_DEAD_SECS`, default 600, same `node_is_dead` test) changes in two ways:
+   - It un-places a Workspace/Environment ONLY when `spec.desiredState == Stopped`. A stopped
+     worktree was flushed and replica-gated at stop time (or timed out with
+     `FlushUnreplicated`, which the person already saw); moving it loses nothing new. A RUNNING
+     one stays pinned to the dead node and gets condition `Degraded=True/NodeDead` with the
+     message `node {n} is down; edits since the last sync point exist only there — stop and
+     start to move it, or wait for the node`. Its pod is gone with the node; nothing pretends
+     otherwise.
+   - It gains a Volume arm: for every Volume whose `spec.nodeName` names a dead node, write
+     status `phase: Unavailable`, condition `Available=False/NodeDead`, and — only when every
+     parent naming that volume is `Stopped` — clear `spec.nodeName` to `""`. Clearing the
+     owner is a **spec** write, the one new exception to "the agent writes status, not spec"
+     beside `restoreTo`. Idempotent, runs on every node; two nodes clearing the same pin
+     converge.
+
+   **The person decides.** Stopping a workspace on a dead node (`desiredState: Stopped` through
+   the existing API) is the explicit "move on": the next sweep un-places it and releases its
+   volume, a survivor claims it, and starting it again re-hosts from the latest sync point that
+   survivor holds. `/v1`'s stop handler answers with the loss window when the parent carries
+   `NodeDead` (`"edits after {lastSyncAt} are on the dead node and will not follow"`). If the
+   node returns first, its pod comes back with everything intact — the pin never moved.
 2. **Takeover on claim.** A workspace or environment un-placed by the sweep is claimed as today
    (`may_claim` already requires this node's `VolumeReplica` to be `Synced` when the volume has
    commits). In `resolve_volume`, before the `NodeMismatch` guard: if the Volume's
@@ -64,24 +82,27 @@ RBAC is already sufficient: the agent has `patch` on `volumes`.
 
 ## What this deliberately accepts
 
-- **A partitioned-but-alive node.** A node that is cut off from the API server for
-  `WS_NODE_DEAD_SECS` but still running its pod keeps writing to a subvolume it no longer owns.
-  When it reconnects it finds its Workspace un-placed, its Volume owned elsewhere; its
-  controller tears down the pod (the object is no longer its own), and everything it wrote after
-  the last sync point that replicated is lost. That is the same window as a real death, plus
-  whatever the person typed into a pod that was effectively already dead. Not fenced: the
-  alternative (a lease the pod itself must renew) is a second liveness system. Documented, not
-  solved.
-- **Data-loss window** is one `WS_SYNC_SECS` plus one `WS_REPLICA_SECS` of edits — the
-  latest transient the survivor actually holds. Unchanged from the sync-points spec.
+- **A partitioned-but-alive node.** A node cut off from the API server for `WS_NODE_DEAD_SECS`
+  keeps its Running pods — and, under this design, keeps owning their volumes, because a
+  Running worktree is never released. The only way it loses one is the person stopping it from
+  the outside during the partition; on reconnect the old node sees the object is no longer its
+  own, tears the pod down, and whatever was typed after the last replicated sync point is
+  gone. The person asked for exactly that. Not fenced beyond this: a lease the pod must renew
+  would be a second liveness system.
+- **Data-loss window on an explicit stop-and-move** is one `WS_SYNC_SECS` plus one
+  `WS_REPLICA_SECS` of edits — the latest transient the survivor holds. Unchanged from the
+  sync-points spec, and now always chosen, never imposed.
+- **A Running workspace on a dead node stays down** until the node returns or the person stops
+  it. That is the price of the rule above, paid on purpose.
 - **Replicas: 1.** A volume with no second replica has no Synced survivor; the sweep still
-  marks it `Unavailable`, and the parent waits un-placed until the node returns. On return the
+  marks it `Unavailable`, and a stopped parent waits un-placed until the node returns. On return the
   node's pull beat sees a volume with an empty owner and — because it holds the only copy —
   takes it back through the same takeover path (its replica row is Synced with itself).
 
 ## What this does NOT change
 
 - `ensure_child_volume` still writes the pin at create from `status.nodeName`.
+- `stop` on a live node: the flush gate, timeout and `FlushUnreplicated` are as before.
 - The `NodeMismatch` guard for a non-empty owner. Two places naming a node still refuse rather
   than pick.
 - `may_claim`, placement, the pull protocol, sync points, commits, homes.

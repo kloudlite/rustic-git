@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A volume owned by a dead node becomes unowned and `Unavailable`; the node that claims its workspace or environment takes ownership and re-hosts from the latest sync point.
+**Goal:** A volume owned by a dead node becomes `Unavailable`; a STOPPED workspace or environment on that node is released and re-hosted by a Synced survivor, a RUNNING one is left pinned and marked `NodeDead` until the person stops it.
 
 **Architecture:** Three arms on existing paths: the dead-node sweep in `bins/agent/src/peer.rs` clears `Volume.spec.nodeName`; `resolve_volume` in `bins/agent/src/controller.rs` takes an empty pin with a JSON-patch `test` compare-and-set; the pull beat on a non-owner deletes stale `live/` worktrees. The admission policy allows exactly the two `nodeName` transitions.
 
@@ -15,6 +15,7 @@
 - The agent writes spec on a Volume ONLY for `restoreTo` and `nodeName`; `nodeName` may change only `owned -> ""` (sweep) or `"" -> me` (takeover). Never `owned -> other`.
 - Takeover uses a JSON patch whose first op is `{"op":"test","path":"/spec/nodeName","value":""}`. No read-modify-write.
 - Every sweep and takeover is keep-biased: a list error clears nothing; a patch error takes nothing.
+- The sweep NEVER un-places a parent whose `spec.desiredState` is `Running`, and never clears a Volume pin while any parent naming that volume is `Running`.
 - CI gate: `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test -p rustic-git-agent -p rustic-git-workspaces`.
 - Commit subjects imperative sentence case, no tool attribution, no trailers.
 - Comments say WHY, never what.
@@ -67,63 +68,89 @@ git add crates/workspaces/src/crd.rs deploy/k3s/agent-admission.yaml deploy/k3s/
 git commit -m "Add the Unavailable volume phase and allow the two nodeName transitions"
 ```
 
-### Task 2: The dead-node sweep clears Volume owners
+### Task 2: The sweep spares Running worktrees and releases stopped ones' volumes
 
 **Files:**
-- Modify: `bins/agent/src/peer.rs` (`unclaim_dead_nodes`, ~line 700; tests near line 1181)
+- Modify: `bins/agent/src/peer.rs` (`unclaim_dead_nodes` ~line 700, `unclaim_kind` ~line 733; tests near line 1181)
+- Modify: `crates/workspaces/src/crd.rs` (`VolumeStatus.conditions` if absent)
 
 **Interfaces:**
-- Consumes: `unclaim_kind` (existing), `node_is_dead`, `replace_status`, `crd::Phase::Unavailable`.
-- Produces: `async fn release_dead_volumes(ctx, nodes, floor, now)` called from `unclaim_dead_nodes` after the Environment arm.
+- Consumes: `unclaim_kind`, `node_is_dead`, `replace_status`, `crd::Phase::Unavailable`, `crd::DesiredState`.
+- Produces: `unclaim_kind` gains a `releasable: impl Fn(&K) -> bool` argument; `async fn release_dead_volumes(ctx, nodes, floor, now, running_volumes: &HashSet<String>)`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
-Add beside the existing `unclaim` tests (same fake-API harness as the test at ~line 1224):
+Beside the existing unclaim tests (same harness as the one at ~line 1224). Add helpers `ws_placed_stopped(name, node)` (copy `ws_placed`, `desiredState: "stopped"`, plus `"volumeRef": {"name": format!("vol-{name}")}` in status — match the real field name with `grep -n volume_ref crates/workspaces/src/crd.rs`) and `vol_owned(name, node)`; give `ws_placed` the same `volumeRef`. Add `VOLUMES` path constant and, if the recorder lacks it, `body_of(call)`.
 
 ```rust
     #[tokio::test]
-    async fn a_dead_nodes_volume_loses_its_owner_and_goes_unavailable() {
+    async fn a_running_worktree_on_a_dead_node_is_marked_not_moved() {
         let rec = Recorder::default();
         let ctx = ctx_with_routes(&rec, vec![
             Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_ready("node-a"), node_dead("node-b")]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-run", "node-b")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("v-live", "node-a"), vol_owned("v-dead", "node-b")]) },
-            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/v-dead".into(), status: 200, body: vol_owned("v-dead", "") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/v-dead/status".into(), status: 200, body: vol_owned("v-dead", "") },
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-ws-run", "node-b")]) },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-b") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-run/status".into(), status: 200, body: vol_owned("vol-ws-run", "node-b") },
         ]);
         unclaim_dead_nodes(&ctx).await;
-        let calls = rec.calls();
-        assert!(calls.iter().any(|c| c == "PATCH /apis/rustic-git.io/v1alpha1/volumes/v-dead"));
-        assert!(calls.iter().any(|c| c == "PUT /apis/rustic-git.io/v1alpha1/volumes/v-dead/status"));
-        assert!(!calls.iter().any(|c| c.contains("/volumes/v-live")));
-        let body = rec.body_of("PATCH /apis/rustic-git.io/v1alpha1/volumes/v-dead");
-        assert_eq!(body["spec"]["nodeName"], "");
-        let st = rec.body_of("PUT /apis/rustic-git.io/v1alpha1/volumes/v-dead/status");
-        assert_eq!(st["status"]["phase"], "Unavailable");
+        let ws = rec.body_of("PUT /apis/rustic-git.io/v1alpha1/workspaces/ws-run/status");
+        assert_eq!(ws["status"]["nodeName"], "node-b", "a running worktree keeps its node");
+        assert_eq!(ws["status"]["conditions"][0]["reason"], "NodeDead");
+        assert!(!rec.calls().iter().any(|c| c == "PATCH /apis/rustic-git.io/v1alpha1/volumes/vol-ws-run"), "pin untouched");
+        let vol = rec.body_of("PUT /apis/rustic-git.io/v1alpha1/volumes/vol-ws-run/status");
+        assert_eq!(vol["status"]["phase"], "Unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worktree_on_a_dead_node_is_released_with_its_volume() {
+        let rec = Recorder::default();
+        let ctx = ctx_with_routes(&rec, vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_ready("node-a"), node_dead("node-b")]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed_stopped("ws-stop", "node-b")]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-ws-stop", "node-b"), vol_owned("vol-live", "node-a")]) },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
+            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop/status".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
+        ]);
+        unclaim_dead_nodes(&ctx).await;
+        let ws = rec.body_of("PUT /apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status");
+        assert_eq!(ws["status"]["nodeName"], "");
+        assert_eq!(rec.body_of("PATCH /apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop")["spec"]["nodeName"], "");
+        assert_eq!(rec.body_of("PUT /apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop/status")["status"]["phase"], "Unavailable");
+        assert!(!rec.calls().iter().any(|c| c.contains("/volumes/vol-live")));
     }
 ```
 
-Use the harness's existing helpers; add `vol_owned(name, node)` (a `Volume` JSON with `spec.nodeName = node`, `status.phase = "Ready"`) and the `VOLUMES` path constant if absent, copying the shape of `ws_placed`. If the recorder has no `body_of`, add it as a lookup over recorded `(call, body)` pairs.
-
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent a_dead_nodes_volume` — FAIL (no PATCH issued).
+- [ ] **Step 2: Run, expect failure** — `cargo test -p rustic-git-agent on_a_dead_node` — FAIL.
 
 - [ ] **Step 3: Implement**
 
-Append to `unclaim_dead_nodes` after the Environment arm:
+`unclaim_kind` gets a `releasable: impl Fn(&K) -> bool` parameter and a `degraded_status: impl Fn(&K) -> serde_json::Value`. In its loop, after the `node_is_dead` check:
 
 ```rust
-    release_dead_volumes(ctx, &nodes, floor, now).await;
+        // A Running worktree is never moved by the system: its live edits exist only on the dead
+        // node and only the person may decide those are expendable (spec: "the person decides").
+        // It is marked so the API can say why, and released the moment desiredState is Stopped.
+        let status = if releasable(&obj) { cleared_status(&obj) } else { degraded_status(&obj) };
 ```
 
-and add:
+and `replace_status` with that. Both callers pass `|w| w.spec.desired_state == crd::DesiredState::Stopped` (Environment the same) and a `degraded_status` that keeps `node_name` and sets `conditions = vec![crd::condition("Degraded", true, "NodeDead", &format!("node {n} is down; edits since the last sync point exist only there — stop and start to move it, or wait for the node"), gen)]` where `n` is the claimed node. Skip the write when the object already carries a `NodeDead` condition (no churn every beat).
+
+`unclaim_dead_nodes` collects `running_volumes: HashSet<String>` — the `status.volumeRef.name` of every listed Workspace/Environment with `desiredState == Running` (have `unclaim_kind` return the listed items, or list once and pass the slices in) — then calls:
 
 ```rust
-/// A dead node's Volume loses its owner pin: `spec.nodeName` goes empty (the one spec field
-/// the sweep is allowed to touch, see agent-admission.yaml) and the phase says why. Spec first,
-/// status second — a status that says Unavailable on a still-pinned volume would be a lie the
-/// takeover arm cannot act on, whereas a cleared pin with stale status is taken on the next claim.
-async fn release_dead_volumes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
+    release_dead_volumes(ctx, &nodes, floor, now, &running_volumes).await;
+```
+
+```rust
+/// A dead node's Volume: phase says Unavailable for every one; the owner pin is cleared ONLY
+/// when no Running parent still names it — a pinned-but-unavailable volume is exactly the
+/// "down, not moved" state the spec asks for. Spec first, status second: a cleared pin with
+/// stale status is taken on the next claim; the reverse is a lie the takeover arm cannot act on.
+async fn release_dead_volumes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp, running: &HashSet<String>) {
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     let list = match api.list(&ListParams::default()).await {
         Ok(l) => l.items,
@@ -133,31 +160,37 @@ async fn release_dead_volumes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k
         }
     };
     for vol in list {
-        let owner = vol.spec.node_name.as_str();
+        let owner = vol.spec.node_name.clone();
         if owner.is_empty() || !node_is_dead(nodes.iter().find(|n| n.name_any() == owner), floor, now) {
             continue;
         }
         let name = vol.name_any();
-        let clear = serde_json::json!({ "spec": { "nodeName": "" } });
-        if let Err(e) = api.patch(&name, &PatchParams::default(), &Patch::Merge(&clear)).await {
-            tracing::warn!(volume = %name, error = %e, "pull: unclaim: releasing a dead node's volume");
-            continue;
-        }
-        let mut st = vol.status.clone().unwrap_or_default();
-        st.phase = crd::Phase::Unavailable;
-        let gen = vol.metadata.generation.unwrap_or(0);
-        st.conditions = vec![crd::condition("Available", false, "NodeDead", &format!("owner {owner} is dead; waiting for a Synced node to take the volume"), gen)];
+        let release = !running.contains(&name);
         let mut cur = vol;
-        cur.spec.node_name.clear();
-        if let Err(e) = replace_status(&api, &cur, "Volume", serde_json::to_value(st).expect("VolumeStatus serializes")).await {
-            tracing::warn!(volume = %name, error = %e, "pull: unclaim: marking a released volume unavailable");
+        if release {
+            let clear = serde_json::json!({ "spec": { "nodeName": "" } });
+            if let Err(e) = api.patch(&name, &PatchParams::default(), &Patch::Merge(&clear)).await {
+                tracing::warn!(volume = %name, error = %e, "pull: unclaim: releasing a dead node's volume");
+                continue;
+            }
+            cur.spec.node_name.clear();
         }
-        tracing::info!(volume = %name, %owner, "pull: unclaim: released a dead node's volume");
+        let mut st = cur.status.clone().unwrap_or_default();
+        if st.phase == crd::Phase::Unavailable && !release {
+            continue; // already marked, still pinned: nothing changed since last beat
+        }
+        st.phase = crd::Phase::Unavailable;
+        let gen = cur.metadata.generation.unwrap_or(0);
+        let why = if release { format!("owner {owner} is dead; released, waiting for a Synced node to take it") } else { format!("owner {owner} is dead; a Running worktree still names this volume, so it stays pinned") };
+        st.conditions = vec![crd::condition("Available", false, "NodeDead", &why, gen)];
+        if let Err(e) = replace_status(&api, &cur, "Volume", serde_json::to_value(st).expect("VolumeStatus serializes")).await {
+            tracing::warn!(volume = %name, error = %e, "pull: unclaim: marking a dead node's volume unavailable");
+        }
     }
 }
 ```
 
-If `VolumeStatus` has no `conditions` field, add `#[serde(default)] pub conditions: Vec<Condition>` matching `WorkspaceStatus`'s. Import `kube::api::{Patch, PatchParams}` if not already in scope.
+If `VolumeStatus` has no `conditions`, add `#[serde(default)] pub conditions: Vec<Condition>` matching `WorkspaceStatus`'s. Import `kube::api::{Patch, PatchParams}` and `std::collections::HashSet` as needed. Existing unclaim tests that used a Running `ws_placed` and expected a cleared `nodeName` must flip to `ws_placed_stopped` — that expectation is what this task changes.
 
 - [ ] **Step 4: Run tests** — `cargo test -p rustic-git-agent` — PASS.
 
@@ -165,7 +198,7 @@ If `VolumeStatus` has no `conditions` field, add `#[serde(default)] pub conditio
 
 ```bash
 git add bins/agent/src/peer.rs crates/workspaces/src/crd.rs
-git commit -m "Release a dead node's volumes in the unclaim sweep"
+git commit -m "Release only stopped worktrees from a dead node and mark the rest"
 ```
 
 ### Task 3: Takeover in `resolve_volume`
@@ -317,13 +350,14 @@ git commit -m "Drop a lost volume's stale worktrees on the node that lost it"
 ### Task 5: Docs and the e2e assertion
 
 **Files:**
+- Modify: `crates/workspaces/src/api.rs` (`stop_ws` ~line 900 and the environment stop handler): when the object's status carries a `NodeDead` condition, the 2xx response body includes `"warning": "node {n} is down; edits after the last sync point are only on that node and will not follow the move"` — read the node from `status.nodeName`. One test in the api test module: a stopped workspace with a `NodeDead` condition answers with that warning, one without does not.
 - Modify: `CLAUDE.md` ("Workspaces and environments": one sentence after the `status.nodeName` claim sentence)
 - Modify: `deploy/k3s/README.md` (a "Node death" subsection: what the sweep does, the 600 s floor, the partition caveat, and how to read `Unavailable`)
-- Modify: `tests/ws_e2e.sh` (after the cross-node sync-point assertions: cordon+drain is not available in the harness, so simulate by scaling the agent DaemonSet off one node with a nodeSelector label, wait `WS_NODE_DEAD_SECS`, assert the Volume goes `Unavailable` with empty `nodeName`, then that the workspace re-claims on the other node and its Volume `spec.nodeName` equals the new `status.nodeName`)
+- Modify: `tests/ws_e2e.sh` (after the cross-node sync-point assertions: cordon+drain is not available in the harness, so simulate by scaling the agent DaemonSet off one node with a nodeSelector label, wait `WS_NODE_DEAD_SECS`, assert a RUNNING workspace's Volume goes `Unavailable` but keeps `nodeName` and the workspace carries `NodeDead`; then stop the workspace through the API, assert the response carries the warning, the pin clears, the workspace re-claims on the other node and its Volume `spec.nodeName` equals the new `status.nodeName`)
 
 - [ ] **Step 1: CLAUDE.md sentence**
 
-> When a node is dead for `WS_NODE_DEAD_SECS`, the unclaim sweep also clears every `Volume.spec.nodeName` it owned and marks the volume `Unavailable`; the node that then claims the parent takes the pin with a JSON-patch `test` on the empty value (`take_volume`), the one other spec write the admission policy allows.
+> When a node is dead for `WS_NODE_DEAD_SECS`, the unclaim sweep marks its volumes `Unavailable` and moves ONLY the worktrees whose `desiredState` is `Stopped` — a Running one keeps its pin and a `NodeDead` condition, because its live edits exist only on the dead node and only the person may write them off by stopping it. A released volume's pin is cleared, and the node that then claims the parent takes it with a JSON-patch `test` on the empty value (`take_volume`), the one other spec write the admission policy allows.
 
 - [ ] **Step 2: README subsection and e2e block** as described; the e2e step is skipped (not failed) with a log line when the cluster has fewer than two agent nodes.
 
@@ -336,5 +370,6 @@ git commit -m "Document volume takeover and assert it end to end"
 
 ## Self-review
 
-- Spec coverage: sweep (Task 2), takeover + guard (Task 3), returning node (Task 4), `Unavailable` + admission (Task 1), docs/caveats (Task 5). replicas:1 return-path is Task 3's takeover arm plus Task 4's empty-owner keep rule.
+- Spec coverage: sweep with the Running/Stopped split (Task 2), takeover + guard (Task 3), returning node (Task 4), `Unavailable` + admission (Task 1), stop warning + docs/caveats (Task 5). replicas:1 return-path is Task 3's takeover arm plus Task 4's empty-owner keep rule.
+- The stop handler already writes `desiredState: Stopped`; nothing new fires the move — the next sweep beat does.
 - Names: `take_volume`, `release_dead_volumes`, `drop_stale_worktrees`, `Phase::Unavailable` consistent across tasks.
