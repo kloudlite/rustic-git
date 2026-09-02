@@ -46,7 +46,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: web
-          image: ghcr.io/kloudlite/rustic-git-web:9f03fe6d545a247cfa60c28e8510e8bb9a97d3ad
+          image: ghcr.io/kloudlite/rustic-git-web:01fa9d807d7c437d9702b8bbfebae78ebebff93d
           ports:
             - { name: http, containerPort: 3000 }
           env:
