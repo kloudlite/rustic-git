@@ -167,7 +167,7 @@ The decommissioning node's own agent runs a decommission beat (30 s). It stops n
 Draining therefore takes as long as the people take to stop. An operator who needs the node
 sooner stops those workspaces through `/v1` like anyone else; the system never does it for them.
 
-Only after `drained` may the VM be deleted and its flannel `/32` removed from the ZeroFS
+Only after `drained` shows in that annotation may the VM be deleted and its flannel `/32` removed from the ZeroFS
 policy. Deleting earlier is the dead-node path: copies still heal, but any volume not yet
 released waits for a node that will never return.
 
@@ -197,6 +197,47 @@ Walked on 2026-09-03 against the rules above; each has an answer in this spec.
 | Many stops in a burst | The wake `Notify` coalesces; a pull pass already running finishes and runs once more (a pending flag), never concurrently. |
 | Deleting an interrupted parent | Ordinary delete; the ownerReference collects everything, and the edits on the dead node are discarded with it. The person chose to delete. |
 | Environment with several services | One volume, one stop transient, same rules; the StatefulSets go down together after the cut. |
+
+## Simplifications (audit of 2026-09-03)
+
+The rules above were checked against each other and against the code for anything said twice or
+kept for no reader. These are binding on the plan.
+
+1. **One "not a place to run" predicate.** Dead (NotReady past `WS_NODE_DEAD_SECS`) and
+   decommissioning (the label) are the same thing to placement. `live_nodes`, `owner_alive`,
+   `may_claim` and the sweep all call one `unplaceable(node)`; nothing tests the two conditions
+   separately.
+2. **One "is it replicated" truth.** The `Replicated` condition on a stopped parent is computed
+   in one place (the owner's reconcile of a stopped parent) and read everywhere else: the sweep
+   consults it instead of recomputing; the API and web show it. No separate `AwaitingReplica`
+   reason on `NodeDead` — a parent waiting for both shows `NodeDead` plus `Replicated=False`.
+   `replicas: 1` is not a separate reason either: `Replicated=False` with the message "no
+   replica is configured for this volume".
+3. **No `Released` reason.** `Unavailable` with an empty pin IS the released state; a third
+   reason would restate the pin.
+4. **The stop-generation annotation goes.** `stop-{parent}-{generation}` already carries the
+   generation in its name; the annotation and the `STOP_GENERATION` constant are deleted.
+5. **`StopPush::Landed` carries nothing.** With the flush wait gone, `unreplicated`,
+   `FLUSH_TIMED_OUT`, `FlushUnreplicated` and `flush_timeout` all go; `Landed` is a unit variant.
+6. **`status.compatibleNodes` is dead** once placement is the up-to-date rule: its only reader
+   is the "no volume yet" arm of `may_claim`, which becomes "any placeable node". The field is
+   dropped from the status writes and the CRD (kept as a tolerated-unknown on read so old
+   objects still parse).
+7. **One decommission annotation, not two.** `rustic-git.io/decommission-status` carries the
+   whole story: `draining running=N owned=N copies=N` while in progress, `drained <RFC 3339>`
+   when done. Operators grep one key.
+8. **`basedOn` on every clone response**, not only the interrupted one. A clone is always based
+   on a cut; the response always names the snapshot and its time, and the web always shows it.
+   The interrupted case differs only in that the cut is older than "now".
+9. **One per-volume decision function** for the dead-node and decommission sweeps: the three
+   arms in "Dead-node sweep, per volume" are one function over the beat's listing, called with
+   the dead set or the decommission set. `release_dead_volumes`, the per-kind `releasable`
+   closures in `unclaim_kind`, and the `running_volumes` plumbing between them are deleted.
+10. **`source_nodes` is deleted**, replaced by the same up-to-date check a start uses.
+
+Not simplified, on purpose: the two-step move of a volume at start (owner releases, taker
+CASes) stays instead of an owner-writes-the-target handoff, because the handoff would need the
+admission policy to allow any `nodeName` change, and the two-step reuses the reviewed CAS.
 
 ## What this does NOT change
 
