@@ -203,7 +203,10 @@ response's `based_on` (`snapshot`, `at`, `age_seconds`, `interrupted`) always na
 onto. It places by the one up-to-date rule like everything else, which is why a running source's
 clone lands on the owner: at the instant of the cut nothing else holds it. An INTERRUPTED source
 cannot be cut at all, so its clone grafts onto the newest transient an up-to-date node already
-holds and `based_on` states that age — the one way forward, chosen knowingly. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
+holds and `based_on` states that age — the one way forward, chosen knowingly. An ENVIRONMENT clone
+is the exception in kind: it still copies bytes from the source's own live subvolume on the node
+that holds it, so it cuts nothing, carries no `based_on`, and refuses an interrupted source with a
+409 — there is nothing on a live node to copy from. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
 an explicit past **snapshot** — a PUSHED commit record, named by id. Between pushes, a background
 sync beat (`WS_SYNC_SECS`, `bins/agent/src/sync.rs`) cuts a TRANSIENT `Snapshot` — never a parent,
 never advancing `status.head` — from each running worktree whose btrfs generation has moved, so a

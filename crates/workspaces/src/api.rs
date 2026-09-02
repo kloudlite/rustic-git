@@ -1662,8 +1662,25 @@ async fn clone_env(
     let new_id = rid("env");
     let volume = env_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
-    let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
-    let based_on = clone_base(c, &src.spec.owner, &volume, &id, interrupted, src.controller_owner_ref(&())).await?;
+    // An environment clone COPIES bytes from the source's own live subvolume on the node that
+    // holds it (`clone_local_ids`). An interrupted source's node is down, so there is nothing to
+    // copy from and the clone would sit `Creating` forever — refused here, before anything is
+    // created, rather than left as a workspace-shaped promise this path cannot keep. A workspace
+    // clone of an interrupted source IS allowed: it grafts onto a replicated sync point instead.
+    if src.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
+        return Err((
+            StatusCode::CONFLICT,
+            "the source environment is interrupted: its node is down, and an environment is copied from that node; cloning it waits for the node to return",
+        )
+            .into_response());
+    }
+    // No cut here, unlike `clone_ws`: the copy is taken from the live subvolume, so a snapshot
+    // would be a CR nothing reads that retention sweeps a minute later. That is also why the
+    // response carries no `based_on` — there is no cut this clone is based ON.
+    //
+    // ponytail: the ceiling is that an environment clone is LOCAL-ONLY. The upgrade is the
+    // workspace's shared-worktree path (a `clone-{env}-{hex}` cut, `commit: Some(_)`, and the
+    // `CommitPending` guard in this controller that `resolve_volume` would then need).
     let e = create_environment(
         c,
         &new_id,
@@ -1674,15 +1691,8 @@ async fn clone_env(
             services: src.spec.services.clone(),
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
-                // `None`, deliberately: an environment clone still COPIES bytes into a fresh child
-                // Volume (`clone_local_ids`), where a workspace clone is a second worktree of the
-                // source's own volume — a resolved commit here would silently flip environments onto
-                // the shared-worktree path, which `resolve_volume` and this controller have no
-                // clone-commit guard for. The local copy is at least as fresh as the cut `based_on`
-                // names, so the report stays honest.
-                // ponytail: the ceiling is that an environment clone is LOCAL-ONLY — an interrupted
-                // environment has no bytes on any live node to copy, so it cannot be cloned at all.
-                // The upgrade is the workspace's shared-worktree path, guard and all.
+                // `None`: a fresh child Volume filled by a local copy, never a second worktree of
+                // the source's volume. See the comment above `create_environment`.
                 source: Some(VolumeSource::CloneOf { volume, commit: None }),
             }),
             desired_state: DesiredState::Running,
@@ -1690,7 +1700,7 @@ async fn clone_env(
         },
     )
     .await?;
-    Ok(with_based_on(&env_doc(&e, &HashSet::new()), &based_on))
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
 }
 
 // ── push ─────────────────────────────────────────────────────────────────

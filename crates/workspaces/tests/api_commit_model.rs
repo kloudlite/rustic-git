@@ -719,19 +719,16 @@ async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
     assert_eq!(r.status(), 409);
 }
 
-/// Environments clone by the same rule, off their own volume and worktree.
+/// An environment clone COPIES bytes from the source's own live subvolume, so it cuts nothing:
+/// a snapshot here would be a CR nothing reads that retention sweeps a minute later, and there is
+/// no cut for `based_on` to name.
 #[tokio::test]
-async fn cloning_an_environment_cuts_a_transient_too() {
+async fn cloning_an_environment_cuts_nothing_and_reports_no_base() {
     let routes = vec![
         get(format!("{API}/environments/env-1"), placed_env("env-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
-            transient("sync-env-1-bbbb", "env-1", "karthik", "env-1")
-        ]})),
         get(format!("{API}/volumes/env-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "env-1", "uid": "vol-uid-2"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
-                body: snapshot("clone-env-1-cafe", "env-1", "karthik", "env-1", "sync-env-1-bbbb", "working") },
         Route { method: "POST", path: format!("{API}/environments"), status: 201, body: placed_env("env-2", "karthik") },
     ];
     let s = server(routes).await;
@@ -744,13 +741,38 @@ async fn cloning_an_environment_cuts_a_transient_too() {
         .await
         .unwrap();
     assert_eq!(r.status(), 202);
-    let cut = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
-    assert!(cut["metadata"]["name"].as_str().unwrap().starts_with("clone-env-1-"), "{cut}");
+    assert!(s.rec.sent("POST", &format!("{API}/snapshots")).is_empty(), "the live subvolume is the source; nothing is cut");
     let made = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
-    // `commit` stays null on purpose: an environment clone still COPIES bytes into a fresh child
-    // Volume, and a resolved commit would silently flip it onto the workspace's shared-worktree
-    // path. The local copy is at least as fresh as the cut, so `based_on` is still honest.
     assert!(made["spec"]["storage"]["source"]["cloneOf"]["commit"].is_null(), "{made}");
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["based_on"]["snapshot"], cut["metadata"]["name"]);
+    assert!(body["based_on"].is_null(), "no cut, nothing to be based on: {body}");
+}
+
+/// The copy comes off the source's node, so an interrupted environment cannot be cloned at all —
+/// refused before anything is created, rather than left as a promise this path cannot keep. The
+/// workspace clone of an interrupted source is the one that IS allowed, grafting onto a replica.
+#[tokio::test]
+async fn cloning_an_interrupted_environment_is_a_409_that_names_the_wait() {
+    let mut src = placed_env("env-1", "karthik");
+    src["status"]["conditions"] = json!([{
+        "type": "Degraded", "status": "True", "reason": "NodeDead",
+        "message": "node node-a is down", "lastTransitionTime": "2026-09-03T10:00:00Z"
+    }]);
+    let routes = vec![get(format!("{API}/environments/env-1"), src)];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let r = reqwest::Client::new()
+        .post(format!("{}/v1/environments/env-1/clone", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "copy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert!(r.text().await.unwrap().contains("cloning it waits for the node to return"));
+    assert!(
+        !s.rec.calls().iter().any(|c| c.starts_with("POST")),
+        "and nothing at all is created first: {:?}",
+        s.rec.calls()
+    );
 }

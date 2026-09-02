@@ -351,6 +351,10 @@ mod tests {
     fn test_ctx(routes: Vec<rustic_git_workspaces::kube_test::Route>) -> Arc<Ctx> {
         use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
         let (client, _) = mock_client(routes);
+        // `Ctx::new` PANICS without it, by design (an agent that defaulted to `:latest` would move
+        // every workspace on its next restart). Set here, as `sync.rs`'s own `test_ctx` does, so
+        // this test does not silently depend on another test having set it first.
+        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
         Arc::new(Ctx::new(
             client,
             Arc::new(Engine::new(EnginePool::new(std::path::Path::new("/tmp/claim-test")))),
