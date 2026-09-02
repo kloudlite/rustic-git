@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
-// `owner` reaches every action below as FormData, and goes straight into a revalidatePath
+// `owner` and `id` reach every action below as FormData, and go straight into a revalidatePath
 // PATTERN. A segment carrying `/` or `..` would silently revalidate something else, so each
 // action refuses it — a bad one is never a real submission, since the pages that render these
 // forms fill the field from the route params.
@@ -22,7 +22,8 @@ export type EnvActionState = {
 export async function startEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
-  const id = String(formData.get("id") ?? "");
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
@@ -50,7 +51,8 @@ export async function stopEnvironment(_prev: EnvActionState, formData: FormData)
 export async function pushEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
-  const id = String(formData.get("id") ?? "");
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
   const message = String(formData.get("message") ?? "").trim();
 
   const token = await tokenOr();
@@ -80,7 +82,8 @@ export async function pushEnvironment(_prev: EnvActionState, formData: FormData)
 export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
-  const id = String(formData.get("id") ?? "");
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
   const snapshotId = String(formData.get("snapshotId") ?? "");
   const mode = formData.get("mode");
   if (mode !== "inplace" && mode !== "new") return { error: "Could not tell where to restore to." };
@@ -119,7 +122,8 @@ export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: Fo
 export async function cloneEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
-  const id = String(formData.get("id") ?? "");
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { error: "Name the clone." };
 
@@ -162,7 +166,8 @@ export async function deleteEnvironment(_prev: EnvActionState, formData: FormDat
 export async function deleteEnvironmentSnapshot(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
-  const id = String(formData.get("id") ?? "");
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
   const snapshotId = String(formData.get("snapshotId") ?? "");
 
   const token = await tokenOr();
@@ -178,7 +183,8 @@ export async function deleteEnvironmentSnapshot(_prev: EnvActionState, formData:
 export async function deleteEnvironmentSnapshots(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
-  const id = String(formData.get("id") ?? "");
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
