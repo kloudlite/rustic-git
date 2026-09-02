@@ -530,7 +530,7 @@
                     "nullable": true,
                     "properties": {
                       "compatibleNodes": {
-                        "description": "Every node that holds this object's volume — the memory placement uses when `nodeName` is\nempty. Nothing in this design writes more than one entry; nothing in it may assume there is\nonly one (replication across nodes is a later design).",
+                        "description": "DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'\n`branches` now, so \"who held this once\" is never consulted. Kept as a tolerated field so a\nstored object written before the cutover still parses; nothing writes it, and it leaves the\nCRD schema with the rest of the dead fields.",
                         "items": {
                           "type": "string"
                         },
@@ -958,7 +958,7 @@
                     "nullable": true,
                     "properties": {
                       "compatibleNodes": {
-                        "description": "Every node that holds this object's volume — the memory placement uses when `nodeName` is\nempty. Nothing in this design writes more than one entry; nothing in it may assume there is\nonly one (replication across nodes is a later design).",
+                        "description": "DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'\n`branches` now, so \"who held this once\" is never consulted. Kept as a tolerated field so a\nstored object written before the cutover still parses; nothing writes it, and it leaves the\nCRD schema with the rest of the dead fields.",
                         "items": {
                           "type": "string"
                         },

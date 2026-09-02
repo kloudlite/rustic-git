@@ -35,7 +35,6 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
                 serde_json::json!({
                     "phase": crd::Phase::Error,
                     "nodeName": prev.node_name,
-                    "compatibleNodes": prev.compatible_nodes,
                     "volumeRef": prev.volume_ref,
                     "conditions": kept_conditions(&prev.conditions, cond),
                 })
@@ -56,7 +55,6 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         &e.spec.region,
         &e.spec.storage,
         &prev.node_name.clone(),
-        &prev.compatible_nodes,
         &prev.conditions.clone(),
         gen,
         ctx,

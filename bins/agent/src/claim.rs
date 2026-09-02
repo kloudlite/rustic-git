@@ -10,58 +10,58 @@
 //! here (node allocatable minus scheduled pod requests), which is a change to this function only.
 
 use crate::controller::{replace_status, Ctx, ReconcileErr};
+use k8s_openapi::api::core::v1::Node;
 use kube::api::{Api, ListParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Resource, ResourceExt};
 use rustic_git_workspaces::crd::{self, binding_name, OwnerBinding, OwnerBindingSpec};
 use std::sync::Arc;
 
-/// What the commit-model arm needs about the volume behind an unplaced object, gathered once in
+/// What the claim needs to know about the volume behind an unplaced object, gathered once in
 /// `decide` (async) and handed to the pure, testable `may_claim` below.
-struct CommitPlacement {
+struct Placement {
     /// Any `Snapshot` CR for this volume, Ready or not — "a commit was ever started" is enough to
     /// leave the never-started-dataless guard armed; only a volume with none at all is bootstrap.
     has_commits: bool,
-    my_replica_synced: bool,
+    /// THIS node's own replica row, or `None` when it has never pulled the volume.
+    my_replica: Option<crd::VolumeReplica>,
+    /// The worktree's newest Ready transient, cluster-wide — the name `my_replica` must hold.
+    newest_transient: Option<String>,
+    worktree: String,
 }
 
-/// Whether THIS node may claim `object`, given the nodes already known to hold its data.
+/// Whether THIS node may claim the object, and the ONE placement rule in the system: the owner
+/// always, any other node only when it is up to date for the worktree being claimed.
 ///
-/// Empty `compatible` with no source means "nowhere holds it yet", which every node may claim. A
-/// `cloneOf` is the exception the spec calls out: the new object holds nothing, but a local clone
-/// needs the SOURCE's disk, so the source's memory decides.
+/// This is the check that used to sit in `stop_push`'s flush gate, holding a person's stop open to
+/// answer a question nobody was asking yet. It belongs here, where the answer is actually used —
+/// and it is why a stop is now instant and a cross-node START is what waits.
 ///
-/// `commit` is `Some` once a `cloneOf` source has not already decided it: rulings A+B from the
-/// task brief replace the `compatibleNodes` check entirely in that case — a volume with no
-/// commits yet is the bootstrap case, claimable by any node; once it has commits, only a node
-/// whose `VolumeReplica` reports `Synced` may claim (which also means a volume with commits but
-/// no Synced replica anywhere is left unplaced, on purpose — every node's own `decide` reaches
-/// this same `false`).
-fn may_claim(me: &str, compatible: &[String], source_compatible: Option<&[String]>, commit: Option<&CommitPlacement>) -> bool {
-    if let Some(src) = source_compatible {
-        return src.iter().any(|n| n == me);
+/// `compatibleNodes` is gone: it was a memory of "who held this once", and holding it once is not
+/// holding it now. A volume with no commits at all is still bootstrap, claimable by anyone,
+/// because there are no bytes anywhere for a claim to be near.
+fn may_claim(me: &str, owner: &str, p: &Placement) -> bool {
+    if !p.has_commits {
+        return true;
     }
-    match commit {
-        Some(c) => !c.has_commits || c.my_replica_synced,
-        None => compatible.is_empty() || compatible.iter().any(|n| n == me),
+    if owner == me {
+        return true;
     }
+    p.my_replica.as_ref().is_some_and(|r| crate::peer::up_to_date(r, &p.worktree, p.newest_transient.as_deref()))
 }
 
-/// Gathers `CommitPlacement` for `volume` (`None` when the child `Volume` has not been created
-/// yet — every workspace/environment starts that way, and that IS the bootstrap case). Errors
-/// propagate rather than being swallowed: a claim decided on a partial read of "does anyone have
-/// this" is exactly the never-started-dataless bug the guard exists to prevent.
-async fn commit_placement(ctx: &Arc<Ctx>, volume: Option<&str>) -> Result<CommitPlacement, ReconcileErr> {
+/// Gathers `Placement` for `volume` (`None` when the child `Volume` has not been created yet —
+/// every workspace/environment starts that way, and that IS the bootstrap case). Errors propagate
+/// rather than being swallowed: a claim decided on a partial read of "does anyone have this" is
+/// exactly the never-started-dataless bug the guard exists to prevent.
+async fn placement(ctx: &Arc<Ctx>, volume: Option<&str>, worktree: &str) -> Result<Placement, ReconcileErr> {
     let Some(volume) = volume else {
-        return Ok(CommitPlacement { has_commits: false, my_replica_synced: false });
+        return Ok(Placement { has_commits: false, my_replica: None, newest_transient: None, worktree: worktree.into() });
     };
     let has_commits = has_commits(ctx, volume).await?;
-    let replicas: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
-    let my_replica_synced = replicas
-        .get_opt(&crd::replica_name(volume, &ctx.node))
-        .await?
-        .is_some_and(|r| r.status.is_some_and(|s| s.phase == "Synced"));
-    Ok(CommitPlacement { has_commits, my_replica_synced })
+    let my_replica = Api::<crd::VolumeReplica>::all(ctx.client.clone()).get_opt(&crd::replica_name(volume, &ctx.node)).await?;
+    let newest_transient = crate::peer::newest_transient(ctx, volume, worktree).await?;
+    Ok(Placement { has_commits, my_replica, newest_transient, worktree: worktree.into() })
 }
 
 /// Any `Snapshot` CR for `volume`, Ready or not. Shared by the claim's own bootstrap check and by
@@ -86,44 +86,16 @@ pub(crate) async fn commit_ready(ctx: &Arc<Ctx>, volume: &str, commit: &str) -> 
         .is_some_and(|s| s.spec.volume == volume && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)))
 }
 
-/// The nodes holding a `cloneOf` source's disk, when there is one. A source that has vanished
-/// yields `Some([])` — nobody claims, and the object stays visible as unplaced rather than being
-/// silently started somewhere with no data.
-///
-/// Resolved as a `Volume`, not as a `Workspace`: `clone_env` writes the ENVIRONMENT's id here, so a
-/// workspace-only lookup never found it and no node ever claimed a cloned environment. Both kinds
-/// own a Volume of the parent's own name, and its `spec.nodeName` is the disk's real location —
-/// which is the only thing placement needs.
-async fn source_nodes(
-    ctx: &Arc<Ctx>,
-    source: Option<&crd::VolumeSource>,
-) -> Result<Option<Vec<String>>, ReconcileErr> {
-    let Some(crd::VolumeSource::CloneOf { volume, .. }) = source else { return Ok(None) };
-    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    let nodes = match api.get_opt(volume).await? {
-        Some(v) => vec![v.spec.node_name],
-        None => vec![],
-    };
-    Ok(Some(nodes))
-}
-
-/// The `storage.source` of a parent, which is `Option` for release 1 (a legacy object has no
-/// `storage` block at all — see `WorkspaceSpec::storage`).
-fn storage_source(storage: Option<&crd::WorkspaceStorage>) -> Option<&crd::VolumeSource> {
-    storage.and_then(|s| s.source.as_ref())
-}
-
-/// `union(existing, {me})` — a SET, computed and set, never appended.
-///
-/// A level-triggered reconciler re-runs by design, and an append grows the array every time. The
-/// desired value is "every node known to hold this object's data, including me"; that is what gets
-/// written, so re-running is a no-op instead of a leak.
-pub(crate) fn with_me(existing: &[String], me: &str) -> Vec<String> {
-    let mut out = existing.to_vec();
-    if !out.iter().any(|n| n == me) {
-        out.push(me.to_string());
+/// The SOURCE volume of a `cloneOf`, whose name is also the source worktree's: a clone holds
+/// nothing of its own yet, so it places by the same up-to-date rule read over what it is a copy
+/// OF. This replaces `source_nodes`, which pinned a clone to the source volume's `nodeName`
+/// unconditionally — which is why a clone of a released or dead-node source could never start
+/// anywhere at all.
+fn clone_source(storage: Option<&crd::WorkspaceStorage>) -> Option<&str> {
+    match storage.and_then(|s| s.source.as_ref()) {
+        Some(crd::VolumeSource::CloneOf { volume, .. }) => Some(volume),
+        _ => None,
     }
-    out
 }
 
 /// A pre-migration object: it names its node in the DEPRECATED `spec.nodeName` and has never had a
@@ -134,13 +106,13 @@ pub(crate) fn with_me(existing: &[String], me: &str) -> Vec<String> {
 /// leave it alone; `Some(status)` is the status to write.
 ///
 /// Split out because a 409 has to run the SAME decision against the re-read object: the peer that
-/// beat us may have placed it (leave it), or may have only widened `compatibleNodes` (still ours to
-/// claim). A second, subtly different decision on the retry path is how a loser talks itself into
+/// beat us may have placed it (leave it), or may have written something else entirely (still ours
+/// to claim). A second, subtly different decision on the retry path is how a loser talks itself into
 /// overwriting a winner.
 async fn decide(
     ctx: &Arc<Ctx>,
+    name: &str,
     node_name: &str,
-    compatible: &[String],
     storage: Option<&crd::WorkspaceStorage>,
     volume: Option<&str>,
     phase: crd::Phase,
@@ -158,16 +130,30 @@ async fn decide(
     if ctx.homes_export.is_none() {
         return Ok(None);
     }
-    let src = source_nodes(ctx, storage_source(storage)).await?;
-    // Fetched only when there is no `cloneOf` source: a cloneOf's own arm never needs it.
-    let commit = if src.is_none() { Some(commit_placement(ctx, volume).await?) } else { None };
-    if !may_claim(&ctx.node, compatible, src.as_deref(), commit.as_ref()) {
+    // A node being retired takes no new work: the label is the operator's decision and the claim
+    // is where it has to bite, or a drain never finishes because new workspaces keep landing.
+    let me = Api::<Node>::all(ctx.client.clone()).get_opt(&ctx.node).await?;
+    if crate::peer::unplaceable(me.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()) {
+        return Ok(None);
+    }
+    // A clone is decided over its SOURCE's volume and worktree; everything else over its own. Both
+    // go through the same rule — there is no "same node as the source" policy any more.
+    let (volume, worktree) = match clone_source(storage) {
+        Some(v) => (Some(v), v),
+        None => (volume, name),
+    };
+    // The volume's CURRENT owner, not a remembered one.
+    let owner = match volume {
+        Some(v) => Api::<crd::Volume>::all(ctx.client.clone()).get_opt(v).await?.map(|x| x.spec.node_name).unwrap_or_default(),
+        None => String::new(),
+    };
+    let p = placement(ctx, volume, worktree).await?;
+    if !may_claim(&ctx.node, &owner, &p) {
         return Ok(None);
     }
     Ok(Some(serde_json::json!({
         "phase": phase,
         "nodeName": ctx.node,
-        "compatibleNodes": with_me(compatible, &ctx.node),
         "conditions": [crd::condition("Placed", true, "Claimed", &format!("claimed by {}", ctx.node), gen)],
     })))
 }
@@ -182,7 +168,6 @@ const ATTEMPTS: usize = 2;
 /// Everything the claim needs out of one object, whatever its kind.
 struct Parts<'a> {
     node_name: String,
-    compatible: Vec<String>,
     storage: Option<&'a crd::WorkspaceStorage>,
     /// The child `Volume`'s name, once the reconciler has created and reported it — `None` for
     /// every object that has never been placed at all, which the commit-model arm reads as "no
@@ -210,8 +195,8 @@ where
         let p = parts(&obj);
         let Some(patch) = decide(
             ctx,
+            &obj.name_any(),
             &p.node_name,
-            &p.compatible,
             p.storage,
             p.volume,
             phase,
@@ -222,11 +207,11 @@ where
             return Ok(Action::await_change());
         };
         // F1: `replace_status` PUTs the WHOLE status subresource, so a write built from ONLY the
-        // 4 fields `decide` cares about would silently erase everything else already there —
+        // 3 fields `decide` cares about would silently erase everything else already there —
         // `head`, `volumeRef`, `packages`, `podRef`, `durable`. Start from THIS object's current
         // status (fresh on the first attempt; re-read on a 409 below) and merge just the claim's
         // own fields onto it, so the claim never touches anything but
-        // phase/nodeName/compatibleNodes/conditions.
+        // phase/nodeName/conditions.
         let mut status = serde_json::to_value(&obj).map_err(|e| ReconcileErr(e.to_string()))?["status"].take();
         if status.is_null() {
             status = serde_json::json!({});
@@ -270,7 +255,6 @@ pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         let st = o.status.clone().unwrap_or_default();
         Parts {
             node_name: st.node_name,
-            compatible: st.compatible_nodes,
             storage: o.spec.storage.as_ref(),
             volume: o.status.as_ref().and_then(|s| s.volume_ref.as_deref()),
             region: &o.spec.region,
@@ -288,7 +272,6 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         let st = o.status.clone().unwrap_or_default();
         Parts {
             node_name: st.node_name,
-            compatible: st.compatible_nodes,
             storage: o.spec.storage.as_ref(),
             volume: o.status.as_ref().and_then(|s| s.volume_ref.as_deref()),
             region: &o.spec.region,
@@ -316,5 +299,78 @@ pub async fn ensure_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result
         Ok(_) => Ok(()),
         Err(kube::Error::Api(s)) if s.code == 409 => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn replica(node: &str, phase: &str, branches: &[(&str, &str)]) -> crd::VolumeReplica {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": format!("vol-1.{node}")},
+            "spec": {"volume": "vol-1", "node": node},
+            "status": {"phase": phase,
+                       "branches": branches.iter().cloned().collect::<std::collections::BTreeMap<_, _>>()},
+        }))
+        .unwrap()
+    }
+
+    fn p(has_commits: bool, my_replica: Option<crd::VolumeReplica>, newest: Option<&str>) -> Placement {
+        Placement {
+            has_commits,
+            my_replica,
+            newest_transient: newest.map(str::to_string),
+            worktree: "ws-1".into(),
+        }
+    }
+
+    /// The owner is ALWAYS allowed: it holds the bytes by construction, and a rule that could
+    /// refuse the owner is a rule that can strand a workspace with nowhere at all to start.
+    #[test]
+    fn the_owner_may_always_claim_even_with_no_replica_row() {
+        assert!(may_claim("node-a", "node-a", &p(true, None, Some("stop-ws-1-3"))));
+    }
+
+    /// Another node needs the NAME, not the phase: this is the check that used to live in the
+    /// flush gate, moved to where the decision is actually made.
+    #[test]
+    fn another_node_may_claim_only_when_it_holds_the_newest_transient() {
+        let holding = Some(replica("node-b", "Synced", &[("ws-1", "stop-ws-1-3")]));
+        let behind = Some(replica("node-b", "Synced", &[("ws-1", "sync-ws-1-old")]));
+        assert!(may_claim("node-b", "node-a", &p(true, holding, Some("stop-ws-1-3"))));
+        assert!(!may_claim("node-b", "node-a", &p(true, behind, Some("stop-ws-1-3"))));
+        assert!(!may_claim("node-b", "node-a", &p(true, None, Some("stop-ws-1-3"))), "no row is not up to date");
+    }
+
+    /// No transient at all: a restore-to-new, or a worktree that never ran. A `Synced` replica
+    /// holds every Ready commit, so plain `Synced` is the right bar — and the spec says so.
+    #[test]
+    fn with_no_transient_a_synced_replica_may_claim() {
+        assert!(may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Synced", &[])), None)));
+        assert!(!may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Syncing", &[])), None)));
+    }
+
+    /// Bootstrap is unchanged and is the reason `has_commits` survives: a volume nothing has ever
+    /// committed to is claimable by any node, because there are no bytes anywhere to be near.
+    #[test]
+    fn a_volume_with_no_commits_is_claimable_by_anyone() {
+        assert!(may_claim("node-b", "node-a", &p(false, None, None)));
+        assert!(may_claim("node-b", "", &p(false, None, None)), "and by anyone when nothing owns it yet");
+    }
+
+    /// A clone places over its SOURCE, whose volume name is also the source worktree's name —
+    /// `source_nodes`' pin to the source's node is gone, so a clone of a released source can start
+    /// on any node that is up to date for it.
+    #[test]
+    fn a_clone_places_over_its_source_worktree() {
+        let storage = crd::WorkspaceStorage {
+            quota_gb: 20,
+            source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: None }),
+        };
+        assert_eq!(clone_source(Some(&storage)), Some("ws-src"));
+        assert_eq!(clone_source(Some(&crd::WorkspaceStorage { quota_gb: 20, source: None })), None);
+        assert_eq!(clone_source(None), None);
     }
 }

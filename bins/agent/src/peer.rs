@@ -366,7 +366,7 @@ fn spawn_send_tokio(btrfs_bin: &str, path: &FsPath, parent: Option<&FsPath>, clo
 /// `WS_NODE_DEAD_SECS`, default 600 — how long a node must be observed NotReady before its
 /// `VolumeReplica` rows are reaped. Long enough that a rolling restart or a brief kubelet hiccup
 /// never costs a replica row; the row is cheap to recreate, a wrongly-reaped one is not.
-fn node_dead_secs() -> i64 {
+pub(crate) fn node_dead_secs() -> i64 {
     std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
 }
 

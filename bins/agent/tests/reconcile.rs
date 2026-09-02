@@ -126,6 +126,15 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
                                       "spec": {"volume": "ws-1", "node": "node-b"},
                                       "status": {"phase": "Synced", "branches": {}, "lastSyncAt": rfc3339_ago(1)}}]}),
     ));
+    // The claim asks whether THIS node is placeable at all (dead or decommissioning takes no new
+    // work), so every fixture needs a Ready node-a. Appended last, so a decommission test's own
+    // route wins.
+    routes.push(rustic_git_workspaces::kube_test::get(
+        "/api/v1/nodes/node-a",
+        serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"},
+                           "status": {"conditions": [{"type": "Ready", "status": "True",
+                                                      "lastTransitionTime": rfc3339_ago(60)}]}}),
+    ));
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
@@ -449,7 +458,7 @@ async fn an_unplaced_workspace_is_claimed_with_one_optimistic_status_write() {
     let sent = rec.sent("PUT", WS_STATUS);
     assert_eq!(sent.len(), 1, "exactly one status write");
     assert_eq!(sent[0]["status"]["nodeName"], "node-a");
-    assert_eq!(sent[0]["status"]["compatibleNodes"], serde_json::json!(["node-a"]));
+    assert!(sent[0]["status"]["compatibleNodes"].is_null(), "compatibleNodes is dead and never written: {}", sent[0]);
     // The schema declares `status.phase` required; a write without it is a 422 from a real server.
     assert_eq!(sent[0]["status"]["phase"], "pending", "every status write carries a phase: {}", sent[0]);
     assert_eq!(
@@ -561,43 +570,31 @@ async fn a_claim_that_loses_the_race_re_reads_and_binds_nothing() {
     assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "one attempt, then re-read and yield — not a retry loop");
 }
 
-/// `compatibleNodes` is a SET. Appending on a re-run grows the array without bound, and a
-/// level-triggered reconciler re-runs by design.
+/// A clone holds nothing of its own, so it places by the ONE rule read over the SOURCE worktree:
+/// this node has no replica of `ws-src` at all, so it must not claim. `source_nodes`' pin to the
+/// source's `nodeName` is gone — a released or dead-node source is now claimable by any node that
+/// is up to date for it.
 #[tokio::test]
-async fn claiming_twice_does_not_grow_compatible_nodes() {
+async fn a_clone_is_not_claimed_by_a_node_that_is_behind_on_its_source() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
-            binding_route(),
+            // The source volume has commits and lives on node-b, so node-a claims only if it is up
+            // to date for the source worktree.
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/volumes/ws-src",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                                   "metadata": {"name": "ws-src", "uid": "src-uid"},
+                                   "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 20}}),
+            ),
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200,
+                    body: commit_list_of("Snapshot", vec![snapshot_cr("ws-src-a", "ws-src")]) },
+            rustic_git_workspaces::kube_test::not_found(format!(
+                "/apis/rustic-git.io/v1alpha1/volumereplicas/{}",
+                crd::replica_name("ws-src", "node-a")
+            )),
         ],
-    );
-    // Already lists this node, but has no `nodeName` — the shape a claim that wrote
-    // `compatibleNodes` and then lost its status write leaves behind.
-    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "compatibleNodes": ["node-a"]}));
-
-    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
-    let sent = rec.sent("PUT", WS_STATUS);
-    assert_eq!(sent[0]["status"]["compatibleNodes"], serde_json::json!(["node-a"]), "union, not append");
-}
-
-/// A `cloneOf` needs the SOURCE's disk, so the new object's own (empty) `compatibleNodes` cannot
-/// decide — the source's can. A node that does not hold the source must not claim, or the clone
-/// stops being a local btrfs snapshot and becomes a network copy of data that is already here.
-#[tokio::test]
-async fn a_clone_is_claimed_only_where_its_source_lives() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": "ws-src"},
-        "spec": {"owner": "alice", "team": "", "name": "src", "region": "r1",
-                 "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
-        "status": {"phase": "ready", "nodeName": "node-b", "compatibleNodes": ["node-b"]}
-    });
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces/ws-src", src)],
     );
     let mut w = workspace(serde_json::json!({}));
     w.spec.storage = Some(crd::WorkspaceStorage {
@@ -608,8 +605,67 @@ async fn a_clone_is_claimed_only_where_its_source_lives() {
     rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
     assert!(
         rec.sent("PUT", WS_STATUS).is_empty(),
-        "node-a does not hold ws-src's disk and must not claim its clone: {:?}", rec.calls()
+        "node-a is not up to date for ws-src and must not claim its clone: {:?}", rec.calls()
     );
+}
+
+/// The same clone, on a node whose replica HOLDS the source worktree's newest transient: claimed,
+/// with no "same node as the source" rule anywhere in it.
+#[tokio::test]
+async fn a_clone_is_claimed_by_a_node_up_to_date_for_the_source_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut synced = volume_replica("ws-src", "node-a", "Synced");
+    synced["status"]["branches"] = serde_json::json!({"ws-src": "sync-ws-src-9"});
+    let mut transient = snapshot_cr("sync-ws-src-9", "ws-src");
+    transient["spec"]["worktree"] = "ws-src".into();
+    transient["spec"]["transient"] = true.into();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/volumes/ws-src",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                                   "metadata": {"name": "ws-src", "uid": "src-uid"},
+                                   "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 20}}),
+            ),
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200,
+                    body: commit_list_of("Snapshot", vec![transient]) },
+            rustic_git_workspaces::kube_test::get(
+                format!("/apis/rustic-git.io/v1alpha1/volumereplicas/{}", crd::replica_name("ws-src", "node-a")),
+                synced,
+            ),
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+    let mut w = workspace(serde_json::json!({}));
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: None }),
+    });
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "up to date for the source: claimed: {:?}", rec.calls());
+}
+
+/// A node an operator is draining takes no new work, and the claim is where that has to bite: a
+/// drain that keeps being handed fresh workspaces never finishes.
+#[tokio::test]
+async fn a_decommissioning_node_claims_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![rustic_git_workspaces::kube_test::get(
+            "/api/v1/nodes/node-a",
+            serde_json::json!({"apiVersion": "v1", "kind": "Node",
+                               "metadata": {"name": "node-a", "labels": {crd::DECOMMISSION_LABEL: "true"}},
+                               "status": {"conditions": [{"type": "Ready", "status": "True",
+                                                          "lastTransitionTime": rfc3339_ago(60)}]}}),
+        )],
+    );
+
+    rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "a draining node must not claim: {:?}", rec.calls());
 }
 
 // ── commit-model placement ──────────────────────────────────────────────
@@ -2203,7 +2259,7 @@ const ENV_STATUS: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1/status
 const SRC_VOL: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-src";
 
 #[tokio::test]
-async fn a_cloned_environment_is_claimed_where_its_source_volume_lives() {
+async fn a_cloned_environment_is_claimed_by_its_source_volumes_owner() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
@@ -2220,16 +2276,25 @@ async fn a_cloned_environment_is_claimed_where_its_source_volume_lives() {
     );
 
     rustic_git_agent::claim::claim_environment(&cloned_env("env-src"), &ctx).await.unwrap();
-    assert_eq!(rec.sent("PUT", ENV_STATUS).len(), 1, "the source's disk is here: {:?}", rec.calls());
+    assert_eq!(rec.sent("PUT", ENV_STATUS).len(), 1, "this node owns the source volume: {:?}", rec.calls());
 }
 
 #[tokio::test]
 async fn a_cloned_environment_is_not_claimed_off_its_sources_node() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![rustic_git_workspaces::kube_test::get(SRC_VOL, src_volume("node-b"))]);
+    // A source with commits: bootstrap would claim anywhere, so the rule only bites once there is
+    // something to be up to date WITH — and node-a has no replica row for env-src at all.
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(SRC_VOL, src_volume("node-b")),
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200,
+                    body: commit_list_of("Snapshot", vec![snapshot_cr("env-src-a", "env-src")]) },
+        ],
+    );
 
     rustic_git_agent::claim::claim_environment(&cloned_env("env-src"), &ctx).await.unwrap();
-    assert!(rec.sent("PUT", ENV_STATUS).is_empty(), "node-a holds nothing of env-src: {:?}", rec.calls());
+    assert!(rec.sent("PUT", ENV_STATUS).is_empty(), "node-a is not up to date for env-src: {:?}", rec.calls());
 }
 
 /// The permanent path is a status write like any other, so it needs the same no-op guard: without
@@ -3541,7 +3606,6 @@ async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_dire
     let st = &sent.last().unwrap()["status"];
     assert_eq!(st["nodeName"], "node-a");
     assert_eq!(st["volumeRef"], "vol-1");
-    assert_eq!(st["compatibleNodes"], serde_json::json!(["node-a"]));
 }
 
 /// `write_attach_label` patches `spec.attachedEnvironment` verbatim into a label value — unchecked,

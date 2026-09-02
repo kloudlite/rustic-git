@@ -498,9 +498,10 @@ pub struct WorkspaceStatus {
     /// watch's `status.nodeName=` field selector matches.
     #[serde(default)]
     pub node_name: String,
-    /// Every node that holds this object's volume — the memory placement uses when `nodeName` is
-    /// empty. Nothing in this design writes more than one entry; nothing in it may assume there is
-    /// only one (replication across nodes is a later design).
+    /// DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'
+    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field so a
+    /// stored object written before the cutover still parses; nothing writes it, and it leaves the
+    /// CRD schema with the rest of the dead fields.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compatible_nodes: Vec<String>,
     /// The child `Volume`, reported rather than wished for: the reconciler creates it and then
@@ -607,9 +608,10 @@ pub struct EnvironmentStatus {
     /// watch's `status.nodeName=` field selector matches.
     #[serde(default)]
     pub node_name: String,
-    /// Every node that holds this object's volume — the memory placement uses when `nodeName` is
-    /// empty. Nothing in this design writes more than one entry; nothing in it may assume there is
-    /// only one (replication across nodes is a later design).
+    /// DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'
+    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field so a
+    /// stored object written before the cutover still parses; nothing writes it, and it leaves the
+    /// CRD schema with the rest of the dead fields.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compatible_nodes: Vec<String>,
     /// The child `Volume`, reported rather than wished for: the reconciler creates it and then

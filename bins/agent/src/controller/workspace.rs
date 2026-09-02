@@ -662,7 +662,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                 serde_json::json!({
                     "phase": crd::Phase::Error,
                     "nodeName": prev.node_name,
-                    "compatibleNodes": prev.compatible_nodes,
                     "volumeRef": prev.volume_ref,
                     "conditions": kept_conditions(&prev.conditions, cond),
                 })
@@ -688,7 +687,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         &w.spec.region,
         &w.spec.storage,
         &prev.node_name.clone(),
-        &prev.compatible_nodes,
         &prev.conditions.clone(),
         gen,
         ctx,
@@ -1015,7 +1013,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                                     serde_json::json!({
                                         "phase": crd::Phase::Error,
                                         "nodeName": prev.node_name,
-                                        "compatibleNodes": prev.compatible_nodes,
                                         "volumeRef": prev.volume_ref,
                                         "conditions": kept_conditions(&prev.conditions, cond),
                                     })
@@ -1042,7 +1039,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                             serde_json::json!({
                                 "phase": crd::Phase::Error,
                                 "nodeName": prev.node_name,
-                                "compatibleNodes": prev.compatible_nodes,
                                 "volumeRef": prev.volume_ref,
                                 "conditions": kept_conditions(&prev.conditions, cond),
                             })

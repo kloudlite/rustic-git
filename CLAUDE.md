@@ -143,8 +143,8 @@ and the two spec fields a parent's reconciler copies into its own child (`Volume
 and `Volume.spec.quotaGb` on the home volume an `OwnerBinding` owns),
 and the policy refuses it any other spec change. Apply both files. There is no job queue, no lease,
 no agent registration and no long poll: `/v1` writes ONE unplaced object and establishes no facts
-about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, remembered in
-`status.compatibleNodes`), so two nodes can never contend for the same subvolume and the API never
+about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, admitted for the owner
+node always and for any other node only while it is up to date for that worktree), so two nodes can never contend for the same subvolume and the API never
 places anything. When a node is dead for `WS_NODE_DEAD_SECS`, the unclaim sweep marks its volumes
 `Unavailable` and moves ONLY the worktrees whose `desiredState` is `Stopped` — a Running one keeps
 its pin and a `NodeDead` condition, because its live edits exist only on the dead node and only

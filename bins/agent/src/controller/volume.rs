@@ -479,7 +479,6 @@ pub(crate) async fn resolve_volume<P>(
     region: &str,
     storage: &Option<crd::WorkspaceStorage>,
     node_name: &str,
-    compatible_nodes: &[String],
     // The parent's current conditions, so a settle here keeps the ones later passes read back.
     prev_conditions: &[Condition],
     gen: i64,
@@ -497,7 +496,7 @@ where
         None => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
     };
     if let Some(outcome) = outcome {
-        let (node, nodes) = (node_name.to_string(), compatible_nodes.to_vec());
+        let node = node_name.to_string();
         let kept = prev_conditions.to_vec();
         return Ok(Resolved::Settled(
             settle(
@@ -509,7 +508,6 @@ where
                     serde_json::json!({
                         "phase": crd::Phase::Error,
                         "nodeName": node,
-                        "compatibleNodes": nodes,
                         // Terminal is not the end of the object: a detach after it still has to find
                         // the grant, so the kept conditions come through here too.
                         "conditions": kept_conditions(&kept, cond),
@@ -526,8 +524,7 @@ where
     // OWN volume, not a new subvolume — `ensure_child_volume` (and the btrfs clone it would
     // trigger via `clone_local_ids`) is skipped entirely, and `volumeRef` ends up naming the
     // source's volume directly. `check_source` above already proved the source object exists;
-    // this reads the Volume itself, which is what placement (`claim::source_nodes`) already
-    // pinned this parent's node to.
+    // this reads the Volume itself, which placement decided this parent's node over.
     let shared = match &s.source {
         Some(VolumeSource::CloneOf { volume, commit: Some(_) }) => {
             let vols: Api<crd::Volume> = Api::all(ctx.client.clone());
