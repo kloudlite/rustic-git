@@ -189,6 +189,44 @@ pub fn valid_ws_name(name: &str) -> bool {
         && name.bytes().any(|b| b != b'.')
 }
 
+/// Every untrusted string on a `WorkspaceSpec` that becomes a path, an argv word or an object
+/// name, checked in ONE place at the agent.
+///
+/// `/v1` checks these on write, but `/v1` is not the only writer: a restored backup, a migration
+/// or an operator with kubectl produces a spec no handler ever saw, and the agent's own builders
+/// splice these into a root `/bin/sh -c` prelude and into `{pool}/homes/{owner}`. Same rule, same
+/// reason, as `git_init_container`'s repo/branch re-check.
+pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> {
+    if !valid_ws_name(&spec.name) {
+        return Err(format!("workspace name {:?} is not a name", spec.name));
+    }
+    validate_owner(&spec.owner)?;
+    if !spec.team.is_empty() && !rustic_git_storage::store::valid_segment(&spec.team) {
+        return Err(format!("team {:?} is not a segment", spec.team));
+    }
+    // `write_attach_label` (controller/workspace.rs) patches this verbatim into a label value —
+    // unchecked, a hostile or over-long value 422s that patch and wedges the reconcile forever.
+    if let Some(env) = &spec.attached_environment {
+        if !rustic_git_storage::store::valid_segment(env) || env.len() > 63 {
+            return Err(format!("attachedEnvironment {env:?} is not a segment"));
+        }
+    }
+    // Packages are deliberately NOT checked here: the profile build already validates them and
+    // reports the far more useful `PackagesReady` condition, which this would pre-empt.
+    Ok(())
+}
+
+/// `spec.owner` alone — the half an `Environment` shares. It is joined onto the pool root and
+/// chowned by a privileged process (`ensure_shared_home`, `ensure_homecache`), so a traversal here
+/// is a root-run `mkdir`/`chown` outside the pool. The reserved names (`api`, `v2`, `img`) that
+/// `store::valid_owner` also refuses are refused here on purpose: no real owner may hold one.
+pub fn validate_owner(owner: &str) -> Result<(), String> {
+    match rustic_git_storage::store::valid_owner(owner) {
+        true => Ok(()),
+        false => Err(format!("owner {owner:?} is not an owner name")),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Service {
     pub name: String,

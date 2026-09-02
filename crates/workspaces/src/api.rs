@@ -306,7 +306,7 @@ fn kube_err(e: kube::Error) -> Response {
     }
 }
 
-pub use crate::k8s::{KIND_LABEL, OWNER_LABEL, TEAM_LABEL};
+pub use crate::k8s::{ATTACHED_ENV_LABEL, KIND_LABEL, OWNER_LABEL, TEAM_LABEL};
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
 /// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
@@ -953,7 +953,13 @@ async fn attach_ws(
         return Err((StatusCode::CONFLICT, "the environment is in another region, which is another cluster").into_response());
     }
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
-    let patch = serde_json::json!({"spec": {"attachedEnvironment": body.environment}});
+    // The label is stamped here, not left for the next reconcile: `delete_env`'s sweep selects on
+    // it, and a window where the spec says attached but the label does not would let a delete
+    // racing this call miss the workspace it needs to clear.
+    let patch = serde_json::json!({
+        "spec": {"attachedEnvironment": body.environment},
+        "metadata": {"labels": {ATTACHED_ENV_LABEL: body.environment}},
+    });
     api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -983,8 +989,12 @@ async fn detach_ws(
     let c = kube(&s)?.clone();
     let api: Api<crd::Workspace> = Api::all(c.clone());
     // `null` is how a merge patch REMOVES a key. `""` would leave the reconciler resolving an
-    // environment named empty-string.
-    let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
+    // environment named empty-string. The label is cleared in the same patch, for the same reason
+    // it is stamped in the same patch on attach.
+    let patch = serde_json::json!({
+        "spec": {"attachedEnvironment": serde_json::Value::Null},
+        "metadata": {"labels": {ATTACHED_ENV_LABEL: serde_json::Value::Null}},
+    });
     api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
     // A STOPPED workspace never reaches the attach block of a reconcile — `apply_workspace` returns
     // at the stop gate — so the agent would never collect the environment-side half, and clearing
@@ -1462,13 +1472,25 @@ async fn delete_env(
     // reconciler treats a missing environment as unattached anyway, so a failure here degrades to a
     // stale field rather than a dangling grant.
     let wss: Api<crd::Workspace> = Api::all(c.clone());
-    if let Ok(list) = wss.list(&ListParams::default()).await {
-        for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
-            let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
-            if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
-                tracing::warn!(workspace = %w.name_any(), error = %e, "clearing an attachment");
+    // NOT `owned_by(&e.spec.owner)`: `attach_ws` authorizes through `may_act_on`, which admits
+    // team members, so a teammate's workspace can be attached to this environment while owned by
+    // someone else entirely — an owner-scoped selector would miss it. `ATTACHED_ENV_LABEL` is the
+    // view of `spec.attachedEnvironment` built for exactly this (`heal_attached_label` keeps it honest),
+    // so it is the one selector that cannot miss an attached workspace regardless of who owns it.
+    // The `Err` arm is LOGGED, not dropped: a failed list leaves workspaces pointing at a deleted
+    // environment, and the reconciler treating that as unattached is a degradation somebody has
+    // to be able to find in the logs.
+    let attached_to = ListParams::default().labels(&format!("{ATTACHED_ENV_LABEL}={id}"));
+    match wss.list(&attached_to).await {
+        Ok(list) => {
+            for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
+                let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
+                if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
+                    tracing::warn!(workspace = %w.name_any(), error = %e, "clearing an attachment");
+                }
             }
         }
+        Err(err) => tracing::warn!(environment = %id, error = %err, "listing workspaces to clear attachments; some may still name this environment"),
     }
     let mut doc = env_doc(&e, &HashSet::new());
     doc.state = EnvState::Deleted;
@@ -1721,6 +1743,20 @@ async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
     v
 }
 
+/// `OWNER_LABEL in (…)`, built only from slugs that are single validated segments.
+///
+/// `in (a,b)` is comma-delimited and paren-terminated, so one slug carrying `,` or `)` widens or
+/// breaks the set — on a listing that decides whether a row says "source deleted". Slugs are
+/// directory-validated today; every other selector in this file takes a single validated value,
+/// and this one now does too.
+pub fn owner_set_selector(owners: &[String]) -> String {
+    // `owners` is always `caller_owners`'s output, and that always starts with the caller's own
+    // (already-validated) owner — so this never filters down to an empty set.
+    let safe: Vec<&str> =
+        owners.iter().filter(|o| rustic_git_storage::store::valid_owner(o)).map(String::as_str).collect();
+    format!("{OWNER_LABEL} in ({})", safe.join(","))
+}
+
 /// The live parents, by volume id, with the kind they are. One list call per kind, never one per
 /// row — and used ONLY for `deleted` and as a provenance fallback.
 ///
@@ -1736,7 +1772,7 @@ async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BT
         live.insert(w.name_any(), ("workspace".to_string(), w.spec.name.clone()));
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
-    let lp = ListParams::default().labels(&format!("{OWNER_LABEL} in ({})", owners.join(",")));
+    let lp = ListParams::default().labels(&owner_set_selector(owners));
     for e in envs.list(&lp).await.ok()?.items {
         live.insert(e.name_any(), ("environment".to_string(), e.spec.name.clone()));
     }

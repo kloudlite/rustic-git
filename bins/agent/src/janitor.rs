@@ -539,9 +539,12 @@ mod janitor_tests {
     fn stale_worktrees_go_only_when_this_node_is_not_the_owner() {
         let (engine, _tmp) = fake_engine();
         std::fs::create_dir_all(engine.pool.live("v1").join("ws-1")).unwrap();
+        // A file beside the worktrees is not a worktree and must survive.
+        std::fs::write(engine.pool.live("v1").join("notes.txt"), b"x").unwrap();
         assert_eq!(drop_stale_worktrees(&engine, "v1", "node-b", "node-b"), 0, "owner keeps its worktrees");
         assert_eq!(drop_stale_worktrees(&engine, "v1", "", "node-b"), 0, "unowned: the takeover has not settled, keep");
         assert_eq!(drop_stale_worktrees(&engine, "v1", "node-a", "node-b"), 1);
+        assert!(engine.pool.live("v1").join("notes.txt").exists(), "a plain file is not a subvolume");
     }
 }
 

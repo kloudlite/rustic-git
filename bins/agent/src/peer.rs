@@ -244,9 +244,9 @@ async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<String, Str
     Ok(format!("{ip}:8444"))
 }
 
-/// `WS_PEER_SEND_TIMEOUT_SECS`, default 3600 — the same generous shape as the receiver's
-/// `WS_PEER_RECV_TIMEOUT_SECS`. A send is legitimately tens of GiB; this exists to unwedge a
-/// connection that has actually stalled, not to police link speed.
+/// `WS_PEER_SEND_TIMEOUT_SECS`, default 3600. A send is legitimately tens of GiB; this exists to
+/// unwedge a connection that has actually stalled, not to police link speed. The receive side has
+/// no timeout knob of its own — the sender's is the only bound on a transfer.
 fn send_timeout() -> Duration {
     Duration::from_secs(std::env::var("WS_PEER_SEND_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600))
 }
@@ -290,7 +290,7 @@ fn node_dead_secs() -> i64 {
     std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
 }
 
-/// One pass of the puller — spawned beside `replicate_beat` in `controller.rs`. Inert without a
+/// One pass of the puller — spawned beside `replicate_beat` in `controller/run.rs`. Inert without a
 /// peer secret, same fail-closed rule every dial in this file follows: no secret, no
 /// authenticated GET to another node's root-run `btrfs send`.
 pub async fn pull_beat(ctx: &Arc<Ctx>) {
@@ -334,11 +334,15 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     let now = k8s_openapi::jiff::Timestamp::now();
     let floor = node_dead_secs();
 
-    // Both dead-node sweeps run every pass regardless of what follows: a dead node's stale
-    // replica rows and stranded claims must not wait on this node having anything to pull, and
-    // they run beside each other so the two never drift onto different dead-node rules.
-    reap_dead_replicas(ctx, &nodes, floor, now).await;
-    unclaim_dead_nodes(ctx, &nodes, floor, now).await;
+    // One LISTING for the whole pass, for the same reason the node list is threaded: reap,
+    // unclaim, place and retire each decide what to delete, and two of them acting on different
+    // views of the cluster is how a copy nobody else holds gets dropped. The sweeps below run
+    // once this has succeeded, beside each other so the two never drift onto different dead-node
+    // rules; a partial listing bails the whole beat rather than let any of them act on it.
+    let Some(beat) = crate::listing::beat(ctx).await else { return };
+
+    reap_dead_replicas(ctx, &beat, &nodes, floor, now).await;
+    unclaim_dead_nodes(ctx, &beat, &nodes, floor, now).await;
 
     let candidates = match pool_nodes(&ctx.client).await {
         Ok(v) => v,
@@ -357,10 +361,10 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     };
 
     let live = live_nodes(&candidates, &nodes, floor, now);
-    for id in interesting_volumes(ctx, &live).await {
-        pull_volume(ctx, btrfs_bin, &http, secret, &id).await;
+    for id in interesting_volumes(ctx, &beat, &live) {
+        pull_volume(ctx, &beat, btrfs_bin, &http, secret, &id).await;
     }
-    retire_pass(ctx, &live).await;
+    retire_pass(ctx, &beat, &live).await;
 }
 
 /// Every volume this node must hold a commit-model replica of: named by replication's rendezvous
@@ -368,59 +372,33 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
 /// the volume behind a Workspace/Environment whose pod runs here right now, OR a volume this node
 /// itself owns (`spec.nodeName == me`) — the owner's row is a source for every standby, and a
 /// STOPPED volume (no pod, nothing in `Workspace/Environment.status.nodeName`) still needs one, or
-/// the first standby to look finds an empty source list forever. List errors on the
-/// Workspace/Environment half are warned and skipped — a transient API hiccup must not stop the
-/// replication half from pulling.
-async fn interesting_volumes(ctx: &Arc<Ctx>, live: &[String]) -> Vec<String> {
+/// the first standby to look finds an empty source list forever. A Volume-list hiccup now idles
+/// the whole beat (keep-biased — see `beat`'s bail-out above) instead of falling back to only the
+/// worktree-hosted volumes it used to still pull.
+fn interesting_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(list) => {
-            for v in &list.items {
-                if v.metadata.deletion_timestamp.is_some() {
-                    continue;
-                }
-                let id = v.name_any();
-                let i_am_owner = v.spec.node_name == ctx.node;
-                let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
-                let targets = replicate::targets(&id, &v.spec.node_name, live, standby_count(owner_alive, v.spec.replicas));
-                // Holding a copy on disk is interesting on its own: with `replicas: 1` a returning
-                // node's replica row was reaped while it was dead and rendezvous elected someone
-                // else who has no source at all, so nothing would ever re-register the one copy
-                // that exists.
-                let hold_a_copy = ctx.engine.pool.voldir(&id).exists();
-                if (i_am_owner || hold_a_copy || targets.iter().any(|t| t == &ctx.node)) && !out.contains(&id) {
-                    out.push(id);
-                }
-            }
+    for v in &beat.volumes {
+        if v.metadata.deletion_timestamp.is_some() {
+            continue;
         }
-        Err(e) => tracing::warn!(error = %e, "pull: listing volumes; only worktree-hosted volumes considered"),
+        let id = v.name_any();
+        let i_am_owner = v.spec.node_name == ctx.node;
+        let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
+        let targets = replicate::targets(&id, &v.spec.node_name, live, standby_count(owner_alive, v.spec.replicas));
+        // Holding a copy on disk is interesting on its own: with `replicas: 1` a returning node's
+        // replica row was reaped while it was dead and rendezvous elected someone else who has no
+        // source at all, so nothing would ever re-register the one copy that exists.
+        let hold_a_copy = ctx.engine.pool.voldir(&id).exists();
+        if (i_am_owner || hold_a_copy || targets.iter().any(|t| t == &ctx.node)) && !out.contains(&id) {
+            out.push(id);
+        }
     }
-
-    match Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(list) => {
-            for w in list.items {
-                let running_here = w.status.as_ref().is_some_and(|s| s.node_name == ctx.node);
-                if let (true, Some(v)) = (running_here, w.status.and_then(|s| s.volume_ref)) {
-                    if !out.contains(&v) {
-                        out.push(v);
-                    }
-                }
-            }
+    // The parent half: a worktree running here needs its volume pulled whether or not rendezvous
+    // named this node. Same list `retire_pass` and the sync beat read.
+    for p in &beat.parents {
+        if !out.contains(&p.volume) {
+            out.push(p.volume.clone());
         }
-        Err(e) => tracing::warn!(error = %e, "pull: listing workspaces"),
-    }
-    match Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(list) => {
-            for e in list.items {
-                let running_here = e.status.as_ref().is_some_and(|s| s.node_name == ctx.node);
-                if let (true, Some(v)) = (running_here, e.status.and_then(|s| s.volume_ref)) {
-                    if !out.contains(&v) {
-                        out.push(v);
-                    }
-                }
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "pull: listing environments"),
     }
     out
 }
@@ -459,7 +437,7 @@ fn retired(have: &HashSet<String>, existing: &HashSet<String>, any_pull_failed: 
 /// Pulls every `Snapshot` this node is missing for `volume`, then rewrites this node's own
 /// `VolumeReplica`. Keep-biased throughout: a `Snapshot`-list error skips the volume with nothing
 /// touched, same as `replica_reconcile`'s lookup-error branch.
-async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
+async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     // Taken BEFORE the listing, and stamped as this pass's `lastSyncAt` at the end. See
     // `VolumeReplicaStatus::last_sync_at`: a pass that finished at T proves nothing about a
@@ -498,21 +476,27 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
         .collect();
     let order = replicate::order_groups(&pairs);
 
-    let replicas: Vec<crd::VolumeReplica> = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(list) => list.items.into_iter().filter(|r| r.spec.volume == volume).collect(),
-        Err(e) => {
-            tracing::warn!(%volume, error = %e, "pull: listing replicas; nothing to pull from");
-            Vec::new()
-        }
-    };
+    let replicas: Vec<&crd::VolumeReplica> = beat.replicas.iter().filter(|r| r.spec.volume == volume).collect();
     // Synced sources first — a Syncing replica may itself be mid-pull and not actually have the
     // commit yet — falling back to any other replica of the volume (including a Syncing one)
     // rather than giving up outright. Never my own row: pulling from myself is meaningless, and
     // an owner or a re-selected standby always sees its own (possibly stale) row in this list.
-    let not_me = |r: &&crd::VolumeReplica| r.spec.node != ctx.node;
-    let synced = |r: &&crd::VolumeReplica| r.status.as_ref().is_some_and(|s| s.phase == "Synced");
+    let not_me = |r: &&&crd::VolumeReplica| r.spec.node != ctx.node;
+    let synced = |r: &&&crd::VolumeReplica| r.status.as_ref().is_some_and(|s| s.phase == "Synced");
     let mut sources: Vec<&str> = replicas.iter().filter(not_me).filter(synced).map(|r| r.spec.node.as_str()).collect();
     sources.extend(replicas.iter().filter(not_me).filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
+
+    // Resolved ONCE per pass, before the commit loop: `agent_pod_addr` is a namespaced pod LIST
+    // with two selectors, and a node catching up on N commits was making N of them per source to
+    // learn the same IP. A source whose pod cannot be found now is skipped for the whole pass —
+    // which is what the per-commit `continue` amounted to anyway, one list at a time.
+    let mut addrs: Vec<(&str, String)> = Vec::new();
+    for &source in &sources {
+        match agent_pod_addr(&ctx.client, source).await {
+            Ok(a) => addrs.push((source, a)),
+            Err(e) => tracing::warn!(%volume, source, error = %e, "pull: no peer address; skipping this source"),
+        }
+    }
 
     // Any pull that could not be satisfied this pass. It gates the retire pass below, because
     // the two together would otherwise LOSE a sync point: the owner deletes `sync-A`'s CR the
@@ -528,14 +512,8 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
         let my_parent = nearest_held_ancestor(parent, &by_name, &have);
 
         let mut pulled = false;
-        for &source in &sources {
-            let addr = match agent_pod_addr(&ctx.client, source).await {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::warn!(%volume, %name, source, error = %e, "pull: no peer address; trying next source");
-                    continue;
-                }
-            };
+        for (source, addr) in &addrs {
+            let source = *source;
             // `my_parent` is MY nearest held ancestor — the source may never have had it (it can
             // have pulled a different, shorter chain, or dropped an old commit already). A `-p`
             // the source doesn't recognize fails ITS `btrfs send`, which surfaces here as a
@@ -543,10 +521,10 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
             // `send_to_target` already handles on the push side. One retry against the SAME
             // source with no parent at all before moving on, so a single bad guess costs one
             // extra full pull instead of losing this commit (and every descendant) forever.
-            let mut result = pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, my_parent.as_deref()).await;
+            let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref()).await;
             if result.is_err() && my_parent.is_some() {
                 tracing::warn!(%volume, %name, source, "pull: incremental receive failed, falling back to a full pull from the same source");
-                result = pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, None).await;
+                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None).await;
             }
             match result {
                 Ok(()) => {
@@ -699,19 +677,10 @@ fn node_is_dead(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timesta
 // local clock reaps a row slightly early, a slow one slightly late. `WS_NODE_DEAD_SECS`'s
 // default (600s) swallows ordinary NTP drift; upgrade to an apiserver-relative delta (read the
 // list's own server timestamp instead of a local `now`) if skew ever gets close to the floor.
-async fn reap_dead_replicas(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
-    let replicas = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(list) => list.items,
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: reaper: listing replicas");
-            return;
-        }
-    };
-
+async fn reap_dead_replicas(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
     let replica_api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
-    for r in replicas {
-        let dead = node_is_dead(nodes.iter().find(|n| n.name_any() == r.spec.node), floor, now);
-        if dead {
+    for r in &beat.replicas {
+        if node_is_dead(nodes.iter().find(|n| n.name_any() == r.spec.node), floor, now) {
             let rname = r.name_any();
             if let Err(e) = replica_api.delete(&rname, &Default::default()).await {
                 tracing::warn!(replica = %rname, error = %e, "pull: reaper: deleting a dead node's replica row");
@@ -726,7 +695,7 @@ async fn reap_dead_replicas(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s
 /// watch picks it back up as unplaced. A Ready node's claim is never touched: this is the ONLY
 /// place besides the claim itself allowed to write `status.nodeName`, per the module doc's
 /// one-fact-one-writer rule.
-async fn unclaim_dead_nodes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
+async fn unclaim_dead_nodes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
     let mut running_volumes: HashSet<String> = HashSet::new();
     let ws_ok = unclaim_kind::<crd::Workspace>(ctx, "Workspace", nodes, floor, now, |w| {
         w.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or("")
@@ -759,7 +728,7 @@ async fn unclaim_dead_nodes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s
     // A half-listed parent set means `running_volumes` is missing Running worktrees, and the
     // release pass would then clear their pins — the one thing the spec forbids. Skip it whole.
     if ws_ok && envs_ok {
-        release_dead_volumes(ctx, nodes, floor, now, &running_volumes).await;
+        release_dead_volumes(ctx, beat, nodes, floor, now, &running_volumes).await;
     }
 }
 
@@ -869,18 +838,16 @@ fn already_marked_dead<K: serde::Serialize>(obj: &K) -> bool {
 /// when no Running parent still names it — a pinned-but-unavailable volume is exactly the
 /// "down, not moved" state the spec asks for. Spec first, status second: a cleared pin with
 /// stale status is taken on the next claim; the reverse is a lie the takeover arm cannot act on.
-async fn release_dead_volumes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp, running: &HashSet<String>) {
+async fn release_dead_volumes(
+    ctx: &Arc<Ctx>,
+    beat: &crate::listing::Beat,
+    nodes: &[Node],
+    floor: i64,
+    now: k8s_openapi::jiff::Timestamp,
+    running: &HashSet<String>,
+) {
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    // ponytail: second full Volume list per beat — the pull beat (~line 376/840) already lists
-    // Volumes; share that list if it shows up in API server load.
-    let list = match api.list(&ListParams::default()).await {
-        Ok(l) => l.items,
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: unclaim: listing volumes; releasing nothing");
-            return;
-        }
-    };
-    for vol in list {
+    for vol in beat.volumes.iter().cloned() {
         let owner = vol.spec.node_name.clone();
         if owner.is_empty() || !node_is_dead(nodes.iter().find(|n| n.name_any() == owner), floor, now) {
             continue;
@@ -951,32 +918,6 @@ fn should_retire(me: &str, owner: &str, targets: &[String], hosted: bool, synced
         && targets.iter().all(|t| synced.contains(t))
 }
 
-/// Workspaces and Environments whose pod runs on THIS node, by their `status.volumeRef` — same
-/// selector `sync.rs`'s `live_worktrees` uses. A list error here must not retire anything: a
-/// worktree this beat can't see is a worktree `should_retire` would wrongly call unhosted.
-async fn hosted_volumes(ctx: &Arc<Ctx>) -> Option<HashSet<String>> {
-    let mut out = HashSet::new();
-    let mine = ListParams::default().fields(&format!("status.nodeName={}", ctx.node));
-    match Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await {
-        Ok(list) => out.extend(list.items.into_iter().filter_map(|w| w.status.and_then(|s| s.volume_ref))),
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: retire: listing workspaces; retiring nothing");
-            return None;
-        }
-    }
-    match Api::<crd::Environment>::all(ctx.client.clone()).list(&mine).await {
-        Ok(list) => out.extend(list.items.into_iter().filter_map(|e| e.status.and_then(|s| s.volume_ref))),
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: retire: listing environments; retiring nothing");
-            return None;
-        }
-    }
-    Some(out)
-}
-
-/// Drops this node's copy of any volume whose rendezvous slot over `live` no longer names it —
-/// see `should_retire`. Runs at the end of `pull_beat_with`, after the pull loop, so a new
-/// target's pull lands before anyone retires the copy it just replaced.
 /// Directories under `{pool}/vol` that no listed Volume names. Files beside them (`{id}.owner`,
 /// `{id}.lock`) are not volumes and are cleaned with their directory by `cleanup_local`.
 fn orphan_voldirs(vol_root: &std::path::Path, known: &HashSet<String>) -> Vec<String> {
@@ -991,22 +932,13 @@ fn orphan_voldirs(vol_root: &std::path::Path, known: &HashSet<String>) -> Vec<St
     out
 }
 
-async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
-    let vols = match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(l) => l.items,
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: retire: listing volumes; retiring nothing");
-            return;
-        }
-    };
-    let rows = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(l) => l.items,
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: retire: listing replicas; retiring nothing");
-            return;
-        }
-    };
-    let Some(hosted) = hosted_volumes(ctx).await else { return };
+/// Drops this node's copy of any volume whose rendezvous slot over `live` no longer names it —
+/// see `should_retire`. Runs at the end of `pull_beat_with`, after the pull loop, so a new
+/// target's pull lands before anyone retires the copy it just replaced.
+async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String]) {
+    let vols = &beat.volumes;
+    let rows = &beat.replicas;
+    let hosted = beat.hosted_volumes();
     // A local voldir with no Volume CR at all is an orphan: nothing lists it, so no pull, no
     // retire and no worktree drop ever visits it again. The Volume is always created before any
     // node makes its directory (the parent's reconciler creates the CR, the pull beat only pulls
@@ -1036,9 +968,19 @@ async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
             // can lag a pod that's actually running here, and deleting a live worktree out from
             // under a running pod is the one thing this pass must never do.
             if !hosted.contains(&id) {
-                let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
-                if dropped > 0 {
-                    tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+                // `v.spec.node_name` is from `beat.volumes`, listed before the pull loop ran; a
+                // takeover landing in that window makes it stale, and against a stale owner this
+                // would delete the worktree this node just created for itself. One fresh GET,
+                // right before the delete, catches that race; a failed GET keeps everything.
+                // Keep-bias: a failed GET, like `mine`, skips the drop rather than risking one
+                // against a node name that may already be stale.
+                if let Ok(Some(fresh)) = Api::<crd::Volume>::all(ctx.client.clone()).get_opt(&id).await {
+                    if fresh.spec.node_name != ctx.node {
+                        let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
+                        if dropped > 0 {
+                            tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+                        }
+                    }
                 }
             }
             continue;
@@ -1137,6 +1079,41 @@ mod reconcile_tests {
         serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
     }
 
+    /// The per-beat listing, built inline: these tests exercise what each consumer DECIDES from a
+    /// beat, not how the beat is listed — `listing.rs` owns that half.
+    fn beat_of(
+        volumes: Vec<serde_json::Value>,
+        replicas: Vec<serde_json::Value>,
+        parents: Vec<(&'static str, &str, &str)>,
+    ) -> crate::listing::Beat {
+        crate::listing::Beat {
+            volumes: volumes.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect(),
+            replicas: replicas.into_iter().map(|r| serde_json::from_value(r).unwrap()).collect(),
+            parents: parents
+                .into_iter()
+                .map(|(kind, name, volume)| crate::listing::Parent {
+                    kind,
+                    name: name.into(),
+                    volume: volume.into(),
+                    owner: "alice".into(),
+                    head: None,
+                    phase: crd::Phase::Ready,
+                    pod_ref: Some(format!("ws-alice/{name}")),
+                    owner_ref: Default::default(),
+                })
+                .collect(),
+        }
+    }
+
+    fn replica_of(volume: &str, node: &str, phase: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": format!("{volume}.{node}"), "uid": format!("uid-{node}")},
+            "spec": {"volume": volume, "node": node},
+            "status": {"phase": phase, "branches": {}},
+        })
+    }
+
     /// A `Snapshot`-list error must keep every local commit untouched and write no replica
     /// status — the same keep-biased rule `replica_reconcile`'s lookup-error branch follows.
     #[tokio::test]
@@ -1146,7 +1123,7 @@ mod reconcile_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, "btrfs", &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1").await;
 
         assert!(rec.calls().iter().all(|c| !c.contains("volumereplicas")), "a snapshot-list error must never reach the replica write");
     }
@@ -1232,7 +1209,7 @@ mod reconcile_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, "btrfs", &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1").await;
 
         assert!(rec.calls().iter().all(|c| !c.contains("/peer/v1/commit/")), "nothing missing: no GET should ever be issued");
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
@@ -1344,20 +1321,6 @@ fi
         });
         let routes = vec![
             Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("vol-1-child", "vol-1", "vol-1-parent")]) },
-            Route {
-                method: "GET",
-                path: VOLREPLICAS.into(),
-                status: 200,
-                body: list_of(
-                    "VolumeReplica",
-                    vec![serde_json::json!({
-                        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
-                        "metadata": {"name": "vol-1.node-a", "uid": "uid-a"},
-                        "spec": {"volume": "vol-1", "node": "node-a"},
-                        "status": {"phase": "Synced", "branches": {}},
-                    })],
-                ),
-            },
             Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
             not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
             Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: serde_json::json!({
@@ -1376,12 +1339,36 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, &bin, &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1").await;
 
         assert!(tmp.path().join("vol/vol-1/snap/vol-1-child").exists(), "the full-pull retry must land the commit");
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["status"]["phase"], "Synced", "the fallback succeeded: nothing is missing any more");
+    }
+
+    /// Catching up on three commits from one source resolves that source's pod address ONCE, not
+    /// once per commit: a full namespaced pod list with two selectors is not a per-commit cost.
+    #[tokio::test]
+    async fn pull_volume_resolves_a_source_address_once_per_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v1/snap")).unwrap();
+        let snaps = vec![
+            ready_snapshot("v1-aaaa", "v1", ""),
+            ready_snapshot("v1-bbbb", "v1", "v1-aaaa"),
+            ready_snapshot("v1-cccc", "v1", "v1-bbbb"),
+        ];
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", snaps) },
+            Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("v1", "node-b", "Synced")], vec![]), "btrfs", &http, "s3cret", "v1").await;
+
+        let pod_lists = rec.calls().iter().filter(|c| c.as_str() == "GET /api/v1/namespaces/kube-system/pods").count();
+        assert_eq!(pod_lists, 1, "one address lookup per source per pass, not per commit: {:?}", rec.calls());
     }
 
     /// The owner of a STOPPED volume (no pod, so no Workspace/Environment names it in
@@ -1396,16 +1383,11 @@ fi
             "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
         });
-        let routes = vec![
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
         let tmp = tempfile::tempdir().unwrap();
-        let (ctx, _rec) = test_ctx(tmp.path(), "node-b", routes);
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-b", Vec::new());
         let live = vec!["node-b".to_string()];
 
-        let ids = interesting_volumes(&ctx, &live).await;
+        let ids = interesting_volumes(&ctx, &beat_of(vec![volume], vec![], vec![]), &live);
 
         assert_eq!(ids, vec!["vol-1".to_string()], "a volume this node owns is always interesting, running or not");
     }
@@ -1445,16 +1427,11 @@ fi
             "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
         });
-        let routes = vec![
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
         let tmp = tempfile::tempdir().unwrap();
-        let (ctx, _rec) = test_ctx(tmp.path(), "node-c", routes);
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-c", Vec::new());
         let live = vec!["node-a".to_string(), "node-c".to_string()];
 
-        assert_eq!(interesting_volumes(&ctx, &live).await, vec!["v2".to_string()]);
+        assert_eq!(interesting_volumes(&ctx, &beat_of(vec![volume], vec![], vec![]), &live), vec!["v2".to_string()]);
     }
 
     /// `replicas: 1` return path: the reaper deleted this node's replica row while it was dead,
@@ -1468,18 +1445,14 @@ fi
             "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 1},
             "status": {"phase": "unavailable"},
         });
-        let routes = vec![
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
         let tmp = tempfile::tempdir().unwrap();
-        let (ctx, _rec) = test_ctx(tmp.path(), "node-c", routes);
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-c", Vec::new());
         let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
-        assert!(interesting_volumes(&ctx, &live).await.is_empty(), "no local copy: nothing to do");
+        let beat = beat_of(vec![volume], vec![], vec![]);
+        assert!(interesting_volumes(&ctx, &beat, &live).is_empty(), "no local copy: nothing to do");
 
         std::fs::create_dir_all(ctx.engine.pool.voldir("v0")).unwrap();
-        assert_eq!(interesting_volumes(&ctx, &live).await, vec!["v0".to_string()]);
+        assert_eq!(interesting_volumes(&ctx, &beat, &live), vec!["v0".to_string()]);
     }
 
     /// A Workspace list error hides every Running worktree, so the release pass would read an
@@ -1496,7 +1469,7 @@ fi
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        unclaim_dead_nodes(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        unclaim_dead_nodes(&ctx, &beat_of(vec![vol_owned("vol-ws-run", "node-b")], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         assert!(
             !rec.calls().iter().any(|c| c.contains("/volumes")),
@@ -1532,22 +1505,18 @@ fi
                 "status": {"phase": "Synced", "branches": {}},
             })
         };
-        let replicas = list_of(
-            "VolumeReplica",
-            // node-d: absent from the node list entirely. node-e: present, but with no `Ready`
-            // condition reported yet — the API server just hasn't converged it, not a fact about
-            // liveness.
-            vec![replica("node-a"), replica("node-b"), replica("node-c"), replica("node-d"), replica("node-e")],
-        );
+        // node-d: absent from the node list entirely. node-e: present, but with no `Ready`
+        // condition reported yet — the API server just hasn't converged it, not a fact about
+        // liveness.
+        let replica_rows = vec![replica("node-a"), replica("node-b"), replica("node-c"), replica("node-d"), replica("node-e")];
 
         let routes = vec![
-            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: replicas },
             Route { method: "DELETE", path: format!("{VOLREPLICAS}/vol-1.node-b"), status: 200, body: serde_json::json!({}) },
             Route { method: "DELETE", path: format!("{VOLREPLICAS}/vol-1.node-d"), status: 200, body: serde_json::json!({}) },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
-        reap_dead_replicas(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        reap_dead_replicas(&ctx, &beat_of(vec![], replica_rows, vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
         assert_eq!(deletes.len(), 2, "{deletes:?}");
@@ -1628,14 +1597,13 @@ fi
         let routes = vec![
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-live", "node-a"), ws_placed_stopped("ws-dead", "node-b")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![env_placed_stopped("env-dead", "node-b")]) },
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![]) },
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status".into(), status: 200, body: ws_placed_stopped("ws-dead", "") },
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/environments/env-dead/status".into(), status: 200, body: env_placed_stopped("env-dead", "") },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        unclaim_dead_nodes(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        unclaim_dead_nodes(&ctx, &beat_of(vec![], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status");
         assert_eq!(ws_sent.len(), 1, "the dead node's workspace claim is cleared once: {:?}", rec.calls());
@@ -1659,14 +1627,13 @@ fi
         let routes = vec![
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-run", "node-b")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-ws-run", "node-b")]) },
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-b") },
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-run/status".into(), status: 200, body: vol_owned("vol-ws-run", "node-b") },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        unclaim_dead_nodes(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        unclaim_dead_nodes(&ctx, &beat_of(vec![vol_owned("vol-ws-run", "node-b")], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status");
         assert_eq!(ws_sent.len(), 1, "{:?}", rec.calls());
@@ -1711,12 +1678,11 @@ fi
         let routes = vec![
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![already_degraded]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![already_unavailable]) },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        unclaim_dead_nodes(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        unclaim_dead_nodes(&ctx, &beat_of(vec![already_unavailable], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         assert!(
             !rec.calls().iter().any(|c| c.starts_with("PUT") || c.starts_with("PATCH")),
@@ -1734,7 +1700,6 @@ fi
         let routes = vec![
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed_stopped("ws-stop", "node-b")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-ws-stop", "node-b"), vol_owned("vol-live", "node-a")]) },
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
             // The API server bumps resourceVersion on the patch; the status PUT must carry the
             // NEW one or it 409s and the volume never gets marked.
@@ -1744,7 +1709,7 @@ fi
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        unclaim_dead_nodes(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        unclaim_dead_nodes(&ctx, &beat_of(vec![vol_owned("vol-ws-stop", "node-b"), vol_owned("vol-live", "node-a")], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status");
         assert_eq!(ws_sent.len(), 1);
@@ -1785,7 +1750,7 @@ fi
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
-        assert!(crate::controller::take_volume(&ctx, "v1", "node-a").await.unwrap());
+        assert!(crate::controller::volume::take_volume(&ctx, "v1", "node-a").await.unwrap());
 
         let sent = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/v1");
         assert_eq!(sent.len(), 1);
@@ -1806,7 +1771,7 @@ fi
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
-        assert!(!crate::controller::take_volume(&ctx, "v1", "node-a").await.unwrap());
+        assert!(!crate::controller::volume::take_volume(&ctx, "v1", "node-a").await.unwrap());
         assert_eq!(rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/v1").len(), 1);
     }
 
@@ -1893,20 +1858,6 @@ fi
             // just another item on the same list, not a special case that only fires when it's
             // the sole entry.
             Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("vol-1-aaaaaaaa", "vol-1", ""), ready_transient("sync-ws-1-x", "vol-1", "")]) },
-            Route {
-                method: "GET",
-                path: VOLREPLICAS.into(),
-                status: 200,
-                body: list_of(
-                    "VolumeReplica",
-                    vec![serde_json::json!({
-                        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
-                        "metadata": {"name": "vol-1.node-a", "uid": "uid-a"},
-                        "spec": {"volume": "vol-1", "node": "node-a"},
-                        "status": {"phase": "Synced", "branches": {}},
-                    })],
-                ),
-            },
             Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
             not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
             Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: serde_json::json!({
@@ -1926,7 +1877,7 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, &bin, &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1").await;
 
         assert!(tmp.path().join("vol/vol-1/snap/sync-ws-1-x").exists(), "the transient must land on disk like any other commit");
         let paths = seen_paths.lock().unwrap().clone();
@@ -1993,11 +1944,8 @@ fi
             "spec": {"volume": "v1", "node": "node-c"},
             "status": {"phase": "Synced", "branches": {}},
         });
+        let beat = beat_of(vec![volume], vec![replica_c], vec![]);
         let routes = vec![
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
-            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![replica_c]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
             Route {
                 method: "DELETE",
                 path: format!("{VOLREPLICAS}/v1.node-b"),
@@ -2013,7 +1961,7 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
 
-        retire_pass(&ctx, &live).await;
+        retire_pass(&ctx, &beat, &live).await;
 
         assert!(rec.calls().iter().any(|c| c == &format!("DELETE {VOLREPLICAS}/v1.node-b")), "{:?}", rec.calls());
         assert!(!ctx.engine.pool.voldir("v1").exists(), "the local copy must be gone");
@@ -2038,16 +1986,11 @@ fi
             "spec": {"volume": "v1", "node": "node-c"},
             "status": {"phase": "Syncing", "branches": {}},
         });
-        let routes = vec![
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
-            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![replica_c]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let beat = beat_of(vec![volume], vec![replica_c], vec![]);
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", Vec::new());
         let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
 
-        retire_pass(&ctx, &live).await;
+        retire_pass(&ctx, &beat, &live).await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "{:?}", rec.calls());
         assert!(ctx.engine.pool.voldir("v1").exists(), "an unsynced replacement must not cost the copy");
@@ -2080,14 +2023,8 @@ fi
             "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
         });
-        let routes = vec![
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
-            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
-        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", routes);
-        retire_pass(&ctx, &["node-a".to_string()]).await;
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", Vec::new());
+        retire_pass(&ctx, &beat_of(vec![volume], vec![], vec![]), &["node-a".to_string()]).await;
         assert!(!ctx.engine.pool.voldir("v-gone").exists(), "no CR: the copy goes");
         assert!(ctx.engine.pool.voldir("v-live").exists(), "listed: untouched");
     }
@@ -2109,25 +2046,82 @@ fi
             "spec": {"volume": "v1", "node": "node-c"},
             "status": {"phase": "Synced", "branches": {}},
         });
-        let ws = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-            "metadata": {"name": "ws-1"},
-            "spec": {"owner": "alice", "team": "", "source": {}},
-            "status": {"phase": "running", "nodeName": "node-b", "volumeRef": "v1"},
-        });
-        let routes = vec![
-            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
-            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![replica_c]) },
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let beat = beat_of(vec![volume], vec![replica_c], vec![("Workspace", "ws-1", "v1")]);
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", Vec::new());
         let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
 
-        retire_pass(&ctx, &live).await;
+        retire_pass(&ctx, &beat, &live).await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "{:?}", rec.calls());
         assert!(ctx.engine.pool.voldir("v1").exists(), "hosting a worktree here must keep the whole copy");
         assert!(ctx.engine.pool.live("v1").join("ws-1").exists(), "and must not drop the live worktree either");
+    }
+
+    /// `beat.volumes` is listed before the pull loop runs; a takeover landing in that window makes
+    /// `v.spec.node_name` stale. Here the list still says node-a, but a takeover has already moved
+    /// the volume to node-b (me) by the time this pass gets around to it — the fresh GET right
+    /// before the delete must catch that and keep the worktree this node just created for itself.
+    #[tokio::test]
+    async fn retire_pass_rechecks_ownership_before_dropping_a_worktree_a_fresh_takeover_claimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v1/live/ws-1")).unwrap();
+
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let beat = beat_of(vec![volume], vec![], vec![]);
+        let routes = vec![Route {
+            method: "GET",
+            path: format!("{VOLUMES}/v1"),
+            status: 200,
+            body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                "metadata": {"name": "v1"},
+                "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
+                "status": {"phase": "ready"},
+            }),
+        }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let live = vec!["node-a".to_string(), "node-b".to_string()];
+
+        retire_pass(&ctx, &beat, &live).await;
+
+        assert!(ctx.engine.pool.live("v1").join("ws-1").exists(), "a fresh takeover made this worktree mine; it must survive");
+        assert!(rec.calls().iter().any(|c| c == &format!("GET {VOLUMES}/v1")), "{:?}", rec.calls());
+    }
+
+    /// The listing budget: one pull beat over one volume makes ONE Volume list, ONE VolumeReplica
+    /// list for the beat, ONE Workspace list and ONE Environment list for this node's parents —
+    /// plus `unclaim_kind`'s cluster-wide pair and the per-volume snapshot list. What it must never
+    /// do again is re-list Volumes three times and Workspaces/Environments three times.
+    #[tokio::test]
+    async fn a_pull_beat_lists_each_kind_once_for_the_beat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 1},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_json("node-a", "True", "2000-01-01T00:00:00Z")]) },
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        pull_beat_with(&ctx, "btrfs", "s3cret").await;
+
+        let count = |p: &str| rec.calls().iter().filter(|c| c.as_str() == format!("GET {p}")).count();
+        assert_eq!(count(VOLUMES), 1, "{:?}", rec.calls());
+        assert_eq!(count(VOLREPLICAS), 1, "{:?}", rec.calls());
+        assert!(count(WORKSPACES) <= 2, "{:?}", rec.calls());
+        assert!(count(ENVIRONMENTS) <= 2, "{:?}", rec.calls());
     }
 }

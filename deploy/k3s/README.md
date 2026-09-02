@@ -263,7 +263,10 @@ Order:
 
 ```sh
 # 1. CRDs first — the new kinds (Snapshot, VolumeReplica) and the selectableFields the agent's
-#    watches filter on. Already applied on dev; harmless to re-apply.
+#    watches filter on. Already applied on dev; harmless to re-apply. This now includes
+#    VolumeReplica's `.spec.volume` selector (added 2026-09-02, used only by `flush_gate`):
+#    apply it BEFORE the agent image that reads it — an agent ahead of the CRD gets a 400 on
+#    every stop's flush gate (stop_push parks the teardown), not on replication.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
 # 2. Roll the agent (repin the image tag to the SHA CI built, then apply and wait).
@@ -275,10 +278,15 @@ deploy/roll.sh
 kubectl rollout status deploy/rustic-git-api -n rustic-git
 ```
 
+Pre-existing asymmetry, follow-up only: `live_parents` in `crates/workspaces/src/api.rs` selects
+Workspaces by a single owner (`owned_by`) but Environments by the caller's whole owner set
+(`owner_set_selector`), so a team environment shows here while a lone workspace under a teammate's
+name would not.
+
 **Every existing volume's pod restarts once — and, for homes, force it explicitly.** There is no
 bulk migration step: an old-layout volume (`{pool}/vol/{id}/live` is itself the RW subvolume) is
 migrated the first time it's CLAIMED on a node under the flag (`migrate_and_seed_baseline` in
-`bins/agent/src/controller.rs`, calling `Engine::migrate_volume`), which moves `live` to a
+`bins/agent/src/controller/workspace.rs`, calling `Engine::migrate_volume`), which moves `live` to a
 directory holding one worktree, `live/{id}` — and the pod that was mounting the OLD path has to be
 recreated to pick up the new one, exactly like the hostpath cutover above. A workspace/environment
 volume migrates lazily, the first time it's claimed, so its pod restarting on its own schedule is
@@ -404,7 +412,7 @@ hour, and worth knowing before the first "my home is gone" message arrives.
 every other migration in this file. The two paths below are NEVER typed by hand: the source
 directory name is lowercased and can be truncated (`home_volume_name` → `dns_label`, `crd.rs`),
 the destination is the owner's handle verbatim — original case, never truncated
-(`ensure_shared_home`/`homes_root` in `controller.rs`, called straight off `spec.owner`). For any
+(`ensure_shared_home`/`homes_root` in `controller/workspace.rs`, called straight off `spec.owner`). For any
 owner whose handle has uppercase, or is long enough to truncate, these are DIFFERENT strings.
 Typing one `<owner>` value consistently (lowercase, since that's the one that makes the source
 directory exist) rsyncs into a sibling directory the pods never mount — the person logs into an

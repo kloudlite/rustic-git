@@ -236,3 +236,12 @@ async fn personal_workspace_unaffected_by_membership() {
     let doc: Value = resp.json().await.unwrap();
     assert_eq!(doc["owner"], "karthik");
 }
+
+/// A slug that is not a segment never reaches a label selector: `in (a,b)` is comma-delimited, so
+/// one bad slug widens the set the listing decides `deleted:` from.
+#[test]
+fn the_owner_set_selector_drops_slugs_that_are_not_segments() {
+    let owners = vec!["alice".to_string(), "bad,slug".to_string(), "ok-team".to_string(), "no)paren".to_string()];
+    let sel = rustic_git_workspaces::api::owner_set_selector(&owners);
+    assert_eq!(sel, "rustic-git.io/owner in (alice,ok-team)", "only validated segments");
+}

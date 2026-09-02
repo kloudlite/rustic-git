@@ -1,6 +1,6 @@
 //! `rustic-git-agent`: the fleet-side process that materializes workspaces on local btrfs.
 //!
-//! `run` boots the node-scoped controller (`controller.rs`), which watches the CRDs bound to this
+//! `run` boots the node-scoped controller (`controller/`), which watches the CRDs bound to this
 //! node and converges the local btrfs pool and its pods.
 
 use rustic_git_agent::{run, Config};

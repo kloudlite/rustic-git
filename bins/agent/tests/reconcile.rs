@@ -284,7 +284,7 @@ async fn a_reconcile_that_cannot_read_the_pool_deletes_nothing() {
 fn phase_names_the_doc_enum() {
     use rustic_git_workspaces::model::{EnvState, WsState};
 
-    // Grepped from controller.rs. Volume phases are excluded deliberately: a Volume is never
+    // Grepped from controller/workspace.rs. Volume phases are excluded deliberately: a Volume is never
     // projected into a doc, so its vocabulary is its own.
     use rustic_git_workspaces::crd::Phase;
     for p in [Phase::Ready, Phase::Stopped, Phase::Error, Phase::Creating].map(Phase::as_str) {
@@ -380,6 +380,15 @@ fn ready_binding() -> Route {
                            "status": {"conditions": [{"type": "NamespaceReady", "status": "True",
                                                       "reason": "Converged", "message": "ok",
                                                       "lastTransitionTime": "2026-08-27T00:00:00Z"}]}}),
+    )
+}
+
+/// The owner's own namespace, present — the other half `namespace_ready` now checks alongside the
+/// binding condition.
+fn ready_namespace() -> Route {
+    rustic_git_workspaces::kube_test::get(
+        format!("/api/v1/namespaces/{}", crd::ws_namespace("alice", "")),
+        serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ws-alice"}}),
     )
 }
 
@@ -1257,6 +1266,35 @@ async fn a_wrong_owner_label_is_re_stamped_from_spec() {
     assert_eq!(rec.calls()[0], format!("PATCH {WS}"), "healed before anything else: {:?}", rec.calls());
 }
 
+/// `ATTACHED_ENV_LABEL` is `spec.attachedEnvironment`'s listing view (`delete_env`'s sweep selects
+/// on it, since a teammate's workspace may be attached to an environment it does not own — an
+/// owner label cannot stand in for it). A reconcile re-stamps it from spec exactly as it does the
+/// owner label.
+#[tokio::test]
+async fn a_stale_attached_env_label_is_re_stamped_from_spec() {
+    let tmp = tempfile::tempdir().unwrap();
+    const WS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: WS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let mut j = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    j["spec"]["desiredState"] = serde_json::json!("stopped");
+    j["spec"]["attachedEnvironment"] = serde_json::json!("env-1");
+    j["metadata"]["labels"]["rustic-git.io/attached-environment"] = serde_json::json!("env-stale");
+    let w: crd::Workspace = serde_json::from_value(j).unwrap();
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", WS);
+    assert_eq!(sent.len(), 1, "owner/kind/team already match spec, only the attached-env label heals: {:?}", rec.calls());
+    assert_eq!(sent[0]["metadata"]["labels"]["rustic-git.io/attached-environment"], "env-1", "{}", sent[0]);
+    assert!(sent[0].get("spec").is_none(), "labels only — a controller never writes spec: {}", sent[0]);
+}
+
 /// A NEW object with no `storage` can never build a disk, and no retry adds a field.
 #[tokio::test]
 async fn a_new_workspace_without_storage_fails_permanently() {
@@ -1300,7 +1338,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     let init = k8s::git_init_container(source, "alpine/git:2.45.2", "git.example.com", "22")
         .expect("a valid repo is accepted")
         .expect("a gitRepo source seeds with an init container");
-    let pod = k8s::workspace_pod(&spec, "ws-1", "ws-1", &test_pod_ctx(), Some(init));
+    let pod = k8s::workspace_pod(&spec, "ws-1", "ws-1", &test_pod_ctx(), Some(init)).unwrap();
 
     let inits = pod.spec.as_ref().unwrap().init_containers.as_ref().expect("init containers");
     assert_eq!(inits.len(), 1);
@@ -1376,6 +1414,7 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
             ready_binding(),
+            ready_namespace(),
             rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
             rustic_git_workspaces::kube_test::post(
                 "/api/v1/namespaces/ws-alice/secrets",
@@ -1510,7 +1549,7 @@ const REPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
 /// field selector is a 400 from a real API server on every reconcile — which parked a real stop
 /// forever, unseen by this mock, which accepts any selector. So pin the request shape itself.
 #[tokio::test]
-async fn the_flush_gate_lists_replicas_without_a_field_selector() {
+async fn the_flush_gate_lists_replicas_by_spec_volume() {
     let _t = FlushTimeout::set("600");
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(tmp.path(), vec![]);
@@ -1521,7 +1560,7 @@ async fn the_flush_gate_lists_replicas_without_a_field_selector() {
     let lists: Vec<&String> = requests.iter().filter(|c| c.contains("volumereplicas")).collect();
     assert!(!lists.is_empty(), "the gate must list replicas: {requests:?}");
     for c in lists {
-        assert!(!c.contains("fieldSelector"), "unsupported field selector on VolumeReplica: {c}");
+        assert!(c.contains("fieldSelector=spec.volume"), "expected a spec.volume field selector: {c}");
     }
 }
 const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1-1";
@@ -2375,6 +2414,7 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
     routes.extend(vec![
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
         ready_binding(),
+        ready_namespace(),
         rustic_git_workspaces::kube_test::post(
             "/api/v1/namespaces/ws-alice/pods",
             serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}),
@@ -2827,6 +2867,7 @@ async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a
     let routes = vec![
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
         ready_binding(),
+        ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx_without_homes_export(tmp.path(), routes);
@@ -2859,6 +2900,9 @@ fn attach_routes() -> Vec<Route> {
         ),
         np("ws-alice"),
         np("env-abc"),
+        // `attached_workspace` sets `spec.attachedEnvironment` with no label to match, so the
+        // reconcile's `heal_attached_label` patches it back in on the first pass.
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: ws_json(serde_json::json!({})) },
     ]
 }
 
@@ -3335,6 +3379,7 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
         ready_binding(),
+        ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
@@ -3365,6 +3410,7 @@ async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-gone"),
         ready_binding(),
+        ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
@@ -3467,4 +3513,166 @@ async fn the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved(
         rec.sent("POST", SNAPSHOTS_LIST).is_empty(),
         "an unreadable generation must cut nothing: {:?}", rec.sent("POST", SNAPSHOTS_LIST)
     );
+}
+
+/// The owner guard: `spec.owner` becomes `{pool}/homes/{owner}` and is chowned by a privileged
+/// process, so a traversing owner must settle Permanent before `ensure_shared_home` runs — not be
+/// caught by accident because `heal_labels` patches the same string as a label first.
+#[tokio::test]
+async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    // `patch_ok` answers with a Volume; the status write here deserializes as a Workspace.
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }],
+    );
+    let w: crd::Workspace = serde_json::from_value(serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
+        "spec": {"owner": "../../etc", "team": "", "name": "ws", "region": "r1",
+                 "image": "", "packages": [], "desiredState": "running"},
+        "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+                   "volumeRef": "vol-1", "conditions": []},
+    }))
+    .unwrap();
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent, never retried");
+    let sent = rec.sent("PATCH", WS_STATUS);
+    let reason = sent.last().expect("a status write")["status"]["conditions"][0]["reason"].clone();
+    assert_eq!(reason, "InvalidSpec");
+    assert!(!tmp.path().join("homes").exists(), "nothing under the pool root was created");
+    assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "nothing was created: {:?}", rec.calls());
+    // `patch_status` is a forced apply, so an omitted field is pruned — placement must survive.
+    let st = &sent.last().unwrap()["status"];
+    assert_eq!(st["nodeName"], "node-a");
+    assert_eq!(st["volumeRef"], "vol-1");
+    assert_eq!(st["compatibleNodes"], serde_json::json!(["node-a"]));
+}
+
+/// `write_attach_label` patches `spec.attachedEnvironment` verbatim into a label value — unchecked,
+/// a hostile value 422s that patch and wedges the reconcile forever with no Permanent settle.
+#[tokio::test]
+async fn a_workspace_with_a_traversing_attached_environment_settles_permanent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }],
+    );
+    let w: crd::Workspace = serde_json::from_value(serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
+        "spec": {"owner": "alice", "team": "", "name": "ws", "region": "r1",
+                 "image": "", "packages": [], "desiredState": "running", "attachedEnvironment": "../evil"},
+        "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+                   "volumeRef": "vol-1", "conditions": []},
+    }))
+    .unwrap();
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent, never retried");
+    let sent = rec.sent("PATCH", WS_STATUS);
+    let reason = sent.last().expect("a status write")["status"]["conditions"][0]["reason"].clone();
+    assert_eq!(reason, "InvalidSpec");
+    assert!(
+        rec.calls().iter().all(|c| c == &format!("PATCH {WS_STATUS}") || !c.starts_with("PATCH") && !c.starts_with("POST")),
+        "no POST/PATCH beyond the status write: {:?}", rec.calls()
+    );
+}
+
+/// The same guard on an Environment, whose `spec.owner` reaches `{pool}/homecache/{owner}`.
+#[tokio::test]
+async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_placement() {
+    const ENV_STATUS: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1/status";
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![Route { method: "PATCH", path: ENV_STATUS.into(), status: 200, body: env_json(serde_json::json!({})) }],
+    );
+    let mut json = env_json(serde_json::json!({
+        "phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "vol-1",
+        "serviceStatus": [], "conditions": []
+    }));
+    json["spec"]["owner"] = serde_json::json!("../../etc");
+    let e: crd::Environment = serde_json::from_value(json).unwrap();
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent, never retried");
+    let sent = rec.sent("PATCH", ENV_STATUS);
+    let st = &sent.last().expect("a status write")["status"];
+    assert_eq!(st["conditions"][0]["reason"], "InvalidSpec");
+    assert_eq!(st["nodeName"], "node-a");
+    assert_eq!(st["volumeRef"], "vol-1");
+    assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "nothing was created: {:?}", rec.calls());
+    assert!(!tmp.path().join("homecache").exists(), "nothing under the pool root was created");
+}
+
+
+/// The gate is a per-NODE fact read off a cluster-scoped condition: node A's pass sets
+/// `NamespaceReady=True` after creating the namespaces ITS workspaces need, and a workspace in a
+/// team this node has never seen would sail past it into a 60 s `ensure_ssh` retry. The namespace
+/// itself is what must answer.
+#[tokio::test]
+async fn the_namespace_gate_asks_about_this_workspace_s_own_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let binding = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+        "metadata": {"name": "r1-alice", "uid": "b-uid", "generation": 1},
+        "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"},
+        "status": {"observedGeneration": 1,
+                   "conditions": [{"type": "NamespaceReady", "status": "True", "reason": "Converged",
+                                   "message": "", "lastTransitionTime": "2000-01-01T00:00:00Z"}]},
+    });
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice", binding),
+        rustic_git_workspaces::kube_test::not_found(format!(
+            "/api/v1/namespaces/{}",
+            rustic_git_workspaces::crd::ws_namespace("alice", "eng")
+        )),
+    ];
+    let (ctx, _rec) = ctx(tmp.path(), routes);
+
+    assert!(!rustic_git_agent::binding::namespace_ready(&ctx, "r1", "alice", "eng").await.unwrap(),
+            "a True condition from another node must not pass a namespace this node has not made");
+}
+
+/// The pod bind-mounts this file BY INODE (`type: File`, no subPath), so a rewrite that replaces
+/// the inode — `rename(2)`, the usual way to write a file atomically — leaves every running pod
+/// reading the old one and attachment silently stops working. Verified on a live cluster; this
+/// test is what stops someone "fixing" it into an atomic write.
+#[test]
+fn rewriting_a_resolv_conf_keeps_the_same_inode() {
+    use std::os::unix::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = tmp.path().to_string_lossy().to_string();
+    // The template the agent reads is its own `/etc/resolv.conf`; skip where that is unreadable.
+    if std::fs::read_to_string("/etc/resolv.conf").is_err() {
+        return;
+    }
+
+    rustic_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
+    let path = rustic_git_workspaces::k8s::attach_file(&pool, "ws-1");
+    let before = std::fs::metadata(&path).unwrap().ino();
+
+    rustic_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", Some("env-abc")).unwrap();
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(before, after.ino(), "the file was replaced, not truncated: every running pod now reads the old inode");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("env-abc"), "and the new content did land");
+}
+
+/// A pre-migration pod mounted this path with a `subPath`, which kubernetes created as a
+/// DIRECTORY. A node upgraded from that shape must clear it rather than leave the workspace with
+/// no DNS for as long as the pod lives.
+#[test]
+fn a_directory_left_by_the_old_subpath_mount_is_replaced_by_the_file() {
+    if std::fs::read_to_string("/etc/resolv.conf").is_err() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = tmp.path().to_string_lossy().to_string();
+    let path = rustic_git_workspaces::k8s::attach_file(&pool, "ws-1");
+    std::fs::create_dir_all(&path).unwrap();
+
+    rustic_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
+    assert!(std::fs::metadata(&path).unwrap().is_file());
 }

@@ -37,7 +37,9 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
             "OwnerBinding" | "Volume" => &[".spec.nodeName"],
             "Workspace" | "Environment" => &[".status.nodeName"],
             "Snapshot" => &[".spec.volume"],
-            "VolumeReplica" => &[".spec.node", ".status.phase"],
+            // `.spec.volume`: `flush_gate` and `pull_volume` both filtered client-side because a
+            // selector on it was a 400. Dropping it makes both a full-cluster replica scan again.
+            "VolumeReplica" => &[".spec.node", ".status.phase", ".spec.volume"],
             other => panic!("unknown kind {other}"),
         };
         if want.is_empty() {

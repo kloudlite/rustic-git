@@ -1239,7 +1239,7 @@ async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
 /// Attaching writes SPEC and nothing else — the agent owns status, and the whole grant (resolv.conf,
 /// both NetworkPolicies) is its reconcile, not this handler's.
 #[tokio::test]
-async fn attaching_sets_the_spec_field_and_nothing_else() {
+async fn attaching_sets_the_spec_field_and_its_listing_label() {
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
@@ -1257,7 +1257,10 @@ async fn attaching_sets_the_spec_field_and_nothing_else() {
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let patch = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
     assert_eq!(patch["spec"]["attachedEnvironment"], "env-1");
-    assert!(patch["status"].is_null(), "the API writes spec only");
+    // `delete_env`'s sweep selects on this label, since a teammate's workspace can be attached to
+    // an environment it does not own — stamped in the same patch as spec so the two never drift.
+    assert_eq!(patch["metadata"]["labels"]["rustic-git.io/attached-environment"], "env-1");
+    assert!(patch["status"].is_null(), "the API writes spec/labels only");
 }
 
 /// A different region is a different cluster: there is no route and no DNS between them, so this is
@@ -1328,6 +1331,9 @@ async fn detaching_is_a_null_merge_patch_and_repeats() {
     let patches = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1"));
     assert_eq!(patches.len(), 2);
     assert!(patches[0]["spec"]["attachedEnvironment"].is_null());
+    // Cleared in the same patch as the spec field, so the listing label never outlives the
+    // attachment it is a view of.
+    assert!(patches[0]["metadata"]["labels"]["rustic-git.io/attached-environment"].is_null());
 }
 
 /// Deleting an environment clears the attachment on every workspace pointing at it: only `/v1` may
@@ -1359,6 +1365,39 @@ async fn deleting_an_environment_clears_the_attachments_to_it() {
     assert!(patch["spec"]["attachedEnvironment"].is_null());
     // The unattached one is left alone.
     assert!(s.rec.sent("PATCH", &format!("{API}/workspaces/ws-2")).is_empty());
+}
+
+/// The attachment sweep selects on `ATTACHED_ENV_LABEL`, not on the caller's owner label: `attach_ws`
+/// authorizes through `may_act_on`, which admits team members, so a workspace attached to this
+/// environment may be owned by someone else on the team entirely. An owner-scoped selector would
+/// silently miss it and leave it pointing at a deleted environment forever.
+#[tokio::test]
+async fn delete_env_lists_only_workspaces_attached_to_it() {
+    let s = server(vec![
+        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
+        Route { method: "DELETE", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
+        get(format!("{API}/workspaces"), json!({"apiVersion": "v1", "kind": "WorkspaceList", "items": []})),
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/v1/environments/env-1", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let listed = s
+        .rec
+        .requests()
+        .into_iter()
+        .find(|r| r.starts_with(&format!("GET {API}/workspaces?")))
+        .expect("the attachment sweep listed workspaces");
+    assert!(
+        listed.contains("rustic-git.io%2Fattached-environment%3Denv-1")
+            || listed.contains("rustic-git.io/attached-environment=env-1"),
+        "{listed}"
+    );
 }
 
 /// Nothing stamps a finalizer on a `Workspace`, so its deletion is pure garbage collection and the
