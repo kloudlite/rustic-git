@@ -65,8 +65,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         Resolved::Settled(a) => return Ok(a),
         // No StatefulSet may exist before the disk does: a pod bound to an unmaterialized subvolume
         // wedges forever on `path … does not exist`.
-        Resolved::Wait { volume_ref, phase, cond, action, unplace } => {
-            let node_name = if unplace { String::new() } else { prev.node_name.clone() };
+        Resolved::Wait { volume_ref, phase, cond, action } => {
             let st = crd::EnvironmentStatus {
                 // An environment whose disk is being swapped is not being CREATED, and saying so
                 // is alarming in the one moment a person is already nervous: an in-flight restore
@@ -76,7 +75,6 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
                 observed_generation: None,
                 volume_ref: volume_ref.or(prev.volume_ref.clone()),
                 conditions: vec![cond],
-                node_name,
                 ..prev
             };
             write_env_status(e, st, ctx).await?;

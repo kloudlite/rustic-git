@@ -717,6 +717,36 @@ async fn commit_model_a_synced_replica_claims_a_workspace_with_commits() {
     assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "Synced: claimed");
 }
 
+/// An up-to-date non-owner must NOT claim a parent whose volume is pinned to a LIVE owner, even
+/// though `may_claim`'s up-to-date rule would otherwise allow it — that combination is exactly
+/// the mismatch arm's self-heal turned into a ping-pong: un-place, re-claim, mismatch, un-place,
+/// every 5s, forever, with the real owner's own reconcile never getting a turn.
+#[tokio::test]
+async fn an_up_to_date_non_owner_does_not_claim_a_parent_whose_volume_has_a_live_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/volumes/vol-1",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                                   "metadata": {"name": "vol-1", "uid": "uid-1"},
+                                   "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 20}}),
+            ),
+            rustic_git_workspaces::kube_test::get(
+                "/api/v1/nodes/node-b",
+                serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-b"},
+                                   "status": {"conditions": [{"type": "Ready", "status": "True",
+                                                              "lastTransitionTime": rfc3339_ago(60)}]}}),
+            ),
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "only the live owner may claim its own volume's parent");
+}
+
 /// The same volume, but this node's replica is Syncing (or absent) — ruling A's other half: no
 /// claim, and the object is left unplaced for whichever node IS Synced.
 #[tokio::test]
@@ -1341,16 +1371,28 @@ async fn a_mismatch_against_a_live_owner_un_places_me() {
                                    "status": {"conditions": [{"type": "Ready", "status": "True",
                                                               "lastTransitionTime": rfc3339_ago(60)}]}}),
             ),
-            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            // A guarded write is a PUT of the whole status subresource — never a forced PATCH,
+            // which would let this un-place race and silently clobber node-b's own claim.
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
-    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-1"}));
+    let w = workspace(serde_json::json!({
+        "phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-1",
+        "head": "ws-1-aaaaaaaa", "conditions": [{"type": "PackagesReady", "status": "True", "reason": "Built",
+                                                  "message": "ok", "lastTransitionTime": "2026-08-27T00:00:00Z"}],
+    }));
 
     let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
-    let sent = rec.sent("PATCH", WS_STATUS);
+    let sent = rec.sent("PUT", WS_STATUS);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["status"]["nodeName"], "", "I un-place myself so the real owner reclaims it");
+    assert_eq!(sent[0]["status"]["volumeRef"], "ws-1", "the guarded write merges onto the fetched status, not a bare patch");
+    assert_eq!(sent[0]["status"]["head"], "ws-1-aaaaaaaa", "unrelated status fields ride along untouched");
+    assert!(
+        sent[0]["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "PackagesReady"),
+        "kept conditions survive alongside the new NodeMismatch one: {:?}", sent[0]["status"]["conditions"]
+    );
     assert_ne!(action, kube::runtime::controller::Action::await_change(), "and come back rather than awaiting a change I just caused");
 }
 

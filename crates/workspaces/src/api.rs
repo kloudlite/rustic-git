@@ -900,16 +900,17 @@ async fn start_ws(
 /// losing (see the design's "the person decides" rule): stopping it is that decision, so the
 /// response says what it costs, read off the `NodeDead` condition the sweep already wrote.
 fn node_dead_warning(node_name: &str, conditions: &[crd::Condition]) -> Option<String> {
-    conditions
-        .iter()
-        .find(|c| c.reason == "NodeDead" && c.status == "True")
-        .map(|_| format!("node {node_name} is down; edits after the last sync point are only on that node and will not follow the move"))
+    interrupted(conditions)
+        .then(|| format!("node {node_name} is down; edits after the last sync point are only on that node and will not follow the move"))
 }
 
 /// Interrupted: the node died while this was RUNNING, so its live edits exist only there. The
-/// sweep writes `Degraded/NodeDead` and keeps the pin; nothing in the system may move it.
+/// sweep writes `Degraded/NodeDead` and keeps the pin; nothing in the system may move it. Both the
+/// type and the reason, not the reason alone — `NodeDead` is a specific enough token that nothing
+/// else uses it today, but matching only half of what the sweep writes is how this and the sweep
+/// drift apart the day something else reuses the reason on a different condition type.
 fn interrupted(conditions: &[crd::Condition]) -> bool {
-    conditions.iter().any(|c| c.reason == "NodeDead" && c.status == "True")
+    conditions.iter().any(|c| c.type_ == "Degraded" && c.reason == "NodeDead" && c.status == "True")
 }
 
 /// The one answer a start gets while a parent is interrupted. There is deliberately no force

@@ -147,6 +147,17 @@ async fn decide(
         Some(v) => Api::<crd::Volume>::all(ctx.client.clone()).get_opt(v).await?.map(|x| x.spec.node_name).unwrap_or_default(),
         None => String::new(),
     };
+    // Only the owner may claim a parent whose volume it owns, full stop — an up-to-date non-owner
+    // is otherwise allowed to claim (see `may_claim`), which is exactly what turns the mismatch
+    // arm's self-heal into a ping-pong: it un-places, and the very next pass here re-claims the
+    // same parent before the live owner's own reconcile gets to it. A DEAD owner is not this
+    // guard's business — `may_claim`'s up-to-date rule is what lets a replacement take over.
+    if !owner.is_empty() && owner != ctx.node {
+        let owner_node = Api::<Node>::all(ctx.client.clone()).get_opt(&owner).await?;
+        if !crate::peer::unplaceable(owner_node.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()) {
+            return Ok(None);
+        }
+    }
     let p = placement(ctx, volume, worktree).await?;
     if !may_claim(&ctx.node, &owner, &p) {
         return Ok(None);

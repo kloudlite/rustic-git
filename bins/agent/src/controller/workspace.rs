@@ -697,14 +697,12 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         Resolved::Settled(a) => return Ok(a),
         // Unobserved on purpose on every wait: this generation has not converged, so the next pass
         // re-runs instead of treating a half-built workspace as done.
-        Resolved::Wait { volume_ref, phase, cond, action, unplace } => {
-            let node_name = if unplace { String::new() } else { prev.node_name.clone() };
+        Resolved::Wait { volume_ref, phase, cond, action } => {
             let st = crd::WorkspaceStatus {
                 phase,
                 observed_generation: None,
                 volume_ref: volume_ref.or(prev.volume_ref.clone()),
                 conditions: ws_conditions(&prev, cond),
-                node_name,
                 ..prev
             };
             write_ws_status(w, st, ctx).await?;

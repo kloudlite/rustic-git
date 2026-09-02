@@ -3,7 +3,10 @@
 //! — a workspace and an environment both own exactly one volume with identical semantics.
 //! Split out of `controller.rs` unchanged.
 
-use super::{conditions_eq, kept_conditions, running_contains, settle, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Work, RETRY, TICK};
+use super::{
+    conditions_eq, kept_conditions, replace_status, running_contains, settle, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr,
+    Work, RETRY, TICK,
+};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use rustic_git_workspaces::k8s;
 use kube::api::{Patch, PatchParams, PostParams};
@@ -460,11 +463,7 @@ pub(crate) enum Resolved {
     Ready(Box<crd::Volume>),
     /// Not usable yet (or ever). The parent writes `phase` + `cond` into ITS OWN status struct —
     /// the two status types share no trait — and returns `action`.
-    ///
-    /// `unplace` is set only by the mismatch-against-a-live-owner branch: the parent must blank
-    /// its own `status.nodeName` so the real owner's next claim is unopposed, instead of leaving
-    /// a pin that names a node whose reconcile already gave up on this parent.
-    Wait { volume_ref: Option<String>, phase: crd::Phase, cond: Condition, action: Action, unplace: bool },
+    Wait { volume_ref: Option<String>, phase: crd::Phase, cond: Condition, action: Action },
     /// `settle` already wrote the status; the parent just returns.
     Settled(Action),
 }
@@ -547,8 +546,7 @@ where
                 phase: crd::Phase::Creating,
                 cond: crd::condition("Ready", false, "SourceVolumeNotReady", "waiting for the clone source's volume", gen),
                 action: Action::requeue(TICK),
-                unplace: false,
-            });
+                });
         }
         None => {
             ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx)
@@ -571,7 +569,6 @@ where
             phase: crd::Phase::Creating,
             cond: crd::condition("Ready", false, "VolumeTakeover", "taking ownership of the released volume", gen),
             action: Action::requeue(std::time::Duration::from_secs(5)),
-            unplace: false,
         });
     }
     if vol.spec.node_name != node_name {
@@ -593,20 +590,34 @@ where
         };
         if alive {
             tracing::info!(volume = %id, owner = %vol.spec.node_name, "lost the volume; un-placing myself so the owner reclaims it");
-            return Ok(Resolved::Wait {
-                volume_ref: None,
-                phase: crd::Phase::Pending,
-                cond: crd::condition("Placed", false, "NodeMismatch", &why, gen),
-                action: Action::requeue(std::time::Duration::from_secs(5)),
-                unplace: true,
-            });
+            // GUARDED, exactly like the claim itself (`claim.rs:209-226`): this write races the
+            // real owner's own claim of the same parent, and a forced apply (`write_ws_status`/
+            // `patch_status`) would let this un-place silently clobber a claim node-b just made.
+            // Merge onto the object AS FETCHED so nothing but nodeName/phase/conditions moves —
+            // `volumeRef`/`head`/`durable`/every other status field rides along untouched.
+            let mut status = serde_json::to_value(parent).map_err(|e| ReconcileErr(e.to_string()))?["status"].take();
+            if status.is_null() {
+                status = serde_json::json!({});
+            }
+            if let Some(dst) = status.as_object_mut() {
+                dst.insert("nodeName".into(), serde_json::json!(""));
+                dst.insert("phase".into(), serde_json::json!(crd::Phase::Pending));
+                dst.insert("conditions".into(), serde_json::json!(kept_conditions(prev_conditions, crd::condition("Placed", false, "NodeMismatch", &why, gen))));
+            }
+            let api: Api<P> = Api::all(ctx.client.clone());
+            return Ok(Resolved::Settled(match replace_status(&api, parent, &api_kind, status).await {
+                Ok(()) => Action::requeue(std::time::Duration::from_secs(5)),
+                // Someone else moved this parent first (the owner's own claim, or a peer's earlier
+                // un-place) — not an error, just requeue and let the fresher object drive.
+                Err(kube::Error::Api(s)) if s.code == 409 => Action::requeue(std::time::Duration::from_secs(5)),
+                Err(e) => return Err(e.into()),
+            }));
         }
         return Ok(Resolved::Wait {
             volume_ref: None,
             phase: crd::Phase::Error,
             cond: crd::condition("Degraded", true, "NodeMismatch", &why, gen),
             action: Action::await_change(),
-            unplace: false,
         });
     }
     if !volume_is_ready(&vol) {
@@ -632,7 +643,6 @@ where
                 gen,
             ),
             action: if failed.is_some() { Action::await_change() } else { Action::requeue(TICK) },
-            unplace: false,
         });
     }
     Ok(Resolved::Ready(Box::new(vol)))
