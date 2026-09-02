@@ -32,6 +32,12 @@ pub const KIND_LABEL: &str = "rustic-git.io/kind";
 /// The team a workspace was made in, empty for personal. Same rule as the other two: a listing
 /// view of `spec.team`, re-stamped by the controller, never authorization.
 pub const TEAM_LABEL: &str = "rustic-git.io/team";
+/// A view of `Workspace.spec.attachedEnvironment`, same rule as the other three labels: `attach_ws`
+/// authorizes through `may_act_on` (team members included), so a plain `owner` selector on
+/// `delete_env`'s sweep misses a teammate's attached workspace — this label is what the sweep
+/// selects on instead. Stamped by `/v1`'s attach/detach handlers and re-stamped from spec by
+/// `heal_labels` on every reconcile; never a decision, only a listing shortcut.
+pub const ATTACHED_ENV_LABEL: &str = "rustic-git.io/attached-environment";
 pub const SERVICE_LABEL: &str = "rustic-git.io/service";
 /// The container's writable layer and logs — NOT the tenant's data, which lives on their btrfs
 /// subvolume and is bounded by its own qgroup quota.

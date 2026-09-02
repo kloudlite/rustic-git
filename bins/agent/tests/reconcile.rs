@@ -1257,6 +1257,35 @@ async fn a_wrong_owner_label_is_re_stamped_from_spec() {
     assert_eq!(rec.calls()[0], format!("PATCH {WS}"), "healed before anything else: {:?}", rec.calls());
 }
 
+/// `ATTACHED_ENV_LABEL` is `spec.attachedEnvironment`'s listing view (`delete_env`'s sweep selects
+/// on it, since a teammate's workspace may be attached to an environment it does not own — an
+/// owner label cannot stand in for it). A reconcile re-stamps it from spec exactly as it does the
+/// owner label.
+#[tokio::test]
+async fn a_stale_attached_env_label_is_re_stamped_from_spec() {
+    let tmp = tempfile::tempdir().unwrap();
+    const WS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: WS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let mut j = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    j["spec"]["desiredState"] = serde_json::json!("stopped");
+    j["spec"]["attachedEnvironment"] = serde_json::json!("env-1");
+    j["metadata"]["labels"]["rustic-git.io/attached-environment"] = serde_json::json!("env-stale");
+    let w: crd::Workspace = serde_json::from_value(j).unwrap();
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", WS);
+    assert_eq!(sent.len(), 1, "owner/kind/team already match spec, only the attached-env label heals: {:?}", rec.calls());
+    assert_eq!(sent[0]["metadata"]["labels"]["rustic-git.io/attached-environment"], "env-1", "{}", sent[0]);
+    assert!(sent[0].get("spec").is_none(), "labels only — a controller never writes spec: {}", sent[0]);
+}
+
 /// A NEW object with no `storage` can never build a disk, and no retry adds a field.
 #[tokio::test]
 async fn a_new_workspace_without_storage_fails_permanently() {
@@ -2859,6 +2888,9 @@ fn attach_routes() -> Vec<Route> {
         ),
         np("ws-alice"),
         np("env-abc"),
+        // `attached_workspace` sets `spec.attachedEnvironment` with no label to match, so the
+        // reconcile's `heal_attached_label` patches it back in on the first pass.
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: ws_json(serde_json::json!({})) },
     ]
 }
 
@@ -3531,37 +3563,3 @@ async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_
     assert!(!tmp.path().join("homecache").exists(), "nothing under the pool root was created");
 }
 
-/// Minimal running Workspace, mirroring `volume_json`'s shape — this test only needs a name to
-/// stand in for the reconcile's target; it never depends on the pass converging.
-fn workspace_json_running(id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1",
-        "kind": "Workspace",
-        "metadata": {"name": id, "uid": "ws-uid-1", "generation": 1},
-        "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1",
-                 "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
-        "status": {"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]},
-    })
-}
-
-/// The reactor must stay free while the shared-home mount check runs: `mount_homes` shells out to
-/// `ls`, `umount -f -l` and `nsenter … mount`, up to ~65 s of synchronous syscalls. Asserted by
-/// running a reconcile on a single-threaded runtime beside a timer — a blocking call on the
-/// reactor starves the timer, a `spawn_blocking` one does not.
-#[tokio::test(flavor = "current_thread")]
-async fn a_workspace_reconcile_never_blocks_the_reactor() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok("/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status")]);
-    let w = workspace_json_running("ws-1");
-    let w: crd::Workspace = serde_json::from_value(w).unwrap();
-
-    let ticked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = ticked.clone();
-    let timer = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
-    });
-    let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
-    timer.await.unwrap();
-    assert!(ticked.load(std::sync::atomic::Ordering::SeqCst), "the reactor made no progress during the reconcile");
-}

@@ -591,6 +591,25 @@ where
     Ok(())
 }
 
+/// `ATTACHED_ENV_LABEL` is `spec.attachedEnvironment`'s listing view, same rule as `heal_labels`
+/// above: `delete_env`'s sweep selects on it instead of an owner label (a teammate may attach a
+/// workspace it does not own), so an object whose label has drifted from spec — the API-authored
+/// patch failed to also land, a restored backup — would leave that sweep unable to find it.
+async fn heal_attached_label(api: &Api<crd::Workspace>, w: &crd::Workspace) -> Result<(), ReconcileErr> {
+    let want = w.spec.attached_environment.as_deref();
+    let cur = w.meta().labels.as_ref().and_then(|l| l.get(k8s::ATTACHED_ENV_LABEL)).map(String::as_str);
+    if cur == want {
+        return Ok(());
+    }
+    let label = match want {
+        Some(env) => serde_json::json!(env),
+        None => serde_json::Value::Null,
+    };
+    let patch = serde_json::json!({"metadata": {"labels": {k8s::ATTACHED_ENV_LABEL: label}}});
+    api.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
+    Ok(())
+}
+
 pub fn owner_ref_of_kind<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, ReconcileErr> {
     obj.controller_owner_ref(&()).ok_or_else(|| ReconcileErr("object has no uid".into()))
 }
@@ -1952,7 +1971,9 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         )
         .await;
     }
-    heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
+    let ws_api = Api::<crd::Workspace>::all(ctx.client.clone());
+    heal_labels(&ws_api, w, &w.spec.owner, &w.spec.team, "workspace").await?;
+    heal_attached_label(&ws_api, w).await?;
     let mut prev = w.status.clone().unwrap_or_default();
     // Stopping is a home push and a pod delete — it needs neither the disk nor the namespace. Run
     // it BEFORE those gates: a workspace whose Volume failed permanently would otherwise be

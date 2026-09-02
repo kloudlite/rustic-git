@@ -306,7 +306,7 @@ fn kube_err(e: kube::Error) -> Response {
     }
 }
 
-pub use crate::k8s::{KIND_LABEL, OWNER_LABEL, TEAM_LABEL};
+pub use crate::k8s::{ATTACHED_ENV_LABEL, KIND_LABEL, OWNER_LABEL, TEAM_LABEL};
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
 /// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
@@ -953,7 +953,13 @@ async fn attach_ws(
         return Err((StatusCode::CONFLICT, "the environment is in another region, which is another cluster").into_response());
     }
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
-    let patch = serde_json::json!({"spec": {"attachedEnvironment": body.environment}});
+    // The label is stamped here, not left for the next reconcile: `delete_env`'s sweep selects on
+    // it, and a window where the spec says attached but the label does not would let a delete
+    // racing this call miss the workspace it needs to clear.
+    let patch = serde_json::json!({
+        "spec": {"attachedEnvironment": body.environment},
+        "metadata": {"labels": {ATTACHED_ENV_LABEL: body.environment}},
+    });
     api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -983,8 +989,12 @@ async fn detach_ws(
     let c = kube(&s)?.clone();
     let api: Api<crd::Workspace> = Api::all(c.clone());
     // `null` is how a merge patch REMOVES a key. `""` would leave the reconciler resolving an
-    // environment named empty-string.
-    let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
+    // environment named empty-string. The label is cleared in the same patch, for the same reason
+    // it is stamped in the same patch on attach.
+    let patch = serde_json::json!({
+        "spec": {"attachedEnvironment": serde_json::Value::Null},
+        "metadata": {"labels": {ATTACHED_ENV_LABEL: serde_json::Value::Null}},
+    });
     api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
     // A STOPPED workspace never reaches the attach block of a reconcile — `apply_workspace` returns
     // at the stop gate — so the agent would never collect the environment-side half, and clearing
@@ -1462,13 +1472,16 @@ async fn delete_env(
     // reconciler treats a missing environment as unattached anyway, so a failure here degrades to a
     // stale field rather than a dangling grant.
     let wss: Api<crd::Workspace> = Api::all(c.clone());
-    // Owner-scoped, like every other listing in this file (`owned_by`'s comment says why): an
-    // unfiltered cluster-wide list on every environment delete is a full Workspace scan, and
-    // `attach_ws` refuses a cross-owner or cross-region attachment, so this selector cannot miss
-    // one. The `Err` arm is LOGGED, not dropped: a failed list leaves workspaces pointing at a
-    // deleted environment, and the reconciler treating that as unattached is a degradation
-    // somebody has to be able to find in the logs.
-    match wss.list(&owned_by(&e.spec.owner)).await {
+    // NOT `owned_by(&e.spec.owner)`: `attach_ws` authorizes through `may_act_on`, which admits
+    // team members, so a teammate's workspace can be attached to this environment while owned by
+    // someone else entirely — an owner-scoped selector would miss it. `ATTACHED_ENV_LABEL` is the
+    // view of `spec.attachedEnvironment` built for exactly this (`heal_labels` keeps it honest),
+    // so it is the one selector that cannot miss an attached workspace regardless of who owns it.
+    // The `Err` arm is LOGGED, not dropped: a failed list leaves workspaces pointing at a deleted
+    // environment, and the reconciler treating that as unattached is a degradation somebody has
+    // to be able to find in the logs.
+    let attached_to = ListParams::default().labels(&format!("{ATTACHED_ENV_LABEL}={id}"));
+    match wss.list(&attached_to).await {
         Ok(list) => {
             for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
                 let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
