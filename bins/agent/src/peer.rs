@@ -816,7 +816,7 @@ async fn write_replica_status(
 /// replica reaper and the claim-unclaim sweep can never drift apart: absent from a nodes list we
 /// DID get is dead; present with `Ready=false` past `floor` seconds is dead; present with no
 /// readable `Ready` condition at all is NOT dead — the API server just hasn't converged one yet.
-fn node_is_dead(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timestamp) -> bool {
+pub(crate) fn node_is_dead(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timestamp) -> bool {
     match node {
         None => true,
         Some(n) => n

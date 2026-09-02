@@ -605,9 +605,14 @@ where
         // nothing else: it is the only code that knows whether a Running sibling still pins it. A
         // failed Node read keeps today's refuse-and-wait — un-placing on a maybe-dead owner would
         // be a second thing allowed to release a volume.
+        //
+        // `node_is_dead`, NOT `unplaceable`: a DECOMMISSIONING owner is alive and still draining,
+        // so it will reclaim this parent. Reading it as not-alive skips the self-heal and parks the
+        // loser in `Error`/`Degraded=NodeMismatch` under `await_change()` — forever, since nothing
+        // else ever touches that claim. `claim.rs` keeps `unplaceable`: nothing NEW may land here.
         let owner_node = Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&vol.spec.node_name).await;
         let alive = match &owner_node {
-            Ok(n) => !crate::peer::unplaceable(n.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+            Ok(n) => !crate::peer::node_is_dead(n.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
             Err(_) => false,
         };
         if alive {
@@ -668,4 +673,104 @@ where
         });
     }
     Ok(Resolved::Ready(Box::new(vol)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
+    use rustic_git_workspaces::kube_test::{get, mock_client, Recorder, Route};
+
+    struct NoopNix;
+    #[async_trait::async_trait]
+    impl crate::nix::Nix for NoopNix {
+        async fn build(&self, _e: &str, _t: std::time::Duration) -> Result<std::path::PathBuf, String> {
+            Ok(std::path::PathBuf::from("/tmp"))
+        }
+        async fn ping(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn collect_garbage(&self) -> Result<u64, String> {
+            Ok(0)
+        }
+    }
+
+    fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+        let (client, rec) = mock_client(routes);
+        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
+        (
+            Arc::new(Ctx::new(
+                client,
+                Arc::new(Engine::new(EnginePool::new(pool))),
+                node.into(),
+                pool.to_string_lossy().into(),
+                "r1".into(),
+                vec![],
+                Some("test:/".into()),
+                Arc::new(NoopNix),
+                pool.join("profiles"),
+            )),
+            rec,
+        )
+    }
+
+    /// A DECOMMISSIONING owner is ALIVE: it is draining at its people's pace and will reclaim this
+    /// parent. Reading it through `unplaceable` (which folds decommissioning into dead) skipped the
+    /// mismatch self-heal, and the loser of the takeover race then sat in `Error` under
+    /// `await_change()` forever, holding a `status.nodeName` nothing would ever clear.
+    #[tokio::test]
+    async fn a_decommissioning_owner_is_alive_so_the_loser_un_places_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "vol-1", "uid": "uid-src", "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "name": "src", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
+            "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1"},
+        });
+        let parent_json = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-2", "uid": "uid-ws-2", "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "name": "copy", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
+            "status": {"phase": "ready", "nodeName": "node-b", "volumeRef": "vol-1"},
+        });
+        let routes = vec![
+            get("/apis/rustic-git.io/v1alpha1/workspaces/vol-1", src),
+            get(
+                "/apis/rustic-git.io/v1alpha1/volumes/vol-1",
+                serde_json::json!({
+                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                    "metadata": {"name": "vol-1", "uid": "uid-vol-1", "generation": 1, "resourceVersion": "9"},
+                    "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+                    "status": {"phase": "ready"},
+                }),
+            ),
+            get(
+                "/api/v1/nodes/node-a",
+                serde_json::json!({
+                    "apiVersion": "v1", "kind": "Node",
+                    "metadata": {"name": "node-a", "labels": {rustic_git_workspaces::crd::DECOMMISSION_LABEL: "true"}},
+                    "status": {"conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2000-01-01T00:00:00Z"}]},
+                }),
+            ),
+            Route {
+                method: "PUT",
+                path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-2/status".into(),
+                status: 200,
+                body: parent_json.clone(),
+            },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let parent: crd::Workspace = serde_json::from_value(parent_json).unwrap();
+        let storage = Some(crd::WorkspaceStorage {
+            quota_gb: 5,
+            source: Some(VolumeSource::CloneOf { volume: "vol-1".into(), commit: Some("sync-vol-1-bbbb".into()) }),
+        });
+
+        let out = resolve_volume(&parent, "alice", "", "r1", &storage, "node-b", &[], 1, &ctx).await.unwrap();
+
+        assert!(matches!(out, Resolved::Settled(_)), "the loser settles by un-placing, not by waiting on an error");
+        let sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-2/status").remove(0);
+        assert_eq!(sent["status"]["nodeName"], "", "un-placed, so the live draining owner reclaims it");
+        assert_ne!(sent["status"]["phase"], "error", "a live owner is not an error: {sent}");
+    }
 }
