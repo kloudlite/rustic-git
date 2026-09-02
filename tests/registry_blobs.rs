@@ -29,7 +29,7 @@ async fn a_blob_pushed_in_one_request_comes_back() {
 #[tokio::test]
 async fn a_large_blob_streams_back_exact_bytes() {
     // Regression guard for the streamed GET path: buffering the whole layer in the handler
-    // was an anonymous memory-DoS for public images (max_layer is 10 GiB by default).
+    // was an anonymous memory-DoS for public images (max_layer is 5 GiB by default).
     let (base, _e, c, token) = authed().await;
     let body = vec![0xABu8; 5 * 1024 * 1024];
     let d = Digest::of(&body);
