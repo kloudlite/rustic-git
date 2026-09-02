@@ -205,20 +205,19 @@ async fn advance_head(ctx: &Arc<Ctx>, kind: &str, worktree: &str, name: &str) ->
 /// delete, no matter how far back in the keep-window they fall. List errors propagate: a
 /// half-seen head set is exactly the case that would let retention delete a commit someone is
 /// still standing on.
-async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str, owner: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
+async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
     // F4: matched on the commit NAME's `{volume}-` prefix (`crd::snapshot_name`), not on
     // `volume_ref` — a worktree whose status is mid-rebuild has `volumeRef` momentarily unset,
     // and filtering on it there would make its head briefly invisible to retention. The prefix
     // match is exact (commit names are volume-prefixed random hex) and cheap.
     //
-    // Owner-scoped server-side: this runs on every push, and the unscoped version was a full
-    // cluster scan of both parent kinds each time. A volume's worktrees all belong to one owner,
-    // and the owner comes from the snapshot list the caller already has. NOT node-scoped: a head
-    // must stay protected while its worktree is claimed on another node mid-takeover.
-    let mine = ListParams::default().labels(&format!("{}={owner}", rustic_git_workspaces::k8s::OWNER_LABEL));
+    // ponytail: cluster-wide, not owner-scoped — a shared clone or a restore-to-new can put a
+    // worktree owned by a DIFFERENT owner on this volume (`CloneOf`), and an unpushed clone's head
+    // is its clone commit with no `Snapshot` under any owner to derive a selector from. Upgrade
+    // path: a volume-keyed label on parents, if this scan ever shows up in profiling.
     let prefix = format!("{volume}-");
     let mut heads = std::collections::HashSet::new();
-    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await?.items {
+    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
         if let Some(h) = w.status.as_ref().and_then(|s| s.head.clone()) {
             if h.starts_with(&prefix) {
                 heads.insert(h);
@@ -234,7 +233,7 @@ async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str, owner: &str) -> Result<std
             }
         }
     }
-    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&mine).await?.items {
+    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
         if let Some(h) = e.status.as_ref().and_then(|s| s.head.clone()) {
             if h.starts_with(&prefix) {
                 heads.insert(h);
@@ -306,10 +305,7 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     // parent, and is never a delete candidate on the commit path.
     let by_name: std::collections::HashMap<String, crd::Snapshot> =
         ready.into_iter().filter(|(_, s)| !s.spec.transient).collect();
-    // The owner comes from the volume's own commits — every `Snapshot` on this volume carries it,
-    // and `retain` has already listed them.
-    let owner = by_name.values().next().map(|s| s.spec.owner.clone()).unwrap_or_default();
-    let heads = match worktree_heads(ctx, volume, &owner).await {
+    let heads = match worktree_heads(ctx, volume).await {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(%volume, error = %e, "retention: listing worktree heads; nothing deleted this pass");
@@ -918,22 +914,61 @@ mod commit_tests {
         let _ = &rec;
     }
 
-    /// Retention's head scan is owner-scoped: an unfiltered cluster-wide Workspace and Environment
-    /// list on every push is a full scan for a prefix match it does client-side anyway.
+    /// A volume can carry commits and worktrees from more than one owner — a shared clone or a
+    /// restore-to-new lands a second owner's worktree on the SAME volume (CLAUDE.md's "Workspaces
+    /// and environments"). Retention must scan every owner's parents, not just the one whose
+    /// commit it just cut, or a foreign owner's head goes undetected and gets swept. Same 13-commit
+    /// chain and `WS_SNAPSHOT_KEEP=10` as `retention_deletes_beyond_keep_sparing_pinned_and_heads`
+    /// (both set it to the default value, so no race with tests that leave it unset) — but here
+    /// the tail entry that test deletes (`c2`) is instead a DIFFERENT owner's head.
     #[tokio::test]
-    async fn worktree_heads_selects_by_owner() {
+    async fn retention_spares_another_owners_head_on_a_shared_volume() {
+        std::env::set_var("WS_SNAPSHOT_KEEP", "10");
         let tmp = tempfile::tempdir().unwrap();
+        let name = |i: i32| format!("vol-1-c{i}");
+        let mut items = Vec::new();
+        for i in 0..13 {
+            let parent = if i == 0 { String::new() } else { name(i - 1) };
+            // c1 pinned, exactly as the sibling test — ownership of a COMMIT is not what protects
+            // it, only being pinned or being some worktree's head is, and this test isolates the
+            // "different owner's head" case from those two.
+            let pinned = i == 1;
+            let owner = if i == 2 { "bob" } else { "alice" };
+            items.push(serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": name(i), "uid": format!("{}-uid", name(i))},
+                "spec": {"volume": "vol-1", "owner": owner, "worktree": "ws-1", "parent": parent, "pinned": pinned},
+                "status": {"phase": "ready"},
+            }));
+        }
+        // Bob's own worktree, on the SAME volume as alice's chain, owned by a different owner —
+        // its head is `c2`, the exact tail entry the sibling test deletes when nothing protects it.
+        let bob_ws = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-bob", "uid": "bob-uid"},
+            "spec": {"owner": "bob", "team": "", "name": "bob", "region": "r1", "image": "img", "desiredState": "running"},
+            "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1", "head": name(2)},
+        });
+        // c0, alice's own head, is protected the same way the sibling test protects it.
+        let alice_ws = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-1", "uid": "ws-1-uid"},
+            "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1", "image": "img", "desiredState": "running"},
+            "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1", "head": name(0)},
+        });
         let routes = vec![
-            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) },
+            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![alice_ws, bob_ws]) },
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
-        worktree_heads(&ctx, "v1", "alice").await.unwrap();
+        retain(&ctx, "vol-1", &name(12)).await;
 
-        for kind in ["workspaces", "environments"] {
-            let req = rec.requests().into_iter().find(|r| r.contains(&format!("/{kind}?"))).unwrap_or_default();
-            assert!(req.contains("owner%3Dalice") || req.contains("owner=alice"), "{kind}: {req}");
-        }
+        assert!(
+            rec.calls().iter().all(|c| !c.starts_with("DELETE")),
+            "a different owner's head on a shared volume must still be spared: {:?}",
+            rec.calls()
+        );
     }
 }
