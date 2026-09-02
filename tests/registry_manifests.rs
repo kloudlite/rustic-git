@@ -794,3 +794,32 @@ async fn a_manifest_push_is_one_wal_flush() {
     let after = count().await;
     assert_eq!(after - before, 1, "a manifest push must be one batched write, not {} flushes", after - before);
 }
+
+/// A pull is a manifest that was served. A tag whose manifest object is gone 404s, and a 404 is
+/// not a pull — counting at tag resolution inflated the number the page shows.
+#[tokio::test]
+async fn a_tag_whose_manifest_is_gone_is_not_counted_as_a_pull() {
+    use slatedb::object_store::ObjectStoreExt;
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    // One honest pull first, so the counter is provably live.
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), 1);
+
+    // Take the bytes away behind the tag, and clear the cached copy so the GET reaches the store.
+    e.store.manifests().remove(&format!("acme/nginx/{d}"));
+    e.store.os.delete(&rustic_git_registry::store::manifest_path("acme", "nginx", &d)).await.unwrap();
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        e.store.pulls("acme", "nginx", "latest").await.unwrap(),
+        1,
+        "a 404 is not a pull"
+    );
+}

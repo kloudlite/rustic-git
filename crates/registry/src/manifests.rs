@@ -319,16 +319,18 @@ async fn manifest_response(
     let Some(r) = reference(&reference_str) else {
         return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest");
     };
+    // The tag this GET resolved, if any — the pull is counted where the bytes are actually
+    // served, not here: a tag whose manifest object is gone 404s below, and counting at
+    // resolution inflated the number by every one of those.
+    let mut pulled_tag: Option<String> = None;
     let d = match r {
         Reference::Digest(d) => d,
         Reference::Tag(t) => match app.store.tag(&owner, &name, &t).await {
             Ok(Some(d)) => {
-                // The pull counter. GET by tag only — a HEAD is docker probing, and a GET by
-                // digest is docker re-reading what the tag already resolved to; counting either
-                // would inflate. A map increment only — no lock, no write — so a hundred
-                // concurrent pulls of one tag do not queue behind each other here.
+                // GET by tag only — a HEAD is docker probing, and a GET by digest is docker
+                // re-reading what the tag already resolved to; counting either would inflate.
                 if with_body {
-                    app.store.bump_pulls(&owner, &name, &t);
+                    pulled_tag = Some(t);
                 }
                 d
             }
@@ -343,6 +345,11 @@ async fn manifest_response(
             (header::CONTENT_LENGTH, bytes.len().to_string()),
             (header::HeaderName::from_static("docker-content-digest"), d.to_string()),
         ];
+        // A map increment only — no lock, no write — so a hundred concurrent pulls of one tag do
+        // not queue behind each other here.
+        if let Some(t) = &pulled_tag {
+            app.store.bump_pulls(&owner, &name, t);
+        }
         return if with_body { (StatusCode::OK, hdrs, bytes).into_response() } else { (StatusCode::OK, hdrs).into_response() };
     }
     let bytes = match app.store.os.get(&manifest_path(&owner, &name, &d)).await {
@@ -366,6 +373,9 @@ async fn manifest_response(
         Err(e) => return crate::oci_internal(e),
     };
     app.store.manifests().insert(cache_key, (bytes.clone(), media.clone()));
+    if let Some(t) = &pulled_tag {
+        app.store.bump_pulls(&owner, &name, t);
+    }
     let hdrs = [
         (header::CONTENT_TYPE, media),
         (header::CONTENT_LENGTH, bytes.len().to_string()),
