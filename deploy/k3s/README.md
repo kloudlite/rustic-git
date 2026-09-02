@@ -642,11 +642,14 @@ pace, and an operator in a hurry stops those workspaces through `/v1` like anyon
    node is alive and the work on it is healthy.
 2. Watch the one annotation: `kubectl describe node <n> | grep decommission-status`, or
    `kubectl get node <n> -o jsonpath='{.metadata.annotations.rustic-git\.io/decommission-status}'`.
-   It reads `draining running=N owned=N copies=N` and is rewritten every `WS_DECOMMISSION_SECS`
-   (default 30). `running` is people's workspaces — it only falls when they stop them. `owned`
-   falls as each volume becomes releasable (everything on it stopped AND replicated); `copies`
-   falls as its replicas re-home and its own retire pass drops them.
-3. When all three reach zero the annotation becomes `drained <RFC 3339>`, and it is sticky: it
+   It reads `draining running=N owned=N copies=N thin=N` and is rewritten every
+   `WS_DECOMMISSION_SECS` (default 30). `running` is people's workspaces — it only falls when they
+   stop them. `owned` falls as each volume becomes releasable (everything on it stopped AND
+   replicated); `copies` falls as its replicas re-home and its own retire pass drops them. `thin`
+   is durability, not residency: volumes whose bytes are still on this node and which OTHER nodes
+   do not yet hold `spec.replicas - 1` Synced copies of. It is what stops the gate opening on a
+   volume that is one node away from having no redundancy left.
+3. When all four reach zero the annotation becomes `drained <RFC 3339>`, and it is sticky: it
    records when the node drained, not when we last looked.
 4. Only then delete the VM, and remove that node's flannel `/32` from the `ipBlock` list in
    `deploy/k3s/system-netpol.yaml` (read one off a node with `ip -4 addr show flannel.1`; the list

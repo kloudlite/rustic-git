@@ -165,7 +165,7 @@ The decommissioning node's own agent runs a decommission beat (30 s). It stops n
 4. **Drained** when the node hosts no parent, owns no volume, holds no `VolumeReplica` row, and
    every volume it ever touched has `spec.replicas` Synced rows on other nodes. Stamped as the
    annotation `rustic-git.io/drained: <RFC 3339>`. Progress on the way is the annotation
-   `rustic-git.io/decommission-status: "running=N owned=N awaiting=N copies=N"`, rewritten each
+   `rustic-git.io/decommission-status: "draining running=N owned=N copies=N thin=N"`, rewritten each
    beat, readable with `kubectl describe node`. This needs `patch` on `nodes` for the agent; a
    broad verb, taken knowingly, because the agent already runs as root with the host PID
    namespace on that node.
@@ -230,7 +230,9 @@ kept for no reader. These are binding on the plan.
    dropped from the status writes and the CRD (kept as a tolerated-unknown on read so old
    objects still parse).
 7. **One decommission annotation, not two.** `rustic-git.io/decommission-status` carries the
-   whole story: `draining running=N owned=N copies=N` while in progress, `drained <RFC 3339>`
+   whole story: `draining running=N owned=N copies=N thin=N` while in progress (`thin` is the
+   durability count of item 4: volumes whose bytes are still here and which other nodes do not yet
+   hold `spec.replicas - 1` Synced copies of), `drained <RFC 3339>`
    when done. Operators grep one key.
 8. **`basedOn` on every clone response**, not only the interrupted one. A clone is always based
    on a cut; the response always names the snapshot and its time, and the web always shows it.

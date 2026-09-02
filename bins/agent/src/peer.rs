@@ -994,8 +994,16 @@ pub(crate) async fn sweep_volumes(
         // Every parent on the volume carries the condition, whatever the verdict — that is how the
         // API answers "why will this not start". Last, because on a release the pin is already
         // clear: an un-placed parent is only safe once nothing owns the volume.
+        //
+        // `Degraded=True` only where something actually failed — the dead-node sweep, whose owner
+        // really is gone. A drain (`mark_running: false`) only ever reaches here on a RELEASE, of a
+        // volume whose every parent is stopped and replicated: nothing about that is degraded, and
+        // writing the word would paint a healthy workspace red in the API and the web for a routine
+        // retirement. `Placed=False` is the condition the claim itself owns, so the next node's
+        // claim overwrites it — exactly as a spread's `Moving` does.
+        let cond = if mark_running { ("Degraded", true) } else { ("Placed", false) };
         for p in &parents {
-            mark_parent(ctx, p, ("Degraded", true), reason, &why, release).await;
+            mark_parent(ctx, p, cond, reason, &why, release).await;
         }
     }
 }

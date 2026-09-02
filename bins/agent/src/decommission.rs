@@ -27,14 +27,42 @@ pub(crate) fn beat_interval() -> std::time::Duration {
     std::time::Duration::from_secs(std::env::var("WS_DECOMMISSION_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30))
 }
 
-/// Drained is a conjunction: nothing running here, no volume owned here, no replica row here.
-/// Anything short of that is progress, and the counts say which of the three is holding it.
-pub(crate) fn drain_status(running: usize, owned: usize, copies: usize, now: &str) -> String {
-    if running == 0 && owned == 0 && copies == 0 {
+/// Drained is a conjunction: nothing running here, no volume owned here, no replica row here, and
+/// nothing whose durability still depends on this node. Anything short of that is progress, and the
+/// counts say which of the four is holding it.
+pub(crate) fn drain_status(running: usize, owned: usize, copies: usize, thin: usize, now: &str) -> String {
+    if running == 0 && owned == 0 && copies == 0 && thin == 0 {
         format!("drained {now}")
     } else {
-        format!("draining running={running} owned={owned} copies={copies}")
+        format!("draining running={running} owned={owned} copies={copies} thin={thin}")
     }
+}
+
+/// Volumes whose bytes are still HERE — owned, or held as a copy — and which other nodes do not
+/// yet hold `spec.replicas - 1` Synced copies of.
+///
+/// The other three counts say "is anything still on this node"; this one says "would deleting the
+/// VM cost anyone a replica". A volume can be released and its last copy re-homed in the same beat
+/// the operator reads `drained`, so without this the gate would open on a volume that is one node
+/// away from having no redundancy at all. Synced only, and on OTHER nodes only: a Syncing row is a
+/// transfer in progress, not durability, and this node's own copy is the one about to vanish.
+fn thin_volumes(beat: &crate::listing::Beat, me: &str) -> usize {
+    beat.volumes
+        .iter()
+        .filter(|v| {
+            let name = v.name_any();
+            let here = v.spec.node_name == me || beat.replicas.iter().any(|r| r.spec.volume == name && r.spec.node == me);
+            if !here {
+                return false;
+            }
+            let elsewhere = beat
+                .replicas
+                .iter()
+                .filter(|r| r.spec.volume == name && r.spec.node != me && r.status.as_ref().is_some_and(|st| st.phase == "Synced"))
+                .count();
+            elsewhere < v.spec.replicas.saturating_sub(1) as usize
+        })
+        .count()
 }
 
 pub async fn decommission_beat(ctx: &Arc<Ctx>) {
@@ -86,7 +114,8 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
     let running = beat.parents.iter().filter(|p| p.is_live_worktree()).count();
     let owned = beat.volumes.iter().filter(|v| v.spec.node_name == ctx.node).count();
     let copies = beat.replicas.iter().filter(|r| r.spec.node == ctx.node).count();
-    let status = drain_status(running, owned, copies, &chrono::Utc::now().to_rfc3339());
+    let thin = thin_volumes(&beat, &ctx.node);
+    let status = drain_status(running, owned, copies, thin, &chrono::Utc::now().to_rfc3339());
     // Sticky: the stamp answers "when did this node drain", so the FIRST beat that saw nothing
     // left is the one that owns it. Rewriting a fresh `now` every 30 s would turn the operator's
     // gate into "when did we last look", and lose the only timestamp anyone wants. A node that
@@ -233,8 +262,11 @@ mod tests {
     /// story, in progress or finished. Two keys is two things to remember and one to forget.
     #[test]
     fn the_status_line_carries_progress_then_the_drained_stamp() {
-        assert_eq!(drain_status(2, 3, 1, "2026-09-03T10:00:00Z"), "draining running=2 owned=3 copies=1");
-        assert_eq!(drain_status(0, 0, 0, "2026-09-03T10:00:00Z"), "drained 2026-09-03T10:00:00Z");
+        assert_eq!(drain_status(2, 3, 1, 0, "2026-09-03T10:00:00Z"), "draining running=2 owned=3 copies=1 thin=0");
+        // Nothing left ON the node, but a volume it still holds bytes for is one copy short: the
+        // gate stays shut, because deleting the VM is what would cost that copy.
+        assert_eq!(drain_status(0, 0, 0, 1, "2026-09-03T10:00:00Z"), "draining running=0 owned=0 copies=0 thin=1");
+        assert_eq!(drain_status(0, 0, 0, 0, "2026-09-03T10:00:00Z"), "drained 2026-09-03T10:00:00Z");
     }
 
     /// A running parent is NEVER stopped: it is the person's, and the node waits. It is told, in
@@ -284,7 +316,7 @@ mod tests {
             "a running workspace is not Degraded by a drain: {sent}"
         );
         let ann = rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0);
-        assert_eq!(ann["metadata"]["annotations"]["rustic-git.io/decommission-status"], "draining running=1 owned=1 copies=0");
+        assert_eq!(ann["metadata"]["annotations"]["rustic-git.io/decommission-status"], "draining running=1 owned=1 copies=0 thin=1");
     }
 
     /// Drained is a conjunction of the three counts, and the annotation is the operator's gate on
@@ -344,7 +376,40 @@ mod tests {
 
         let vol = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status").remove(0);
         assert_eq!(vol["status"]["conditions"][0]["reason"], "Decommissioned");
-        assert_eq!(rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status")[0]["status"]["nodeName"], "");
+        let ws = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status").remove(0);
+        assert_eq!(ws["status"]["nodeName"], "");
+        // A stopped, fully replicated workspace is HEALTHY: it is being moved, not broken. The
+        // word the claim itself owns is `Placed`, and `Degraded` here would paint it red in the
+        // web for a routine retirement.
+        let cond = ws["status"]["conditions"].as_array().unwrap().iter().find(|c| c["reason"] == "Decommissioned").expect("the condition");
+        assert_eq!(cond["type"], "Placed");
+        assert_eq!(cond["status"], "False");
+        assert!(!ws["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Degraded"), "{ws}");
+    }
+
+    /// The gate is about the VM, not the node object: a node holding somebody's only other copy is
+    /// not drained, however little is running on it. Deleting it there is the dead-node path.
+    #[tokio::test]
+    async fn a_node_still_holding_a_copy_is_not_stamped_drained() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_decommissioning("node-a"), node_ready_json("node-b")]) },
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-1", "node-b")]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![replica_of("vol-1", "node-a", "Synced")]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+            Route { method: "PATCH", path: "/api/v1/nodes/node-a".into(), status: 200, body: node_decommissioning("node-a") },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        decommission_beat(&ctx).await;
+
+        // `replicas: 2` and the only Synced copy off this node is... none: the owner's own bytes
+        // are not a replica row, so this node's copy is still half the durability.
+        assert_eq!(
+            rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0)["metadata"]["annotations"][DECOMMISSION_STATUS],
+            "draining running=0 owned=0 copies=1 thin=1"
+        );
     }
 
     /// The stamp answers "when did this node drain", so only the first beat that saw nothing left
@@ -386,7 +451,7 @@ mod tests {
         decommission_beat(&ctx).await;
         assert_eq!(
             rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0)["metadata"]["annotations"][DECOMMISSION_STATUS],
-            "draining running=0 owned=1 copies=0"
+            "draining running=0 owned=1 copies=0 thin=1"
         );
     }
 }

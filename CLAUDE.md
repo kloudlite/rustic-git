@@ -159,7 +159,8 @@ difference — whatever runs there keeps running: the node's own agent beats eve
 `WS_DECOMMISSION_SECS` (30), tells its running parents (`Decommissioning=True/NodeLeaving`),
 releases each volume as it becomes releasable (reason `Decommissioned`, and never marks a running
 one `Unavailable`), and stamps `rustic-git.io/decommission-status: draining running=N owned=N
-copies=N` until it can stamp a sticky `drained <RFC 3339>`, which is the operator's gate on
+copies=N thin=N` (`thin` = volumes whose bytes are still here and which other nodes hold fewer than
+`spec.replicas - 1` Synced copies of) until it can stamp a sticky `drained <RFC 3339>`, the gate on
 deleting the VM. Independently of any of that, every replica the dead
 node held is healed onto a live third node automatically — placement stops naming dead nodes as
 candidates and retires a copy once its replacement is Synced (`live_nodes`/`retire_pass`) — because
