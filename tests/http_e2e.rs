@@ -252,15 +252,37 @@ async fn an_anonymous_request_for_an_unknown_repo_opens_nothing() {
         "/other/name.git/info/refs?service=git-upload-pack",
     ] {
         let r = raw_get(port, p, None);
-        // 404, not 401: routing runs before authentication and a name with nothing under it is
-        // answered there, so the claim a stranger used to cost the elected writer never happens.
-        assert!(r.starts_with("HTTP/1.1 404"), "{p}: {r}");
+        assert!(r.starts_with("HTTP/1.1 401"), "{p}: {r}");
     }
     assert_eq!(
         s.pool.warm_count(),
         0,
         "an unauthenticated stranger must not conjure a database"
     );
+}
+
+/// The existence gate must not become an oracle. Routing runs before authentication, so a missing
+/// name that answered 404 there would tell an anonymous client which private repos exist. It is
+/// served locally instead: the handler authenticates first, and only a caller who is allowed to
+/// know gets the 404. Nothing is opened either way — that is the other half of the gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_repo_is_indistinguishable_from_a_private_one_until_you_authenticate() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "secret").await.unwrap(); // private by default
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+
+    let warm = s.pool.warm_count(); // `create_repo` opened `secret`; nothing else may be opened
+    let private = raw_get(port, "/alice/secret/info/refs?service=git-upload-pack", None);
+    let missing = raw_get(port, "/alice/nosuch/info/refs?service=git-upload-pack", None);
+    assert!(private.starts_with("HTTP/1.1 401"), "{private}");
+    assert_eq!(missing, private, "a missing name must answer byte-for-byte as a private one does");
+
+    // With credentials the answer may differ — that caller is allowed to know.
+    let r = raw_get(port, "/alice/nosuch/info/refs?service=git-upload-pack", Some(&token));
+    assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+    assert_eq!(s.pool.warm_count(), warm, "no database was opened for a name that does not exist");
 }
 
 /// Shallow clone, through a real git client.

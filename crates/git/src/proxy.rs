@@ -89,12 +89,14 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     // Same rule as HTTP: consult the map from here, forward on if it names someone else — unless
     // out of hops, where we still refuse to serve what routing says is not ours.
     let route = app.route(&format!("{ro}/{rn}")).await;
-    // Before the hop bound: a name that exists nowhere is not a routing disagreement, and saying so
-    // would send the client away to retry something that will never appear.
-    if matches!(route, crate::ownership::Route::Missing) {
-        return refuse(reader, "no such repository").await;
-    }
-    if hops >= MAX_HOPS && !matches!(route, crate::ownership::Route::Local) {
+    // `Missing` counts as ours to answer: there is nothing under the key, so serving here opens
+    // nothing and the session reports it after the identity is already established.
+    if hops >= MAX_HOPS
+        && !matches!(
+            route,
+            crate::ownership::Route::Local | crate::ownership::Route::Missing
+        )
+    {
         return refuse(reader, "routing disagreement at hop limit; retry").await;
     }
     if hops < MAX_HOPS {
@@ -103,7 +105,9 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
             crate::ownership::Route::Unavailable => {
                 return refuse(reader, "no node may safely serve this repository; retry").await
             }
-            crate::ownership::Route::Missing => return refuse(reader, "no such repository").await,
+            // Nothing under this key: serve here, and let the session report it exactly as it
+            // does for a repo that was deleted. Nothing is opened — `open_repo` checks first.
+            crate::ownership::Route::Missing => {}
             crate::ownership::Route::Peer(peer) => {
                 // Two-hop: we are the middle node. stream_to_peer reads the OWNER's status line
                 // itself; with `relay = true` it writes a status line UPSTREAM to the node that

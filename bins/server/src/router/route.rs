@@ -410,10 +410,15 @@ async fn route_inner(
             .unwrap_or(crate::proxy::MAX_HOPS),
     };
     let route = app.route_for(&repo, may_create(req.method(), &path)).await;
-    // Before the hop bound: nothing under this key anywhere is not a routing disagreement, and a
-    // 503 telling the client to retry a name that does not exist is a lie whatever the hop count.
+    // Nothing under this key anywhere: there is nobody to forward to and nothing worth claiming,
+    // so serve it HERE — which means the handler answers, after authenticating, exactly as it did
+    // before this gate existed. Answering 404 from the middleware would say "no such repo" to a
+    // caller who has not authenticated, making private names enumerable. The handlers check the
+    // prefix before they open anything (`open_repo`, `image_exists`), so serving locally opens no
+    // database; that check is what makes this safe, and it is why this runs ahead of the hop bound
+    // too — a name that exists nowhere is not a routing disagreement.
     if matches!(route, crate::ownership::Route::Missing) {
-        return missing(&path);
+        return next.run(req).await;
     }
     // Out of hops: never forward again (that is the bound), but never knowingly open a repo we do
     // not own either — a chain that arrives here disagreeing with our own view, or arrives at an
@@ -430,8 +435,8 @@ async fn route_inner(
     }
     match route {
         crate::ownership::Route::Local => next.run(req).await,
-        // Answered above; the arm is what keeps this match exhaustive.
-        crate::ownership::Route::Missing => missing(&path),
+        // Served above; the arm is what keeps this match exhaustive.
+        crate::ownership::Route::Missing => next.run(req).await,
         crate::ownership::Route::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "no node may safely serve this repository right now; retry",
@@ -561,16 +566,6 @@ async fn route_inner(
                 }
             }
         }
-    }
-}
-
-/// A key nothing exists under, answered in the shape the caller speaks so a registry client still
-/// gets an OCI envelope.
-fn missing(path: &str) -> Response {
-    if crate::registry::is_v2_path(path) {
-        crate::registry::oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image")
-    } else {
-        (StatusCode::NOT_FOUND, "not found").into_response()
     }
 }
 

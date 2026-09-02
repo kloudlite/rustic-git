@@ -58,14 +58,9 @@ async fn a_manifest_put_by_digest_that_does_not_match_is_refused() {
     assert_eq!(b["errors"][0]["code"], "DIGEST_INVALID");
 }
 
-/// The image has to exist for MANIFEST_UNKNOWN to be reachable: a name with nothing under it is
-/// refused as NAME_UNKNOWN by routing, before any handler runs.
 #[tokio::test]
 async fn an_unknown_manifest_is_manifest_unknown() {
     let (base, _e, c, token, _m, _d) = pushed().await;
-    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
-        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
-        .body(_m.clone()).send().await.unwrap();
     let r = c.get(format!("{base}/v2/acme/nginx/manifests/nope"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
@@ -220,13 +215,9 @@ async fn two_pushes_to_one_tag_leave_it_pointing_at_exactly_one_of_them() {
 
 #[tokio::test]
 async fn errors_use_the_oci_envelope() {
-    // A pushed image: a name that does not exist is answered by routing as NAME_UNKNOWN before
-    // authentication, and it is the auth envelope this asserts.
-    let (base, _e, c, token, _m, _d) = pushed().await;
-    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
-        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
-        .body(_m.clone()).send().await.unwrap();
-    let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest")).send().await.unwrap();
+    let (base, _e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let r = c.get(format!("{base}/v2/acme/nope/manifests/latest")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["errors"][0]["code"], "UNAUTHORIZED");
@@ -289,9 +280,6 @@ async fn a_manifest_with_a_subject_is_listed_as_its_referrer() {
 #[tokio::test]
 async fn referrers_of_an_unreferenced_digest_is_an_empty_index() {
     let (base, _e, c, token, _m, _d) = pushed().await;
-    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
-        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
-        .body(_m.clone()).send().await.unwrap();
     let d = Digest::of(b"nothing points here");
     let r = c.get(format!("{base}/v2/acme/nginx/referrers/{d}"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();

@@ -934,11 +934,11 @@ async fn a_peer_stream_reports_refusals_as_a_status_line() {
     }
 }
 
-/// A name with nothing under it is refused on the status line: routing answers `Missing` before a
-/// session is ever accepted, so the peer stream says so instead of opening anything.
+/// A missing repo is reported after "ok", on the git ERR channel - the same channel a local
+/// session uses - because "ok" must not wait for open_repo (which may download packs).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_peer_stream_refuses_a_repo_that_does_not_exist() {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+async fn a_peer_stream_reports_a_missing_repo_on_the_err_channel() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     let e = common::env().await;
     let addr = stream_listener(e.store.clone()).await;
     let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -946,9 +946,11 @@ async fn a_peer_stream_refuses_a_repo_that_does_not_exist() {
     let mut r = BufReader::new(sock);
     let mut line = String::new();
     r.read_line(&mut line).await.unwrap();
-    // Routing now answers a name with nothing under it before the session starts, so the refusal
-    // arrives as the status line rather than on the ERR channel after "ok".
-    assert_eq!(line.trim(), "error: no such repository");
+    assert_eq!(line.trim(), "ok");
+    let mut rest = Vec::new();
+    r.read_to_end(&mut rest).await.unwrap();
+    let rest = String::from_utf8_lossy(&rest);
+    assert!(rest.contains("ERR repository not found"), "got {rest:?}");
 }
 
 /// Two hops: B (not owner) -> C (not owner, but C can reach A) -> A. C must relay A's "ok" back to
@@ -1076,12 +1078,7 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "ls-remote on a deleted repo must fail: {err}");
-    // Either refusal is correct and both reach the client: the owner's handler reports it while
-    // the map still names a live holder, routing itself once that lease is gone.
-    assert!(
-        err.contains("repository not found") || err.contains("no such repository"),
-        "stderr: {err}",
-    );
+    assert!(err.contains("repository not found"), "stderr: {err}");
 }
 
 /// A percent-encoded repo name must not bypass routing. The middleware sees the raw path and
