@@ -534,7 +534,9 @@ pub(super) async fn api_pull_outcome(
 ///
 /// Only the state, the sentence and the fast-forward flag: the two tips the answer belongs to were
 /// stamped by the check that asked for this, and keeping them is what lets the NEXT check see that
-/// a branch has moved since. A change with no recorded check at all is left alone — the verdict
+/// a branch has moved since — and a verdict that names different ones is refused 409, the same
+/// shape of answer a lapsed claim gets on the outcome route. A change with no recorded check at
+/// all is left alone — the verdict
 /// would have no tips to be true of.
 pub(super) async fn api_pull_mergeability(
     State(app): State<Arc<App>>,
@@ -558,6 +560,17 @@ pub(super) async fn api_pull_mergeability(
         let Some(m) = pr.mergeability.as_mut() else {
             return Some(StatusCode::NO_CONTENT.into_response());
         };
+        // The outcome route matches `?by=` against the claim; a check has no claim, so this
+        // matches the tips instead. A lane whose lease lapsed can report long after another lane
+        // answered from newer tips, and its `Clean`/`Dirty` would overwrite the fresher one.
+        // An UNSTAMPED verdict is still accepted: a worker older than this field, and one that
+        // could not resolve either branch, must keep working through a roll — and the next check
+        // rewrites the row anyway.
+        if !v.base_oid.is_empty() && (v.base_oid != m.base_oid || v.head_oid != m.head_oid) {
+            return Some(
+                (StatusCode::CONFLICT, "this verdict was computed from other tips").into_response(),
+            );
+        }
         m.state = v.state;
         m.detail = v.detail.clone();
         m.fast_forward = v.fast_forward;
