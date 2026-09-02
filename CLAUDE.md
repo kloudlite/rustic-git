@@ -147,9 +147,12 @@ about it — the node controllers CLAIM it (a guarded write of `status.nodeName`
 places anything. When a node is dead for `WS_NODE_DEAD_SECS`, the unclaim sweep marks its volumes
 `Unavailable` and moves ONLY the worktrees whose `desiredState` is `Stopped` — a Running one keeps
 its pin and a `NodeDead` condition, because its live edits exist only on the dead node and only
-the person may write them off by stopping it. A released volume's pin is cleared, and the node
-that then claims the parent takes it with a JSON-patch `test` on the empty value (`take_volume`),
-the one other spec write the admission policy allows. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
+the person may write them off by stopping it. Independently of any of that, every replica the dead
+node held is healed onto a live third node automatically — placement stops naming dead nodes as
+candidates and retires a copy once its replacement is Synced (`live_nodes`/`retire_pass`) — because
+healing a COPY risks nothing, unlike moving the live worktree. A released volume's pin is cleared,
+and the node that then claims the parent takes it with a JSON-patch `test` on the empty value
+(`take_volume`), the one other spec write the admission policy allows. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
 exactly one btrfs subvolume with identical semantics — and it is a CHILD: the parent's controller
 creates it with an ownerReference, so deleting the parent is the whole delete. Containers live in
 a namespace per owner or environment (`crd::ws_namespace` → `ws-{owner}` / `wt-{owner}-…` for a

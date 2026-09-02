@@ -326,6 +326,94 @@ async fn start_and_stop_patch_the_desired_state() {
     }
 }
 
+/// A `NodeDead` condition on the parent's status is what makes stopping it a real decision — the
+/// person is choosing to lose whatever the dead node holds since the last sync point — so the
+/// response has to say so, and only then.
+fn with_node_dead(mut w: Value) -> Value {
+    w["status"]["conditions"] = json!([
+        {"type": "Degraded", "status": "True", "reason": "NodeDead", "message": "node down",
+         "observedGeneration": 1, "lastTransitionTime": "2026-09-01T00:00:00Z"}
+    ]);
+    w
+}
+
+#[tokio::test]
+async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
+    let dead = with_node_dead(placed_ws("ws-1", "karthik"));
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), dead),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+    ];
+    let s = server(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    let warning = body["warning"].as_str().expect("a workspace pinned to a dead node must warn on stop");
+    assert!(warning.contains(NODE), "warning must name the dead node: {warning}");
+    assert!(warning.contains("will not follow the move"));
+
+    // A healthy workspace: same route, no `NodeDead` condition — no warning key at all, but the
+    // body still parses as JSON (a body-less 202 throws in the web client's `res.json()`).
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+    ];
+    let s = server(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("warning").is_none(), "a healthy workspace must not get a manufactured warning: {body}");
+}
+
+#[tokio::test]
+async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
+    let dead = with_node_dead(env_obj("env-1", "karthik"));
+    let routes = vec![
+        get(format!("{API}/environments/env-1"), dead),
+        Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
+    ];
+    let s = server(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/env-1/stop", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    let warning = body["warning"].as_str().expect("an environment pinned to a dead node must warn on stop");
+    assert!(warning.contains(NODE));
+    // The warning rides alongside the environment doc, not instead of it.
+    assert_eq!(body["id"], "env-1");
+    assert_eq!(body["state"], "stopped");
+
+    let routes = vec![
+        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
+    ];
+    let s = server(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/env-1/stop", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("warning").is_none(), "a healthy environment must not get a manufactured warning: {body}");
+    assert_eq!(body["id"], "env-1");
+}
+
 /// Delete is ONE call. The "Workspace first, then Volume" ordering became the API server's job the
 /// moment the Volume got an ownerReference.
 #[tokio::test]

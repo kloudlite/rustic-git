@@ -915,11 +915,15 @@ async fn stop_ws(
     let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Stopped).await?;
+    // Every non-204 success is `res.json()`'d by the web client (web/apps/web/src/lib/api.ts) —
+    // a body-less 202 throws there, so this always emits an object, `warning` present only when
+    // there is one to give.
     let warning = w.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
-    match warning {
-        Some(w) => Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"warning": w}))).into_response()),
-        None => Ok(StatusCode::ACCEPTED.into_response()),
-    }
+    let body = match warning {
+        Some(w) => serde_json::json!({"warning": w}),
+        None => serde_json::json!({}),
+    };
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
 #[derive(serde::Deserialize)]

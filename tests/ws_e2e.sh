@@ -992,148 +992,80 @@ fi
 echo "OK (commit model): push -> Ready Snapshot, clone from head, restore to a named commit, replica on a second node all passed"
 
 # ---------------------------------------------------------------------------
-# Volume takeover: node JOIN (spread + retire) always run when the cluster has enough real,
-# `rustic-git.io/pool=true`-labelled agent nodes; node DEATH additionally needs a way to make one
-# of them NotReady, which this harness's own loopback single-node agent cannot simulate on itself
-# (E2E_NODE deliberately has the pool label off, so it isn't one of these), so it is gated behind
-# WS_E2E_KILL_NODE — see that block below for what it does and why it is opt-in.
+# Volume takeover: node JOIN (spread + retire). Node DEATH is verified by hand on the cluster —
+# `node_is_dead` reads the Node object's Ready condition, and nothing this harness can do from
+# inside the script (a label flip, a nodeSelector trick) makes kubelet stop heartbeating, so there
+# is no safe in-script way to simulate it; not covered here.
 # ---------------------------------------------------------------------------
 POOL_NODES=$(kubectl get nodes -l rustic-git.io/pool=true --no-headers 2>/dev/null | awk '{print $1}')
 POOL_NODE_COUNT=$(printf '%s\n' "$POOL_NODES" | grep -c . || true)
 if [ "$POOL_NODE_COUNT" -lt 3 ]; then
   log "volume takeover: skipping (need >=3 rustic-git.io/pool=true nodes, found $POOL_NODE_COUNT)"
 else
-  log "volume takeover: node JOIN — removing the pool label from one node, then re-adding it"
-  TARGET_NODE=$(printf '%s\n' "$POOL_NODES" | head -1)
-  # replicas:2 over >=3 pool nodes means rendezvous names exactly one standby besides the owner;
-  # dropping the label makes that standby's slot move to whichever live node the hash picks next.
+  log "volume takeover: node JOIN — creating a workspace, then dropping a THIRD node's pool label"
   TAKEOVER_WS_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
     -H 'Content-Type: application/json' -d '{"name":"e2e-takeover","region":"'"$REGION_ID"'","quota_gb":5}')
   TAKEOVER_WS_ID=$(echo "$TAKEOVER_WS_JSON" | field id)
   [ -n "$TAKEOVER_WS_ID" ] || fail "no id in takeover-workspace create response: $TAKEOVER_WS_JSON"
   wait_ws_ready "$TAKEOVER_WS_ID"
 
-  OLD_STANDBY=""
+  STANDBY=""
   for i in $(seq 1 30); do
-    OLD_STANDBY=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
+    STANDBY=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
       -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null | tr ' ' '\n' | grep -vx "$E2E_NODE" | head -1)
-    [ -n "$OLD_STANDBY" ] && break
+    [ -n "$STANDBY" ] && break
     sleep 2
   done
-  [ -n "$OLD_STANDBY" ] || fail "takeover workspace $TAKEOVER_WS_ID never got a Synced standby replica"
+  [ -n "$STANDBY" ] || fail "takeover workspace $TAKEOVER_WS_ID never got a Synced standby replica"
 
-  kubectl label node "$OLD_STANDBY" rustic-git.io/pool- >/dev/null
-  # `slot moved elsewhere` is what a node's own pull beat logs (peer.rs) when rendezvous stops
-  # naming it for a volume it used to hold — reading the log is cheaper than re-deriving the same
-  # rendezvous hash in a standalone binary just to predict which live node inherits the slot.
-  kubectl label node "$OLD_STANDBY" rustic-git.io/pool=true --overwrite >/dev/null
+  # A node the workspace does not already touch — dropping its label must be a real join event
+  # for this volume, not a no-op re-election of the same standby (that node was never a candidate
+  # for it, so nothing here can move onto it and back onto itself).
+  JOIN_NODE=$(printf '%s\n' "$POOL_NODES" | grep -vx "$E2E_NODE" | grep -vx "$STANDBY" | head -1)
+  [ -n "$JOIN_NODE" ] || fail "could not find a third pool node distinct from $E2E_NODE and $STANDBY"
 
-  NEW_STANDBY=""
-  # Three pull beats' worth of slack (WS_SYNC_SECS above is 5s; the real cluster's agents run
-  # their own beat interval, so this waits on the observed state, not a fixed multiple of it).
+  kubectl label node "$JOIN_NODE" rustic-git.io/pool- >/dev/null
+  # One pull beat (WS_SYNC_SECS=5 above governs this script's own agent; give the real cluster's
+  # agents the same order of magnitude to notice the node is gone) so placement settles onto the
+  # remaining live nodes before the join is measured, or the label add below finds nothing moved.
+  sleep 10
+  kubectl label node "$JOIN_NODE" rustic-git.io/pool=true --overwrite >/dev/null
+
+  # `slot moved elsewhere` is what a node's own pull beat logs (peer.rs) when rendezvous starts
+  # naming it for a volume it did not hold before — reading VolumeReplica rows for a Synced entry
+  # on the joiner is cheaper than re-deriving the same rendezvous hash in a standalone binary.
+  JOINED=""
   for i in $(seq 1 90); do
-    NEW_STANDBY=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
-      -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null \
-      | tr ' ' '\n' | grep -vx "$E2E_NODE" | grep -vx "$OLD_STANDBY" | head -1)
-    [ -n "$NEW_STANDBY" ] && break
+    JOINED=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
+      -o jsonpath="{.items[?(@.spec.node==\"$JOIN_NODE\")].status.phase}" 2>/dev/null)
+    [ "$JOINED" = "Synced" ] && break
     sleep 4
   done
-  [ -n "$NEW_STANDBY" ] || fail "no Synced VolumeReplica for $TAKEOVER_WS_ID appeared on a node other than $E2E_NODE/$OLD_STANDBY after the join"
+  [ "$JOINED" = "Synced" ] || fail "no Synced VolumeReplica for $TAKEOVER_WS_ID appeared on the joining node $JOIN_NODE"
+
+  DISPLACED=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
+    -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null \
+    | tr ' ' '\n' | grep -vx "$E2E_NODE" | grep -vx "$JOIN_NODE" | head -1)
+  # replicas defaults to 2 (owner + one standby), so the joiner's new copy must have displaced
+  # exactly the node that used to hold the slot; there must be no Synced standby left besides the
+  # joiner now.
+  [ -z "$DISPLACED" ] || fail "expected only $JOIN_NODE as the standby after the join, but $DISPLACED still has a Synced row"
 
   for i in $(seq 1 30); do
     kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
-      -o jsonpath="{.items[?(@.spec.node==\"$OLD_STANDBY\")]}" 2>/dev/null | grep -q . || break
+      -o jsonpath="{.items[?(@.spec.node==\"$STANDBY\")]}" 2>/dev/null | grep -q . || break
     sleep 2
   done
   kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
-    -o jsonpath="{.items[?(@.spec.node==\"$OLD_STANDBY\")]}" 2>/dev/null | grep -q . \
-    && fail "the retired standby $OLD_STANDBY's VolumeReplica row for $TAKEOVER_WS_ID is still around"
-  TAKEOVER_VOL=$(kubectl get workspace "$TAKEOVER_WS_ID" -o jsonpath='{.status.volumeRef}')
-  ssh_or_local() {
-    # The old standby's subvolume lives on ITS OWN pool, not this script's loopback $MOUNT, so it
-    # can only be checked when this script's own node happens to be the one that retired.
-    if [ "$OLD_STANDBY" = "$E2E_NODE" ]; then
-      [ -e "$MOUNT/vol/$TAKEOVER_VOL" ] && fail "retired subvolume $MOUNT/vol/$TAKEOVER_VOL still present on $OLD_STANDBY"
-    fi
-  }
-  ssh_or_local
-  log "volume takeover: node JOIN passed (standby moved $OLD_STANDBY -> $NEW_STANDBY, old row and subvolume gone)"
-
-  # -------------------------------------------------------------------------
-  # Node DEATH. cordon+drain leaves the node Ready (kubelet still heartbeats), which is not what
-  # `node_is_dead` looks at, so there is no safe way to fake NotReady from inside this script
-  # without touching real cluster infrastructure. Opt in with WS_E2E_KILL_NODE=<node-name> — a
-  # pool node whose rustic-git-agent DaemonSet pod this block is allowed to scale off via a
-  # nodeSelector label flip, e.g. by cutting power to that node's kubelet or removing it from the
-  # DaemonSet's node selector out of band. Left unset (the default everywhere else, including CI),
-  # this half does not run and is not asserted.
-  # -------------------------------------------------------------------------
-  if [ -z "${WS_E2E_KILL_NODE:-}" ]; then
-    log "volume takeover: node DEATH skipped (set WS_E2E_KILL_NODE=<pool node> to run it; see the comment above this line)"
-  else
-    KILL_NODE="$WS_E2E_KILL_NODE"
-    kubectl get node "$KILL_NODE" -l rustic-git.io/pool=true >/dev/null 2>&1 \
-      || fail "WS_E2E_KILL_NODE=$KILL_NODE is not a rustic-git.io/pool=true node"
-
-    log "volume takeover: node DEATH — creating a RUNNING workspace pinned to $KILL_NODE"
-    DEATH_WS_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
-      -H 'Content-Type: application/json' -d '{"name":"e2e-death","region":"'"$REGION_ID"'","quota_gb":5}')
-    DEATH_WS_ID=$(echo "$DEATH_WS_JSON" | field id)
-    [ -n "$DEATH_WS_ID" ] || fail "no id in death-workspace create response: $DEATH_WS_JSON"
-    wait_ws_ready "$DEATH_WS_ID"
-    DEATH_NODE=$(kubectl get workspace "$DEATH_WS_ID" -o jsonpath='{.status.nodeName}')
-
-    log "volume takeover: labelling $KILL_NODE's agent DaemonSet pod off (nodeSelector flip) to simulate death"
-    kubectl label node "$KILL_NODE" rustic-git.io/dead-sim=true --overwrite >/dev/null
-    # The real DaemonSet's manifest carries `rustic-git.io/dead-sim notin (true)` in its
-    # nodeSelector for exactly this drill — see deploy/k3s/agent-daemonset.yaml's header comment.
-    # Without that selector present, this label is a harmless no-op and the wait below times out,
-    # which is a real failure, not a false pass.
-
-    log "volume takeover: waiting WS_NODE_DEAD_SECS for the sweep to act"
-    sleep "${WS_NODE_DEAD_SECS:-600}"
-
-    THIRD_NODE=""
-    for i in $(seq 1 60); do
-      THIRD_NODE=$(kubectl get volumereplicas -l "rustic-git.io/volume=$DEATH_WS_ID" \
-        -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null \
-        | tr ' ' '\n' | grep -vx "$DEATH_NODE" | head -1)
-      [ -n "$THIRD_NODE" ] && break
-      sleep 4
-    done
-    [ -n "$THIRD_NODE" ] || fail "no Synced VolumeReplica for $DEATH_WS_ID appeared on a third node after $KILL_NODE died"
-
-    DEATH_VOL_PHASE=$(kubectl get workspace "$DEATH_WS_ID" -o jsonpath='{.status.volumeRef}' \
-      | xargs -I{} kubectl get volume {} -o jsonpath='{.status.phase}')
-    [ "$DEATH_VOL_PHASE" = "unavailable" ] || fail "RUNNING workspace $DEATH_WS_ID's Volume did not go Unavailable, got: $DEATH_VOL_PHASE"
-    DEATH_VOL_NODE=$(kubectl get workspace "$DEATH_WS_ID" -o jsonpath='{.status.volumeRef}' \
-      | xargs -I{} kubectl get volume {} -o jsonpath='{.spec.nodeName}')
-    [ "$DEATH_VOL_NODE" = "$DEATH_NODE" ] || fail "a RUNNING workspace's dead-node Volume must keep its pin, got nodeName=$DEATH_VOL_NODE want=$DEATH_NODE"
-    kubectl wait --for=condition=Degraded "workspace/$DEATH_WS_ID" --timeout=30s \
-      || fail "RUNNING workspace $DEATH_WS_ID never carried a Degraded condition after its node died"
-    [ "$(kubectl get workspace "$DEATH_WS_ID" -o jsonpath='{.status.conditions[?(@.type=="Degraded")].reason}')" = "NodeDead" ] \
-      || fail "workspace $DEATH_WS_ID's Degraded condition reason is not NodeDead"
-
-    log "volume takeover: stopping $DEATH_WS_ID through the API and checking the warning"
-    STOP_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$DEATH_WS_ID/stop" -H "Authorization: Bearer $USER_TOKEN")
-    echo "$STOP_JSON" | grep -q '"warning"' || fail "stopping a workspace pinned to a dead node did not return a warning: $STOP_JSON"
-
-    log "volume takeover: waiting for the pin to clear and the workspace to re-claim on a live node"
-    for i in $(seq 1 60); do
-      DEATH_VOL_NODE=$(kubectl get workspace "$DEATH_WS_ID" -o jsonpath='{.status.volumeRef}' \
-        | xargs -I{} kubectl get volume {} -o jsonpath='{.spec.nodeName}')
-      [ -n "$DEATH_VOL_NODE" ] && [ "$DEATH_VOL_NODE" != "$DEATH_NODE" ] && break
-      sleep 4
-    done
-    [ -n "$DEATH_VOL_NODE" ] && [ "$DEATH_VOL_NODE" != "$DEATH_NODE" ] \
-      || fail "workspace $DEATH_WS_ID's volume never re-claimed onto a live node after stop"
-    DEATH_STATUS_NODE=$(kubectl get workspace "$DEATH_WS_ID" -o jsonpath='{.status.nodeName}')
-    [ "$DEATH_STATUS_NODE" = "$DEATH_VOL_NODE" ] || fail "workspace $DEATH_WS_ID's status.nodeName ($DEATH_STATUS_NODE) does not match its re-claimed Volume's spec.nodeName ($DEATH_VOL_NODE)"
-
-    kubectl label node "$KILL_NODE" rustic-git.io/dead-sim- >/dev/null 2>&1 || true
-    log "volume takeover: node DEATH passed (replica healed to $THIRD_NODE, Volume marked Unavailable+pinned while Running, warning on stop, re-claimed on $DEATH_VOL_NODE after stop)"
+    -o jsonpath="{.items[?(@.spec.node==\"$STANDBY\")]}" 2>/dev/null | grep -q . \
+    && fail "the displaced node $STANDBY's VolumeReplica row for $TAKEOVER_WS_ID is still around"
+  # The displaced node's subvolume lives on ITS OWN pool, not this script's loopback $MOUNT, so it
+  # can only be checked here when this script's own node happens to be the one that was displaced.
+  if [ "$STANDBY" = "$E2E_NODE" ]; then
+    TAKEOVER_VOL=$(kubectl get workspace "$TAKEOVER_WS_ID" -o jsonpath='{.status.volumeRef}')
+    [ -e "$MOUNT/vol/$TAKEOVER_VOL" ] && fail "retired subvolume $MOUNT/vol/$TAKEOVER_VOL still present on $STANDBY"
   fi
+  log "volume takeover: node JOIN passed (standby moved $STANDBY -> $JOIN_NODE, old row and subvolume gone)"
 fi
-
 echo
 echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history) all passed"
