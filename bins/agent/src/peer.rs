@@ -977,6 +977,20 @@ async fn hosted_volumes(ctx: &Arc<Ctx>) -> Option<HashSet<String>> {
 /// Drops this node's copy of any volume whose rendezvous slot over `live` no longer names it —
 /// see `should_retire`. Runs at the end of `pull_beat_with`, after the pull loop, so a new
 /// target's pull lands before anyone retires the copy it just replaced.
+/// Directories under `{pool}/vol` that no listed Volume names. Files beside them (`{id}.owner`,
+/// `{id}.lock`) are not volumes and are cleaned with their directory by `cleanup_local`.
+fn orphan_voldirs(vol_root: &std::path::Path, known: &HashSet<String>) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(vol_root) else { return Vec::new() };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !known.contains(n))
+        .collect();
+    out.sort();
+    out
+}
+
 async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
     let vols = match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(l) => l.items,
@@ -993,6 +1007,16 @@ async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
         }
     };
     let Some(hosted) = hosted_volumes(ctx).await else { return };
+    // A local voldir with no Volume CR at all is an orphan: nothing lists it, so no pull, no
+    // retire and no worktree drop ever visits it again. The Volume is always created before any
+    // node makes its directory (the parent's reconciler creates the CR, the pull beat only pulls
+    // listed volumes), so "no CR" is never "not yet", only "gone". A CR mid-deletion still counts
+    // as present — garbage collection finishes on its own and the next beat sees it absent.
+    let known: HashSet<String> = vols.iter().map(|v| v.name_any()).collect();
+    for id in orphan_voldirs(&ctx.engine.pool.root.join("vol"), &known) {
+        tracing::info!(volume = %id, "pull: retire: no Volume CR; dropping the orphaned local copy");
+        janitor::cleanup_local(&ctx.engine, &id);
+    }
     for v in vols {
         let id = v.name_any();
         if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() {
@@ -2033,6 +2057,41 @@ fi
     /// would drop the whole copy but for one thing: a `Workspace` is running here right now
     /// against this volume (`hosted`). The owner record can lag a pod that's already up, so
     /// neither the whole copy NOR its live worktree may be touched while that's true.
+    #[test]
+    fn orphan_voldirs_names_only_directories_no_volume_lists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vol");
+        std::fs::create_dir_all(root.join("v-live")).unwrap();
+        std::fs::create_dir_all(root.join("v-gone")).unwrap();
+        std::fs::write(root.join("v-gone.lock"), b"").unwrap();
+        let known: HashSet<String> = ["v-live".to_string()].into_iter().collect();
+        assert_eq!(orphan_voldirs(&root, &known), vec!["v-gone".to_string()]);
+        assert!(orphan_voldirs(&tmp.path().join("missing"), &known).is_empty(), "no vol dir yet: nothing to name");
+    }
+
+    #[tokio::test]
+    async fn retire_pass_drops_a_voldir_whose_volume_cr_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v-gone/snap")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v-live/snap")).unwrap();
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v-live"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", routes);
+        retire_pass(&ctx, &["node-a".to_string()]).await;
+        assert!(!ctx.engine.pool.voldir("v-gone").exists(), "no CR: the copy goes");
+        assert!(ctx.engine.pool.voldir("v-live").exists(), "listed: untouched");
+    }
+
     #[tokio::test]
     async fn retire_pass_keeps_a_hosted_worktree_even_when_its_replacement_is_synced() {
         let tmp = tempfile::tempdir().unwrap();
