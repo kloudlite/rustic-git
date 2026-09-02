@@ -1474,6 +1474,9 @@
               },
               {
                 "jsonPath": ".status.phase"
+              },
+              {
+                "jsonPath": ".spec.volume"
               }
             ],
             "served": true,

@@ -1510,7 +1510,7 @@ const REPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
 /// field selector is a 400 from a real API server on every reconcile — which parked a real stop
 /// forever, unseen by this mock, which accepts any selector. So pin the request shape itself.
 #[tokio::test]
-async fn the_flush_gate_lists_replicas_without_a_field_selector() {
+async fn the_flush_gate_lists_replicas_by_spec_volume() {
     let _t = FlushTimeout::set("600");
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(tmp.path(), vec![]);
@@ -1521,7 +1521,7 @@ async fn the_flush_gate_lists_replicas_without_a_field_selector() {
     let lists: Vec<&String> = requests.iter().filter(|c| c.contains("volumereplicas")).collect();
     assert!(!lists.is_empty(), "the gate must list replicas: {requests:?}");
     for c in lists {
-        assert!(!c.contains("fieldSelector"), "unsupported field selector on VolumeReplica: {c}");
+        assert!(c.contains("fieldSelector=spec.volume"), "expected a spec.volume field selector: {c}");
     }
 }
 const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1-1";

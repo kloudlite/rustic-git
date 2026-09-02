@@ -263,7 +263,10 @@ Order:
 
 ```sh
 # 1. CRDs first — the new kinds (Snapshot, VolumeReplica) and the selectableFields the agent's
-#    watches filter on. Already applied on dev; harmless to re-apply.
+#    watches filter on. Already applied on dev; harmless to re-apply. This now includes
+#    VolumeReplica's `.spec.volume` selector (added 2026-09-02, used by `flush_gate` and
+#    `pull_volume`): apply it BEFORE the agent image that reads it — an agent ahead of the CRD
+#    gets a 400 on every stop's flush gate.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
 # 2. Roll the agent (repin the image tag to the SHA CI built, then apply and wait).

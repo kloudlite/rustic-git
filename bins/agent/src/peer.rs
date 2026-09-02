@@ -498,7 +498,8 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
         .collect();
     let order = replicate::order_groups(&pairs);
 
-    let replicas: Vec<crd::VolumeReplica> = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
+    let lp = ListParams::default().fields(&format!("spec.volume={volume}"));
+    let replicas: Vec<crd::VolumeReplica> = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&lp).await {
         Ok(list) => list.items.into_iter().filter(|r| r.spec.volume == volume).collect(),
         Err(e) => {
             tracing::warn!(%volume, error = %e, "pull: listing replicas; nothing to pull from");
