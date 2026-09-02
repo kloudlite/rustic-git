@@ -990,12 +990,16 @@ async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
             .map(|r| r.spec.node.clone())
             .collect();
         if !should_retire(&ctx.node, &v.spec.node_name, &targets, hosted.contains(&id), &synced) {
-            // Still a target/replica, just not the owner: keep the volume but a `live/{ws}`
-            // worktree under it belongs only to the owner — anything there is what a takeover
-            // away from this node left behind.
-            let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
-            if dropped > 0 {
-                tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+            // Still a target/replica, just not the owner: a `live/{ws}` worktree under it
+            // belongs only to the owner and is what a takeover away from this node left behind
+            // — UNLESS this node is `hosted` (serving a pod from it right now): the owner record
+            // can lag a pod that's actually running here, and deleting a live worktree out from
+            // under a running pod is the one thing this pass must never do.
+            if !hosted.contains(&id) {
+                let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
+                if dropped > 0 {
+                    tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+                }
             }
             continue;
         }
@@ -1950,5 +1954,48 @@ fi
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "{:?}", rec.calls());
         assert!(ctx.engine.pool.voldir("v1").exists(), "an unsynced replacement must not cost the copy");
+    }
+
+    /// This node isn't the owner and its replacement (node-c) is fully synced — `should_retire`
+    /// would drop the whole copy but for one thing: a `Workspace` is running here right now
+    /// against this volume (`hosted`). The owner record can lag a pod that's already up, so
+    /// neither the whole copy NOR its live worktree may be touched while that's true.
+    #[tokio::test]
+    async fn retire_pass_keeps_a_hosted_worktree_even_when_its_replacement_is_synced() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v1/live/ws-1")).unwrap();
+
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let replica_c = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": "v1.node-c", "uid": "uid-c"},
+            "spec": {"volume": "v1", "node": "node-c"},
+            "status": {"phase": "Synced", "branches": {}},
+        });
+        let ws = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-1"},
+            "spec": {"owner": "alice", "team": "", "source": {}},
+            "status": {"phase": "running", "nodeName": "node-b", "volumeRef": "v1"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![replica_c]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
+
+        retire_pass(&ctx, &live).await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "{:?}", rec.calls());
+        assert!(ctx.engine.pool.voldir("v1").exists(), "hosting a worktree here must keep the whole copy");
+        assert!(ctx.engine.pool.live("v1").join("ws-1").exists(), "and must not drop the live worktree either");
     }
 }
