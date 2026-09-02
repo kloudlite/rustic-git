@@ -7,7 +7,7 @@ use crate::{binding, claim, snapshot};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::Pod;
 use rustic_git_workspaces::k8s;
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::watcher;
 use kube::{Api, Resource, ResourceExt};
@@ -326,21 +326,17 @@ fn spawn_pull(ctx: Arc<Ctx>) {
         let mut tick = tokio::time::interval(crate::peer::replica_interval());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let wake = ctx.pull_wake.clone();
-        let mut pending = false;
+        let mut next = crate::peer::Next::Wait;
         loop {
-            if !pending {
+            if next == crate::peer::Next::Wait {
                 tokio::select! {
                     _ = tick.tick() => {}
                     _ = wake.notified() => {}
                 }
             }
-            pending = false;
             crate::peer::pull_beat(&ctx).await;
-            // Wakes that arrived DURING the pass: `notify_one` left one permit, so this takes it
-            // without waiting and runs exactly one more pass however many arrived.
-            if wake.notified().now_or_never().is_some() {
-                pending = true;
-            }
+            // Wakes that arrived DURING the pass decide whether to go straight round again.
+            next = crate::peer::after_pass(&wake);
         }
     });
 }
