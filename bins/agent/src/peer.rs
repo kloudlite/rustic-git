@@ -1032,9 +1032,14 @@ pub(crate) async fn sweep_volumes(
             && prev.conditions.iter().any(|c| c.type_ == "Available" && c.reason == reason && c.message == why);
         if !idle {
             // The same re-read-on-409 loop `mark_parent_of` and `write_replica_status` use, and for
-            // the same reason: this is a PUT carrying `resourceVersion`, the owner's own controller
-            // writes the very same object, and a lost race used to just warn — leaving the volume
-            // `Available=True` for a dead owner until something else happened to touch it.
+            // the same reason: this is a PUT carrying `resourceVersion`, and a lost race used to
+            // just warn — leaving the volume `Available=True` for a dead owner until something else
+            // happened to touch it.
+            //
+            // THREE attempts is enough only because the owner is no longer writing back: the
+            // parent and volume reconcilers bail on `i_am_dead` (see `controller::i_am_dead`), so a
+            // partitioned agent no longer rewrites this status every 15 s. Against that, no bound
+            // would have been enough; against one-shot writers, three is plenty.
             for attempt in 0..3 {
                 let mut st = cur.status.clone().unwrap_or_default();
                 st.phase = crd::Phase::Unavailable;
