@@ -29,7 +29,7 @@ pub async fn image_listing(
     include_private: bool,
     q: &std::collections::HashMap<String, String>,
 ) -> crate::Result<Vec<crate::index::Marker>> {
-    let n = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let n = q.get("n").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(usize::MAX);
     let mut markers =
         crate::index::list_page(&app.store, crate::index::Kind::Img, owner, include_private, q.get("last").map(String::as_str), n)
             .await?;

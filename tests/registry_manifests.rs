@@ -674,7 +674,8 @@ async fn a_referrer_without_an_artifact_type_omits_the_field() {
 }
 
 /// `_catalog` pages exactly like `tags/list`: `n` caps, `last` is exclusive, a truncated page
-/// carries `Link`. `n=0` is an empty page — nothing to continue from, so no `Link` either.
+/// carries `Link`. `n=0` is no page size at all, not an empty page — an empty page with no
+/// `Link` reads as an exhausted catalog to a paging client.
 #[tokio::test]
 async fn the_catalog_paginates() {
     let (base, _e, c, token, m, _d) = pushed().await;
@@ -696,7 +697,7 @@ async fn the_catalog_paginates() {
     let r = c.get(format!("{base}/v2/_catalog?n=0")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert!(r.headers().get("link").is_none());
     let b: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(b["repositories"], serde_json::json!([]));
+    assert_eq!(b["repositories"], serde_json::json!(["acme/api", "acme/nginx", "acme/web"]));
 }
 
 /// A push by digest may name tags as `?tag=` (repeatable). Each valid one resolves; a malformed
