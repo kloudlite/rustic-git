@@ -12,7 +12,9 @@ import { safeSegment } from "@/lib/slug";
 import { getSession } from "@/lib/session";
 
 /** `ok` is what lets a dialog close on success — see `useDialogUntilSuccess`. */
-export type WsActionState = { ok?: true; error?: string } | null;
+/** `warning`: the api's sentence when a stop moves a workspace off a dead node — edits since the
+ *  last sync point stay on that node. Not an error: the stop happened, the person should know. */
+export type WsActionState = { ok?: true; error?: string; warning?: string } | null;
 
 /** Mutations are async jobs (202 + a doc whose `state` is still `creating`), so
  *  there is nothing to poll here: revalidating just re-renders the list with
@@ -89,7 +91,7 @@ export async function stopWorkspace(_prev: WsActionState, formData: FormData): P
   const r = await api.stopWorkspace(token, id);
   if (!r.ok) return { error: r.message || "Could not stop." };
   revalidatePath(`/${owner}/workspaces`);
-  return { ok: true };
+  return { ok: true, warning: r.value?.warning };
 }
 
 export async function deleteWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {

@@ -882,7 +882,7 @@ export function startWorkspace(token: string, id: string) {
 }
 
 export function stopWorkspace(token: string, id: string) {
-  return call<void>(`/v1/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST", token });
+  return call<{ warning?: string }>(`/v1/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST", token });
 }
 
 export function startEnvironment(token: string, id: string) {
@@ -890,7 +890,7 @@ export function startEnvironment(token: string, id: string) {
 }
 
 export function stopEnvironment(token: string, id: string) {
-  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}/stop`, { method: "POST", token });
+  return call<ApiEnvironment & { warning?: string }>(`/v1/environments/${encodeURIComponent(id)}/stop`, { method: "POST", token });
 }
 
 /** `crates/workspaces/src/api.rs::VolumeSummary` — one row per VOLUME that has ever been

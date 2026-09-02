@@ -64,6 +64,7 @@ function ToggleForm({ owner, id, running }: { owner: string; id: string; running
         {running ? "Stop" : "Start"}
       </Button>
       {state?.error && <p role="alert" className="mt-1 text-caption font-medium text-destructive">{state.error}</p>}
+      {state?.warning && <p role="status" className="mt-1 text-caption font-medium text-warning">{state.warning}</p>}
     </form>
   );
 }

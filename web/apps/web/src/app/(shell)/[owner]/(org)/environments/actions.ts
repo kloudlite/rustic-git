@@ -13,6 +13,8 @@ import { safeSegment } from "@/lib/slug";
 export type EnvActionState = {
   ok?: true;
   error?: string;
+  /** A stop off a dead node: edits since the last sync point stay there. Shown, not fatal. */
+  warning?: string;
   /** A push's request id — the only thing `push` answers with. See `pushEnvironment`. */
   requestId?: string;
 } | null;
@@ -42,7 +44,7 @@ export async function stopEnvironment(_prev: EnvActionState, formData: FormData)
   const r = await api.stopEnvironment(token, id);
   if (!r.ok) return { error: r.message || "Could not stop." };
   revalidatePath(`/${owner}/environments`);
-  return { ok: true };
+  return { ok: true, warning: r.value?.warning };
 }
 
 export async function pushEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
