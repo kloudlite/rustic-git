@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { basedOnSentence, noticesFor } from "./ws-status";
+import { basedOnSentence, cloneResult, noticesFor } from "./ws-status";
 
 describe("noticesFor", () => {
   test("a stopped workspace still copying says so, and says when it will be safe", () => {
@@ -42,6 +42,16 @@ describe("noticesFor", () => {
     expect(n).toEqual([{ tone: "info", text: "This node is being retired; stop when convenient and the next start lands elsewhere." }]);
   });
 
+  // A condition that has flipped back to False keeps its reason; reading the reason alone would
+  // leave "its node is down" on the page forever after the node came back.
+  test("a cleared Degraded says nothing, even with the reason still NodeDead", () => {
+    expect(noticesFor({ state: "ready", degraded: { ready: false, reason: "NodeDead", message: "node n1 is down" } })).toEqual([]);
+  });
+
+  test("a cleared Decommissioning says nothing, even with the reason still NodeLeaving", () => {
+    expect(noticesFor({ state: "ready", decommissioning: { ready: false, reason: "NodeLeaving", message: "retired" } })).toEqual([]);
+  });
+
   test("a running workspace with nothing to say says nothing", () => {
     expect(noticesFor({ state: "ready" })).toEqual([]);
   });
@@ -56,5 +66,16 @@ describe("basedOnSentence", () => {
   test("an interrupted clone states the gap, because that is the whole decision", () => {
     expect(basedOnSentence({ snapshot: "sync-ws-1-bbbb", at: "2026-09-03T14:32:07Z", age_seconds: 360, interrupted: true }))
       .toBe("Cloned from the sync point of 14:32:07, 6 minutes before the node went down.");
+  });
+});
+
+describe("cloneResult", () => {
+  test("carries the sentence when the clone says what it was based on", () => {
+    expect(cloneResult({ based_on: { snapshot: "sync-ws-1-bbbb", at: "2026-09-03T14:32:07Z", age_seconds: 360, interrupted: true } }))
+      .toEqual({ ok: true, basedOn: "Cloned from the sync point of 14:32:07, 6 minutes before the node went down." });
+  });
+
+  test("an environment clone, which carries no based_on, is a plain success", () => {
+    expect(cloneResult({})).toEqual({ ok: true, basedOn: undefined });
   });
 });

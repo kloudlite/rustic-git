@@ -72,7 +72,9 @@ function ToggleForm({ owner, id, running }: { owner: string; id: string; running
 
 function CloneDialog({ owner, id }: { owner: string; id: string }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(cloneWorkspace, null);
-  const [open, setOpen] = useDialogUntilSuccess(state);
+  // A clone that named the cut it was based on is the one success that must NOT close the dialog:
+  // this is the only place that cut is ever named, so hide the `ok` from the auto-close hook.
+  const [open, setOpen] = useDialogUntilSuccess(state?.basedOn ? null : state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -88,8 +90,9 @@ function CloneDialog({ owner, id }: { owner: string; id: string }) {
           <input type="hidden" name="id" value={id} />
           <Input name="name" placeholder="Name" aria-label="Name" autoFocus required className="h-9" />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          {state?.basedOn && <p role="status" className="text-sm2 text-muted-foreground">Cloned — {state.basedOn}</p>}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>{state?.basedOn ? "Close" : "Cancel"}</Button>
             <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Clone</Button>
           </DialogFooter>
         </form>

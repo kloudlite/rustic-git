@@ -16,10 +16,10 @@ export function noticesFor(x: {
 }): WsNotice[] {
   // Interrupted first: it is the only one that changes what the buttons can do (start is refused,
   // clone is the way forward), so it must not be buried under a copying notice.
-  if (x.degraded?.reason === "NodeDead") {
+  if (x.degraded?.ready && x.degraded.reason === "NodeDead") {
     return [{ tone: "warning", text: "Its node is down. It resumes when the node returns — or clone it from the last synced point." }];
   }
-  if (x.decommissioning?.reason === "NodeLeaving") {
+  if (x.decommissioning?.ready && x.decommissioning.reason === "NodeLeaving") {
     return [{ tone: "info", text: "This node is being retired; stop when convenient and the next start lands elsewhere." }];
   }
   const r = x.replicated;
@@ -46,4 +46,13 @@ export function basedOnSentence(b: { snapshot: string; at?: string | null; age_s
   const mins = Math.max(0, Math.round(b.age_seconds / 60));
   const ago = mins === 1 ? "1 minute" : `${mins} minutes`;
   return `Cloned from the sync point of ${time}, ${ago} before the node went down.`;
+}
+
+/** The clone response's `based_on` as the one thing the dialog says back. Pure and here so the
+ *  server action is a call rather than a branch nothing can test without a request. */
+export function cloneResult(v: { based_on?: { snapshot: string; at?: string | null; age_seconds: number; interrupted: boolean } | null }): {
+  ok: true;
+  basedOn?: string;
+} {
+  return { ok: true, basedOn: v.based_on ? basedOnSentence(v.based_on) : undefined };
 }

@@ -9,12 +9,15 @@ import * as api from "@/lib/api";
 // action refuses it — a bad one is never a real submission, since the pages that render these
 // forms fill the field from the route params.
 import { safeSegment } from "@/lib/slug";
+import { cloneResult } from "@/lib/ws-status";
 import { getSession } from "@/lib/session";
 
 /** `ok` is what lets a dialog close on success — see `useDialogUntilSuccess`. */
 /** `warning`: the api's sentence when a stop moves a workspace off a dead node — edits since the
  *  last sync point stay on that node. Not an error: the stop happened, the person should know. */
-export type WsActionState = { ok?: true; error?: string; warning?: string } | null;
+/** `basedOn`: the sentence naming the cut a clone was grafted onto. A success the dialog must
+ *  SHOW rather than close on — it is the only place that cut is ever named. */
+export type WsActionState = { ok?: true; error?: string; warning?: string; basedOn?: string } | null;
 
 /** Mutations are async jobs (202 + a doc whose `state` is still `creating`), so
  *  there is nothing to poll here: revalidating just re-renders the list with
@@ -47,7 +50,7 @@ export async function cloneWorkspace(_prev: WsActionState, formData: FormData): 
   const r = await api.cloneWorkspace(token, id, name);
   if (!r.ok) return { error: r.message || "Could not clone." };
   revalidatePath(`/${owner}/workspaces`);
-  return { ok: true };
+  return cloneResult(r.value);
 }
 
 export async function restoreWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
