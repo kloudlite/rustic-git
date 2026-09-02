@@ -327,22 +327,34 @@ pub async fn wake_peers(ctx: &Arc<Ctx>, live: &[String], secret: &str) {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Next {
     RunAgain,
-    /// Something could not be fetched: come back in `RETRY_SOON` rather than at the next tick, and
+    /// Something could not be fetched: come back after this long rather than at the next tick, and
     /// still take a wake the moment one arrives.
-    RetrySoon,
+    RetrySoon(Duration),
     Wait,
 }
 
-/// How long a pass that missed a commit waits. Short enough that a source coming back is picked up
+/// The FIRST retry delay after a missed pass. Short enough that a source coming back is picked up
 /// while the person is still watching, long enough not to hammer a peer that is simply down.
 pub(crate) const RETRY_SOON: Duration = Duration::from_secs(30);
 
-pub(crate) fn after_pass(wake: &tokio::sync::Notify, missed: bool) -> Next {
+/// `RETRY_SOON` doubled per CONSECUTIVE missed pass, capped at the ordinary tick. Without the cap
+/// a permanently unfetchable commit — a Snapshot whose only source is gone for good — pinned every
+/// node placed on that volume at a 30 s beat forever, node-wide: the flag is per-PASS, so one
+/// stuck volume paid the whole node's listing cost every 30 s until someone deleted the CR.
+/// Capping at `replica_interval` makes the worst case exactly today's steady state.
+fn retry_delay(misses: u32) -> Duration {
+    RETRY_SOON.saturating_mul(1u32 << misses.saturating_sub(1).min(16)).min(replica_interval())
+}
+
+/// `misses` counts CONSECUTIVE passes that missed something, and is reset by any clean pass — a
+/// volume that starts fetching again returns the node to its ordinary beat immediately.
+pub(crate) fn after_pass(wake: &tokio::sync::Notify, missed: bool, misses: &mut u32) -> Next {
     use futures::FutureExt;
+    *misses = if missed { misses.saturating_add(1) } else { 0 };
     if wake.notified().now_or_never().is_some() {
         Next::RunAgain
     } else if missed {
-        Next::RetrySoon
+        Next::RetrySoon(retry_delay(*misses))
     } else {
         Next::Wait
     }
@@ -2965,12 +2977,13 @@ fi
     #[test]
     fn a_burst_of_wakes_during_a_pass_buys_exactly_one_more_pass() {
         let wake = tokio::sync::Notify::new();
-        assert_eq!(after_pass(&wake, false), Next::Wait, "no wake, no extra pass");
+        let mut misses = 0;
+        assert_eq!(after_pass(&wake, false, &mut misses), Next::Wait, "no wake, no extra pass");
         for _ in 0..5 {
             wake.notify_one();
         }
-        assert_eq!(after_pass(&wake, false), Next::RunAgain, "a wake during the pass runs it again");
-        assert_eq!(after_pass(&wake, false), Next::Wait, "five wakes are one permit, not five passes");
+        assert_eq!(after_pass(&wake, false, &mut misses), Next::RunAgain, "a wake during the pass runs it again");
+        assert_eq!(after_pass(&wake, false, &mut misses), Next::Wait, "five wakes are one permit, not five passes");
     }
 
     /// F4 (drill, 2026-09-03): a pass that could not fetch a commit waited out the full tick. It
@@ -2979,9 +2992,41 @@ fi
     #[test]
     fn a_pass_that_missed_a_commit_retries_soon_unless_a_wake_is_pending() {
         let wake = tokio::sync::Notify::new();
-        assert_eq!(after_pass(&wake, true), Next::RetrySoon);
+        let mut misses = 0;
+        assert_eq!(after_pass(&wake, true, &mut misses), Next::RetrySoon(RETRY_SOON));
         wake.notify_one();
-        assert_eq!(after_pass(&wake, true), Next::RunAgain, "a pending wake beats the retry");
+        assert_eq!(after_pass(&wake, true, &mut misses), Next::RunAgain, "a pending wake beats the retry");
+    }
+
+    /// Round 2: an unfetchable commit used to pin the whole node at a 30 s pass forever. The delay
+    /// doubles per consecutive miss, caps at the ordinary tick, and a single clean pass resets it.
+    #[test]
+    fn consecutive_misses_back_off_to_the_ordinary_tick_and_one_clean_pass_resets() {
+        std::env::set_var("WS_REPLICA_SECS", "300");
+        let wake = tokio::sync::Notify::new();
+        let mut misses = 0;
+        let delays: Vec<Duration> = (0..6)
+            .map(|_| match after_pass(&wake, true, &mut misses) {
+                Next::RetrySoon(d) => d,
+                other => panic!("expected a retry, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_secs(30),
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                Duration::from_secs(240),
+                // Capped: 480 s would be longer than the beat it is meant to accelerate.
+                Duration::from_secs(300),
+                Duration::from_secs(300),
+            ]
+        );
+
+        assert_eq!(after_pass(&wake, false, &mut misses), Next::Wait, "a clean pass goes back to the tick");
+        assert_eq!(misses, 0, "and forgets the streak");
+        assert_eq!(after_pass(&wake, true, &mut misses), Next::RetrySoon(RETRY_SOON), "so the next miss starts over at 30 s");
     }
 
     fn agent_pod(node: &str, ip: &str) -> serde_json::Value {
