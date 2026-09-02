@@ -327,13 +327,22 @@ pub async fn wake_peers(ctx: &Arc<Ctx>, live: &[String], secret: &str) {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Next {
     RunAgain,
+    /// Something could not be fetched: come back in `RETRY_SOON` rather than at the next tick, and
+    /// still take a wake the moment one arrives.
+    RetrySoon,
     Wait,
 }
 
-pub(crate) fn after_pass(wake: &tokio::sync::Notify) -> Next {
+/// How long a pass that missed a commit waits. Short enough that a source coming back is picked up
+/// while the person is still watching, long enough not to hammer a peer that is simply down.
+pub(crate) const RETRY_SOON: Duration = Duration::from_secs(30);
+
+pub(crate) fn after_pass(wake: &tokio::sync::Notify, missed: bool) -> Next {
     use futures::FutureExt;
     if wake.notified().now_or_never().is_some() {
         Next::RunAgain
+    } else if missed {
+        Next::RetrySoon
     } else {
         Next::Wait
     }
@@ -373,9 +382,11 @@ pub(crate) fn node_dead_secs() -> i64 {
 /// One pass of the puller — spawned beside `replicate_beat` in `controller/run.rs`. Inert without a
 /// peer secret, same fail-closed rule every dial in this file follows: no secret, no
 /// authenticated GET to another node's root-run `btrfs send`.
-pub async fn pull_beat(ctx: &Arc<Ctx>) {
+/// Returns true when some commit could not be fetched this pass, so the caller retries soon
+/// instead of waiting out the full tick.
+pub async fn pull_beat(ctx: &Arc<Ctx>) -> bool {
     if ctx.peer_secret.is_empty() {
-        return;
+        return false;
     }
     pull_beat_with(ctx, "btrfs", &ctx.peer_secret).await
 }
@@ -410,14 +421,14 @@ fn standby_count(owner_alive: bool, replicas: u32) -> usize {
 /// Split out so tests can point the receive half at a fake `btrfs` — same shape as
 /// `SendTo::btrfs_bin` on the send side — and pass the secret directly rather than through
 /// `WS_PEER_SECRET`, which every test in this binary would otherwise share.
-async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
+async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) -> bool {
     // Listed ONCE and threaded through everything below: a partial view of who is alive must reap,
     // unclaim and place nothing, and every one of those decisions needs to agree on the same list.
     let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(list) => list.items,
         Err(e) => {
             tracing::warn!(error = %e, "pull: listing nodes; reaping, unclaiming and placing nothing");
-            return;
+            return false;
         }
     };
 
@@ -435,7 +446,7 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     // deliberate trade — a wrong sweep deletes data, a paused one only waits.
     if node_is_dead(nodes.iter().find(|k| k.name_any() == ctx.node), floor, now) {
         tracing::warn!(node = %ctx.node, "pull: my own Node reads NotReady past the floor; sweeping nothing this pass");
-        return;
+        return false;
     }
 
     // One LISTING for the whole pass, for the same reason the node list is threaded: reap,
@@ -443,7 +454,7 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     // views of the cluster is how a copy nobody else holds gets dropped. The sweeps below run
     // once this has succeeded, beside each other so the two never drift onto different dead-node
     // rules; a partial listing bails the whole beat rather than let any of them act on it.
-    let Some(beat) = crate::listing::beat(ctx).await else { return };
+    let Some(beat) = crate::listing::beat(ctx).await else { return false };
 
     reap_dead_replicas(ctx, &beat, &nodes, floor, now).await;
     // DEAD nodes only, never merely decommissioning ones: a decommissioning node is alive, its
@@ -454,7 +465,7 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "pull: listing pool nodes");
-            return;
+            return false;
         }
     };
 
@@ -462,15 +473,17 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "pull: building the http client");
-            return;
+            return false;
         }
     };
 
     let live = live_nodes(&candidates, &nodes, floor, now);
+    let mut missed = false;
     for id in interesting_volumes(ctx, &beat, &live) {
-        pull_volume(ctx, &beat, btrfs_bin, &http, secret, &id).await;
+        missed |= pull_volume(ctx, &beat, btrfs_bin, &http, secret, &id, &live).await;
     }
     retire_pass(ctx, &beat, &live).await;
+    missed
 }
 
 /// Every volume this node must hold a commit-model replica of: named by replication's rendezvous
@@ -543,7 +556,8 @@ fn retired(have: &HashSet<String>, existing: &HashSet<String>, any_pull_failed: 
 /// Pulls every `Snapshot` this node is missing for `volume`, then rewrites this node's own
 /// `VolumeReplica`. Keep-biased throughout: a `Snapshot`-list error skips the volume with nothing
 /// touched, same as `replica_reconcile`'s lookup-error branch.
-async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
+#[allow(clippy::too_many_arguments)]
+async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str, live: &[String]) -> bool {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     // One list, all phases: the Ready subset drives the pull below, and the FULL name set is what
     // tells a deleted CR from a Working one, below — a `Snapshot` has no finalizer (see
@@ -553,7 +567,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
         Ok(list) => list.items,
         Err(e) => {
             tracing::warn!(%volume, error = %e, "pull: listing snapshots; keeping everything");
-            return;
+            return false;
         }
     };
     let existing: HashSet<String> = all.iter().map(|s| s.name_any()).collect();
@@ -564,7 +578,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
         Ok(names) => names.into_iter().collect(),
         Err(e) => {
             tracing::warn!(%volume, error = %e, "pull: local_commits");
-            return;
+            return false;
         }
     };
 
@@ -587,6 +601,16 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     let synced = |r: &&&crd::VolumeReplica| r.status.as_ref().is_some_and(|s| s.phase == "Synced");
     let mut sources: Vec<&str> = replicas.iter().filter(not_me).filter(synced).map(|r| r.spec.node.as_str()).collect();
     sources.extend(replicas.iter().filter(not_me).filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
+    // The OWNER, last, and only while it is live. Every commit exists on the owner by
+    // construction, but a replica row for it may not exist yet (a fresh volume) or may have been
+    // reaped — which left the first standby with an empty source list and a commit it could never
+    // fetch. Last so a Synced peer is still preferred, and skipped when the owner is not in `live`
+    // so a genuinely dead owner does not cost a failed dial per commit per pass.
+    if let Some(owner) = beat.volumes.iter().find(|v| v.name_any() == volume).map(|v| v.spec.node_name.as_str()) {
+        if !owner.is_empty() && owner != ctx.node && live.iter().any(|n| n == owner) && !sources.contains(&owner) {
+            sources.push(owner);
+        }
+    }
 
     // Resolved ONCE per pass, before the commit loop: `agent_pod_addr` is a namespaced pod LIST
     // with two selectors, and a node catching up on N commits was making N of them per source to
@@ -674,6 +698,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     if let Err(e) = write_replica_status(ctx, volume, !missing_at_end, branches).await {
         tracing::warn!(%volume, error = %e, "pull: writing VolumeReplica status");
     }
+    any_pull_failed
 }
 
 /// One `GET /peer/v1/commit/{volume}/{name}` streamed straight into `btrfs receive
@@ -1369,7 +1394,7 @@ mod reconcile_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
 
         assert!(rec.calls().iter().all(|c| !c.contains("volumereplicas")), "a snapshot-list error must never reach the replica write");
     }
@@ -1428,7 +1453,7 @@ mod reconcile_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
 
         assert!(rec.calls().iter().all(|c| !c.contains("/peer/v1/commit/")), "nothing missing: no GET should ever be issued");
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
@@ -1588,7 +1613,7 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1", &[]).await;
 
         assert!(tmp.path().join("vol/vol-1/snap/vol-1-child").exists(), "the full-pull retry must land the commit");
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
@@ -1596,6 +1621,37 @@ fi
         assert_eq!(sent[0]["status"]["phase"], "Synced", "the fallback succeeded: nothing is missing any more");
         // Before the guard: see `PeerServer`.
         peer_server.stop().await;
+    }
+
+    /// F4 (drill, 2026-09-03): with no replica row for the owner (a fresh volume, or a row the
+    /// reaper took) the first standby had an EMPTY source list and could never fetch a thing. The
+    /// owner is a source of last resort — and only while it is live, so a genuinely dead owner
+    /// costs no failed dial per commit per pass.
+    #[tokio::test]
+    async fn the_owner_is_a_last_resort_source_only_while_it_is_live() {
+        let routes = || {
+            vec![
+                Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("v1-aaaa", "v1", "")]) },
+                Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![]) },
+                not_found(format!("{VOLREPLICAS}/v1.node-b")),
+                Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: replica_of("v1", "node-b", "Syncing") },
+                Route { method: "PUT", path: format!("{VOLREPLICAS}/v1.node-b/status"), status: 200, body: replica_of("v1", "node-b", "Syncing") },
+            ]
+        };
+        let http = peer_http_client().unwrap();
+        let beat = beat_of(vec![vol_owned("v1", "node-a")], vec![], vec![]);
+        let pod_lists = |rec: &Recorder| rec.calls().iter().filter(|c| c.as_str() == "GET /api/v1/namespaces/kube-system/pods").count();
+
+        let live = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(live.path(), "node-b", routes());
+        let missed = pull_volume(&ctx, &beat, "btrfs", &http, "s3cret", "v1", &["node-a".to_string()]).await;
+        assert_eq!(pod_lists(&rec), 1, "the live owner is tried: {:?}", rec.calls());
+        assert!(missed, "the commit did not land, so the pass asks for a retry");
+
+        let dead = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(dead.path(), "node-b", routes());
+        pull_volume(&ctx, &beat, "btrfs", &http, "s3cret", "v1", &[]).await;
+        assert_eq!(pod_lists(&rec), 0, "a dead owner is not dialled at all: {:?}", rec.calls());
     }
 
     /// Catching up on three commits from one source resolves that source's pod address ONCE, not
@@ -1616,7 +1672,7 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("v1", "node-b", "Synced")], vec![]), "btrfs", &http, "s3cret", "v1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("v1", "node-b", "Synced")], vec![]), "btrfs", &http, "s3cret", "v1", &[]).await;
 
         let pod_lists = rec.calls().iter().filter(|c| c.as_str() == "GET /api/v1/namespaces/kube-system/pods").count();
         assert_eq!(pod_lists, 1, "one address lookup per source per pass, not per commit: {:?}", rec.calls());
@@ -2374,7 +2430,7 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
         let http = peer_http_client().unwrap();
 
-        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1", &[]).await;
 
         assert!(tmp.path().join("vol/vol-1/snap/sync-ws-1-x").exists(), "the transient must land on disk like any other commit");
         let paths = seen_paths.lock().unwrap().clone();
@@ -2764,7 +2820,7 @@ fi
         }
 
         let http = peer_http_client().unwrap();
-        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
 
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         let branches = &sent[0]["status"]["branches"];
@@ -2797,7 +2853,7 @@ fi
         std::fs::create_dir_all(ctx.engine.pool.snap_dir("vol-1")).unwrap();
 
         let http = peer_http_client().unwrap();
-        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1").await;
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
 
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1);
@@ -2871,12 +2927,23 @@ fi
     #[test]
     fn a_burst_of_wakes_during_a_pass_buys_exactly_one_more_pass() {
         let wake = tokio::sync::Notify::new();
-        assert_eq!(after_pass(&wake), Next::Wait, "no wake, no extra pass");
+        assert_eq!(after_pass(&wake, false), Next::Wait, "no wake, no extra pass");
         for _ in 0..5 {
             wake.notify_one();
         }
-        assert_eq!(after_pass(&wake), Next::RunAgain, "a wake during the pass runs it again");
-        assert_eq!(after_pass(&wake), Next::Wait, "five wakes are one permit, not five passes");
+        assert_eq!(after_pass(&wake, false), Next::RunAgain, "a wake during the pass runs it again");
+        assert_eq!(after_pass(&wake, false), Next::Wait, "five wakes are one permit, not five passes");
+    }
+
+    /// F4 (drill, 2026-09-03): a pass that could not fetch a commit waited out the full tick. It
+    /// now comes back in 30 s — but a pending wake still wins, because a stop waiting on a replica
+    /// must never be delayed by a retry.
+    #[test]
+    fn a_pass_that_missed_a_commit_retries_soon_unless_a_wake_is_pending() {
+        let wake = tokio::sync::Notify::new();
+        assert_eq!(after_pass(&wake, true), Next::RetrySoon);
+        wake.notify_one();
+        assert_eq!(after_pass(&wake, true), Next::RunAgain, "a pending wake beats the retry");
     }
 
     fn agent_pod(node: &str, ip: &str) -> serde_json::Value {

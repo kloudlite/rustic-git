@@ -329,15 +329,26 @@ fn spawn_pull(ctx: Arc<Ctx>) {
         let wake = ctx.pull_wake.clone();
         let mut next = crate::peer::Next::Wait;
         loop {
-            if next == crate::peer::Next::Wait {
-                tokio::select! {
-                    _ = tick.tick() => {}
-                    _ = wake.notified() => {}
+            match next {
+                // A pass that could not fetch something retries in 30 s instead of at the next
+                // tick — a wake still wins the race, so a stop or a clone is never delayed by it.
+                crate::peer::Next::RetrySoon => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(crate::peer::RETRY_SOON) => {}
+                        _ = wake.notified() => {}
+                    }
                 }
+                crate::peer::Next::Wait => {
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = wake.notified() => {}
+                    }
+                }
+                crate::peer::Next::RunAgain => {}
             }
-            crate::peer::pull_beat(&ctx).await;
+            let missed = crate::peer::pull_beat(&ctx).await;
             // Wakes that arrived DURING the pass decide whether to go straight round again.
-            next = crate::peer::after_pass(&wake);
+            next = crate::peer::after_pass(&wake, missed);
         }
     });
 }
