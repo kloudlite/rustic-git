@@ -126,7 +126,6 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
                                       "spec": {"volume": "ws-1", "node": "node-b"},
                                       "status": {"phase": "Synced", "branches": {}, "lastSyncAt": rfc3339_ago(1)}}]}),
     ));
-    routes.push(Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
@@ -1560,7 +1559,6 @@ fn env_flush_routes(stop: serde_json::Value, replicas: serde_json::Value) -> Vec
         rustic_git_workspaces::kube_test::get(STOP_REQ, stop),
         rustic_git_workspaces::kube_test::get(REPLICAS, replicas),
         Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
-        Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
     ]
 }
@@ -1601,6 +1599,11 @@ async fn a_stop_proceeds_once_another_replica_is_synced_after_the_cut() {
     rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
 
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "replicated: teardown proceeds: {:?}", rec.calls());
+    // C1: the stop CR is the stopped worktree's ONE remaining sync point — `status.head` never
+    // names it, the last beat transient was reclaimed when it turned Ready, and every replica
+    // drops a CR-less subvolume within a cycle. Deleting it here ends the worktree with zero sync
+    // points anywhere and sends a later re-host all the way back to `head`.
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "the stop CR must survive teardown: {:?}", rec.calls());
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "Stopped");
 }
@@ -1690,14 +1693,45 @@ async fn a_workspace_stop_cuts_a_sync_point_before_deleting_the_pod() {
             ),
             rustic_git_workspaces::kube_test::get(REPLICAS, replicas),
             Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
-            Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
     rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx2).await.unwrap();
     let calls = rec.calls();
     assert!(calls.iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "landed: the pod goes: {calls:?}");
+    // C1: the pod goes, the stop CR STAYS — it is the stopped worktree's only sync point now.
+    assert!(!calls.iter().any(|c| c == &format!("DELETE {WS_STOP_REQ}")), "the stop CR must survive teardown: {calls:?}");
     assert_eq!(rec.sent("PATCH", WS_STATUS).last().unwrap()["status"]["phase"], "stopped");
+}
+
+/// I3: a single-node region has nowhere for the bytes to go, so no peer can ever report `Synced`
+/// and the gate can only end in the timeout — ten minutes added to every stop in the region. With
+/// the node list saying there is no other pool node, the stop lands immediately and the condition
+/// says WHY, distinct from a flush that genuinely timed out.
+#[tokio::test]
+async fn a_stop_in_a_single_node_region_lands_immediately() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(5)}));
+    // Freshly created: nowhere near the flush bound, so a wait here would be a real ten-minute one.
+    ready["metadata"]["creationTimestamp"] = serde_json::json!(rfc3339_ago(5));
+    let mut routes = env_flush_routes(ready, replica_list(&[]));
+    routes.push(rustic_git_workspaces::kube_test::get(
+        "/api/v1/nodes",
+        serde_json::json!({
+            "apiVersion": "v1", "kind": "NodeList", "metadata": {"resourceVersion": "1"},
+            "items": [{"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a", "uid": "n-a"}}],
+        }),
+    ));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "nowhere to replicate: no wait: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "stopped");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "FlushUnreplicated");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["message"], "no other node in the region holds replicas");
 }
 
 
