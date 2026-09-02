@@ -213,7 +213,7 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
 }
 
 /// `manifest_stat` per image, at most `STAT_CONCURRENCY` LISTs in flight, results in input order.
-const STAT_CONCURRENCY: usize = 16;
+pub(crate) const STAT_CONCURRENCY: usize = 16;
 /// The futures are collected before the stream is built: a closure mapping names to futures
 /// held across the await is what made the worker's spawned lane "not general enough" over
 /// lifetimes.

@@ -104,12 +104,14 @@ async fn object_store_prefix_listing_is_segment_wise() {
     assert_eq!(hits, vec!["repo/img/acme/nginx/a".to_string()], "prefix leaked into a sibling");
 }
 
-/// An object store that answers one nominated key with a transient error, so the backfill's
-/// failure direction can be exercised at all. Everything else delegates.
+/// An object store that answers one nominated key with a transient error for its first
+/// `fails_left` GETs, so both the backfill's failure direction and its retry can be exercised at
+/// all. Everything else delegates.
 #[derive(Debug)]
 struct FailsOneGet {
     inner: std::sync::Arc<slatedb::object_store::memory::InMemory>,
     bad: slatedb::object_store::path::Path,
+    fails_left: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Display for FailsOneGet {
@@ -140,7 +142,14 @@ impl slatedb::object_store::ObjectStore for FailsOneGet {
         l: &slatedb::object_store::path::Path,
         o: slatedb::object_store::GetOptions,
     ) -> slatedb::object_store::Result<slatedb::object_store::GetResult> {
-        if *l == self.bad {
+        if *l == self.bad
+            && self
+                .fails_left
+                .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
+                    n.checked_sub(1)
+                })
+                .is_ok()
+        {
             return Err(slatedb::object_store::Error::Generic {
                 store: "FailsOneGet",
                 source: "injected transient failure".into(),
@@ -195,7 +204,11 @@ async fn an_unreadable_manifest_reads_as_not_held_not_as_a_fault() {
 
     let inner = std::sync::Arc::new(slatedb::object_store::memory::InMemory::new());
     inner.put(&loc, PutPayload::from(manifest)).await.unwrap();
-    let os = std::sync::Arc::new(FailsOneGet { inner, bad: loc.clone() });
+    let os = std::sync::Arc::new(FailsOneGet {
+        inner,
+        bad: loc.clone(),
+        fails_left: std::sync::atomic::AtomicUsize::new(usize::MAX),
+    });
     let tmp = tempfile::tempdir().unwrap();
     let store = std::sync::Arc::new(
         rustic_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
@@ -231,5 +244,44 @@ async fn the_backfill_marks_itself_done_and_does_not_walk_twice() {
             .await
             .unwrap(),
         "the row survives the manifest; the walk must not run a second time"
+    );
+}
+
+/// A manifest skipped over a transient blip must NOT leave the image marked backfilled: the mark
+/// stops anyone ever walking again, so the blip would lose that manifest's hold rows forever.
+/// Observable as: the first pull answers "not held", a second clean pull answers "held".
+#[tokio::test]
+async fn a_blip_during_the_walk_does_not_mark_the_image_backfilled() {
+    use slatedb::object_store::{ObjectStoreExt, PutPayload};
+
+    let layer = Digest::of(b"layer");
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "layers": [{"digest": layer.to_string(), "size": 5}]
+    })
+    .to_string()
+    .into_bytes();
+    let md = Digest::of(&manifest);
+    let loc = rustic_git_registry::store::manifest_path("acme", "nginx", &md);
+
+    let inner = std::sync::Arc::new(slatedb::object_store::memory::InMemory::new());
+    inner.put(&loc, PutPayload::from(manifest)).await.unwrap();
+    let os = std::sync::Arc::new(FailsOneGet {
+        inner,
+        bad: loc.clone(),
+        fails_left: std::sync::atomic::AtomicUsize::new(1),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(
+        rustic_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
+    );
+
+    assert!(
+        !rustic_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await.unwrap(),
+        "the blip skips the only manifest, so nothing is held yet"
+    );
+    assert!(
+        rustic_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await.unwrap(),
+        "the walk was never marked done, so the next pull retries it and finds the layer"
     );
 }

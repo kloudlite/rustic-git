@@ -202,15 +202,8 @@ pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
 /// Drop every hold row for `d`, whatever wrote it. The mirror of `forget_manifest_blobs` on the
 /// blob-delete path: the rows say "this image holds these bytes", so they must not outlive them.
 pub async fn forget_blob_rows(db: &Db, d: &Digest) -> Result<()> {
-    let mut it = db.scan_prefix(format!("{BLOB_PREFIX}{d}/"), ..).await?;
-    let mut doomed = vec![];
-    while let Some(kv) = it.next().await? {
-        doomed.push(kv.key.to_vec());
-    }
-    for k in doomed {
-        db.delete(k).await?;
-    }
-    Ok(())
+    // Every key ends with the empty suffix, so this is "all rows under the digest's prefix".
+    delete_suffixed(db, &format!("{BLOB_PREFIX}{d}/"), "").await
 }
 
 async fn has_blob_row(db: &Db, d: &Digest) -> Result<bool> {
@@ -243,8 +236,11 @@ pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest
     if db.get(BLOB_ROWS_BACKFILLED).await?.is_some() {
         return has_blob_row(&db, d).await;
     }
-    backfill_blob_rows(store, owner, name, &db).await?;
-    db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
+    // Only a COMPLETE walk may claim the image is backfilled. A manifest skipped over a transient
+    // GET blip would otherwise lose its hold rows forever, since the mark stops anyone re-walking.
+    if !backfill_blob_rows(store, owner, name, &db).await? {
+        db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
+    }
     has_blob_row(&db, d).await
 }
 
@@ -255,7 +251,10 @@ pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest
 /// nothing and is skipped: under-granting is the safe failure for authorization, unlike the
 /// sweep, where the same manifest must abort. Propagating the store's error here answered a
 /// pull with a 500 where the honest answer is a 404.
-async fn backfill_blob_rows(store: &Store, owner: &str, name: &str, db: &Db) -> Result<()> {
+///
+/// Returns whether any manifest was skipped, so the caller can withhold the "done" mark and let a
+/// later pull retry a walk that only failed on a blip.
+async fn backfill_blob_rows(store: &Store, owner: &str, name: &str, db: &Db) -> Result<bool> {
     use slatedb::object_store::ObjectStore;
     let prefix = OsPath::from(format!("manifests/{owner}/{name}"));
     let mut listing = store.os.list(Some(&prefix));
@@ -271,19 +270,22 @@ async fn backfill_blob_rows(store: &Store, owner: &str, name: &str, db: &Db) -> 
             };
             (p, bytes)
         }),
-        16,
+        crate::gc::STAT_CONCURRENCY,
     );
+    let mut skipped = false;
     while let Some((loc, bytes)) = futures::StreamExt::next(&mut fetched).await {
         let Some(via) = crate::gc::digest_from_path(&loc) else { continue };
         let bytes = match bytes {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(owner = %owner, name = %name, manifest = %loc, error = %e, "blob rows: skipping unreadable manifest");
+                skipped = true;
                 continue;
             }
         };
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             tracing::warn!(owner = %owner, name = %name, manifest = %loc, "blob rows: skipping unparseable manifest");
+            skipped = true;
             continue;
         };
         let mut named = std::collections::HashSet::new();
@@ -295,7 +297,7 @@ async fn backfill_blob_rows(store: &Store, owner: &str, name: &str, db: &Db) -> 
             db.write(b).await?;
         }
     }
-    Ok(())
+    Ok(skipped)
 }
 
 /// `(count, newest_ms)` for the image's manifests, kept in the image's own single-writer database

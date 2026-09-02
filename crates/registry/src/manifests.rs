@@ -196,7 +196,7 @@ pub async fn put_manifest(
         })
         .collect();
     let present: Vec<bool> =
-        futures::StreamExt::collect::<Vec<bool>>(futures::StreamExt::buffered(futures::stream::iter(probes), 16)).await;
+        futures::StreamExt::collect::<Vec<bool>>(futures::StreamExt::buffered(futures::stream::iter(probes), crate::gc::STAT_CONCURRENCY)).await;
     if present.iter().any(|ok| !ok) {
         return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
     }
