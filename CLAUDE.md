@@ -144,7 +144,12 @@ and the policy refuses it any other spec change. Apply both files. There is no j
 no agent registration and no long poll: `/v1` writes ONE unplaced object and establishes no facts
 about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, remembered in
 `status.compatibleNodes`), so two nodes can never contend for the same subvolume and the API never
-places anything. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
+places anything. When a node is dead for `WS_NODE_DEAD_SECS`, the unclaim sweep marks its volumes
+`Unavailable` and moves ONLY the worktrees whose `desiredState` is `Stopped` — a Running one keeps
+its pin and a `NodeDead` condition, because its live edits exist only on the dead node and only
+the person may write them off by stopping it. A released volume's pin is cleared, and the node
+that then claims the parent takes it with a JSON-patch `test` on the empty value (`take_volume`),
+the one other spec write the admission policy allows. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
 exactly one btrfs subvolume with identical semantics — and it is a CHILD: the parent's controller
 creates it with an ownerReference, so deleting the parent is the whole delete. Containers live in
 a namespace per owner or environment (`crd::ws_namespace` → `ws-{owner}` / `wt-{owner}-…` for a

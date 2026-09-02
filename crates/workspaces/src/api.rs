@@ -897,15 +897,29 @@ async fn start_ws(
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
+/// The person is the one who decides whether a Running worktree pinned to a dead node is worth
+/// losing (see the design's "the person decides" rule): stopping it is that decision, so the
+/// response says what it costs, read off the `NodeDead` condition the sweep already wrote.
+fn node_dead_warning(node_name: &str, conditions: &[crd::Condition]) -> Option<String> {
+    conditions
+        .iter()
+        .find(|c| c.reason == "NodeDead" && c.status == "True")
+        .map(|_| format!("node {node_name} is down; edits after the last sync point are only on that node and will not follow the move"))
+}
+
 async fn stop_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
-    my_ws(&s, &owner, &id).await?;
+    let w = my_ws(&s, &owner, &id).await?;
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Stopped).await?;
-    Ok(StatusCode::ACCEPTED.into_response())
+    let warning = w.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
+    match warning {
+        Some(w) => Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"warning": w}))).into_response()),
+        None => Ok(StatusCode::ACCEPTED.into_response()),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1422,7 +1436,12 @@ async fn stop_env(
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Stopped).await?;
     let mut doc = env_doc(&e, &HashSet::new());
     doc.state = EnvState::Stopped;
-    Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
+    let warning = e.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
+    let mut body = serde_json::to_value(&doc).expect("Environment doc always serializes");
+    if let Some(w) = warning {
+        body["warning"] = serde_json::Value::String(w);
+    }
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
 async fn delete_env(
@@ -2134,6 +2153,20 @@ mod tests {
             mounts: vec![Mount { folder: folder.into(), path: path.into() }],
             ports: vec![],
         }
+    }
+
+    /// A stopped workspace pinned to a dead node must warn what stopping costs; one with no
+    /// `NodeDead` condition must not manufacture a warning out of an unrelated condition.
+    #[test]
+    fn stop_warns_only_when_the_pin_is_on_a_dead_node() {
+        let dead = [crd::condition("Degraded", true, "NodeDead", "node n1 is down", 4)];
+        let warning = super::node_dead_warning("n1", &dead).expect("must warn");
+        assert!(warning.contains("n1"));
+        assert!(warning.contains("will not follow the move"));
+
+        let healthy = [crd::condition(crd::PACKAGES_READY, true, "Ready", "ok", 4)];
+        assert!(super::node_dead_warning("n1", &healthy).is_none());
+        assert!(super::node_dead_warning("n1", &[]).is_none());
     }
 
     #[test]

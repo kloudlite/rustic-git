@@ -514,3 +514,37 @@ check whether the volume has any peers at all (`spec.replicas`) and whether repl
 enabled (`WS_PEER_SECRET`, above) before assuming the timeout is too short. On a SINGLE-NODE region
 the gate is skipped entirely rather than waited out — there is nowhere for the bytes to go, so
 every stop lands at once with message "no other node in the region holds replicas".
+
+### Node death
+
+A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` (default 600) —
+that floor, not a shorter probe, is what keeps a brief kubelet hiccup from tearing anything down.
+Every surviving agent's pull beat then does two things to that node's volumes: replicas heal onto
+a third live node automatically (rendezvous stops naming the dead node as a candidate, so a
+survivor picks up the missing copy on its own), and every `Volume` the dead node owned goes
+`status.phase: Unavailable` with condition `Available=False/NodeDead` — `kubectl get volumes`
+is the fast way to see which ones are affected.
+
+What moves automatically stops there. A Workspace or Environment whose `desiredState` is
+`Stopped` is un-placed by the sweep, its volume's owner pin cleared, and a survivor with a Synced
+replica claims it on the next beat — this is the whole re-hosting path, no data lost, because a
+stopped worktree was already flushed and replica-gated when it stopped. A RUNNING one is left
+alone: its pin stays on the dead node and it gets condition `Degraded=True/NodeDead`, because its
+live edits since the last sync point exist only on that node's disk, and re-hosting it
+automatically would silently throw them away. The `/v1` stop endpoint reports that cost as a
+`warning` in its response body when it sees the condition, so stopping (and thereby moving) a
+workspace on a dead node is always something a person chose, never something the sweep did for
+them. If the node comes back before anyone stops it, its pin was never cleared, so nothing
+moves — the pod resumes with everything intact.
+
+Caveat: this all keys off "NotReady in the API server for `WS_NODE_DEAD_SECS`", which is not the
+same fact as "the node's pods stopped running". A node that is merely network-partitioned from
+the control plane keeps its Running pods alive and keeps writing to their volumes for as long as
+the partition lasts; the sweep on every other node still marks its volumes `Unavailable` and, for
+any workspace already `Stopped`, still hands the volume to a survivor. Two writers can therefore
+exist briefly across a partition, which is why the admission policy only ever allows the two
+scripted `nodeName` transitions (an empty pin being taken, or a pin being cleared) rather than a
+free rewrite — a wrong write is repairable, never silently doubled. On reconnect the old node
+sees its object is no longer its own and tears the pod down; whatever was typed during the
+partition and never replicated is gone. There is no lease a pod must renew to prevent this — that
+would be a second liveness system on top of the Node object's own.
