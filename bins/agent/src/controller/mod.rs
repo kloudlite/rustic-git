@@ -33,6 +33,7 @@ pub(crate) use volume::{heal_labels, owner_ref_of_kind, reconcile_volume, resolv
 pub mod run;
 pub use run::{run, running_contains, wake_on_finish};
 pub(crate) mod stop;
+pub use stop::replicated_condition;
 pub(crate) mod status;
 pub(crate) use status::{conditions_eq, create_if_absent, delete_ignoring_404, ensure, forget_applied, patch_status, replace_status, settle, write_status, Outcome};
 
@@ -132,6 +133,10 @@ pub struct Ctx {
     /// the payload is nothing at all: "something changed, pull now". `notify_one` stores exactly
     /// one permit, so a burst of stops coalesces into one extra pass instead of N.
     pub pull_wake: Arc<tokio::sync::Notify>,
+    /// `WS_PEER_SECRET`, read ONCE at boot. Every peer dial takes it as a parameter from here
+    /// rather than reading process env itself: a function that reads env is a function whose
+    /// tests must write env, and this binary's tests all share one process.
+    pub peer_secret: String,
 }
 
 impl Ctx {
@@ -158,6 +163,7 @@ impl Ctx {
             volume_writer: Mutex::new(Some(volume_writer)),
             applied: Mutex::new(HashMap::new()),
             pull_wake: Arc::new(tokio::sync::Notify::new()),
+            peer_secret: std::env::var("WS_PEER_SECRET").unwrap_or_default(),
             wake_volume,
             wake_workspace,
             wakes: Mutex::new(Some((vol_rx, ws_rx))),

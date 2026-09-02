@@ -212,12 +212,14 @@ it watches its own node's objects and converges them (`bins/agent/src/controller
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
 to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
 nothing else — no object store, no Azure credential, and no HTTP service of ours.
-Stopping a workspace or environment cuts a `stop-{ws}-{gen}`/`stop-{env}-{gen}` sync point, named by the parent's generation so every stop is a fresh snapshot (skipped if the pod
-never ran) and waits for another node's `VolumeReplica` to report `Synced` at or after that
-listing, bounded by `WS_STOP_FLUSH_TIMEOUT_SECS`; the Deployment deletes for an environment are
-gated on that wait, not on a full push (`apply_environment`'s `DesiredState::Stopped` arm). A stop
-that times out tears down anyway with condition reason `FlushUnreplicated` — it never blocks a
-stop forever on a replica that doesn't show up.
+Stopping a workspace or environment cuts a `stop-{ws}-{gen}`/`stop-{env}-{gen}` sync point, named
+by the parent's generation so every stop is a fresh snapshot (skipped if the workspace pod never
+ran), and tears down as soon as that cut is Ready — it waits for no peer. The owner then wakes
+every placeable node's puller (`peer::wake_peers`) and records the ONE truth about whether this
+may start elsewhere as the `Replicated` condition (`controller/stop.rs`): `False/Running` in the
+same status write that records a running pod, and while stopped `False/AwaitingReplica` until
+another node's `VolumeReplica` holds the cut BY NAME, then `True/Replicated`. It is computed only
+by the owner and only for a stopped parent, and read everywhere else (`/v1`, the web, placement).
 
 **Every person has one persistent home per region, not per node** — `/home/kl` in every workspace
 pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS export served by ZeroFS, mounted by

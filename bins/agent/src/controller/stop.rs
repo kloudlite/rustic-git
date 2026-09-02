@@ -1,56 +1,50 @@
-//! The stop-before-teardown gate both parent kinds share: cut a final sync point, wait until
-//! another node's replica reports `Synced` at or after it, then let the caller tear down.
+//! The stop-before-teardown cut both parent kinds share: cut a final sync point and, once it is
+//! Ready, let the caller tear down. Nothing waits here for a replica — that judgement is the
+//! `Replicated` condition below, and the placement rule that reads it.
 //!
 //! Kind-agnostic on purpose — a `Workspace` and an `Environment` share no status type, and this is
-//! the one place a stop request's lifecycle is decided. Split out of `controller.rs` unchanged.
+//! the one place a stop request's lifecycle is decided.
 
 use super::{owner_ref_of_kind, Ctx, ReconcileErr};
 use crate::sync;
-use kube::api::PostParams;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use kube::api::{ListParams, PostParams};
 use kube::{Api, Resource, ResourceExt};
 use rustic_git_workspaces::crd;
 use std::sync::Arc;
-use std::time::Duration;
 
-/// What a fixed-name stop request says about its push: landed, failed, or still to wait for
-/// (including "just created it"). The caller writes ITS OWN status — the two parent kinds share
-/// no status type, and this is the one place the request's lifecycle is decided.
+/// What a fixed-name stop request says about its push: landed, or still being cut. The caller
+/// writes ITS OWN status — the two parent kinds share no status type, and this is the one place
+/// the request's lifecycle is decided.
+///
+/// `Landed` carries nothing. It used to carry WHY the final sync point had not been replicated,
+/// because the stop waited for that and gave up after ten minutes; the wait moved into placement
+/// (a stopped parent starts on its own node until a peer is up to date), so a stop is never
+/// "unreplicated", only not-yet-replicated — which the `Replicated` condition says, on the object,
+/// for as long as it is true.
 pub(crate) enum StopPush {
-    /// `unreplicated` is `Some(why)` when no other node holds the final sync point — the teardown
-    /// proceeds anyway (a stop that never finishes is worse than one whose last seconds live on
-    /// one node), but the caller must say so in its condition, and the string says WHY: a timed-out
-    /// flush and a region with nowhere to replicate TO are the same outcome for very different
-    /// reasons, and an operator reading the condition needs to tell them apart.
-    Landed { unreplicated: Option<&'static str> },
+    Landed,
     // No `Failed`: `commit_worktree`'s cut is keep-biased and never marks a `Snapshot` `Error` —
-    // it just retries `Working` forever (Task 8; see `stop_push`'s doc). A wedged stop-push is a
-    // `Waiting` that never lands, not a distinct failure state.
+    // it just retries `Working` forever. A wedged stop-push is a `Waiting` that never lands, not a
+    // distinct failure state, and it keeps the pod up rather than tearing down without a cut.
     Waiting,
 }
-
-/// The stop-before-teardown gate a stopping parent waits on: create the request once, then wait
-/// until its own status says `done`.
-///
-/// The parent generation a stop request was created for. An annotation, not a label: nothing
-/// selects on it, and a label is a view of `spec` while this is a fact about the request itself.
-const STOP_GENERATION: &str = "rustic-git.io/stop-generation";
 
 /// `stop-{parent}-{generation}`: one object per STOP, keyed by the parent's generation (Start and
 /// Stop each bump it), so a retried pass converges on the same name and a later stop gets a new
 /// one. The name must never repeat across stops: a replica that pulled `stop-{ws}` once already
 /// held a subvolume under that name, the next stop's cut found it present and reported Ready
-/// without cutting, and the flush gate then counted a copy of the PREVIOUS stop as this one's —
-/// nothing since the last sync beat ever left the node. The caller KEEPS the object once its
+/// without cutting, so a copy of the PREVIOUS stop passed for this one's — nothing since the last
+/// sync beat ever left the node. The caller KEEPS the object once its
 /// teardown completes — it is the stopped worktree's one remaining sync point, and the thing a
 /// re-host on another node checks out in preference to `head`; `retain`'s one-transient-per-
 /// worktree rule removes it (and any older-generation stop) once something newer is Ready.
 ///
-/// Only `Landed` proceeds. `Failed` leaves the parent running with `Ready=False` and nothing torn
-/// down: a parent torn down without a landed push loses its last state for good, so a push that
-/// failed must stop the teardown rather than wave it through. `await_change` is safe there because
-/// both parent controllers watch `Snapshot` and map it back by ownerReference — the parent
-/// is woken by the request's own status moving, and by an operator deleting it and letting the
-/// `None` arm below create a fresh one.
+/// Only `Landed` proceeds: a parent torn down without a landed cut loses its last state for good,
+/// so a cut that has not happened must stop the teardown rather than be waved through.
+/// `await_change` is safe there because both parent controllers watch `Snapshot` and map it back
+/// by ownerReference — the parent is woken by the request's own status moving, and by an operator
+/// deleting it and letting the `None` arm below create a fresh one.
 pub(crate) fn stop_name<P: ResourceExt>(parent: &P) -> String {
     format!("stop-{}-{}", parent.name_any(), parent.meta().generation.unwrap_or(0))
 }
@@ -72,24 +66,10 @@ where
     // the NEXT stop — tearing that one down without pushing at all.
     let cr = api.get_opt(name).await?.filter(|s| s.metadata.deletion_timestamp.is_none());
     let phase = cr.as_ref().map(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending));
-    let gen = parent.meta().generation.unwrap_or(0).to_string();
     match phase {
-        Some(crd::Phase::Ready) => {
-            let ready_at = cr.as_ref().and_then(|s| s.status.as_ref()).and_then(|st| st.ready_at.clone());
-            match flush_gate(volume, ready_at.as_deref(), ctx).await? {
-                StopPush::Waiting if flush_expired(cr.as_ref()) => {
-                    tracing::warn!(%volume, "stop: no replica holds the final sync point; tearing down anyway");
-                    Ok(StopPush::Landed { unreplicated: Some(FLUSH_TIMED_OUT) })
-                }
-                other => Ok(other),
-            }
-        }
-        // Still being cut — bounded by the same clock, so a wedged `commit_worktree` cannot park
-        // the teardown forever.
-        Some(_) if flush_expired(cr.as_ref()) => {
-            tracing::warn!(%volume, "stop: the final sync point never became Ready; tearing down anyway");
-            Ok(StopPush::Landed { unreplicated: Some(FLUSH_TIMED_OUT) })
-        }
+        Some(crd::Phase::Ready) => Ok(StopPush::Landed),
+        // Still being cut. Unbounded on purpose: the cut is local btrfs work with nothing to wait
+        // on but itself, and tearing a pod down before it lands is the one thing that loses data.
         Some(_) => Ok(StopPush::Waiting),
         None => {
             // A sync point, not a commit: a stop is the last moment the worktree's bytes can be
@@ -117,7 +97,6 @@ where
             // The label both parent controllers select their watch by. A view, like every label
             // here — the ownerReference above is what the mapper actually reads.
             snap.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), parent.name_any());
-            snap.metadata.annotations.get_or_insert_with(Default::default).insert(STOP_GENERATION.to_string(), gen);
             // The same stamp the sync beat writes, read the same way. Without it the beat sees a
             // sync point it did not cut, reads its generation as 0, and cuts one redundant
             // transient after every single stop.
@@ -142,70 +121,51 @@ where
     }
 }
 
-/// `WS_STOP_FLUSH_TIMEOUT_SECS`, default 600. Read at call time, not cached: it is a bound on how
-/// long a person waits for a stop, and the only reason it is configurable at all is that a slow
-/// link makes the right number a property of the cluster.
-pub fn flush_timeout() -> Duration {
-    Duration::from_secs(std::env::var("WS_STOP_FLUSH_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600))
-}
-
-/// The whole wait's bound, measured from the stop request's OWN creation rather than from the
-/// cut's `readyAt`. `readyAt` only exists once the cut succeeded, and `commit_worktree` is
-/// keep-biased — a worktree whose cut can never succeed retries `Working` forever — so a bound on
-/// the replicated leg alone would let a broken worktree park its parent's teardown for good.
-/// A request with no `creationTimestamp` (only a fixture) never expires.
-fn flush_expired(cr: Option<&crd::Snapshot>) -> bool {
-    let Some(created) = cr.and_then(|s| s.metadata.creation_timestamp.as_ref()) else { return false };
-    // Whole seconds via jiff (what `k8s_openapi::Time` wraps): a bound measured in minutes has no
-    // use for sub-second precision, and a negative age (clock skew) is zero elapsed.
-    let age = k8s_openapi::jiff::Timestamp::now().as_second() - created.0.as_second();
-    age.max(0) as u64 >= flush_timeout().as_secs()
-}
-
-/// Ready is not landed: the point of the final sync point is that ANOTHER node holds it, so the
-/// gate waits until some replica reports `Synced` at or after the cut became Ready.
-async fn flush_gate(volume: &str, ready_at: Option<&str>, ctx: &Arc<Ctx>) -> Result<StopPush, ReconcileErr> {
-    // A single-node region has nowhere for the bytes to go, so no peer can EVER report `Synced`
-    // and the wait below can only end in the timeout — ten minutes added to every stop in the
-    // region to learn what the node list already says. Keep-biased: a list error is "we do not
-    // know", which falls through to the real wait rather than waving the teardown through.
-    // This is also why a never-started environment no longer waits: its volume has no replica
-    // anywhere, and on a single-node region that is now answered immediately.
-    if crate::peer::pool_nodes(&ctx.client).await.is_ok_and(|nodes| nodes.iter().all(|n| n == &ctx.node)) {
-        return Ok(StopPush::Landed { unreplicated: Some(NO_PEERS) });
+/// THE "is it replicated" truth, computed in exactly one place — the owner's reconcile of a
+/// stopped parent — and read everywhere else (the dead-node sweep, `/v1`, the web). One
+/// field-selected `VolumeReplica` list plus one field-selected `Snapshot` list per reconcile of a
+/// stopped parent; both are cheap and neither runs for a running one.
+///
+/// `replicas: 1` is not a second reason: no standby can ever be up to date, so the answer is the
+/// same `False/AwaitingReplica` with a message that says it will never change. An operator reads
+/// one condition either way.
+pub async fn replicated_condition(
+    ctx: &Arc<Ctx>,
+    volume: &str,
+    worktree: &str,
+    replicas: u32,
+    prev: &[Condition],
+    gen: i64,
+) -> Result<Condition, ReconcileErr> {
+    let was = prev.iter().find(|c| c.type_ == REPLICATED);
+    if replicas <= 1 {
+        return Ok(crd::condition_since(was, REPLICATED, false, "AwaitingReplica", NO_REPLICA_CONFIGURED, gen));
     }
-    // A cut from before `readyAt` existed gives nothing to compare a `lastSyncAt` against, and
-    // waiting on a comparison that can never be made would park the stop forever.
-    let Some(ready) = ready_at.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) else {
-        return Ok(StopPush::Landed { unreplicated: Some(NO_READY_AT) });
-    };
-    // Server-side now that `VolumeReplica` declares `.spec.volume` selectable — this ran once per
-    // 15 s tick per stopping parent as a full-cluster replica scan. The `spec.volume` re-check
-    // below stays: a field selector narrows a query and is never what decides anything.
-    let lp = kube::api::ListParams::default().fields(&format!("spec.volume={volume}"));
-    let list = Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&lp).await?;
-    // `lastSyncAt` is the instant that pass LISTED the volume's snapshots, not when it wrote its
-    // row (see `VolumeReplicaStatus::last_sync_at`) — which is the only reason `>= readyAt` proves
-    // the replica's listing actually saw this cut. Parsed, never string-compared: two nodes may
-    // stamp the same instant with different offsets.
-    let replicated = list.items.iter().filter(|r| r.spec.volume == volume).any(|r| {
-        r.spec.node != ctx.node
-            && r.status.as_ref().is_some_and(|st| {
-                st.phase == "Synced"
-                    && st
-                        .last_sync_at
-                        .as_deref()
-                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                        .is_some_and(|t| t >= ready)
-            })
-    });
-    Ok(if replicated { StopPush::Landed { unreplicated: None } } else { StopPush::Waiting })
+    let newest = crate::peer::newest_transient(ctx, volume, worktree).await?;
+    let lp = ListParams::default().fields(&format!("spec.volume={volume}"));
+    let rows = Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&lp).await?;
+    // Never my own row: the point of the final sync point is that ANOTHER node holds it. The
+    // `spec.volume` re-check stays — a field selector narrows a query and is never what decides.
+    let held = rows
+        .items
+        .iter()
+        .filter(|r| r.spec.volume == volume && r.spec.node != ctx.node)
+        .any(|r| crate::peer::up_to_date(r, worktree, newest.as_deref()));
+    Ok(if held {
+        crd::condition_since(was, REPLICATED, true, "Replicated", "another node holds the final sync point", gen)
+    } else {
+        crd::condition_since(was, REPLICATED, false, "AwaitingReplica", "no other node holds the final sync point yet", gen)
+    })
 }
 
-/// The three honest `FlushUnreplicated` messages. Separate constants because they are the only
-/// thing that tells an operator whether to go looking for a broken link or not.
-const NO_PEERS: &str = "no other node in the region holds replicas";
+/// While the parent runs, no other node is an option whatever the copies hold — its live edits are
+/// on this disk only. Written in the same status write that records the pod, so the answer is
+/// never a stale leftover from the last stop.
+pub(crate) fn running_condition(prev: &[Condition], gen: i64) -> Condition {
+    let was = prev.iter().find(|c| c.type_ == REPLICATED);
+    crd::condition_since(was, REPLICATED, false, "Running", "running here; its live edits are on this node only", gen)
+}
 
-const NO_READY_AT: &str = "the final sync point recorded no readyAt to prove replication against";
+pub(crate) const REPLICATED: &str = "Replicated";
 
-const FLUSH_TIMED_OUT: &str = "stopped without a replica holding the final sync point";
+const NO_REPLICA_CONFIGURED: &str = "no replica is configured for this volume";

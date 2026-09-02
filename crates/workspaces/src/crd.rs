@@ -280,11 +280,10 @@ pub struct SnapshotStatus {
     status = "VolumeReplicaStatus",
     selectable = ".spec.node",
     selectable = ".status.phase",
-    // Scopes only `flush_gate`'s per-tick replica list (`controller/stop.rs`) — `pull_volume`
-    // filters Snapshots by `spec.volume`, a different kind, not this one. Apply
+    // Scopes only `replicated_condition`'s per-reconcile replica list (`controller/stop.rs`) —
+    // `pull_volume` filters Snapshots by `spec.volume`, a different kind, not this one. Apply
     // `deploy/k3s/crds.yaml` BEFORE rolling an agent that uses it: an unsupported field selector
-    // is a 400 from `flush_gate`, which `stop_push` reads as a failed flush and parks the
-    // teardown — every stop wedges, not replication.
+    // is a 400, and every stopped parent's `Replicated` recompute then errors — not replication.
     selectable = ".spec.volume",
     printcolumn = r#"{"name":"Volume","type":"string","jsonPath":".spec.volume"}"#,
     printcolumn = r#"{"name":"Node","type":"string","jsonPath":".spec.node"}"#,

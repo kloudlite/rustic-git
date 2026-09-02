@@ -447,3 +447,36 @@ async fn refs_of_a_zero_commit_volume_is_null_not_not_found() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["main"], Value::Null);
 }
+
+fn stopped_ws_replicated(name: &str, owner: &str, status: &str, reason: &str, message: &str) -> Value {
+    let mut w = placed_ws(name, owner);
+    w["status"]["phase"] = json!("stopped");
+    w["status"]["conditions"] = json!([{
+        "type": "Replicated", "status": status, "reason": reason, "message": message,
+        "lastTransitionTime": "2026-09-03T10:00:00Z", "observedGeneration": 3
+    }]);
+    w
+}
+
+/// The condition the owner wrote is what `/v1` answers with, verbatim: the UI's "safe to start
+/// anywhere" vs "still copying" is that one field, and re-deriving it here would be a second
+/// truth that can disagree with the node's.
+#[tokio::test]
+async fn get_and_stop_expose_the_replicated_condition() {
+    let ws = stopped_ws_replicated("ws-1", "karthik", "False", "AwaitingReplica", "no other node holds the final sync point yet");
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), ws.clone()),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "v1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: ws },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let http = reqwest::Client::new();
+
+    let got: Value = http.get(format!("{}/v1/workspaces/ws-1", s.base)).bearer_auth(&tok).send().await.unwrap().json().await.unwrap();
+    assert_eq!(got["replicated"]["ready"], false);
+    assert_eq!(got["replicated"]["message"], "no other node holds the final sync point yet");
+
+    let stopped: Value = http.post(format!("{}/v1/workspaces/ws-1/stop", s.base)).bearer_auth(&tok).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stopped["replicated"]["reason"], "AwaitingReplica");
+}

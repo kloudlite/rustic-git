@@ -1,7 +1,8 @@
 //! The `Environment` reconciler: one volume, a namespace of StatefulSets, and the restore gate.
 //! Split out of `controller.rs` unchanged.
 
-use super::stop::{stop_name, stop_push, StopPush};
+use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
+use super::workspace::replaced;
 use super::{delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, migrate_and_seed_baseline, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, Service};
@@ -116,8 +117,18 @@ async fn stop_environment(
     // the `stop-{env}` request is kept after teardown, so a later event would find it `Ready` at
     // this same generation and re-run a teardown that is already done, rather than cutting
     // anything. The guard saves the round trips.
+    // Already stopped at this generation: the teardown is done, but `Replicated` is not a
+    // one-shot fact — a peer catches up minutes later, and the condition is what tells the UI
+    // (and the placement rule) that this may now start elsewhere. Recomputed each pass, written
+    // only when it actually changed, so a converged environment is idle.
     if e.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Stopped && s.observed_generation == Some(gen)) {
-        return Ok(Action::await_change());
+        let replicated = replicated_condition(ctx, &id, &e.name_any(), vol.spec.replicas, &prev.conditions, gen).await?;
+        let conditions = replaced(&prev.conditions, replicated);
+        if !conditions_eq(&prev.conditions, &conditions) {
+            let st = crd::EnvironmentStatus { conditions, ..prev };
+            write_env_status(e, st, ctx).await?;
+        }
+        return Ok(Action::requeue(TICK));
     }
     // Stopped at an OLDER generation: the services were torn down after a push that landed,
     // and nothing has run since, so there is nothing new on disk to push. A restore is the
@@ -149,8 +160,8 @@ async fn stop_environment(
     // requested.
     // The worktree is the environment's own name — the same string the sync beat cuts under, so
     // the stop's sync point extends that chain rather than starting a second one.
-    let unreplicated = match stop_push(&stop_name(e), &e.spec.owner, &vol.name_any(), &e.name_any(), e, ctx).await? {
-        StopPush::Landed { unreplicated } => unreplicated,
+    match stop_push(&stop_name(e), &e.spec.owner, &vol.name_any(), &e.name_any(), e, ctx).await? {
+        StopPush::Landed => {}
         StopPush::Waiting => {
             let st = crd::EnvironmentStatus {
                 // Still `running`: the StatefulSets exist (at zero) until the push lands, and
@@ -171,25 +182,28 @@ async fn stop_environment(
         forget_applied(ctx, "StatefulSet", ns, &svc.name);
         delete_ignoring_404(deployments, &svc.name).await?;
     }
+    // Poke every placeable peer: the cut exists NOW, and waiting out the pull beat is what used to
+    // make a cross-node start take minutes. Best-effort by construction — the ticker still comes.
+    let live = crate::peer::placeable_nodes(ctx).await;
+    crate::peer::wake_peers(ctx, &live, &ctx.peer_secret).await;
+    let replicated = replicated_condition(ctx, &id, &e.name_any(), vol.spec.replicas, &prev.conditions, gen).await?;
     let st = crd::EnvironmentStatus {
         phase: crd::Phase::Stopped,
         observed_generation: Some(gen),
         volume_ref: Some(id),
         service_status: vec![],
-        conditions: vec![stopped_condition(unreplicated, gen)],
+        conditions: vec![stopped_condition(gen), replicated],
         ..prev
     };
     write_env_status(e, st, ctx).await?;
-    Ok(Action::await_change())
+    Ok(Action::requeue(TICK))
 }
 
-/// The stop's own Ready condition. `FlushUnreplicated` is the record that this parent's last
-/// seconds of work exist on exactly one node — the only place a reader can learn it.
-pub(crate) fn stopped_condition(unreplicated: Option<&str>, gen: i64) -> Condition {
-    match unreplicated {
-        None => crd::condition("Ready", true, "Stopped", "pushed and stopped", gen),
-        Some(why) => crd::condition("Ready", true, "FlushUnreplicated", why, gen),
-    }
+/// The stop's own Ready condition. No `FlushUnreplicated` arm: whether the last sync point has
+/// reached another node is the `Replicated` condition's job, written on every reconcile of a
+/// stopped parent and true for as long as it is true — not a one-shot record of one bad moment.
+pub(crate) fn stopped_condition(gen: i64) -> Condition {
+    crd::condition("Ready", true, "Stopped", "pushed and stopped", gen)
 }
 
 /// Converge the environment's namespace, storage and services against spec, and report what the
@@ -333,6 +347,10 @@ async fn run_environment(
             if e.spec.restore.is_some() {
                 c.push(crd::condition("Restoring", false, "Restored", "the snapshot is live", gen));
             }
+            // Written in the SAME status write that records the running services: from here on no
+            // other node is an option whatever the copies hold, and a stale `True` left over from
+            // the last stop is exactly the answer placement must never read.
+            c.push(running_condition(&prev.conditions, gen));
             c
         },
         volume_ref: Some(id.clone()),

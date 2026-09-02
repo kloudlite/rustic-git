@@ -264,9 +264,9 @@ Order:
 ```sh
 # 1. CRDs first — the new kinds (Snapshot, VolumeReplica) and the selectableFields the agent's
 #    watches filter on. Already applied on dev; harmless to re-apply. This now includes
-#    VolumeReplica's `.spec.volume` selector (added 2026-09-02, used only by `flush_gate`):
-#    apply it BEFORE the agent image that reads it — an agent ahead of the CRD gets a 400 on
-#    every stop's flush gate (stop_push parks the teardown), not on replication.
+#    VolumeReplica's `.spec.volume` selector (added 2026-09-02): apply it BEFORE the agent image
+#    that reads it — an agent ahead of the CRD gets a 400 on every stopped parent's `Replicated`
+#    recompute, not on replication.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
 # 2. Roll the agent (repin the image tag to the SHA CI built, then apply and wait).
@@ -574,14 +574,13 @@ the sync beat from a running worktree's moved btrfs generation so a peer has som
 pull between pushes; `stop-{ws}-{gen}`/`stop-{env}-{gen}` is the same mechanism cutting one last transient on
 the way down. There is at most one Ready transient per worktree at a time — retain deletes the
 previous one only once the new one is Ready, so seeing two Ready together is a brief overlap, not
-a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks; `WS_STOP_FLUSH_TIMEOUT_SECS`
-(default 600) is how long a stop waits for a peer's `VolumeReplica` to pick up the stop transient
-before giving up. Condition reason `FlushUnreplicated` on a stopped workspace or environment means
-exactly that: nothing synced the final transient in time, so the stop went through unreplicated —
-check whether the volume has any peers at all (`spec.replicas`) and whether replication is even
-enabled (`WS_PEER_SECRET`, above) before assuming the timeout is too short. On a SINGLE-NODE region
-the gate is skipped entirely rather than waited out — there is nowhere for the bytes to go, so
-every stop lands at once with message "no other node in the region holds replicas".
+a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks. A stop waits for its own cut
+and nothing else, then wakes every placeable peer so they pull within seconds. Whether a peer
+actually holds that cut is the `Replicated` condition on the stopped workspace or environment,
+rewritten by its owner on every reconcile: `False/AwaitingReplica` until another node holds it by
+name, then `True/Replicated`. Stuck on `AwaitingReplica`? Check whether the volume has any peers
+at all (`spec.replicas` — `1` says so in the condition's own message) and whether replication is
+enabled (`WS_PEER_SECRET`, above).
 
 ### Node death
 

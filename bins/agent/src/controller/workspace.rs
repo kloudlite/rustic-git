@@ -1,7 +1,7 @@
 //! The `Workspace` reconciler: profile, host key, home, worktree, attachment and the one pod.
 //! Split out of `controller.rs` unchanged.
 
-use super::stop::{stop_name, stop_push, StopPush};
+use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
 use super::{conditions_eq, create_if_absent, delete_ignoring_404, ensure, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
 use crate::binding;
 use std::time::Duration;
@@ -417,49 +417,56 @@ pub(crate) fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condi
     c
 }
 
+/// One condition replaced by type, the rest kept in order. `Replicated` is rewritten on every
+/// reconcile of a stopped parent, and a naive push would grow the list without bound.
+pub(crate) fn replaced(prev: &[Condition], c: Condition) -> Vec<Condition> {
+    let mut out: Vec<Condition> = prev.iter().filter(|p| p.type_ != c.type_).cloned().collect();
+    out.push(c);
+    out
+}
+
 /// `ws_conditions` with this pass's freshly resolved `Attached` — replacing the preserved copy,
 /// which is the previous pass's answer, and dropping it entirely when nothing is attached.
 fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Condition> {
     conds.into_iter().filter(|c| c.type_ != crd::ATTACHED).chain(attached).collect()
 }
 
-/// Stop the workspace: cut a final sync point, wait until a replica holds it, then delete the pod.
-/// The home is on the shared NFS mount and needs no push of its own (spec 2026-09-01) — this gate
-/// is about the WORKTREE, whose last minute of work exists nowhere else until it is replicated.
+/// Stop the workspace: cut a final sync point, then delete the pod. The cut is what the wait is
+/// for — once it is Ready the worktree's last minute of work exists as a snapshot, and whether any
+/// PEER holds a copy of it is the `Replicated` condition's answer, not a gate. The home is on the
+/// shared NFS mount and needs no push of its own (spec 2026-09-01).
 async fn stop_workspace(
     w: &crd::Workspace,
     prev: crd::WorkspaceStatus,
     gen: i64,
     ctx: &Arc<Ctx>,
 ) -> Result<Action, ReconcileErr> {
-    // Already stopped: nothing to do.
+    let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
+    // Already stopped: the teardown is done, but `Replicated` is not a one-shot fact — a peer
+    // catches up minutes later, and the condition is what tells the UI (and the placement rule)
+    // that this may now start elsewhere. Recomputed each pass, written only when it actually
+    // changed, so a converged workspace is idle.
     if prev.phase == crd::Phase::Stopped {
-        if prev.observed_generation != Some(gen) {
-            let st = crd::WorkspaceStatus { observed_generation: Some(gen), ..prev };
+        let replicated = replicated_condition(ctx, &id, &w.name_any(), replicas_of(ctx, &id), &prev.conditions, gen).await?;
+        let conditions = replaced(&prev.conditions, replicated);
+        if prev.observed_generation != Some(gen) || !conditions_eq(&prev.conditions, &conditions) {
+            let st = crd::WorkspaceStatus { observed_generation: Some(gen), conditions, ..prev };
             write_ws_status(w, st, ctx).await?;
         }
-        return Ok(Action::await_change());
+        return Ok(Action::requeue(TICK));
     }
     let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
-    // The Volume child takes the parent's own name, so the pod's name is known without reading
-    // (or creating) it.
-    let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
     // The workspace's OWN name, never `id` (which is `volume_ref` — the SOURCE volume for a
     // shared-volume clone). Deleting by `id` here would stop the clone by killing its source's
     // pod, taking a running workspace down with it.
-    // Flush before the pod goes: once it is deleted the worktree stops changing, but nothing has
-    // carried its bytes off this node, and a node that then dies takes them with it.
     //
-    // Nothing ran, nothing to flush: with no pod there is no writer, so the worktree holds exactly
-    // what its last commit or sync point already does, and cutting one here would gate a stop on
-    // replicating bytes no one produced. An environment has no equivalent signal — its
-    // StatefulSets are scaled to zero by `drain_services` on the way in, so "no pods now" says
-    // nothing about whether any ran — and keeps its unconditional flush.
-    let unreplicated = if prev.pod_ref.is_none() {
-        None
-    } else {
+    // Nothing ran, nothing to cut: with no pod there is no writer, so the worktree holds exactly
+    // what its last commit or sync point already does. An environment has no equivalent signal —
+    // its StatefulSets are scaled to zero by `drain_services` on the way in, so "no pods now" says
+    // nothing about whether any ran — and keeps its unconditional cut.
+    if prev.pod_ref.is_some() {
         match stop_push(&stop_name(w), &w.spec.owner, &id, &w.name_any(), w, ctx).await? {
-            StopPush::Landed { unreplicated } => unreplicated,
+            StopPush::Landed => {}
             StopPush::Waiting => {
                 let conditions = ws_conditions(
                     &prev,
@@ -472,16 +479,22 @@ async fn stop_workspace(
                 return Ok(Action::requeue(TICK));
             }
         }
-    };
+    }
     delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &w.name_any()).await?;
-    // The `stop-{ws}` CR is KEPT. It is a transient now, not a commit: `status.head` never names
-    // it, so deleting it here would leave the stopped worktree with no sync point anywhere — the
-    // last beat's transient was already reclaimed when this one turned Ready, and every replica's
-    // `pull_volume` drops a CR-less subvolume within a cycle. A later re-host would then fall all
-    // the way back to `head`, losing exactly what the flush above just waited for.
+    // The `stop-{ws}-{gen}` CR is KEPT. It is a transient now, not a commit: `status.head` never
+    // names it, so deleting it here would leave the stopped worktree with no sync point anywhere —
+    // the last beat's transient was already reclaimed when this one turned Ready, and every
+    // replica's `pull_volume` drops a CR-less subvolume within a cycle. A later re-host would then
+    // fall all the way back to `head`, losing exactly what the cut above just took.
+    //
+    // Poke every placeable peer: the cut exists NOW, and waiting out the pull beat is what used to
+    // make a cross-node start take minutes. Best-effort by construction — the ticker still comes.
+    let live = crate::peer::placeable_nodes(ctx).await;
+    crate::peer::wake_peers(ctx, &live, &ctx.peer_secret).await;
     // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
     // showing "installing packages…" for a workspace that is simply off.
-    let conditions = ws_conditions(&prev, stopped_condition(unreplicated, gen));
+    let replicated = replicated_condition(ctx, &id, &w.name_any(), replicas_of(ctx, &id), &prev.conditions, gen).await?;
+    let conditions = replaced(&ws_conditions(&prev, stopped_condition(gen)), replicated);
     let st = crd::WorkspaceStatus {
         phase: crd::Phase::Stopped,
         observed_generation: Some(gen),
@@ -491,7 +504,18 @@ async fn stop_workspace(
         ..prev
     };
     write_ws_status(w, st, ctx).await?;
-    Ok(Action::await_change())
+    Ok(Action::requeue(TICK))
+}
+
+/// The volume's replica count from the shared watch store, never a GET: a stop must not depend on
+/// the Volume being readable (a workspace whose subvolume broke could then never be stopped). An
+/// unknown volume gets the CRD's own default, which is what the reconciler that creates the
+/// replica children uses for a `Volume` written before the field existed.
+fn replicas_of(ctx: &Arc<Ctx>, id: &str) -> u32 {
+    ctx.volumes
+        .get(&kube::runtime::reflector::ObjectRef::new(id))
+        .map(|v| v.spec.replicas)
+        .unwrap_or(crd::DEFAULT_REPLICAS)
 }
 
 /// A shared-volume clone (`spec.storage.source` is `CloneOf { commit: Some(_), .. }`) checks out
@@ -1043,9 +1067,16 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     observed_generation: None,
                     volume_ref: Some(id.clone()),
                     pod_ref: Some(format!("{ns}/{pod_name}")),
-                    conditions: with_attached(
-                        ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
-                        attached.clone(),
+                    // `Replicated=False/Running` goes in the SAME write that records the pod:
+                    // from the moment a pod exists here, no other node is an option whatever the
+                    // copies hold, and a stale `True` left over from the last stop is exactly the
+                    // answer placement must never read.
+                    conditions: replaced(
+                        &with_attached(
+                            ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
+                            attached.clone(),
+                        ),
+                        running_condition(&prev.conditions, gen),
                     ),
                     ..prev
                 };
@@ -1062,15 +1093,22 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         // deleting the pod, and it must not depend on either being healthy.
         DesiredState::Stopped => unreachable!("stopped is handled before the gates"),
     };
+    // Same rule as the `PodNotReady` write above: a running workspace is `Replicated=False/Running`
+    // for as long as it runs, and `None` for the paths that record no pod at all.
+    let conditions = with_attached(
+        ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen)),
+        attached,
+    );
+    let conditions = match pod_ref {
+        Some(_) => replaced(&conditions, running_condition(&prev.conditions, gen)),
+        None => conditions,
+    };
     let st = crd::WorkspaceStatus {
         phase,
         observed_generation: Some(gen),
         volume_ref: Some(id),
         pod_ref,
-        conditions: with_attached(
-            ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen)),
-            attached,
-        ),
+        conditions,
         ..prev
     };
     write_ws_status(w, st, ctx).await?;

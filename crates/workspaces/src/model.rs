@@ -93,15 +93,30 @@ pub struct Workspace {
     /// "installing…" rather than as a failure that was never reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packages_status: Option<PackagesDoc>,
+    /// The `Replicated` condition, verbatim from the owner's own write — the UI's "safe to start
+    /// anywhere" vs "still copying". Absent until the owner has said anything: inventing a value
+    /// here would be a second truth that can disagree with the node's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicated: Option<ConditionDoc>,
 }
 
-/// The `PackagesReady` condition, flattened for the web.
+/// A `meta/v1.Condition` flattened for the web — the shape `packages_status` and `replicated`
+/// both take. One struct, because a second identical one is a second thing to keep in step.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PackagesDoc {
+pub struct ConditionDoc {
     pub ready: bool,
     pub reason: String,
     pub message: String,
 }
+
+impl From<&crate::crd::Condition> for ConditionDoc {
+    fn from(c: &crate::crd::Condition) -> Self {
+        ConditionDoc { ready: c.status == "True", reason: c.reason.clone(), message: c.message.clone() }
+    }
+}
+
+/// The `PackagesReady` condition, under the name the field is called by.
+pub type PackagesDoc = ConditionDoc;
 
 /// Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —
 /// see the "An environment is a composition" decision in the design doc. Any non-empty `folder`
@@ -279,6 +294,9 @@ pub struct Environment {
     /// services stop, `Restoring` while the disk is swapped). `None` is the ordinary state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restoring: Option<String>,
+    /// The `Replicated` condition, as on `Workspace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicated: Option<ConditionDoc>,
 }
 
 

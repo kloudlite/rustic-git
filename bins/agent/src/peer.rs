@@ -294,7 +294,7 @@ async fn wake(State(state): State<Arc<PeerState>>, headers: HeaderMap) -> impl I
 ///
 /// The secret is a parameter, not an env read: the callers already hold one (`Ctx::peer_secret`,
 /// read once at boot) and a function that reads process env is a function whose tests must write
-/// process env.
+/// process env. Tests therefore pass their own without touching the process.
 pub async fn wake_peers(ctx: &Arc<Ctx>, live: &[String], secret: &str) {
     if secret.is_empty() {
         return; // fail-closed, same rule as every other dial in this file
@@ -374,11 +374,23 @@ fn node_dead_secs() -> i64 {
 /// peer secret, same fail-closed rule every dial in this file follows: no secret, no
 /// authenticated GET to another node's root-run `btrfs send`.
 pub async fn pull_beat(ctx: &Arc<Ctx>) {
-    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
-    if secret.is_empty() {
+    if ctx.peer_secret.is_empty() {
         return;
     }
-    pull_beat_with(ctx, "btrfs", &secret).await
+    pull_beat_with(ctx, "btrfs", &ctx.peer_secret.clone()).await
+}
+
+/// The nodes a stopped parent could start on, from this node's own view — the pool minus the
+/// unplaceable. Keep-biased: a listing error is an empty list, which wakes nobody and places
+/// nothing, rather than a guess about who is alive.
+pub(crate) async fn placeable_nodes(ctx: &Arc<Ctx>) -> Vec<String> {
+    let (Ok(pool), Ok(nodes)) = (
+        pool_nodes(&ctx.client).await,
+        Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await,
+    ) else {
+        return Vec::new();
+    };
+    live_nodes(&pool, &nodes.items, node_dead_secs(), k8s_openapi::jiff::Timestamp::now())
 }
 
 /// Rendezvous over the FULL pool keeps electing a corpse: the reaper deletes its row every beat
@@ -744,8 +756,6 @@ pub(crate) fn newest_transient_of(snaps: &[crd::Snapshot], worktree: &str) -> Op
 /// pulling node and `readyAt` by the owner, and a skewed clock must never make an old copy look
 /// current. A worktree with no transient at all (never ran, or a fresh restore) has nothing to
 /// name, so plain `Synced` is the right bar: a Synced replica holds every Ready commit.
-// Tasks 4, 5, 6 and 10 are the callers; until they land only the tests read these.
-#[allow(dead_code)]
 pub(crate) fn up_to_date(replica: &crd::VolumeReplica, worktree: &str, newest_transient: Option<&str>) -> bool {
     let Some(st) = replica.status.as_ref() else { return false };
     match newest_transient {
@@ -759,8 +769,6 @@ pub(crate) fn up_to_date(replica: &crd::VolumeReplica, worktree: &str, newest_tr
 /// the bar `up_to_date` compares a replica's `branches` against, so intersecting it with local
 /// state would let a node behind on its pulls declare itself current. `snapshot::latest_transient`
 /// is the local-hold variant, for a caller asking what it can actually check out right now.
-// Tasks 4, 5, 6 and 10 are the callers; until they land only the tests read these.
-#[allow(dead_code)]
 pub(crate) async fn newest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<String>, kube::Error> {
     let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let list = api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await?;

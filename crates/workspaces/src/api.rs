@@ -416,13 +416,8 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
             gateway: gateway_url(&w.spec.region, &id),
             host_key,
         }),
-        packages_status: st.and_then(|s| {
-            s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY).map(|c| PackagesDoc {
-                ready: c.status == "True",
-                reason: c.reason.clone(),
-                message: c.message.clone(),
-            })
-        }),
+        packages_status: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY).map(ConditionDoc::from)),
+        replicated: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Replicated").map(ConditionDoc::from)),
         id,
     }
 }
@@ -449,6 +444,7 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
         restoring: st
             .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Restoring" && c.status == "True"))
             .map(|c| c.reason.clone()),
+        replicated: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Replicated").map(ConditionDoc::from)),
         id,
     }
 }
@@ -918,11 +914,15 @@ async fn stop_ws(
     // Every non-204 success is `res.json()`'d by the web client (web/apps/web/src/lib/api.ts) —
     // a body-less 202 throws there, so this always emits an object, `warning` present only when
     // there is one to give.
+    // The whole doc, not a bare `{}`: the caller needs `replicated` to know whether this may be
+    // started elsewhere, and a second round trip for it would race the stop it just asked for.
     let warning = w.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
-    let body = match warning {
-        Some(w) => serde_json::json!({"warning": w}),
-        None => serde_json::json!({}),
-    };
+    let mut doc = ws_doc(&w, &HashSet::new());
+    doc.state = WsState::Stopped;
+    let mut body = serde_json::to_value(&doc).expect("Workspace doc always serializes");
+    if let Some(w) = warning {
+        body["warning"] = serde_json::Value::String(w);
+    }
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
