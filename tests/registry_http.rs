@@ -670,3 +670,25 @@ async fn imagetags_answers_from_the_meta_row_without_reading_the_manifest() {
     assert_eq!(row["bytes"].as_u64().unwrap(), 8, "config + layer, as declared");
     assert!(row["pushed_ms"].as_i64().unwrap() > 0);
 }
+
+/// `last` on the wire is `{who}/{name}`. A client that pages with a bare name, or with another
+/// owner's prefixed one, must not have that string used verbatim as this owner's marker — the
+/// answer stays owner-scoped either way, but the page it returns has to be the right one.
+#[tokio::test]
+async fn a_catalog_marker_without_this_owners_prefix_is_not_used_as_a_name() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    for name in ["alpha", "beta", "gamma"] {
+        e.store.refresh_image_marker("acme", name).await.unwrap();
+    }
+    // A bare `last` names no image of this owner; the page must still start from the top.
+    let r = c.get(format!("{base}/v2/_catalog?last=zzz-not-an-owner-prefixed-name"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(
+        b["repositories"],
+        serde_json::json!(["acme/alpha", "acme/beta", "acme/gamma"]),
+        "a marker that is not `{{who}}/{{name}}` must not truncate the catalog"
+    );
+}
