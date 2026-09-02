@@ -434,13 +434,17 @@ async fn route_inner(
             .unwrap_or(crate::proxy::MAX_HOPS),
     };
     let route = app.route_for(&repo, may_create(req.method(), &path)).await;
-    // Nothing under this key anywhere: there is nobody to forward to and nothing worth claiming,
-    // so serve it HERE — which means the handler answers, after authenticating, exactly as it did
-    // before this gate existed. Answering 404 from the middleware would say "no such repo" to a
-    // caller who has not authenticated, making private names enumerable. The handlers check the
-    // prefix before they open anything (`open_repo`, `image_exists`), so serving locally opens no
-    // database; that check is what makes this safe, and it is why this runs ahead of the hop bound
-    // too — a name that exists nowhere is not a routing disagreement.
+    // The leader says nobody owns this key and its prefix is empty: there is nobody to forward to
+    // and nothing worth claiming, so serve it HERE — the handler then answers after authenticating,
+    // exactly as it did before this gate existed. Answering 404 from the middleware would say "no
+    // such repo" to a caller who has not authenticated, making private names enumerable.
+    //
+    // What keeps this from opening a database on the wrong node is the handler's own `exists`
+    // probe (`open_repo`, `image_exists`), which is the same call the gate made. The residual is
+    // narrow but real: a creator elsewhere that claims and flushes between the leader's "nobody"
+    // and that probe would be fenced by an open here. See `App::route_for` for the ceiling and the
+    // upgrade path. It runs ahead of the hop bound because a name that exists nowhere is not a
+    // routing disagreement.
     if matches!(route, crate::ownership::Route::Missing) {
         return next.run(req).await;
     }

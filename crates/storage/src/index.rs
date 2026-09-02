@@ -60,6 +60,9 @@ pub fn path(public: bool, kind: Kind, owner: &str, name: &str) -> Path {
 /// from the description on the way in: `decode` parses per line, so a newline that reached here
 /// would write fields of its own, and `check_description` refusing them at the API is one caller,
 /// not a guarantee about every future writer of a marker.
+///
+/// This filters on the way IN only: a marker written before it, whose description carried a
+/// newline, still decodes with the forged field until something rewrites it.
 fn body(m: &Marker) -> Vec<u8> {
     let description: String = m.description.chars().filter(|c| !c.is_control()).collect();
     format!(

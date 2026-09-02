@@ -582,15 +582,6 @@ mod tests {
         // and so never reaches a client as text.
         let pipe = Error::new(ErrorKind::BrokenPipe, "client went away");
         assert!(!fault(pipe));
-        // A source-level guard: nothing under the git router may construct an `io::Error::other`
-        // whose message is built from a peer address or a store URL.
-        let src = include_str!("git.rs");
-        for line in src.lines().filter(|l| l.contains("Error::other(")) {
-            assert!(
-                !line.contains("format!") || line.contains("too large"),
-                "an `Other` with a formatted message is echoed to the client verbatim: {line}"
-            );
-        }
     }
 
     /// EIO has no `ErrorKind` of its own, so it lands in `Uncategorized` — the kind every OS

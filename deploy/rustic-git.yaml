@@ -345,9 +345,12 @@ spec:
     - ports:
         - { protocol: TCP, port: 8080 }
         - { protocol: TCP, port: 2222 }
-    # Prometheus presents no secret, so metrics have their own port — open it to the whole
-    # cluster network exactly as 8080 is, and nothing else.
-    - ports:
+    # Prometheus presents no secret, so metrics have their own port — and a rule with no `from:`
+    # would open it to every pod in the cluster. Only the monitoring namespace may scrape it.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
         - { protocol: TCP, port: 9464 }
 ---
 # The read API: no repo state, no ownership, no local packs. A Deployment, not a StatefulSet —

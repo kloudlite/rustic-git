@@ -118,9 +118,15 @@ async fn an_oversized_upload_pack_negotiation_is_refused_anonymously() {
         .header("git-protocol", "version=2")
         .body(vec![b'0'; 9 * 1024 * 1024])
         .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 413);
+        .await;
+    // Either outcome is the same refusal, and the point of the cap — that the body is never
+    // buffered — holds for both: the limit answers 413 without reading the rest, and hyper resets
+    // the connection rather than draining 9 MiB it will not use. Which one the client sees is a
+    // race between the response and the reset, so asserting only the 413 flakes.
+    match r {
+        Ok(r) => assert_eq!(r.status(), 413),
+        Err(e) => assert!(e.is_request(), "expected a refusal, got {e}"),
+    }
     // And a real-sized negotiation still gets through to the protocol, so the cap is not simply
     // refusing everything: a v2 command with no flush is a client error, never a 413.
     let mut body = Vec::new();

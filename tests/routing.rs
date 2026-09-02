@@ -769,6 +769,28 @@ async fn a_claim_that_lands_while_the_prefix_is_still_empty_is_forwarded_not_ser
     assert_eq!(b.store.pool.warm_count(), 0, "and B opened nothing");
 }
 
+/// The gate replaced one leader WRITE per invented name per LEASE_TTL with a leader READ — which
+/// would be one per request without this cache. A repeated invented name must cost exactly one
+/// ask per window, however often it is routed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_invented_name_asks_the_leader_once_per_window() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let _a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let asks = || b.app.owner_asks.load(std::sync::atomic::Ordering::Relaxed);
+    let before = asks();
+    for _ in 0..5 {
+        assert_eq!(b.app.route("alice/nope").await, rustic_git_storage::ownership::Route::Missing);
+    }
+    assert_eq!(asks() - before, 1, "one leader read for the whole window");
+    // Past the window it asks again — the cache forgets, so a name that becomes real is seen.
+    b.app.advance_clock(rustic_git_app::MISSING_ASK_EVERY + std::time::Duration::from_millis(1));
+    assert_eq!(b.app.route("alice/nope").await, rustic_git_storage::ownership::Route::Missing);
+    assert_eq!(asks() - before, 2, "and once more in the next window");
+    assert_eq!(b.store.pool.warm_count(), 0);
+}
+
 /// `may_create` is the whole exempt set: the create route and registry writes claim an
 /// empty-prefix name, everything else does not.
 #[test]
