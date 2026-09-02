@@ -17,14 +17,31 @@ spec:
     - Ingress
   ingress:
     - from:
-        # The node subnet, NOT a podSelector on the agents. `mount_homes` runs the mount under
-        # `nsenter -t 1 -n` — pid 1's network namespace — so the client socket is the NODE's, and
-        # its source address is the node IP in 10.60.1.0/24; kube-proxy then masquerades it to the
-        # node IP again on the way in. A policy selecting agent PODS never matches the mount and
-        # wedges every home on a `hard` mount. This still excludes the 10.42.0.0/16 pod CIDR, which
-        # is the whole point of the policy: tenant pods cannot reach 2049.
+        # NOT a podSelector on the agents. `mount_homes` runs the mount under `nsenter -t 1 -n` —
+        # pid 1's network namespace — so the client is the NODE, not the agent pod.
+        #
+        # That gives TWO source addresses, both needed. A mount on the node ZeroFS itself runs on
+        # arrives with the node's own subnet address (10.60.1.0/24). A mount from any OTHER node
+        # goes node → ClusterIP → remote pod, which flannel masquerades over VXLAN to that node's
+        # `flannel.1` address — observed live inside the pod as 10.42.3.0 (session-0), 10.42.4.0
+        # (env-0), 10.42.5.0 (session-1), 10.42.0.0 (k3s-cp). A node's pod /24 hands out .1 upwards
+        # to pods, so the .0 is only ever that node's own VXLAN endpoint: these /32s admit the
+        # nodes and still leave the rest of 10.42.0.0/16 — every tenant pod — locked out, which is
+        # what this policy is for.
+        #
+        # HAND-MAINTAINED: a new node's `flannel.1` /32 must be added here BEFORE its agent first
+        # mounts, or the agent wedges on a `hard` mount. It is a step in the node-join runbook
+        # beside the labels. Read one off a node with `ip -4 addr show flannel.1`.
         - ipBlock:
             cidr: 10.60.1.0/24
+        - ipBlock:
+            cidr: 10.42.0.0/32
+        - ipBlock:
+            cidr: 10.42.3.0/32
+        - ipBlock:
+            cidr: 10.42.4.0/32
+        - ipBlock:
+            cidr: 10.42.5.0/32
       ports:
         - protocol: TCP
           port: 2049

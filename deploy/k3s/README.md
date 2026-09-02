@@ -14,7 +14,7 @@ Files, in the order a cluster is built:
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins every namespaced object it writes — pods, statefulsets, services, networkpolicies, limitranges, Secrets, RoleBindings — to the `ws-`/`wt-`/`env-` namespaces it makes. Apply with `agent-rbac.yaml`, always. |
 | `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
-| `system-netpol.yaml` | The one NetworkPolicy admitting 2049 to ZeroFS, from the node subnet (`10.60.1.0/24`) only — the mount runs in the node's netns via `nsenter`, so its client is the node IP, not an agent pod IP; the pod CIDR stays out, which is the point. The export authenticates nothing, so reachability is the authorization. `app: zerofs` is the sole selector. Apply with `zerofs.yaml`. |
+| `system-netpol.yaml` | The one NetworkPolicy admitting 2049 to ZeroFS. The mount runs in the node's netns via `nsenter`, so its client is the node, never an agent pod: the `from` list is the node subnet (`10.60.1.0/24`, for a mount on ZeroFS's own node) **plus one `/32` per node's `flannel.1` address** (every other node, masqueraded over VXLAN). Hand-maintained — a new node's `/32` goes in before its agent mounts. The export authenticates nothing, so reachability is the authorization. `app: zerofs` is the sole selector. Apply with `zerofs.yaml`. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `zerofs.yaml` | The region's shared-home NFS export (ZeroFS, single replica — see its header). Apply before rolling agents with `WS_HOMES_EXPORT` set; see "Shared home" below. |
 | `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods, and metrics (9464) only from a namespace literally named `monitoring` — no such namespace exists yet, so edit that rule to name the scraper's real namespace before expecting 9464 to be reachable. No Service — discovery is by pod IP from the API. See "Replication" below. |
@@ -98,6 +98,15 @@ kubectl label node <node> rustic-git.io/env=true           # may host environmen
 
 One key per role, not `role=session`, because a label key holds one value and a small cluster needs
 one node to be both.
+
+A new node ALSO needs its `flannel.1` address added to `system-netpol.yaml` before its agent first
+mounts the shared home — that policy's `from` list is hand-maintained, and an agent whose mount is
+denied wedges on a `hard` mount rather than failing:
+
+```sh
+ssh <node> ip -4 -o addr show flannel.1     # e.g. 10.42.6.0 — add `- ipBlock: {cidr: 10.42.6.0/32}`
+kubectl apply -f system-netpol.yaml
+```
 
 ## Control-plane backup
 
@@ -693,8 +702,10 @@ check and its own rollback — if a check fails, roll that step back before star
    `kubectl apply -f system-netpol.yaml`. *Check:* restart ONE agent
    (`kubectl -n kube-system delete pod <agent pod>`), wait for it to be `2/2 Running`, then
    `kubectl -n kube-system exec <that pod> -c agent -- ls /wspool-prod/homes` — it must list the
-   owners' directories, promptly. A hang here means the policy is not matching the mount's source
-   address. *Rollback:* `kubectl -n rustic-git-system delete networkpolicy zerofs-nfs-from-agents`
+   owners' directories, promptly. Pick an agent on a node OTHER than `k3s-cp`: the ZeroFS node's
+   own mount is admitted by the node-subnet rule and would pass even if every `flannel.1` /32 were
+   wrong. A hang here means the policy is not matching that node's masqueraded source address —
+   check it against `ip -4 -o addr show flannel.1` on that node. *Rollback:* `kubectl -n rustic-git-system delete networkpolicy zerofs-nfs-from-agents`
    **and then restart that agent pod** — a `hard` NFS mount that is already wedged does not
    recover when the policy is removed; only a fresh mount does.
 
