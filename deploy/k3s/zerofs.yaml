@@ -106,9 +106,10 @@ spec:
           # silently on different builds).
           #
           # NOTE the tag has NO `v`: upstream's SOURCE tags are `v2.3.2` but the published image
-          # tags are `2.3.2`, and `ghcr.io/barre/zerofs:v2.3.2` 404s. `sha-b66813e` (that
-          # release's commit) is the immutable equivalent if a moved tag ever matters.
-          image: ghcr.io/barre/zerofs:2.3.2
+          # tags are `2.3.2`, and `ghcr.io/barre/zerofs:v2.3.2` 404s. The `@sha256:` suffix — not
+          # the tag — is now the pin: a tag upstream can move would put an unreviewed build in
+          # front of every owner's home directory.
+          image: ghcr.io/barre/zerofs:2.3.2@sha256:3e55849c76a9243253660c3479ac2c96c7e69843dc3432512212650004a821ae
           command: ["zerofs", "run", "-c", "/etc/zerofs/zerofs.toml"]
           envFrom:
             - secretRef:

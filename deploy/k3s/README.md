@@ -12,8 +12,9 @@ Files, in the order a cluster is built:
 | `format-pool.sh` | Run on each worker with the data disk as argument. btrfs at `/wspool-prod`. |
 | `crds.yaml` | **Generated** — do not hand-edit. `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
-| `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins its Secrets/RoleBindings/Namespaces to `ws-*`/`env-*`. Apply with `agent-rbac.yaml`, always. |
+| `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins every namespaced object it writes — pods, statefulsets, services, networkpolicies, limitranges, Secrets, RoleBindings — to the `ws-`/`wt-`/`env-` namespaces it makes. Apply with `agent-rbac.yaml`, always. |
 | `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
+| `system-netpol.yaml` | Default-deny plus the one 2049-from-agents rule in `rustic-git-system`: the NFS home export authenticates nothing, so reachability is the authorization. Apply with `zerofs.yaml`. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `zerofs.yaml` | The region's shared-home NFS export (ZeroFS, single replica — see its header). Apply before rolling agents with `WS_HOMES_EXPORT` set; see "Shared home" below. |
 | `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods. No Service — discovery is by pod IP from the API. See "Replication" below. |
@@ -48,7 +49,7 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f system-netpol.yaml
 ```
 
 ### Upgrading an existing cluster off PersistentVolumes

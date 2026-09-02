@@ -6,9 +6,12 @@
 # is what authenticates a request that does arrive; this NetworkPolicy is what stops the request
 # arriving from an untrusted namespace at all, so the two are meant to land together.
 #
-# Scope, stated so nobody over-reads it: this restricts PORT 8444 ONLY — any other listener the
-# agent ever grows stays reachable until a policy covers it — and NetworkPolicies are additive,
-# so a later policy selecting these pods with a broader `from` silently widens this one.
+# Scope, stated so nobody over-reads it: a NetworkPolicy with `policyTypes: [Ingress]` selecting
+# these pods denies ALL other ingress to them, not just what its rules name — so this file must
+# list every port the agent serves, and the metrics rule below is not optional decoration: without
+# it the `prometheus.io/scrape` on 9464 in the daemonset stops working the moment this is applied.
+# NetworkPolicies are additive, so a later policy selecting these pods with a broader `from`
+# silently widens this one.
 #
 # No Service object here, on purpose: the sender discovers standby targets by pod IP straight
 # from the Kubernetes API (the same rendezvous-over-`nodes list` the RBAC comment in
@@ -34,3 +37,10 @@ spec:
       ports:
         - protocol: TCP
           port: 8444
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9464

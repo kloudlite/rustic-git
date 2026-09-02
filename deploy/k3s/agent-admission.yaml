@@ -25,23 +25,33 @@ spec:
   matchConstraints:
     resourceRules:
       # Main resources only: `workspaces` does not match `workspaces/status`, which is the
-      # controller's half and is meant to change on every reconcile.
+      # controller's half and is meant to change on every reconcile. `snapshots` and
+      # `volumereplicas` are here because the agent holds `patch` on both: a Snapshot's `parent` is
+      # the history chain `/v1` reads back at `GET /v1/volumes/{name}/history`, so an unchecked
+      # patch grafts that chain.
       - apiGroups: ["rustic-git.io"]
         apiVersions: ["*"]
-        operations: ["UPDATE"]
-        resources: ["workspaces", "environments", "volumes", "ownerbindings"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["workspaces", "environments", "volumes", "ownerbindings", "snapshots", "volumereplicas"]
   matchConditions:
     - name: from-the-agent
       expression: "request.userInfo.username == 'system:serviceaccount:kube-system:rustic-git-agent'"
   validations:
+    # A create has no oldObject, so it gets its own arm. The only Volume the agent authors is a
+    # PARENT'S CHILD (`ensure_child_volume`, which sets an ownerReference and lets garbage
+    # collection do the deleting); a free-standing Volume with an arbitrary region, quota or source
+    # is `/v1`'s to write, never the controller's.
     - expression: >-
-        object.kind == 'Volume'
-          ? (object.spec.all(k, k == 'restoreTo'
-                                || (k == 'nodeName' && (oldObject.spec.nodeName == '' || object.spec.nodeName == ''))
-                                || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
-             && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
-          : object.spec == oldObject.spec
-      message: "rustic-git-agent writes status, not spec (exceptions: Volume.spec.restoreTo, and Volume.spec.nodeName only owned->'' or ''->node)"
+        request.operation == 'CREATE'
+          ? (object.kind != 'Volume'
+             || (has(object.metadata.ownerReferences) && size(object.metadata.ownerReferences) > 0))
+          : (object.kind == 'Volume'
+               ? (object.spec.all(k, k == 'restoreTo'
+                                     || (k == 'nodeName' && (oldObject.spec.nodeName == '' || object.spec.nodeName == ''))
+                                     || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
+                  && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
+               : object.spec == oldObject.spec)
+      message: "rustic-git-agent writes status, not spec (exceptions: Volume.spec.restoreTo, Volume.spec.nodeName owned->'' or ''->node, and a created Volume must be a parent's child)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -53,11 +63,20 @@ spec:
 ---
 # 2. `bind` on a ClusterRole plus `rolebindings: create` is, to RBAC, "grant that role to any
 #    subject in any namespace" — including the agent itself in kube-system, which would be
-#    `secrets` there. This pins every namespaced object the agent writes to the tenant namespaces
-#    it makes (`ws-*` for workspaces, `env-*` for environments), every RoleBinding to the two
-#    roles and two subjects the design names, and every Secret to the host key it creates.
+#    `secrets` there. The same shape is true of `pods: create`, which the role holds cluster-wide:
+#    a privileged `hostPath: /` pod in kube-system turns root-on-one-node into root-on-the-cluster
+#    and mints any user's token, and the pod fence in workspace-admission.yaml cannot refuse it
+#    because that binding is scoped to namespaces carrying `rustic-git.io/kind`. So this pins EVERY
+#    namespaced kind the agent writes — pods, statefulsets, services, networkpolicies, limitranges,
+#    secrets, rolebindings — to the tenant namespaces it makes (`ws-`/`wt-` for workspaces, `env-`
+#    for environments; `wt-` is the team pair, see `crd::ws_namespace`), every RoleBinding to the
+#    two roles and two subjects the design names, and every Secret to the host key it creates.
 #    Any other kind reaching this policy is denied outright: a new write in the code needs a row
 #    in agent-rbac.yaml AND a branch here.
+#
+#    Not covered, deliberately: DELETE. `object` is null on a delete, which needs a second
+#    expression shape, and the residual is denial of service on a kube-system pod the kubelet
+#    recreates — not a privilege gain like CREATE is.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -69,7 +88,15 @@ spec:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["namespaces", "secrets"]
+        resources: ["namespaces", "secrets", "pods", "services", "limitranges"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["statefulsets"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["networkpolicies"]
       - apiGroups: ["rbac.authorization.k8s.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
@@ -80,19 +107,28 @@ spec:
   validations:
     - expression: >-
         object.kind == 'Namespace'
-          ? (object.metadata.name.startsWith('ws-') || object.metadata.name.startsWith('env-'))
+          ? (object.metadata.name.startsWith('ws-')
+             || object.metadata.name.startsWith('wt-')
+             || object.metadata.name.startsWith('env-'))
         : object.kind == 'Secret'
-          ? (object.metadata.namespace.startsWith('ws-') && object.metadata.name.startsWith('ws-ssh-'))
+          ? ((object.metadata.namespace.startsWith('ws-') || object.metadata.namespace.startsWith('wt-'))
+             && object.metadata.name.startsWith('ws-ssh-'))
         : object.kind == 'RoleBinding'
-          ? ((object.metadata.namespace.startsWith('ws-') || object.metadata.namespace.startsWith('env-'))
+          ? ((object.metadata.namespace.startsWith('ws-')
+              || object.metadata.namespace.startsWith('wt-')
+              || object.metadata.namespace.startsWith('env-'))
              && object.roleRef.kind == 'ClusterRole'
              && object.roleRef.name in ['rustic-git-api-secrets', 'rustic-git-agent-ws-secrets']
              && has(object.subjects)
              && object.subjects.all(s, s.kind == 'ServiceAccount'
                                        && s.namespace == 'kube-system'
                                        && s.name in ['rustic-git-api', 'rustic-git-agent']))
+        : (object.kind in ['Pod', 'StatefulSet', 'Service', 'NetworkPolicy', 'LimitRange'])
+          ? (object.metadata.namespace.startsWith('ws-')
+             || object.metadata.namespace.startsWith('wt-')
+             || object.metadata.namespace.startsWith('env-'))
         : false
-      message: "rustic-git-agent may only write ws-*/env-* namespaces, ws-ssh-* Secrets, and the two api/agent secret RoleBindings"
+      message: "rustic-git-agent may only write ws-/wt-/env- namespaces and namespaced objects inside them, ws-ssh-* Secrets, and the two api/agent secret RoleBindings"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
