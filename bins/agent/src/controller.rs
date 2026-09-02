@@ -2976,14 +2976,17 @@ async fn flush_gate(volume: &str, ready_at: Option<&str>, ctx: &Arc<Ctx>) -> Res
     let Some(ready) = ready_at.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) else {
         return Ok(StopPush::Landed { unreplicated: Some(NO_READY_AT) });
     };
-    let list = Api::<crd::VolumeReplica>::all(ctx.client.clone())
-        .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
-        .await?;
+    // Unfiltered, then filtered here — NOT `.fields("spec.volume=…")`: `VolumeReplica` declares
+    // only `.spec.node` and `.status.phase` as selectable, and a field selector the API server
+    // does not support is a 400 on every reconcile, which parked a real stop forever before the
+    // timeout could ever be consulted. The mock client accepts any selector, so a test cannot
+    // catch this; `pull_volume` lists the same kind the same way for the same reason.
+    let list = Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&kube::api::ListParams::default()).await?;
     // `lastSyncAt` is the instant that pass LISTED the volume's snapshots, not when it wrote its
     // row (see `VolumeReplicaStatus::last_sync_at`) — which is the only reason `>= readyAt` proves
     // the replica's listing actually saw this cut. Parsed, never string-compared: two nodes may
     // stamp the same instant with different offsets.
-    let replicated = list.items.iter().any(|r| {
+    let replicated = list.items.iter().filter(|r| r.spec.volume == volume).any(|r| {
         r.spec.node != ctx.node
             && r.status.as_ref().is_some_and(|st| {
                 st.phase == "Synced"

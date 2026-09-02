@@ -1505,6 +1505,25 @@ const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-env-1";
 const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
 const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 const REPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
+
+/// `VolumeReplica` declares only `.spec.node`/`.status.phase` as selectable; a `spec.volume=`
+/// field selector is a 400 from a real API server on every reconcile — which parked a real stop
+/// forever, unseen by this mock, which accepts any selector. So pin the request shape itself.
+#[tokio::test]
+async fn the_flush_gate_lists_replicas_without_a_field_selector() {
+    let _t = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let w = stopping_ws();
+    let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
+    // `requests()`, not `calls()`: only the former keeps the query string the selector lives in.
+    let requests = rec.requests();
+    let lists: Vec<&String> = requests.iter().filter(|c| c.contains("volumereplicas")).collect();
+    assert!(!lists.is_empty(), "the gate must list replicas: {requests:?}");
+    for c in lists {
+        assert!(!c.contains("fieldSelector"), "unsupported field selector on VolumeReplica: {c}");
+    }
+}
 const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1";
 
 /// `WS_STOP_FLUSH_TIMEOUT_SECS` is process-global and `flush_timeout()` reads it at call time, so
