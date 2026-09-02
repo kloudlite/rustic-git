@@ -9,7 +9,7 @@ describe("safeSegment", () => {
   });
 
   test("rejects anything that would change which path is revalidated", () => {
-    for (const s of ["", ".", "..", "a/b", "a[b]", "../etc", "x".repeat(101), "a b", "café", " alice"]) {
+    for (const s of ["", ".", "..", "a/b", "a[b]", "../etc", "x".repeat(101), "a\u0000b", "café", " alice"]) {
       expect(safeSegment(s)).toBeNull();
     }
   });
@@ -18,7 +18,7 @@ describe("safeSegment", () => {
     // Environment ids are k8s object names (RFC 1123 subdomain), which is a strict subset of the
     // rule above — so guarding `id` with safeSegment refuses no real submission.
     for (const id of ["env-4f2c", "web.staging", "e", "0"]) expect(safeSegment(id)).toBe(id);
-    for (const id of ["", "..", "env/../other", "env%2f..", "a b"]) expect(safeSegment(id)).toBeNull();
+    for (const id of ["", "..", "env/../other", "env%2f..", "a\u0000b"]) expect(safeSegment(id)).toBeNull();
   });
 });
 
