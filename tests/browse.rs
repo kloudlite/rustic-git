@@ -367,7 +367,7 @@ async fn a_gpg_signed_commit_verifies_against_its_key() {
         issuers.iter().any(|i| known.iter().any(|k| k.ends_with(i) || i.ends_with(k))),
         "the issuer resolves to this key: issuers={issuers:?} known={known:?}",
     );
-    assert!(rustic_git_api::gpg::emails_of(&key).contains(&"t@t".to_string()));
+    assert!(rustic_git_api::gpg::verified_emails(&key).contains(&"t@t".to_string()));
 
     // The whole judgement.
     let reason = rustic_git_api::gpg::verify(&armoured, &sig, &signed.payload, "t@t");

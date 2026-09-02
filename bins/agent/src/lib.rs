@@ -14,6 +14,7 @@ pub mod nix;
 pub mod peer;
 pub mod snapshot;
 pub mod sshkeys;
+pub mod sync;
 
 /// Env-derived config for `run`. `WS_REGISTRY_URL`/`WS_AGENT_TOKEN` are gone with the
 /// object-store registry surface they pointed at (Task 8).

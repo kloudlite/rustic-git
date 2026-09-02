@@ -127,10 +127,9 @@ merge commits — gix-pack drops all-but-last-parent additions on a merge
 
 `crates/workspaces` + `bins/agent` (`rustic-git-agent`) + `bins/api` (`rustic-git-api`) add a
 second, unrelated control plane: btrfs-backed dev workspaces and multi-service environments,
-separate from git storage — but sharing the registry namespace with container images: a
-workspace/environment's pushed state lives as `vol/{owner}/{id}` in the SAME
-`bins/server/src/vol_agent.rs` surface that owns `img/{owner}/{name}`, addressed by the server
-tier (`rustic-git`), not `bins/api`.
+separate from git storage, and separate from the registry too: a workspace/environment's pushed
+state is a `Snapshot` CR plus a read-only btrfs subvolume on each node that holds it. Nothing about
+it goes through the server tier, and nothing about it goes to an object store.
 
 **Kubernetes is the reconcile substrate, and the CRDs are the source of truth.**
 `crates/workspaces/src/crd.rs` defines `Volume`/`Workspace`/`Environment` in
@@ -172,14 +171,16 @@ directories left behind by a workspace that is simply gone.
 
 Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests) now
 holds ONLY cross-cluster `Region` metadata — `bins/api` is its only writer, via `/v1/regions`.
-Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob storage, keyed
-`blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one test run or one
-region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
+Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. Snapshot BYTES have
+no object store at all: a snapshot is a read-only btrfs subvolume under `{pool}/vol/{volume}/snap/`,
+and it reaches other nodes as a `btrfs send` streamed over the peer listener between agents
+(`bins/agent/src/peer.rs`) — never uploaded anywhere. Durability is therefore replica count
+(`Volume.spec.replicas`, placed by `replicate::targets`), not a blob container.
 
 Four verbs, no separate commit step: `push` is the single mutating verb — `/v1` writes a
-`SnapshotRequest` and the owning node fulfils it: snapshot + upload + register + move the `main`
-ref, atomically, with an optional message (`GET /v1/volumes/{name}/history|refs` on `bins/api`
-reads the result back as a label list of `done` SnapshotRequests, not from the registry). A
+`Snapshot` CR naming the volume's current head as its parent and the owning node fulfils it:
+snapshot + upload + mark `Ready` + advance `status.head`, with an optional message
+(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads the chain of `Ready` `Snapshot`s back). A
 workspace created with `repo`/`branch` is seeded by an init container that clones it over SSH with
 the owner's platform key, inside the workspace pod itself — no credential Secret is minted for it.
 There is no user-facing un-pushed state; internally
@@ -191,15 +192,23 @@ user-facing) is local-first when the source is materialized on the same pool
 (`Engine::clone_local_snapshot`, which works even on a source that has never pushed at all,
 running or not); its registry-history fallback (`inherit`) always grafts onto the source's last
 PUSHED history. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
-an explicit past **snapshot** — a PUSHED commit record, named by id. The agent
+an explicit past **snapshot** — a PUSHED commit record, named by id. Between pushes, a background
+sync beat (`WS_SYNC_SECS`, `bins/agent/src/sync.rs`) cuts a TRANSIENT `Snapshot` — never a parent,
+never advancing `status.head` — from each running worktree whose btrfs generation has moved, so a
+peer node's replica always has something recent to fetch; retain keeps exactly one Ready transient
+per worktree, and a node re-hosting a worktree checks out the newest one it holds locally before
+falling back to `status.head`. The agent
 (`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
 it watches its own node's objects and converges them (`bins/agent/src/controller.rs`), and its
-identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It still
-reaches the SERVER tier (`WS_REGISTRY_URL`, not `bins/api`) for the `vol/{owner}/{id}` registry
-surface — commit records and ref moves — and that is the only thing it calls over HTTP.
-Stopping an environment always pushes its own subvolume first, and the Deployment deletes are
-gated on the push having LANDED rather than merely been requested (`apply_environment`'s
-`DesiredState::Stopped` arm) — the one place push happens without an explicit `/push` call.
+identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
+to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
+nothing else — no object store, no Azure credential, and no HTTP service of ours.
+Stopping a workspace or environment cuts a `stop-{ws}`/`stop-{env}` sync point (skipped if the pod
+never ran) and waits for another node's `VolumeReplica` to report `Synced` at or after that
+listing, bounded by `WS_STOP_FLUSH_TIMEOUT_SECS`; the Deployment deletes for an environment are
+gated on that wait, not on a full push (`apply_environment`'s `DesiredState::Stopped` arm). A stop
+that times out tears down anyway with condition reason `FlushUnreplicated` — it never blocks a
+stop forever on a replica that doesn't show up.
 
 **Every person has one persistent home per region, not per node** — `/home/kl` in every workspace
 pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS export served by ZeroFS, mounted by

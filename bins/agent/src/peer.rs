@@ -219,7 +219,7 @@ pub fn replica_interval() -> std::time::Duration {
 
 /// The pool-eligible nodes, `rustic-git.io/pool=true`, name-sorted so `replicate::targets`'
 /// rendezvous scoring is deterministic across every node running this beat.
-async fn pool_nodes(client: &kube::Client) -> Result<Vec<String>, String> {
+pub(crate) async fn pool_nodes(client: &kube::Client) -> Result<Vec<String>, String> {
     let api: kube::Api<Node> = kube::Api::all(client.clone());
     let lp = ListParams::default().labels("rustic-git.io/pool=true");
     let list = api.list(&lp).await.map_err(|e| e.to_string())?;
@@ -403,7 +403,18 @@ fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (Str
 /// Local commits whose CR is gone entirely — retention's disk-side convergence. Pure, so
 /// `pull_volume`'s "which locals to drop" decision is testable without real btrfs (`drop_commit`
 /// itself is the engine's own concern, covered by `engine_commit.rs`'s loopback tests).
-fn retired(have: &HashSet<String>, existing: &HashSet<String>) -> Vec<String> {
+///
+/// `any_pull_failed` reclaims NOTHING. The owner deletes `sync-A`'s CR the instant `sync-B` is
+/// Ready, so a replica that could not reach the owner this pass would drop its local `sync-A` and
+/// gain nothing — going from one sync point to none, in exactly the partition-then-owner-death
+/// case sync points exist for. Deferring the reclaim costs a subvolume until the next clean pass.
+/// ponytail: all-or-nothing rather than transients-only, because a retired name has no CR left to
+/// read `spec.transient` off — telling a swept commit from a swept sync point here would mean
+/// trusting the name prefix. Split it if held-back commits ever cost real space.
+fn retired(have: &HashSet<String>, existing: &HashSet<String>, any_pull_failed: bool) -> Vec<String> {
+    if any_pull_failed {
+        return Vec::new();
+    }
     have.iter().filter(|n| !existing.contains(*n)).cloned().collect()
 }
 
@@ -412,6 +423,10 @@ fn retired(have: &HashSet<String>, existing: &HashSet<String>) -> Vec<String> {
 /// touched, same as `replica_reconcile`'s lookup-error branch.
 async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    // Taken BEFORE the listing, and stamped as this pass's `lastSyncAt` at the end. See
+    // `VolumeReplicaStatus::last_sync_at`: a pass that finished at T proves nothing about a
+    // commit that turned Ready after its listing, and a stop's flush gate reads exactly that.
+    let listed_at = chrono::Utc::now().to_rfc3339();
     // One list, all phases: the Ready subset drives the pull below, and the FULL name set is what
     // tells a deleted CR from a Working one, below — a `Snapshot` has no finalizer (see
     // `snapshot::reconcile_commit`'s module doc), so this diff against `local_commits` is the only
@@ -461,6 +476,12 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
     let mut sources: Vec<&str> = replicas.iter().filter(not_me).filter(synced).map(|r| r.spec.node.as_str()).collect();
     sources.extend(replicas.iter().filter(not_me).filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
 
+    // Any pull that could not be satisfied this pass. It gates the retire pass below, because
+    // the two together would otherwise LOSE a sync point: the owner deletes `sync-A`'s CR the
+    // instant `sync-B` is Ready, so a replica that cannot reach the owner right now would drop
+    // its local `sync-A` and gain nothing — from one sync point to none, in exactly the
+    // partition-then-owner-death case sync points exist for.
+    let mut any_pull_failed = false;
     for name in order {
         if have.contains(&name) {
             continue;
@@ -499,6 +520,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
             }
         }
         if !pulled {
+            any_pull_failed = true;
             tracing::warn!(%volume, %name, "pull: no source could supply this commit this pass");
         }
     }
@@ -506,7 +528,8 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
     // Drop any local commit whose CR is gone entirely (not merely `Working` — `existing` holds
     // every phase). `drop_commit` is Ok-on-absent, so every node that ever held a copy converges
     // on the same disk state without a second round trip to confirm it.
-    for name in retired(&have, &existing) {
+    // Gated on `any_pull_failed` — see `retired`.
+    for name in retired(&have, &existing, any_pull_failed) {
         if let Err(e) = ctx.engine.drop_commit(volume, &name) {
             tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired commit failed; left for the next pass");
         } else {
@@ -515,7 +538,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
     }
 
     let missing_at_end = ready.iter().any(|s| !have.contains(&s.name_any()));
-    if let Err(e) = write_replica_status(ctx, volume, !missing_at_end).await {
+    if let Err(e) = write_replica_status(ctx, volume, !missing_at_end, &listed_at).await {
         tracing::warn!(%volume, error = %e, "pull: writing VolumeReplica status");
     }
 }
@@ -583,7 +606,7 @@ async fn pull_one(
 /// Create-or-update THIS node's own `VolumeReplica` — the sole writer, per the module doc. v1:
 /// `branches` is left empty (the brief allows this — the scheduler's precise per-branch arm is
 /// Task 4's), `phase` is `Synced` iff nothing was missing at the end of this pass.
-async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool) -> Result<(), kube::Error> {
+async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool, listed_at: &str) -> Result<(), kube::Error> {
     let name = crd::replica_name(volume, &ctx.node);
     let api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
     let mut obj = match api.get_opt(&name).await? {
@@ -600,7 +623,7 @@ async fn write_replica_status(ctx: &Arc<Ctx>, volume: &str, synced: bool) -> Res
     let status = crd::VolumeReplicaStatus {
         phase: if synced { "Synced" } else { "Syncing" }.to_string(),
         branches: Default::default(),
-        last_sync_at: Some(chrono::Utc::now().to_rfc3339()),
+        last_sync_at: Some(listed_at.to_string()),
     };
     for attempt in 0..2 {
         match replace_status(&api, &obj, "VolumeReplica", serde_json::to_value(&status).map_err(kube::Error::SerdeError)?).await {
@@ -759,7 +782,7 @@ async fn unclaim_kind<K>(
 mod reconcile_tests {
     use super::*;
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
+    use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
     use std::os::unix::fs::PermissionsExt;
 
     struct NoopNix;
@@ -866,11 +889,38 @@ mod reconcile_tests {
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
 
-        write_replica_status(&ctx, "vol-1", true).await.unwrap();
+        write_replica_status(&ctx, "vol-1", true, "2026-09-02T00:00:00+00:00").await.unwrap();
 
         let created = rec.sent("POST", VOLREPLICAS);
         assert_eq!(created.len(), 1, "{:?}", rec.calls());
         assert_eq!(created[0]["metadata"]["labels"]["rustic-git.io/volume"], "vol-1");
+    }
+
+    /// `lastSyncAt` is the instant its pass LISTED, handed in by `pull_volume` — never `now()` at
+    /// write time. A pass that lists at T and finishes at T+5min knows nothing about a snapshot
+    /// that turned Ready at T+1min, and a stop's flush gate reads this stamp as proof that it did.
+    /// This pins the plumbing: whatever `pull_volume` measured is what lands on the row.
+    #[tokio::test]
+    async fn write_replica_status_stamps_the_listing_instant_not_the_write_instant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = crd::replica_name("vol-1", "node-b");
+        let listed_at = "2026-09-02T00:00:00+00:00";
+        let row = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": name, "uid": "vr-uid"},
+            "spec": {"volume": "vol-1", "node": "node-b"},
+        });
+        let routes = vec![
+            get(format!("{VOLREPLICAS}/{name}"), row.clone()),
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/{name}/status"), status: 200, body: row },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+
+        write_replica_status(&ctx, "vol-1", true, listed_at).await.unwrap();
+
+        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/{name}/status"));
+        assert_eq!(sent.len(), 1, "{:?}", rec.calls());
+        assert_eq!(sent[0]["status"]["lastSyncAt"], listed_at);
     }
 
     /// Nothing missing (every Ready `Snapshot` is already a local commit): `pull_volume` makes no
@@ -915,8 +965,30 @@ mod reconcile_tests {
     fn retired_picks_out_locals_whose_cr_is_gone() {
         let have: HashSet<String> = ["a".into(), "b".into(), "c".into()].into_iter().collect();
         let existing: HashSet<String> = ["a".into(), "c".into()].into_iter().collect();
-        assert_eq!(retired(&have, &existing), vec!["b".to_string()]);
-        assert!(retired(&have, &have).is_empty(), "nothing missing: nothing retired");
+        assert_eq!(retired(&have, &existing, false), vec!["b".to_string()]);
+        assert!(retired(&have, &have, false).is_empty(), "nothing missing: nothing retired");
+    }
+
+    /// C2: a pass that could not pull something reclaims NOTHING. The owner deletes `sync-A`'s CR
+    /// the moment `sync-B` is Ready, so a replica that cannot reach the owner this pass (a
+    /// partition, a peer 500, a `send_timeout`) would drop its only local sync point and gain no
+    /// replacement — one sync point to zero, in the exact case the feature exists for.
+    #[test]
+    fn a_failed_pull_reclaims_nothing_this_pass() {
+        let have: HashSet<String> = ["sync-A".into()].into_iter().collect();
+        // `sync-A`'s CR is gone (retention deleted it when `sync-B` turned Ready); `sync-B` is the
+        // one this pass failed to fetch, so it is not in `have`.
+        let existing: HashSet<String> = ["sync-B".into()].into_iter().collect();
+        assert!(retired(&have, &existing, true).is_empty(), "a failed pull must not drop the last sync point");
+        assert_eq!(retired(&have, &existing, false), vec!["sync-A".to_string()], "a clean pass still reclaims it");
+    }
+
+    // These two tests each spin up a real peer server on the fixed `:8444` production port
+    // (`agent_pod_addr` hard-codes it, so there's no way around binding it for real) — serialized
+    // so they never race each other for the port when the harness runs them concurrently.
+    fn peer_port_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     /// An incremental receive whose `-p` the source never had (this node's nearest held ancestor
@@ -926,6 +998,7 @@ mod reconcile_tests {
     /// the source's own `-p` failure surfacing as an incomplete stream) and succeeds call 2.
     #[tokio::test]
     async fn an_incremental_pull_that_fails_falls_back_to_a_full_pull_from_the_same_source() {
+        let _port_guard = peer_port_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         // I already hold "vol-1-parent" locally — so `my_parent` is `Some`, and the first GET
         // carries `?parent=vol-1-parent`.
@@ -1179,5 +1252,142 @@ fi
         unclaim_dead_nodes(&ctx).await;
 
         assert!(rec.calls().iter().all(|c| !c.starts_with("PUT")), "a nodes-list error must clear nothing: {:?}", rec.calls());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Task 6: a transient (sync point) is just another `Snapshot` to the pull beat — no separate
+    // code path exists for it, so these prove the existing plumbing already replicates one.
+    // -----------------------------------------------------------------------------------------
+
+    fn ready_transient(name: &str, volume: &str, parent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1",
+            "kind": "Snapshot",
+            "metadata": {"name": name, "uid": "snap-uid-transient"},
+            "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        })
+    }
+
+    /// A transient is addressed, pulled, and counted toward `Synced` exactly like a commit: same
+    /// `GET /peer/v1/commit/{volume}/{name}` shape (its name just happens to start with `sync-`),
+    /// same replica-status write at the end of the pass. No code change should be needed for this
+    /// to pass — that is the point of Task 6.
+    #[tokio::test]
+    async fn a_ready_transient_is_pulled_and_counts_toward_synced() {
+        let _port_guard = peer_port_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join("btrfs");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+if [ "$1" = "receive" ]; then
+    cat >/dev/null
+    mkdir -p "$2/sync-ws-1-x"
+    exit 0
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = bin.to_string_lossy().into_owned();
+
+        let send_bin = bin_dir.join("btrfs-send");
+        std::fs::write(&send_bin, "#!/bin/sh\nprintf 'bytes'\nexit 0\n").unwrap();
+        std::fs::set_permissions(&send_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let send_bin = send_bin.to_string_lossy().into_owned();
+        let source_pool = tmp.path().join("source-pool");
+        std::fs::create_dir_all(source_pool.join("vol/vol-1/snap/sync-ws-1-x")).unwrap();
+        let (client, _rec) = mock_client(vec![]);
+        let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin);
+        // Captures every request path the real peer server sees, so we can prove the transient is
+        // fetched over `/peer/v1/commit/{volume}/{name}` — the exact same endpoint a real commit
+        // uses — rather than trusting the on-disk result alone.
+        let seen_paths: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen_paths2 = seen_paths.clone();
+        let app = router(peer_state).layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let seen_paths = seen_paths2.clone();
+            async move {
+                seen_paths.lock().unwrap().push(req.uri().to_string());
+                next.run(req).await
+            }
+        }));
+        let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(tokio_listener, app).await;
+        });
+
+        let pod = serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "agent-a"},
+            "status": {"podIP": "127.0.0.1"},
+        });
+        let routes = vec![
+            // One already-local commit alongside the missing transient: proves the transient is
+            // just another item on the same list, not a special case that only fires when it's
+            // the sole entry.
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("vol-1-aaaaaaaa", "vol-1", ""), ready_transient("sync-ws-1-x", "vol-1", "")]) },
+            Route {
+                method: "GET",
+                path: VOLREPLICAS.into(),
+                status: 200,
+                body: list_of(
+                    "VolumeReplica",
+                    vec![serde_json::json!({
+                        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                        "metadata": {"name": "vol-1.node-a", "uid": "uid-a"},
+                        "spec": {"volume": "vol-1", "node": "node-a"},
+                        "status": {"phase": "Synced", "branches": {}},
+                    })],
+                ),
+            },
+            Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
+            not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
+            Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
+                "spec": {"volume": "vol-1", "node": "node-b"},
+                "status": {"phase": "Syncing", "branches": {}},
+            }) },
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
+                "spec": {"volume": "vol-1", "node": "node-b"},
+                "status": {"phase": "Synced", "branches": {}},
+            }) },
+        ];
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-aaaaaaaa")).unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, &bin, &http, "s3cret", "vol-1").await;
+
+        assert!(tmp.path().join("vol/vol-1/snap/sync-ws-1-x").exists(), "the transient must land on disk like any other commit");
+        let paths = seen_paths.lock().unwrap().clone();
+        assert!(
+            paths.iter().any(|p| p.contains("/peer/v1/commit/vol-1/sync-ws-1-")),
+            "the transient is fetched over the same commit endpoint as a real commit: {paths:?}"
+        );
+        let created = rec.sent("POST", VOLREPLICAS);
+        assert_eq!(created.len(), 1, "the replica row is created fresh (Syncing, per the mocked response) before the final status write");
+        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["status"]["phase"], "Synced", "and lands Synced once the transient is pulled");
+    }
+
+    /// A transient's `Snapshot` CR being gone is exactly the same "retired" case a deleted commit
+    /// is — `pull_volume` diffs local names against the full CR list regardless of `transient`,
+    /// so a local sync point whose CR disappeared is dropped the same way.
+    #[tokio::test]
+    async fn a_deleted_transient_is_dropped_from_every_replica() {
+        let have: HashSet<String> = ["vol-1-aaaaaaaa".into(), "sync-ws-1-a".into()].into_iter().collect();
+        // "sync-ws-1-a" is local but absent from the CR list entirely — its Snapshot was deleted.
+        let existing: HashSet<String> = ["vol-1-aaaaaaaa".into()].into_iter().collect();
+        assert_eq!(retired(&have, &existing, false), vec!["sync-ws-1-a".to_string()], "a clean pass reclaims it");
     }
 }

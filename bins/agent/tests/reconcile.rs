@@ -107,6 +107,25 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
         "/apis/rustic-git.io/v1alpha1/snapshots",
         serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": []}),
     ));
+    // Likewise the stop's flush gate: a workspace stop now waits until another node holds its
+    // final sync point, so the default answer for every test that is not ABOUT the flush is
+    // "already cut, already replicated". Appended last, so a flush test's own routes win.
+    routes.push(rustic_git_workspaces::kube_test::get(
+        WS_STOP_REQ,
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                           "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid", "creationTimestamp": rfc3339_ago(60)},
+                           "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
+                           "status": {"phase": "ready", "readyAt": rfc3339_ago(30)}}),
+    ));
+    routes.push(rustic_git_workspaces::kube_test::get(
+        REPLICAS,
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList",
+                           "metadata": {"resourceVersion": "1"},
+                           "items": [{"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                                      "metadata": {"name": "ws-1.node-b", "uid": "vr-b"},
+                                      "spec": {"volume": "ws-1", "node": "node-b"},
+                                      "status": {"phase": "Synced", "branches": {}, "lastSyncAt": rfc3339_ago(1)}}]}),
+    ));
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
@@ -743,12 +762,17 @@ async fn f4_a_volume_replica_get_error_claims_nothing() {
 async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = ssh_routes();
-    routes.push(Route {
-        method: "GET",
-        path: SNAPSHOTS_LIST.into(),
-        status: 200,
-        body: commit_list_of("Snapshot", vec![snapshot_cr("ws-1-a", "ws-1")]),
-    });
+    // TWICE: a re-host pass lists snapshots once for `latest_transient` and once for
+    // `has_commits`, and this mock walks a path's routes in order — with one route the second
+    // listing would fall through to the empty default and read as a zero-commit bootstrap.
+    for _ in 0..2 {
+        routes.push(Route {
+            method: "GET",
+            path: SNAPSHOTS_LIST.into(),
+            status: 200,
+            body: commit_list_of("Snapshot", vec![snapshot_cr("ws-1-a", "ws-1")]),
+        });
+    }
     let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
     // `ws_ctx_with_ssh` pre-seeds an empty worktree so tests that expect a normal checkout don't
     // need real btrfs; THIS test's whole point is that no checkout may happen at all, so undo
@@ -760,6 +784,76 @@ async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)), "waits for T5/T6 to record a head");
     assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "no pod without a resolved head: {:?}", rec.calls());
     assert!(!tmp.path().join("vol/ws-1/live/ws-1").exists(), "no bootstrap worktree either");
+}
+
+/// The re-host fixture: a placed workspace whose `status.head` is `ws-1-aaaaaaaa`, no worktree on
+/// this pool (that is what makes it a re-host), and a snapshot listing of that head plus two sync
+/// points — ordered so a pick by listing order, or a last-one-wins pick, lands on the wrong object.
+/// `present` names the `snap/` dirs this node actually holds.
+async fn rehost_outcome(tmp: &std::path::Path, present: &[&str]) -> String {
+    let transient = |name: &str, generation: &str| {
+        let mut s = snapshot_cr(name, "ws-1");
+        s["spec"]["transient"] = true.into();
+        s["metadata"]["annotations"] = serde_json::json!({"rustic-git.io/synced-generation": generation});
+        s
+    };
+    let mut routes = ssh_routes();
+    routes.push(Route {
+        method: "GET",
+        path: SNAPSHOTS_LIST.into(),
+        status: 200,
+        body: commit_list_of(
+            "Snapshot",
+            vec![snapshot_cr("ws-1-aaaaaaaa", "ws-1"), transient("sync-ws-1-bbbbbbbb", "9"), transient("sync-ws-1-cccccccc", "4")],
+        ),
+    });
+    let (ctx, _rec, _fake) = ws_ctx_with_ssh(tmp, routes);
+    std::fs::remove_dir_all(tmp.join("vol/ws-1/live/ws-1")).unwrap();
+    for name in present {
+        std::fs::create_dir_all(tmp.join("vol/ws-1/snap").join(name)).unwrap();
+    }
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.status.as_mut().unwrap().head = Some("ws-1-aaaaaaaa".into());
+    // Which snapshot the checkout was asked for is read off WHICH failure comes back, and that is
+    // sharp on any platform: a source that is not on the pool fails `NO_SUCH_RECORD` before any
+    // shell-out, and a source that IS there gets past that check — succeeding on a btrfs node and
+    // dying in `spawn btrfs` on one without, but never as `NO_SUCH_RECORD`.
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.err().map(|e| e.0).unwrap_or_default()
+}
+
+/// Re-host: a node that has never run this worktree starts from the newest SYNC POINT, not from
+/// `status.head` — the sync beat replicated it after the last commit, so the loss window on a node
+/// death is one `WS_SYNC_SECS`. Only the gen-9 sync point is on the pool, and the head commit is
+/// NOT, so picking the head (or the older gen-4 point) is a `NO_SUCH_RECORD`.
+#[tokio::test]
+async fn a_workspace_starting_on_a_new_node_checks_out_its_latest_sync_point_over_its_head() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let outcome = rehost_outcome(tmp.path(), &["sync-ws-1-bbbbbbbb"]).await;
+
+    assert_ne!(
+        outcome,
+        rustic_git_workspaces::engine::ops::NO_SUCH_RECORD,
+        "the checkout must have been asked for the local sync point, not the absent head commit"
+    );
+}
+
+/// The other half, and the reason `latest_transient` intersects with `local_commits`: a replica one
+/// pull cycle behind sees a `Ready` transient whose subvolume has not landed here yet. Checking
+/// that out is a PERMANENT `NO_SUCH_RECORD` with no fallback, where `head` — which this node DOES
+/// hold — would have started the worktree perfectly well. Neither sync point is on the pool here,
+/// so a sharp fall back to the head is the only acceptable outcome.
+#[tokio::test]
+async fn a_sync_point_this_node_has_not_pulled_yet_falls_back_to_the_head() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let outcome = rehost_outcome(tmp.path(), &["ws-1-aaaaaaaa"]).await;
+
+    assert_ne!(
+        outcome,
+        rustic_git_workspaces::engine::ops::NO_SUCH_RECORD,
+        "an unpulled sync point must not be checked out; the local head must be"
+    );
 }
 
 const WS_CLONE_OBJ: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-clone";
@@ -1385,8 +1479,11 @@ fn env_vol() -> serde_json::Value {
 fn stop_commit(status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "stop-env-1", "uid": "stop-uid-1"},
-        "spec": {"volume": "env-1"},
+        // `creationTimestamp` is what the whole-wait bound measures from — an hour ago, so a test
+        // that wants the bound to bite only has to set the timeout, and one that does not is
+        // unaffected because it never waits on the bound at all.
+        "metadata": {"name": "stop-env-1", "uid": "stop-uid-1", "creationTimestamp": rfc3339_ago(3600)},
+        "spec": {"volume": "env-1", "owner": "acme", "worktree": "env-1", "transient": true},
         "status": status,
     })
 }
@@ -1407,6 +1504,235 @@ fn ws_stop_routes() -> Vec<Route> {
 const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-env-1";
 const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
 const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
+const REPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
+const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1";
+
+/// `WS_STOP_FLUSH_TIMEOUT_SECS` is process-global and `flush_timeout()` reads it at call time, so
+/// every test that SETS it takes this lock. The coupling is one-way and worth stating: a test that
+/// never sets the var still races one that does, so any test whose outcome depends on the timeout
+/// must take the lock and set the value it wants explicitly rather than relying on the default.
+/// Every other stop test is deliberately timeout-independent (already cut, already replicated).
+static FLUSH_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Sets the timeout for the guard's lifetime and restores the default (unset) on drop.
+struct FlushTimeout(std::sync::MutexGuard<'static, ()>);
+
+impl FlushTimeout {
+    fn set(secs: &str) -> Self {
+        let g = FLUSH_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("WS_STOP_FLUSH_TIMEOUT_SECS", secs);
+        FlushTimeout(g)
+    }
+}
+
+impl Drop for FlushTimeout {
+    fn drop(&mut self) {
+        std::env::remove_var("WS_STOP_FLUSH_TIMEOUT_SECS");
+    }
+}
+
+fn rfc3339_ago(secs: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
+}
+
+/// A `VolumeReplicaList` as the flush gate lists it.
+fn replica_list(rows: &[(&str, &str, Option<&str>)]) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList",
+        "metadata": {"resourceVersion": "1"},
+        "items": rows.iter().map(|(node, phase, last)| serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": crd::replica_name("env-1", node), "uid": format!("vr-{node}")},
+            "spec": {"volume": "env-1", "node": node},
+            "status": {"phase": phase, "branches": {}, "lastSyncAt": last},
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Everything a stopping environment touches before the flush gate: the drain, and the volume.
+fn env_flush_routes(stop: serde_json::Value, replicas: serde_json::Value) -> Vec<Route> {
+    vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+        Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[])),
+        rustic_git_workspaces::kube_test::get(STOP_REQ, stop),
+        rustic_git_workspaces::kube_test::get(REPLICAS, replicas),
+        Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+    ]
+}
+
+/// Ready is not landed. The whole point of the final sync point is that another node holds it, so
+/// a cut only this node has leaves the services up — tearing down here would strand the last
+/// minutes of work on one disk.
+#[tokio::test]
+async fn a_stop_waits_for_a_replica_to_hold_the_flush() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(5)}));
+    // Freshly created, so the whole-wait bound is nowhere near — this test is about the replica,
+    // not the timeout.
+    ready["metadata"]["creationTimestamp"] = serde_json::json!(rfc3339_ago(5));
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replica_list(&[("node-a", "Synced", Some(&rfc3339_ago(1)))])));
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "only this node holds it: {:?}", rec.calls());
+    assert_eq!(rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap()["status"]["conditions"][0]["reason"], "FlushBeforeStop");
+}
+
+/// Another node reporting `Synced` at or after the cut became Ready is the landing signal.
+#[tokio::test]
+async fn a_stop_proceeds_once_another_replica_is_synced_after_the_cut() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(30)}));
+    // An offset other than Z on purpose: these two stamps are parsed as instants, never compared
+    // as strings — lexically this one sorts BEFORE the `readyAt` above.
+    let replicas = replica_list(&[
+        ("node-a", "Synced", Some(&rfc3339_ago(60))),
+        ("node-b", "Synced", Some(&(chrono::Utc::now() - chrono::Duration::seconds(1)).with_timezone(&chrono::FixedOffset::east_opt(5 * 3600).unwrap()).to_rfc3339())),
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replicas));
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "replicated: teardown proceeds: {:?}", rec.calls());
+    // C1: the stop CR is the stopped worktree's ONE remaining sync point — `status.head` never
+    // names it, the last beat transient was reclaimed when it turned Ready, and every replica
+    // drops a CR-less subvolume within a cycle. Deleting it here ends the worktree with zero sync
+    // points anywhere and sends a later re-host all the way back to `head`.
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "the stop CR must survive teardown: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "Stopped");
+}
+
+/// A stop that can never be replicated must still finish — a workspace nobody can stop is worse
+/// than one whose last sync point lives on a single node — but it says so.
+#[tokio::test]
+async fn a_stop_tears_down_after_the_flush_timeout_with_a_condition() {
+    let _env = FlushTimeout::set("0");
+    let tmp = tempfile::tempdir().unwrap();
+    let ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(5)}));
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replica_list(&[("node-a", "Synced", Some(&rfc3339_ago(1)))])));
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "past the bound: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "stopped");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "FlushUnreplicated");
+}
+
+/// The bound covers the WHOLE wait, not just the replicated leg. `commit_worktree` is keep-biased
+/// and retries a failing cut `Working` forever, so a worktree whose snapshot can never be taken
+/// would otherwise park its parent's teardown for good — the pod kept alive by a gate that can
+/// never open.
+#[tokio::test]
+async fn a_stop_whose_cut_never_becomes_ready_tears_down_after_the_timeout() {
+    let _env = FlushTimeout::set("0");
+    let tmp = tempfile::tempdir().unwrap();
+    let wedged = stop_commit(serde_json::json!({"phase": "working"}));
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(wedged, replica_list(&[])));
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "a wedged cut must not park: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "FlushUnreplicated");
+}
+
+/// The workspace half of the same gate: the pod is what keeps the worktree changing, so the cut
+/// happens first and the delete waits on it landing.
+#[tokio::test]
+async fn a_workspace_stop_cuts_a_sync_point_before_deleting_the_pod() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx1, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::not_found(WS_STOP_REQ),
+            rustic_git_workspaces::kube_test::post(
+                "/apis/rustic-git.io/v1alpha1/snapshots",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                                   "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid"},
+                                   "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true}}),
+            ),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        ],
+    );
+
+    rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx1).await.unwrap();
+    let cut = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots");
+    assert_eq!(cut.len(), 1, "one sync point: {:?}", rec.calls());
+    assert_eq!(cut[0]["spec"]["transient"], true, "a sync point, not a commit a user sees");
+    assert_eq!(cut[0]["spec"]["worktree"], "ws-1", "the PARENT's name, not the volume's");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "no delete before it lands: {:?}", rec.calls());
+
+    // Second pass: the cut is Ready and node-b holds it.
+    drop(rec);
+    let tmp2 = tempfile::tempdir().unwrap();
+    let replicas = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList", "metadata": {"resourceVersion": "1"},
+        "items": [{"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                   "metadata": {"name": crd::replica_name("ws-1", "node-b"), "uid": "vr-b"},
+                   "spec": {"volume": "ws-1", "node": "node-b"},
+                   "status": {"phase": "Synced", "branches": {}, "lastSyncAt": rfc3339_ago(1)}}],
+    });
+    let (ctx2, rec) = ctx(
+        tmp2.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(
+                WS_STOP_REQ,
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                                   "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid"},
+                                   "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
+                                   "status": {"phase": "ready", "readyAt": rfc3339_ago(30)}}),
+            ),
+            rustic_git_workspaces::kube_test::get(REPLICAS, replicas),
+            Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx2).await.unwrap();
+    let calls = rec.calls();
+    assert!(calls.iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "landed: the pod goes: {calls:?}");
+    // C1: the pod goes, the stop CR STAYS — it is the stopped worktree's only sync point now.
+    assert!(!calls.iter().any(|c| c == &format!("DELETE {WS_STOP_REQ}")), "the stop CR must survive teardown: {calls:?}");
+    assert_eq!(rec.sent("PATCH", WS_STATUS).last().unwrap()["status"]["phase"], "stopped");
+}
+
+/// I3: a single-node region has nowhere for the bytes to go, so no peer can ever report `Synced`
+/// and the gate can only end in the timeout — ten minutes added to every stop in the region. With
+/// the node list saying there is no other pool node, the stop lands immediately and the condition
+/// says WHY, distinct from a flush that genuinely timed out.
+#[tokio::test]
+async fn a_stop_in_a_single_node_region_lands_immediately() {
+    let _env = FlushTimeout::set("600");
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(5)}));
+    // Freshly created: nowhere near the flush bound, so a wait here would be a real ten-minute one.
+    ready["metadata"]["creationTimestamp"] = serde_json::json!(rfc3339_ago(5));
+    let mut routes = env_flush_routes(ready, replica_list(&[]));
+    routes.push(rustic_git_workspaces::kube_test::get(
+        "/api/v1/nodes",
+        serde_json::json!({
+            "apiVersion": "v1", "kind": "NodeList", "metadata": {"resourceVersion": "1"},
+            "items": [{"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a", "uid": "n-a"}}],
+        }),
+    ));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "nowhere to replicate: no wait: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "stopped");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "FlushUnreplicated");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["message"], "no other node in the region holds replicas");
+}
 
 
 
@@ -1875,14 +2201,28 @@ async fn a_stopped_workspace_with_a_broken_volume_still_loses_its_pod() {
     let tmp = tempfile::tempdir().unwrap();
     let ns = crd::ws_namespace("alice", "");
     let pod_del = format!("/api/v1/namespaces/{ns}/pods/ws-1");
+    // An EXPLICIT wedged cut, not the fixture's default "already replicated" answer: a broken
+    // volume is exactly the case whose `commit_worktree` never succeeds, and a stop gated on that
+    // cut is how this invariant regresses. The bound is what saves it, so the timeout is set here.
+    let _env = FlushTimeout::set("0");
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
+            rustic_git_workspaces::kube_test::get(
+                WS_STOP_REQ,
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                                   "metadata": {"name": "stop-ws-1", "uid": "wedged", "creationTimestamp": rfc3339_ago(3600)},
+                                   "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
+                                   "status": {"phase": "working"}}),
+            ),
             Route { method: "DELETE", path: pod_del.clone(), status: 200, body: serde_json::json!({"kind": "Status"}) },
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
-    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "volumeRef": "ws-1"}));
+    // With a `podRef`: a workspace that never ran skips the flush entirely, which would make this
+    // test pass without ever exercising the gate.
+    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "volumeRef": "ws-1",
+                                             "podRef": "ws-alice/ws-1"}));
     w.spec.desired_state = crd::DesiredState::Stopped;
 
     let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
@@ -1893,7 +2233,9 @@ async fn a_stopped_workspace_with_a_broken_volume_still_loses_its_pod() {
         "the stop must not depend on the Volume at all: {:?}",
         rec.calls()
     );
-    assert_eq!(rec.sent("PATCH", WS_STATUS).last().unwrap()["status"]["phase"], "stopped");
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "stopped");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "FlushUnreplicated");
 }
 
 /// The home is on the shared NFS mount now (spec 2026-09-01): a stop deletes the pod straight
@@ -3065,5 +3407,42 @@ async fn commit_model_restore_in_place_never_calls_the_registry() {
     assert!(
         !rec.calls().iter().any(|c| c.contains("get_history") || c.contains("registry")),
         "commit-model restore must never fetch from the registry: {:?}", rec.calls()
+    );
+}
+
+/// The sync beat is keep-biased about not knowing: `Engine::generation` shells out to `btrfs
+/// subvolume show`, which cannot work here, so this asserts the beat WARNS AND CREATES NOTHING on
+/// a generation error — cutting on "we do not know" would cut a redundant sync point every single
+/// pass. The decision itself (has the generation moved?) is a pure function tested in `sync.rs`;
+/// no fake-`generation` seam is worth carrying for a second test of it.
+#[tokio::test]
+async fn the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a",
+                                             "volumeRef": "vol-1", "podRef": "ws-1"}))]
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/environments",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList",
+                                   "metadata": {}, "items": []}),
+            ),
+        ],
+    );
+
+    rustic_git_agent::sync::sync_beat(&ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c == "GET /apis/rustic-git.io/v1alpha1/snapshots"),
+        "the beat must look for this worktree's existing sync point: {:?}", rec.calls()
+    );
+    assert!(
+        rec.sent("POST", SNAPSHOTS_LIST).is_empty(),
+        "an unreadable generation must cut nothing: {:?}", rec.sent("POST", SNAPSHOTS_LIST)
     );
 }

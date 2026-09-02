@@ -239,17 +239,6 @@ const SEED_DIR: &str = "/workspace";
 /// Everything under here except `workspaces/` is the same in every workspace the person opens
 /// on this node.
 pub const HOME_DIR: &str = "/home/kl";
-/// The paths a MIGRATION must not copy out of an old per-node btrfs home into the shared NFS
-/// export: the six directories the old design kept as nested subvolumes (package caches, the
-/// editors' remote servers) and never pushed. They are dead weight on the export — the node-local
-/// `homecache` volume rebuilds every one of them for free on first use — so this is the rsync
-/// exclusion list in `deploy/k3s/README.md`'s migration step, and nothing else.
-///
-/// It does NOT describe what the pod mounts: the running layout redirects caches by ENV VAR
-/// (`login_env` -> `HOME_CACHE_DIR`) and mounts four hardcoded `homecache` subPaths, which are
-/// deliberately not these paths. Cross-check `workspace_pod`, never this list, for that.
-pub const HOME_LOCAL_DIRS: [&str; 6] =
-    [".cache", ".npm", ".cargo/registry", ".local/share/pnpm", ".vscode-server", ".cursor-server"];
 /// Where the node-local cache volume lands inside the home: tool caches redirected here (via
 /// `login_env`) never touch the NFS-backed home, so a cold cache never blocks on network I/O and a
 /// warm one never crosses it either.
@@ -621,12 +610,6 @@ fn host_dir(name: &str, path: String) -> Volume {
     }
 }
 
-/// The store, read-only. Mounted at its root because the profile lives under it too; the
-/// individual mounts below pick the two subdirectories the pod may see.
-fn nix_volume() -> Volume {
-    host_dir("nix", NIX_ROOT.to_string())
-}
-
 /// This workspace's rendered `resolv.conf`. A FILE, and mounted as one: the agent rewrites it in
 /// place precisely because the pod holds the inode.
 fn attach_volume(pool: &str, ws_id: &str) -> Volume {
@@ -957,7 +940,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodConte
                 homecache_volume(ctx.pool, &spec.owner),
                 workspaces_volume(),
                 live_worktree_volume(ctx.pool, id, ws_id),
-                nix_volume(),
+                // The store, read-only, at its root because the profile lives under it too; the
+                // mounts pick the two subdirectories the pod may see.
+                host_dir("nix", NIX_ROOT.to_string()),
                 attach_volume(ctx.pool, ws_id),
                 user_key_volume(init.is_some()),
             ];

@@ -39,7 +39,6 @@ reqwest012 = { package = "reqwest", version = "0.12", default-features = false, 
 futures = { workspace = true }
 object_store = { workspace = true }
 bytes = { workspace = true }
-zstd = { workspace = true }
 sha2 = { workspace = true }
 libc = { workspace = true }
 reqwest = { workspace = true }

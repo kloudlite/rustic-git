@@ -37,26 +37,6 @@ use rustic_git_core::jwt::Jwt;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Team-membership lookup, kept behind a trait rather than a direct dependency on
-/// `rustic_git_pulls::directory::Directory` (mongo-backed, heavy to construct) so unit tests can
-/// supply a closure/stub instead. Production wires `Directory` in via an adapter in `bins/api`.
-/// One method only: "is this caller in this team" reduces to "which teams is the caller in", and
-/// list_env needs the full list anyway.
-#[async_trait::async_trait]
-pub trait MembershipCheck: Send + Sync {
-    /// Every team slug `user` belongs to. Called once per request, no cache —
-    /// ponytail: an in-process cache would cut the N+1 here, add one if this ever shows up hot.
-    async fn teams_for(&self, user: &str) -> Vec<String>;
-}
-
-/// Is this CLI login still valid? A `cli` JWT carries a `jti` whose row in the directory IS the
-/// revocation list — the same rule `crates/api`'s `user_identity` enforces, behind a trait for the
-/// same reason `MembershipCheck` is one.
-#[async_trait::async_trait]
-pub trait CliTokenCheck: Send + Sync {
-    async fn is_live(&self, jti: &str) -> bool;
-}
-
 /// What every workspace of an owner carries about them, from the directory the api tier owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnerMaterial {
@@ -67,11 +47,38 @@ pub struct OwnerMaterial {
     pub git_email: String,
 }
 
+/// The three lookups this api makes against the platform directory, kept behind a trait rather
+/// than a direct dependency on `rustic_git_pulls::directory::Directory` (mongo-backed, heavy to
+/// construct) so unit tests can supply a stub instead. Production wires `Directory` in via an
+/// adapter in `bins/api`.
+///
+/// Every method defaults to the UNWIRED answer, so a test stub implements only the lookups its
+/// case exercises. That is NOT the same as a missing directory: `teams_for`'s default returns an
+/// empty Vec, which `resolve_new_owner` reads as "asked and answered", so a partial stub gets a
+/// 403 "not a member" where no directory at all gets a 503. Only test stubs are partial —
+/// production wires the full `Dir` adapter in `bins/api`.
 #[async_trait::async_trait]
-pub trait AuthorizedKeys: Send + Sync {
-    /// `None` when the lookup FAILED — distinct from `Some` with an empty `authorized_keys`,
-    /// which is a user with no keys and is written as an empty file.
-    async fn for_owner(&self, owner: &str) -> Option<OwnerMaterial>;
+pub trait Directory: Send + Sync {
+    /// Every team slug `user` belongs to. Called once per request, no cache —
+    /// ponytail: an in-process cache would cut the N+1 here, add one if this ever shows up hot.
+    async fn teams_for(&self, _user: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Is this CLI login still valid? A `cli` JWT carries a `jti` whose row in the directory IS
+    /// the revocation list — the same rule `crates/api`'s `user_identity` enforces. `false`
+    /// refuses the token, which is what an unwired directory must do: a 30-day token nobody can
+    /// cancel is the worse failure.
+    async fn is_live(&self, _jti: &str) -> bool {
+        false
+    }
+
+    /// The owner's ssh keys and git identity. `None` when the lookup FAILED — distinct from `Some`
+    /// with an empty `authorized_keys`, which is a user with no keys and is written as an empty
+    /// file.
+    async fn for_owner(&self, _owner: &str) -> Option<OwnerMaterial> {
+        None
+    }
 }
 
 pub struct ApiState {
@@ -79,16 +86,11 @@ pub struct ApiState {
     pub jwt: Arc<Jwt>,
     /// Emails allowed to hit the admin-gated region routes. See module docs.
     pub admins: HashSet<String>,
-    /// Team lookups for team-owned environments (see module docs' Part 2). `None` means no
-    /// directory is wired (dev, or the directory tier is down) — team envs answer 503 rather than
-    /// silently behaving as if the caller has no teams.
-    pub membership: Option<Arc<dyn MembershipCheck>>,
-    /// `None` means no directory is wired: CLI tokens are then refused outright rather than
-    /// accepted unrevokable — a 30-day token nobody can cancel is the worse failure.
-    pub cli_tokens: Option<Arc<dyn CliTokenCheck>>,
-    /// The owner's ssh keys, for the `authorized_keys` half of the workspace key Secret. `None`
-    /// (dev, no directory) installs the private key alone, exactly as before ssh existed.
-    pub authorized_keys: Option<Arc<dyn AuthorizedKeys>>,
+    /// Team membership, CLI-token revocation and the owner's ssh keys. `None` means no directory
+    /// is wired (dev, or the directory tier is down): team envs answer 503 rather than silently
+    /// behaving as if the caller has no teams, CLI tokens are refused outright, and a workspace
+    /// comes up with the private key alone exactly as before ssh existed.
+    pub directory: Option<Arc<dyn Directory>>,
     /// `None` when no kubeconfig/in-cluster config is available: every workspace, environment and
     /// volume route answers 503 rather than not existing.
     pub kube: Option<kube::Client>,
@@ -108,27 +110,15 @@ impl ApiState {
             store,
             jwt,
             admins,
-            membership: None,
-            cli_tokens: None,
-            authorized_keys: None,
+            directory: None,
             kube: None,
             keys: None,
             upstream: None,
         }
     }
 
-    pub fn with_membership(mut self, membership: Arc<dyn MembershipCheck>) -> Self {
-        self.membership = Some(membership);
-        self
-    }
-
-    pub fn with_cli_tokens(mut self, check: Arc<dyn CliTokenCheck>) -> Self {
-        self.cli_tokens = Some(check);
-        self
-    }
-
-    pub fn with_authorized_keys(mut self, keys: Arc<dyn AuthorizedKeys>) -> Self {
-        self.authorized_keys = Some(keys);
+    pub fn with_directory(mut self, directory: Arc<dyn Directory>) -> Self {
+        self.directory = Some(directory);
         self
     }
 
@@ -149,7 +139,7 @@ impl ApiState {
 }
 
 async fn teams_for(s: &ApiState, caller: &str) -> Vec<String> {
-    match &s.membership {
+    match &s.directory {
         Some(m) => m.teams_for(caller).await,
         None => Vec::new(),
     }
@@ -164,7 +154,6 @@ async fn may_act_on(s: &ApiState, caller: &str, owner: &str) -> bool {
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/regions", post(create_region).get(list_regions))
-        .route("/v1/regions/{id}/rotate-token", post(rotate_region_token))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws).patch(patch_ws_packages))
@@ -202,17 +191,6 @@ fn rid(prefix: &str) -> String {
     format!("{prefix}-{}", rustic_git_core::hex(&b))
 }
 
-/// Header carrying the per-region agent token, mirroring `rustic_git_core::peer::PEER_HEADER`'s
-/// naming and constant-time-compare style.
-pub const WS_AGENT_HEADER: &str = "x-rustic-git-ws-agent-token";
-
-fn random_token() -> String {
-    use rand::RngCore;
-    let mut b = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut b);
-    rustic_git_core::hex(&b)
-}
-
 /// The owner identity for everything workspace/environment/volume-shaped is the USERNAME,
 /// not the email: volume paths (`vol/{owner}/{name}`) go through the same owner-name
 /// validation as git repos, and an email's `@`/`.` can never route there. A token without a
@@ -225,7 +203,7 @@ async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<Str
     // ponytail: one directory read per CLI request, no cache — same tradeoff `teams_for` takes;
     // add a short-TTL cache if it shows up hot, remembering it delays a revocation by its TTL.
     if let Some(jti) = jti {
-        match &state.cli_tokens {
+        match &state.directory {
             Some(check) if check.is_live(&jti).await => {}
             _ => return Err(unauthorized()),
         }
@@ -273,38 +251,6 @@ fn active_status() -> String {
     "active".into()
 }
 
-/// Mint a fresh agent token for an existing region, returning it once.
-///
-/// `create_region` deliberately PRESERVES an existing token, so re-registering a region cannot
-/// rotate it — which left a leaked agent token with no way to be revoked short of editing the
-/// store by hand. That is the gap this closes: a token that cannot be rotated is a token that
-/// stays valid forever after it leaks.
-///
-/// The new token is returned in the response and nowhere else, the same contract `create_region`
-/// has for a first mint. Every agent in the region must be updated before or shortly after this
-/// call — the old token stops working the moment it lands.
-async fn rotate_region_token(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Response, Response> {
-    let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
-    let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
-    require_admin(&s, &email)?;
-
-    let mut r = s
-        .store
-        .regions()
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(not_found)?;
-    r.agent_token = random_token();
-    s.store.put_region(&r).await.map_err(store_err)?;
-    Ok((StatusCode::OK, Json(r)).into_response())
-}
-
 async fn create_region(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -315,24 +261,12 @@ async fn create_region(
     let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
     let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
     require_admin(&s, &email)?;
-    // Existing region re-registered without a token yet: generate and persist one now rather
-    // than leaving agents unable to authenticate. Returned once, here, on the create response —
-    // callers must save it (same shape as any bearer secret minted on creation).
-    let agent_token =
-        s.store.regions().await.map_err(store_err)?.into_iter().find(|r| r.id == body.id).and_then(|r| {
-            if r.agent_token.is_empty() {
-                None
-            } else {
-                Some(r.agent_token)
-            }
-        });
     let r = Region {
         id: body.id,
         name: body.name,
         storage_account: body.storage_account,
         blob_container: body.blob_container,
         status: if body.status == "inactive" { "inactive".into() } else { "active".into() },
-        agent_token: agent_token.unwrap_or_else(random_token),
     };
     s.store.put_region(&r).await.map_err(store_err)?;
     Ok((StatusCode::CREATED, Json(r)).into_response())
@@ -343,11 +277,7 @@ async fn list_regions(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     caller(&s, &headers).await?;
-    // The token is a secret, returned once on creation only — never echoed back on list.
-    let mut regions = s.store.regions().await.map_err(store_err)?;
-    for r in &mut regions {
-        r.agent_token.clear();
-    }
+    let regions = s.store.regions().await.map_err(store_err)?;
     Ok(Json(regions).into_response())
 }
 
@@ -774,7 +704,7 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
     // the owner out of a workspace they can otherwise reach, and the next call rewrites it anyway.
     // Unwired (dev, no directory) writes NOTHING for the same reason a failed lookup does: an
     // empty `authorized_keys` is not "no keys yet", it is the owner locked out of their workspace.
-    let Some(lookup) = &s.authorized_keys else { return };
+    let Some(lookup) = &s.directory else { return };
     let Some(material) = lookup.for_owner(owner).await else {
         tracing::warn!(%owner, "could not read the owner's ssh keys; leaving the secret alone");
         return;
@@ -1253,7 +1183,7 @@ async fn resolve_new_owner(s: &ApiState, caller: &str, owner: Option<String>) ->
     if owner == caller {
         return Ok(owner);
     }
-    match &s.membership {
+    match &s.directory {
         None => Err((StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response()),
         Some(_) if may_act_on(s, caller, &owner).await => Ok(owner),
         Some(_) => Err((StatusCode::FORBIDDEN, "not a member of that team").into_response()),
@@ -1648,13 +1578,14 @@ async fn create_commit(
             parent: parent.unwrap_or_default(),
             message,
             pinned: false,
+            transient: false,
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, volume));
     // `status` on CREATE is stored verbatim (the subresource split only governs UPDATE/PATCH), so
     // this is how the object is born `Working` instead of the schema's `Pending` default —
     // `reconcile_commit` only ever acts on `Working`.
-    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, size_bytes: None });
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())
 }
@@ -2146,13 +2077,13 @@ mod tests {
     /// an ssh key add never reached that team's workspaces.
     #[tokio::test]
     async fn a_dns_truncated_team_namespace_is_still_the_owners() {
-        use super::{owners_namespaces, ApiState, MembershipCheck};
+        use super::{owners_namespaces, ApiState, Directory};
         use std::sync::Arc;
 
         let long = "a".repeat(60);
         struct Stub(String);
         #[async_trait::async_trait]
-        impl MembershipCheck for Stub {
+        impl Directory for Stub {
             async fn teams_for(&self, _user: &str) -> Vec<String> {
                 vec![self.0.clone()]
             }
@@ -2162,7 +2093,7 @@ mod tests {
             Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
             Default::default(),
         )
-        .with_membership(Arc::new(Stub(long.clone())));
+        .with_directory(Arc::new(Stub(long.clone())));
 
         let ns = crd::ws_namespace("karthik", &long);
         assert!(ns.len() <= 63 && !ns.ends_with("-karthik"), "this team must be hashed: {ns}");

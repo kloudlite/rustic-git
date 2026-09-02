@@ -1,9 +1,9 @@
-//! Team-owned environments: authorization via a stub `MembershipCheck` (a real `Directory` is
-//! mongo-backed and heavy to spin up for a unit test — see `ApiState::membership`'s doc), against
+//! Team-owned environments: authorization via a stub `Directory` (the real one is mongo-backed
+//! and heavy to spin up for a unit test — see `ApiState::directory`'s doc), against
 //! a mocked API server for the objects the handlers write.
 
 use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState, MembershipCheck};
+use rustic_git_workspaces::api::{router, ApiState, Directory};
 use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::{json, Value};
@@ -17,7 +17,7 @@ const NODE: &str = "node-a";
 struct StubMembership;
 
 #[async_trait::async_trait]
-impl MembershipCheck for StubMembership {
+impl Directory for StubMembership {
     async fn teams_for(&self, user: &str) -> Vec<String> {
         if user == "karthik" { vec!["acme".into()] } else { vec![] }
     }
@@ -62,14 +62,13 @@ async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
             storage_account: "acct".into(),
             blob_container: "wslayers".into(),
             status: "active".into(),
-            agent_token: "tok".into(),
         })
         .await
         .unwrap();
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let mut state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new());
     if with_membership {
-        state = state.with_membership(Arc::new(StubMembership));
+        state = state.with_directory(Arc::new(StubMembership));
     }
     let (client, rec) = mock_client(routes);
     state = state.with_kube(client);

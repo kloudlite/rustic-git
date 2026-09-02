@@ -1145,13 +1145,6 @@
                   "spec": {
                     "description": "Which node an owner's work lands on. One object per `{region, owner}`.\n\nWatched by the agent on `spec.nodeName`: this object is what makes an owner's per-team\nnamespaces exist on that node.",
                     "properties": {
-                      "homeQuotaGb": {
-                        "default": 2,
-                        "description": "The cap on the owner's per-node btrfs home, in GiB, back when there was one. Retained so\nexisting objects keep parsing (and defaulted so older ones do too); read by nothing — the\nNFS home has no qgroup and no `Volume` to copy this onto.",
-                        "format": "uint64",
-                        "minimum": 0.0,
-                        "type": "integer"
-                      },
                       "nodeName": {
                         "description": "The node the owner used to be pinned to. Still stamped by `claim::ensure_binding` and still\nrequired by the schema so every existing object parses — but read by NOTHING: the home is a\nregion-shared NFS directory now, so a binding is not node-scoped and every node reconciles\nevery binding.",
                         "type": "string"
@@ -1306,6 +1299,11 @@
                         "description": "Keeps this commit out of any future retention sweep. Never cleared by a controller.",
                         "type": "boolean"
                       },
+                      "transient": {
+                        "default": false,
+                        "description": "A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a\nreplica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and\nretained ONE per worktree — see `snapshot::retain`. `push` never sets this.",
+                        "type": "boolean"
+                      },
                       "volume": {
                         "type": "string"
                       },
@@ -1338,11 +1336,10 @@
                         ],
                         "type": "string"
                       },
-                      "sizeBytes": {
-                        "format": "uint64",
-                        "minimum": 0.0,
+                      "readyAt": {
+                        "description": "When `phase` became `Ready`, RFC3339. The instant a replica's `lastSyncAt` is compared\nagainst to decide whether it holds THIS cut — `lastTransitionTime` on a condition would do,\nbut a `Snapshot` has no conditions.",
                         "nullable": true,
-                        "type": "integer"
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -1445,6 +1442,7 @@
                         "type": "object"
                       },
                       "lastSyncAt": {
+                        "description": "The instant the pull pass that produced this row LISTED the volume's snapshots — never the\ninstant the row was written. A pass takes minutes; anything that turned Ready after the\nlisting was invisible to it, so a write-time stamp would claim a commit this replica\nprovably does not hold. A stop's flush gate compares this against the stop transient's\n`readyAt`, and that comparison is only sound with the listing instant.",
                         "nullable": true,
                         "type": "string"
                       },

@@ -34,10 +34,6 @@ use axum::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn now_ms() -> i64 {
-    crate::ownership::now_ms() as i64
-}
-
 /// The repo's own database, migrated. `Err` is the response to return as-is.
 ///
 /// The directory state is whatever this node was started with. Configured-but-unreachable fails
@@ -72,7 +68,7 @@ async fn emit(app: &App, kind: crate::events::Kind, pr: &PullRequest, actor: &st
             repo: pr.repo.clone(),
             number: pr.number,
             actor: actor.to_string(),
-            at_ms: now_ms(),
+            at_ms: crate::ownership::now_ms() as i64,
             title: pr.title.clone(),
             base: pr.base.clone(),
             head: pr.head.clone(),
@@ -187,7 +183,7 @@ pub(super) async fn api_pull_open(
         head: head.to_string(),
         state: PullState::Open,
         author: new.author.clone(),
-        created_at_ms: now_ms(),
+        created_at_ms: crate::ownership::now_ms() as i64,
         merged_at_ms: None,
         comments: Vec::new(),
         merge: None,
@@ -222,7 +218,7 @@ pub(super) async fn api_pull_comment(
         return (StatusCode::BAD_REQUEST, "say something").into_response();
     }
     let pr = match update(&app, &owner, &name, number, |pr| {
-        pr.comments.push(Comment { author: new.author.clone(), body, at_ms: now_ms() });
+        pr.comments.push(Comment { author: new.author.clone(), body, at_ms: crate::ownership::now_ms() as i64 });
         None
     })
     .await
@@ -274,7 +270,7 @@ pub(super) async fn api_pull_merge(
             state: crate::pulls::MergeState::Queued,
             strategy,
             requested_by: who.clone(),
-            requested_at_ms: now_ms(),
+            requested_at_ms: crate::ownership::now_ms() as i64,
             claimed_at_ms: None,
             claimed_by: None,
             detail: None,
@@ -473,7 +469,7 @@ pub(super) async fn api_pull_outcome(
             OutcomeState::Merged => {
                 pr.state = PullState::Merged;
                 if pr.merged_at_ms.is_none() {
-                    pr.merged_at_ms = Some(now_ms());
+                    pr.merged_at_ms = Some(crate::ownership::now_ms() as i64);
                 }
                 // A merged change already records that it merged, in its own state; `Queued` is
                 // not a state a finished job stays in, so clearing is the honest end.

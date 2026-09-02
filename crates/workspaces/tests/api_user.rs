@@ -5,7 +5,7 @@
 //! the handler POSTed or PATCHed, read back off the mock's recorder.
 
 use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState, MembershipCheck};
+use rustic_git_workspaces::api::{router, ApiState, Directory};
 use rustic_git_workspaces::kube_test::{get, mock_client, post, stub_registry, Recorder, Route};
 use rustic_git_workspaces::upstream::Upstream;
 use rustic_git_workspaces::store::{MemStore, MetaStore};
@@ -134,7 +134,7 @@ async fn server_with_registry(routes: Vec<Route>, registry_base: String) -> Serv
 struct StubMembership;
 
 #[async_trait::async_trait]
-impl rustic_git_workspaces::api::MembershipCheck for StubMembership {
+impl Directory for StubMembership {
     async fn teams_for(&self, user: &str) -> Vec<String> {
         if user == "karthik" { vec!["acme".into()] } else { vec![] }
     }
@@ -147,7 +147,7 @@ async fn server_with_teams(routes: Vec<Route>, registry_base: String) -> Server 
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
         .with_kube(client)
-        .with_membership(Arc::new(StubMembership))
+        .with_directory(Arc::new(StubMembership))
         .with_upstream(Arc::new(Upstream::new(registry_base, "peer-secret")));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -197,7 +197,6 @@ async fn region(store: &MemStore, id: &str) {
             storage_account: "acct".into(),
             blob_container: "wslayers".into(),
             status: "active".into(),
-            agent_token: format!("tok-{id}"),
         })
         .await
         .unwrap();
@@ -424,72 +423,6 @@ async fn region_create_requires_admin() {
     assert_eq!(resp.status(), 201);
 }
 
-/// A leaked agent token must be revocable. `create_region` preserves an existing token by design,
-/// so without this endpoint the only way to invalidate one was editing the store by hand.
-#[tokio::test]
-async fn rotating_a_region_token_replaces_it_and_is_admin_only() {
-    let s = server_with(&["admin@example.com"], None).await;
-    let client = reqwest::Client::new();
-    let admin = token(&s.jwt, "admin");
-
-    let created: serde_json::Value = client
-        .post(format!("{}/v1/regions", s.base))
-        .bearer_auth(&admin)
-        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let first = created["agent_token"].as_str().unwrap().to_string();
-    assert!(!first.is_empty(), "a region is created with a token");
-
-    // Re-registering must NOT rotate — that is the behaviour rotate exists to work around.
-    let again: serde_json::Value = client
-        .post(format!("{}/v1/regions", s.base))
-        .bearer_auth(&admin)
-        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(again["agent_token"].as_str().unwrap(), first, "re-register keeps the token");
-
-    // A non-admin cannot rotate somebody's region credential.
-    let resp = client
-        .post(format!("{}/v1/regions/centralindia/rotate-token", s.base))
-        .bearer_auth(token(&s.jwt, "karthik"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 403);
-
-    let rotated: serde_json::Value = client
-        .post(format!("{}/v1/regions/centralindia/rotate-token", s.base))
-        .bearer_auth(&admin)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let second = rotated["agent_token"].as_str().unwrap();
-    assert_ne!(second, first, "rotation must actually replace the token");
-    assert!(!second.is_empty());
-
-    // Unknown region is a 404, not a silently-created one.
-    let resp = client
-        .post(format!("{}/v1/regions/nosuch/rotate-token", s.base))
-        .bearer_auth(&admin)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-}
-
 /// Same rule as `create_ws`, on the environment side.
 #[tokio::test]
 async fn create_env_writes_exactly_one_unplaced_environment() {
@@ -711,7 +644,7 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
     let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
         .with_kube(client)
         .with_keys(keys)
-        .with_authorized_keys(Arc::new(StubKeys));
+        .with_directory(Arc::new(StubKeys));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });
@@ -814,7 +747,7 @@ async fn patch_merges_the_package_list_and_echoes_the_doc() {
 struct StubCliTokens(bool);
 
 #[async_trait::async_trait]
-impl rustic_git_workspaces::api::CliTokenCheck for StubCliTokens {
+impl Directory for StubCliTokens {
     async fn is_live(&self, _jti: &str) -> bool {
         self.0
     }
@@ -827,7 +760,7 @@ async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
         .with_kube(client)
-        .with_cli_tokens(Arc::new(StubCliTokens(live)));
+        .with_directory(Arc::new(StubCliTokens(live)));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
@@ -971,7 +904,7 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
 struct StubKeys;
 
 #[async_trait::async_trait]
-impl rustic_git_workspaces::api::AuthorizedKeys for StubKeys {
+impl Directory for StubKeys {
     async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         Some(rustic_git_workspaces::api::OwnerMaterial {
             authorized_keys: "ssh-ed25519 AAAA karthik@laptop".into(),
@@ -989,13 +922,17 @@ fn ns_obj(name: &str, owner: &str) -> Value {
 }
 
 /// `karthik` is in `team1` and in a team whose name is long enough that the personal form of the
-/// name would have to be DNS-hashed.
+/// name would have to be DNS-hashed. Carries `StubKeys`' material too: one directory, so one stub.
 struct KeyTeams(String);
 
 #[async_trait::async_trait]
-impl MembershipCheck for KeyTeams {
+impl Directory for KeyTeams {
     async fn teams_for(&self, _user: &str) -> Vec<String> {
         vec!["team1".into(), self.0.clone()]
+    }
+
+    async fn for_owner(&self, owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+        StubKeys.for_owner(owner).await
     }
 }
 
@@ -1045,8 +982,7 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     )
     .with_kube(client)
     .with_keys(keys)
-    .with_membership(Arc::new(KeyTeams(long_team)))
-    .with_authorized_keys(Arc::new(StubKeys));
+    .with_directory(Arc::new(KeyTeams(long_team)));
 
     rustic_git_workspaces::api::refresh_user_keys(&state, "karthik").await;
 
@@ -1077,7 +1013,6 @@ async fn an_unknown_or_inactive_region_is_refused_on_create() {
         storage_account: "acct".into(),
         blob_container: "wslayers".into(),
         status: "inactive".into(),
-        agent_token: "tok".into(),
     };
     s.store.put_region(&inactive).await.unwrap();
     let tok = token(&s.jwt, "karthik");

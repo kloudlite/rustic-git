@@ -27,5 +27,3 @@ BUILD_DISK_GB=256
 # 0.0.0.0/0 here is a finding, not a default.
 ADMIN_CIDR=203.0.113.1/32
 
-# WS_REGISTRY_URL/WS_AGENT_TOKEN are gone with the object-store registry surface they pointed at
-# (Task 8) — the agent no longer reaches the server tier for anything.

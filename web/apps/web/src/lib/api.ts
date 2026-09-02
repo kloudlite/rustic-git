@@ -776,9 +776,9 @@ export function setWorkspacePackages(token: string, id: string, packages: string
   });
 }
 
-/** `crates/workspaces/src/model.rs::Region` — `agent_token` is cleared on list, so it is
- *  not modelled here. Narrowed to what the app reads (`listRegions`'s only caller uses just
- *  `status` and `id`); `name`, `storage_account`, `blob_container` have no reader anywhere. */
+/** `crates/workspaces/src/model.rs::Region`, narrowed to what the app reads (`listRegions`'s only
+ *  caller uses just `status` and `id`); `name`, `storage_account`, `blob_container` have no
+ *  reader anywhere. */
 export type ApiRegion = { id: string; status: string };
 
 export function listRegions(token: string) {

@@ -244,6 +244,11 @@ pub struct SnapshotSpec {
     /// Keeps this commit out of any future retention sweep. Never cleared by a controller.
     #[serde(default)]
     pub pinned: bool,
+    /// A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a
+    /// replica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and
+    /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this.
+    #[serde(default)]
+    pub transient: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -252,8 +257,11 @@ pub struct SnapshotStatus {
     /// `Working` until the btrfs subvolume is actually cut; `Ready` is the point past which the
     /// object is immutable.
     pub phase: Phase,
+    /// When `phase` became `Ready`, RFC3339. The instant a replica's `lastSyncAt` is compared
+    /// against to decide whether it holds THIS cut — `lastTransitionTime` on a condition would do,
+    /// but a `Snapshot` has no conditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
+    pub ready_at: Option<String>,
 }
 
 /// One node's copy of a volume's commit history — the per-node replica state the commit model
@@ -294,6 +302,11 @@ pub struct VolumeReplicaStatus {
     /// `head`/`durable` claim against this replica.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branches: BTreeMap<String, String>,
+    /// The instant the pull pass that produced this row LISTED the volume's snapshots — never the
+    /// instant the row was written. A pass takes minutes; anything that turned Ready after the
+    /// listing was invisible to it, so a write-time stamp would claim a commit this replica
+    /// provably does not hold. A stop's flush gate compares this against the stop transient's
+    /// `readyAt`, and that comparison is only sound with the listing instant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<String>,
 }
@@ -313,7 +326,7 @@ pub fn replica_name(volume: &str, node: &str) -> String {
 
 /// Four random bytes as 8 lowercase hex characters — the same `rand`-backed shape `api::rid` uses
 /// for every other object id in this crate, kept local because a `Snapshot` name is not prefixed.
-fn short_hex() -> String {
+pub fn short_hex() -> String {
     use rand::RngCore;
     let mut b = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut b);
@@ -646,18 +659,6 @@ pub struct OwnerBindingSpec {
     /// region-shared NFS directory now, so a binding is not node-scoped and every node reconciles
     /// every binding.
     pub node_name: String,
-    /// The cap on the owner's per-node btrfs home, in GiB, back when there was one. Retained so
-    /// existing objects keep parsing (and defaulted so older ones do too); read by nothing — the
-    /// NFS home has no qgroup and no `Volume` to copy this onto.
-    #[serde(default = "default_home_quota_gb")]
-    pub home_quota_gb: u64,
-}
-
-/// The default for the retained-but-unread `homeQuotaGb`. Kept only so an object written without
-/// the field still deserializes.
-pub const DEFAULT_HOME_QUOTA_GB: u64 = 2;
-fn default_home_quota_gb() -> u64 {
-    DEFAULT_HOME_QUOTA_GB
 }
 
 /// Two: one active copy plus one standby, the smallest number that survives a single node loss.
@@ -772,10 +773,7 @@ fn dns_label(raw: &str) -> String {
 /// a namespace that says what it is.
 pub fn env_namespace(id: &str) -> String {
     let id = id.to_lowercase();
-    match id.strip_prefix("env-") {
-        Some(rest) => format!("env-{rest}"),
-        None => format!("env-{id}"),
-    }
+    format!("env-{}", id.strip_prefix("env-").unwrap_or(&id))
 }
 
 /// Every CRD this repo owns, for YAML generation and for a startup precondition check.
@@ -923,17 +921,6 @@ mod tests {
         assert_eq!(back, spec);
     }
 
-    /// The binding is created by whichever agent wins a placement claim, which has no opinion
-    /// about quotas — so an object written without the field must read the default, and every
-    /// binding that exists today (none carry it) must keep parsing.
-    #[test]
-    fn a_binding_without_a_home_quota_reads_the_default() {
-        let b: OwnerBindingSpec =
-            serde_json::from_value(serde_json::json!({"owner": "Alice", "region": "r1", "nodeName": "n"})).unwrap();
-        assert_eq!(b.home_quota_gb, DEFAULT_HOME_QUOTA_GB);
-        assert_eq!(DEFAULT_HOME_QUOTA_GB, 2);
-    }
-
     #[test]
     fn a_volume_without_replicas_reads_the_default_of_two() {
         let v: VolumeSpec = serde_json::from_value(serde_json::json!({
@@ -963,7 +950,7 @@ mod tests {
     #[test]
     fn snapshot_spec_round_trips_with_empty_parent_and_no_message() {
         let spec = SnapshotSpec {
-            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false,
+            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false, transient: false,
         };
         let v = serde_json::to_value(&spec).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
@@ -972,10 +959,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_status_round_trips_and_omits_absent_size() {
-        let st = SnapshotStatus { phase: Phase::Working, size_bytes: None };
+    fn snapshot_status_round_trips_and_omits_absent_ready_at() {
+        let st = SnapshotStatus { phase: Phase::Working, ready_at: None };
         let v = serde_json::to_value(&st).unwrap();
-        assert!(!v.as_object().unwrap().contains_key("sizeBytes"));
+        assert!(!v.as_object().unwrap().contains_key("readyAt"));
         let back: SnapshotStatus = serde_json::from_value(v).unwrap();
         assert_eq!(back, st);
     }

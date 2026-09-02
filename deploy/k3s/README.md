@@ -20,7 +20,6 @@ Files, in the order a cluster is built:
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `rustic-git-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
-| `rotate-agent-token.sh` | Mint a new region agent token at the api and install it in the DaemonSet in one step. |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly backup of the SQLite datastore, the cluster identity and a YAML dump of every CRD object to Azure Blob. Restore procedure is in the script's trailing comment. |
 | `backup-controlplane.{service,timer}` | The systemd units that make "hourly" true — see "Control-plane backup" below. |
@@ -370,9 +369,10 @@ for HOME_VOL in $(kubectl get volumes --no-headers | awk '{print $1}' | grep '^h
 
   # On the node the OwnerBinding pinned (`kubectl get volume $HOME_VOL -o
   # jsonpath='{.status.nodeName}'`), copy the old home's content into the new export, EXCLUDING
-  # the six node-local cache dirs (k8s::HOME_LOCAL_DIRS, which exists for exactly this list —
-  # it is NOT what the pod mounts) — they were nested btrfs subvolumes the
-  # old design never pushed, and copying them across is dead weight the new node-local
+  # the six node-local cache dirs listed on the rsync below (they are NOT what the pod mounts —
+  # the running layout redirects caches by env var, `login_env` -> HOME_CACHE_DIR, onto four
+  # hardcoded homecache subPaths; cross-check `workspace_pod` for that) — they were nested
+  # btrfs subvolumes the old design never pushed, and copying them across is dead weight the new node-local
   # {pool}/homecache/{owner} rebuilds for free on first use anyway. The old worktree is
   # {pool}/vol/{HOME_VOL}/live/{HOME_VOL} — NOT {pool}/vol/{HOME_VOL}/live, which is the directory
   # the worktree sits inside, not the worktree itself (same trap the commit-model migration above
@@ -461,10 +461,10 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
 
 ## Two things that bite
 
-**The agent Secret is not in this directory.** `rustic-git-agent` in `kube-system` carries the
-region's agent token and the Azure credentials, and it is created by hand because it holds secrets.
-Without it the controller runs but every push fails at the registry. Keys: `WS_REGISTRY_URL`,
-`WS_REGION`, `WS_AGENT_TOKEN`, `AZURE_ACCOUNT`, `AZURE_KEY`, `AZURE_CONTAINER`.
+**The agent Secret is not in this directory.** `rustic-git-agent` in `kube-system` carries
+`WS_REGION` and `WS_PEER_SECRET`, and it is created by hand because it holds a secret. The agent
+holds no registry URL, no agent token and no Azure credential any more: its commit history is the
+`Volume`'s own status.
 
 **A snapshot can only be restored in the region it was pushed in.** A `CommitRecord` names the
 region its blobs live in, and a `restoreOf` source carries that region down to the agent. The
@@ -498,3 +498,19 @@ How many copies a volume gets is `Volume.spec.replicas`, per volume — there is
 knob. Rollout order is unconstrained: the listener and the puller are both fail-closed without the
 secret, so an agent that rolls ahead of its peers, or ahead of the Secret, or ahead of
 `agent-peer.yaml`, just keeps running with replication idle rather than moving anything unsafe.
+
+### Sync points
+
+`kubectl get snapshots` shows more than commits: `sync-{worktree}-{8hex}` is a transient, cut by
+the sync beat from a running worktree's moved btrfs generation so a peer has something recent to
+pull between pushes; `stop-{ws}`/`stop-{env}` is the same mechanism cutting one last transient on
+the way down. There is at most one Ready transient per worktree at a time — retain deletes the
+previous one only once the new one is Ready, so seeing two Ready together is a brief overlap, not
+a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks; `WS_STOP_FLUSH_TIMEOUT_SECS`
+(default 600) is how long a stop waits for a peer's `VolumeReplica` to pick up the stop transient
+before giving up. Condition reason `FlushUnreplicated` on a stopped workspace or environment means
+exactly that: nothing synced the final transient in time, so the stop went through unreplicated —
+check whether the volume has any peers at all (`spec.replicas`) and whether replication is even
+enabled (`WS_PEER_SECRET`, above) before assuming the timeout is too short. On a SINGLE-NODE region
+the gate is skipped entirely rather than waited out — there is nowhere for the bytes to go, so
+every stop lands at once with message "no other node in the region holds replicas".

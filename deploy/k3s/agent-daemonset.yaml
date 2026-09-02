@@ -162,17 +162,12 @@ spec:
             # Pinned, so seeding works whatever image the workspace itself runs.
             - name: WS_GIT_INIT_IMAGE
               value: alpine/git:2.45.2
-            # `WS_REGION` comes from the `rustic-git-agent` Secret alongside the token it was minted
-            # with: the two must name the same region record, or the first push stamps the volume with
-            # one region and the ref move is refused for the other (seen 27 Aug as `ref move: 401`).
-            # Never set it inline here — an explicit env silently overrides `envFrom`.
+            # `WS_REGION` comes from the `rustic-git-agent` Secret: it names the region whose blob
+            # container this node reads and writes, and is half of an `OwnerBinding`'s identity
+            # (controller.rs). A node pointed at the wrong region cannot see snapshots pushed by its
+            # neighbours. Never set it inline here — an explicit env silently overrides `envFrom`.
             - name: RUST_BACKTRACE
               value: "1"
-            # The store client and the daemon it talks to are two containers sharing one host
-            # /nix; NIX_REMOTE=daemon is what points the agent's `nix` at the socket instead of
-            # trying (and failing, unprivileged) to open the store itself.
-            - name: NIX_REMOTE
-              value: daemon
             # The nixpkgs every profile on this node is built against. Rolling it rebuilds every
             # workspace's profile on its next pass (a cache download, not a compile).
             - name: WS_NIXPKGS
@@ -197,14 +192,38 @@ spec:
               value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
             - name: WS_REPLICA_SECS
               value: "300"
+            # How often the sync beat checks each running worktree's btrfs generation and cuts a
+            # transient Snapshot if it moved — the only thing that gives a replica anything to
+            # fetch between pushes (sync.rs). Idle worktrees cost one `btrfs subvolume show` per
+            # interval, so this can run far hotter than WS_REPLICA_SECS.
+            - name: WS_SYNC_SECS
+              value: "60"
+            # How long `stop_push` waits, from the stop transient's creation, for another node's
+            # VolumeReplica to report Synced with last_sync_at at or after that listing — past this
+            # the stop tears down anyway and records condition reason FlushUnreplicated rather than
+            # hanging a workspace stop on a replica that never shows up (controller.rs).
+            - name: WS_STOP_FLUSH_TIMEOUT_SECS
+              value: "600"
             # Bind address for the peer listener (btrfs send over HTTP, agent-to-agent). Port
             # 8444 is a plain hostPath-style pod IP; discovery is by pod IP from the API (agent-peer
             # .yaml), so no ClusterIP Service exists for it. Fail-closed even if this changes: the
             # listener only starts when WS_PEER_SECRET (below) is non-empty — see peer.rs.
             - name: WS_PEER_ADDR
               value: 0.0.0.0:8444
+            # How long another node must be observed NotReady before this one reaps its
+            # VolumeReplica rows and takes over — positive evidence only (peer.rs).
+            - name: WS_NODE_DEAD_SECS
+              value: "600"
+            # Ceiling on one btrfs send to a peer; the escape hatch for a stream that hangs rather
+            # than fails, so the beat moves on to the next source (peer.rs).
+            - name: WS_PEER_SEND_TIMEOUT_SECS
+              value: "3600"
+            # How many Ready commits of a chain survive the post-push sweep; the rest are pruned
+            # unless pinned (snapshot.rs). Floors at 1 whatever is set here.
+            - name: WS_SNAPSHOT_KEEP
+              value: "10"
           envFrom:
-            # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
+            # `WS_REGION` (which region's blob container this node uses) and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its
             # dev fallbacks, which is why this is a Secret and not inline.
             #
