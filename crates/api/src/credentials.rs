@@ -240,15 +240,8 @@ pub(crate) async fn revoke(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// The fingerprint of an OpenSSH public key line, or an error naming what is wrong with it.
-/// The production `ssh_fingerprint` (a test-only twin lives in `tests/common`): the only consumer in
-/// this crate, and duplicating eight lines is cheaper than adding a shared axum-free home for a
-/// function that needs `russh` only here.
-fn ssh_fingerprint(line: &str) -> crate::Result<String> {
-    let key = russh::keys::PublicKey::from_openssh(line.trim())
-        .map_err(|_| crate::err("that does not look like an OpenSSH public key"))?;
-    Ok(key.fingerprint(russh::keys::HashAlg::Sha256).to_string())
-}
+// One copy, in core — this crate and the server binary both index keys by it.
+use rustic_git_core::sshkeys::ssh_fingerprint;
 
 /// The credential id and the fingerprints an ssh SIGNING key answers to. Kept beside `add_key`
 /// and used by it, so a test can build exactly the row registration writes.
