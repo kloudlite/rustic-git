@@ -11,6 +11,7 @@
 **Spec:** docs/superpowers/specs/2026-09-03-stop-interrupt-decommission-design.md
 
 ## Global Constraints
+- `Replicated` is written `False / Running` by the owner the instant a parent starts (in the same status write that records the pod), and recomputed only while the parent is stopped; the spread chooser, the sweep and `/v1` read the condition and never recompute it (spec, 2026-09-03 amendment).
 - Up to date, for a worktree: the replica row's `status.branches[worktree]` equals that worktree's newest Ready transient's NAME; never a clock — `lastSyncAt` is the puller's clock and `readyAt` the owner's.
 - A worktree with no transient at all (never ran, or a fresh restore) falls back to plain `phase == "Synced"`.
 - `status.branches` semantics: `worktree → snapshot name`, the newest Ready transient of that worktree this node actually holds locally, written by the pull pass that holds it.

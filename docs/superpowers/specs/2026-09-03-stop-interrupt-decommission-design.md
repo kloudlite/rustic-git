@@ -50,12 +50,17 @@ wait moves out of stop and into placement.
   (peer listener, `WS_PEER_SECRET`, same NetworkPolicy as the commit route). The handler fires a
   `tokio::sync::Notify` that `spawn_pull` selects on beside its ticker, so the peers pull within
   seconds. A wake that cannot be delivered is a warn: the ticker still comes.
-- The parent's status carries a `Replicated` condition on the stopped object: `False /
-  AwaitingReplica` until some other node's replica is up to date for this worktree, then
-  `True / Replicated`. The owner's controller writes it on every reconcile of a stopped parent
-  (one field-selected VolumeReplica list, already server-side selectable on `spec.volume`).
-  `/v1`'s stop and get answers include it, so the UI can say "safe to start anywhere" or "still
-  copying".
+- The parent's status carries a `Replicated` condition, the ONE place the answer "could this
+  start somewhere else" is kept, so nobody has to remember the caveats of the comparison:
+  - the instant the parent starts running, the owner writes `False / Running` — from then on
+    no other node is an option, whatever the copies hold;
+  - after a stop, `False / AwaitingReplica` until some other node's copy holds the stop
+    snapshot, then `True / Replicated` (`replicas: 1`: stays `False` with the message "no
+    replica is configured for this volume").
+  The owner's controller writes it on start and on every reconcile of a stopped parent (one
+  field-selected VolumeReplica list). `/v1`, the web, the sweep and the start-spread chooser
+  read the condition; only the owner ever computes it. A copy's own record (`branches`) is a
+  fact about what it holds and is never "discarded" — the judgement lives in the condition.
 
 ### Where a stopped parent starts (spread, ruled 2026-09-03)
 
@@ -207,8 +212,8 @@ kept for no reader. These are binding on the plan.
    decommissioning (the label) are the same thing to placement. `live_nodes`, `owner_alive`,
    `may_claim` and the sweep all call one `unplaceable(node)`; nothing tests the two conditions
    separately.
-2. **One "is it replicated" truth.** The `Replicated` condition on a stopped parent is computed
-   in one place (the owner's reconcile of a stopped parent) and read everywhere else: the sweep
+2. **One "is it replicated" truth.** The `Replicated` condition is computed in one place (the
+   owner: `False/Running` on start, recomputed while stopped) and read everywhere else: the sweep
    consults it instead of recomputing; the API and web show it. No separate `AwaitingReplica`
    reason on `NodeDead` — a parent waiting for both shows `NodeDead` plus `Replicated=False`.
    `replicas: 1` is not a separate reason either: `Replicated=False` with the message "no
