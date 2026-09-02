@@ -464,7 +464,8 @@ async fn stop_workspace(
     // what its last commit or sync point already does. An environment has no equivalent signal —
     // its StatefulSets are scaled to zero by `drain_services` on the way in, so "no pods now" says
     // nothing about whether any ran — and keeps its unconditional cut.
-    if prev.pod_ref.is_some() {
+    let cut = prev.pod_ref.is_some();
+    if cut {
         match stop_push(&stop_name(w), &w.spec.owner, &id, &w.name_any(), w, ctx).await? {
             StopPush::Landed => {}
             StopPush::Waiting => {
@@ -489,8 +490,12 @@ async fn stop_workspace(
     //
     // Poke every placeable peer: the cut exists NOW, and waiting out the pull beat is what used to
     // make a cross-node start take minutes. Best-effort by construction — the ticker still comes.
-    let live = crate::peer::placeable_nodes(ctx).await;
-    crate::peer::wake_peers(ctx, &live, &ctx.peer_secret).await;
+    // Only when there WAS a cut: a workspace that never ran has nothing new for a peer to fetch,
+    // so waking the whole fleet would be a cluster-wide listing per no-op stop.
+    if cut {
+        let live = crate::peer::placeable_nodes(ctx).await;
+        crate::peer::wake_peers(ctx, &live, &ctx.peer_secret).await;
+    }
     // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
     // showing "installing packages…" for a workspace that is simply off.
     let replicated = replicated_condition(ctx, &id, &w.name_any(), replicas_of(ctx, &id), &prev.conditions, gen).await?;

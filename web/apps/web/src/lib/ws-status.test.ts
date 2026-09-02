@@ -57,6 +57,11 @@ describe("noticesFor", () => {
   });
 });
 
+/** A pinned zone, so the sentence's shape is asserted without pinning the machine's. */
+const utc = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "UTC" });
+/** The default formatter, mirrored: the reader's own zone, whatever CI happens to run in. */
+const local = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+
 describe("basedOnSentence", () => {
   test("an ordinary clone names the cut it was made from", () => {
     expect(basedOnSentence({ snapshot: "clone-ws-1-cafe", at: null, age_seconds: 0, interrupted: false }))
@@ -64,15 +69,17 @@ describe("basedOnSentence", () => {
   });
 
   test("an interrupted clone states the gap, because that is the whole decision", () => {
-    expect(basedOnSentence({ snapshot: "sync-ws-1-bbbb", at: "2026-09-03T14:32:07Z", age_seconds: 360, interrupted: true }))
+    expect(basedOnSentence({ snapshot: "sync-ws-1-bbbb", at: "2026-09-03T14:32:07Z", age_seconds: 360, interrupted: true }, utc))
       .toBe("Cloned from the sync point of 14:32:07, 6 minutes before the node went down.");
   });
 });
 
 describe("cloneResult", () => {
   test("carries the sentence when the clone says what it was based on", () => {
-    expect(cloneResult({ based_on: { snapshot: "sync-ws-1-bbbb", at: "2026-09-03T14:32:07Z", age_seconds: 360, interrupted: true } }))
-      .toEqual({ ok: true, basedOn: "Cloned from the sync point of 14:32:07, 6 minutes before the node went down." });
+    const r = cloneResult({ based_on: { snapshot: "sync-ws-1-bbbb", at: "2026-09-03T14:32:07Z", age_seconds: 360, interrupted: true } });
+    // The time is rendered in the READER's zone, so this asserts through the same formatter rather
+    // than pinning a string only a UTC machine would produce.
+    expect(r.basedOn).toBe(`Cloned from the sync point of ${local.format(new Date("2026-09-03T14:32:07Z"))}, 6 minutes before the node went down.`);
   });
 
   test("an environment clone, which carries no based_on, is a plain success", () => {

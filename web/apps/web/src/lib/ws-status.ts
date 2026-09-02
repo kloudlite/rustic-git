@@ -38,10 +38,18 @@ export function noticesFor(x: {
 /** What a clone was grafted onto. Always shown: a clone is always based on a cut, and the
  *  interrupted case differs only in that the cut is older than "now" — which is precisely the
  *  thing the person accepted when they chose it. The age comes from the API's own `age_seconds`,
- *  never from this browser's clock: only the node knows when the source stopped moving. */
-export function basedOnSentence(b: { snapshot: string; at?: string | null; age_seconds: number; interrupted: boolean }): string {
+ *  never from this browser's clock: only the node knows when the source stopped moving.
+ *
+ *  The TIME, though, is the reader's own: a UTC slice told someone in IST their work was cut at
+ *  09:02 when their clock said 14:32. `fmt` is injectable only so a test can pin a zone — the
+ *  default is the browser's locale and zone, which is what every caller wants. */
+const localTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+export function basedOnSentence(
+  b: { snapshot: string; at?: string | null; age_seconds: number; interrupted: boolean },
+  fmt: Intl.DateTimeFormat = localTime,
+): string {
   if (!b.at) return "Cloned from a sync point taken just now.";
-  const time = new Date(b.at).toISOString().slice(11, 19);
+  const time = fmt.format(new Date(b.at));
   if (!b.interrupted) return `Cloned from the sync point of ${time}.`;
   const mins = Math.max(0, Math.round(b.age_seconds / 60));
   const ago = mins === 1 ? "1 minute" : `${mins} minutes`;

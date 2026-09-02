@@ -1136,6 +1136,9 @@ fn age_seconds(at: Option<&str>) -> i64 {
 /// all. The clone then grafts onto the newest transient — which, by the up-to-date rule, is exactly
 /// the one an up-to-date node holds — and the response states its age so the person chooses the
 /// gap knowingly. With no transient anywhere there is nothing to graft onto and no way forward.
+/// Returns the cut UNCREATED (`Some`) in the ordinary case: the caller creates the workspace first
+/// and only then writes it. A create that fails after the cut leaves a `Working` Snapshot nothing
+/// will ever fulfil, which then blocks the next clone on the one-cut-in-flight guard.
 async fn clone_base(
     c: &kube::Client,
     owner: &str,
@@ -1143,7 +1146,7 @@ async fn clone_base(
     worktree: &str,
     interrupted: bool,
     parent_ref: Option<OwnerReference>,
-) -> Result<BasedOn, Response> {
+) -> Result<(BasedOn, Option<crd::Snapshot>), Response> {
     let (newest, all) = newest_transient(c, volume, worktree).await?;
     if interrupted {
         // Not the newest transient cluster-wide — the newest one another node actually HOLDS. The
@@ -1161,7 +1164,7 @@ async fn clone_base(
                 .into_response()
         })?;
         let at = held.status.as_ref().and_then(|st| st.ready_at.clone());
-        return Ok(BasedOn { snapshot: held.name_any(), age_seconds: age_seconds(at.as_deref()), at, interrupted: true });
+        return Ok((BasedOn { snapshot: held.name_any(), age_seconds: age_seconds(at.as_deref()), at, interrupted: true }, None));
     }
     refuse_cut_in_flight(&all, worktree)?;
     let name = format!("clone-{worktree}-{}", crd::short_hex());
@@ -1186,9 +1189,7 @@ async fn clone_base(
     // Owned by the source parent, exactly as the sync beat's cuts are: deleting the source is the
     // whole delete, and a cut nothing points at would otherwise outlive it as a leaked subvolume.
     snap.metadata.owner_references = parent_ref.map(|r| vec![r]);
-    let api: Api<crd::Snapshot> = Api::all(c.clone());
-    api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
-    Ok(BasedOn { snapshot: name, at: None, age_seconds: 0, interrupted: false })
+    Ok((BasedOn { snapshot: name, at: None, age_seconds: 0, interrupted: false }, Some(snap)))
 }
 
 /// Attach `based_on` to a doc the way `stop_ws` attaches `warning`: a key beside the doc's own
@@ -1223,7 +1224,7 @@ async fn clone_ws(
     // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
     // the last sync beat happened to leave.
     let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
-    let based_on = clone_base(c, &owner, &volume, &id, interrupted, src.controller_owner_ref(&())).await?;
+    let (based_on, cut) = clone_base(c, &owner, &volume, &id, interrupted, src.controller_owner_ref(&())).await?;
     let source = VolumeSource::CloneOf { volume, commit: Some(based_on.snapshot.clone()) };
     let w = create_workspace(
         c,
@@ -1243,6 +1244,12 @@ async fn clone_ws(
         },
     )
     .await?;
+    // The cut LAST: the workspace already exists and names it, so nothing can leave a `Working`
+    // Snapshot behind that no clone will ever consume and every later clone would 409 on.
+    if let Some(snap) = cut {
+        let api: Api<crd::Snapshot> = Api::all(c.clone());
+        api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
+    }
     Ok(with_based_on(&ws_doc(&w, &HashSet::new()), &based_on))
 }
 

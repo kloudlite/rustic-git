@@ -2520,8 +2520,9 @@ fi
 
     /// The listing budget: one pull beat over one volume makes ONE Volume list, ONE VolumeReplica
     /// list for the beat, ONE Workspace list and ONE Environment list for this node's parents —
-    /// plus `unclaim_kind`'s cluster-wide pair and the per-volume snapshot list. What it must never
-    /// do again is re-list Volumes three times and Workspaces/Environments three times.
+    /// plus the sweep's cluster-wide Workspace/Environment pair and the per-volume snapshot list.
+    /// What it must never do again is re-list Volumes three times and Workspaces/Environments
+    /// three times.
     #[tokio::test]
     async fn a_pull_beat_lists_each_kind_once_for_the_beat() {
         let tmp = tempfile::tempdir().unwrap();

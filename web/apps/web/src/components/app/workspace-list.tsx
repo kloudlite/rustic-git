@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
-import { basedOnSentence, noticesFor } from "@/lib/ws-status";
+import { noticesFor } from "@/lib/ws-status";
 import { CopyButton } from "@/components/repo/copy-button";
 import { useCopy } from "@/lib/use-copy";
 import { sshConfigBlock, sshOneLiner } from "@/lib/ssh-config";
@@ -170,9 +170,9 @@ function Packages({ w }: { w: ApiWorkspace }) {
  *  `text-warning` only for the interrupted case — everything else here is information, and a page
  *  where every line is orange is a page nobody reads. Shared with `environment-list.tsx` so the
  *  two lists cannot drift apart on wording. */
-export function Notices({ w }: { w: Parameters<typeof noticesFor>[0] & { based_on?: ApiWorkspace["based_on"] } }) {
+export function Notices({ w }: { w: Parameters<typeof noticesFor>[0] }) {
   const notices = noticesFor(w);
-  if (notices.length === 0 && !w.based_on) return null;
+  if (notices.length === 0) return null;
   return (
     <>
       {notices.map((n) => (
@@ -180,7 +180,6 @@ export function Notices({ w }: { w: Parameters<typeof noticesFor>[0] & { based_o
           {n.text}
         </span>
       ))}
-      {w.based_on && <span className="mt-1 block text-sm2 text-muted-foreground">{basedOnSentence(w.based_on)}</span>}
     </>
   );
 }
