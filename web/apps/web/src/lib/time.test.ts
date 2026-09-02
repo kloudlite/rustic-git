@@ -16,11 +16,19 @@ describe("when", () => {
     expect(when(Date.UTC(2020, 0, 15))).toMatch(/Jan 1[45], 2020/);
     expect(whenSeconds(Date.UTC(2020, 0, 15) / 1000)).toMatch(/2020/);
   });
+
+  test("a non-finite ms is unknown, not just now", () => {
+    expect(when(NaN)).toBe("unknown");
+  });
 });
 
 describe("stamp", () => {
   test("is the same string on every machine", () => {
     expect(stamp(Date.UTC(2024, 2, 5, 14, 7))).toBe("Mar 5, 2024, 2:07 PM UTC");
+  });
+
+  test("a non-finite ms is unknown, not a thrown RangeError", () => {
+    expect(stamp(NaN)).toBe("unknown");
   });
 });
 

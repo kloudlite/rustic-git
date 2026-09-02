@@ -921,7 +921,8 @@ export function listVolumes(token: string, kind?: "workspace" | "environment", o
   return call<ApiVolumeSummary[]>(`/v1/volumes${q ? `?${q}` : ""}`, { method: "GET", token });
 }
 
-/** `crates/workspaces/src/registry.rs::CommitRecord`, newest first. */
+/** `crates/workspaces/src/api.rs::commit_model_history_rows`, newest first. The row also carries
+ *  `phase`, left undeclared here — no reader in this app looks at it yet; add it if one needs to. */
 export type ApiCommitRecord = {
   id: string;
   state: unknown;

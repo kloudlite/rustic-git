@@ -2,11 +2,12 @@ import { CircleDot, GitMerge, GitPullRequestClosed } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PullState } from "@/lib/api";
 
-/** What state a change is in, said the same way everywhere it appears. Colour is
- *  never the only signal — each state has its own icon and its own word. */
-/** Exported for the test: the fallback below is the whole point of this map, and asserting it
- *  through rendered JSX would need a DOM for one property lookup. */
-export const LOOK = {
+/** What state a change is in, said the same way everywhere it appears. Colour is never the
+ *  only signal — each state has its own icon and its own word. Exported for the test: the
+ *  fallback in `StateBadge` below is the whole point of this map, and asserting it through
+ *  rendered JSX would need a DOM for one property lookup. Typed as `Record<PullState, …>` so
+ *  a `PullState` added without a matching entry here is a compile error, not a runtime one. */
+export const LOOK: Record<PullState, { Icon: typeof CircleDot; label: string; cls: string }> = {
   open: { Icon: CircleDot, label: "Open", cls: "border-success/40 bg-success/10 text-success" },
   merged: { Icon: GitMerge, label: "Merged", cls: "border-primary/40 bg-primary/10 text-primary" },
   closed: { Icon: GitPullRequestClosed, label: "Closed", cls: "border-destructive/40 bg-destructive/10 text-destructive" },

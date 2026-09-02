@@ -21,8 +21,10 @@ const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
   ["minute", 60],
 ];
 
-/** `ms` is a unix timestamp in milliseconds. */
+/** `ms` is a unix timestamp in milliseconds. A non-finite `ms` (a null `createdAt` upstream,
+ *  e.g.) has no sensible relative form — say so rather than let `Intl` throw or lie. */
 export function when(ms: number): string {
+  if (!Number.isFinite(ms)) return "unknown";
   const seconds = Math.round((ms - Date.now()) / 1000);
   const ago = Math.abs(seconds);
   if (ago < 45) return "just now";
@@ -41,7 +43,10 @@ export function when(ms: number): string {
 // some ICU builds and ", " on others, which is the same mismatch by a different route.
 const STAMP_DAY = new Intl.DateTimeFormat("en", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 const STAMP_TIME = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit", timeZone: "UTC" });
-export const stamp = (ms: number) => `${STAMP_DAY.format(ms)}, ${STAMP_TIME.format(ms)} UTC`;
+// `Intl.DateTimeFormat.format` throws a RangeError on NaN — a null `createdAt` reaches here as
+// `stamp(snapshotTime(c))` from a client component (env-snapshots.tsx), so an unguarded throw
+// takes the whole page down over one missing timestamp.
+export const stamp = (ms: number) => (Number.isFinite(ms) ? `${STAMP_DAY.format(ms)}, ${STAMP_TIME.format(ms)} UTC` : "unknown");
 
 /** The same, for the unix SECONDS that git objects carry. */
 export const whenSeconds = (seconds: number) => when(seconds * 1000);
