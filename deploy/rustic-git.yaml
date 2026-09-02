@@ -29,7 +29,7 @@ spec:
       # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8081"
+        prometheus.io/port: "9464"
         prometheus.io/path: /metrics
     spec:
       # None of these pods talks to THIS cluster's API server (the api tier reaches the k3s
@@ -143,11 +143,16 @@ spec:
             # after the receive path streams to storage instead of buffering.
             - name: RUSTIC_GIT_MAX_BODY
               value: "536870912"
+            # Metrics on a port of their own: 8081 requires the peer secret, which Prometheus
+            # cannot present, and the scrape text enumerates every repo this node has touched.
+            - name: RUSTIC_GIT_METRICS_ADDR
+              value: 0.0.0.0:9464
           ports:
             - { name: http, containerPort: 8080 }
             - { name: ssh, containerPort: 2222 }
             - { name: peer, containerPort: 8081 }
             - { name: peer-stream, containerPort: 8082 }
+            - { name: metrics, containerPort: 9464 }
           # On termination Kubernetes removes the pod from endpoints and sends SIGTERM at once.
           # Sleep first so endpoint removal reaches every node's DNS (TTL 5s) plus every node's
           # membership cache (TTL 2s) plus margin, so no peer forwards into a dying pod. Then the
@@ -340,6 +345,13 @@ spec:
     - ports:
         - { protocol: TCP, port: 8080 }
         - { protocol: TCP, port: 2222 }
+    # Prometheus presents no secret, so metrics have their own port — and a rule with no `from:`
+    # would open it to every pod in the cluster. Only the monitoring namespace may scrape it.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { protocol: TCP, port: 9464 }
 ---
 # The read API: no repo state, no ownership, no local packs. A Deployment, not a StatefulSet —
 # this tier owns no repo and holds no lease, so pods are interchangeable and any of them can

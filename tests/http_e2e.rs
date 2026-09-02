@@ -261,6 +261,30 @@ async fn an_anonymous_request_for_an_unknown_repo_opens_nothing() {
     );
 }
 
+/// The existence gate must not become an oracle. Routing runs before authentication, so a missing
+/// name that answered 404 there would tell an anonymous client which private repos exist. It is
+/// served locally instead: the handler authenticates first, and only a caller who is allowed to
+/// know gets the 404. Nothing is opened either way — that is the other half of the gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_repo_is_indistinguishable_from_a_private_one_until_you_authenticate() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "secret").await.unwrap(); // private by default
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+
+    let warm = s.pool.warm_count(); // `create_repo` opened `secret`; nothing else may be opened
+    let private = raw_get(port, "/alice/secret/info/refs?service=git-upload-pack", None);
+    let missing = raw_get(port, "/alice/nosuch/info/refs?service=git-upload-pack", None);
+    assert!(private.starts_with("HTTP/1.1 401"), "{private}");
+    assert_eq!(missing, private, "a missing name must answer byte-for-byte as a private one does");
+
+    // With credentials the answer may differ — that caller is allowed to know.
+    let r = raw_get(port, "/alice/nosuch/info/refs?service=git-upload-pack", Some(&token));
+    assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+    assert_eq!(s.pool.warm_count(), warm, "no database was opened for a name that does not exist");
+}
+
 /// Shallow clone, through a real git client.
 ///
 /// The failure this guards against is not "the clone errors" — it is a clone that
@@ -861,4 +885,48 @@ async fn consolidation_crash_before_retire_leaves_duplicates_not_holes() {
     assert_eq!(s.consolidate("alice", "crash").await.unwrap(), (4, 1));
     common::git(w.path(), &["clone", "-q", &url, "after"]);
     common::git(&w.path().join("after"), &["fsck", "--no-progress"]);
+}
+
+/// Like `raw_get`, but with a username of the test's choosing — every other helper here sends
+/// git's `x` placeholder, which is exactly the half this test has to vary.
+fn raw_get_as(port: u16, path: &str, user: &str, token: &str) -> String {
+    use base64::Engine;
+    use std::io::{Read, Write};
+    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let cred = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{token}"));
+    write!(
+        c,
+        "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\
+         Authorization: Basic {cred}\r\nGit-Protocol: version=2\r\n\r\n"
+    )
+    .unwrap();
+    let mut s = Vec::new();
+    c.read_to_end(&mut s).unwrap();
+    String::from_utf8_lossy(&s).to_string()
+}
+
+/// The token is the secret, but the username must name the owner it belongs to (or be git's `x`).
+/// Halves that disagree did not verify: the answer is 401, never a silent fall-through to
+/// anonymous — which on a PUBLIC repo would look like a success and hide a wrong credential.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_valid_token_under_the_wrong_username_is_refused() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "proj").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let refs = "/alice/proj.git/info/refs?service=git-upload-pack";
+
+    // The matching halves work, so the refusals below are about the mismatch and nothing else.
+    assert!(raw_get_as(port, refs, "x", &token).starts_with("HTTP/1.1 200"));
+    assert!(raw_get_as(port, refs, "alice", &token).starts_with("HTTP/1.1 200"));
+
+    // A real token, a username that is neither `x` nor its owner: 401.
+    let r = raw_get_as(port, refs, "bob", &token);
+    assert!(r.starts_with("HTTP/1.1 401"), "{r}");
+
+    // And on a PUBLIC repo it is still 401, not a fall-through to the anonymous read.
+    s.set_public("alice", "proj", true).await.unwrap();
+    let r = raw_get_as(port, refs, "bob", &token);
+    assert!(r.starts_with("HTTP/1.1 401"), "a wrong username must not read anonymously: {r}");
 }

@@ -65,6 +65,18 @@ pub(crate) fn check_description(d: &str) -> std::result::Result<(), Response> {
         )
             .into_response());
     }
+    // The listing marker is `k=v` lines parsed per line and the description is written last, so a
+    // newline in it writes real fields — a forged `created_by=` renders as the creator in every
+    // listing. Refused here because both `create` and the description edit route through this one
+    // function; every other control character goes with it, since none of them belongs on a line
+    // under a repo name.
+    if d.chars().any(char::is_control) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "description may not contain control characters",
+        )
+            .into_response());
+    }
     Ok(())
 }
 
@@ -551,6 +563,17 @@ mod tests {
         assert!(check_description(&"x".repeat(MAX_DESCRIPTION + 1)).is_err());
         // Counted in characters, not bytes: a 300-character non-ASCII blurb is a blurb.
         assert!(check_description(&"é".repeat(MAX_DESCRIPTION)).is_ok());
+    }
+
+    /// The marker body is `k=v` lines parsed per line, so a newline in a description writes real
+    /// fields — `created_by=someone.else` renders as the forged creator in every listing.
+    #[test]
+    fn a_description_with_control_characters_is_refused() {
+        assert!(check_description("hi\ncreated_by=someone.else").is_err());
+        assert!(check_description("hi\rthere").is_err());
+        assert!(check_description("hi\tthere").is_err());
+        assert!(check_description("hi \u{0000} there").is_err());
+        assert!(check_description("perfectly ordinary — with an em dash").is_ok());
     }
 
     /// A stub owning node: answers `create` as told (or never, to stand in for a timeout) and

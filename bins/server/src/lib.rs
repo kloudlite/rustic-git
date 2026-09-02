@@ -22,3 +22,10 @@ pub mod browse_api;
 pub mod lanes;
 pub mod listeners;
 pub mod router;
+
+/// `may_create` decides, before authentication, which routes may claim a name that does not exist
+/// yet. Exported for the routing integration test — the exempt set is the security property, so it
+/// is asserted from outside rather than only in the module that writes it.
+pub mod router_test {
+    pub use crate::router::route::may_create;
+}

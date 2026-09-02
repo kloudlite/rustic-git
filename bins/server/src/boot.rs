@@ -30,16 +30,9 @@ pub fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
     Ok(russh::keys::PrivateKey::read_openssh_file(p)?)
 }
 
-/// The fingerprint of an OpenSSH public key line, or an error naming what is wrong with it. Used
-/// to validate and identify a key before it is stored. A body-identical copy lives in
-/// `crates/api/src/credentials.rs` (that crate cannot depend on this binary) — a change here must
-/// be mirrored there. `crate::auth` is `rustic-git-storage`, which stays free of the ssh key
-/// parsing dependency on purpose, so it is not a home for this.
-pub(crate) fn ssh_fingerprint(line: &str) -> Result<String> {
-    let key = russh::keys::PublicKey::from_openssh(line.trim())
-        .map_err(|_| crate::err("that does not look like an OpenSSH public key"))?;
-    Ok(key.fingerprint(russh::keys::HashAlg::Sha256).to_string())
-}
+/// One copy, in core: `crates/api` needs the same parse and `storage` must not carry the ssh
+/// dependency, so neither of those two is a home for it.
+pub(crate) use rustic_git_core::sshkeys::ssh_fingerprint;
 
 /// Same either-variable "is a fleet configured" test as `set-visibility`/`set-image-visibility`
 /// (keying on the secret alone would let an operator whose shell doesn't export it take the

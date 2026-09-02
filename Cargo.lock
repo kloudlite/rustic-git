@@ -5640,6 +5640,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rand 0.8.7",
  "reqwest 0.13.4",
+ "russh",
  "rustls",
  "serde",
  "serde_json",

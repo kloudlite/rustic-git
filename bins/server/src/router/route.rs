@@ -51,6 +51,7 @@ pub(crate) async fn livez(State(app): State<Arc<App>>) -> Response {
 ///                                                 | "heldby\n{node}\n{expires_ms}"
 /// POST /own/renew    "{node}\n{repo}\n{repo}…"   -> one LOST repo per line (empty = all renewed)
 /// POST /own/release  "{repo}\n{node}"           -> "" (the entry is shortened, never deleted)
+/// POST /own/owner    "{repo}"                    -> "" (nobody) | "{node}\n{expires_ms}"
 /// ```
 ///
 /// **A node that does not hold the lease answers 421 to all four** — before the grant (it never
@@ -82,6 +83,24 @@ pub(crate) async fn own_claim(State(app): State<Arc<App>>, body: String) -> Resp
         Ok(crate::ownership::Grant::HeldBy(e)) => {
             (StatusCode::OK, format!("heldby\n{}\n{}", e.node, e.expires_ms)).into_response()
         }
+        Err(e) => own_err(&app, e),
+    }
+}
+
+/// `POST /own/owner "{repo}"` -> `""` (nobody) | `"{node}\n{expires_ms}"`. A READ of the map, on
+/// the leader, taking nothing: routing asks it for a key whose object-store prefix is empty, where
+/// a claim would be an anonymous client's write against the elected writer.
+pub(crate) async fn own_owner(State(app): State<Arc<App>>, body: String) -> Response {
+    if let Some(r) = leader_only(&app) {
+        return r;
+    }
+    let repo = body.trim_end();
+    if repo.is_empty() || repo.contains('\n') {
+        return (StatusCode::BAD_REQUEST, "repo").into_response();
+    }
+    match app.ask_owner(repo).await {
+        Ok(Some(e)) => (StatusCode::OK, format!("{}\n{}", e.node, e.expires_ms)).into_response(),
+        Ok(None) => (StatusCode::OK, "").into_response(),
         Err(e) => own_err(&app, e),
     }
 }
@@ -219,6 +238,25 @@ pub(crate) fn api_route(path: &str) -> Option<(&str, &str, &str)> {
         Some(tail) => BROWSE_TAILS.contains(&tail).then_some((owner, second, tail)),
         None => BROWSE_TAILS.contains(&second).then_some((owner, "", "")),
     }
+}
+
+/// Which routes may claim a repo key whose object-store prefix is still empty — the exemption
+/// `App::route_for` gates the claim on. Exactly the paths that can CREATE a database: the git-repo
+/// create, and the registry uploads that bring an image's database into being on its first push.
+/// The method list is what CREATES, not what writes: `DELETE` can only remove something that is
+/// already there, so it is gated exactly like `GET` — otherwise a spray of anonymous deletes for
+/// invented names is the same leader amplifier the gate exists to close.
+pub fn may_create(method: &axum::http::Method, path: &str) -> bool {
+    if let Some((_, name, tail)) = api_route(path.trim_start_matches('/')) {
+        if !name.is_empty() && tail == "create" {
+            return true;
+        }
+    }
+    crate::registry::image_route(path.trim_start_matches('/')).is_some()
+        && matches!(
+            *method,
+            axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::PATCH
+        )
 }
 
 pub(crate) fn repo_of(path: &str) -> Option<String> {
@@ -395,7 +433,21 @@ async fn route_inner(
             .and_then(|v| v.parse().ok())
             .unwrap_or(crate::proxy::MAX_HOPS),
     };
-    let route = app.route(&repo).await;
+    let route = app.route_for(&repo, may_create(req.method(), &path)).await;
+    // The leader says nobody owns this key and its prefix is empty: there is nobody to forward to
+    // and nothing worth claiming, so serve it HERE — the handler then answers after authenticating,
+    // exactly as it did before this gate existed. Answering 404 from the middleware would say "no
+    // such repo" to a caller who has not authenticated, making private names enumerable.
+    //
+    // What keeps this from opening a database on the wrong node is the handler's own `exists`
+    // probe (`open_repo`, `image_exists`), which is the same call the gate made. The residual is
+    // narrow but real: a creator elsewhere that claims and flushes between the leader's "nobody"
+    // and that probe would be fenced by an open here. See `App::route_for` for the ceiling and the
+    // upgrade path. It runs ahead of the hop bound because a name that exists nowhere is not a
+    // routing disagreement.
+    if matches!(route, crate::ownership::Route::Missing) {
+        return next.run(req).await;
+    }
     // Out of hops: never forward again (that is the bound), but never knowingly open a repo we do
     // not own either — a chain that arrives here disagreeing with our own view, or arrives at an
     // unhealthy node, gets 503 rather than a second writer. Same bound, no wrong opens.
@@ -411,6 +463,8 @@ async fn route_inner(
     }
     match route {
         crate::ownership::Route::Local => next.run(req).await,
+        // Served above; the arm is what keeps this match exhaustive.
+        crate::ownership::Route::Missing => next.run(req).await,
         crate::ownership::Route::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "no node may safely serve this repository right now; retry",
@@ -554,12 +608,6 @@ pub(crate) async fn trust_peer(
         .get(crate::proxy::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    // Prometheus cannot present the secret. `/metrics` reads a process-local snapshot and
-    // touches no database, so the routing invariant is not in play — and `route_inner` below
-    // serves it locally in any case (`repo_of` is `None` for it).
-    if req.uri().path() == "/metrics" {
-        return next.run(req).await;
-    }
     if !crate::proxy::secret_eq(presented, &app.forwarder.secret) {
         return (StatusCode::FORBIDDEN, "peer secret").into_response();
     }

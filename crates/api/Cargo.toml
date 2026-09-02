@@ -9,7 +9,7 @@ name = "rustic_git_api"
 
 [dependencies]
 tracing = { workspace = true }
-rustic-git-core = { path = "../core" }
+rustic-git-core = { path = "../core", features = ["ssh"] }
 rustic-git-storage = { path = "../storage" }
 rustic-git-pulls = { path = "../pulls" }
 rustic-git-workspaces = { path = "../workspaces" }

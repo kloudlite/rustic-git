@@ -21,6 +21,13 @@ tokio = { workspace = true }
 rand = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+# Only for `sshkeys`: two crates (the server binary and the api) both need the fingerprint of an
+# OpenSSH public key, and a hand-mirrored copy of a security-relevant parse drifts. Optional so
+# `storage`, which depends on core and must stay free of ssh parsing, does not pull it in.
+russh = { workspace = true, optional = true }
+
+[features]
+ssh = ["dep:russh"]
 
 [dev-dependencies]
 rustls = { workspace = true }

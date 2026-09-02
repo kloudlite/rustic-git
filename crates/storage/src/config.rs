@@ -120,9 +120,20 @@ pub fn fleet_store_ok(url: &str) -> Result<()> {
     if url.starts_with("file://") {
         return Err(crate::err(
             "RUSTIC_GIT_S3_URL=file:// cannot host a fleet: the leader lease needs conditional \
-             updates, which LocalFileSystem lacks; use mem:// for a local fleet, or s3:// / az:// \
+             updates, which LocalFileSystem lacks; use s3:// / az:// \
              — and on s3://, an endpoint with conditional_put disabled is just as unfenced, \
              because the lease's compare-and-swap silently becomes an overwrite",
+        ));
+    }
+    // `InMemory` is per-process. In a real multi-pod fleet every pod takes epoch 1 of its own
+    // lease, every pod is leader and every pod opens every database — the same two-writer bug the
+    // `file://` refusal above exists for, with no URL scheme to give it away. The in-process test
+    // fleet is the legitimate case, and it says so.
+    if url == "mem://" && std::env::var("RUSTIC_GIT_ALLOW_MEM_FLEET").is_err() {
+        return Err(crate::err(
+            "RUSTIC_GIT_S3_URL=mem:// cannot host a fleet: InMemory is per-process, so every pod \
+             would be its own leader and open every database; set RUSTIC_GIT_ALLOW_MEM_FLEET=1 \
+             only for an in-process test fleet",
         ));
     }
     Ok(())
@@ -147,9 +158,15 @@ pub async fn open_store(background: bool) -> Result<Arc<Store>> {
 
 #[cfg(test)]
 mod tests {
+    // cargo runs a crate's tests in parallel threads, and every test below mutates process-wide
+    // env vars — unserialized, two of them interleave and each sees the other's values. One lock
+    // per crate, held for the body of each test, the same way `bins/kl/src/config.rs` does it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn azure_url_gets_a_multipart_view() {
-        // Edition 2021: `set_var` is a safe fn, and this is the crate's only env-writing test.
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Edition 2021: `set_var` is a safe fn.
         std::env::set_var("RUSTIC_GIT_S3_URL", "az://c");
         std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "acct");
         std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", "a2V5"); // any valid base64
@@ -160,8 +177,21 @@ mod tests {
     #[test]
     fn a_file_store_cannot_host_a_fleet() {
         assert!(super::fleet_store_ok("file://./x").is_err());
-        for ok in ["mem://", "s3://bucket", "az://container"] {
+        for ok in ["s3://bucket", "az://container"] {
             super::fleet_store_ok(ok).unwrap();
         }
+    }
+
+    /// `InMemory` is per-process: every pod would take epoch 1 of its own lease, every pod would
+    /// be leader, and every pod would open every database — the exact two-writer bug the guard
+    /// exists to prevent. Allowed only when something says out loud that it is a test fleet.
+    #[test]
+    fn mem_is_not_a_fleet_store_unless_opted_into() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RUSTIC_GIT_ALLOW_MEM_FLEET");
+        assert!(super::fleet_store_ok("mem://").is_err());
+        std::env::set_var("RUSTIC_GIT_ALLOW_MEM_FLEET", "1");
+        assert!(super::fleet_store_ok("mem://").is_ok());
+        std::env::remove_var("RUSTIC_GIT_ALLOW_MEM_FLEET");
     }
 }

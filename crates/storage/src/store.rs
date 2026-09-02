@@ -617,16 +617,12 @@ impl Store {
         Ok(())
     }
 
-    pub async fn forget_pack_public(&self, owner: &str, name: &str, fname: &str) -> Result<()> {
-        self.forget_pack(owner, name, fname).await
-    }
-
     /// Drop `open_repo`'s synced pack list: the index is about to change under it.
     fn forget_cached_packs(&self, owner: &str, name: &str) {
         self.packs.lock().unwrap_or_else(|p| p.into_inner()).remove(&format!("{owner}/{name}"));
     }
 
-    async fn forget_pack(&self, owner: &str, name: &str, fname: &str) -> Result<()> {
+    pub async fn forget_pack(&self, owner: &str, name: &str, fname: &str) -> Result<()> {
         self.forget_cached_packs(owner, name);
         self.db_for(owner, name).await?
             .delete(format!("{}{}", pack_index_prefix(owner, name), fname))

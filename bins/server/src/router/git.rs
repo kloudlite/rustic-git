@@ -118,13 +118,20 @@ fn body_reader(headers: &HeaderMap, raw: Box<dyn Read + Send>) -> Box<dyn Read +
     }
 }
 
+/// Cap on an upload-pack negotiation body. A `want`/`have` pkt-line is about 50 bytes, so this is
+/// over 150 000 of them — past any real negotiation, and small enough that the concurrent-request
+/// count that OOMs the pod is unreachable. NOT `max_body`: this body is BUFFERED, and an OOM here
+/// moves repo ownership on an attacker's schedule.
+const MAX_NEGOTIATION: usize = 8 * 1024 * 1024;
+
 /// Read the whole body only AFTER `open()` has authenticated the caller. `Bytes` as an extractor
-/// runs before the handler, so an anonymous client could make the pod buffer `max_body` and, with
-/// a few of those in flight, OOM it — which moves repo ownership, the one thing that must not
-/// happen on an attacker's schedule. The `DefaultBodyLimit` layer only governs extractors, so the
-/// cap is applied here by hand. Upload-pack only: its request is the negotiation, kilobytes.
+/// runs before the handler, so an anonymous client could make the pod buffer the whole cap and,
+/// with a few of those in flight, OOM it. The `DefaultBodyLimit` layer only governs extractors, so
+/// the cap is applied here by hand. Upload-pack only: its request is the negotiation, kilobytes —
+/// so the cap is `MAX_NEGOTIATION`, not the 2 GiB `max_body` that governs receive-pack's STREAMED
+/// body (`live_body`), which never sits in memory.
 async fn read_body(body: Body) -> Result<Bytes, Response> {
-    axum::body::to_bytes(body, max_body())
+    axum::body::to_bytes(body, MAX_NEGOTIATION)
         .await
         .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response())
 }
@@ -506,6 +513,14 @@ async fn respond(
 /// push path also writes packs to local disk, and the OS reports a full or read-only disk as an
 /// `io::Error` too (`StorageFull`, `ReadOnlyFilesystem`, `PermissionDenied`, `Uncategorized`…),
 /// which used to come back as a 400 with the OS message in it.
+///
+/// `Other` is the one kind whose MESSAGE is echoed to the client in the 400 body, so every
+/// producer of one on these paths must be a literal: pkt-line's own `io::Error::other`,
+/// `live_body`'s "request body too large", and `Capped::fill_buf`'s "pack exceeds the size
+/// limit" (`crates/git/src/protocol/receive.rs:463`). `git.rs:263`'s `Error::other(e.to_string())`
+/// is exempt — it lands in the post-status-line streaming body, which never reaches
+/// `is_client_fault`. A future `Other` built with `format!` would put an internal string on the
+/// wire — `the_only_other_kind_errors_answered_400_are_the_three_literals` is what refuses one.
 fn is_client_fault(e: &crate::Error) -> bool {
     use std::io::ErrorKind::*;
     e.downcast_ref::<ClientError>().is_some()
@@ -549,6 +564,24 @@ mod tests {
         assert!(!fault(Error::from_raw_os_error(libc_eio())));
         assert!(is_client_fault(&client_err("no such ref")));
         assert!(!is_client_fault(&crate::err("store: timeout")));
+    }
+
+    /// `Other` is answered 400 WITH ITS MESSAGE, so every producer of one on these paths must be
+    /// a literal the client may read. Today that is pkt-line's own `io::Error::other`,
+    /// `live_body`'s cap, and `Capped::fill_buf`'s pack-size cap
+    /// (`crates/git/src/protocol/receive.rs:463`). This pins the contract: a new `Other` carrying
+    /// an internal detail (a store URL, a peer address, a secret) must fail here rather than ship.
+    #[test]
+    fn the_only_other_kind_errors_answered_400_are_the_three_literals() {
+        let fault = |e: Error| is_client_fault(&(Box::new(e) as crate::Error));
+        // The three producers, by their exact strings.
+        assert!(fault(Error::other("request body too large")));
+        assert!(fault(Error::other("bad pkt len")));
+        assert!(fault(Error::other("pack exceeds the size limit")));
+        // The one `Other` the response path itself makes is a broken pipe, which is not `Other`
+        // and so never reaches a client as text.
+        let pipe = Error::new(ErrorKind::BrokenPipe, "client went away");
+        assert!(!fault(pipe));
     }
 
     /// EIO has no `ErrorKind` of its own, so it lands in `Uncategorized` — the kind every OS

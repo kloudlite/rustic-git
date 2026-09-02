@@ -184,6 +184,9 @@ async fn run(
                 "no node may safely serve this repository right now; retry",
             ))
         }
+        // Nothing under this key: fall through and let the session report it, as it does for a
+        // repo that was deleted. `open_repo` checks the prefix, so nothing is opened.
+        crate::ownership::Route::Missing => {}
         crate::ownership::Route::Peer(peer) => {
             let authed = auth_owner.clone().expect("authorize() passed, so the owner is set");
             // The stream lives until after the exit status is sent: dropping it closes the channel.

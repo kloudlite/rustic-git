@@ -1,7 +1,7 @@
 # Alerts
 
-Every pod is annotated `prometheus.io/scrape` (no Operator assumed); the server tier serves
-`/metrics` on the peer port (8081), every other binary on `RUSTIC_GIT_METRICS_ADDR` (9464).
+Every pod is annotated `prometheus.io/scrape` (no Operator assumed); every binary, the server tier
+included, serves `/metrics` on `RUSTIC_GIT_METRICS_ADDR` (9464).
 Structured logs: `RUSTIC_GIT_LOG_FORMAT=json` on any pod. Node/disk signals come from
 node-exporter, which is not deployed by this repo — install it before the last two rules fire.
 

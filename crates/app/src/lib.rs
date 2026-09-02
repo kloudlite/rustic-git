@@ -63,6 +63,16 @@ pub struct App {
     // ponytail: unbounded map; entries are one u64 per repo ever recovered, and a repo count
     // that makes this matter is a bigger problem elsewhere first.
     pub recovery_asked: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// Names this node has already asked the leader about and been told nobody owns, with the
+    /// `now_ms()` of the answer. Without it a repeated invented name is one leader READ per
+    /// request — cheaper than the map write it replaced, but at request rate rather than once per
+    /// LEASE_TTL, which is the wrong direction for a path an anonymous client reaches.
+    // ponytail: 4096 entries, swept on insert; a spray wider than that just gets less caching, and
+    // an LRU is the upgrade if the sweep ever shows up in a profile.
+    missing_seen: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// How many times this node has asked the leader who owns a repo. Read by the routing tests to
+    /// prove the negative cache actually saves the ask.
+    pub owner_asks: std::sync::atomic::AtomicU64,
     /// Milliseconds added to this node's wall clock. Zero in production; a test advances it to
     /// age a lease entry or a recovery window without sleeping through it. Per node, not
     /// process-wide: the routing tests run many nodes in one process, and skewing them all
@@ -93,6 +103,12 @@ pub struct App {
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
 pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long "the leader says nobody owns this" is believed. Well under `LEASE_TTL`, so a key that
+/// someone really does claim is seen on the next window rather than after a lease's worth of 404s.
+pub const MISSING_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+/// The most names the negative cache remembers at once.
+const MISSING_CACHE_MAX: usize = 4096;
 
 /// See `App::claim_gate`.
 pub const MAX_WAITING_CLAIMS: usize = 64;
@@ -151,6 +167,8 @@ impl App {
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             recovery_asked: Default::default(),
+            missing_seen: Default::default(),
+            owner_asks: Default::default(),
             skew_ms: std::sync::atomic::AtomicU64::new(0),
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
@@ -380,7 +398,10 @@ impl App {
     /// the leader — and if the leader cannot be reached, answer `Unavailable`. **Never serve on a
     /// failed claim**: falling back to "well, serve it here" is failover to whoever asked first,
     /// which is the two-writer bug this design exists to remove.
-    pub async fn route(&self, repo: &str) -> Route {
+    ///
+    /// `may_create` says whether the route being served can bring this database into being (see
+    /// `router::route::may_create`); only such a route may claim a key with nothing under it.
+    pub async fn route_for(&self, repo: &str, may_create: bool) -> Route {
         let now = self.now_ms();
         let entry = match self.owner(repo).await {
             Ok(c) => c,
@@ -408,17 +429,58 @@ impl App {
                 if self.store.pool.is_closed() {
                     return Route::Unavailable;
                 }
-                // A repo the map does not name is CLAIMED before anyone opens it, whether or not
-                // its object-store prefix has anything in it yet. Routing on "does the prefix
-                // exist" was a two-writer window: the first write to a new repo, image or
-                // volume opened it here unleased, and until its manifest landed every other node
-                // saw the same empty prefix and opened it too. A request for a name that really
-                // does not exist still 404s in the handler (`open_repo` checks the prefix before
-                // it opens anything); the claim it left behind lapses on the lease TTL, unrenewed,
-                // because a repo never opened is never warm.
-                // ponytail: one leader write per invented name per LEASE_TTL, pre-auth. Ceiling is
-                // the leader's claim rate under a spray of distinct bad names; a per-node token
-                // bucket on claims for empty-prefix names is the upgrade if that ever shows.
+                // A repo the map does not name is CLAIMED before anyone opens it. Routing on
+                // "does the prefix exist" was a two-writer window: the first write to a new repo,
+                // image or volume opened it here unleased, and until its manifest landed every
+                // other node saw the same empty prefix and opened it too. That is why the routes
+                // which can CREATE claim unconditionally — the window is theirs and they keep the
+                // lease. Every other route gates on the prefix, because `route()` runs before
+                // authentication: without the gate a spray of invented names is one leader map
+                // write per name per LEASE_TTL, from an anonymous client, against the one node the
+                // whole fleet's routing depends on. An `exists` that errs falls back to claiming,
+                // exactly as `force_claim` does — an unreadable store must not turn into a 404.
+                let empty_prefix = !may_create
+                    && match repo.split_once('/') {
+                        Some((o, n)) => !self.store.pool.exists(o, n).await.unwrap_or(true),
+                        None => false,
+                    };
+                if empty_prefix {
+                    // Ask the LEADER who owns it before answering Missing. This node's own copy
+                    // of the map is a follower's, up to a poll interval behind, so "the map names
+                    // nobody" is only ever a guess here — which is why the claim path asks the
+                    // leader too. Unlike a claim this WRITES NOTHING, so an invented name still
+                    // costs the elected writer no map write.
+                    //
+                    // What it buys, exactly: the prefix probe and the map read are not one atomic
+                    // look, and a creator elsewhere can claim the key and flush its first objects
+                    // between them — after which falling through to a handler HERE opens the
+                    // database unleased and fences the owner. The leader read narrows that window
+                    // to the gap between its "nobody" and the handler's own `exists` probe; the
+                    // creator's flush has to land inside THAT gap to hurt, which is far smaller
+                    // than the whole request. It is not zero.
+                    // ponytail: residual unleased-open window between the leader's "nobody" and
+                    // the handler's probe; an atomic claim-or-read on the leader (answer the owner
+                    // if there is one, claim only if the prefix is non-empty, all under the
+                    // leader's lock) is the upgrade if it ever bites.
+                    //
+                    // A leader that cannot be reached is treated exactly like "nobody", on
+                    // purpose: the alternative is 503 on a path an anonymous client reaches, and
+                    // the cost of being wrong is bounded — a just-claimed, unflushed repo answers
+                    // 404 locally after authentication, and nothing is opened, because the
+                    // handler's own probe sees the same empty prefix.
+                    if !self.may_ask_who_owns(repo) {
+                        return Route::Missing;
+                    }
+                    return match self.ask_owner(repo).await.ok().flatten() {
+                        Some(e) if !ownership::is_expired(&e, self.now_ms()) => {
+                            self.route_to(e.node)
+                        }
+                        _ => {
+                            self.note_no_owner(repo);
+                            Route::Missing
+                        }
+                    };
+                }
                 match self.claim(repo).await {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
                     Err(e) => {
@@ -442,6 +504,11 @@ impl App {
                 }
             }
         };
+        self.route_to(node)
+    }
+
+    /// The node the map named, as a `Route`.
+    fn route_to(&self, node: String) -> Route {
         if node == self.self_name {
             // An unhealthy node still forwards what it does not own (safe, and keeps its share of
             // load-balancer traffic flowing) but never serves what it does. The same holds for a
@@ -458,6 +525,13 @@ impl App {
                 name: node,
             })
         }
+    }
+
+    /// `route_for` for the paths that can never create a database — every git route, and the peer
+    /// stream. The default is the safe one on purpose: a new caller that forgets to think about it
+    /// gets the gated behaviour, not the amplifier.
+    pub async fn route(&self, repo: &str) -> Route {
+        self.route_for(repo, false).await
     }
 
     /// This node's view of wall-clock time, in ms since the epoch. Every lease decision this
@@ -484,6 +558,34 @@ impl App {
                 true
             }
         }
+    }
+
+    /// Whether the leader still has to be asked who owns `repo`, recording the ask if so. A "no
+    /// owner" answer is remembered for `MISSING_ASK_EVERY`, which is well under `LEASE_TTL`, so a
+    /// creator that claims the key is still seen within one window. See `missing_seen`.
+    fn may_ask_who_owns(&self, repo: &str) -> bool {
+        let now = self.now_ms();
+        let mut m = self.missing_seen.lock().unwrap();
+        if m.get(repo)
+            .is_some_and(|t| now.saturating_sub(*t) < MISSING_ASK_EVERY.as_millis() as u64)
+        {
+            return false;
+        }
+        if m.len() >= MISSING_CACHE_MAX {
+            // Drop what has aged out; if it is still full the spray is wider than the cap, and
+            // forgetting everything is the honest bound — the worst case is the uncached rate.
+            m.retain(|_, t| now.saturating_sub(*t) < MISSING_ASK_EVERY.as_millis() as u64);
+            if m.len() >= MISSING_CACHE_MAX {
+                m.clear();
+            }
+        }
+        true
+    }
+
+    /// Remember that the leader named nobody for `repo`.
+    fn note_no_owner(&self, repo: &str) {
+        let now = self.now_ms();
+        self.missing_seen.lock().unwrap().insert(repo.to_string(), now);
     }
 
     /// Ask for this repo. On the leader that is a local decision and a write; anywhere else it is
@@ -522,6 +624,31 @@ impl App {
             }
         }
         self.claim_inner(repo, true, Patience::Recover).await
+    }
+
+    /// Who the LEADER says owns `repo` — the authoritative read, and the reason it exists: this
+    /// node's copy of the map is eventually consistent, so "the map names nobody" is only ever a
+    /// guess here. Unlike `claim` it takes no lease and writes nothing.
+    pub async fn ask_owner(&self, repo: &str) -> Result<Option<Entry>> {
+        self.owner_asks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.is_leader() {
+            return self.ownership.get(repo).await;
+        }
+        // The recovery budget, not the claim budget: this runs ahead of authentication, so it must
+        // never hold a task through a leader failover.
+        let reply = self
+            .ask_leader_with("owner", repo.to_string(), Patience::Recover)
+            .await?;
+        let mut lines = reply.lines();
+        match (lines.next(), lines.next()) {
+            (Some(node), Some(expires)) if !node.is_empty() => Ok(Some(Entry {
+                node: node.to_string(),
+                expires_ms: expires
+                    .parse()
+                    .map_err(|_| err(format!("owner reply: bad expiry {expires:?}")))?,
+            })),
+            _ => Ok(None),
+        }
     }
 
     async fn claim_inner(&self, repo: &str, force: bool, patience: Patience) -> Result<Grant> {
@@ -816,7 +943,8 @@ impl App {
         // THE invariant violation (CLAUDE.md): another node opened this database under us. Every
         // path (HTTP, SSH, peer) lands here, so this is the one count that means "it happened".
         metrics::counter!("db_fence_detected_total").increment(1);
-        if !matches!(self.route(&format!("{owner}/{name}")).await, Route::Local) {
+        // The ungated form: the database demonstrably exists — it just fenced us.
+        if !matches!(self.route_for(&format!("{owner}/{name}"), true).await, Route::Local) {
             return false;
         }
         // Pool::get never reopens a fenced handle by itself (that is the amplifier this exists to

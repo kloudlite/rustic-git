@@ -2,9 +2,8 @@
 //! `metrics` macros are silent without a recorder, and six `main`s drifting apart is how one of
 //! them ends up exporting nothing while its dashboards stay green.
 //!
-//! Exposure is deliberately NOT on any public listener. The server mounts `routes()` on its peer
-//! router (the peer port never leaves the cluster network policy); every other binary serves a
-//! dedicated listener via `serve_if_configured` on `RUSTIC_GIT_METRICS_ADDR`, unset in dev.
+//! Exposure is deliberately NOT on any public listener. Every binary, the server included, serves
+//! a dedicated listener via `serve_if_configured` on `RUSTIC_GIT_METRICS_ADDR`, unset in dev.
 //! Metric text lists every repository key a node has touched — that is an enumeration oracle.
 
 use axum::{extract::Request, middleware::Next, response::Response, routing::get, Router};

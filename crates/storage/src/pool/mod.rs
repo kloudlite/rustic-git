@@ -283,16 +283,16 @@ impl Pool {
         self.closed.load(Ordering::SeqCst)
     }
 
-    /// Whether a repo's database exists, without opening it.
-    ///
-    /// Opening creates: `Db::builder(...).build()` has no create-if-missing switch, so probing an
-    /// unknown path through `get` would bring a database into being for every bad request. A warm
-    /// entry is proof enough; otherwise ask the object store, which costs one LIST.
     /// How many repo databases this node is holding open. Reported by `/healthz`.
     pub fn warm_count(&self) -> usize {
         self.entries.lock().unwrap().len()
     }
 
+    /// Whether a repo's database exists, without opening it.
+    ///
+    /// Opening creates: `Db::builder(...).build()` has no create-if-missing switch, so probing an
+    /// unknown path through `get` would bring a database into being for every bad request. A warm
+    /// entry is proof enough; otherwise ask the object store, which costs one LIST.
     pub async fn exists(&self, owner: &str, name: &str) -> Result<bool> {
         if self
             .entries

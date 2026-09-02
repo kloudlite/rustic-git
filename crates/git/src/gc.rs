@@ -132,7 +132,7 @@ pub async fn retire(store: &Store, repo: &Repo, old: &[(String, u64)]) -> Result
     let mut ordered: Vec<&str> = old.iter().map(|(f, _)| f.as_str()).collect();
     ordered.sort_by_key(|f| !f.ends_with(".idx"));
     for fname in ordered {
-        store.forget_pack_public(&repo.owner, &repo.name, fname).await?;
+        store.forget_pack(&repo.owner, &repo.name, fname).await?;
         store
             .os
             .delete(&OsPath::from(format!("{}/{}", repo.s3_prefix(), fname)))
