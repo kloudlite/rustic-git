@@ -517,7 +517,7 @@ every stop lands at once with message "no other node in the region holds replica
 
 ### Node death
 
-A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` (default 600) —
+A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` (code default 600; the DaemonSet sets 180, enough for a reboot to finish without healing around it) —
 that floor, not a shorter probe, is what keeps a brief kubelet hiccup from tearing anything down.
 Every surviving agent's pull beat then does two things to that node's volumes: replicas heal onto
 a third live node automatically (rendezvous stops naming the dead node as a candidate, so a
