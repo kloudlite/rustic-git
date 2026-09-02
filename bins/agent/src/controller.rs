@@ -1937,9 +1937,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             w,
             "Workspace",
             gen,
+            // `patch_status` is a forced server-side apply: a field omitted here is PRUNED, so an
+            // invalid spec would erase the placement memory that says where this workspace lives.
             move |cond| {
                 serde_json::json!({
                     "phase": crd::Phase::Error,
+                    "nodeName": prev.node_name,
+                    "compatibleNodes": prev.compatible_nodes,
+                    "volumeRef": prev.volume_ref,
                     "conditions": kept_conditions(&prev.conditions, cond),
                 })
             },
@@ -2408,14 +2413,26 @@ pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus
 
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let gen = e.meta().generation.unwrap_or(0);
-    // `spec.owner` reaches `ensure_homecache`'s `{pool}/homecache/{owner}` here too.
+    // `spec.owner` reaches `ensure_homecache`'s `{pool}/homecache/{owner}` here too. Only the
+    // owner: `EnvironmentSpec.name` is display text that reaches no path and no argv — the
+    // namespace and every pool path are built from `vol.name_any()`, not from it.
     if let Err(why) = model::validate_owner(&e.spec.owner) {
+        let prev = e.status.clone().unwrap_or_default();
         return settle(
             Outcome::Permanent(why, "InvalidSpec"),
             e,
             "Environment",
             gen,
-            move |cond| serde_json::json!({"phase": crd::Phase::Error, "conditions": vec![cond]}),
+            // Pruned-on-omit, as above: keep the placement fields and the prior conditions.
+            move |cond| {
+                serde_json::json!({
+                    "phase": crd::Phase::Error,
+                    "nodeName": prev.node_name,
+                    "compatibleNodes": prev.compatible_nodes,
+                    "volumeRef": prev.volume_ref,
+                    "conditions": kept_conditions(&prev.conditions, cond),
+                })
+            },
             ctx,
         )
         .await;

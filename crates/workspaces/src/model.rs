@@ -211,7 +211,8 @@ pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> 
 
 /// `spec.owner` alone — the half an `Environment` shares. It is joined onto the pool root and
 /// chowned by a privileged process (`ensure_shared_home`, `ensure_homecache`), so a traversal here
-/// is a root-run `mkdir`/`chown` outside the pool.
+/// is a root-run `mkdir`/`chown` outside the pool. The reserved names (`api`, `v2`, `img`) that
+/// `store::valid_owner` also refuses are refused here on purpose: no real owner may hold one.
 pub fn validate_owner(owner: &str) -> Result<(), String> {
     match rustic_git_storage::store::valid_owner(owner) {
         true => Ok(()),

@@ -3485,6 +3485,8 @@ async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_dire
         "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
         "spec": {"owner": "../../etc", "team": "", "name": "ws", "region": "r1",
                  "image": "", "packages": [], "desiredState": "running"},
+        "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+                   "volumeRef": "vol-1", "conditions": []},
     }))
     .unwrap();
 
@@ -3494,4 +3496,37 @@ async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_dire
     let reason = sent.last().expect("a status write")["status"]["conditions"][0]["reason"].clone();
     assert_eq!(reason, "InvalidSpec");
     assert!(!tmp.path().join("homes").exists(), "nothing under the pool root was created");
+    assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "nothing was created: {:?}", rec.calls());
+    // `patch_status` is a forced apply, so an omitted field is pruned — placement must survive.
+    let st = &sent.last().unwrap()["status"];
+    assert_eq!(st["nodeName"], "node-a");
+    assert_eq!(st["volumeRef"], "vol-1");
+    assert_eq!(st["compatibleNodes"], serde_json::json!(["node-a"]));
+}
+
+/// The same guard on an Environment, whose `spec.owner` reaches `{pool}/homecache/{owner}`.
+#[tokio::test]
+async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_placement() {
+    const ENV_STATUS: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1/status";
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![Route { method: "PATCH", path: ENV_STATUS.into(), status: 200, body: env_json(serde_json::json!({})) }],
+    );
+    let mut json = env_json(serde_json::json!({
+        "phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "vol-1",
+        "serviceStatus": [], "conditions": []
+    }));
+    json["spec"]["owner"] = serde_json::json!("../../etc");
+    let e: crd::Environment = serde_json::from_value(json).unwrap();
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent, never retried");
+    let sent = rec.sent("PATCH", ENV_STATUS);
+    let st = &sent.last().expect("a status write")["status"];
+    assert_eq!(st["conditions"][0]["reason"], "InvalidSpec");
+    assert_eq!(st["nodeName"], "node-a");
+    assert_eq!(st["volumeRef"], "vol-1");
+    assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "nothing was created: {:?}", rec.calls());
+    assert!(!tmp.path().join("homecache").exists(), "nothing under the pool root was created");
 }
