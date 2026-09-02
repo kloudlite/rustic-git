@@ -239,6 +239,12 @@ kept for no reader. These are binding on the plan.
    the dead set or the decommission set. `release_dead_volumes`, the per-kind `releasable`
    closures in `unclaim_kind`, and the `running_volumes` plumbing between them are deleted.
 10. **`source_nodes` is deleted**, replaced by the same up-to-date check a start uses.
+11. **Four CRD fields leave with this release**, each with zero readers afterwards:
+    `Workspace/Environment.status.compatibleNodes` (item 6), `Workspace/Environment.status.durable`
+    (a replica watermark nothing ever wrote; the `Replicated` condition is that answer),
+    `VolumeReplica.status.lastSyncAt` (its only reader was the flush gate; up to date is by name),
+    and `OwnerBinding.spec.nodeName` (the home pin, meaningless since homes moved to ZeroFS).
+    Old objects still parse — the fields are simply no longer declared, written or generated.
 
 Not simplified, on purpose: the two-step move of a volume at start (owner releases, taker
 CASes) stays instead of an owner-writes-the-target handoff, because the handoff would need the

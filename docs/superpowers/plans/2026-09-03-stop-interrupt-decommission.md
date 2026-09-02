@@ -2365,9 +2365,13 @@ and the rule (lines 214–216):
 - [ ] **Step 5: Commit** — `git add bins/agent/src deploy/k3s/agent-rbac.yaml && git commit -m "Drain a labelled node without stopping anyone's work"`
 
 ---
-### Task 12: Regenerate the CRDs for the dropped `compatibleNodes`
+### Task 12: Drop the four dead CRD fields and regenerate the CRDs
 
-**Files:**
+**Files:** (plus, for the three fields below, every struct literal and status write that names them — grep `durable`, `last_sync_at`, `node_name` in binding.rs/OwnerBindingSpec)
+
+Also removed in this task, each with zero readers after Tasks 1–11 (spec Simplifications item 11): `WorkspaceStatus.durable` and `EnvironmentStatus.durable` (never written; drop the field, its doc, and the two `a.durable == b.durable` equality terms in the status-equality helpers), `VolumeReplicaStatus.last_sync_at` (Task 1 replaced its one reader; drop the field and the `listed_at` plumbing in `write_replica_status` that only fed it — keep the listing-instant ordering comment if `branches` still depends on it), and `OwnerBindingSpec.node_name` (drop the field; `claim::ensure_binding` stops passing it). Serde tolerates the fields on old objects because nothing sets `deny_unknown_fields`; assert that with one test that deserializes a Workspace status JSON carrying `durable` and `compatibleNodes` and a VolumeReplica status carrying `lastSyncAt` without error.
+
+**Original files:**
 - Modify `deploy/k3s/crds.yaml` (regenerated, `compatibleNodes` gone from both parent status schemas).
 - Test `crates/workspaces/tests/crd_yaml.rs` (it already asserts the checked-in yaml matches what the code generates).
 
