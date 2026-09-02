@@ -185,6 +185,9 @@ async fn team_owner_without_a_directory_configured_is_503() {
 async fn member_can_clone_a_team_environment() {
     let routes = vec![
         get(format!("{API}/environments/env-1"), env_obj("env-1", "acme", "node-z")),
+        // A clone cuts its own sync point first, so it lists and then creates a Snapshot.
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        post(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot", "metadata": {"name": "clone-env-1-cafe"}, "spec": {"volume": "env-1", "owner": "acme", "worktree": "env-1", "parent": "", "pinned": false, "transient": true}})),
         post(format!("{API}/environments"), env_obj("env-new", "acme", "node-z")),
     ];
     let s = server(true, routes).await;

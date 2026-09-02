@@ -197,10 +197,13 @@ There is no user-facing un-pushed state; internally
 crash-recovery seam — a push that dies mid-flight leaves the stage files and an internal
 `unpushed` mark so a retried push picks them up, never re-snapshotting stray data or losing it).
 `clone` (`POST /v1/workspaces/{id}/clone`, the one local-copy verb — "fork" appears nowhere
-user-facing) is local-first when the source is materialized on the same pool
-(`Engine::clone_local_snapshot`, which works even on a source that has never pushed at all,
-running or not); its registry-history fallback (`inherit`) always grafts onto the source's last
-PUSHED history. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
+user-facing) cuts its OWN sync point at the moment of the request — a `clone-{ws}-{hex}` transient
+parented on the source's newest one — rather than leaning on whatever the last beat left, and the
+response's `based_on` (`snapshot`, `at`, `age_seconds`, `interrupted`) always names what it grafted
+onto. It places by the one up-to-date rule like everything else, which is why a running source's
+clone lands on the owner: at the instant of the cut nothing else holds it. An INTERRUPTED source
+cannot be cut at all, so its clone grafts onto the newest transient an up-to-date node already
+holds and `based_on` states that age — the one way forward, chosen knowingly. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
 an explicit past **snapshot** — a PUSHED commit record, named by id. Between pushes, a background
 sync beat (`WS_SYNC_SECS`, `bins/agent/src/sync.rs`) cuts a TRANSIENT `Snapshot` — never a parent,
 never advancing `status.head` — from each running worktree whose btrfs generation has moved, so a

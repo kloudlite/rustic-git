@@ -1053,11 +1053,112 @@ struct CloneBody {
     name: String,
 }
 
+/// What a clone was grafted onto. Always present on a clone response: a clone is always based on
+/// a cut, and only the interrupted case makes that cut older than "now" — which is the one thing a
+/// person needs to weigh before accepting it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BasedOn {
+    pub snapshot: String,
+    /// The cut's `readyAt` — absent for a cut this request just made, which is not Ready yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// How stale the copy is, in seconds, at the moment of this response. Zero for a fresh cut.
+    pub age_seconds: i64,
+    /// The source's node was down, so this is the newest cut a peer already HOLDS rather than a
+    /// fresh one taken for this request.
+    pub interrupted: bool,
+}
+
+/// The newest Ready transient of `worktree`, as the whole object: a clone's parent when the owner
+/// can cut, and the clone's own base when it cannot. `crd::newest_transient_of` is the ordering,
+/// shared with the agent so `/v1` and placement can never disagree about which cut is newest.
+async fn newest_transient(c: &kube::Client, volume: &str, worktree: &str) -> Result<Option<crd::Snapshot>, Response> {
+    let api: Api<crd::Snapshot> = Api::all(c.clone());
+    let list = api
+        .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await
+        .map_err(kube_err)?;
+    // Same one-cut-in-flight rule `create_commit` enforces: a second Working cut of one worktree
+    // forks the transient chain, and the loser then misdescribes what it holds.
+    if list.items.iter().any(|sn| sn.spec.worktree == worktree && sn.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Working)) {
+        return Err((StatusCode::CONFLICT, "a snapshot is already being cut for this workspace").into_response());
+    }
+    let newest = crd::newest_transient_of(&list.items, worktree);
+    Ok(newest.and_then(|n| list.items.into_iter().find(|s| s.name_any() == n)))
+}
+
+/// Seconds between `at` and now, floored at 0. An unparseable or absent timestamp is 0: the age is
+/// advisory, and a clone must never fail because a clock string did not parse.
+fn age_seconds(at: Option<&str>) -> i64 {
+    at.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds().max(0))
+        .unwrap_or(0)
+}
+
+/// What this clone grafts onto, and — in the ordinary case — the act of creating it.
+///
+/// The cut is taken HERE rather than left to the next sync beat because a clone that leaned on the
+/// last beat could be a whole `WS_SYNC_SECS` stale: silent data loss nobody asked for. It is a
+/// `clone-{worktree}-{hex}` TRANSIENT, the same shape the sync beat produces, so the puller sends a
+/// delta against what a replica already holds and retention sweeps it like any other sync point.
+///
+/// An INTERRUPTED source is the one exception: its node is down, so nothing can be cut there at
+/// all. The clone then grafts onto the newest transient — which, by the up-to-date rule, is exactly
+/// the one an up-to-date node holds — and the response states its age so the person chooses the
+/// gap knowingly. With no transient anywhere there is nothing to graft onto and no way forward.
+async fn clone_base(
+    c: &kube::Client,
+    owner: &str,
+    volume: &str,
+    worktree: &str,
+    interrupted: bool,
+) -> Result<BasedOn, Response> {
+    let newest = newest_transient(c, volume, worktree).await?;
+    if interrupted {
+        let held = newest.ok_or_else(|| {
+            (StatusCode::CONFLICT, "the source's node is down and no node holds a sync point of it yet").into_response()
+        })?;
+        let at = held.status.as_ref().and_then(|st| st.ready_at.clone());
+        return Ok(BasedOn { snapshot: held.name_any(), age_seconds: age_seconds(at.as_deref()), at, interrupted: true });
+    }
+    let name = format!("clone-{worktree}-{}", crd::short_hex());
+    let mut snap = crd::Snapshot::new(
+        &name,
+        crd::SnapshotSpec {
+            volume: volume.to_string(),
+            owner: owner.to_string(),
+            worktree: worktree.to_string(),
+            // The previous sync point, so the puller sends a delta. Empty on a source that has
+            // never been snapshotted at all, exactly as a root commit is.
+            parent: newest.map(|s| s.name_any()).unwrap_or_default(),
+            message: Some("cloning".to_string()),
+            pinned: false,
+            transient: true,
+        },
+    );
+    // `status` on CREATE is stored verbatim, which is how this is born `Working` and reaches the
+    // owning node's snapshot reconciler rather than sitting at the schema's `Pending` default.
+    snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
+    snap.metadata.labels = Some(crd::commit_labels(owner, volume));
+    let api: Api<crd::Snapshot> = Api::all(c.clone());
+    api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
+    Ok(BasedOn { snapshot: name, at: None, age_seconds: 0, interrupted: false })
+}
+
+/// Attach `based_on` to a doc the way `stop_ws` attaches `warning`: a key beside the doc's own
+/// fields, so the web client's `res.json()` of a Workspace/Environment keeps working unchanged.
+fn with_based_on<T: serde::Serialize>(doc: &T, based_on: &BasedOn) -> Response {
+    let mut body = serde_json::to_value(doc).expect("doc always serializes");
+    body["based_on"] = serde_json::to_value(based_on).expect("BasedOn always serializes");
+    (StatusCode::ACCEPTED, Json(body)).into_response()
+}
+
 /// The one local-copy route.
 ///
-/// It no longer copies a node from the source: locality is the CLAIM's job now, through the
-/// source's `status.compatibleNodes`. Copying a node here would be this process authoring a fact it
-/// does not own, and it would go stale the moment node retirement moved the source.
+/// It names no node: placement is the claim's job now, and the ONE rule — a node up to date for the
+/// SOURCE worktree — is read there. At the instant of the cut above the owner is simply the only
+/// node that qualifies, so a running source's clone lands on the owner by arithmetic; there is no
+/// "same node" rule here or anywhere.
 async fn clone_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -1072,14 +1173,12 @@ async fn clone_ws(
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
-    // A clone is a second worktree of the SOURCE's own volume, pinned to the head the caller saw
-    // right now — resolved ONCE, here, so the clone never drifts with the source's later pushes.
-    // An uncommitted source has nothing to pin to, so that is a 400, not a clone of an empty
-    // worktree indistinguishable from a real one.
-    let head = src.status.as_ref().and_then(|st| st.head.clone()).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "source workspace has no commits yet; push before cloning").into_response()
-    })?;
-    let source = VolumeSource::CloneOf { volume, commit: Some(head) };
+    // A clone is a second worktree of the SOURCE's own volume, pinned to a cut taken NOW — resolved
+    // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
+    // the last sync beat happened to leave.
+    let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
+    let based_on = clone_base(c, &owner, &volume, &id, interrupted).await?;
+    let source = VolumeSource::CloneOf { volume, commit: Some(based_on.snapshot.clone()) };
     let w = create_workspace(
         c,
         &new_id,
@@ -1098,7 +1197,7 @@ async fn clone_ws(
         },
     )
     .await?;
-    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &HashSet::new()))).into_response())
+    Ok(with_based_on(&ws_doc(&w, &HashSet::new()), &based_on))
 }
 
 /// What a copy of `volume` should be sized at.
@@ -1531,6 +1630,8 @@ async fn clone_env(
     let new_id = rid("env");
     let volume = env_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
+    let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
+    let based_on = clone_base(c, &src.spec.owner, &volume, &id, interrupted).await?;
     let e = create_environment(
         c,
         &new_id,
@@ -1541,17 +1642,18 @@ async fn clone_env(
             services: src.spec.services.clone(),
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
-                // ponytail: environment clone still copies bytes into a fresh child Volume even
-                // under commit_model — the brief scoped the shared-worktree architecture change to
-                // workspaces only. Extend the same way `clone_ws` does below if environments need it.
-                source: Some(VolumeSource::CloneOf { volume, commit: None }),
+                // ponytail: environment clone still copies bytes into a fresh child Volume, where a
+                // workspace clone is a second worktree of the source's own volume — the brief scoped
+                // the shared-worktree architecture change to workspaces only. The CUT is the same
+                // either way, which is all `based_on` promises.
+                source: Some(VolumeSource::CloneOf { volume, commit: Some(based_on.snapshot.clone()) }),
             }),
             desired_state: DesiredState::Running,
             restore: None,
         },
     )
     .await?;
-    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
+    Ok(with_based_on(&env_doc(&e, &HashSet::new()), &based_on))
 }
 
 // ── push ─────────────────────────────────────────────────────────────────

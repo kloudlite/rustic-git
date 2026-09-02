@@ -878,6 +878,38 @@ fn condition_now(kind: &str, status: bool, reason: &str, message: &str, generati
     }
 }
 
+/// The btrfs generation the sync beat replicated, stamped by the owner AFTER it cuts (taking a
+/// read-only snapshot bumps the source subvolume's own generation, so the pre-cut value leaves
+/// every idle worktree permanently "due"). It lives here, beside `Snapshot`, because both the
+/// agent that writes it and `/v1` — which must order the same transients to pick a clone's parent
+/// — read it, and two copies of the ordering key is how two tiers disagree about which cut is
+/// newest.
+pub const SYNCED_GENERATION: &str = "rustic-git.io/synced-generation";
+
+/// Public so the replica writer can apply the SAME key to the subset it actually holds on disk.
+pub fn transient_generation_of(s: &Snapshot) -> u64 {
+    use kube::ResourceExt;
+    s.annotations().get(SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok()).unwrap_or(0)
+}
+
+/// The newest Ready transient of `worktree` among `snaps` — ordered by `SYNCED_GENERATION`, never
+/// by creation time, because the annotation is the btrfs generation actually replicated and it is
+/// the one ordering that survives clock skew between the owner that cut it and the node that
+/// pulled it. A stop or clone cut carries no annotation until the owner stamps it post-cut and so
+/// reads as 0: it loses to any annotated one and still beats nothing. Ties break by NAME so two
+/// nodes computing this independently never disagree.
+pub fn newest_transient_of(snaps: &[Snapshot], worktree: &str) -> Option<String> {
+    use kube::ResourceExt;
+    snaps
+        .iter()
+        .filter(|s| {
+            s.spec.transient && s.spec.worktree == worktree && s.status.as_ref().is_some_and(|st| st.phase == Phase::Ready)
+        })
+        .map(|s| (transient_generation_of(s), s.name_any()))
+        .max()
+        .map(|(_, name)| name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

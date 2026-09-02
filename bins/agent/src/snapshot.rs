@@ -109,6 +109,14 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     )
     .await?;
 
+    // Poke every placeable peer: fresh bytes exist NOW, and waiting out the pull beat is what made
+    // a clone or a cross-node start take minutes. Every cut goes through here — a push, a sync
+    // point, a stop cut, a clone cut — and they all mean the same thing to a replica, so the wake
+    // belongs here rather than duplicated at each cut site. Best-effort by construction; the
+    // ticker still comes.
+    let live = crate::peer::placeable_nodes(&ctx).await;
+    crate::peer::wake_peers(&ctx, &live, &ctx.peer_secret).await;
+
     // A transient (sync point) never advances the worktree's head — it replicates a live
     // worktree continuously without ever becoming a commit the user sees or clones from.
     if !s.spec.transient {

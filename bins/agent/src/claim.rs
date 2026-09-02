@@ -371,6 +371,23 @@ mod tests {
         assert!(may_claim("node-b", "", &p(false, None, None)), "and by anyone when nothing owns it yet");
     }
 
+    /// Carried from Task 5's review: a clone of a source that had never been snapshotted read as
+    /// bootstrap and was claimable ANYWHERE, on a node with none of the source's bytes. The clone
+    /// cut `/v1` now takes is a `Snapshot` CR of the source volume, so `has_commits` is true from
+    /// the moment the clone exists and the up-to-date rule applies to it like everything else.
+    #[test]
+    fn a_clone_of_a_never_snapshotted_source_places_only_where_its_cut_is_held() {
+        let cut = Some("clone-ws-1-cafe");
+        let holding = Some(replica("node-b", "Synced", &[("ws-1", "clone-ws-1-cafe")]));
+        assert!(may_claim("node-b", "node-a", &p(true, holding, cut)));
+        assert!(!may_claim("node-b", "node-a", &p(true, None, cut)), "the cut arms the guard: no row, no claim");
+        assert!(
+            !may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Synced", &[])), cut)),
+            "and a Synced row that does not name the cut is not up to date for it"
+        );
+        assert!(may_claim("node-a", "node-a", &p(true, None, cut)), "the owner cut it, so the owner holds it");
+    }
+
     /// A clone places over its SOURCE, whose volume name is also the source worktree's name —
     /// `source_nodes`' pin to the source's node is gone, so a clone of a released source can start
     /// on any node that is up to date for it.

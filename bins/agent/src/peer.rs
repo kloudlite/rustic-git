@@ -656,7 +656,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     // `newest_transient_of` is all that is left to apply — one pass, max per worktree.
     let mut best: std::collections::BTreeMap<String, (u64, String)> = Default::default();
     for s in ready.iter().filter(|s| s.spec.transient && have.contains(&s.name_any())) {
-        let key = (transient_generation(s), s.name_any());
+        let key = (crd::transient_generation_of(s), s.name_any());
         let slot = best.entry(s.spec.worktree.clone()).or_insert_with(|| key.clone());
         if key > *slot {
             *slot = key;
@@ -728,30 +728,10 @@ async fn pull_one(
     Ok(())
 }
 
-/// The btrfs generation the sync beat replicated, as the ordering key. A stop cut carries no
-/// annotation (it is stamped post-cut on the owner only), so it reads as 0.
-fn transient_generation(s: &crd::Snapshot) -> u64 {
-    s.annotations().get(crate::sync::SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok()).unwrap_or(0)
-}
-
-/// The newest Ready transient of `worktree` among `snaps` — ordered by the sync beat's
-/// `SYNCED_GENERATION` annotation, never by creation time, because the annotation is the btrfs
-/// generation actually replicated and it is the one ordering that survives clock skew between the
-/// owner that cut it and the node that pulled it. A stop cut carries no annotation (it is stamped
-/// post-cut on the owner only) and so reads as 0: it loses to any annotated one and still beats
-/// nothing. Ties break by NAME so two nodes computing this independently never disagree.
-pub(crate) fn newest_transient_of(snaps: &[crd::Snapshot], worktree: &str) -> Option<String> {
-    snaps
-        .iter()
-        .filter(|s| {
-            s.spec.transient
-                && s.spec.worktree == worktree
-                && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)
-        })
-        .map(|s| (transient_generation(s), s.name_any()))
-        .max()
-        .map(|(_, name)| name)
-}
+/// The ordering key and the "newest transient" rule both live in `crd` now: `/v1` picks a clone
+/// cut's parent with the same function this node's placement reads, and two copies of that key is
+/// how two tiers disagree about which cut is newest.
+pub(crate) use crd::newest_transient_of;
 
 /// THE placement bar, and the only one: a replica is up to date for a worktree when it HOLDS that
 /// worktree's newest Ready transient, by name. Names, not clocks — `lastSyncAt` is stamped by the

@@ -24,7 +24,7 @@ use std::sync::Arc;
 /// re-stamps it), not the one this beat writes here: taking a read-only snapshot bumps its SOURCE
 /// subvolume's generation by one, so recording the pre-cut value leaves every idle worktree
 /// permanently "due" and cutting once per interval forever.
-pub const SYNCED_GENERATION: &str = "rustic-git.io/synced-generation";
+pub use crd::SYNCED_GENERATION;
 
 /// `WS_SYNC_SECS`, default 60. Lives beside the beat, as `peer::replica_interval` does.
 pub fn sync_interval() -> std::time::Duration {
