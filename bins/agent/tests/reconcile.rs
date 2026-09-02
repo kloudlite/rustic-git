@@ -1300,7 +1300,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     let init = k8s::git_init_container(source, "alpine/git:2.45.2", "git.example.com", "22")
         .expect("a valid repo is accepted")
         .expect("a gitRepo source seeds with an init container");
-    let pod = k8s::workspace_pod(&spec, "ws-1", "ws-1", &test_pod_ctx(), Some(init));
+    let pod = k8s::workspace_pod(&spec, "ws-1", "ws-1", &test_pod_ctx(), Some(init)).unwrap();
 
     let inits = pod.spec.as_ref().unwrap().init_containers.as_ref().expect("init containers");
     assert_eq!(inits.len(), 1);
@@ -3467,4 +3467,31 @@ async fn the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved(
         rec.sent("POST", SNAPSHOTS_LIST).is_empty(),
         "an unreadable generation must cut nothing: {:?}", rec.sent("POST", SNAPSHOTS_LIST)
     );
+}
+
+/// The owner guard: `spec.owner` becomes `{pool}/homes/{owner}` and is chowned by a privileged
+/// process, so a traversing owner must settle Permanent before `ensure_shared_home` runs — not be
+/// caught by accident because `heal_labels` patches the same string as a label first.
+#[tokio::test]
+async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    // `patch_ok` answers with a Volume; the status write here deserializes as a Workspace.
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }],
+    );
+    let w: crd::Workspace = serde_json::from_value(serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
+        "spec": {"owner": "../../etc", "team": "", "name": "ws", "region": "r1",
+                 "image": "", "packages": [], "desiredState": "running"},
+    }))
+    .unwrap();
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent, never retried");
+    let sent = rec.sent("PATCH", WS_STATUS);
+    let reason = sent.last().expect("a status write")["status"]["conditions"][0]["reason"].clone();
+    assert_eq!(reason, "InvalidSpec");
+    assert!(!tmp.path().join("homes").exists(), "nothing under the pool root was created");
 }

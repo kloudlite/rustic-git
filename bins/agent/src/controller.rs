@@ -1926,8 +1926,28 @@ fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32) -> Result
 }
 
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
+    // BEFORE `heal_labels`, and before anything reads the spec: the label patch happens to reject
+    // a `/` today, which is the only thing standing between `spec.owner` and a root-run
+    // `mkdir`/`chown` under the pool root. Do not rely on a cosmetic call failing first.
+    if let Err(why) = model::validate_ws_spec(&w.spec) {
+        let prev = w.status.clone().unwrap_or_default();
+        return settle(
+            Outcome::Permanent(why, "InvalidSpec"),
+            w,
+            "Workspace",
+            gen,
+            move |cond| {
+                serde_json::json!({
+                    "phase": crd::Phase::Error,
+                    "conditions": kept_conditions(&prev.conditions, cond),
+                })
+            },
+            ctx,
+        )
+        .await;
+    }
+    heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let mut prev = w.status.clone().unwrap_or_default();
     // Stopping is a home push and a pod delete — it needs neither the disk nor the namespace. Run
     // it BEFORE those gates: a workspace whose Volume failed permanently would otherwise be
@@ -2268,7 +2288,32 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     }
                 }
             };
-            create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init)).await?;
+            let pod = match k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init) {
+                Ok(p) => p,
+                // Unreachable while `validate_ws_spec` runs at the top of this function; kept
+                // because the builder is the boundary and must be able to say no on its own.
+                Err(why) => {
+                    let prev = prev.clone();
+                    return settle(
+                        Outcome::Permanent(why, "InvalidName"),
+                        w,
+                        "Workspace",
+                        gen,
+                        move |cond| {
+                            serde_json::json!({
+                                "phase": crd::Phase::Error,
+                                "nodeName": prev.node_name,
+                                "compatibleNodes": prev.compatible_nodes,
+                                "volumeRef": prev.volume_ref,
+                                "conditions": kept_conditions(&prev.conditions, cond),
+                            })
+                        },
+                        ctx,
+                    )
+                    .await;
+                }
+            };
+            create_if_absent(&pods, &pod).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
             // from the apply made a broken workspace indistinguishable from a working one.
@@ -2362,8 +2407,20 @@ pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus
 // ── environments ─────────────────────────────────────────────────────────
 
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "", "environment").await?;
     let gen = e.meta().generation.unwrap_or(0);
+    // `spec.owner` reaches `ensure_homecache`'s `{pool}/homecache/{owner}` here too.
+    if let Err(why) = model::validate_owner(&e.spec.owner) {
+        return settle(
+            Outcome::Permanent(why, "InvalidSpec"),
+            e,
+            "Environment",
+            gen,
+            move |cond| serde_json::json!({"phase": crd::Phase::Error, "conditions": vec![cond]}),
+            ctx,
+        )
+        .await;
+    }
+    heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "", "environment").await?;
     let prev = e.status.clone().unwrap_or_default();
     let owner_ref = owner_ref_of_kind(e)?;
     // Same resolution as a workspace, including the release-1 adoption — an environment is
