@@ -720,6 +720,51 @@ async fn a_claim_on_an_unowned_repo_is_granted_and_only_the_claimant_warms() {
     assert_eq!(a.store.pool.warm_count(), 0, "the leader did not — it only granted");
 }
 
+/// An invented repo name costs the elected writer nothing: `route` gates the claim on the prefix
+/// existing, so a spray of distinct bad names writes no map entries at all. The create route is
+/// the exemption, and it still claims — that is what keeps the first write to a new repo leased.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invented_repo_name_is_404_and_claims_nothing() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    for i in 0..5 {
+        let res = client().await
+            .get(format!("http://{}/alice/nope{i}/info/refs?service=git-upload-pack", b.public))
+            .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
+            .send().await.unwrap();
+        assert_eq!(res.status(), 404, "an invented name is not found, not 503");
+        assert_eq!(a.app.owner(&format!("alice/nope{i}")).await.unwrap(), None, "nothing claimed");
+    }
+    assert_eq!(b.store.pool.warm_count(), 0, "and nothing was opened");
+    // A real repo still routes and claims exactly as before.
+    e.store.create_repo("alice", "web").await.unwrap();
+    let res = client().await
+        .get(format!("http://{}/alice/web/info/refs?service=git-upload-pack", b.public))
+        .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "rustic-git-1");
+}
+
+/// `may_create` is the whole exempt set: the create route and registry writes claim an
+/// empty-prefix name, everything else does not.
+#[test]
+fn only_the_create_routes_may_claim_a_name_that_does_not_exist() {
+    use axum::http::Method;
+    use rustic_git_server::router_test::may_create;
+    assert!(may_create(&Method::POST, "/api/alice/web/create"));
+    assert!(may_create(&Method::POST, "/v2/alice/web/blobs/uploads/"));
+    assert!(may_create(&Method::PUT, "/v2/alice/web/manifests/v1"));
+    assert!(!may_create(&Method::GET, "/v2/alice/web/manifests/v1"));
+    assert!(!may_create(&Method::HEAD, "/v2/alice/web/blobs/sha256:abc"));
+    assert!(!may_create(&Method::POST, "/alice/web/git-receive-pack"));
+    assert!(!may_create(&Method::GET, "/api/alice/web/refs"));
+    assert!(!may_create(&Method::DELETE, "/api/alice/web/volumedelete"));
+}
+
 /// A follower that is asked to decide ownership answers 421: it is not the leader, and the
 /// caller's idea of who is has gone stale. It must not proxy the message on, and must not answer.
 #[tokio::test(flavor = "multi_thread")]
@@ -889,11 +934,11 @@ async fn a_peer_stream_reports_refusals_as_a_status_line() {
     }
 }
 
-/// A missing repo is reported after "ok", on the git ERR channel - the same channel a local
-/// session uses - because "ok" must not wait for open_repo (which may download packs).
+/// A name with nothing under it is refused on the status line: routing answers `Missing` before a
+/// session is ever accepted, so the peer stream says so instead of opening anything.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_peer_stream_reports_a_missing_repo_on_the_err_channel() {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+async fn a_peer_stream_refuses_a_repo_that_does_not_exist() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let e = common::env().await;
     let addr = stream_listener(e.store.clone()).await;
     let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -901,11 +946,9 @@ async fn a_peer_stream_reports_a_missing_repo_on_the_err_channel() {
     let mut r = BufReader::new(sock);
     let mut line = String::new();
     r.read_line(&mut line).await.unwrap();
-    assert_eq!(line.trim(), "ok");
-    let mut rest = Vec::new();
-    r.read_to_end(&mut rest).await.unwrap();
-    let rest = String::from_utf8_lossy(&rest);
-    assert!(rest.contains("ERR repository not found"), "got {rest:?}");
+    // Routing now answers a name with nothing under it before the session starts, so the refusal
+    // arrives as the status line rather than on the ERR channel after "ok".
+    assert_eq!(line.trim(), "error: no such repository");
 }
 
 /// Two hops: B (not owner) -> C (not owner, but C can reach A) -> A. C must relay A's "ok" back to
@@ -1033,7 +1076,12 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "ls-remote on a deleted repo must fail: {err}");
-    assert!(err.contains("repository not found"), "stderr: {err}");
+    // Either refusal is correct and both reach the client: the owner's handler reports it while
+    // the map still names a live holder, routing itself once that lease is gone.
+    assert!(
+        err.contains("repository not found") || err.contains("no such repository"),
+        "stderr: {err}",
+    );
 }
 
 /// A percent-encoded repo name must not bypass routing. The middleware sees the raw path and
@@ -1078,7 +1126,7 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
     // The repo must exist: routing does not claim a repo that does not, it lets the handler 404.
     e.store.create_repo("alice", "web").await.unwrap();
 
-    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
     assert_eq!(b.store.pool.warm_count(), 1);
 
@@ -1110,15 +1158,15 @@ async fn an_evicting_node_still_owns_the_repo_during_the_drain() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
-    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
 
     b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
     b.store.pool.sweep().await;
 
     assert_eq!(b.store.pool.warm_count(), 1, "closed before the drain was over");
-    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local, "still serving");
-    match a.app.route(repo).await {
+    assert_eq!(b.app.route_for(repo, true).await, rustic_git_storage::ownership::Route::Local, "still serving");
+    match a.app.route_for(repo, true).await {
         rustic_git_storage::ownership::Route::Peer(p) => assert_eq!(p.name, "rustic-git-1"),
         r => panic!("the other node must still forward to the evicting node: {r:?}"),
     }
@@ -1134,7 +1182,7 @@ async fn a_node_that_loses_its_lease_closes_the_database() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
-    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
     assert_eq!(b.store.pool.warm_count(), 1);
 
@@ -1227,7 +1275,7 @@ async fn a_repo_that_goes_warm_again_during_the_drain_is_not_released() {
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
     e.store.create_repo("alice", "web").await.unwrap();
-    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
 
     // Retire it, then take a reference back before the drain is over.
@@ -1285,13 +1333,13 @@ async fn a_node_whose_pool_is_closed_does_not_claim() {
     e.store.create_repo("alice", "web").await.unwrap();
 
     // Warm, then shut down the way SIGTERM does: releases the lease and closes the pool.
-    assert_eq!(a.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
+    assert_eq!(a.app.route_for(repo, true).await, rustic_git_storage::ownership::Route::Local);
     a.store.pool.get("alice", "web").await.unwrap();
     a.store.pool.close().await;
 
     assert!(a.store.pool.is_closed());
     assert_eq!(
-        a.app.route(repo).await,
+        a.app.route_for(repo, true).await,
         rustic_git_storage::ownership::Route::Unavailable,
         "a closed pool must refuse, not claim the repo back on its way out"
     );
@@ -1822,10 +1870,10 @@ async fn an_empty_prefix_is_claimed_never_served_unclaimed() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     // B routes first: the answer may be Local, but only because B now HOLDS the lease.
-    assert_eq!(b.app.route("alice/unflushed").await, Route::Local);
+    assert_eq!(b.app.route_for("alice/unflushed", true).await, Route::Local);
     assert_eq!(a.app.owner("alice/unflushed").await.unwrap().unwrap().node, "rustic-git-1");
     // A sees the same empty prefix and must defer to B, not open it too.
-    match a.app.route("alice/unflushed").await {
+    match a.app.route_for("alice/unflushed", true).await {
         Route::Peer(p) => assert_eq!(p.name, "rustic-git-1"),
         other => panic!("A must forward to the claimant, got {other:?}"),
     }

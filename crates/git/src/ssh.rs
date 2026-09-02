@@ -184,6 +184,7 @@ async fn run(
                 "no node may safely serve this repository right now; retry",
             ))
         }
+        crate::ownership::Route::Missing => return Err(crate::err("no such repository")),
         crate::ownership::Route::Peer(peer) => {
             let authed = auth_owner.clone().expect("authorize() passed, so the owner is set");
             // The stream lives until after the exit status is sent: dropping it closes the channel.

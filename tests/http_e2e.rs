@@ -252,7 +252,9 @@ async fn an_anonymous_request_for_an_unknown_repo_opens_nothing() {
         "/other/name.git/info/refs?service=git-upload-pack",
     ] {
         let r = raw_get(port, p, None);
-        assert!(r.starts_with("HTTP/1.1 401"), "{p}: {r}");
+        // 404, not 401: routing runs before authentication and a name with nothing under it is
+        // answered there, so the claim a stranger used to cost the elected writer never happens.
+        assert!(r.starts_with("HTTP/1.1 404"), "{p}: {r}");
     }
     assert_eq!(
         s.pool.warm_count(),

@@ -1,6 +1,6 @@
 pub(crate) mod git;
 pub(crate) mod limits;
-pub(crate) mod route;
+pub mod route;
 
 pub(crate) use git::{git_routes, open};
 pub(crate) use limits::internal;

@@ -54,6 +54,10 @@ pub enum Route {
     /// Nobody may safely serve it right now — 503, and let the client retry. The leader being
     /// unreachable lands here, deliberately: an unclaimable repo is not served by whoever asked.
     Unavailable,
+    /// The map names nobody and there is nothing in the object store under this key — so there is
+    /// nothing to route and nothing worth claiming. 404. Distinct from `Unavailable` because a
+    /// name that does not exist must not tell a client to retry.
+    Missing,
 }
 
 /// The reply to a claim: either the asker now owns it, or someone else already does.

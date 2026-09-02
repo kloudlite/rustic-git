@@ -221,6 +221,20 @@ pub(crate) fn api_route(path: &str) -> Option<(&str, &str, &str)> {
     }
 }
 
+/// Which routes may claim a repo key whose object-store prefix is still empty — the exemption
+/// `App::route_for` gates the claim on. Exactly the paths that can CREATE a database: the git-repo
+/// create, and a registry write, which brings an image's database into being on its first upload.
+/// A `GET`/`HEAD` never creates one, so it never claims a name that does not exist.
+pub fn may_create(method: &axum::http::Method, path: &str) -> bool {
+    if let Some((_, name, tail)) = api_route(path.trim_start_matches('/')) {
+        if !name.is_empty() && tail == "create" {
+            return true;
+        }
+    }
+    crate::registry::image_route(path.trim_start_matches('/')).is_some()
+        && !matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD)
+}
+
 pub(crate) fn repo_of(path: &str) -> Option<String> {
     let path = path.trim_start_matches('/');
     if crate::registry::is_v2_path(path) {
@@ -395,7 +409,12 @@ async fn route_inner(
             .and_then(|v| v.parse().ok())
             .unwrap_or(crate::proxy::MAX_HOPS),
     };
-    let route = app.route(&repo).await;
+    let route = app.route_for(&repo, may_create(req.method(), &path)).await;
+    // Before the hop bound: nothing under this key anywhere is not a routing disagreement, and a
+    // 503 telling the client to retry a name that does not exist is a lie whatever the hop count.
+    if matches!(route, crate::ownership::Route::Missing) {
+        return missing(&path);
+    }
     // Out of hops: never forward again (that is the bound), but never knowingly open a repo we do
     // not own either — a chain that arrives here disagreeing with our own view, or arrives at an
     // unhealthy node, gets 503 rather than a second writer. Same bound, no wrong opens.
@@ -411,6 +430,8 @@ async fn route_inner(
     }
     match route {
         crate::ownership::Route::Local => next.run(req).await,
+        // Answered above; the arm is what keeps this match exhaustive.
+        crate::ownership::Route::Missing => missing(&path),
         crate::ownership::Route::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "no node may safely serve this repository right now; retry",
@@ -540,6 +561,16 @@ async fn route_inner(
                 }
             }
         }
+    }
+}
+
+/// A key nothing exists under, answered in the shape the caller speaks so a registry client still
+/// gets an OCI envelope.
+fn missing(path: &str) -> Response {
+    if crate::registry::is_v2_path(path) {
+        crate::registry::oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image")
+    } else {
+        (StatusCode::NOT_FOUND, "not found").into_response()
     }
 }
 

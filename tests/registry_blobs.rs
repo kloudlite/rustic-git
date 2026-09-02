@@ -69,9 +69,14 @@ async fn head_answers_size_without_the_body() {
     assert!(r.bytes().await.unwrap().is_empty());
 }
 
+/// A read for a name that exists nowhere is refused by routing as NAME_UNKNOWN before the handler
+/// runs, so the image has to exist for BLOB_UNKNOWN to be reachable at all — one push makes it so.
 #[tokio::test]
 async fn an_absent_blob_is_blob_unknown() {
     let (base, _e, c, token) = authed().await;
+    let seed = b"a layer that was pushed".to_vec();
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={}", Digest::of(&seed)))
+        .basic_auth("acme", Some(&token)).body(seed).send().await.unwrap();
     let d = Digest::of(b"never pushed");
     let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();
@@ -222,6 +227,9 @@ async fn a_wrong_sha512_digest_is_refused_and_stores_nothing() {
 #[tokio::test]
 async fn an_absent_but_well_formed_sha512_digest_is_blob_unknown() {
     let (base, _e, c, token) = authed().await;
+    let seed = b"a layer that was pushed".to_vec();
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={}", Digest::of(&seed)))
+        .basic_auth("acme", Some(&token)).body(seed).send().await.unwrap();
     let d = Digest::of_algo("sha512", b"never pushed").unwrap();
     let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();

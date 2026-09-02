@@ -380,7 +380,10 @@ impl App {
     /// the leader — and if the leader cannot be reached, answer `Unavailable`. **Never serve on a
     /// failed claim**: falling back to "well, serve it here" is failover to whoever asked first,
     /// which is the two-writer bug this design exists to remove.
-    pub async fn route(&self, repo: &str) -> Route {
+    ///
+    /// `may_create` says whether the route being served can bring this database into being (see
+    /// `router::route::may_create`); only such a route may claim a key with nothing under it.
+    pub async fn route_for(&self, repo: &str, may_create: bool) -> Route {
         let now = self.now_ms();
         let entry = match self.owner(repo).await {
             Ok(c) => c,
@@ -408,17 +411,23 @@ impl App {
                 if self.store.pool.is_closed() {
                     return Route::Unavailable;
                 }
-                // A repo the map does not name is CLAIMED before anyone opens it, whether or not
-                // its object-store prefix has anything in it yet. Routing on "does the prefix
-                // exist" was a two-writer window: the first write to a new repo, image or
-                // volume opened it here unleased, and until its manifest landed every other node
-                // saw the same empty prefix and opened it too. A request for a name that really
-                // does not exist still 404s in the handler (`open_repo` checks the prefix before
-                // it opens anything); the claim it left behind lapses on the lease TTL, unrenewed,
-                // because a repo never opened is never warm.
-                // ponytail: one leader write per invented name per LEASE_TTL, pre-auth. Ceiling is
-                // the leader's claim rate under a spray of distinct bad names; a per-node token
-                // bucket on claims for empty-prefix names is the upgrade if that ever shows.
+                // A repo the map does not name is CLAIMED before anyone opens it. Routing on
+                // "does the prefix exist" was a two-writer window: the first write to a new repo,
+                // image or volume opened it here unleased, and until its manifest landed every
+                // other node saw the same empty prefix and opened it too. That is why the routes
+                // which can CREATE claim unconditionally — the window is theirs and they keep the
+                // lease. Every other route gates on the prefix, because `route()` runs before
+                // authentication: without the gate a spray of invented names is one leader map
+                // write per name per LEASE_TTL, from an anonymous client, against the one node the
+                // whole fleet's routing depends on. An `exists` that errs falls back to claiming,
+                // exactly as `force_claim` does — an unreadable store must not turn into a 404.
+                if !may_create {
+                    if let Some((o, n)) = repo.split_once('/') {
+                        if !self.store.pool.exists(o, n).await.unwrap_or(true) {
+                            return Route::Missing;
+                        }
+                    }
+                }
                 match self.claim(repo).await {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
                     Err(e) => {
@@ -458,6 +467,13 @@ impl App {
                 name: node,
             })
         }
+    }
+
+    /// `route_for` for the paths that can never create a database — every git route, and the peer
+    /// stream. The default is the safe one on purpose: a new caller that forgets to think about it
+    /// gets the gated behaviour, not the amplifier.
+    pub async fn route(&self, repo: &str) -> Route {
+        self.route_for(repo, false).await
     }
 
     /// This node's view of wall-clock time, in ms since the epoch. Every lease decision this
@@ -816,7 +832,8 @@ impl App {
         // THE invariant violation (CLAUDE.md): another node opened this database under us. Every
         // path (HTTP, SSH, peer) lands here, so this is the one count that means "it happened".
         metrics::counter!("db_fence_detected_total").increment(1);
-        if !matches!(self.route(&format!("{owner}/{name}")).await, Route::Local) {
+        // The ungated form: the database demonstrably exists — it just fenced us.
+        if !matches!(self.route_for(&format!("{owner}/{name}"), true).await, Route::Local) {
             return false;
         }
         // Pool::get never reopens a fenced handle by itself (that is the amplifier this exists to
