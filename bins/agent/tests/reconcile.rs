@@ -241,6 +241,32 @@ async fn a_working_volume_with_nothing_running_is_re_run_not_left_stranded() {
     wait_idle(&ctx).await;
 }
 
+/// The dead-node sweep writes `Unavailable` as a status change only, so when the owner returns
+/// `observedGeneration` is still current. The pass must run anyway, or the volume — and every
+/// workspace on it — stays "not materialized" until someone edits the object by hand.
+#[tokio::test]
+async fn an_unavailable_volume_is_re_run_when_its_owner_reconciles_it_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let mut v = volume(7);
+    v.status = Some(rustic_git_workspaces::crd::VolumeStatus {
+        phase: rustic_git_workspaces::crd::Phase::Unavailable,
+        observed_generation: Some(7),
+        subvolume_present: true,
+        conditions: vec![crd::condition("Available", false, "NodeDead", "owner node-a is dead", 7)],
+        ..Default::default()
+    });
+
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    assert_ne!(
+        action,
+        kube::runtime::controller::Action::await_change(),
+        "a returned owner must re-run its Unavailable volume, not await a spec change that never comes"
+    );
+    assert!(!ctx.running.lock().unwrap().is_empty(), "the recovery pass must actually start work");
+    wait_idle(&ctx).await;
+}
+
 /// Keep-biased: an API error or an unreadable pool means requeue with backoff, never "reality
 /// doesn't match, so remove it". Same discipline as crates/registry/src/gc.rs.
 #[tokio::test]

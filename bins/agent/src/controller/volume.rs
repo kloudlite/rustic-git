@@ -84,10 +84,16 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     // purpose — it is what keeps `materialize` off, so this recovery re-applies the quota and
     // reports, and never re-runs a create or a clone against a volume that already exists.
     let stranded = v.status.as_ref().is_some_and(|s| s.phase == Phase::Working) && !running_contains(ctx, &uid);
+    // The dead-node sweep marks a volume `Unavailable` with a STATUS write, which leaves
+    // `observedGeneration` current. When the owner comes back, its volumes are exactly as they
+    // were and nothing bumps the spec, so without this the pass below never re-runs and every
+    // workspace on the node waits on "not materialized" forever (seen live, 2026-09-02). This
+    // reconciler is field-selected on the pin, so reaching here already means the volume is ours.
+    let returned = v.status.as_ref().is_some_and(|s| s.phase == Phase::Unavailable);
 
     // 1. Nothing asked for. Pushing is a `Snapshot` with its own reconciler now, so a
     //    materialized volume at its current generation has nothing left for this pass to do.
-    if observed && !stranded && !running_contains(ctx, &uid) {
+    if observed && !stranded && !returned && !running_contains(ctx, &uid) {
         return Ok(Action::await_change());
     }
 
