@@ -421,12 +421,27 @@ impl App {
                 // write per name per LEASE_TTL, from an anonymous client, against the one node the
                 // whole fleet's routing depends on. An `exists` that errs falls back to claiming,
                 // exactly as `force_claim` does — an unreadable store must not turn into a 404.
-                if !may_create {
-                    if let Some((o, n)) = repo.split_once('/') {
-                        if !self.store.pool.exists(o, n).await.unwrap_or(true) {
-                            return Route::Missing;
+                let empty_prefix = !may_create
+                    && match repo.split_once('/') {
+                        Some((o, n)) => !self.store.pool.exists(o, n).await.unwrap_or(true),
+                        None => false,
+                    };
+                if empty_prefix {
+                    // Re-read the map before answering Missing, and read it from the LEADER. The
+                    // prefix probe and the map read at the top of this function are not one atomic
+                    // look: a creator on another node can claim the key and flush its first
+                    // objects in between, and falling through to a handler HERE would then open
+                    // the database unleased and fence the legitimate owner. This node's own copy
+                    // cannot settle that — it is a follower's, up to a poll interval behind, which
+                    // is why the claim path asks the leader too. Unlike a claim this WRITES
+                    // NOTHING, so an invented name still costs the elected writer nothing; and if
+                    // the leader names nobody (or cannot be reached), there is nothing to route.
+                    return match self.ask_owner(repo).await.ok().flatten() {
+                        Some(e) if !ownership::is_expired(&e, self.now_ms()) => {
+                            self.route_to(e.node)
                         }
-                    }
+                        _ => Route::Missing,
+                    };
                 }
                 match self.claim(repo).await {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
@@ -451,6 +466,11 @@ impl App {
                 }
             }
         };
+        self.route_to(node)
+    }
+
+    /// The node the map named, as a `Route`.
+    fn route_to(&self, node: String) -> Route {
         if node == self.self_name {
             // An unhealthy node still forwards what it does not own (safe, and keeps its share of
             // load-balancer traffic flowing) but never serves what it does. The same holds for a
@@ -538,6 +558,30 @@ impl App {
             }
         }
         self.claim_inner(repo, true, Patience::Recover).await
+    }
+
+    /// Who the LEADER says owns `repo` — the authoritative read, and the reason it exists: this
+    /// node's copy of the map is eventually consistent, so "the map names nobody" is only ever a
+    /// guess here. Unlike `claim` it takes no lease and writes nothing.
+    pub async fn ask_owner(&self, repo: &str) -> Result<Option<Entry>> {
+        if self.is_leader() {
+            return self.ownership.get(repo).await;
+        }
+        // The recovery budget, not the claim budget: this runs ahead of authentication, so it must
+        // never hold a task through a leader failover.
+        let reply = self
+            .ask_leader_with("owner", repo.to_string(), Patience::Recover)
+            .await?;
+        let mut lines = reply.lines();
+        match (lines.next(), lines.next()) {
+            (Some(node), Some(expires)) if !node.is_empty() => Ok(Some(Entry {
+                node: node.to_string(),
+                expires_ms: expires
+                    .parse()
+                    .map_err(|_| err(format!("owner reply: bad expiry {expires:?}")))?,
+            })),
+            _ => Ok(None),
+        }
     }
 
     async fn claim_inner(&self, repo: &str, force: bool, patience: Patience) -> Result<Grant> {

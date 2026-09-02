@@ -4,7 +4,7 @@ pub mod route;
 
 pub(crate) use git::{git_routes, open};
 pub(crate) use limits::internal;
-use route::{own_claim, own_release, own_renew, route_peer, route_public, trust_nobody, trust_peer};
+use route::{own_claim, own_owner, own_release, own_renew, route_peer, route_public, trust_nobody, trust_peer};
 
 use crate::App;
 use axum::{routing::get, routing::post, Router};
@@ -35,6 +35,7 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .route("/livez", get(route::livez))
         .route("/own/claim", post(own_claim))
         .route("/own/renew", post(own_renew))
+        .route("/own/owner", post(own_owner))
         .route("/own/release", post(own_release))
         // Scraped without the secret (see `trust_peer`); never mounted on the public router.
         .merge(rustic_git_core::metrics::routes())

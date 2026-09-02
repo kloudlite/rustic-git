@@ -51,6 +51,7 @@ pub(crate) async fn livez(State(app): State<Arc<App>>) -> Response {
 ///                                                 | "heldby\n{node}\n{expires_ms}"
 /// POST /own/renew    "{node}\n{repo}\n{repo}…"   -> one LOST repo per line (empty = all renewed)
 /// POST /own/release  "{repo}\n{node}"           -> "" (the entry is shortened, never deleted)
+/// POST /own/owner    "{repo}"                    -> "" (nobody) | "{node}\n{expires_ms}"
 /// ```
 ///
 /// **A node that does not hold the lease answers 421 to all four** — before the grant (it never
@@ -82,6 +83,24 @@ pub(crate) async fn own_claim(State(app): State<Arc<App>>, body: String) -> Resp
         Ok(crate::ownership::Grant::HeldBy(e)) => {
             (StatusCode::OK, format!("heldby\n{}\n{}", e.node, e.expires_ms)).into_response()
         }
+        Err(e) => own_err(&app, e),
+    }
+}
+
+/// `POST /own/owner "{repo}"` -> `""` (nobody) | `"{node}\n{expires_ms}"`. A READ of the map, on
+/// the leader, taking nothing: routing asks it for a key whose object-store prefix is empty, where
+/// a claim would be an anonymous client's write against the elected writer.
+pub(crate) async fn own_owner(State(app): State<Arc<App>>, body: String) -> Response {
+    if let Some(r) = leader_only(&app) {
+        return r;
+    }
+    let repo = body.trim_end();
+    if repo.is_empty() || repo.contains('\n') {
+        return (StatusCode::BAD_REQUEST, "repo").into_response();
+    }
+    match app.ask_owner(repo).await {
+        Ok(Some(e)) => (StatusCode::OK, format!("{}\n{}", e.node, e.expires_ms)).into_response(),
+        Ok(None) => (StatusCode::OK, "").into_response(),
         Err(e) => own_err(&app, e),
     }
 }
@@ -223,8 +242,10 @@ pub(crate) fn api_route(path: &str) -> Option<(&str, &str, &str)> {
 
 /// Which routes may claim a repo key whose object-store prefix is still empty — the exemption
 /// `App::route_for` gates the claim on. Exactly the paths that can CREATE a database: the git-repo
-/// create, and a registry write, which brings an image's database into being on its first upload.
-/// A `GET`/`HEAD` never creates one, so it never claims a name that does not exist.
+/// create, and the registry uploads that bring an image's database into being on its first push.
+/// The method list is what CREATES, not what writes: `DELETE` can only remove something that is
+/// already there, so it is gated exactly like `GET` — otherwise a spray of anonymous deletes for
+/// invented names is the same leader amplifier the gate exists to close.
 pub fn may_create(method: &axum::http::Method, path: &str) -> bool {
     if let Some((_, name, tail)) = api_route(path.trim_start_matches('/')) {
         if !name.is_empty() && tail == "create" {
@@ -232,7 +253,10 @@ pub fn may_create(method: &axum::http::Method, path: &str) -> bool {
         }
     }
     crate::registry::image_route(path.trim_start_matches('/')).is_some()
-        && !matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD)
+        && matches!(
+            *method,
+            axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::PATCH
+        )
 }
 
 pub(crate) fn repo_of(path: &str) -> Option<String> {

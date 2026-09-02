@@ -749,6 +749,26 @@ async fn an_invented_repo_name_is_404_and_claims_nothing() {
     assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "rustic-git-1");
 }
 
+/// The prefix probe and the map read are not one atomic look: a creator on another node can claim
+/// the key and flush between them. Answering `Missing` then would send the request to a handler
+/// HERE, which would open the database unleased and fence the owner. Routing must re-read and
+/// forward instead — this is that ordering, with the entry already in place and the prefix empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_that_lands_while_the_prefix_is_still_empty_is_forwarded_not_served() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    // A is mid-create: it holds the lease, but nothing of `alice/fresh` has been flushed yet.
+    a.app.claim("alice/fresh").await.unwrap();
+    assert!(!b.store.pool.exists("alice", "fresh").await.unwrap(), "the prefix must still be empty");
+    match b.app.route("alice/fresh").await {
+        rustic_git_storage::ownership::Route::Peer(p) => assert_eq!(p.name, LEADER),
+        other => panic!("must forward to the claimant, got {other:?}"),
+    }
+    assert_eq!(b.store.pool.warm_count(), 0, "and B opened nothing");
+}
+
 /// `may_create` is the whole exempt set: the create route and registry writes claim an
 /// empty-prefix name, everything else does not.
 #[test]
@@ -759,7 +779,12 @@ fn only_the_create_routes_may_claim_a_name_that_does_not_exist() {
     assert!(may_create(&Method::POST, "/v2/alice/web/blobs/uploads/"));
     assert!(may_create(&Method::PUT, "/v2/alice/web/manifests/v1"));
     assert!(!may_create(&Method::GET, "/v2/alice/web/manifests/v1"));
+    assert!(may_create(&Method::PATCH, "/v2/alice/web/blobs/uploads/deadbeef"));
     assert!(!may_create(&Method::HEAD, "/v2/alice/web/blobs/sha256:abc"));
+    // DELETE can only remove what is already there, so it never needs to claim a name that does
+    // not exist — and left exempt it would be the same anonymous amplifier as an unGATED GET.
+    assert!(!may_create(&Method::DELETE, "/v2/alice/web/manifests/v1"));
+    assert!(!may_create(&Method::DELETE, "/v2/alice/web/blobs/sha256:abc"));
     assert!(!may_create(&Method::POST, "/alice/web/git-receive-pack"));
     assert!(!may_create(&Method::GET, "/api/alice/web/refs"));
     assert!(!may_create(&Method::DELETE, "/api/alice/web/volumedelete"));
