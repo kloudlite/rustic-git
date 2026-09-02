@@ -426,6 +426,18 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     let now = k8s_openapi::jiff::Timestamp::now();
     let floor = node_dead_secs();
 
+    // A node the cluster reads as dead must not sweep: its agent kept running through a kubelet
+    // outage, so it went on reaping replicas, unclaiming volumes and retiring copies on a view of
+    // the cluster nobody else shares — and every other live node was already doing that work
+    // correctly. `node_is_dead`, never `unplaceable`: a DECOMMISSIONING node is alive and must keep
+    // sweeping, or its own drain never finishes. The 180 s floor is the only guard here: a node
+    // wrongly NotReady past it stops reconciling until its Node object recovers, which is the
+    // deliberate trade — a wrong sweep deletes data, a paused one only waits.
+    if node_is_dead(nodes.iter().find(|k| k.name_any() == ctx.node), floor, now) {
+        tracing::warn!(node = %ctx.node, "pull: my own Node reads NotReady past the floor; sweeping nothing this pass");
+        return;
+    }
+
     // One LISTING for the whole pass, for the same reason the node list is threaded: reap,
     // unclaim, place and retire each decide what to delete, and two of them acting on different
     // views of the cluster is how a copy nobody else holds gets dropped. The sweeps below run
@@ -977,18 +989,36 @@ pub(crate) async fn sweep_volumes(
                 }
             }
         }
-        let mut st = cur.status.clone().unwrap_or_default();
-        let idle = st.phase == crd::Phase::Unavailable
+        let prev = cur.status.clone().unwrap_or_default();
+        let idle = prev.phase == crd::Phase::Unavailable
             && !release
-            && st.conditions.iter().any(|c| c.type_ == "Available" && c.reason == reason && c.message == why);
+            && prev.conditions.iter().any(|c| c.type_ == "Available" && c.reason == reason && c.message == why);
         if !idle {
-            st.phase = crd::Phase::Unavailable;
-            let gen = cur.metadata.generation.unwrap_or(0);
-            // No `Released` reason: `Unavailable` with an empty pin IS released, and a third word
-            // would restate the pin the object already carries.
-            st.conditions = vec![crd::condition("Available", false, reason, &why, gen)];
-            if let Err(e) = replace_status(&api, &cur, "Volume", serde_json::to_value(st).expect("VolumeStatus serializes")).await {
-                tracing::warn!(volume = %name, error = %e, "sweep: marking an unavailable owner's volume");
+            // The same re-read-on-409 loop `mark_parent_of` and `write_replica_status` use, and for
+            // the same reason: this is a PUT carrying `resourceVersion`, the owner's own controller
+            // writes the very same object, and a lost race used to just warn — leaving the volume
+            // `Available=True` for a dead owner until something else happened to touch it.
+            for attempt in 0..3 {
+                let mut st = cur.status.clone().unwrap_or_default();
+                st.phase = crd::Phase::Unavailable;
+                let gen = cur.metadata.generation.unwrap_or(0);
+                // No `Released` reason: `Unavailable` with an empty pin IS released, and a third
+                // word would restate the pin the object already carries.
+                st.conditions = vec![crd::condition("Available", false, reason, &why, gen)];
+                match replace_status(&api, &cur, "Volume", serde_json::to_value(st).expect("VolumeStatus serializes")).await {
+                    Ok(()) => break,
+                    Err(kube::Error::Api(s)) if s.code == 409 && attempt < 2 => match api.get(&name).await {
+                        Ok(fresh) => cur = fresh,
+                        Err(e) => {
+                            tracing::warn!(volume = %name, error = %e, "sweep: re-read after conflict");
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(volume = %name, error = %e, "sweep: marking an unavailable owner's volume");
+                        break;
+                    }
+                }
             }
         }
         // Every parent on the volume carries the condition, whatever the verdict — that is how the
@@ -1935,6 +1965,50 @@ fi
             let sent = rec.sent("PUT", &format!("/apis/rustic-git.io/v1alpha1/workspaces/{name}/status"));
             assert!(sent.iter().any(|w| w["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "NodeDead")), "{name}");
         }
+    }
+
+    /// F3(a) (drill, 2026-09-03): the volume status write raced the owner's own controller and a
+    /// 409 only warned, leaving a dead owner's volume `Available=True`. Re-read and retry, the
+    /// same shape `mark_parent_of` and `write_replica_status` already use.
+    #[tokio::test]
+    async fn the_sweep_retries_a_conflicted_volume_status_write() {
+        let old = "2000-01-01T00:00:00Z";
+        let nodes = vec![node_ready_obj("node-x"), node_dead_obj("node-b", old)];
+        let conflict = serde_json::to_value(kube::core::Status::failure("conflict", "Conflict").with_code(409)).unwrap();
+        let routes = vec![
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-1", ws_placed("ws-1", "node-b")),
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: ws_placed("ws-1", "node-b") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 409, body: conflict },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_at_rv("vol-1", "node-b", "10") },
+            get("/apis/rustic-git.io/v1alpha1/volumes/vol-1", vol_at_rv("vol-1", "node-b", "10")),
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        // Not replicated ⇒ Mark, so the pin is never touched and only the status write is under test.
+        let mut beat = beat_of(vec![vol_owned("vol-1", "node-b")], vec![], vec![]);
+        beat.all_parents = vec![parent_at("Workspace", "ws-1", "vol-1", crd::Phase::Ready, false)];
+
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+
+        let writes = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status");
+        assert_eq!(writes.len(), 2, "the conflicted write is retried once: {:?}", rec.calls());
+        assert_eq!(writes[1]["metadata"]["resourceVersion"], "10", "and against the re-read object");
+        assert_eq!(writes[1]["status"]["conditions"][0]["reason"], "NodeDead");
+    }
+
+    /// F3(b) (drill, 2026-09-03): the agent kept sweeping through its own node's kubelet outage —
+    /// reaping, unclaiming and retiring on a view nobody else shared. A node the cluster reads as
+    /// dead does nothing; the absence of every other route makes that provable.
+    #[tokio::test]
+    async fn a_node_the_cluster_reads_as_dead_sweeps_nothing() {
+        let old = "2000-01-01T00:00:00Z";
+        let routes = vec![get(NODES, list_of("Node", vec![node_json("node-x", "False", old), node_json("node-a", "True", old)]))];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+
+        pull_beat_with(&ctx, "/bin/true", "s3cret").await;
+
+        assert_eq!(rec.calls(), vec![format!("GET {NODES}")], "the node list and nothing else");
     }
 
     /// A dead node's parents are un-placed — `status.nodeName` alone — on both kinds, once every
