@@ -24,7 +24,10 @@ pub fn dir() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|x| !x.is_empty()) {
         return PathBuf::from(x).join("kl");
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config").join("kl")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+        .join("kl")
 }
 
 pub fn path() -> PathBuf {
@@ -37,7 +40,8 @@ pub fn known_hosts() -> PathBuf {
 
 pub fn load() -> Result<Config, String> {
     let p = path();
-    let s = std::fs::read_to_string(&p).map_err(|_| "not logged in — run `kl login`".to_string())?;
+    let s =
+        std::fs::read_to_string(&p).map_err(|_| "not logged in — run `kl login`".to_string())?;
     serde_json::from_str(&s).map_err(|e| format!("{}: {e}", p.display()))
 }
 
@@ -126,12 +130,19 @@ pub fn pin_host_key(id: &str, host_key: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// `KL_CONFIG_DIR`, `HOME` and `XDG_CONFIG_HOME` are process-global, and cargo runs tests in
+    /// parallel threads: every test that sets one holds this first, or they interleave and read
+    /// each other's directory. Poisoning is irrelevant — a panicking test leaves stale env, not a
+    /// corrupt lock — so the guard is taken back from a poisoned mutex rather than unwrapped.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The finding: `pin_host_key` filtered out any existing line for the id and appended whatever
     /// the api just returned, so a changed key was adopted silently on every connect. Chained with
     /// the api's Secret grant, that is a silent MITM of every workspace ssh session — ssh's own
     /// known_hosts would have shouted.
     #[test]
     fn a_changed_host_key_is_refused_not_adopted() {
+        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let d = tempfile::tempdir().unwrap();
         std::env::set_var("KL_CONFIG_DIR", d.path());
         super::pin_host_key("ws-1", "ssh-ed25519 AAAAfirst").unwrap();
@@ -148,7 +159,9 @@ mod tests {
         std::env::set_var("KL_ACCEPT_NEW_HOST_KEY", "1");
         super::pin_host_key("ws-1", "ssh-ed25519 AAAAsecond").unwrap();
         std::env::remove_var("KL_ACCEPT_NEW_HOST_KEY");
-        assert!(std::fs::read_to_string(super::known_hosts()).unwrap().contains("AAAAsecond"));
+        assert!(std::fs::read_to_string(super::known_hosts())
+            .unwrap()
+            .contains("AAAAsecond"));
         // An id with no stored line is a first sight, which is what a pin is FOR.
         super::pin_host_key("ws-2", "ssh-ed25519 AAAAother").unwrap();
     }
@@ -158,8 +171,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn config_is_written_private() {
+        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
-        the_config_dir_is_dot_config_kl_everywhere();
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("kl");
         std::env::set_var("KL_CONFIG_DIR", &dir);
@@ -175,7 +188,8 @@ mod tests {
         std::fs::set_permissions(super::path(), std::fs::Permissions::from_mode(0o644)).unwrap();
         super::save(&cfg).unwrap();
 
-        let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let mode =
+            |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(super::path()), 0o600);
         assert_eq!(mode(dir), 0o700);
     }
@@ -189,7 +203,11 @@ mod tests {
         std::fs::write(&p, "old").unwrap();
         let tmp = super::stage(&p, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
-        assert_eq!(tmp.parent(), p.parent(), "same directory, or rename is a copy");
+        assert_eq!(
+            tmp.parent(),
+            p.parent(),
+            "same directory, or rename is a copy"
+        );
         assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "new");
         super::commit(&tmp, &p).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
@@ -199,11 +217,10 @@ mod tests {
     /// The web's copy-paste block hard-codes `~/.config/kl/known_hosts`, so the CLI has to agree
     /// on every platform — including the Mac, where `dirs::config_dir()` does not.
     ///
-    /// Called from `config_is_written_private` rather than run as its own `#[test]`: both touch
-    /// process-wide env and cargo runs tests in parallel threads, so as two tests they race over
-    /// `KL_CONFIG_DIR`.
+    #[test]
     #[cfg(unix)]
     fn the_config_dir_is_dot_config_kl_everywhere() {
+        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("KL_CONFIG_DIR");
         std::env::set_var("XDG_CONFIG_HOME", "/xdg");
         assert_eq!(super::dir(), std::path::Path::new("/xdg/kl"));

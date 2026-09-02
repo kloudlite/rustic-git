@@ -20,9 +20,17 @@ fn ssh_makes_one_api_call_and_hands_the_session_to_the_proxy_by_env() {
 
     let bin = tempfile::tempdir().unwrap();
     let fake = bin.path().join("ssh");
-    std::fs::write(&fake, "#!/bin/sh\necho \"ARGS $*\"\necho \"SESSION ${KL_SSH_SESSION:-none}\"\n").unwrap();
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\necho \"ARGS $*\"\necho \"SESSION ${KL_SSH_SESSION:-none}\"\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
 
     let out = Command::new(env!("CARGO_BIN_EXE_kl"))
         .args(["ws", "ssh", "gh", "--", "-A"])
@@ -31,11 +39,25 @@ fn ssh_makes_one_api_call_and_hands_the_session_to_the_proxy_by_env() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(s.api_calls.load(std::sync::atomic::Ordering::SeqCst), 1, "{stdout}");
-    assert!(stdout.contains("kl@ws-1 -A"), "the name resolved to the id: {stdout}");
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        s.api_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("kl@ws-1 -A"),
+        "the name resolved to the id: {stdout}"
+    );
     assert!(stdout.contains("HostKeyAlias=ws-1"), "{stdout}");
-    let session = stdout.lines().find_map(|l| l.strip_prefix("SESSION ")).unwrap();
+    let session = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("SESSION "))
+        .unwrap();
     let v: serde_json::Value = serde_json::from_str(session).unwrap();
     assert_eq!(v["id"], "ws-1");
     assert_eq!(v["token"], "sst_test");

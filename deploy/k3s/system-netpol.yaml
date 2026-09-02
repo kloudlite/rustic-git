@@ -1,6 +1,6 @@
 # ZeroFS serves EVERY owner's home in the region over NFSv3, and NFSv3 with AUTH_SYS and `nolock`
 # (see `mount_homes`) authenticates nothing at all — so "who can reach 2049" IS the authorization,
-# and this policy is what makes that set the agent DaemonSet rather than every pod in the cluster.
+# and this policy is what makes that set the cluster's own NODES rather than every pod in it.
 # The gateway shares this namespace but is unaffected: its ingress is a node `hostPort`, which
 # NetworkPolicy does not gate (see gateway.yaml).
 apiVersion: networking.k8s.io/v1
@@ -9,6 +9,7 @@ metadata:
   name: zerofs-nfs-from-agents
   namespace: rustic-git-system
 spec:
+  # `app: zerofs` is the SOLE selector for the export pod — nothing else keys off that label.
   podSelector:
     matchLabels:
       app: zerofs
@@ -16,15 +17,14 @@ spec:
     - Ingress
   ingress:
     - from:
-        # `mount_homes` runs in the agent pod itself, so the mount's client is the agent's pod IP.
-        # ONE peer, not two: a `-` before `podSelector` would mean "every pod in kube-system OR
-        # every `rustic-git-agent` pod anywhere" (see the `attach_egress` comment in k8s.rs).
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              app: rustic-git-agent
+        # The node subnet, NOT a podSelector on the agents. `mount_homes` runs the mount under
+        # `nsenter -t 1 -n` — pid 1's network namespace — so the client socket is the NODE's, and
+        # its source address is the node IP in 10.60.1.0/24; kube-proxy then masquerades it to the
+        # node IP again on the way in. A policy selecting agent PODS never matches the mount and
+        # wedges every home on a `hard` mount. This still excludes the 10.42.0.0/16 pod CIDR, which
+        # is the whole point of the policy: tenant pods cannot reach 2049.
+        - ipBlock:
+            cidr: 10.60.1.0/24
       ports:
         - protocol: TCP
           port: 2049

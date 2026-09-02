@@ -70,8 +70,9 @@ table inet node {
     # and flannel's VXLAN arrives on flannel.1 below.
     #
     # If a node-served port is ever added, add it here as one line — never widen back to `accept`.
-    ip saddr $POD_CIDR ct state established,related accept
-    iifname "cni0" ct state established,related accept
+    #
+    # No `established,related` line for the pod CIDR or cni0: the chain's global est/related accept
+    # above already covers every reply, and a second copy reads like it grants something.
     # Not a blank exception: kube-proxy DNATs ClusterIP 10.43.0.1:443 to this node's 6443 with the
     # pod's own saddr preserved, so every pod using in-cluster config (coredns, metrics-server,
     # every rustic-git-agent pod — the DaemonSet is not hostNetwork — the gateways) reaches the

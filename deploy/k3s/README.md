@@ -14,7 +14,7 @@ Files, in the order a cluster is built:
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins every namespaced object it writes — pods, statefulsets, services, networkpolicies, limitranges, Secrets, RoleBindings — to the `ws-`/`wt-`/`env-` namespaces it makes. Apply with `agent-rbac.yaml`, always. |
 | `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
-| `system-netpol.yaml` | The one NetworkPolicy admitting 2049 to ZeroFS, from the agent DaemonSet only: the NFS home export authenticates nothing, so reachability is the authorization. Apply with `zerofs.yaml`. |
+| `system-netpol.yaml` | The one NetworkPolicy admitting 2049 to ZeroFS, from the node subnet (`10.60.1.0/24`) only — the mount runs in the node's netns via `nsenter`, so its client is the node IP, not an agent pod IP; the pod CIDR stays out, which is the point. The export authenticates nothing, so reachability is the authorization. `app: zerofs` is the sole selector. Apply with `zerofs.yaml`. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `zerofs.yaml` | The region's shared-home NFS export (ZeroFS, single replica — see its header). Apply before rolling agents with `WS_HOMES_EXPORT` set; see "Shared home" below. |
 | `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods, and metrics (9464) only from a namespace literally named `monitoring` — no such namespace exists yet, so edit that rule to name the scraper's real namespace before expecting 9464 to be reachable. No Service — discovery is by pod IP from the API. See "Replication" below. |
@@ -629,3 +629,99 @@ Recovery is one of:
 Either way, once the (new) ZeroFS pod is `Ready`, restart the agents so their NFS mounts
 re-resolve to it: `kubectl -n kube-system rollout restart ds/rustic-git-agent`. Skipping this
 leaves agents on stale NFS file handles, which answer `EIO` rather than re-mounting on their own.
+
+## Rollout: 2026-09-02 hardening
+
+The order below is not a preference. Steps 5 and 6 both touch the NFS home path, step 8 depends
+on 6, and step 9 can lock you out of a node; everything else is independent. Do them one at a
+time, on a normal weekday, with `KUBECONFIG` pointed at the prod cluster (see "Iterating"
+above for where that file lives) and `cd deploy/k3s`. Every step below names its own
+check and its own rollback — if a check fails, roll that step back before starting the next one.
+
+1. **NSG (`provision-azure.sh`).** From `deploy/k3s`, with `env.sh` filled in, run
+   `API_CLIENTS=<the api tier's egress CIDRs, comma-separated> ./provision-azure.sh`. It is
+   idempotent: every rule is guarded by a `show`, and the VMs already exist so nothing is
+   created. *Check:* `az network nsg rule list -g "$RG" --nsg-name k3s-nsg -o table` shows
+   exactly ONE Allow rule on port 80 — `gateway-cloudflare` at priority 120. If a second Allow-80
+   rule appears (an older `allow-http-cloudflare` at 230), delete it:
+   `az network nsg rule delete -g "$RG" --nsg-name k3s-nsg -n allow-http-cloudflare`.
+   *Rollback:* `az network nsg rule delete` the rule you did not want; the NSG is the only state
+   this step writes.
+
+2. **`workspace-admission.yaml`.** Pre-checks first, all three must pass:
+   `kubectl get runtimeclass gvisor` exists;
+   `kubectl -n kube-system get secret rustic-git-agent -o jsonpath='{.data.WS_RUNTIME_CLASS}' | base64 -d`
+   prints `gvisor`; and every workspace pod already runs under it —
+   `kubectl get pod -A -l rustic-git.io/kind -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,RC:.spec.runtimeClassName`
+   shows `gvisor` on every row, no `<none>`. Only then
+   `kubectl apply -f workspace-admission.yaml`. *Check:* create one workspace (`kl ws create …`)
+   and watch it reach `Running` — the policy refuses pods at admission, so a bad policy shows up
+   as a workspace stuck in `Creating` with a denial event on its namespace.
+   *Rollback:* `kubectl delete validatingadmissionpolicybinding rustic-git-workspace-pod-fence`
+   (delete the binding, not the policy — a policy with no binding enforces nothing).
+
+3. **`agent-rbac.yaml` + `agent-admission.yaml`, together.** They are one change: the role is
+   only true because the policy enforces it. `kubectl apply -f agent-rbac.yaml -f agent-admission.yaml`.
+   *Check:* over a FULL reconcile pass — wait five minutes, long enough for every beat including
+   the sync beat (`WS_SYNC_SECS`, default 60s) to have run —
+   `kubectl -n kube-system logs ds/rustic-git-agent --since=5m | grep -i forbidden` stays empty.
+   A single `forbidden` line means the role lost a verb the controller uses — do not leave it.
+   *Rollback:* delete the two bindings
+   (`kubectl delete validatingadmissionpolicybinding rustic-git-agent-spec-is-read-only rustic-git-agent-tenant-namespaces-only`)
+   and re-apply the previous revision of both files from git — deleting the ClusterRoleBinding
+   instead would stop the agent dead, which is not a rollback.
+
+4. **`api-rbac.yaml`.** `kubectl apply -f api-rbac.yaml`. *Check:* a **new** owner — one who has
+   never had a workspace, so their namespace and `user-key` Secret do not exist yet — creates
+   their first workspace and can `kl ws ssh` into it. That is the only path that exercises
+   `secrets: create`; an existing owner's key is an update and would pass either way.
+   *Rollback:* re-apply the previous revision of the file from git.
+
+5. **`zerofs.yaml` — maintenance window.** `strategy: Recreate` with one replica means the export
+   goes DOWN for the restart, and every home with it; `hard` mounts block rather than fail, so
+   running workspaces hang until it returns. Announce it. Before applying, confirm the image
+   digest in the file really is ZeroFS 2.3.2 (`grep image: zerofs.yaml`, then
+   `docker buildx imagetools inspect <ref>` or the upstream release page) — a digest bump is the
+   whole change and pinning the wrong one is a silent downgrade. Apply, wait for
+   `kubectl -n rustic-git-system rollout status deploy/zerofs`, then IMMEDIATELY
+   `kubectl -n kube-system rollout restart ds/rustic-git-agent` — agents hold stale NFS file
+   handles across a ZeroFS restart and answer `EIO` instead of remounting.
+   *Rollback:* re-apply the previous revision (the old digest) and restart the agents again.
+
+6. **`system-netpol.yaml` — NOT in the same minute as step 5.** Give step 5's agents time to
+   remount and prove healthy first, or a hung home is ambiguous between the two changes.
+   `kubectl apply -f system-netpol.yaml`. *Check:* restart ONE agent
+   (`kubectl -n kube-system delete pod <agent pod>`), wait for it to be `2/2 Running`, then
+   `kubectl -n kube-system exec <that pod> -c agent -- ls /wspool-prod/homes` — it must list the
+   owners' directories, promptly. A hang here means the policy is not matching the mount's source
+   address. *Rollback:* `kubectl -n rustic-git-system delete networkpolicy zerofs-nfs-from-agents`
+   **and then restart that agent pod** — a `hard` NFS mount that is already wedged does not
+   recover when the policy is removed; only a fresh mount does.
+
+7. **`agent-peer.yaml`.** `kubectl apply -f agent-peer.yaml`, any time — it only narrows who may
+   reach 8444/9464. *Check:* a `kl ws push` on a workspace with replicas still reports its
+   replica `Synced`. *Rollback:* re-apply the previous revision.
+
+8. **`agent-daemonset.yaml` — only after step 6 is verified good.** It adds a nix-daemon sidecar
+   requesting 500m CPU / 1Gi memory on every pooled node, so check there is room first:
+   `kubectl describe node | grep -A6 "Allocated resources"` on each node must leave that much
+   unrequested, or the DaemonSet pod sits `Pending` and that node serves no workspaces.
+   `kubectl apply -f agent-daemonset.yaml`, then
+   `kubectl -n kube-system rollout status ds/rustic-git-agent`.
+   *Rollback:* `kubectl -n kube-system rollout undo ds/rustic-git-agent`.
+
+9. **`harden-node.sh` — one node at a time, last.** This one can lock you out: it drops by default
+   on the public NIC. Before touching a node, open a SECOND ssh session to it and LEAVE IT OPEN
+   (that session is the rollback channel), and have the Azure serial console open in a browser as
+   the backstop. Then, per node:
+   `CF_CIDRS=$(paste -sd, cloudflare-ips-v4.txt) ssh <node> sudo CF_CIDRS="$CF_CIDRS" bash -s < harden-node.sh`.
+   *Check, all four, before moving to the next node:* `kubectl get node <n>` still `Ready`; that
+   node's agent log has no apiserver connection errors
+   (`kubectl -n kube-system logs <that node's agent pod> --since=2m`); `kl ws ssh` into a
+   workspace running on that node succeeds; and a `kl ws push` from it completes.
+   *Rollback, from the held session:* `nft delete table inet node` — the whole ruleset is one
+   table, so that one command restores the previous (open) state instantly.
+
+The Rust-side changes in this batch — the narrowed `allow-dns` egress rule and the `kl` host-key
+pin — are NOT in any step above. They ship as code: merge to master, wait for the image build,
+`deploy/pin.sh <sha>`, commit, `deploy/roll.sh`. Applying a manifest cannot deliver them.

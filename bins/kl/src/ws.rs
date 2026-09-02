@@ -6,7 +6,13 @@ pub async fn list(team: Option<&str>) -> Result<(), String> {
     let ws = api::list(&cfg, team).await.map_err(|e| e.to_string())?;
     println!("{:<20} {:<24} {:<10} PACKAGES", "NAME", "ID", "STATE");
     for w in &ws {
-        println!("{:<20} {:<24} {:<10} {}", w.name, w.id, w.state, w.packages.join(","));
+        println!(
+            "{:<20} {:<24} {:<10} {}",
+            w.name,
+            w.id,
+            w.state,
+            w.packages.join(",")
+        );
     }
     Ok(())
 }
@@ -17,7 +23,9 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
     // mints rides to the ProxyCommand child in ssh's environment rather than being minted again.
     // The host key is pinned here because ssh reads known_hosts in the parent process, before the
     // proxy has run even once; a change from what's stored is refused, not adopted.
-    let s = api::ssh_session(&cfg, target).await.map_err(|e| e.to_string())?;
+    let s = api::ssh_session(&cfg, target)
+        .await
+        .map_err(|e| e.to_string())?;
     let id = &s.id;
     // The id lands in ssh's argv and in a /bin/sh-parsed ProxyCommand; the api is trusted for
     // its content but not for its shape.
@@ -34,14 +42,20 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
         // what ssh's tokeniser accepts here.
         .arg(format!("ProxyCommand=\"{}\" ws proxy {id}", me.display()))
         .arg("-o")
-        .arg(format!("UserKnownHostsFile={}", config::known_hosts().display()))
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            config::known_hosts().display()
+        ))
         .arg("-o")
         .arg(format!("HostKeyAlias={id}"))
         .arg(format!("kl@{id}"))
         .args(args)
         // The token in a child's environment is readable by this user's other processes — the
         // same user who holds the CLI token it was minted from, and it expires in minutes.
-        .env(crate::proxy::SESSION_ENV, serde_json::to_string(&s).map_err(|e| e.to_string())?);
+        .env(
+            crate::proxy::SESSION_ENV,
+            serde_json::to_string(&s).map_err(|e| e.to_string())?,
+        );
     // exec, not spawn: ssh owns the terminal (job control, window resizes, the exit status) and a
     // parent sitting in the middle only gets those wrong.
     #[cfg(unix)]
@@ -66,7 +80,15 @@ pub async fn ssh_config() -> Result<(), String> {
     // by remote host" later.
     if !on_path("kl") {
         println!("Note: `kl` is not on your PATH; ssh will not find the ProxyCommand.");
-        println!("      Add {} to PATH.", std::env::current_exe().map(|p| p.parent().map(|d| d.display().to_string()).unwrap_or_default()).unwrap_or_default());
+        println!(
+            "      Add {} to PATH.",
+            std::env::current_exe()
+                .map(|p| p
+                    .parent()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default())
+                .unwrap_or_default()
+        );
     }
     Ok(())
 }

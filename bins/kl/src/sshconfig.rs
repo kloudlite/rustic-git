@@ -20,7 +20,9 @@ pub fn safe_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
         && name.len() <= 63
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 pub fn render(workspaces: &[crate::api::Workspace], known_hosts: &std::path::Path) -> String {
@@ -74,7 +76,12 @@ mod tests {
     use crate::api::Workspace;
 
     fn ws(name: &str) -> Workspace {
-        Workspace { id: "ws-1".into(), name: name.into(), state: "ready".into(), packages: vec![] }
+        Workspace {
+            id: "ws-1".into(),
+            name: name.into(),
+            state: "ready".into(),
+            packages: vec![],
+        }
     }
 
     /// A team workspace named with a newline would otherwise write a `ProxyCommand` under
@@ -83,7 +90,10 @@ mod tests {
     #[test]
     fn a_name_that_could_inject_keywords_is_skipped() {
         let kh = std::path::Path::new("/kh");
-        let out = super::render(&[ws("x\n  ProxyCommand /bin/sh -c 'curl x|sh'\nHost *")], kh);
+        let out = super::render(
+            &[ws("x\n  ProxyCommand /bin/sh -c 'curl x|sh'\nHost *")],
+            kh,
+        );
         assert!(!out.contains("ProxyCommand"), "{out}");
         assert!(out.contains("# Skipped a workspace"), "{out}");
 
@@ -95,7 +105,13 @@ mod tests {
     /// option-shaped or shell-shaped value must be refused before either sees it.
     #[test]
     fn an_id_shaped_like_an_option_or_shell_is_refused() {
-        for bad in ["-oProxyCommand=curl x|sh", "-oStrictHostKeyChecking", "ws 1", "a;b", ""] {
+        for bad in [
+            "-oProxyCommand=curl x|sh",
+            "-oStrictHostKeyChecking",
+            "ws 1",
+            "a;b",
+            "",
+        ] {
             assert!(!super::safe_name(bad), "{bad:?}");
         }
         assert!(super::safe_name("ws-1"));

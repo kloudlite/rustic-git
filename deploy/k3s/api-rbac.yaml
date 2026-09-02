@@ -75,7 +75,13 @@ rules:
     # `patch` is what server-side apply needs; without it the key install fails with a 403 that
     # reads like a missing binding. No `delete`: the Secret carries an ownerReference and is
     # reclaimed with its namespace.
-    verbs: ["get", "create", "update", "patch"]
+    verbs: ["get", "update", "patch"]
+  # `create` is a SEPARATE rule with no `resourceNames`, because a name-restricted rule can never
+  # authorize a create (the object's name does not exist yet at authorization time) — folding it in
+  # above silently removed `create`, so a new owner's very first `user-key` apply 403'd.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
