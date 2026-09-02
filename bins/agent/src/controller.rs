@@ -1763,7 +1763,7 @@ async fn stop_workspace(
     let unreplicated = if prev.pod_ref.is_none() {
         None
     } else {
-        match stop_push(&format!("stop-{}", w.name_any()), &w.spec.owner, &id, &w.name_any(), w, ctx).await? {
+        match stop_push(&stop_name(w), &w.spec.owner, &id, &w.name_any(), w, ctx).await? {
             StopPush::Landed { unreplicated } => unreplicated,
             StopPush::Waiting => {
                 let conditions = ws_conditions(
@@ -2469,7 +2469,7 @@ async fn stop_environment(
     // requested.
     // The worktree is the environment's own name — the same string the sync beat cuts under, so
     // the stop's sync point extends that chain rather than starting a second one.
-    let unreplicated = match stop_push(&format!("stop-{}", e.name_any()), &e.spec.owner, &vol.name_any(), &e.name_any(), e, ctx).await? {
+    let unreplicated = match stop_push(&stop_name(e), &e.spec.owner, &vol.name_any(), &e.name_any(), e, ctx).await? {
         StopPush::Landed { unreplicated } => unreplicated,
         StopPush::Waiting => {
             let st = crd::EnvironmentStatus {
@@ -2845,13 +2845,15 @@ pub(crate) enum StopPush {
 /// selects on it, and a label is a view of `spec` while this is a fact about the request itself.
 const STOP_GENERATION: &str = "rustic-git.io/stop-generation";
 
-/// One object named `stop-{env}` / `stop-{ws}` per parent, not one per pass: a fresh request each
-/// pass would be an unbounded stream of pushes for one stopping parent. The caller KEEPS it once
-/// its teardown completes — it is the stopped worktree's one remaining sync point, and the thing a
-/// re-host on another node checks out in preference to `head`. It goes away on its own: the next
-/// beat cut for this worktree supersedes it under `retain`'s one-transient-per-worktree rule, and
-/// the next stop of the same parent deletes it on the stale path below before creating a fresh
-/// one, so a `done` request from an earlier generation is never read as this stop's own.
+/// `stop-{parent}-{generation}`: one object per STOP, keyed by the parent's generation (Start and
+/// Stop each bump it), so a retried pass converges on the same name and a later stop gets a new
+/// one. The name must never repeat across stops: a replica that pulled `stop-{ws}` once already
+/// held a subvolume under that name, the next stop's cut found it present and reported Ready
+/// without cutting, and the flush gate then counted a copy of the PREVIOUS stop as this one's —
+/// nothing since the last sync beat ever left the node. The caller KEEPS the object once its
+/// teardown completes — it is the stopped worktree's one remaining sync point, and the thing a
+/// re-host on another node checks out in preference to `head`; `retain`'s one-transient-per-
+/// worktree rule removes it (and any older-generation stop) once something newer is Ready.
 ///
 /// Only `Landed` proceeds. `Failed` leaves the parent running with `Ready=False` and nothing torn
 /// down: a parent torn down without a landed push loses its last state for good, so a push that
@@ -2859,21 +2861,10 @@ const STOP_GENERATION: &str = "rustic-git.io/stop-generation";
 /// both parent controllers watch `Snapshot` and map it back by ownerReference — the parent
 /// is woken by the request's own status moving, and by an operator deleting it and letting the
 /// `None` arm below create a fresh one.
-///
-/// The one `error` this retries itself is `AgentRestarted`: the push did not FAIL, the process
-/// holding its handle died, and `/v1` has no delete for a stop commit — so left alone, the
-/// fixed-name request parks the parent until someone finds `kubectl`. A re-run is safe there: the
-/// engine's `unpushed` stage mark makes a retried push resume, not re-snapshot. A real
-/// `PushFailed` still parks, because a btrfs send that failed once fails the same way at TICK.
-///
-/// A finished request from an EARLIER generation of the parent is absent too. The obvious recovery
-/// from `StopSnapshotFailed` is Start, which the Running arm serves without touching the leftover
-/// request — and the next Stop would then read its `error` and park on the first pass, before any
-/// push was attempted, until someone finds `kubectl`. A stale `done` is the same mistake the other
-/// way: a stop that was abandoned for Start and landed later would let the NEXT stop tear down
-/// without pushing what ran since. The parent's generation at creation is stamped on the request
-/// (`STOP_GENERATION`); Start and Stop each bump it. A request without the stamp — from before it
-/// existed — is taken as current, so a rollout does not restart a push in flight.
+fn stop_name<P: ResourceExt>(parent: &P) -> String {
+    format!("stop-{}-{}", parent.name_any(), parent.meta().generation.unwrap_or(0))
+}
+
 async fn stop_push<P>(
     name: &str,
     owner: &str,
@@ -2890,23 +2881,8 @@ where
     // that is still terminating (a finalizer holds it) would otherwise read as a landed push for
     // the NEXT stop — tearing that one down without pushing at all.
     let cr = api.get_opt(name).await?.filter(|s| s.metadata.deletion_timestamp.is_none());
-    let mut phase = cr.as_ref().map(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending));
+    let phase = cr.as_ref().map(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending));
     let gen = parent.meta().generation.unwrap_or(0).to_string();
-    // A `Ready` CR from an EARLIER generation of the parent is stale for the same reason a stale
-    // the old `SnapshotRequest` used to be: the obvious recovery from a failed stop is Start, which does
-    // not touch this CR, and the NEXT stop must cut a fresh commit rather than read the old one as
-    // already landed. `commit_worktree` is keep-biased and never marks a cut `Error` — it retries
-    // `Working` forever — so there is no `AgentRestarted`/failed-request analogue to recover here;
-    // a wedged cut shows up as `StopPush::Waiting` staying `Progressing` rather than a permanent
-    // `StopSnapshotFailed` condition. See the task-8 report for this as a known behaviour change.
-    let stale =
-        cr.as_ref().is_some_and(|s| phase == Some(crd::Phase::Ready) && s.annotations().get(STOP_GENERATION).is_some_and(|g| *g != gen));
-    if stale {
-        delete_ignoring_404(&api, name).await?;
-        // Absent now, so this same pass creates the fresh one (a 409 from a still-terminating
-        // object is the "same request" case below, and the next pass gets through).
-        phase = None;
-    }
     match phase {
         Some(crd::Phase::Ready) => {
             let ready_at = cr.as_ref().and_then(|s| s.status.as_ref()).and_then(|st| st.ready_at.clone());

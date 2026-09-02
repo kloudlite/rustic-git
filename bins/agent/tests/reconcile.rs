@@ -113,7 +113,7 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
     routes.push(rustic_git_workspaces::kube_test::get(
         WS_STOP_REQ,
         serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-                           "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid", "creationTimestamp": rfc3339_ago(60)},
+                           "metadata": {"name": "stop-ws-1-1", "uid": "stop-ws-uid", "creationTimestamp": rfc3339_ago(60)},
                            "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
                            "status": {"phase": "ready", "readyAt": rfc3339_ago(30)}}),
     ));
@@ -1482,7 +1482,7 @@ fn stop_commit(status: serde_json::Value) -> serde_json::Value {
         // `creationTimestamp` is what the whole-wait bound measures from — an hour ago, so a test
         // that wants the bound to bite only has to set the timeout, and one that does not is
         // unaffected because it never waits on the bound at all.
-        "metadata": {"name": "stop-env-1", "uid": "stop-uid-1", "creationTimestamp": rfc3339_ago(3600)},
+        "metadata": {"name": "stop-env-1-1", "uid": "stop-uid-1", "creationTimestamp": rfc3339_ago(3600)},
         "spec": {"volume": "env-1", "owner": "acme", "worktree": "env-1", "transient": true},
         "status": status,
     })
@@ -1501,7 +1501,7 @@ fn ws_stop_routes() -> Vec<Route> {
 
 // ── the stop-before-teardown snapshot ────────────────────────────────────
 
-const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-env-1";
+const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-env-1-1";
 const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
 const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 const REPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
@@ -1524,7 +1524,7 @@ async fn the_flush_gate_lists_replicas_without_a_field_selector() {
         assert!(!c.contains("fieldSelector"), "unsupported field selector on VolumeReplica: {c}");
     }
 }
-const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1";
+const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1-1";
 
 /// `WS_STOP_FLUSH_TIMEOUT_SECS` is process-global and `flush_timeout()` reads it at call time, so
 /// every test that SETS it takes this lock. The coupling is one-way and worth stating: a test that
@@ -1678,7 +1678,7 @@ async fn a_workspace_stop_cuts_a_sync_point_before_deleting_the_pod() {
             rustic_git_workspaces::kube_test::post(
                 "/apis/rustic-git.io/v1alpha1/snapshots",
                 serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-                                   "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid"},
+                                   "metadata": {"name": "stop-ws-1-1", "uid": "stop-ws-uid"},
                                    "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true}}),
             ),
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
@@ -1709,7 +1709,7 @@ async fn a_workspace_stop_cuts_a_sync_point_before_deleting_the_pod() {
             rustic_git_workspaces::kube_test::get(
                 WS_STOP_REQ,
                 serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-                                   "metadata": {"name": "stop-ws-1", "uid": "stop-ws-uid"},
+                                   "metadata": {"name": "stop-ws-1-1", "uid": "stop-ws-uid"},
                                    "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
                                    "status": {"phase": "ready", "readyAt": rfc3339_ago(30)}}),
             ),
@@ -2233,7 +2233,7 @@ async fn a_stopped_workspace_with_a_broken_volume_still_loses_its_pod() {
             rustic_git_workspaces::kube_test::get(
                 WS_STOP_REQ,
                 serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-                                   "metadata": {"name": "stop-ws-1", "uid": "wedged", "creationTimestamp": rfc3339_ago(3600)},
+                                   "metadata": {"name": "stop-ws-1-1", "uid": "wedged", "creationTimestamp": rfc3339_ago(3600)},
                                    "spec": {"volume": "ws-1", "owner": "alice", "worktree": "ws-1", "transient": true},
                                    "status": {"phase": "working"}}),
             ),

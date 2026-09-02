@@ -211,7 +211,7 @@ it watches its own node's objects and converges them (`bins/agent/src/controller
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
 to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
 nothing else — no object store, no Azure credential, and no HTTP service of ours.
-Stopping a workspace or environment cuts a `stop-{ws}`/`stop-{env}` sync point (skipped if the pod
+Stopping a workspace or environment cuts a `stop-{ws}-{gen}`/`stop-{env}-{gen}` sync point, named by the parent's generation so every stop is a fresh snapshot (skipped if the pod
 never ran) and waits for another node's `VolumeReplica` to report `Synced` at or after that
 listing, bounded by `WS_STOP_FLUSH_TIMEOUT_SECS`; the Deployment deletes for an environment are
 gated on that wait, not on a full push (`apply_environment`'s `DesiredState::Stopped` arm). A stop

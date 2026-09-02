@@ -503,7 +503,7 @@ secret, so an agent that rolls ahead of its peers, or ahead of the Secret, or ah
 
 `kubectl get snapshots` shows more than commits: `sync-{worktree}-{8hex}` is a transient, cut by
 the sync beat from a running worktree's moved btrfs generation so a peer has something recent to
-pull between pushes; `stop-{ws}`/`stop-{env}` is the same mechanism cutting one last transient on
+pull between pushes; `stop-{ws}-{gen}`/`stop-{env}-{gen}` is the same mechanism cutting one last transient on
 the way down. There is at most one Ready transient per worktree at a time — retain deletes the
 previous one only once the new one is Ready, so seeing two Ready together is a brief overlap, not
 a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks; `WS_STOP_FLUSH_TIMEOUT_SECS`
