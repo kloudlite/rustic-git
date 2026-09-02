@@ -513,6 +513,12 @@ async fn respond(
 /// push path also writes packs to local disk, and the OS reports a full or read-only disk as an
 /// `io::Error` too (`StorageFull`, `ReadOnlyFilesystem`, `PermissionDenied`, `Uncategorized`…),
 /// which used to come back as a 400 with the OS message in it.
+///
+/// `Other` is the one kind whose MESSAGE is echoed to the client in the 400 body, so every
+/// producer of one on these paths must be a literal: pkt-line's own `io::Error::other`, and
+/// `live_body`'s "request body too large". A future `Other` built with `format!` would put an
+/// internal string on the wire — `the_only_other_kind_errors_answered_400_are_the_two_literals`
+/// is what refuses one.
 fn is_client_fault(e: &crate::Error) -> bool {
     use std::io::ErrorKind::*;
     e.downcast_ref::<ClientError>().is_some()
@@ -556,6 +562,31 @@ mod tests {
         assert!(!fault(Error::from_raw_os_error(libc_eio())));
         assert!(is_client_fault(&client_err("no such ref")));
         assert!(!is_client_fault(&crate::err("store: timeout")));
+    }
+
+    /// `Other` is answered 400 WITH ITS MESSAGE, so every producer of one on these paths must be
+    /// a literal the client may read. Today that is pkt-line's own `io::Error::other` and
+    /// `live_body`'s cap. This pins the contract: a new `Other` carrying an internal detail (a
+    /// store URL, a peer address, a secret) must fail here rather than ship.
+    #[test]
+    fn the_only_other_kind_errors_answered_400_are_the_two_literals() {
+        let fault = |e: Error| is_client_fault(&(Box::new(e) as crate::Error));
+        // The two producers, by their exact strings.
+        assert!(fault(Error::other("request body too large")));
+        assert!(fault(Error::other("bad pkt len")));
+        // The one `Other` the response path itself makes is a broken pipe, which is not `Other`
+        // and so never reaches a client as text.
+        let pipe = Error::new(ErrorKind::BrokenPipe, "client went away");
+        assert!(!fault(pipe));
+        // A source-level guard: nothing under the git router may construct an `io::Error::other`
+        // whose message is built from a peer address or a store URL.
+        let src = include_str!("git.rs");
+        for line in src.lines().filter(|l| l.contains("Error::other(")) {
+            assert!(
+                !line.contains("format!") || line.contains("too large"),
+                "an `Other` with a formatted message is echoed to the client verbatim: {line}"
+            );
+        }
     }
 
     /// EIO has no `ErrorKind` of its own, so it lands in `Uncategorized` — the kind every OS
