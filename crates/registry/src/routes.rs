@@ -43,9 +43,11 @@ pub async fn image_listing(
     } else {
         Vec::new()
     };
-    // One listing per image, fanned out — a serial loop here put the whole catalog page behind
-    // N sequential round trips.
-    let stats = futures::future::join_all(unmarked.iter().map(|n| super::store::manifest_stat(&app.store, owner, n))).await;
+    // One listing per image, bounded at 16 — the same cap and the same reason as
+    // `gc::stats_of`, which this now IS: a serial loop put the catalog page behind N sequential
+    // round trips, and an unbounded fan-out put it behind N simultaneous ones.
+    let names: Vec<&str> = unmarked.iter().map(String::as_str).collect();
+    let stats = crate::gc::stats_of(&app.store, owner, &names).await;
     for (name, stat) in unmarked.into_iter().zip(stats) {
         let (count, newest) = stat.unwrap_or((0, None));
         markers.push(crate::index::Marker {

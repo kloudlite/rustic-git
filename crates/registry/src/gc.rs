@@ -217,7 +217,7 @@ const STAT_CONCURRENCY: usize = 16;
 /// The futures are collected before the stream is built: a closure mapping names to futures
 /// held across the await is what made the worker's spawned lane "not general enough" over
 /// lifetimes.
-async fn stats_of(store: &Store, owner: &str, names: &[&str]) -> Vec<Result<(usize, Option<i64>)>> {
+pub(crate) async fn stats_of(store: &Store, owner: &str, names: &[&str]) -> Vec<Result<(usize, Option<i64>)>> {
     let futs: Vec<_> = names.iter().map(|n| manifest_stat(store, owner, n)).collect();
     futures::StreamExt::collect(futures::StreamExt::buffered(futures::stream::iter(futs), STAT_CONCURRENCY)).await
 }

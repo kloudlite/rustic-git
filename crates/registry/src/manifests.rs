@@ -182,15 +182,21 @@ pub async fn put_manifest(
     // decides what to probe for), and refusing here turned that leniency into a rejected push.
     let digests: Vec<Digest> = named.iter().filter_map(|s| Digest::parse(s)).collect();
     // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
-    // write. Each probe is independent; blob path first because that is where layers live —
-    // the manifest path is only hit for an index's entries.
+    // write. Bounded at 16 for the same reason `gc` bounds its walk — an index may name
+    // thousands of children, and one push must not open thousands of connections. Each probe is
+    // independent; blob path first because that is where layers live — the manifest path is
+    // only hit for an index's entries.
     // ponytail: a sweep can still delete an old blob between this head and the put below —
     // GC is keep-biased and this window is unchanged from the serial version, so it's not new risk.
-    let present = futures::future::join_all(digests.iter().map(|bd| async {
-        app.store.os.head(&blob_path(&owner, bd)).await.is_ok()
-            || app.store.os.head(&manifest_path(&owner, &name, bd)).await.is_ok()
-    }))
-    .await;
+    let probes: Vec<_> = digests
+        .iter()
+        .map(|bd| async {
+            app.store.os.head(&blob_path(&owner, bd)).await.is_ok()
+                || app.store.os.head(&manifest_path(&owner, &name, bd)).await.is_ok()
+        })
+        .collect();
+    let present: Vec<bool> =
+        futures::StreamExt::collect::<Vec<bool>>(futures::StreamExt::buffered(futures::stream::iter(probes), 16)).await;
     if present.iter().any(|ok| !ok) {
         return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
     }

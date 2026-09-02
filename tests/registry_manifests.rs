@@ -823,3 +823,56 @@ async fn a_tag_whose_manifest_is_gone_is_not_counted_as_a_pull() {
         "a 404 is not a pull"
     );
 }
+
+/// An index may name thousands of children, and every one of them is probed before the push is
+/// accepted. The probe must stay bounded (16, the number `gc` uses and states the reason for) —
+/// an unbounded `join_all` here opened one connection per declared digest. Correctness is the
+/// observable half: every named blob is checked, so a manifest naming one absent child among
+/// many is still refused.
+#[tokio::test]
+async fn an_index_naming_many_children_is_probed_without_fanning_out_unbounded() {
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    // 200 real children plus one that was never pushed.
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    for i in 0..200u32 {
+        bodies.push(format!("child-{i}").into_bytes());
+    }
+    common::seed_blobs(&e, "acme", &bodies.iter().map(|b| b.as_slice()).collect::<Vec<_>>()).await;
+    let mut children: Vec<serde_json::Value> = bodies
+        .iter()
+        .map(|b| serde_json::json!({"mediaType": MEDIA, "digest": Digest::of(b).to_string(), "size": b.len()}))
+        .collect();
+
+    let ok = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": children.clone()
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/wide"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", "application/vnd.oci.image.index.v1+json")
+        .body(ok).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "every child is present");
+
+    children.push(serde_json::json!({
+        "mediaType": MEDIA,
+        "digest": Digest::of(b"never pushed").to_string(),
+        "size": 1
+    }));
+    let bad = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": children
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/wide2"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", "application/vnd.oci.image.index.v1+json")
+        .body(bad).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND, "one absent child among 200 still refuses");
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
+}
