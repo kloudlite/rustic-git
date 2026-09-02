@@ -9,8 +9,8 @@
 //! the binding pinned every workspace of theirs to it. The home is a directory on a region-shared
 //! NFS mount now, so every node reconciles every binding (the objects below are all
 //! server-side-applied, which is convergent under concurrent appliers) and placement is the
-//! claim's own business. `spec.nodeName` survives only so existing objects still parse; nothing
-//! reads it.
+//! claim's own business. An old stored object may still carry `spec.nodeName`; the struct no
+//! longer has the field, so the value is ignored on read and gone on the next write.
 //!
 //! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
 
