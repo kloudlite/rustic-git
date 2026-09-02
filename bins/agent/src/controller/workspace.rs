@@ -425,6 +425,17 @@ pub(crate) fn replaced(prev: &[Condition], c: Condition) -> Vec<Condition> {
     out
 }
 
+/// Drop the dead-node sweep's `Degraded=True/NodeDead` from a parent's conditions.
+///
+/// The sweep only ever writes it from ANOTHER node, and nothing ever cleared it: a workspace
+/// stopped on a node that then died kept `NodeDead` after the node came back Ready, and `/v1`
+/// went on answering `start` with 409 "interrupted" forever (drill, 2026-09-03). The owner
+/// reconciling its own object IS the proof its node is alive — the watch is field-selected on
+/// `status.nodeName`, so nobody else reaches this code for this object.
+pub(crate) fn cleared_node_dead(prev: &[Condition]) -> Vec<Condition> {
+    prev.iter().filter(|c| !(c.type_ == "Degraded" && c.reason == "NodeDead")).cloned().collect()
+}
+
 /// `ws_conditions` with this pass's freshly resolved `Attached` — replacing the preserved copy,
 /// which is the previous pass's answer, and dropping it entirely when nothing is attached.
 fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Condition> {
@@ -448,7 +459,7 @@ async fn stop_workspace(
     // changed, so a converged workspace is idle.
     if prev.phase == crd::Phase::Stopped {
         let replicated = replicated_condition(ctx, &id, &w.name_any(), replicas_of(ctx, &id), &prev.conditions, gen).await?;
-        let conditions = replaced(&prev.conditions, replicated);
+        let conditions = replaced(&cleared_node_dead(&prev.conditions), replicated);
         if prev.observed_generation != Some(gen) || !conditions_eq(&prev.conditions, &conditions) {
             let st = crd::WorkspaceStatus { observed_generation: Some(gen), conditions, ..prev };
             write_ws_status(w, st, ctx).await?;
@@ -499,7 +510,7 @@ async fn stop_workspace(
     // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
     // showing "installing packages…" for a workspace that is simply off.
     let replicated = replicated_condition(ctx, &id, &w.name_any(), replicas_of(ctx, &id), &prev.conditions, gen).await?;
-    let conditions = replaced(&ws_conditions(&prev, stopped_condition(gen)), replicated);
+    let conditions = replaced(&cleared_node_dead(&ws_conditions(&prev, stopped_condition(gen))), replicated);
     let st = crd::WorkspaceStatus {
         phase: crd::Phase::Stopped,
         observed_generation: Some(gen),

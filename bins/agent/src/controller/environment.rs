@@ -2,7 +2,7 @@
 //! Split out of `controller.rs` unchanged.
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
-use super::workspace::replaced;
+use super::workspace::{cleared_node_dead, replaced};
 use super::{delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, migrate_and_seed_baseline, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, Service};
@@ -133,7 +133,7 @@ async fn stop_environment(
     // only when it actually changed, so a converged environment is idle.
     if e.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Stopped && s.observed_generation == Some(gen)) {
         let replicated = replicated_condition(ctx, &id, &e.name_any(), vol.spec.replicas, &prev.conditions, gen).await?;
-        let conditions = replaced(&prev.conditions, replicated);
+        let conditions = replaced(&cleared_node_dead(&prev.conditions), replicated);
         if !conditions_eq(&prev.conditions, &conditions) {
             let st = crd::EnvironmentStatus { conditions, ..prev };
             write_env_status(e, st, ctx).await?;

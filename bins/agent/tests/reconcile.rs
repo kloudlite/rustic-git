@@ -4077,3 +4077,34 @@ async fn when_the_owner_is_preferred_it_starts_here_with_no_writes() {
     assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-3", "node-a"), &parents).await.unwrap(), None);
     assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH") || c.starts_with("PUT")));
 }
+
+/// F5 (drill, 2026-09-03): a workspace stopped on a node that then died kept the sweep's
+/// `Degraded=True/NodeDead` after the node came back Ready — nothing cleared it, so `/v1` went on
+/// answering `start` with 409 "interrupted" for as long as the object lived. The owner reconciling
+/// its own stopped object is the proof its node is alive.
+#[tokio::test]
+async fn a_stopped_parent_reconciled_by_its_owner_drops_node_dead() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = replicated_routes("stop-ws-1-3");
+    routes.push(Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) });
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let mut j = ws_json(serde_json::json!({
+        "phase": "stopped", "nodeName": "node-a", "volumeRef": "vol-1", "observedGeneration": 1,
+        "conditions": [
+            {"type": "Ready", "status": "True", "reason": "Stopped", "message": "pushed and stopped",
+             "lastTransitionTime": "2000-01-01T00:00:00Z"},
+            {"type": "Degraded", "status": "True", "reason": "NodeDead", "message": "owner node-a is unavailable",
+             "lastTransitionTime": "2000-01-01T00:00:00Z"},
+        ],
+    }));
+    j["spec"]["desiredState"] = serde_json::json!("stopped");
+    let w: crd::Workspace = serde_json::from_value(j).unwrap();
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    let st = rec.sent("PATCH", WS_STATUS).last().expect("a status write").clone();
+    let conds = st["status"]["conditions"].as_array().unwrap().clone();
+    assert!(!conds.iter().any(|c| c["type"] == "Degraded"), "NodeDead must be gone: {conds:?}");
+    assert!(conds.iter().any(|c| c["type"] == "Ready" && c["reason"] == "Stopped"), "and the rest kept: {conds:?}");
+}
