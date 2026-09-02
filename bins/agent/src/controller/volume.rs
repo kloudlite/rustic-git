@@ -616,7 +616,7 @@ where
             // real owner's own claim of the same parent, and a forced apply (`write_ws_status`/
             // `patch_status`) would let this un-place silently clobber a claim node-b just made.
             // Merge onto the object AS FETCHED so nothing but nodeName/phase/conditions moves —
-            // `volumeRef`/`head`/`durable`/every other status field rides along untouched.
+            // `volumeRef`/`head`/every other status field rides along untouched.
             let mut status = serde_json::to_value(parent).map_err(|e| ReconcileErr(e.to_string()))?["status"].take();
             if status.is_null() {
                 status = serde_json::json!({});

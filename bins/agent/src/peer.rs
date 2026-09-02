@@ -533,10 +533,6 @@ fn retired(have: &HashSet<String>, existing: &HashSet<String>, any_pull_failed: 
 /// touched, same as `replica_reconcile`'s lookup-error branch.
 async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
-    // Taken BEFORE the listing, and stamped as this pass's `lastSyncAt` at the end. See
-    // `VolumeReplicaStatus::last_sync_at`: a pass that finished at T proves nothing about a
-    // commit that turned Ready after its listing, and a stop's flush gate reads exactly that.
-    let listed_at = chrono::Utc::now().to_rfc3339();
     // One list, all phases: the Ready subset drives the pull below, and the FULL name set is what
     // tells a deleted CR from a Working one, below — a `Snapshot` has no finalizer (see
     // `snapshot::reconcile_commit`'s module doc), so this diff against `local_commits` is the only
@@ -663,7 +659,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
         }
     }
     let branches: std::collections::BTreeMap<String, String> = best.into_iter().map(|(w, (_, n))| (w, n)).collect();
-    if let Err(e) = write_replica_status(ctx, volume, !missing_at_end, &listed_at, branches).await {
+    if let Err(e) = write_replica_status(ctx, volume, !missing_at_end, branches).await {
         tracing::warn!(%volume, error = %e, "pull: writing VolumeReplica status");
     }
 }
@@ -734,10 +730,10 @@ async fn pull_one(
 pub(crate) use crd::newest_transient_of;
 
 /// THE placement bar, and the only one: a replica is up to date for a worktree when it HOLDS that
-/// worktree's newest Ready transient, by name. Names, not clocks — `lastSyncAt` is stamped by the
-/// pulling node and `readyAt` by the owner, and a skewed clock must never make an old copy look
-/// current. A worktree with no transient at all (never ran, or a fresh restore) has nothing to
-/// name, so plain `Synced` is the right bar: a Synced replica holds every Ready commit.
+/// worktree's newest Ready transient, by name — never by comparing clocks, which a skew between
+/// nodes could make an old copy look current. A worktree with no transient at all (never ran, or a
+/// fresh restore) has nothing to name, so plain `Synced` is the right bar: a Synced replica holds
+/// every Ready commit.
 pub(crate) fn up_to_date(replica: &crd::VolumeReplica, worktree: &str, newest_transient: Option<&str>) -> bool {
     let Some(st) = replica.status.as_ref() else { return false };
     match newest_transient {
@@ -785,7 +781,6 @@ async fn write_replica_status(
     ctx: &Arc<Ctx>,
     volume: &str,
     synced: bool,
-    listed_at: &str,
     branches: std::collections::BTreeMap<String, String>,
 ) -> Result<(), kube::Error> {
     let name = crd::replica_name(volume, &ctx.node);
@@ -801,11 +796,7 @@ async fn write_replica_status(
             api.create(&PostParams::default(), &r).await?
         }
     };
-    let status = crd::VolumeReplicaStatus {
-        phase: if synced { "Synced" } else { "Syncing" }.to_string(),
-        branches,
-        last_sync_at: Some(listed_at.to_string()),
-    };
+    let status = crd::VolumeReplicaStatus { phase: if synced { "Synced" } else { "Syncing" }.to_string(), branches };
     for attempt in 0..2 {
         match replace_status(&api, &obj, "VolumeReplica", serde_json::to_value(&status).map_err(kube::Error::SerdeError)?).await {
             Ok(()) => return Ok(()),
@@ -1368,38 +1359,11 @@ mod reconcile_tests {
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
 
-        write_replica_status(&ctx, "vol-1", true, "2026-09-02T00:00:00+00:00", Default::default()).await.unwrap();
+        write_replica_status(&ctx, "vol-1", true, Default::default()).await.unwrap();
 
         let created = rec.sent("POST", VOLREPLICAS);
         assert_eq!(created.len(), 1, "{:?}", rec.calls());
         assert_eq!(created[0]["metadata"]["labels"]["rustic-git.io/volume"], "vol-1");
-    }
-
-    /// `lastSyncAt` is the instant its pass LISTED, handed in by `pull_volume` — never `now()` at
-    /// write time. A pass that lists at T and finishes at T+5min knows nothing about a snapshot
-    /// that turned Ready at T+1min, and a stop's flush gate reads this stamp as proof that it did.
-    /// This pins the plumbing: whatever `pull_volume` measured is what lands on the row.
-    #[tokio::test]
-    async fn write_replica_status_stamps_the_listing_instant_not_the_write_instant() {
-        let tmp = tempfile::tempdir().unwrap();
-        let name = crd::replica_name("vol-1", "node-b");
-        let listed_at = "2026-09-02T00:00:00+00:00";
-        let row = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
-            "metadata": {"name": name, "uid": "vr-uid"},
-            "spec": {"volume": "vol-1", "node": "node-b"},
-        });
-        let routes = vec![
-            get(format!("{VOLREPLICAS}/{name}"), row.clone()),
-            Route { method: "PUT", path: format!("{VOLREPLICAS}/{name}/status"), status: 200, body: row },
-        ];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
-
-        write_replica_status(&ctx, "vol-1", true, listed_at, Default::default()).await.unwrap();
-
-        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/{name}/status"));
-        assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-        assert_eq!(sent[0]["status"]["lastSyncAt"], listed_at);
     }
 
     /// Nothing missing (every Ready `Snapshot` is already a local commit): `pull_volume` makes no

@@ -21,6 +21,17 @@ fn generated_crds_match_the_committed_manifest() {
     assert_eq!(got, want, "run CRD_REGEN=1 cargo test --test crd_yaml to regenerate");
 }
 
+/// The status field placement stopped reading is gone from the SCHEMA too, not merely unwritten:
+/// a schema that still advertises it invites the next reader to trust it. Old stored objects keep
+/// parsing because the Rust struct tolerates the field on read (`#[serde(default)]`) and the CRD
+/// prunes what it does not declare — which is exactly the wanted behaviour: the value disappears
+/// on the first write of an old object, and nothing ever reads it again.
+#[test]
+fn compatible_nodes_is_gone_from_the_published_schema() {
+    let yaml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/crds.yaml")).unwrap();
+    assert!(!yaml.contains("compatibleNodes"), "regenerate deploy/k3s/crds.yaml");
+}
+
 #[test]
 fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
     // Both halves fail SILENTLY when dropped: without `status: {}` a status update folds into
@@ -34,7 +45,8 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
         let v = &crd.spec.versions[0];
         assert!(v.subresources.as_ref().is_some_and(|s| s.status.is_some()), "{}", crd.spec.names.kind);
         let want: &[&str] = match crd.spec.names.kind.as_str() {
-            "OwnerBinding" | "Volume" => &[".spec.nodeName"],
+            "OwnerBinding" => &[],
+            "Volume" => &[".spec.nodeName"],
             "Workspace" | "Environment" => &[".status.nodeName"],
             "Snapshot" => &[".spec.volume"],
             // `.spec.volume`: `replicated_condition` and `pull_volume` both filtered client-side

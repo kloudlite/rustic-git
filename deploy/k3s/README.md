@@ -743,3 +743,13 @@ check and its own rollback — if a check fails, roll that step back before star
 The Rust-side changes in this batch — the narrowed `allow-dns` egress rule and the `kl` host-key
 pin — are NOT in any step above. They ship as code: merge to master, wait for the image build,
 `deploy/pin.sh <sha>`, commit, `deploy/roll.sh`. Applying a manifest cannot deliver them.
+
+## Release: stop/decommission dead-field cleanup
+
+The 2026-09-03 change drops four CRD fields that Tasks 1–11 of the stop/interrupt/decommission
+work left with zero readers: `WorkspaceStatus.compatibleNodes` and `EnvironmentStatus.compatibleNodes`
+(placement already reads the replica rows' `branches` instead), `WorkspaceStatus.durable` and
+`EnvironmentStatus.durable`, `VolumeReplicaStatus.lastSyncAt`, and `OwnerBinding.spec.nodeName`.
+`kubectl apply -f deploy/k3s/crds.yaml` for this change is safe in EITHER order relative to the
+agent roll: an old agent that still writes `compatibleNodes` just has it pruned by the new schema,
+and a new agent never sets any of the four in the first place — nothing reads them either way.

@@ -233,7 +233,7 @@ where
         };
         // F1: `replace_status` PUTs the WHOLE status subresource, so a write built from ONLY the
         // 3 fields `decide` cares about would silently erase everything else already there —
-        // `head`, `volumeRef`, `packages`, `podRef`, `durable`. Start from THIS object's current
+        // `head`, `volumeRef`, `packages`, `podRef`. Start from THIS object's current
         // status (fresh on the first attempt; re-read on a 409 below) and merge just the claim's
         // own fields onto it, so the claim never touches anything but
         // phase/nodeName/conditions.
@@ -314,11 +314,7 @@ pub async fn ensure_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result
     let name = binding_name(region, owner);
     let b = OwnerBinding::new(
         &name,
-        OwnerBindingSpec {
-            owner: owner.into(),
-            region: region.into(),
-            node_name: ctx.node.clone(),
-        },
+        OwnerBindingSpec { owner: owner.into(), region: region.into() },
     );
     match api.create(&PostParams::default(), &b).await {
         Ok(_) => Ok(()),

@@ -555,9 +555,8 @@ pub(crate) async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentS
             && a.compatible_nodes == b.compatible_nodes
             && a.volume_ref == b.volume_ref
             && a.service_status == b.service_status
-            // See `write_ws_status`'s twin comment: without these, a head-only advance is a no-op.
+            // See `write_ws_status`'s twin comment: without this, a head-only advance is a no-op.
             && a.head == b.head
-            && a.durable == b.durable
             // Same rule: the pass that re-applies a restore of the snapshot `head` already names
             // changes only these two, and without them here it would never be recorded — leaving
             // `restore_gate` re-applying that wish forever.

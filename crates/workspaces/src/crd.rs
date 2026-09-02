@@ -257,9 +257,8 @@ pub struct SnapshotStatus {
     /// `Working` until the btrfs subvolume is actually cut; `Ready` is the point past which the
     /// object is immutable.
     pub phase: Phase,
-    /// When `phase` became `Ready`, RFC3339. The instant a replica's `lastSyncAt` is compared
-    /// against to decide whether it holds THIS cut — `lastTransitionTime` on a condition would do,
-    /// but a `Snapshot` has no conditions.
+    /// When `phase` became `Ready`, RFC3339 — `lastTransitionTime` on a condition would do, but a
+    /// `Snapshot` has no conditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_at: Option<String>,
 }
@@ -304,16 +303,9 @@ pub struct VolumeReplicaStatus {
     /// API server only accepts a string type there, never an enum's underlying representation.
     pub phase: String,
     /// Branch name to commit id, this node's own view — what a reader checks before trusting a
-    /// `head`/`durable` claim against this replica.
+    /// `head` claim against this replica.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branches: BTreeMap<String, String>,
-    /// The instant the pull pass that produced this row LISTED the volume's snapshots — never the
-    /// instant the row was written. A pass takes minutes; anything that turned Ready after the
-    /// listing was invisible to it, so a write-time stamp would claim a commit this replica
-    /// provably does not hold. A stop's flush gate compares this against the stop transient's
-    /// `readyAt`, and that comparison is only sound with the listing instant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_sync_at: Option<String>,
 }
 
 /// `{volume}-{8 hex}` — CR-first naming: minted before the btrfs snapshot is cut, so a retried
@@ -499,10 +491,11 @@ pub struct WorkspaceStatus {
     #[serde(default)]
     pub node_name: String,
     /// DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'
-    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field so a
-    /// stored object written before the cutover still parses; nothing writes it, and it leaves the
-    /// CRD schema with the rest of the dead fields.
+    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field (not
+    /// declared in the schema) so a stored object written before the cutover still parses;
+    /// nothing writes it and nothing reads it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
     pub compatible_nodes: Vec<String>,
     /// The child `Volume`, reported rather than wished for: the reconciler creates it and then
     /// says so here.
@@ -525,10 +518,6 @@ pub struct WorkspaceStatus {
     /// "the pod moved and hasn't reconciled yet" looks like, never a fact anyone else may act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
-    /// The last commit this worktree's node has confirmed synced to a replica — the durability
-    /// watermark a client can wait on. Same one-writer rule as `head`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durable: Option<String>,
 }
 
 /// What the reconciler last saw and built from `spec.packages`: `observed` and `observed_hash`
@@ -609,10 +598,11 @@ pub struct EnvironmentStatus {
     #[serde(default)]
     pub node_name: String,
     /// DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'
-    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field so a
-    /// stored object written before the cutover still parses; nothing writes it, and it leaves the
-    /// CRD schema with the rest of the dead fields.
+    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field (not
+    /// declared in the schema) so a stored object written before the cutover still parses;
+    /// nothing writes it and nothing reads it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
     pub compatible_nodes: Vec<String>,
     /// The child `Volume`, reported rather than wished for: the reconciler creates it and then
     /// says so here.
@@ -626,8 +616,6 @@ pub struct EnvironmentStatus {
     /// environment's worktree is checked out on, written only by the node running it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durable: Option<String>,
     /// The `spec.restore` wish this environment has already applied, recorded as the same PAIR the
     /// `Volume` records (`restoredTo` + `restoreRequestedAt`) and for the same reason: restoring
     /// the same snapshot twice is a legitimate ask, so the id alone cannot tell a fresh wish from
@@ -644,10 +632,9 @@ pub struct EnvironmentStatus {
     pub restore_requested_at: Option<String>,
 }
 
-/// Which node an owner's work lands on. One object per `{region, owner}`.
-///
-/// Watched by the agent on `spec.nodeName`: this object is what makes an owner's per-team
-/// namespaces exist on that node.
+/// Which owner has namespaces reconciled, per region. One object per `{region, owner}`, and every
+/// node reconciles every binding — the home is a region-shared NFS directory, so a binding is not
+/// node-scoped (it once pinned an owner to a node; that pin is gone).
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "rustic-git.io",
@@ -656,9 +643,7 @@ pub struct EnvironmentStatus {
     plural = "ownerbindings",
     shortname = "ob",
     status = "OwnerBindingStatus",
-    selectable = ".spec.nodeName",
     printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
-    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".spec.nodeName"}"#,
     printcolumn = r#"{"name":"Region","type":"string","jsonPath":".spec.region"}"#,
     derive = "PartialEq"
 )]
@@ -666,11 +651,6 @@ pub struct EnvironmentStatus {
 pub struct OwnerBindingSpec {
     pub owner: String,
     pub region: String,
-    /// The node the owner used to be pinned to. Still stamped by `claim::ensure_binding` and still
-    /// required by the schema so every existing object parses — but read by NOTHING: the home is a
-    /// region-shared NFS directory now, so a binding is not node-scoped and every node reconciles
-    /// every binding.
-    pub node_name: String,
 }
 
 /// Two: one active copy plus one standby, the smallest number that survives a single node loss.
@@ -1026,16 +1006,34 @@ mod tests {
         let st = VolumeReplicaStatus {
             phase: "Synced".into(),
             branches: std::collections::BTreeMap::from([("main".to_string(), "abc123".to_string())]),
-            last_sync_at: Some("2026-09-01T00:00:00Z".into()),
         };
         let v = serde_json::to_value(&st).unwrap();
         assert_eq!(v["phase"], "Synced");
         let back: VolumeReplicaStatus = serde_json::from_value(v).unwrap();
         assert_eq!(back, st);
 
-        let empty = VolumeReplicaStatus { phase: "Syncing".into(), branches: Default::default(), last_sync_at: None };
+        let empty = VolumeReplicaStatus { phase: "Syncing".into(), branches: Default::default() };
         let v = serde_json::to_value(&empty).unwrap();
         assert!(!v.as_object().unwrap().contains_key("branches"));
-        assert!(!v.as_object().unwrap().contains_key("lastSyncAt"));
+    }
+
+    /// Nothing sets `deny_unknown_fields`, so an object stored before this task's cutover — still
+    /// carrying `durable`, `compatibleNodes`, or `lastSyncAt` — keeps parsing after those fields
+    /// are dropped from the schema and the struct. The value just goes nowhere: it disappears on
+    /// the object's next write and nothing ever reads it again.
+    #[test]
+    fn dropped_fields_are_tolerated_on_deserialize() {
+        let ws_status = serde_json::json!({
+            "phase": "running",
+            "durable": "abc123",
+            "compatibleNodes": ["node-a", "node-b"],
+        });
+        serde_json::from_value::<WorkspaceStatus>(ws_status).expect("durable/compatibleNodes must still parse");
+
+        let replica_status = serde_json::json!({
+            "phase": "Synced",
+            "lastSyncAt": "2026-09-01T00:00:00Z",
+        });
+        serde_json::from_value::<VolumeReplicaStatus>(replica_status).expect("lastSyncAt must still parse");
     }
 }

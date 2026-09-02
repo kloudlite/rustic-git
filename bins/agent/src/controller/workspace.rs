@@ -1186,11 +1186,10 @@ pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus
             && a.node_name == b.node_name
             && a.compatible_nodes == b.compatible_nodes
             && a.volume_ref == b.volume_ref
-            // `head`/`durable` in the comparison: without them, a commit's advance of `head` with
-            // every other field unchanged reads as a no-op and the write silently never happens —
-            // exactly the bug `snapshot::advance_head`'s own test caught.
+            // `head` in the comparison: without it, a commit's advance of `head` with every other
+            // field unchanged reads as a no-op and the write silently never happens — exactly the
+            // bug `snapshot::advance_head`'s own test caught.
             && a.head == b.head
-            && a.durable == b.durable
             && conditions_eq(&a.conditions, &b.conditions)
     })
     .await

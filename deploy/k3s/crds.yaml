@@ -529,13 +529,6 @@
                   "status": {
                     "nullable": true,
                     "properties": {
-                      "compatibleNodes": {
-                        "description": "DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'\n`branches` now, so \"who held this once\" is never consulted. Kept as a tolerated field so a\nstored object written before the cutover still parses; nothing writes it, and it leaves the\nCRD schema with the rest of the dead fields.",
-                        "items": {
-                          "type": "string"
-                        },
-                        "type": "array"
-                      },
                       "conditions": {
                         "items": {
                           "description": "Condition contains details for one aspect of the current state of this API Resource.",
@@ -577,11 +570,6 @@
                           "type": "object"
                         },
                         "type": "array"
-                      },
-                      "durable": {
-                        "description": "The last commit this worktree's node has confirmed synced to a replica — the durability\nwatermark a client can wait on. Same one-writer rule as `head`.",
-                        "nullable": true,
-                        "type": "string"
                       },
                       "head": {
                         "description": "The commit id this worktree is checked out on right now. Written ONLY by the node actually\nrunning the pod — no other node can observe it, and a stale value here is exactly what\n\"the pod moved and hasn't reconciled yet\" looks like, never a fact anyone else may act on.",
@@ -957,13 +945,6 @@
                   "status": {
                     "nullable": true,
                     "properties": {
-                      "compatibleNodes": {
-                        "description": "DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'\n`branches` now, so \"who held this once\" is never consulted. Kept as a tolerated field so a\nstored object written before the cutover still parses; nothing writes it, and it leaves the\nCRD schema with the rest of the dead fields.",
-                        "items": {
-                          "type": "string"
-                        },
-                        "type": "array"
-                      },
                       "conditions": {
                         "items": {
                           "description": "Condition contains details for one aspect of the current state of this API Resource.",
@@ -1005,10 +986,6 @@
                           "type": "object"
                         },
                         "type": "array"
-                      },
-                      "durable": {
-                        "nullable": true,
-                        "type": "string"
                       },
                       "head": {
                         "description": "Same meaning and same one-writer rule as `WorkspaceStatus::head` — the commit id this\nenvironment's worktree is checked out on, written only by the node running it.",
@@ -1130,11 +1107,6 @@
                 "type": "string"
               },
               {
-                "jsonPath": ".spec.nodeName",
-                "name": "Node",
-                "type": "string"
-              },
-              {
                 "jsonPath": ".spec.region",
                 "name": "Region",
                 "type": "string"
@@ -1146,12 +1118,8 @@
                 "description": "Auto-generated derived type for OwnerBindingSpec via `CustomResource`",
                 "properties": {
                   "spec": {
-                    "description": "Which node an owner's work lands on. One object per `{region, owner}`.\n\nWatched by the agent on `spec.nodeName`: this object is what makes an owner's per-team\nnamespaces exist on that node.",
+                    "description": "Which owner has namespaces reconciled, per region. One object per `{region, owner}`, and every\nnode reconciles every binding — the home is a region-shared NFS directory, so a binding is not\nnode-scoped (it once pinned an owner to a node; that pin is gone).",
                     "properties": {
-                      "nodeName": {
-                        "description": "The node the owner used to be pinned to. Still stamped by `claim::ensure_binding` and still\nrequired by the schema so every existing object parses — but read by NOTHING: the home is a\nregion-shared NFS directory now, so a binding is not node-scoped and every node reconciles\nevery binding.",
-                        "type": "string"
-                      },
                       "owner": {
                         "type": "string"
                       },
@@ -1160,7 +1128,6 @@
                       }
                     },
                     "required": [
-                      "nodeName",
                       "owner",
                       "region"
                     ],
@@ -1227,11 +1194,6 @@
                 "type": "object"
               }
             },
-            "selectableFields": [
-              {
-                "jsonPath": ".spec.nodeName"
-              }
-            ],
             "served": true,
             "storage": true,
             "subresources": {
@@ -1341,7 +1303,7 @@
                         "type": "string"
                       },
                       "readyAt": {
-                        "description": "When `phase` became `Ready`, RFC3339. The instant a replica's `lastSyncAt` is compared\nagainst to decide whether it holds THIS cut — `lastTransitionTime` on a condition would do,\nbut a `Snapshot` has no conditions.",
+                        "description": "When `phase` became `Ready`, RFC3339 — `lastTransitionTime` on a condition would do, but a\n`Snapshot` has no conditions.",
                         "nullable": true,
                         "type": "string"
                       }
@@ -1442,13 +1404,8 @@
                         "additionalProperties": {
                           "type": "string"
                         },
-                        "description": "Branch name to commit id, this node's own view — what a reader checks before trusting a\n`head`/`durable` claim against this replica.",
+                        "description": "Branch name to commit id, this node's own view — what a reader checks before trusting a\n`head` claim against this replica.",
                         "type": "object"
-                      },
-                      "lastSyncAt": {
-                        "description": "The instant the pull pass that produced this row LISTED the volume's snapshots — never the\ninstant the row was written. A pass takes minutes; anything that turned Ready after the\nlisting was invisible to it, so a write-time stamp would claim a commit this replica\nprovably does not hold. A stop's flush gate compares this against the stop transient's\n`readyAt`, and that comparison is only sound with the listing instant.",
-                        "nullable": true,
-                        "type": "string"
                       },
                       "phase": {
                         "description": "\"Synced\" | \"Syncing\" — a plain `String`, not `Phase`: this is a `selectableField` and the\nAPI server only accepts a string type there, never an enum's underlying representation.",
