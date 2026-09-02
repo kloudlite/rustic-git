@@ -10,6 +10,7 @@ pub mod binding;
 pub mod claim;
 pub mod controller;
 pub mod janitor;
+pub mod listing;
 pub mod nix;
 pub mod peer;
 pub mod snapshot;
