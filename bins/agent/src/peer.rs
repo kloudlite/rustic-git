@@ -244,9 +244,9 @@ async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<String, Str
     Ok(format!("{ip}:8444"))
 }
 
-/// `WS_PEER_SEND_TIMEOUT_SECS`, default 3600 — the same generous shape as the receiver's
-/// `WS_PEER_RECV_TIMEOUT_SECS`. A send is legitimately tens of GiB; this exists to unwedge a
-/// connection that has actually stalled, not to police link speed.
+/// `WS_PEER_SEND_TIMEOUT_SECS`, default 3600. A send is legitimately tens of GiB; this exists to
+/// unwedge a connection that has actually stalled, not to police link speed. The receive side has
+/// no timeout knob of its own — the sender's is the only bound on a transfer.
 fn send_timeout() -> Duration {
     Duration::from_secs(std::env::var("WS_PEER_SEND_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600))
 }
@@ -290,7 +290,7 @@ fn node_dead_secs() -> i64 {
     std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
 }
 
-/// One pass of the puller — spawned beside `replicate_beat` in `controller.rs`. Inert without a
+/// One pass of the puller — spawned beside `replicate_beat` in `controller/run.rs`. Inert without a
 /// peer secret, same fail-closed rule every dial in this file follows: no secret, no
 /// authenticated GET to another node's root-run `btrfs send`.
 pub async fn pull_beat(ctx: &Arc<Ctx>) {

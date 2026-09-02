@@ -269,7 +269,6 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         let quota_unenforced = engine.set_quota(id, quota_gb).map_err(|e| e.to_string())?;
         Ok(Done {
             phase: Phase::Ready,
-            lineage_tip: None,
             restored_to: restore.as_ref().map(|w| w.snapshot_id.clone()),
             quota_unenforced,
         })

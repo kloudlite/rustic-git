@@ -1,6 +1,6 @@
 //! Process setup for `rustic-git-agent`: the local `Engine`, the storage janitor (`janitor.rs`),
 //! and the
-//! Kubernetes client the node controller (`controller.rs`) reconciles with. The work itself is
+//! Kubernetes client the node controller (`controller/`) reconciles with. The work itself is
 //! there, not here — the CRD IS the work item, so there is no queue, no lease and no poll loop.
 
 use rustic_git_workspaces::engine::{Engine, Pool};

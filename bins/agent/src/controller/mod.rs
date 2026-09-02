@@ -188,7 +188,6 @@ impl Ctx {
 #[derive(Debug, Default)]
 pub struct Done {
     pub phase: Phase,
-    pub lineage_tip: Option<String>,
     /// The snapshot an in-place restore materialized, echoed into `status.restoredTo` — the field
     /// both this controller and the parent read to tell "already done" from "not yet".
     pub restored_to: Option<String>,

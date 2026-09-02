@@ -1475,7 +1475,7 @@ async fn delete_env(
     // NOT `owned_by(&e.spec.owner)`: `attach_ws` authorizes through `may_act_on`, which admits
     // team members, so a teammate's workspace can be attached to this environment while owned by
     // someone else entirely — an owner-scoped selector would miss it. `ATTACHED_ENV_LABEL` is the
-    // view of `spec.attachedEnvironment` built for exactly this (`heal_labels` keeps it honest),
+    // view of `spec.attachedEnvironment` built for exactly this (`heal_attached_label` keeps it honest),
     // so it is the one selector that cannot miss an attached workspace regardless of who owns it.
     // The `Err` arm is LOGGED, not dropped: a failed list leaves workspaces pointing at a deleted
     // environment, and the reconciler treating that as unattached is a degradation somebody has

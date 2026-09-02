@@ -207,7 +207,7 @@ peer node's replica always has something recent to fetch; retain keeps exactly o
 per worktree, and a node re-hosting a worktree checks out the newest one it holds locally before
 falling back to `status.head`. The agent
 (`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
-it watches its own node's objects and converges them (`bins/agent/src/controller.rs`), and its
+it watches its own node's objects and converges them (`bins/agent/src/controller/`), and its
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
 to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
 nothing else — no object store, no Azure credential, and no HTTP service of ours.
@@ -223,7 +223,7 @@ pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS export served by 
 every node at `{pool}/homes` (`mount_homes` in `bins/agent/src/lib.rs`, `WS_HOMES_EXPORT`). There
 is no home `Volume` CR, no owner→node pin, no push beat, no history and no quota — all deliberately
 dropped: an NFS directory has no qgroup to enforce one and no per-commit history to keep. Making
-the export directory exist (`ensure_shared_home` in `bins/agent/src/controller.rs`, plain
+the export directory exist (`ensure_shared_home` in `bins/agent/src/controller/workspace.rs`, plain
 `mkdir`+`chown`, safe on every reconcile) is the whole "materialize a home" story now. A pod
 started before its node's NFS mount is up would hostPath an empty local directory and silently
 strand the owner's dotfiles, so `apply_workspace` parks a workspace in `Creating`/`HomeNotReady`
