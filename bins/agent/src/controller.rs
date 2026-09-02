@@ -1679,7 +1679,7 @@ fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition
 /// EVERY workspace status write goes through one of these two. Three separate sites that built the
 /// list literally each dropped `Attached` and stranded the same grant, which is why the invariant is
 /// "no literal condition list on a workspace path" rather than three more fixes.
-fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
+pub(crate) fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
     let mut c: Vec<Condition> =
         prev.iter().filter(|c| c.type_ == crd::PACKAGES_READY || c.type_ == crd::ATTACHED).cloned().collect();
     c.push(ready);

@@ -23,6 +23,10 @@ rustic-git-core = { path = "../../crates/core" }
 rustic-git-storage = { path = "../../crates/storage" }
 rustic-git-workspaces = { path = "../../crates/workspaces" }
 kube = { workspace = true }
+# The guarded pin-clear patch in peer.rs's `release_dead_volumes` (test-then-replace, so a
+# survivor's takeover landing between list and patch is refused rather than clobbered) — already
+# in the tree transitively via kube-client, pinned at the same version here.
+json-patch = "4.2.0"
 # Not used directly — it is where the `reconcile_on` feature gate lives; see the workspace manifest.
 kube-runtime = { workspace = true }
 k8s-openapi = { workspace = true }

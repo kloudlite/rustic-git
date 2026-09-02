@@ -5548,6 +5548,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "json-patch",
  "k8s-openapi",
  "kube",
  "kube-runtime",
