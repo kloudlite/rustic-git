@@ -56,11 +56,15 @@ pub fn path(public: bool, kind: Kind, owner: &str, name: &str) -> Path {
     Path::from(format!("index/{vis}/{}/{owner}/{name}", kind.seg()))
 }
 
-/// `k=v` lines, `description` last so it may itself contain `=`.
+/// `k=v` lines, `description` last so it may itself contain `=`. Control characters are dropped
+/// from the description on the way in: `decode` parses per line, so a newline that reached here
+/// would write fields of its own, and `check_description` refusing them at the API is one caller,
+/// not a guarantee about every future writer of a marker.
 fn body(m: &Marker) -> Vec<u8> {
+    let description: String = m.description.chars().filter(|c| !c.is_control()).collect();
     format!(
         "v=1\npublic={}\ncreated_by={}\ncreated_ms={}\nmanifests={}\nupdated_ms={}\ndescription={}",
-        m.public, m.created_by, m.created_ms, m.manifests, m.updated_ms, m.description
+        m.public, m.created_by, m.created_ms, m.manifests, m.updated_ms, description
     )
     .into_bytes()
 }
@@ -455,5 +459,20 @@ pub(crate) mod tests {
             updated_ms: 9,
         };
         assert_eq!(decode("x", true, &body(&m)).unwrap().description, "a=b=c");
+    }
+
+    /// Belt and braces behind `check_description`: whatever reaches `body`, one marker is one
+    /// line per field, so no writer can ever inject a second field.
+    #[tokio::test]
+    async fn a_newline_in_a_description_cannot_forge_a_marker_field() {
+        let s = mem_store().await;
+        let mut m = marker("web", false);
+        m.description = "hi\ncreated_by=someone.else\ncreated_ms=0".to_string();
+        write(&s, Kind::Repo, "alice", &m).await.unwrap();
+        let l = list(&s, Kind::Repo, "alice", true).await.unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].created_by, "alice@example.com", "the real creator survives");
+        assert_eq!(l[0].created_ms, 1755772800000);
+        assert!(!l[0].description.contains('\n'));
     }
 }
