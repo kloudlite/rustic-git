@@ -144,6 +144,51 @@ against the downloaded `.hmac`, and only decrypt (`openssl enc -d ...`) once the
 means do not restore — fetch an older `hourly-*`/`daily-*` slot instead. Full restore steps are the
 comment block at the bottom of `backup-controlplane.sh`.
 
+## Rotating the api tier's kubeconfig
+
+The api tier (`bins/api`) authenticates to this cluster with a long-lived kubeconfig held in the
+`rustic-git-k3s-kubeconfig` Secret, mounted at `/etc/rustic-git/k3s` on the `rustic-git-api`
+Deployment (`deploy/rustic-git.yaml`) and pointed at by `KUBECONFIG` there. It is a stopgap — the
+`ponytail:` note beside that env var says the pull design in
+`docs/superpowers/specs/2026-08-26-cluster-sync-design.md` replaces it with each cluster syncing
+its own desired state, at which point this Secret goes away entirely. Until then, rotate it:
+
+```sh
+# 1. A fresh bound token for the api's own ServiceAccount (deploy/k3s/api-rbac.yaml), scoped to
+#    this cluster only — nothing wider than what /v1 already had.
+KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create token rustic-git-api --duration=8760h > /tmp/api.token
+
+# 2. Build a kubeconfig around it with the cluster's CA (already on disk from provisioning, or
+#    pull it fresh):
+KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
+  | base64 -d > /tmp/api-ca.crt
+API_SERVER=$(KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
+kubectl config set-cluster k3s --server="$API_SERVER" --certificate-authority=/tmp/api-ca.crt --embed-certs=true --kubeconfig=/tmp/api.kubeconfig
+kubectl config set-credentials rustic-git-api --token="$(cat /tmp/api.token)" --kubeconfig=/tmp/api.kubeconfig
+kubectl config set-context default --cluster=k3s --user=rustic-git-api --kubeconfig=/tmp/api.kubeconfig
+kubectl config use-context default --kubeconfig=/tmp/api.kubeconfig
+
+# 3. Replace the Secret in the AKS cluster (default context — this is a different cluster from
+#    the k3s one above), and roll the api pods to pick it up:
+kubectl create secret generic rustic-git-k3s-kubeconfig --from-file=config=/tmp/api.kubeconfig \
+  --dry-run=client -o yaml | kubectl -n rustic-git apply -f -
+kubectl -n rustic-git rollout restart deploy/rustic-git-api
+
+# 4. Verify with a live read through the new token, then revoke the old one — a bound token has
+#    no separate revoke call, so "the old token stops working" means deleting the Secret entry
+#    is not enough; the old token is only dead once its --duration expires or the ServiceAccount
+#    it was bound to is deleted and recreated. Rotating on the schedule below is what keeps that
+#    window short.
+curl -s https://api.rustic-git.example/v1/regions -H "Authorization: Bearer <api client token>" | head -c 200
+
+# 5. Clean up the local token files — they are as sensitive as the kubeconfig itself.
+rm -f /tmp/api.token /tmp/api-ca.crt /tmp/api.kubeconfig
+```
+
+Cadence: yearly (the `--duration=8760h` above), or immediately on any suspicion the token leaked —
+a laptop with `.local/k3s.yaml` on it going missing, a log line with the token in it, anything of
+that shape.
+
 ## Release 1: controller ownership
 
 The 2026-08-27 change: the API writes ONE unplaced object, the agents claim it through
