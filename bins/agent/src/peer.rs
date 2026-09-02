@@ -1663,6 +1663,45 @@ fi
         assert!(!rec.calls().iter().any(|c| c.contains("/volumes/vol-live")), "{:?}", rec.calls());
     }
 
+    /// `resolve_volume`'s takeover half, `controller::take_volume`: a CAS win writes the same
+    /// two-op shape the release side above reads back, and a lost race (the API server's `test`
+    /// failing) is reported quietly rather than as an error.
+    #[tokio::test]
+    async fn take_volume_wins_with_a_test_op_on_an_empty_pin() {
+        let routes = vec![Route {
+            method: "PATCH",
+            path: "/apis/rustic-git.io/v1alpha1/volumes/v1".into(),
+            status: 200,
+            body: vol_owned("v1", "node-a"),
+        }];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        assert!(crate::controller::take_volume(&ctx, "v1", "node-a").await.unwrap());
+
+        let sent = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/v1");
+        assert_eq!(sent.len(), 1);
+        let ops = sent[0].as_array().expect("a JSON Patch is an array of ops");
+        assert_eq!(ops[0], serde_json::json!({"op": "test", "path": "/spec/nodeName", "value": ""}));
+        assert_eq!(ops[1], serde_json::json!({"op": "replace", "path": "/spec/nodeName", "value": "node-a"}));
+    }
+
+    #[tokio::test]
+    async fn take_volume_loses_quietly_when_the_test_op_fails() {
+        let routes = vec![Route {
+            method: "PATCH",
+            path: "/apis/rustic-git.io/v1alpha1/volumes/v1".into(),
+            status: 422,
+            body: serde_json::to_value(kube::core::Status::failure("test failed", "Invalid").with_code(422))
+                .expect("Status serializes"),
+        }];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        assert!(!crate::controller::take_volume(&ctx, "v1", "node-a").await.unwrap());
+        assert_eq!(rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/v1").len(), 1);
+    }
+
     // A nodes-list error's effect on both sweeps together is covered by
     // `pull_beat_reaps_unclaims_and_places_nothing_on_a_node_list_error` above — `reap_dead_replicas`
     // and `unclaim_dead_nodes` no longer list Nodes themselves, so there is nothing left to error on

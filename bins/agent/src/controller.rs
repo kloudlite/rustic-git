@@ -1129,6 +1129,28 @@ where
 /// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
 /// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
 /// this guards is a pod wedged forever on `path … does not exist`.
+/// Compare-and-set the owner pin from empty to `node`. The `test` op is what makes two claimants
+/// safe: the API server applies the patch atomically, so exactly one of them sees 200 and the
+/// other a 409/422 it treats as "lost, not broken" — same construction as `peer::release_dead_volumes`.
+pub(crate) async fn take_volume(ctx: &Arc<Ctx>, name: &str, node: &str) -> Result<bool, kube::Error> {
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let ops = json_patch::Patch(vec![
+        json_patch::PatchOperation::Test(json_patch::TestOperation {
+            path: "/spec/nodeName".parse().expect("static pointer parses"),
+            value: serde_json::json!(""),
+        }),
+        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
+            path: "/spec/nodeName".parse().expect("static pointer parses"),
+            value: serde_json::json!(node),
+        }),
+    ]);
+    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 pub(crate) fn volume_is_ready(v: &crd::Volume) -> bool {
     v.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Ready && s.subvolume_present)
 }
@@ -1268,6 +1290,20 @@ where
     // The belt to `ensure_child_volume`'s brace: two places allowed to name a node is two places
     // that can disagree about where the data is, and the failure mode is an owner's data split
     // across pools — so a disagreement refuses rather than picks.
+    // An unowned volume is a dead node's, released by the unclaim sweep. This node claimed the
+    // parent (so `may_claim` already proved its replica is Synced): take the pin. Losing the race
+    // is not an error — the next pass meets the winner's pin and the guard below refuses as usual.
+    if vol.spec.node_name.is_empty() {
+        if take_volume(ctx, &id, node_name).await? {
+            tracing::info!(volume = %id, node = %node_name, "took over an unowned volume");
+        }
+        return Ok(Resolved::Wait {
+            volume_ref: None,
+            phase: crd::Phase::Creating,
+            cond: crd::condition("Ready", false, "VolumeTakeover", "taking ownership of the released volume", gen),
+            action: Action::requeue(std::time::Duration::from_secs(5)),
+        });
+    }
     if vol.spec.node_name != node_name {
         let why = format!("status.nodeName {node_name} disagrees with volume {id}'s node {}", vol.spec.node_name);
         return Ok(Resolved::Wait {
