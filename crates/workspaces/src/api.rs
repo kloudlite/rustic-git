@@ -1608,6 +1608,17 @@ async fn create_commit(
     // `status` on CREATE is stored verbatim (the subresource split only governs UPDATE/PATCH), so
     // this is how the object is born `Working` instead of the schema's `Pending` default —
     // `reconcile_commit` only ever acts on `Working`.
+    // Owned by the Volume so the commit record goes with it: a commit CR with no owner outlived
+    // its deleted workspace once, and its snapshot subvolume sat on a node with nothing left to
+    // reap it. The agent's own cuts (sync points, stops) are owned the same way, via the parent.
+    let vol = Api::<crd::Volume>::all(c.clone()).get(volume).await.map_err(kube_err)?;
+    snap.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+        api_version: format!("{}/{}", crd::GROUP, crd::VERSION),
+        kind: "Volume".to_string(),
+        name: volume.to_string(),
+        uid: vol.metadata.uid.unwrap_or_default(),
+        ..Default::default()
+    }]);
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())

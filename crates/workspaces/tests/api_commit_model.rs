@@ -83,6 +83,7 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -108,6 +109,9 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     // selects on exactly this, and nothing else stamps it.
     assert_eq!(req["metadata"]["labels"]["rustic-git.io/volume"], "ws-1");
     assert_eq!(req["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
+    // Owned by the Volume: the record is garbage-collected with it instead of outliving a deleted workspace.
+    assert_eq!(req["metadata"]["ownerReferences"][0]["kind"], "Volume");
+    assert_eq!(req["metadata"]["ownerReferences"][0]["uid"], "vol-uid-1");
     assert!(!s.rec.calls().iter().any(|c| c.contains("snapshotrequests")), "no SnapshotRequest under the flag");
 }
 
@@ -118,6 +122,7 @@ async fn first_push_of_a_workspace_has_no_parent() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
