@@ -88,6 +88,17 @@ spec:
       labels:
         app: zerofs
     spec:
+      # Pinned to the control plane on purpose: it hosts no workspaces, so it is the node a
+      # dead-node drill or a pool-node reboot never touches. A worker dying with ZeroFS on it
+      # moved the export mid-flight once and left every other node's NFS mount answering EIO
+      # (stale handles from the old server) until the agents were restarted. The taint the
+      # control plane carries is tolerated here and nowhere else.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: zerofs
           # Pinned to the latest release as of 2026-09-01 (github.com/Barre/ZeroFS). Never
