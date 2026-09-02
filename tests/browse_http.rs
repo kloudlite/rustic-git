@@ -1278,3 +1278,51 @@ async fn deleting_one_snapshot_keeps_the_rest_and_walks_the_ref_back() {
     assert!(e.store.history("alice", "env-1").await.unwrap().is_empty());
     assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap(), None);
 }
+
+/// `base`/`head` reach the worker's git argv and the owner's `refs/heads/{}` lookups. A name git
+/// will never accept makes a change permanently unmergeable while still burning a claim, a fetch
+/// and a full worker job on every merge request, re-announced every 30 s. Refused at open, with
+/// the 400 the other field checks already use.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_on_a_branch_name_git_will_not_accept_is_refused() {
+    let e = common::env().await;
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    for bad in [
+        "",
+        "-dashed",
+        "a..b",
+        "has space",
+        "star*",
+        "tilde~1",
+        "caret^",
+        "colon:x",
+        "question?",
+        "bracket[",
+        "back\\slash",
+        "wip.lock",
+    ] {
+        let (s, _) = post_json_as(
+            &router,
+            "alice",
+            "/api/alice/widget/pulls",
+            serde_json::json!({ "title": "t", "body": "", "base": "main", "head": bad }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "head {bad:?} was accepted");
+
+        let (s, _) = post_json_as(
+            &router,
+            "alice",
+            "/api/alice/widget/pulls",
+            serde_json::json!({ "title": "t", "body": "", "base": bad, "head": "topic" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "base {bad:?} was accepted");
+    }
+
+    // And the ordinary names still open, or this test would pass on a handler that refuses all.
+    let (s, _) = open_pr(&router, "/api/alice/widget/pulls", "fine", "feature/ok-1.2").await;
+    assert_eq!(s, StatusCode::CREATED);
+}

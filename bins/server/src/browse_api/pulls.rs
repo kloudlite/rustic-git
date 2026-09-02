@@ -144,6 +144,20 @@ pub(super) struct NewPull {
     author: String,
 }
 
+/// git's `check-ref-format` basics, as much of it as matters here. A change opened on a name git
+/// will never accept is permanently unmergeable while still costing a claim, a fetch and a full
+/// worker job on every merge request, re-announced every 30 s — so it is refused at open rather
+/// than failing forever at merge. Deliberately a denylist of git's own refusals, not a
+/// character allowlist: the names people actually use carry `/`, `.`, `-` and unicode.
+fn valid_branch(b: &str) -> bool {
+    !b.is_empty()
+        && b.len() <= 255
+        && !b.starts_with('-')
+        && !b.contains("..")
+        && !b.ends_with(".lock")
+        && !b.chars().any(|c| c.is_ascii_control() || c == ' ' || "~^:?*[\\".contains(c))
+}
+
 pub(super) async fn api_pull_open(
     State(app): State<Arc<App>>,
     Path((owner, name)): Path<(String, String)>,
@@ -160,6 +174,10 @@ pub(super) async fn api_pull_open(
     let (base, head) = (new.base.trim(), new.head.trim());
     if base == head {
         return (StatusCode::BAD_REQUEST, "a change has to come from a different branch")
+            .into_response();
+    }
+    if !valid_branch(base) || !valid_branch(head) {
+        return (StatusCode::BAD_REQUEST, "that is not a branch name git will accept")
             .into_response();
     }
     let db = match ready(&app, &owner, &name).await {
@@ -579,5 +597,39 @@ async fn update(
         // No refusal recorded and nothing written means the change is not there.
         None => Err(refusal
             .unwrap_or_else(|| (StatusCode::NOT_FOUND, "no such change").into_response())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_branch;
+
+    /// The exact rule list, so a future edit to `valid_branch` is a decision rather than an
+    /// accident. Control characters are in here because a `\n` in a ref name reaches git's argv.
+    #[test]
+    fn branch_names_git_will_never_accept_are_refused() {
+        for ok in ["main", "feature/ok-1.2", "a.b", "release_2", "x".repeat(255).as_str()] {
+            assert!(valid_branch(ok), "{ok:?} is a legal branch name");
+        }
+        for bad in [
+            "",
+            "-leading",
+            "a..b",
+            "sp ace",
+            "tab\tted",
+            "new\nline",
+            "null\0byte",
+            "tilde~",
+            "caret^",
+            "colon:",
+            "question?",
+            "star*",
+            "bracket[",
+            "back\\slash",
+            "wip.lock",
+        ] {
+            assert!(!valid_branch(bad), "{bad:?} must be refused");
+        }
+        assert!(!valid_branch(&"x".repeat(256)), "256 bytes must be refused");
     }
 }
