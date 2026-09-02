@@ -271,3 +271,43 @@ fn the_attached_environment_is_an_optional_string() {
     let required = schema.properties.as_ref().unwrap()["spec"].required.clone().unwrap_or_default();
     assert!(!required.contains(&"attachedEnvironment".to_string()), "must not be required");
 }
+
+/// The bug this exists for: a naming rule lives in Rust and the fence that depends on it lives in
+/// CEL, so only a cluster apply connects them — team workspaces (`wt-`) were denied at namespace
+/// create, at the host-key Secret and at both RoleBindings for as long as the policy said `ws-`
+/// and `env-` only.
+#[test]
+fn every_namespace_the_code_makes_is_admitted() {
+    use rustic_git_workspaces::crd::{env_namespace, ws_namespace};
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/agent-admission.yaml");
+    let policy = std::fs::read_to_string(path).unwrap();
+    // Only the Namespace arm of policy 2's expression: the Secret and RoleBinding arms test
+    // `metadata.namespace` and are asserted separately below.
+    let start = policy.find("object.kind == 'Namespace'").expect("policy 2 has a Namespace branch");
+    let end = policy[start..].find("object.kind == 'Secret'").expect("…followed by the Secret branch") + start;
+    let prefixes: Vec<String> = policy[start..end]
+        .match_indices("startsWith('")
+        .map(|(i, m)| {
+            let rest = &policy[start + i + m.len()..];
+            rest[..rest.find('\'').expect("a closed CEL string literal")].to_string()
+        })
+        .collect();
+    assert!(!prefixes.is_empty(), "no startsWith literals found — did the expression change shape?");
+
+    let mut made = vec![env_namespace("env-abc123")];
+    for (owner, team) in [("alice", ""), ("alice", "alice"), ("alice", "acme"), ("a-b", "b-c")] {
+        made.push(ws_namespace(owner, team));
+    }
+    for ns in &made {
+        assert!(
+            prefixes.iter().any(|p| ns.starts_with(p.as_str())),
+            "namespace {ns} is denied by agent-admission.yaml (admits {prefixes:?})"
+        );
+    }
+    // The Secret and RoleBinding arms gate on `metadata.namespace`, so every workspace prefix must
+    // appear in each of them too — a team workspace's `ws-ssh-{id}` Secret is denied otherwise.
+    let secret_arm = &policy[end..policy.find("object.kind == 'RoleBinding'").expect("a RoleBinding branch")];
+    for p in ["ws-", "wt-"] {
+        assert!(secret_arm.contains(&format!("startsWith('{p}')")), "Secret branch must admit {p} namespaces");
+    }
+}
