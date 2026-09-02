@@ -85,7 +85,12 @@
 #   nodes                                  get,list                     node_roles (startup);
 #                                                                       replication rendezvous
 #                                                                       (peer.rs) — every agent must
-#                                                                       see the same candidate list
+#                                                                       see the same candidate list;
+#                                                                       the decommission label
+#                                          patch                        decommission_beat, THIS
+#                                                                       node's own
+#                                                                       `rustic-git.io/decommission-
+#                                                                       status` annotation only
 #
 # Two things RBAC cannot say, and where the ValidatingAdmissionPolicy in `agent-admission.yaml`
 # takes over. Apply both files; the role without the policy is the honest-but-wide version:
@@ -211,9 +216,17 @@ rules:
   # `list` joined `get` for replication: the sender computes standby targets by rendezvous over
   # the pooled nodes, and every agent must see the same candidate list or two nodes will disagree
   # about who holds what.
+  # `patch` is annotations in practice — the decommission beat writes this node's own
+  # `rustic-git.io/decommission-status`, which is how an operator watches a drain and learns when
+  # the VM is safe to delete. RBAC cannot narrow `patch` to one annotation on one node, and the
+  # admission policy does not match `nodes`, so this is a broad verb taken KNOWINGLY: the agent
+  # already runs as root with the host PID namespace on that node, so a compromised agent could
+  # do anything a node can do regardless of this line. The narrowing that WOULD work — an
+  # admission policy binding `request.name` to the agent's own node — is the upgrade if the
+  # agent ever stops being root.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "patch"]
   # The controller creates two RoleBindings in each workspace namespace: one so the API can write
   # that namespace's git-token Secret (see api-rbac.yaml), one so the agent itself can read and
   # create that namespace's host-key Secret (see `rustic-git-agent-ws-secrets` below). Kubernetes

@@ -63,6 +63,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     spawn_heartbeat(ctx.clone());
     spawn_pull(ctx.clone());
     spawn_sync(ctx.clone());
+    spawn_decommission(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
     // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
@@ -337,6 +338,21 @@ fn spawn_pull(ctx: Arc<Ctx>) {
             crate::peer::pull_beat(&ctx).await;
             // Wakes that arrived DURING the pass decide whether to go straight round again.
             next = crate::peer::after_pass(&wake);
+        }
+    });
+}
+
+/// The decommission beat (`decommission.rs`), same shape as the others. It costs one node list per
+/// 30 s on every node and returns immediately unless THIS node carries the label — cheaper than a
+/// watch on Nodes, and a beat is the right shape anyway: what it waits for (a person stopping their
+/// workspace) is observed through the same listing everything else already reads.
+fn spawn_decommission(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(crate::decommission::beat_interval());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            crate::decommission::decommission_beat(&ctx).await;
         }
     });
 }

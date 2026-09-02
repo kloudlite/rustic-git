@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub mod binding;
 pub mod claim;
 pub mod controller;
+pub mod decommission;
 pub mod janitor;
 pub mod listing;
 pub mod nix;

@@ -1016,7 +1016,7 @@ pub(crate) async fn unplace_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent) {
 /// `cond` is the condition TYPE and its truth: the sweep says `Degraded=True`, a spread says
 /// `Placed=False`. Both the idle check and `replaced` key by type, so one type never disturbs the
 /// other's condition.
-async fn mark_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent, cond: (&'static str, bool), reason: &str, why: &str, release: bool) {
+pub(crate) async fn mark_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent, cond: (&'static str, bool), reason: &str, why: &str, release: bool) {
     match p.kind {
         "Workspace" => mark_parent_of::<crd::Workspace>(ctx, &p.name, "Workspace", cond, reason, why, release).await,
         _ => mark_parent_of::<crd::Environment>(ctx, &p.name, "Environment", cond, reason, why, release).await,
