@@ -145,10 +145,22 @@ and the policy refuses it any other spec change. Apply both files. There is no j
 no agent registration and no long poll: `/v1` writes ONE unplaced object and establishes no facts
 about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, admitted for the owner
 node always and for any other node only while it is up to date for that worktree), so two nodes can never contend for the same subvolume and the API never
-places anything. When a node is dead for `WS_NODE_DEAD_SECS`, the unclaim sweep marks its volumes
-`Unavailable` and moves ONLY the worktrees whose `desiredState` is `Stopped` — a Running one keeps
-its pin and a `NodeDead` condition, because its live edits exist only on the dead node and only
-the person may write them off by stopping it. Independently of any of that, every replica the dead
+places anything. When a node is unplaceable — dead for `WS_NODE_DEAD_SECS`, or labelled
+`rustic-git.io/decommission=true` (`peer::unplaceable`, one predicate for both) — the sweep decides
+PER VOLUME, never per parent (`peer::volume_decision`): any Running parent on it pins the whole
+volume (`Unavailable`, `Degraded=True/NodeDead` on every parent, nothing moves); otherwise any
+stopped parent that is not yet `Replicated` pins it too; otherwise the pin is cleared and every
+parent un-placed, so an up-to-date node claims them on the next start. A running worktree is
+*interrupted*, not moved: `/v1` refuses to start it (409, "its node is down; it resumes when the
+node returns") and the way forward is a clone from the last synced point, whose `based_on` states
+that cut's age (an environment has no such fallback — its clone copies live bytes, so an
+interrupted environment is a 409). A decommission is the planned version of the same thing with one
+difference — whatever runs there keeps running: the node's own agent beats every
+`WS_DECOMMISSION_SECS` (30), tells its running parents (`Decommissioning=True/NodeLeaving`),
+releases each volume as it becomes releasable (reason `Decommissioned`, and never marks a running
+one `Unavailable`), and stamps `rustic-git.io/decommission-status: draining running=N owned=N
+copies=N` until it can stamp a sticky `drained <RFC 3339>`, which is the operator's gate on
+deleting the VM. Independently of any of that, every replica the dead
 node held is healed onto a live third node automatically — placement stops naming dead nodes as
 candidates and retires a copy once its replacement is Synced (`live_nodes`/`retire_pass`) — because
 healing a COPY risks nothing, unlike moving the live worktree. A released volume's pin is cleared,
@@ -218,14 +230,26 @@ it watches its own node's objects and converges them (`bins/agent/src/controller
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
 to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
 nothing else — no object store, no Azure credential, and no HTTP service of ours.
-Stopping a workspace or environment cuts a `stop-{ws}-{gen}`/`stop-{env}-{gen}` sync point, named
-by the parent's generation so every stop is a fresh snapshot (skipped if the workspace pod never
-ran), and tears down as soon as that cut is Ready — it waits for no peer. The owner then wakes
-every placeable node's puller (`peer::wake_peers`) and records the ONE truth about whether this
-may start elsewhere as the `Replicated` condition (`controller/stop.rs`): `False/Running` in the
-same status write that records a running pod, and while stopped `False/AwaitingReplica` until
-another node's `VolumeReplica` holds the cut BY NAME, then `True/Replicated`. It is computed only
-by the owner and only for a stopped parent, and read everywhere else (`/v1`, the web, placement).
+Stopping a workspace or environment cuts a `stop-{ws}-{gen}`/`stop-{env}-{gen}` sync point, named by
+the parent's generation so every stop is a fresh snapshot (skipped if the pod never ran), and tears
+the pod (or the StatefulSets) down as soon as that cut is Ready — a stop is seconds, and it never
+waits for a replica. Right after the cut the owner POSTs `/peer/v1/wake` to every placeable node
+(`peer::wake_peers`) so the peers pull within seconds instead of at the next replication beat; sync
+cuts do not wake anyone, only stop, clone and push cuts do. Whether the bytes have landed elsewhere
+is the `Replicated` condition on the parent (`controller/stop.rs`), computed only by the owner:
+`False/Running` in the same status write that records a running pod, and while stopped
+`False/AwaitingReplica` ("no other node holds the final sync point yet", or "no replica is
+configured for this volume" when `spec.replicas: 1` means it never will) until another node's
+`VolumeReplica` holds the cut BY NAME, then `True/Replicated` ("another node holds the final sync
+point"). It is read everywhere else — `/v1`, the web, the dead-node sweep, placement. **The wait
+moved into placement**: a stopped parent may start on ANOTHER node only once that node is up to
+date for the worktree — its `VolumeReplica.status.branches[worktree]` names that worktree's newest
+Ready transient — and until then the only place it can start is its own node. `may_claim`
+(`bins/agent/src/claim.rs`) is that one rule; `compatibleNodes` is a dead field, kept only so old
+stored objects parse. Starts also SPREAD: when a volume is movable (nothing on it running) its
+owner computes the preferred node by rendezvous (`peer::preferred_node`) over `{owner} ∪ {up-to-date
+nodes}`, keyed by the volume id, and hands the volume over (release CAS + un-place every parent,
+`Placed=False/Moving` — a routine move, never `Degraded`) when that is not itself.
 
 **Every person has one persistent home per region, not per node** — `/home/kl` in every workspace
 pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS export served by ZeroFS, mounted by

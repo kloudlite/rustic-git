@@ -369,8 +369,11 @@ wait_env_ready() {
 # reconcile finished and there is nothing outstanding. Waiting for Ready=false here would wait
 # forever for a state that correctly never happens. `phase` is the field that distinguishes running
 # from stopped, and it is what a human reads in `kubectl get environments` too.
+# The 60s ceiling is an assertion too: the stop cut and the teardown happen in one pass now, and
+# whether a peer has the bytes is a condition read afterwards, not a gate the stop waits on. A stop
+# that needs minutes is the old flush gate having come back.
 wait_env_stopped() {
-  kubectl wait --for=jsonpath='{.status.phase}'=stopped "environment/$1" --timeout=300s \
+  kubectl wait --for=jsonpath='{.status.phase}'=stopped "environment/$1" --timeout=60s \
     || fail "environment $1 never reached phase=stopped"
 }
 
@@ -646,9 +649,24 @@ kubectl -n "$WS_NS" exec "$CLONE_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
 
 log "stopping and restarting the workspace: the home lives on the export, not the pod"
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-kubectl wait --for=jsonpath='{.status.phase}'=stopped "workspace/$WS_ID" --timeout=300s \
+# A stop is now seconds, not minutes: the cut turns Ready and the pod goes in the same pass, and
+# the replica wait moved into placement. 60s, not 300s, is the assertion — a stop that takes
+# longer than that is the flush gate having come back.
+kubectl wait --for=jsonpath='{.status.phase}'=stopped "workspace/$WS_ID" --timeout=60s \
   || fail "workspace $WS_ID never reached phase=stopped"
 kubectl -n "$WS_NS" get "pod/$WS_ID" >/dev/null 2>&1 && fail "the pod is still there after the stop"
+
+# `FlushUnreplicated` is gone entirely: a stop is never "unreplicated", only not-yet-replicated,
+# and that is the `Replicated` condition's job for as long as it is true.
+kubectl get "workspace/$WS_ID" -o json | grep -q FlushUnreplicated \
+  && fail "FlushUnreplicated is gone; a stop no longer records a one-shot flush verdict"
+
+# And the condition that replaced it is there, with one of the two reasons and nothing else.
+REPL=$(kubectl get "workspace/$WS_ID" -o jsonpath='{.status.conditions[?(@.type=="Replicated")].reason}')
+case "$REPL" in
+  Replicated|AwaitingReplica) : ;;
+  *) fail "expected a Replicated condition on the stopped workspace, got '$REPL'" ;;
+esac
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/start" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_ws_ready "$WS_ID"
 kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s || fail "pod $WS_ID did not come back"
@@ -935,6 +953,16 @@ kubectl -n "$WS_NS" exec "$WS_ID" -- getent hosts "db.$ENV_NS" >/dev/null \
 log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_env_stopped "$ENV_ID"
+
+# Same two assertions as the workspace stop: no one-shot flush verdict, and the `Replicated`
+# condition in its place.
+kubectl get "environment/$ENV_ID" -o json | grep -q FlushUnreplicated \
+  && fail "FlushUnreplicated is gone; a stop no longer records a one-shot flush verdict"
+REPL=$(kubectl get "environment/$ENV_ID" -o jsonpath='{.status.conditions[?(@.type=="Replicated")].reason}')
+case "$REPL" in
+  Replicated|AwaitingReplica) : ;;
+  *) fail "expected a Replicated condition on the stopped environment, got '$REPL'" ;;
+esac
 
 log "checking the env's volume registry history is non-empty after stop"
 for i in $(seq 1 30); do

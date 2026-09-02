@@ -574,13 +574,15 @@ the sync beat from a running worktree's moved btrfs generation so a peer has som
 pull between pushes; `stop-{ws}-{gen}`/`stop-{env}-{gen}` is the same mechanism cutting one last transient on
 the way down. There is at most one Ready transient per worktree at a time — retain deletes the
 previous one only once the new one is Ready, so seeing two Ready together is a brief overlap, not
-a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks. A stop waits for its own cut
-and nothing else, then wakes every placeable peer so they pull within seconds. Whether a peer
-actually holds that cut is the `Replicated` condition on the stopped workspace or environment,
-rewritten by its owner on every reconcile: `False/AwaitingReplica` until another node holds it by
-name, then `True/Replicated`. Stuck on `AwaitingReplica`? Check whether the volume has any peers
-at all (`spec.replicas` — `1` says so in the condition's own message) and whether replication is
-enabled (`WS_PEER_SECRET`, above).
+a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks. A stop no longer waits for anything: the
+cut turns Ready, the pod goes, and the owner pokes every placeable peer with `/peer/v1/wake` so the
+copy happens in seconds. Whether it HAS happened is the `Replicated` condition on the stopped
+object — `kubectl get workspace X -o jsonpath='{.status.conditions[?(@.type=="Replicated")]}'`.
+`False/AwaitingReplica` with "no other node holds the final sync point yet" is normal for a few
+seconds after a stop and is only worth investigating if it persists (check `WS_PEER_SECRET`, above
+— replication is fail-closed without it); with the message "no replica is configured for this
+volume" it will never become true (that is `spec.replicas: 1`), and the workspace simply always
+starts on its own node.
 
 ### Node death
 
@@ -588,21 +590,32 @@ A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` 
 that floor, not a shorter probe, is what keeps a brief kubelet hiccup from tearing anything down.
 Every surviving agent's pull beat then does two things to that node's volumes: replicas heal onto
 a third live node automatically (rendezvous stops naming the dead node as a candidate, so a
-survivor picks up the missing copy on its own), and every `Volume` the dead node owned goes
-`status.phase: Unavailable` with condition `Available=False/NodeDead` — `kubectl get volumes`
-is the fast way to see which ones are affected.
+survivor picks up the missing copy on its own), and the sweep decides what happens to each `Volume`
+the dead node owned. The decision is PER VOLUME, not per workspace, because ownership is per volume
+— three arms, in order:
 
-What moves automatically stops there. A Workspace or Environment whose `desiredState` is
-`Stopped` is un-placed by the sweep, its volume's owner pin cleared, and a survivor with a Synced
-replica claims it on the next beat — this is the whole re-hosting path, no data lost, because a
-stopped worktree was already flushed and replica-gated when it stopped. A RUNNING one is left
-alone: its pin stays on the dead node and it gets condition `Degraded=True/NodeDead`, because its
-live edits since the last sync point exist only on that node's disk, and re-hosting it
-automatically would silently throw them away. The `/v1` stop endpoint reports that cost as a
-`warning` in its response body when it sees the condition, so stopping (and thereby moving) a
-workspace on a dead node is always something a person chose, never something the sweep did for
-them. If the node comes back before anyone stops it, its pin was never cleared, so nothing
-moves — the pod resumes with everything intact.
+1. any parent on it is Running → nothing moves. The volume goes `status.phase: Unavailable` with
+   `Available=False/NodeDead` and every parent gets `Degraded=True/NodeDead`, because that
+   worktree's edits since the last sync point exist only on that node's disk.
+2. otherwise, any stopped parent whose `Replicated` condition is not yet `True` → nothing moves
+   either, and the condition's message names which parents are holding it. Starting elsewhere
+   before its bytes are anywhere else would lose them.
+3. otherwise → the owner pin is cleared and every parent is un-placed, so the next start lands on
+   whichever node is up to date for that worktree.
+
+`kubectl get volumes` is the fast way to see which ones are affected, and the `Replicated`
+condition on a stopped parent is the fast way to see why one is stuck on arm 2.
+
+A running worktree on a dead node is INTERRUPTED, not moved: `/v1` refuses to start it with a 409
+("its node is down; it resumes when the node returns"), and the way forward is either waiting for
+the node or cloning it — a workspace clone grafts onto the newest sync point some live node holds
+and says so in the response's `based_on` (snapshot, time, age, `interrupted: true`), so choosing to
+lose the last few seconds is always a person's choice. An interrupted ENVIRONMENT cannot be cloned
+at all (409): an environment clone copies bytes from the source's own live subvolume, and there is
+no live node holding it. Stopping an interrupted parent is always accepted — it is a spec write —
+and its own controller performs the stop when the node returns. If the node comes back before
+anyone stops it, its pin was never cleared, so nothing moves: the pod resumes with everything
+intact.
 
 Caveat: this all keys off "NotReady in the API server for `WS_NODE_DEAD_SECS`", which is not the
 same fact as "the node's pods stopped running". A node that is merely network-partitioned from
@@ -615,6 +628,37 @@ free rewrite — a wrong write is repairable, never silently doubled. On reconne
 sees its object is no longer its own and tears the pod down; whatever was typed during the
 partition and never replicated is gone. There is no lease a pod must renew to prevent this — that
 would be a second liveness system on top of the Node object's own.
+
+### Decommissioning a node
+
+The planned version of node death. It never stops anyone's work; the node drains at the people's
+pace, and an operator in a hurry stops those workspaces through `/v1` like anyone else.
+
+1. `kubectl label node <n> rustic-git.io/decommission=true`. From that moment every other agent
+   treats it as unplaceable — it wins no rendezvous slot, counts as no copy, and refuses claims —
+   while it keeps serving pulls and keeps running everything already on it. Running parents get
+   `Decommissioning=True/NodeLeaving` ("this node is being retired; stop when convenient and the
+   next start lands elsewhere") so the person is told, and nothing is marked `Unavailable`: the
+   node is alive and the work on it is healthy.
+2. Watch the one annotation: `kubectl describe node <n> | grep decommission-status`, or
+   `kubectl get node <n> -o jsonpath='{.metadata.annotations.rustic-git\.io/decommission-status}'`.
+   It reads `draining running=N owned=N copies=N` and is rewritten every `WS_DECOMMISSION_SECS`
+   (default 30). `running` is people's workspaces — it only falls when they stop them. `owned`
+   falls as each volume becomes releasable (everything on it stopped AND replicated); `copies`
+   falls as its replicas re-home and its own retire pass drops them.
+3. When all three reach zero the annotation becomes `drained <RFC 3339>`, and it is sticky: it
+   records when the node drained, not when we last looked.
+4. Only then delete the VM, and remove that node's flannel `/32` from the `ipBlock` list in
+   `deploy/k3s/system-netpol.yaml` (read one off a node with `ip -4 addr show flannel.1`; the list
+   is hand-maintained, see the comment on that file's `ipBlock`).
+
+Deleting the VM before `drained` is the dead-node path: copies still heal, but any volume not yet
+released waits for a node that will never return. That is the whole reason `drained` is a gate and
+not just a progress line.
+
+To abort, remove the label: the beat stops immediately, parents already stopped stay stopped (start
+them — they run here again if the volume was not released, elsewhere if it was), copies already
+re-homed stay re-homed, and the node becomes a rendezvous candidate again.
 
 ### ZeroFS failover (manual, by design)
 
