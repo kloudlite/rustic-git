@@ -104,3 +104,56 @@ cargo test                                → exit 0 (71 result lines, all ok, 0
   Intended, and the floor is the only thing bounding it.
 - F4: the owner is skipped when it is not in `live`, so the dead-owner dial cost is gone — but a
   live owner that is merely unreachable still costs one failed dial per commit per pass.
+
+---
+
+# Round 2
+
+Review verdict on the above: F2 and F4 stand; three fixes. All three below, one commit each.
+
+## The self-dead guard was only half applied (`f8fa85a2`)
+
+`pull_beat_with` bailing was not enough. The parent and volume reconcilers still ran every 15 s on
+a partitioned agent — kubelet down, API server still reachable — and every pass wrote status: the
+stopped arms cleared the sweep's `Degraded=True/NodeDead` (the fix from F5, working exactly as
+written, on a node that had no business writing at all) and `apply_volume`'s `Unavailable` re-run
+rewrote the volume's conditions. The mark another node had just written was therefore absent ~95%
+of the time, and `/v1` accepted `start` on a node the cluster reads as dead.
+
+`controller::i_am_dead` (`bins/agent/src/controller/mod.rs`) — one `get_opt` on our own Node per
+reconcile, `node_is_dead` against the same `WS_NODE_DEAD_SECS` floor — is now the first thing
+`apply_workspace`, `apply_environment` and `apply_volume` do, above every write and above
+`cleared_node_dead`, returning `requeue(TICK)`. Keep-biased on a failed read: a Node we cannot
+fetch is not evidence of death, and pausing on a hiccup would stall every workspace on the node.
+`node_is_dead`, never `unplaceable` — a decommissioning node is alive and must keep converging.
+
+Test: `a_parent_whose_own_node_is_dead_is_not_reconciled_at_all` — the recorder shows the single
+Node read and nothing else. Two existing tests asserted exact call sequences and now account for
+that read (`a_wrong_owner_label_is_re_stamped_from_spec`,
+`a_second_reconcile_of_a_settled_workspace_writes_nothing`).
+
+No RBAC change: `nodes` already carries `get,list,patch` in `deploy/k3s/agent-rbac.yaml`.
+
+## `RetrySoon` was unbounded and node-wide (`6f1e1b21`)
+
+The missed flag is per-PASS, so one permanently unfetchable Snapshot — the only source gone for
+good — kept every node placed on that volume beating every 30 s forever, paying the whole listing
+cost each time. `Next::RetrySoon` now carries its delay: `RETRY_SOON` doubled per CONSECUTIVE
+missed pass, capped at `replica_interval`, so the worst case is exactly today's steady state. Any
+clean pass resets the streak to zero, and the pending wake still wins.
+
+Test: `consecutive_misses_back_off_to_the_ordinary_tick_and_one_clean_pass_resets` asserts the
+30/60/120/240/300/300 sequence and the reset.
+
+## The sweep's retry bound, explained (`1e4beb23`)
+
+Comment only. Three attempts is enough only because the reconcilers no longer write back: against
+an owner rewriting the same status every 15 s no bound would have been enough; against one-shot
+writers, three is plenty. Said so where the loop is.
+
+## Gates (round 2)
+
+```
+cargo clippy --workspace -- -D warnings   → exit 0
+cargo test                                → exit 0 (71 result lines, all ok, 0 failed)
+```
