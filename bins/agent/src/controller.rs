@@ -1903,15 +1903,16 @@ async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Res
 /// there at agent startup), so materializing an owner's home is plain `mkdir` + `chown` — no
 /// subvolume, no snapshot, nothing btrfs-specific. Idempotent; safe on every reconcile.
 ///
-/// Re-verifies the export is still mounted first (`check_homes_mounted`) — mkdir under a vanished
-/// mount point would build the person an empty home on the node's rootfs and report it Ready.
-fn ensure_shared_home(pool: &str, owner: &str, uid: u32) -> Result<(), String> {
+/// Re-verifies the export first and REPAIRS it (`mount_homes`: mounted and answering is a no-op;
+/// stale or missing is detach-and-remount) — mkdir under a vanished mount point would build the
+/// person an empty home on the node's rootfs and report it Ready, and mkdir under a stale one
+/// (the export moved nodes) fails EIO on every reconcile forever without this.
+fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32) -> Result<(), String> {
     // Root-gated for the same reason the chown below is: in production the agent is privileged and
     // `/proc/mounts` tells the truth, while a dev/test pool is an ordinary directory nobody ever
     // mounted — checking there would refuse every reconcile.
     if unsafe { libc::geteuid() } == 0 {
-        let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
-        crate::check_homes_mounted(&mounts, pool)?;
+        crate::mount_homes(pool, export)?;
     }
     let dir = crate::homes_root(pool).join(owner);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -1991,7 +1992,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // materialize. The cache subvolume is local and disposable. Both idempotent, so every reconcile
     // may call them. No WS_HOMES_EXPORT on this node: park, fail closed — a pod started anyway
     // would hostPath an empty local dir and the person's dotfiles would silently not be theirs.
-    if ctx.homes_export.is_none() {
+    let Some(export) = ctx.homes_export.as_deref() else {
         let st = crd::WorkspaceStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,
@@ -2001,8 +2002,8 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         };
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
-    }
-    ensure_shared_home(&ctx.pool, &w.spec.owner, k8s::SSH_UID as u32).map_err(ReconcileErr)?;
+    };
+    ensure_shared_home(&ctx.pool, export, &w.spec.owner, k8s::SSH_UID as u32).map_err(ReconcileErr)?;
     let (engine, owner) = (ctx.engine.clone(), w.spec.owner.clone());
     tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32))
         .await

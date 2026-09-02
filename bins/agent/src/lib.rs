@@ -56,23 +56,6 @@ fn already_mounted(mounts: &str, target: &str) -> bool {
 
 /// Refuses a `{pool}/homes` that is not a mount point, given `/proc/mounts`'s contents.
 ///
-/// `mount_homes` runs ONCE, at agent boot, and everything after it assumes the export is still
-/// there — silently wrong after an operator `umount`, an ESTALE from a re-created ZeroFS, or a
-/// mount that never established. `create_dir_all` under a missing mount point then manufactures a
-/// directory on the node's rootfs and the pod gets an EMPTY home, reported Ready; the hostPath
-/// `type: Directory` guard cannot catch it, because the agent made the directory first. So every
-/// materialize re-checks.
-pub(crate) fn check_homes_mounted(mounts: &str, pool: &str) -> Result<(), String> {
-    let target = homes_root(pool);
-    let Some(target) = target.to_str() else {
-        return Err(format!("{} is not valid UTF-8", target.display()));
-    };
-    if already_mounted(mounts, target) {
-        return Ok(());
-    }
-    Err(format!("the shared-home NFS export is not mounted at {target}; refusing to serve a home off the node's rootfs"))
-}
-
 /// Whether an existing mount at `target` still ANSWERS. A mount can be listed in `/proc/mounts`
 /// and be a corpse: the NFS transport lives in the network namespace of whoever called `mount(2)`,
 /// so when the agent pod that made it is deleted, the namespace dies and the mount survives as an
@@ -85,8 +68,12 @@ pub(crate) fn check_homes_mounted(mounts: &str, pool: &str) -> Result<(), String
 /// the default, `timeout` would send TERM and then wait forever for a child that never dies —
 /// hanging on the very corpse this probe exists to detect.
 fn mount_answers(target: &str) -> bool {
+    // A READDIR, not `stat -f`: statfs is answered off the mount's superblock and kept succeeding
+    // on a mount whose every real operation returned EIO after the NFS server moved to another
+    // node (new ZeroFS process, new file handles). Listing the root walks a handle the server
+    // must actually recognise.
     std::process::Command::new("timeout")
-        .args(["-s", "KILL", "5", "stat", "-f", target])
+        .args(["-s", "KILL", "5", "ls", target])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -117,7 +104,12 @@ fn resolve_export(export: &str) -> Result<String, String> {
     })
 }
 
-fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
+/// Idempotent and re-entrant from the reconcile path, not only from boot: a ZeroFS pod that moves
+/// nodes leaves every client's mount stale, and the fix (detach, remount) is the same one boot
+/// runs. Serialised so two reconciles cannot race an unmount against a mount.
+pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
+    static REPAIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = REPAIR.lock().unwrap_or_else(|e| e.into_inner());
     let target = homes_root(pool);
     let Some(target_str) = target.to_str() else {
         return Err(format!("{} is not valid UTF-8", target.display()));
@@ -270,17 +262,7 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{already_mounted, check_homes_mounted, resolve_export};
-
-    /// The mount-liveness hole: with the export gone, `ensure_shared_home` would otherwise mkdir
-    /// on the node's rootfs and hand the pod a silently empty home.
-    #[test]
-    fn a_homes_root_that_is_not_a_mount_point_is_refused() {
-        let mounts = "zerofs:/ /wspool-prod/homes nfs rw 0 0\n";
-        assert!(check_homes_mounted(mounts, "/wspool-prod").is_ok());
-        let err = check_homes_mounted("/dev/sda1 / ext4 rw 0 0\n", "/wspool-prod").unwrap_err();
-        assert!(err.contains("not mounted"), "{err}");
-    }
+    use super::{already_mounted, resolve_export};
 
     /// Literal addresses only — `to_socket_addrs` on a literal never touches DNS, so this pins the
     /// parsing (last-colon split, v6 brackets) without a resolver in the test.
