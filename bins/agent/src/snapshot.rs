@@ -775,26 +775,17 @@ mod commit_tests {
     #[tokio::test]
     async fn a_new_ready_transient_deletes_the_previous_one_for_its_worktree_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let old = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "sync-ws-1-a", "uid": "a-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
-            "status": {"phase": "ready"},
-        });
-        let new = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "sync-ws-1-b", "uid": "b-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "pinned": false, "transient": true},
-            "status": {"phase": "ready"},
-        });
-        let other = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "sync-ws-2-c", "uid": "c-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-2", "parent": "", "pinned": false, "transient": true},
-            "status": {"phase": "ready"},
-        });
+        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Ready);
+        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", false, true, crd::Phase::Ready);
+        let other = snapshot("sync-ws-2-c", "vol-1", "ws-2", "", false, true, crd::Phase::Ready);
+        // A commit is not a sync point — the transient arm must spare it too.
+        let commit = snapshot("vol-1-commit", "vol-1", "ws-1", "", false, false, crd::Phase::Ready);
+        let items: Vec<serde_json::Value> = [&old, &new, &other, &commit]
+            .into_iter()
+            .map(|s| serde_json::to_value(s.as_ref()).unwrap())
+            .collect();
         let routes = vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![old, new, other]) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) },
             Route {
                 method: "DELETE",
                 path: format!("{SNAPSHOTS_LIST}/sync-ws-1-a"),
@@ -807,7 +798,7 @@ mod commit_tests {
         retain(&ctx, "vol-1", "sync-ws-1-b").await;
 
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "only the same worktree's older transient is deleted: {deletes:?}");
+        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "only the same worktree's older transient is deleted, sparing the commit and the other worktree: {deletes:?}");
     }
 
     /// The previous transient is the btrfs send parent of a still-`Working` new one — deleting it
@@ -970,42 +961,6 @@ mod commit_tests {
             "a different owner's head on a shared volume must still be spared: {:?}",
             rec.calls()
         );
-    }
-
-    fn snap(name: &str, volume: &str, worktree: &str, transient: bool, parent: &str) -> serde_json::Value {
-        serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": name, "uid": format!("{name}-uid")},
-            "spec": {"volume": volume, "owner": "alice", "worktree": worktree,
-                     "parent": parent, "pinned": false, "transient": transient},
-            "status": {"phase": "ready"},
-        })
-    }
-
-    /// One Ready transient per worktree, and NOTHING else: a commit is not a sync point, and
-    /// another worktree's sync point belongs to that worktree. The arm ignores `heads` and
-    /// `pinned` deliberately (see its ponytail note), so this scoping is its whole safety argument.
-    #[tokio::test]
-    async fn the_transient_arm_spares_commits_and_other_worktrees() {
-        let tmp = tempfile::tempdir().unwrap();
-        let items = vec![
-            snap("v1-newsync", "v1", "ws-1", true, "v1-oldsync"),
-            snap("v1-oldsync", "v1", "ws-1", true, ""),
-            snap("v1-commit", "v1", "ws-1", false, ""),
-            snap("v1-otherws", "v1", "ws-2", true, ""),
-        ];
-        let routes = vec![Route {
-            method: "GET",
-            path: "/apis/rustic-git.io/v1alpha1/snapshots".into(),
-            status: 200,
-            body: list_of("Snapshot", items),
-        }];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-
-        retain(&ctx, "v1", "v1-newsync").await;
-
-        let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(deleted, vec!["DELETE /apis/rustic-git.io/v1alpha1/snapshots/v1-oldsync".to_string()], "{deleted:?}");
     }
 
     /// Keep-bias: a snapshot list this pass could not make deletes nothing at all.

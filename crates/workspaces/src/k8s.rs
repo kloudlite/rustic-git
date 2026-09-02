@@ -2377,6 +2377,10 @@ mod tests {
             // namespaceSelector would pass the count above while opening the whole namespace.
             if name != "attach_egress" {
                 assert!(peers[0].get("podSelector").is_some(), "{name}: no podSelector");
+            } else {
+                // Its peer has no podSelector (it targets a whole namespace), so the scoping to
+                // this one workspace pod is the policy's own top-level podSelector instead.
+                assert_eq!(spec["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
             }
             assert!(peers[0].get("namespaceSelector").is_some(), "{name}: no namespaceSelector");
         }

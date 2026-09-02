@@ -539,49 +539,12 @@ mod janitor_tests {
     fn stale_worktrees_go_only_when_this_node_is_not_the_owner() {
         let (engine, _tmp) = fake_engine();
         std::fs::create_dir_all(engine.pool.live("v1").join("ws-1")).unwrap();
+        // A file beside the worktrees is not a worktree and must survive.
+        std::fs::write(engine.pool.live("v1").join("notes.txt"), b"x").unwrap();
         assert_eq!(drop_stale_worktrees(&engine, "v1", "node-b", "node-b"), 0, "owner keeps its worktrees");
         assert_eq!(drop_stale_worktrees(&engine, "v1", "", "node-b"), 0, "unowned: the takeover has not settled, keep");
         assert_eq!(drop_stale_worktrees(&engine, "v1", "node-a", "node-b"), 1);
-    }
-
-    fn plant_worktree(pool: &std::path::Path, volume: &str, ws: &str) -> std::path::PathBuf {
-        let p = pool.join("vol").join(volume).join("live").join(ws);
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
-    /// An EMPTY owner is the window between release and takeover: the returning node may be about
-    /// to take the volume back (`replicas: 1`), and its worktree is the only copy of that work.
-    #[test]
-    fn an_unowned_volume_keeps_every_worktree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let engine = Engine::new(Pool::new(tmp.path()));
-        let wt = plant_worktree(tmp.path(), "v1", "ws-1");
-        assert_eq!(drop_stale_worktrees(&engine, "v1", "", "node-a"), 0);
-        assert!(wt.exists(), "an unowned volume's worktree is not stale");
-    }
-
-    /// I am the owner: these worktrees are mine and running.
-    #[test]
-    fn my_own_volume_keeps_every_worktree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let engine = Engine::new(Pool::new(tmp.path()));
-        let wt = plant_worktree(tmp.path(), "v1", "ws-1");
-        assert_eq!(drop_stale_worktrees(&engine, "v1", "node-a", "node-a"), 0);
-        assert!(wt.exists(), "the owner never drops its own worktrees");
-    }
-
-    /// Owned elsewhere: what a takeover left behind, and the only case that deletes.
-    #[test]
-    fn a_volume_owned_elsewhere_drops_the_worktrees_left_behind() {
-        let tmp = tempfile::tempdir().unwrap();
-        let engine = Engine::new(Pool::new(tmp.path()));
-        let wt = plant_worktree(tmp.path(), "v1", "ws-1");
-        // A file beside the worktrees is not a worktree and must survive.
-        std::fs::write(tmp.path().join("vol/v1/live/notes.txt"), b"x").unwrap();
-        assert_eq!(drop_stale_worktrees(&engine, "v1", "node-b", "node-a"), 1);
-        assert!(!wt.exists(), "the stale worktree goes");
-        assert!(tmp.path().join("vol/v1/live/notes.txt").exists(), "a plain file is not a subvolume");
+        assert!(engine.pool.live("v1").join("notes.txt").exists(), "a plain file is not a subvolume");
     }
 }
 
