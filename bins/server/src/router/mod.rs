@@ -27,6 +27,9 @@ pub fn router(app: Arc<App>) -> Router {
 /// handlers. `/healthz` and the `/own/*` protocol are inside the secret check on purpose: a claim
 /// without the secret must fail loudly (403), not silently succeed and hide a misconfiguration.
 /// The `route` middleware ignores non-git paths, so `/own/*` passes straight through it.
+/// `/metrics` is NOT here: it is a listener of its own (`RUSTIC_GIT_METRICS_ADDR`), because a
+/// scrape route inside the secret check cannot be scraped, and one outside it is an enumeration
+/// oracle for any pod on a cluster running `networkPolicy: none`.
 pub fn peer_router(app: Arc<App>) -> Router {
     git_routes()
         .merge(crate::browse_api::browse_routes())
@@ -37,8 +40,6 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .route("/own/renew", post(own_renew))
         .route("/own/owner", post(own_owner))
         .route("/own/release", post(own_release))
-        // Scraped without the secret (see `trust_peer`); never mounted on the public router.
-        .merge(rustic_git_core::metrics::routes())
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
         .layer(axum::middleware::from_fn_with_state("peer", rustic_git_core::metrics::http_metrics))

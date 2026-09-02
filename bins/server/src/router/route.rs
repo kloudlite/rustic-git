@@ -604,12 +604,6 @@ pub(crate) async fn trust_peer(
         .get(crate::proxy::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    // Prometheus cannot present the secret. `/metrics` reads a process-local snapshot and
-    // touches no database, so the routing invariant is not in play — and `route_inner` below
-    // serves it locally in any case (`repo_of` is `None` for it).
-    if req.uri().path() == "/metrics" {
-        return next.run(req).await;
-    }
     if !crate::proxy::secret_eq(presented, &app.forwarder.secret) {
         return (StatusCode::FORBIDDEN, "peer secret").into_response();
     }

@@ -236,6 +236,9 @@ async fn serve() -> Result<()> {
 async fn main() -> Result<()> {
     rustic_git_core::log::init();
     rustic_git_core::metrics::init();
+    // Its own listener, like every other binary's: the peer port is secret-gated, and metrics
+    // text names every repository key this node has touched.
+    rustic_git_core::metrics::serve_if_configured().await;
     // See config::install_crypto_provider — it must happen before any TLS, and
     // `admin` subcommands reach object storage without going through open_store.
     rustic_git_server::config::install_crypto_provider();
