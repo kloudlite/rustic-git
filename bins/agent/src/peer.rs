@@ -558,13 +558,17 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     // landed here would otherwise advertise data this node cannot serve, and placement would then
     // start a worktree on a node with no bytes for it. `have` is the disk, after the pull loop and
     // after the retire sweep above, so this is the honest answer for this pass.
-    let held: Vec<crd::Snapshot> = ready.iter().filter(|s| have.contains(&s.name_any())).cloned().collect();
-    let mut branches: std::collections::BTreeMap<String, String> = Default::default();
-    for worktree in held.iter().map(|s| s.spec.worktree.clone()).collect::<HashSet<_>>() {
-        if let Some(newest) = newest_transient_of(&held, &worktree) {
-            branches.insert(worktree, newest);
+    // `ready` is already the Ready subset, so the same (generation, name) key as
+    // `newest_transient_of` is all that is left to apply — one pass, max per worktree.
+    let mut best: std::collections::BTreeMap<String, (u64, String)> = Default::default();
+    for s in ready.iter().filter(|s| s.spec.transient && have.contains(&s.name_any())) {
+        let key = (transient_generation(s), s.name_any());
+        let slot = best.entry(s.spec.worktree.clone()).or_insert_with(|| key.clone());
+        if key > *slot {
+            *slot = key;
         }
     }
+    let branches: std::collections::BTreeMap<String, String> = best.into_iter().map(|(w, (_, n))| (w, n)).collect();
     if let Err(e) = write_replica_status(ctx, volume, !missing_at_end, &listed_at, branches).await {
         tracing::warn!(%volume, error = %e, "pull: writing VolumeReplica status");
     }
@@ -630,6 +634,12 @@ async fn pull_one(
     Ok(())
 }
 
+/// The btrfs generation the sync beat replicated, as the ordering key. A stop cut carries no
+/// annotation (it is stamped post-cut on the owner only), so it reads as 0.
+fn transient_generation(s: &crd::Snapshot) -> u64 {
+    s.annotations().get(crate::sync::SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok()).unwrap_or(0)
+}
+
 /// The newest Ready transient of `worktree` among `snaps` — ordered by the sync beat's
 /// `SYNCED_GENERATION` annotation, never by creation time, because the annotation is the btrfs
 /// generation actually replicated and it is the one ordering that survives clock skew between the
@@ -644,11 +654,7 @@ pub(crate) fn newest_transient_of(snaps: &[crd::Snapshot], worktree: &str) -> Op
                 && s.spec.worktree == worktree
                 && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)
         })
-        .map(|s| {
-            let generation =
-                s.annotations().get(crate::sync::SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok()).unwrap_or(0);
-            (generation, s.name_any())
-        })
+        .map(|s| (transient_generation(s), s.name_any()))
         .max()
         .map(|(_, name)| name)
 }
@@ -668,7 +674,11 @@ pub(crate) fn up_to_date(replica: &crd::VolumeReplica, worktree: &str, newest_tr
     }
 }
 
-/// `newest_transient_of` for a caller with no beat listing of its own — one field-selected list.
+/// The newest Ready transient of `worktree` ANYWHERE IN THE CLUSTER — one field-selected list, for
+/// a caller with no beat listing of its own. It deliberately ignores what this node holds: it is
+/// the bar `up_to_date` compares a replica's `branches` against, so intersecting it with local
+/// state would let a node behind on its pulls declare itself current. `snapshot::latest_transient`
+/// is the local-hold variant, for a caller asking what it can actually check out right now.
 // Tasks 4, 5, 6 and 10 are the callers; until they land only the tests read these.
 #[allow(dead_code)]
 pub(crate) async fn newest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<String>, kube::Error> {
@@ -2269,6 +2279,45 @@ fi
         assert!(up_to_date(&synced, "ws-1", None));
         assert!(!up_to_date(&syncing, "ws-1", None));
         assert!(!up_to_date(&syncing, "ws-1", Some("sync-ws-1-bbbb")), "mid-pull is never up to date");
+    }
+
+    /// The other half: of the transients this node DOES hold for a worktree, exactly one — the
+    /// highest generation — is reported. An older held sync point is still on disk and still
+    /// servable, but naming it would make this node look behind to `up_to_date`.
+    #[tokio::test]
+    async fn a_pull_pass_reports_only_the_newest_held_transient_per_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let created = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": "vol-1.node-b", "uid": "r-uid"},
+            "spec": {"volume": "vol-1", "node": "node-b"},
+            "status": {"phase": "Syncing", "branches": {}},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![
+                transient_gen("sync-ws-1-old", "vol-1", "ws-1", 2),
+                transient_gen("sync-ws-1-aaaa", "vol-1", "ws-1", 5),
+                transient_gen("sync-ws-1-unheld", "vol-1", "ws-1", 9),
+                transient_gen("sync-ws-2-cccc", "vol-1", "ws-2", 1),
+            ])},
+            Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![]) },
+            Route { method: "GET", path: format!("{VOLREPLICAS}/vol-1.node-b"), status: 200, body: created.clone() },
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: created },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        // `local_commits` is a plain listing of `snap/{volume}` — a directory per held subvolume.
+        for held in ["sync-ws-1-old", "sync-ws-1-aaaa", "sync-ws-2-cccc"] {
+            std::fs::create_dir_all(ctx.engine.pool.snap_dir("vol-1").join(held)).unwrap();
+        }
+
+        let http = peer_http_client().unwrap();
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1").await;
+
+        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
+        let branches = &sent[0]["status"]["branches"];
+        assert_eq!(branches["ws-1"], "sync-ws-1-aaaa", "the newest HELD one, not the newest listed: {branches:?}");
+        assert_eq!(branches["ws-2"], "sync-ws-2-cccc");
+        assert_eq!(branches.as_object().unwrap().len(), 2, "one entry per worktree: {branches:?}");
     }
 
     /// The pull pass writes what it HOLDS, not what it listed: a transient whose subvolume never

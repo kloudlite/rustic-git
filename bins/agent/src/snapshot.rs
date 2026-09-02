@@ -166,18 +166,10 @@ pub(crate) async fn latest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &st
     let list = Api::<crd::Snapshot>::all(ctx.client.clone())
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
         .await?;
-    let mut best: Option<(u64, String)> = None;
-    for s in list.items {
-        let ready = s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
-        if !s.spec.transient || s.spec.worktree != worktree || !ready || !local.contains(&s.name_any()) {
-            continue;
-        }
-        let gen = s.annotations().get(crate::sync::SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok()).unwrap_or(0);
-        if best.as_ref().is_none_or(|(b, _)| gen >= *b) {
-            best = Some((gen, s.name_any()));
-        }
-    }
-    Ok(best.map(|(_, name)| name))
+    // The ordering key lives in ONE place (`newest_transient_of`) so this and the replica row a
+    // peer reads can never disagree about which name is newest — including the tie-break.
+    let held: Vec<crd::Snapshot> = list.items.into_iter().filter(|s| local.contains(&s.name_any())).collect();
+    Ok(crate::peer::newest_transient_of(&held, worktree))
 }
 
 /// `status.head = name` on the worktree's own Workspace/Environment — a guarded status write,
