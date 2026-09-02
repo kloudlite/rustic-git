@@ -122,10 +122,11 @@ spec:
               # No CPU limit on purpose — a throttled NFS server stalls every home in the region
               # rather than shedding load. The MEMORY limit is the point: this pod is pinned to the
               # control plane, so an unbounded working set pushes the node into pressure and takes
-              # the API server with it. Measured peak on 2026-09-02 was 83Mi (idle cluster, no
-              # working-hour load available in this environment); 2x that rounds up to 1Gi, which
-              # already equals the request above — revisit once there's real home traffic to sample.
-              memory: 1Gi
+              # the API server with it. zerofs.toml pins memory_size_gb = 1.0 (the process's own
+              # in-memory cache), so a 1Gi limit OOM-kills it as that cache warms — the limit has to
+              # cover the cache PLUS the process's own RSS. 1 GiB cache + ~1 GiB headroom for
+              # SlateDB buffers and NFS I/O = 2Gi.
+              memory: 2Gi
           ports:
             - name: nfs
               containerPort: 2049
@@ -138,20 +139,10 @@ spec:
               port: 2049
             initialDelaySeconds: 5
             periodSeconds: 10
-          # Two probes, two questions. Readiness is "is the socket open" — that is exactly what an
-          # agent's `mount` needs and no more. Liveness must ask something a wedged-but-listening
-          # process cannot answer, so it does a real NULL RPC: a TCP accept alone would keep a
-          # deadlocked SlateDB replay in service forever.
-          # Neither rpcinfo nor nc is in this image (checked via `kubectl exec ... -- which`), so
-          # this falls back to bash's /dev/tcp — which is only a TCP connect, no better than the
-          # readiness probe above. Swap for a real NULL RPC (rpcinfo -T tcp 127.0.0.1 100003 3) the
-          # day the image carries rpcinfo.
-          livenessProbe:
-            exec:
-              command: ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/2049 && exec 3<&-"]
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            failureThreshold: 3
+          # ponytail: no liveness probe — neither rpcinfo nor nc is in this image, and a bare TCP
+          # connect only duplicates the readiness probe above while adding a way to restart the
+          # single pod every home in the region depends on. Add one (a real NULL RPC, e.g.
+          # `rpcinfo -T tcp 127.0.0.1 100003 3`) the day the image carries rpcinfo.
           volumeMounts:
             - name: config
               mountPath: /etc/zerofs

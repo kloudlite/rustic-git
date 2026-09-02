@@ -281,15 +281,17 @@ spec:
             privileged: true
           # The container that runs builds shares the node with tenant pods, and the agent beside it
           # already carries a request. Unbounded, a profile build starves the workspaces on the node
-          # it is building for. Measured peak on 2026-09-02 was 9Mi (idle — no build was running in
-          # this environment); 2x that rounds up to 1Gi, same as the request — revisit once a real
-          # nixpkgs evaluation can be sampled.
+          # it is building for. The 9Mi we measured on 2026-09-02 was the idle daemon with nothing
+          # building; the number that matters is the evaluator's, not the daemon's — a nixpkgs
+          # evaluation runs 1.5-3 GiB and nix-conf allows max-jobs = 2, so the limit has to cover
+          # two concurrent evaluations. No CPU limit — a throttled build just runs slower, it
+          # doesn't need to be killed.
           resources:
             requests:
               cpu: 500m
               memory: 1Gi
             limits:
-              memory: 1Gi
+              memory: 4Gi
           volumeMounts:
             - name: nix
               mountPath: /nix

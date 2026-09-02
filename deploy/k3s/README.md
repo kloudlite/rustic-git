@@ -555,18 +555,26 @@ would be a second liveness system on top of the Node object's own.
 ZeroFS runs `replicas: 1` with `strategy: Recreate` because it has one SlateDB behind it and
 SlateDB has one writer — a rolling update that let a second pod start before the first stopped
 would be exactly the fenced-handle bug the ownership map exists to prevent elsewhere. It is also
-pinned to the control-plane node by `nodeSelector`/toleration. Put together: if that node is
-lost, every home in the region is unavailable until it comes back — there is no automatic
-failover for this pod.
+pinned to the `k3s-cp` control-plane node by `nodeSelector`/toleration. Put together: if that
+node is lost, every home in the region is unavailable until it comes back — there is no
+automatic failover for this pod.
 
 Recovery is one of:
 
-- Bring the control-plane node back. The pod reschedules there and homes resume.
-- Move ZeroFS to another node: edit its `nodeSelector`/toleration in `zerofs.yaml`, apply, and
-  **first confirm the old pod is gone** — `kubectl -n rustic-git-system get pod -l app=zerofs`
-  must return empty before the new pod is allowed to start. Two ZeroFS pods open against the
-  same SlateDB prefix is exactly the fencing this repo's one-writer rule forbids; a node that is
-  merely unreachable (not actually dead) can still be holding that database open.
+- Bring `k3s-cp` back. The pod reschedules there and homes resume.
+- Move ZeroFS to another node: edit its `nodeSelector`/toleration in `zerofs.yaml` and apply —
+  the moved pod still needs the `zerofs-store` Secret to exist in `rustic-git-system` on the new
+  node's namespace scope (it already does; Secrets aren't node-scoped, this is just a reminder
+  the pod won't come up without it). **Before applying, confirm the old pod is actually gone** —
+  `kubectl -n rustic-git-system get pod -l app=zerofs` must return empty. If it's stuck
+  `Terminating` instead, first confirm the node is genuinely down —
+  `kubectl get node k3s-cp` — and only if it shows `NotReady`/unreachable, force-delete the
+  stuck pod: `kubectl -n rustic-git-system delete pod -l app=zerofs --force --grace-period=0`.
+  That force-delete is the fencing decision: it tells Kubernetes to forget a pod it can no
+  longer confirm is dead, so it must never be done to a node that is merely unreachable from
+  here but still running — that node's kubelet could still have the old pod's SlateDB handle
+  open, and starting a second pod against the same prefix is exactly the fencing this repo's
+  one-writer rule forbids.
 
 Either way, once the (new) ZeroFS pod is `Ready`, restart the agents so their NFS mounts
 re-resolve to it: `kubectl -n kube-system rollout restart ds/rustic-git-agent`. Skipping this
