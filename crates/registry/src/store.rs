@@ -176,15 +176,14 @@ pub async fn hold_blob(store: &Store, owner: &str, name: &str, d: &Digest) -> Re
     Ok(())
 }
 
-/// Drop the rows manifest `m` contributed. A scan of the whole prefix rather than a re-parse of
-/// the manifest being deleted: this is the rare path, and it must work even when the manifest
-/// bytes are already gone. Rows written `via` another manifest, or by an upload, stay.
-pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
-    let suffix = format!("/{m}");
-    let mut it = db.scan_prefix(BLOB_PREFIX, ..).await?;
+/// Delete every row under `prefix` whose key ends `suffix`. A scan rather than a re-parse of the
+/// thing being deleted: these are the rare paths, and they must work even when the bytes they
+/// would re-parse are already gone.
+pub async fn delete_suffixed(db: &Db, prefix: &str, suffix: &str) -> Result<()> {
+    let mut it = db.scan_prefix(prefix.to_string(), ..).await?;
     let mut doomed = vec![];
     while let Some(kv) = it.next().await? {
-        if String::from_utf8_lossy(&kv.key).ends_with(&suffix) {
+        if String::from_utf8_lossy(&kv.key).ends_with(suffix) {
             doomed.push(kv.key.to_vec());
         }
     }
@@ -192,6 +191,12 @@ pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
         db.delete(k).await?;
     }
     Ok(())
+}
+
+/// Drop the rows manifest `m` contributed. Rows written `via` another manifest, or by an upload,
+/// stay — which is why this matches on the `via` suffix rather than on the digest.
+pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
+    delete_suffixed(db, BLOB_PREFIX, &format!("/{m}")).await
 }
 
 async fn has_blob_row(db: &Db, d: &Digest) -> Result<bool> {

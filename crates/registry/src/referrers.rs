@@ -59,18 +59,7 @@ pub fn index(batch: &mut slatedb::WriteBatch, d: &Digest, bytes: &[u8]) -> Optio
 /// one.
 pub async fn unindex(app: &App, owner: &str, name: &str, d: &Digest) -> crate::Result<()> {
     let db = app.store.image_db(owner, name).await?;
-    let mut it = db.scan_prefix(PREFIX, ..).await?;
-    let suffix = format!("/{d}");
-    let mut doomed = vec![];
-    while let Some(kv) = it.next().await? {
-        if String::from_utf8_lossy(&kv.key).ends_with(&suffix) {
-            doomed.push(kv.key.to_vec());
-        }
-    }
-    for k in doomed {
-        db.delete(k).await?;
-    }
-    Ok(())
+    crate::store::delete_suffixed(&db, PREFIX, &format!("/{d}")).await
 }
 
 /// `GET /referrers/{digest}` — an image index of everything pointing at that digest. Empty is a

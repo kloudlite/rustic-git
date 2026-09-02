@@ -876,3 +876,49 @@ async fn an_index_naming_many_children_is_probed_without_fanning_out_unbounded()
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
 }
+
+/// The two row families a manifest delete has to drop — its blob holds and its referrer entry —
+/// are the same scan-prefix / suffix-match / delete loop, and they must both actually run.
+#[tokio::test]
+async fn deleting_a_manifest_drops_both_its_blob_rows_and_its_referrer_rows() {
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    // A manifest with a `subject`, so a referrer row exists too.
+    let sub = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": Digest::of(b"{}").to_string(), "size": 2},
+        "layers": [],
+        "subject": {"mediaType": MEDIA, "digest": d.to_string(), "size": m.len()}
+    }).to_string().into_bytes();
+    let sd = Digest::of(&sub);
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{sd}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(sub).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let db = e.store.image_db("acme", "nginx").await.unwrap();
+    let rows = |db: std::sync::Arc<slatedb::Db>, prefix: &'static str, suffix: String| async move {
+        let mut it = db.scan_prefix(prefix, ..).await.unwrap();
+        let mut n = 0;
+        while let Some(kv) = it.next().await.unwrap() {
+            if String::from_utf8_lossy(&kv.key).ends_with(&suffix) {
+                n += 1;
+            }
+        }
+        n
+    };
+    assert!(rows(db.clone(), "image/blob/", format!("/{d}")).await > 0, "blob rows before");
+    assert!(rows(db.clone(), "image/referrer/", format!("/{sd}")).await > 0, "referrer row before");
+
+    for target in [&sd, &d] {
+        let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{target}"))
+            .basic_auth("acme", Some(&token)).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED);
+    }
+    assert_eq!(rows(db.clone(), "image/blob/", format!("/{d}")).await, 0, "blob rows after");
+    assert_eq!(rows(db, "image/referrer/", format!("/{sd}")).await, 0, "referrer row after");
+}
