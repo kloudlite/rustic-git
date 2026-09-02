@@ -8,8 +8,12 @@ Date: 2026-09-03. Status: draft for review by the owner of this repo.
   cut into a stop snapshot on the owner node.
 - **Interrupted**: the node died while the workspace or environment was running. Nobody asked.
   The live edits exist only on that node.
-- **Up to date** (a replica, for a worktree): the replica's `lastSyncAt` is at or after the
-  `readyAt` of that worktree's newest Ready transient. An older sync never counts.
+- **Up to date** (a replica, for a worktree): the replica HOLDS that worktree's newest Ready
+  transient, by name. Each pull pass records, per worktree, the newest transient it holds in the
+  replica row's `status.branches` (`worktree → snapshot name`; the field exists and is written
+  empty today). Names, not clocks: `lastSyncAt` is stamped by the pulling node and `readyAt` by
+  the owner, and a skewed clock must never make an old copy look current. A worktree with no
+  transient at all (never ran, or a fresh restore) falls back to plain `Synced`.
 - **Moving**: the right to START next time lands on another node. Nothing is ever moved while
   running, and nothing is copied from a live tree. Only flushed snapshots move.
 - **Parent**: a Workspace or an Environment. **Volume**: the btrfs subvolume under one or more
@@ -140,6 +144,29 @@ Abort semantics: removing the label stops the beat. Parents already stopped stay
 them; they run on this node again if the volume was not yet released, elsewhere if it was).
 Copies already re-homed stay; the node becomes a candidate again and rendezvous settles.
 
+## Cases checked
+
+Walked on 2026-09-03 against the rules above; each has an answer in this spec.
+
+| case | answer |
+|---|---|
+| Stop cut done, node dies before any replica pulled it | Pod is already gone, but no node is up to date → the volume waits for the node (`NodeDead / AwaitingReplica`). Nothing moves, nothing lost. |
+| Node dies between the stop request and the cut | Still running from the system's view → interrupted. Waits. |
+| Person stops an interrupted parent | Honoured when the node returns: the cut happens then, and only then can it move. There is no force option; see open point 3. |
+| Clone of a parent whose volume is released (owner `""`) or whose node is dead | Today the clone is pinned to the source volume's `nodeName` and can never start. Now: clone of an interrupted or decommission-pinned source is refused with 409; clone of a released volume claims like a start, on any up-to-date node for the source worktree. |
+| Restore-to-new from a commit | Unchanged: a `Synced` replica holds every Ready commit, so plain `Synced` is the right bar. |
+| `replicas: 1` | No standby can ever be up to date. `Replicated` stays `False / NoReplica` with a message naming it; cross-node start never offered; node death waits for the node. |
+| Two stopped parents on one volume, one replicated and one not | The volume waits (every parent must be covered). Each parent's condition names its own state so the operator sees which one is holding the volume. |
+| Retention deletes the sync transient before a replica pulled the stop one | The replica's newest held name is still the sync name ≠ the stop name → not up to date. Correct by construction of the name rule. |
+| Two up-to-date nodes race to take a released volume | The CAS picks one; the loser's mismatch self-heal branch un-places it. |
+| Start of a parent whose volume is still pinned to a decommissioning node (a sibling runs there) | The owner path applies: it starts on that node, because that is where the volume is. The node "takes no new work" only for volumes it does not own. |
+| Decommissioning node dies mid-drain | The dead-node path: copies keep healing, released volumes are fine, unreleased ones wait for a node that will not return. Documented as the reason `drained` gates deletion. |
+| Node NotReady for less than the 180 s floor | Nothing is marked; a start or clone issued meanwhile pends until the node is back. Acceptable. |
+| Stop transient cut fails (btrfs error) | As today: no teardown, `Ready=False`, retried. Flush-first is the rule; a teardown without a cut is the one way to lose a stop. |
+| Many stops in a burst | The wake `Notify` coalesces; a pull pass already running finishes and runs once more (a pending flag), never concurrently. |
+| Deleting an interrupted parent | Ordinary delete; the ownerReference collects everything, and the edits on the dead node are discarded with it. The person chose to delete. |
+| Environment with several services | One volume, one stop transient, same rules; the StatefulSets go down together after the cut. |
+
 ## What this does NOT change
 
 - The stop snapshot itself, sync points, retention, the pull protocol, the takeover CAS, the
@@ -160,3 +187,7 @@ Copies already re-homed stay; the node becomes a candidate again and rendezvous 
    up-to-date replica nodes is possible later; say if you want it now.
 2. Decommission never stops running work (ruled 2026-09-03). The node drains at the people's
    pace; an operator in a hurry stops workspaces through `/v1` like anyone else.
+3. An interrupted parent has no "abandon my edits and start from the last sync point" action.
+   A person who wants that today can only wait for the node. If you want it, it is one explicit
+   `/v1` call that releases the volume from the newest replicated transient, and it must say in
+   its response exactly how old that point is.
