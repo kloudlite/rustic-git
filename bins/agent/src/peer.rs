@@ -1740,7 +1740,7 @@ fi
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
-        assert!(crate::controller::take_volume(&ctx, "v1", "node-a").await.unwrap());
+        assert!(crate::controller::volume::take_volume(&ctx, "v1", "node-a").await.unwrap());
 
         let sent = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/v1");
         assert_eq!(sent.len(), 1);
@@ -1761,7 +1761,7 @@ fi
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
-        assert!(!crate::controller::take_volume(&ctx, "v1", "node-a").await.unwrap());
+        assert!(!crate::controller::volume::take_volume(&ctx, "v1", "node-a").await.unwrap());
         assert_eq!(rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/v1").len(), 1);
     }
 
