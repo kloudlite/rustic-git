@@ -123,10 +123,11 @@ For each volume owned by a dead node:
 - If any parent on it is Running → nothing moves. Every parent on the volume keeps its
   `nodeName` and carries `NodeDead`. The volume is `Unavailable / NodeDead`, pin kept.
 - Else, if no other node is up to date for every parent's newest transient → nothing moves
-  yet; parents carry `NodeDead / AwaitingReplica`; the volume is `Unavailable`, pin kept.
-- Else → the pin is cleared (`test`+`replace` as today), the volume is `Unavailable /
-  Released`, and every parent on it is un-placed so an up-to-date node claims it on the next
-  start (the takeover path, unchanged).
+  yet; parents carry `NodeDead` (their `Replicated=False` says which are still waiting, and the
+  volume's message names them); the volume is `Unavailable`, pin kept.
+- Else → the pin is cleared FIRST (`test`+`replace` as today; a lost CAS writes nothing else),
+  then the volume is `Unavailable` with the empty pin, then every parent on it is un-placed so
+  an up-to-date node claims it on the next start (the takeover path, unchanged).
 
 Today's bug — un-placing a stopped parent while a running sibling keeps the volume pinned — is
 impossible under this rule because the parent is never looked at alone.
