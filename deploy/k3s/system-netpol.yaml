@@ -1,28 +1,8 @@
-# `rustic-git-system` holds two things with nothing in common: ZeroFS, which serves EVERY owner's
-# home in the region over NFSv3, and the gateway, which accepts unauthenticated connections from
-# the internet. NFSv3 with AUTH_SYS and `nolock` (see `mount_homes`) authenticates nothing at all,
-# so "who can reach 2049" IS the authorization: anyone who can open that socket reads and writes
-# every owner's dotfiles, shell history and SSH material. Until this file existed the only thing
-# keeping tenant pods off it was their own egress policy's RFC-1918 exclusion
-# (`k8s::allow_internet_egress`) — one NetworkPolicy edit away from the crown jewels, with the
-# internet-facing gateway a pod away in the same namespace.
-#
-# Two objects, because NetworkPolicies are additive and a default-deny alone would also cut the
-# gateway: deny all ingress in the namespace, then admit 2049 to ZeroFS from the agent DaemonSet
-# only. The gateway's own ingress is a `hostPort` on the node, which NetworkPolicy does not gate,
-# so it is unaffected by the deny — see gateway.yaml.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: zerofs-default-deny
-  namespace: rustic-git-system
-spec:
-  podSelector:
-    matchLabels:
-      app: zerofs
-  policyTypes:
-    - Ingress
----
+# ZeroFS serves EVERY owner's home in the region over NFSv3, and NFSv3 with AUTH_SYS and `nolock`
+# (see `mount_homes`) authenticates nothing at all — so "who can reach 2049" IS the authorization,
+# and this policy is what makes that set the agent DaemonSet rather than every pod in the cluster.
+# The gateway shares this namespace but is unaffected: its ingress is a node `hostPort`, which
+# NetworkPolicy does not gate (see gateway.yaml).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

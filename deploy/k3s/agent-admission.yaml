@@ -29,6 +29,12 @@ spec:
       # `volumereplicas` are here because the agent holds `patch` on both: a Snapshot's `parent` is
       # the history chain `/v1` reads back at `GET /v1/volumes/{name}/history`, so an unchecked
       # patch grafts that chain.
+      #
+      # Accepted residual, alongside DELETE below: on CREATE only `Volume` is checked, so the agent
+      # may author a Snapshot with an arbitrary `spec.parent`. That is deliberate — the sync beat
+      # and `stop_push` legitimately create transient Snapshots naming a parent, so denying a
+      # non-empty parent would break both. The chain `/v1` reads back is `!transient` only, and a
+      # transient never becomes one, so a forged parent on a transient never enters the history.
       - apiGroups: ["rustic-git.io"]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]

@@ -37,6 +37,9 @@ spec:
       ports:
         - protocol: TCP
           port: 8444
+    # The scraper must live in a namespace literally named `monitoring`, or this rule must be
+    # edited to name the one it does live in — no such namespace exists on this cluster yet, so
+    # today the rule is inert and nothing reaches 9464.
     - from:
         - namespaceSelector:
             matchLabels:
