@@ -199,6 +199,20 @@ pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
     delete_suffixed(db, BLOB_PREFIX, &format!("/{m}")).await
 }
 
+/// Drop every hold row for `d`, whatever wrote it. The mirror of `forget_manifest_blobs` on the
+/// blob-delete path: the rows say "this image holds these bytes", so they must not outlive them.
+pub async fn forget_blob_rows(db: &Db, d: &Digest) -> Result<()> {
+    let mut it = db.scan_prefix(format!("{BLOB_PREFIX}{d}/"), ..).await?;
+    let mut doomed = vec![];
+    while let Some(kv) = it.next().await? {
+        doomed.push(kv.key.to_vec());
+    }
+    for k in doomed {
+        db.delete(k).await?;
+    }
+    Ok(())
+}
+
 async fn has_blob_row(db: &Db, d: &Digest) -> Result<bool> {
     let mut it = db.scan_prefix(format!("{BLOB_PREFIX}{d}/"), ..).await?;
     Ok(it.next().await?.is_some())

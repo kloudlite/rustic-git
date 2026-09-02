@@ -1,5 +1,5 @@
 //! Blob pull and the two single-shot push forms. Chunked upload lives in `uploads.rs`.
-use super::{auth, oci_err, store::blob_path, Digest};
+use super::{auth, oci_err, store::blob_path, store::ImageExt, Digest};
 use crate::Trusted;
 use crate::App;
 use axum::{
@@ -222,7 +222,23 @@ pub async fn delete_blob(
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
     match app.store.os.delete(&blob_path(&owner, &d)).await {
-        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Ok(()) => {
+            // The rows say this image HOLDS these bytes, so they must not outlive them — the
+            // mirror of `forget_manifest_blobs` on the manifest path. A row cleanup that fails
+            // is logged, never a failed delete: the object is already gone, and a stale row only
+            // ever grants a pull the store then answers 404 for.
+            match app.store.image_db(&owner, &name).await {
+                Ok(db) => {
+                    if let Err(e) = super::store::forget_blob_rows(&db, &d).await {
+                        tracing::warn!(owner = %owner, name = %name, digest = %d, error = %e, "blob delete: hold rows");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(owner = %owner, name = %name, digest = %d, error = %e, "blob delete: hold rows");
+                }
+            }
+            StatusCode::ACCEPTED.into_response()
+        }
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }

@@ -415,3 +415,27 @@ async fn an_image_without_blob_rows_is_backfilled_from_its_manifests() {
     let r = c.get(format!("{base}/v2/acme/nginx/blobs/{theirs}")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
+
+/// The mirror of `forget_manifest_blobs`: once the bytes are gone the image must stop claiming
+/// to hold them, or `image_holds_blob` keeps answering true for a digest the store 404s.
+#[tokio::test]
+async fn deleting_a_blob_drops_the_images_hold_row() {
+    let (base, e, c, token) = authed().await;
+    let body = b"a layer somebody deletes".to_vec();
+    let d = Digest::of(&body);
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert!(
+        rustic_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
+        "the push records the hold"
+    );
+
+    let r = c.delete(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    assert!(
+        !rustic_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
+        "the hold row must go with the bytes"
+    );
+}
