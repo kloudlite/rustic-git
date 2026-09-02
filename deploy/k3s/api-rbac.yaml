@@ -32,6 +32,13 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
     verbs: ["get", "list"]
+  # Read-only, for ONE question: cloning an INTERRUPTED workspace. Its node is down, so nothing can
+  # be cut there and the clone has to graft onto a sync point some OTHER node already holds — and
+  # `status.branches` is the only record of who holds what. `get`/`list` and nothing else: the
+  # replica row is the pulling agent's to write, always.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["volumereplicas"]
+    verbs: ["get", "list"]
   # One policy, one moment: deleting an ATTACHED workspace. Nothing stamps a finalizer on a
   # Workspace, so its deletion is garbage collection the agent never observes, and the
   # environment-side half of the attach grant lives in the environment's namespace where the

@@ -23,7 +23,8 @@ use futures::StreamExt;
 use crate::model::*;
 use crate::store::MetaStore;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
-use kube::ResourceExt;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::{Resource, ResourceExt};
 use std::collections::BTreeMap;
 use axum::{
     extract::{Path, Query, State},
@@ -1072,7 +1073,7 @@ pub struct BasedOn {
 /// The newest Ready transient of `worktree`, as the whole object: a clone's parent when the owner
 /// can cut, and the clone's own base when it cannot. `crd::newest_transient_of` is the ordering,
 /// shared with the agent so `/v1` and placement can never disagree about which cut is newest.
-async fn newest_transient(c: &kube::Client, volume: &str, worktree: &str) -> Result<Option<crd::Snapshot>, Response> {
+async fn newest_transient(c: &kube::Client, volume: &str, worktree: &str) -> Result<(Option<crd::Snapshot>, Vec<crd::Snapshot>), Response> {
     let api: Api<crd::Snapshot> = Api::all(c.clone());
     let list = api
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
@@ -1084,7 +1085,23 @@ async fn newest_transient(c: &kube::Client, volume: &str, worktree: &str) -> Res
         return Err((StatusCode::CONFLICT, "a snapshot is already being cut for this workspace").into_response());
     }
     let newest = crd::newest_transient_of(&list.items, worktree);
-    Ok(newest.and_then(|n| list.items.into_iter().find(|s| s.name_any() == n)))
+    let found = newest.and_then(|n| list.items.iter().find(|s| s.name_any() == n).cloned());
+    Ok((found, list.items))
+}
+
+/// Every transient of `worktree` that some node's `VolumeReplica` reports HOLDING — the candidate
+/// set a clone of an interrupted source may graft onto, because its own node cannot serve a byte.
+/// Read-only, and only here: `status.branches` is the pulling agent's to write, always.
+async fn replicated_transients(c: &kube::Client, volume: &str, worktree: &str) -> Result<HashSet<String>, Response> {
+    let api: Api<crd::VolumeReplica> = Api::all(c.clone());
+    Ok(api
+        .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await
+        .map_err(kube_err)?
+        .items
+        .into_iter()
+        .filter_map(|r| r.status.and_then(|st| st.branches.get(worktree).cloned()))
+        .collect())
 }
 
 /// Seconds between `at` and now, floored at 0. An unparseable or absent timestamp is 0: the age is
@@ -1112,11 +1129,23 @@ async fn clone_base(
     volume: &str,
     worktree: &str,
     interrupted: bool,
+    parent_ref: Option<OwnerReference>,
 ) -> Result<BasedOn, Response> {
-    let newest = newest_transient(c, volume, worktree).await?;
+    let (newest, all) = newest_transient(c, volume, worktree).await?;
     if interrupted {
-        let held = newest.ok_or_else(|| {
-            (StatusCode::CONFLICT, "the source's node is down and no node holds a sync point of it yet").into_response()
+        // Not the newest transient cluster-wide — the newest one another node actually HOLDS. The
+        // owner is down, so a cut it turned Ready seconds before it died may exist nowhere else at
+        // all, and grafting onto that leaves the clone unplaceable forever. `status.branches` on a
+        // `VolumeReplica` is the only record of who holds what, and the up-to-date rule placement
+        // applies reads exactly the same field.
+        let held = replicated_transients(c, volume, worktree).await?;
+        let newest_held = crd::newest_transient_of(&all.iter().filter(|s| held.contains(&s.name_any())).cloned().collect::<Vec<_>>(), worktree);
+        let held = newest_held.and_then(|n| all.into_iter().find(|s| s.name_any() == n)).ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                "the source's node is down and no other node holds a sync point of it yet; nothing can be cloned until one syncs or the node returns",
+            )
+                .into_response()
         })?;
         let at = held.status.as_ref().and_then(|st| st.ready_at.clone());
         return Ok(BasedOn { snapshot: held.name_any(), age_seconds: age_seconds(at.as_deref()), at, interrupted: true });
@@ -1140,6 +1169,9 @@ async fn clone_base(
     // owning node's snapshot reconciler rather than sitting at the schema's `Pending` default.
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     snap.metadata.labels = Some(crd::commit_labels(owner, volume));
+    // Owned by the source parent, exactly as the sync beat's cuts are: deleting the source is the
+    // whole delete, and a cut nothing points at would otherwise outlive it as a leaked subvolume.
+    snap.metadata.owner_references = parent_ref.map(|r| vec![r]);
     let api: Api<crd::Snapshot> = Api::all(c.clone());
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok(BasedOn { snapshot: name, at: None, age_seconds: 0, interrupted: false })
@@ -1177,7 +1209,7 @@ async fn clone_ws(
     // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
     // the last sync beat happened to leave.
     let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
-    let based_on = clone_base(c, &owner, &volume, &id, interrupted).await?;
+    let based_on = clone_base(c, &owner, &volume, &id, interrupted, src.controller_owner_ref(&())).await?;
     let source = VolumeSource::CloneOf { volume, commit: Some(based_on.snapshot.clone()) };
     let w = create_workspace(
         c,
@@ -1631,7 +1663,7 @@ async fn clone_env(
     let volume = env_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
     let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
-    let based_on = clone_base(c, &src.spec.owner, &volume, &id, interrupted).await?;
+    let based_on = clone_base(c, &src.spec.owner, &volume, &id, interrupted, src.controller_owner_ref(&())).await?;
     let e = create_environment(
         c,
         &new_id,
@@ -1642,11 +1674,16 @@ async fn clone_env(
             services: src.spec.services.clone(),
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
-                // ponytail: environment clone still copies bytes into a fresh child Volume, where a
-                // workspace clone is a second worktree of the source's own volume — the brief scoped
-                // the shared-worktree architecture change to workspaces only. The CUT is the same
-                // either way, which is all `based_on` promises.
-                source: Some(VolumeSource::CloneOf { volume, commit: Some(based_on.snapshot.clone()) }),
+                // `None`, deliberately: an environment clone still COPIES bytes into a fresh child
+                // Volume (`clone_local_ids`), where a workspace clone is a second worktree of the
+                // source's own volume — a resolved commit here would silently flip environments onto
+                // the shared-worktree path, which `resolve_volume` and this controller have no
+                // clone-commit guard for. The local copy is at least as fresh as the cut `based_on`
+                // names, so the report stays honest.
+                // ponytail: the ceiling is that an environment clone is LOCAL-ONLY — an interrupted
+                // environment has no bytes on any live node to copy, so it cannot be cloned at all.
+                // The upgrade is the workspace's shared-worktree path, guard and all.
+                source: Some(VolumeSource::CloneOf { volume, commit: None }),
             }),
             desired_state: DesiredState::Running,
             restore: None,

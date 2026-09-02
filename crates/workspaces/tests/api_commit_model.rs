@@ -20,7 +20,7 @@ struct Server {
 fn placed_ws(name: &str, owner: &str) -> Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"rustic-git.io/owner": owner}},
         "spec": {
             "owner": owner, "team": "", "name": name, "region": "centralindia", "image": "nginx:alpine",
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -42,7 +42,7 @@ fn no_workspaces() -> Route {
 fn placed_env(name: &str, owner: &str) -> Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"rustic-git.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "services": [],
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -545,6 +545,7 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
     assert_eq!(cut["spec"]["transient"], true, "a clone cut is a sync point, not a commit in anyone's history");
     assert_eq!(cut["spec"]["parent"], "sync-ws-1-bbbb", "parented on the newest transient so the send is a delta");
     assert_eq!(cut["spec"]["worktree"], "ws-1");
+    assert_eq!(cut["metadata"]["ownerReferences"][0]["name"], "ws-1", "owned by the source: deleting it is the whole delete");
 
     let made = s.rec.sent("POST", &format!("{API}/workspaces")).remove(0);
     assert_eq!(made["spec"]["storage"]["source"]["cloneOf"]["commit"], cut["metadata"]["name"]);
@@ -587,6 +588,20 @@ async fn a_never_snapshotted_source_is_cloneable_and_the_cut_is_its_root() {
     assert_eq!(cut["spec"]["parent"], "");
 }
 
+/// One node's replica row, saying which transient of each worktree it HOLDS.
+fn replica_holding(node: &str, volume: &str, worktree: &str, held: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": format!("{volume}.{node}")},
+        "spec": {"volume": volume, "node": node},
+        "status": {"phase": "Synced", "branches": {worktree: held}},
+    })
+}
+
+fn replicas(items: Vec<Value>) -> Route {
+    get(format!("{API}/volumereplicas"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList", "metadata": {}, "items": items}))
+}
+
 /// Cloning an INTERRUPTED source is allowed — it is the one way forward — and the response says
 /// exactly what it is based on, so choosing it is choosing the gap knowingly.
 #[tokio::test]
@@ -599,6 +614,7 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
+        replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-bbbb")]),
         get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
@@ -632,6 +648,64 @@ async fn cloning_an_interrupted_source_with_no_sync_point_is_a_409() {
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        replicas(vec![]),
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let r = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "copy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+}
+
+/// The cut the DEAD owner turned Ready seconds before it died exists as a CR and is the newest
+/// transient cluster-wide — but its bytes are only on the dead node. Grafting onto it would leave
+/// the clone unplaceable forever, so `/v1` chooses among what a `VolumeReplica` reports HOLDING,
+/// which is the same field placement reads.
+#[tokio::test]
+async fn an_interrupted_clone_skips_a_transient_no_live_node_holds() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
+        no_workspaces(),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+            transient("sync-ws-1-old", "ws-1", "karthik", "ws-1"),
+            // Newest cluster-wide, and held by nobody but the corpse.
+            transient("sync-ws-1-last", "ws-1", "karthik", "ws-1")
+        ]})),
+        replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-old")]),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+            "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let r = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "copy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["based_on"]["snapshot"], "sync-ws-1-old", "the newest a LIVE node can serve, not the newest that exists");
+}
+
+/// A replica row that names another worktree's branch, or none at all, holds nothing of this one.
+#[tokio::test]
+async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
+        no_workspaces(),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
+        ]})),
+        replicas(vec![replica_holding("node-b", "ws-1", "ws-other", "sync-ws-other-zzzz")]),
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -673,7 +747,10 @@ async fn cloning_an_environment_cuts_a_transient_too() {
     let cut = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
     assert!(cut["metadata"]["name"].as_str().unwrap().starts_with("clone-env-1-"), "{cut}");
     let made = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
-    assert_eq!(made["spec"]["storage"]["source"]["cloneOf"]["commit"], cut["metadata"]["name"]);
+    // `commit` stays null on purpose: an environment clone still COPIES bytes into a fresh child
+    // Volume, and a resolved commit would silently flip it onto the workspace's shared-worktree
+    // path. The local copy is at least as fresh as the cut, so `based_on` is still honest.
+    assert!(made["spec"]["storage"]["source"]["cloneOf"]["commit"].is_null(), "{made}");
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["based_on"]["snapshot"], cut["metadata"]["name"]);
 }

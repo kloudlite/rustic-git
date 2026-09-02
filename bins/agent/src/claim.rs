@@ -73,17 +73,31 @@ pub(crate) async fn has_commits(ctx: &Arc<Ctx>, volume: &str) -> Result<bool, Re
     Ok(!snaps.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await?.items.is_empty())
 }
 
-/// Whether `commit` is a `Ready` `Snapshot` of `volume` — the check a clone's grafted commit and a
-/// restore's wished commit both need before checking out or swapping onto it, so naming a
-/// retention-deleted (or foreign-volume) commit is caught here rather than as a bare btrfs
-/// `NO_SUCH_RECORD` with no distinct reason a person could search for. Errors propagate, same rule
-/// as `has_commits`: a listing failure must never read as "no such commit".
-pub(crate) async fn commit_ready(ctx: &Arc<Ctx>, volume: &str, commit: &str) -> Result<bool, ReconcileErr> {
+/// The PHASE of `commit` as a `Snapshot` of `volume`, or `None` when no such snapshot of this
+/// volume exists — the check a clone's grafted commit and a restore's wished commit both need
+/// before checking out or swapping onto it, so naming a retention-deleted (or foreign-volume)
+/// commit is caught here rather than as a bare btrfs `NO_SUCH_RECORD` with no distinct reason a
+/// person could search for. Errors propagate, same rule as `has_commits`: a listing failure must
+/// never read as "no such commit".
+///
+/// The phase, not a bool: a clone is created microseconds after its own cut, so the reconcile that
+/// follows sees a `Working` snapshot almost every time. Reading that as "not ready" and settling
+/// PERMANENT killed every clone at birth. Absent is forever; `Working` is one tick away.
+pub(crate) async fn commit_phase(ctx: &Arc<Ctx>, volume: &str, commit: &str) -> Result<Option<crd::Phase>, ReconcileErr> {
     let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     Ok(snaps
         .get_opt(commit)
         .await?
-        .is_some_and(|s| s.spec.volume == volume && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)))
+        .filter(|s| s.spec.volume == volume)
+        // A Snapshot with no status block yet has never been cut: `status` is a subresource, so
+        // one is born status-less and `reconcile_commit` reads that as `Working` too.
+        .map(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Working)))
+}
+
+/// Whether a clone may still be waiting for this commit rather than being wrong about it forever.
+/// `Error` is the one terminal non-Ready phase; everything else in flight converges.
+pub(crate) fn commit_pending(phase: Option<crd::Phase>) -> bool {
+    matches!(phase, Some(crd::Phase::Working | crd::Phase::Pending | crd::Phase::Creating))
 }
 
 /// The SOURCE volume of a `cloneOf`, whose name is also the source worktree's: a clone holds
@@ -316,6 +330,76 @@ pub async fn ensure_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustic_git_workspaces::kube_test::{get, mock_client, not_found};
+
+    const SNAPS: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
+
+    struct NoopNix;
+    #[async_trait::async_trait]
+    impl crate::nix::Nix for NoopNix {
+        async fn build(&self, _e: &str, _t: std::time::Duration) -> Result<std::path::PathBuf, String> {
+            Ok(std::path::PathBuf::from("/tmp"))
+        }
+        async fn ping(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn collect_garbage(&self) -> Result<u64, String> {
+            Ok(0)
+        }
+    }
+
+    fn test_ctx(routes: Vec<rustic_git_workspaces::kube_test::Route>) -> Arc<Ctx> {
+        use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
+        let (client, _) = mock_client(routes);
+        Arc::new(Ctx::new(
+            client,
+            Arc::new(Engine::new(EnginePool::new(std::path::Path::new("/tmp/claim-test")))),
+            "node-a".into(),
+            "/tmp/claim-test".into(),
+            "r1".into(),
+            vec![],
+            Some("test:/".into()),
+            Arc::new(NoopNix),
+            std::path::PathBuf::from("/tmp/claim-test/profiles"),
+        ))
+    }
+
+    fn snap_json(volume: &str, phase: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "clone-ws-1-cafe"},
+            "spec": {"volume": volume, "owner": "karthik", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+        });
+        if let Some(p) = phase {
+            v["status"] = serde_json::json!({"phase": p});
+        }
+        v
+    }
+
+    /// `/v1` creates a clone's cut microseconds before the clone object that names it, so the very
+    /// first reconcile of that clone sees a `Working` snapshot. Reading that as "not ready" and
+    /// settling `Permanent/NoSuchCommit` killed every clone at birth — the phase, not a bool, is
+    /// what lets the caller tell "one tick away" from "wrong forever".
+    #[tokio::test]
+    async fn commit_phase_reports_working_absent_and_status_less_apart() {
+        let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("ws-1", Some("working")))]);
+        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Working));
+
+        // Status is a SUBRESOURCE, so a Snapshot is born status-less; that is "not cut yet" too.
+        let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("ws-1", None))]);
+        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Working));
+
+        let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("ws-1", Some("ready")))]);
+        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Ready));
+
+        // Retention swept it: absent is forever.
+        let ctx = test_ctx(vec![not_found(format!("{SNAPS}/clone-ws-1-cafe"))]);
+        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), None);
+
+        // Ready, but of ANOTHER volume — as absent as a swept one, and just as permanent.
+        let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("other-vol", Some("ready")))]);
+        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), None);
+    }
 
     fn replica(node: &str, phase: &str, branches: &[(&str, &str)]) -> crd::VolumeReplica {
         serde_json::from_value(serde_json::json!({
@@ -386,6 +470,34 @@ mod tests {
             "and a Synced row that does not name the cut is not up to date for it"
         );
         assert!(may_claim("node-a", "node-a", &p(true, None, cut)), "the owner cut it, so the owner holds it");
+    }
+
+    /// The WORKING window, before the owner has taken the btrfs snapshot: the cut exists as a CR,
+    /// so `has_commits` is true, but it is not Ready and therefore not `newest_transient` — no
+    /// node's `branches` can name it. Placement in that window falls back to the source volume's
+    /// previous transient, and the OWNER is the only node guaranteed to hold it.
+    #[test]
+    fn during_the_working_window_only_the_source_volumes_owner_may_claim_a_clone() {
+        // `newest` is the PREVIOUS transient: the clone cut is not Ready yet, so it is not it.
+        let prev = Some("sync-ws-1-old");
+        assert!(may_claim("node-a", "node-a", &p(true, None, prev)), "the owner always; it holds the bytes");
+        assert!(!may_claim("node-b", "node-a", &p(true, None, prev)), "no replica row is never up to date");
+        // A peer that HAS the previous transient still qualifies — the up-to-date rule is the only
+        // rule, and it is about bytes held, not about who cut what.
+        assert!(may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Synced", &[("ws-1", "sync-ws-1-old")])), prev)));
+    }
+
+    /// A commit still being cut is one tick away, not wrong forever — the distinction that stopped
+    /// every clone being settled `Permanent/NoSuchCommit` at birth, since `/v1` creates the cut
+    /// microseconds before the clone object that names it.
+    #[test]
+    fn a_working_commit_is_pending_and_an_absent_one_is_not() {
+        assert!(commit_pending(Some(crd::Phase::Working)));
+        assert!(commit_pending(Some(crd::Phase::Pending)));
+        assert!(commit_pending(Some(crd::Phase::Creating)));
+        assert!(!commit_pending(None), "absent is forever: retention swept it, or it was never of this volume");
+        assert!(!commit_pending(Some(crd::Phase::Error)), "a failed cut is not going to become Ready");
+        assert!(!commit_pending(Some(crd::Phase::Ready)), "Ready is not pending; it is the destination");
     }
 
     /// A clone places over its SOURCE, whose volume name is also the source worktree's name —

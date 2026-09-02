@@ -828,7 +828,31 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // workspace that has perfectly good state. Only a volume that would ACTUALLY resolve to the
     // clone commit can be permanently broken by that commit being gone.
     if let Some(commit) = clone_commit {
-        if effective_head.as_deref() == Some(commit) && !crate::claim::commit_ready(ctx, &id, commit).await? {
+        let phase = if effective_head.as_deref() == Some(commit) {
+            crate::claim::commit_phase(ctx, &id, commit).await?
+        } else {
+            Some(crd::Phase::Ready)
+        };
+        // The clone's own cut is created by `/v1` microseconds before the clone object itself, so
+        // this reconcile almost always arrives while it is still `Working` — the owner has not
+        // taken the btrfs snapshot yet. That is one tick away, not wrong forever: settling
+        // Permanent here killed every clone at birth. Only an ABSENT (retention-swept, or of
+        // another volume) or `Error` commit is permanent.
+        if crate::claim::commit_pending(phase) {
+            let st = crd::WorkspaceStatus {
+                phase: crd::Phase::Creating,
+                observed_generation: None,
+                volume_ref: Some(id.clone()),
+                conditions: ws_conditions(
+                    &prev,
+                    crd::condition("Ready", false, "CommitPending", &format!("waiting for snapshot {commit} to be cut"), gen),
+                ),
+                ..prev
+            };
+            write_ws_status(w, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
+        if phase != Some(crd::Phase::Ready) {
             let prev = prev.clone();
             let vref = id.clone();
             return settle(
