@@ -515,10 +515,12 @@ async fn respond(
 /// which used to come back as a 400 with the OS message in it.
 ///
 /// `Other` is the one kind whose MESSAGE is echoed to the client in the 400 body, so every
-/// producer of one on these paths must be a literal: pkt-line's own `io::Error::other`, and
-/// `live_body`'s "request body too large". A future `Other` built with `format!` would put an
-/// internal string on the wire — `the_only_other_kind_errors_answered_400_are_the_two_literals`
-/// is what refuses one.
+/// producer of one on these paths must be a literal: pkt-line's own `io::Error::other`,
+/// `live_body`'s "request body too large", and `Capped::fill_buf`'s "pack exceeds the size
+/// limit" (`crates/git/src/protocol/receive.rs:463`). `git.rs:263`'s `Error::other(e.to_string())`
+/// is exempt — it lands in the post-status-line streaming body, which never reaches
+/// `is_client_fault`. A future `Other` built with `format!` would put an internal string on the
+/// wire — `the_only_other_kind_errors_answered_400_are_the_three_literals` is what refuses one.
 fn is_client_fault(e: &crate::Error) -> bool {
     use std::io::ErrorKind::*;
     e.downcast_ref::<ClientError>().is_some()
@@ -565,15 +567,17 @@ mod tests {
     }
 
     /// `Other` is answered 400 WITH ITS MESSAGE, so every producer of one on these paths must be
-    /// a literal the client may read. Today that is pkt-line's own `io::Error::other` and
-    /// `live_body`'s cap. This pins the contract: a new `Other` carrying an internal detail (a
-    /// store URL, a peer address, a secret) must fail here rather than ship.
+    /// a literal the client may read. Today that is pkt-line's own `io::Error::other`,
+    /// `live_body`'s cap, and `Capped::fill_buf`'s pack-size cap
+    /// (`crates/git/src/protocol/receive.rs:463`). This pins the contract: a new `Other` carrying
+    /// an internal detail (a store URL, a peer address, a secret) must fail here rather than ship.
     #[test]
-    fn the_only_other_kind_errors_answered_400_are_the_two_literals() {
+    fn the_only_other_kind_errors_answered_400_are_the_three_literals() {
         let fault = |e: Error| is_client_fault(&(Box::new(e) as crate::Error));
-        // The two producers, by their exact strings.
+        // The three producers, by their exact strings.
         assert!(fault(Error::other("request body too large")));
         assert!(fault(Error::other("bad pkt len")));
+        assert!(fault(Error::other("pack exceeds the size limit")));
         // The one `Other` the response path itself makes is a broken pipe, which is not `Other`
         // and so never reaches a client as text.
         let pipe = Error::new(ErrorKind::BrokenPipe, "client went away");

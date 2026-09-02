@@ -16,6 +16,16 @@ async fn the_peer_listener_no_longer_serves_metrics() {
 }
 
 #[tokio::test]
+async fn the_peer_listener_with_the_secret_still_has_no_metrics_route() {
+    // The regression that matters isn't the auth gate above — it's someone re-merging
+    // `metrics::routes()` into the peer router. A valid secret must still find nothing there.
+    rustic_git_core::metrics::init();
+    let (base, _e) = common::serve_peer().await;
+    let res = common::peer_get(&base, "/metrics").await;
+    assert_eq!(res.status(), 404, "metrics must not be routed on the peer listener");
+}
+
+#[tokio::test]
 async fn the_metrics_listener_serves_prometheus_text_and_counts() {
     rustic_git_core::metrics::init();
     let (base, _e) = common::serve_peer().await;
