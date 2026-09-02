@@ -64,6 +64,12 @@ tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz objects.yaml
 : "${CONTAINER:=k3s-backup}"
 [ -s "$KEY_FILE" ] || { echo "no encryption key at $KEY_FILE — see deploy/k3s/README.md, Control-plane backup step 1b" >&2; exit 1; }
 openssl enc -aes-256-cbc -pbkdf2 -salt -pass "file:$KEY_FILE" -in "$WORK/k3s-backup.tgz" -out "$WORK/k3s-backup.tgz.enc"
+# AES-CBC is unauthenticated: a truncated upload or a tampered blob decrypts to garbage rather than
+# failing, and a restore drill would find out at the worst moment. A detached HMAC over the
+# CIPHERTEXT, keyed by the same file, is the smallest thing that makes a bad blob fail loudly.
+# ponytail: encrypt-then-MAC by hand; `age` does both in one tool if this grows a second consumer.
+openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(xxd -p -c 256 "$KEY_FILE")" \
+  -out "$WORK/k3s-backup.tgz.enc.hmac" "$WORK/k3s-backup.tgz.enc"
 
 put() {
   # The SAS travels in a curl config file, not argv: argv is world-readable in `ps` and lands in
@@ -74,11 +80,13 @@ put() {
   curl -sS --fail -K "$WORK/curl.cfg" -X PUT \
     -H "x-ms-blob-type: BlockBlob" \
     -H "Content-Type: application/octet-stream" \
-    --data-binary "@$WORK/k3s-backup.tgz.enc" >/dev/null
+    --data-binary "@$WORK/$2" >/dev/null
 }
 
-put "hourly-${HOUR}.tgz.enc"
-put "daily-${DOW}.tgz.enc"
+put "hourly-${HOUR}.tgz.enc" k3s-backup.tgz.enc
+put "hourly-${HOUR}.tgz.enc.hmac" k3s-backup.tgz.enc.hmac
+put "daily-${DOW}.tgz.enc" k3s-backup.tgz.enc
+put "daily-${DOW}.tgz.enc.hmac" k3s-backup.tgz.enc.hmac
 
 echo "backed up $(stat -c %s "$WORK/k3s-backup.tgz.enc" 2>/dev/null || stat -f %z "$WORK/k3s-backup.tgz.enc") bytes to hourly-${HOUR} and daily-${DOW}"
 exit "$crd_ok"
@@ -89,11 +97,18 @@ exit "$crd_ok"
 #   1. Install the SAME k3s version, but do not let it start a new cluster:
 #        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.33.5+k3s1 INSTALL_K3S_SKIP_START=true sh -s - server ...
 #   2. systemctl stop k3s
-#   3. Fetch (with a READ SAS — the backup one cannot read), decrypt with the key from the
-#      password manager, unpack. The SAS goes through a config file here too, not the shell
-#      history:
+#   3. Fetch (with a READ SAS — the backup one cannot read) BOTH the blob and its `.hmac`, verify
+#      before decrypting, then decrypt with the key from the password manager and unpack. AES-CBC
+#      decrypts a truncated or tampered blob into silent garbage instead of an error, so a mismatch
+#      here means DO NOT RESTORE — fetch an older `hourly-*`/`daily-*` slot instead. The SAS goes
+#      through a config file here too, not the shell history:
 #        echo 'url = "https://ACCOUNT.blob.core.windows.net/k3s-backup/daily-Mon.tgz.enc?SAS"' > /tmp/get.cfg
 #        curl -sS --fail -K /tmp/get.cfg -o /tmp/b.tgz.enc
+#        echo 'url = "https://ACCOUNT.blob.core.windows.net/k3s-backup/daily-Mon.tgz.enc.hmac?SAS"' > /tmp/get-hmac.cfg
+#        curl -sS --fail -K /tmp/get-hmac.cfg -o /tmp/b.tgz.enc.hmac
+#        openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(xxd -p -c 256 /etc/rustic-git/k3s-backup.key)" \
+#          -out /tmp/b.tgz.enc.hmac.check /tmp/b.tgz.enc
+#        diff /tmp/b.tgz.enc.hmac /tmp/b.tgz.enc.hmac.check   # mismatch => do not restore
 #        openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/rustic-git/k3s-backup.key -in /tmp/b.tgz.enc -out /tmp/b.tgz
 #        tar -xzf /tmp/b.tgz -C /tmp
 #        install -m600 /tmp/state.db /var/lib/rancher/k3s/server/db/state.db

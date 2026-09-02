@@ -136,6 +136,14 @@ up. The account defaults to `rusticgitkolomi`; override `ACCOUNT`/`CONTAINER` in
 Retention, what it does and does not cover, and the Azure-side switches for everything else are in
 `deploy/BACKUPS.md`.
 
+Restoring: every `k3s-backup.tgz.enc` blob travels with a detached `k3s-backup.tgz.enc.hmac`,
+because AES-CBC is unauthenticated — a truncated or tampered blob decrypts to garbage rather than
+failing. Download both, recompute the HMAC over the downloaded `.enc` with the same key
+(`openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(xxd -p -c 256 k3s-backup.key)" ...`), `diff` it
+against the downloaded `.hmac`, and only decrypt (`openssl enc -d ...`) once they match. A mismatch
+means do not restore — fetch an older `hourly-*`/`daily-*` slot instead. Full restore steps are the
+comment block at the bottom of `backup-controlplane.sh`.
+
 ## Release 1: controller ownership
 
 The 2026-08-27 change: the API writes ONE unplaced object, the agents claim it through
