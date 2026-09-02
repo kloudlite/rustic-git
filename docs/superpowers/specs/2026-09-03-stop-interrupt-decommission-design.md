@@ -25,9 +25,11 @@ Date: 2026-09-03. Status: draft for review by the owner of this repo.
    the only place it can start is its own node.
 4. Ownership is per volume, so moving is decided per volume: if any parent on a volume is
    running on the dead node, nothing on that volume moves, stopped siblings included.
-5. Decommission is the planned version of node death: the node's parents are stopped
-   properly, its volumes are released, its copies are re-homed, and only when every volume it
-   touched has its full replica count elsewhere is the node `drained` and safe to delete.
+5. Decommission is the planned version of node death, with one difference: whatever is running
+   there KEEPS running. The node takes no new work, its copies are re-homed, and each volume is
+   released as the people using it stop. Only when nothing runs there, it owns nothing, and
+   every volume it touched has its full replica count elsewhere is the node `drained` and safe
+   to delete.
 
 ## What changes
 
@@ -107,27 +109,28 @@ volume (`standby_count(owner_alive = false)`), and it refuses claims. It keeps s
 its pod keeps running, and its copies are retired by its own retire pass only once the
 replacement is Synced — exactly the existing join/leave mechanics.
 
-The decommissioning node's own agent runs a decommission beat (30 s):
+The decommissioning node's own agent runs a decommission beat (30 s). It stops nothing.
 
-1. **Stop everything running here.** For each Running parent on this node, write
-   `spec.desiredState: stopped`. This is the ONE spec write on a parent the agent ever makes;
-   the admission policy allows the agent exactly the `running → stopped` transition on
-   `desiredState` and nothing else on those objects. The normal stop path then cuts, wakes the
-   peers and tears down. People see their workspace stopped, with the condition
-   `Decommissioning` and the reason in its message; they can start it again, and it lands
-   elsewhere once released.
-2. **Release owned volumes** once every parent on the volume is stopped and some other node is
-   up to date for each: pin cleared, `Unavailable / Decommissioned`, parents un-placed. Same
-   code as the dead-node sweep's third arm.
-3. **Wait for the copies to settle**: the node is drained when it owns no volume, hosts no
-   parent, and holds no `VolumeReplica` row (its retire pass deletes rows as replacements
-   become Synced), and every volume it ever touched has `spec.replicas` Synced rows on other
-   nodes.
-4. **Stamp the node**: annotation `rustic-git.io/drained: <RFC 3339>`. Progress on the way is
-   the annotation `rustic-git.io/decommission-status: "running=N owned=N awaiting=N copies=N"`,
-   rewritten each beat, readable with `kubectl describe node`. This needs `patch` on `nodes`
-   for the agent; it is a broad verb, taken knowingly, because the agent already runs as root
-   with the host PID namespace on that node.
+1. **Running parents keep running.** They are the people's; the node waits for them to stop on
+   their own. Each carries the condition `Decommissioning / NodeLeaving` with the message
+   "this node is being retired; stop when convenient and the next start lands elsewhere".
+   `/v1` and the web show it.
+2. **Release owned volumes** as they become releasable: every parent on the volume stopped and
+   some other node up to date for each. Pin cleared, `Unavailable / Decommissioned`, parents
+   un-placed so their next start lands on an up-to-date node. Same code as the dead-node
+   sweep's third arm.
+3. **Copies settle on their own**: the node is no longer a candidate, so rendezvous re-homes
+   what it held; its retire pass drops each copy once the replacement is Synced.
+4. **Drained** when the node hosts no parent, owns no volume, holds no `VolumeReplica` row, and
+   every volume it ever touched has `spec.replicas` Synced rows on other nodes. Stamped as the
+   annotation `rustic-git.io/drained: <RFC 3339>`. Progress on the way is the annotation
+   `rustic-git.io/decommission-status: "running=N owned=N awaiting=N copies=N"`, rewritten each
+   beat, readable with `kubectl describe node`. This needs `patch` on `nodes` for the agent; a
+   broad verb, taken knowingly, because the agent already runs as root with the host PID
+   namespace on that node.
+
+Draining therefore takes as long as the people take to stop. An operator who needs the node
+sooner stops those workspaces through `/v1` like anyone else; the system never does it for them.
 
 Only after `drained` may the VM be deleted and its flannel `/32` removed from the ZeroFS
 policy. Deleting earlier is the dead-node path: copies still heal, but any volume not yet
@@ -149,11 +152,11 @@ Copies already re-homed stay; the node becomes a candidate again and rendezvous 
 - Stop is seconds instead of minutes; the replica wait moves to the first cross-node start.
 - One `/peer/v1/wake` POST per live node per stop.
 - One VolumeReplica list per reconcile of a stopped parent (field-selected, cheap).
-- `desiredState` becomes agent-writable in one direction; `nodes: patch` for the agent.
+- `nodes: patch` for the agent (annotations only in practice; RBAC cannot narrow it).
 
 ## Open points for the owner
 
 1. Start placement while the owner is alive stays on the owner node. Spreading starts across
    up-to-date replica nodes is possible later; say if you want it now.
-2. Decommission stops running work without asking the people. Confirmed as intended on
-   2026-09-03; say if it should refuse while anything runs instead.
+2. Decommission never stops running work (ruled 2026-09-03). The node drains at the people's
+   pace; an operator in a hurry stops workspaces through `/v1` like anyone else.
