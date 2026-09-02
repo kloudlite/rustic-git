@@ -100,3 +100,38 @@ async fn a_push_body_past_max_body_is_refused_as_it_streams() {
     assert_eq!(r.status(), 400);
     assert!(r.text().await.unwrap().contains("too large"));
 }
+
+/// The negotiation is kilobytes; the cap that used to apply here was `max_body` (2 GiB), buffered
+/// in memory by `to_bytes` on a route an anonymous client reaches on any public repo. A handful of
+/// those OOMs the pod, and an OOM moves repo ownership on the attacker's schedule.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_upload_pack_negotiation_is_refused_anonymously() {
+    let _serial = SERIAL.lock().await;
+    let (base, e) = common::serve_public().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    // Public, so this reaches `read_body` with no credentials at all — the amplifier the cap
+    // exists for.
+    e.store.set_public("alice", "web", true).await.unwrap();
+    let r = reqwest::Client::new()
+        .post(format!("{base}/alice/web.git/git-upload-pack"))
+        .header("content-type", "application/x-git-upload-pack-request")
+        .header("git-protocol", "version=2")
+        .body(vec![b'0'; 9 * 1024 * 1024])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 413);
+    // And a real-sized negotiation still gets through to the protocol, so the cap is not simply
+    // refusing everything: a v2 command with no flush is a client error, never a 413.
+    let mut body = Vec::new();
+    rustic_git_core::pktline::write_text(&mut body, "command=ls-refs").unwrap();
+    let r = reqwest::Client::new()
+        .post(format!("{base}/alice/web.git/git-upload-pack"))
+        .header("content-type", "application/x-git-upload-pack-request")
+        .header("git-protocol", "version=2")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r.status(), 413, "a kilobyte negotiation must not hit the cap");
+}

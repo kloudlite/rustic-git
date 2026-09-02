@@ -118,13 +118,20 @@ fn body_reader(headers: &HeaderMap, raw: Box<dyn Read + Send>) -> Box<dyn Read +
     }
 }
 
+/// Cap on an upload-pack negotiation body. A `want`/`have` pkt-line is about 50 bytes, so this is
+/// over 150 000 of them — past any real negotiation, and small enough that the concurrent-request
+/// count that OOMs the pod is unreachable. NOT `max_body`: this body is BUFFERED, and an OOM here
+/// moves repo ownership on an attacker's schedule.
+const MAX_NEGOTIATION: usize = 8 * 1024 * 1024;
+
 /// Read the whole body only AFTER `open()` has authenticated the caller. `Bytes` as an extractor
-/// runs before the handler, so an anonymous client could make the pod buffer `max_body` and, with
-/// a few of those in flight, OOM it — which moves repo ownership, the one thing that must not
-/// happen on an attacker's schedule. The `DefaultBodyLimit` layer only governs extractors, so the
-/// cap is applied here by hand. Upload-pack only: its request is the negotiation, kilobytes.
+/// runs before the handler, so an anonymous client could make the pod buffer the whole cap and,
+/// with a few of those in flight, OOM it. The `DefaultBodyLimit` layer only governs extractors, so
+/// the cap is applied here by hand. Upload-pack only: its request is the negotiation, kilobytes —
+/// so the cap is `MAX_NEGOTIATION`, not the 2 GiB `max_body` that governs receive-pack's STREAMED
+/// body (`live_body`), which never sits in memory.
 async fn read_body(body: Body) -> Result<Bytes, Response> {
-    axum::body::to_bytes(body, max_body())
+    axum::body::to_bytes(body, MAX_NEGOTIATION)
         .await
         .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response())
 }
