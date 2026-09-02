@@ -8,6 +8,7 @@
 //! reachable from the network, ever.
 
 use crate::controller::{replace_status, Ctx};
+use crate::janitor;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -296,6 +297,20 @@ pub async fn pull_beat(ctx: &Arc<Ctx>) {
     pull_beat_with(ctx, "btrfs").await
 }
 
+/// Rendezvous over the FULL pool keeps electing a corpse: the reaper deletes its row every beat
+/// and no live node ever becomes a target, so a volume sits one copy short until the node comes
+/// back. Placement therefore sees only nodes that pass the same liveness test the reaper uses —
+/// and a node with no Node object at all is dead, not unknown.
+fn live_nodes(pool: &[String], nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) -> Vec<String> {
+    pool.iter().filter(|n| !node_is_dead(nodes.iter().find(|k| k.name_any() == n.as_str()), floor, now)).cloned().collect()
+}
+
+/// `targets()` counts the owner as one of `total` and hands back `total - 1` standbys. A dead
+/// owner holds nothing anyone can reach, so it is not a copy: ask for one standby more.
+fn standby_count(owner_alive: bool, replicas: u32) -> usize {
+    replicas as usize + usize::from(!owner_alive)
+}
+
 /// Split out so tests can point the receive half at a fake `btrfs` — same shape as
 /// `SendTo::btrfs_bin` on the send side.
 async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
@@ -304,11 +319,21 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
         return;
     }
 
+    // Listed ONCE and threaded through everything below: a partial view of who is alive must reap,
+    // unclaim and place nothing, and every one of those decisions needs to agree on the same list.
+    let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: listing nodes; reaping, unclaiming and placing nothing");
+            return;
+        }
+    };
+
     // Both dead-node sweeps run every pass regardless of what follows: a dead node's stale
     // replica rows and stranded claims must not wait on this node having anything to pull, and
     // they run beside each other so the two never drift onto different dead-node rules.
-    reap_dead_replicas(ctx).await;
-    unclaim_dead_nodes(ctx).await;
+    reap_dead_replicas(ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    unclaim_dead_nodes(ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
     let candidates = match pool_nodes(&ctx.client).await {
         Ok(v) => v,
@@ -326,9 +351,11 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
         }
     };
 
-    for id in interesting_volumes(ctx, &candidates).await {
+    let live = live_nodes(&candidates, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now());
+    for id in interesting_volumes(ctx, &live, &live).await {
         pull_volume(ctx, btrfs_bin, &http, &secret, &id).await;
     }
+    retire_pass(ctx, &live).await;
 }
 
 /// Every volume this node must hold a commit-model replica of: named by replication's rendezvous
@@ -339,7 +366,12 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
 /// the first standby to look finds an empty source list forever. List errors on the
 /// Workspace/Environment half are warned and skipped — a transient API hiccup must not stop the
 /// replication half from pulling.
-async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String]) -> Vec<String> {
+///
+/// `candidates` and `live` are both the live-node list — kept as two parameters because
+/// `replicate::targets` takes the placement pool separately from the owner-alive check, and a
+/// caller retiring against a different (e.g. narrower) candidate set than it places against would
+/// be a bug worth a compile error, not a shared name.
+async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String], live: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(list) => {
@@ -349,7 +381,8 @@ async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String]) -> Vec<Strin
                 }
                 let id = v.name_any();
                 let i_am_owner = v.spec.node_name == ctx.node;
-                let targets = replicate::targets(&id, &v.spec.node_name, candidates, v.spec.replicas as usize);
+                let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
+                let targets = replicate::targets(&id, &v.spec.node_name, candidates, standby_count(owner_alive, v.spec.replicas));
                 if (i_am_owner || targets.iter().any(|t| t == &ctx.node)) && !out.contains(&id) {
                     out.push(id);
                 }
@@ -656,14 +689,12 @@ fn node_is_dead(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timesta
     }
 }
 
-async fn reap_dead_replicas(ctx: &Arc<Ctx>) {
-    let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(list) => list.items,
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: reaper: listing nodes; reaping nothing");
-            return;
-        }
-    };
+// ponytail: `now` is THIS node's own clock against another node's `lastTransitionTime`
+// (apiserver-stamped, but ultimately from whichever node reported the condition) — a fast
+// local clock reaps a row slightly early, a slow one slightly late. `WS_NODE_DEAD_SECS`'s
+// default (600s) swallows ordinary NTP drift; upgrade to an apiserver-relative delta (read the
+// list's own server timestamp instead of a local `now`) if skew ever gets close to the floor.
+async fn reap_dead_replicas(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
     let replicas = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(list) => list.items,
         Err(e) => {
@@ -672,13 +703,6 @@ async fn reap_dead_replicas(ctx: &Arc<Ctx>) {
         }
     };
 
-    // ponytail: `now` is THIS node's own clock against another node's `lastTransitionTime`
-    // (apiserver-stamped, but ultimately from whichever node reported the condition) — a fast
-    // local clock reaps a row slightly early, a slow one slightly late. `WS_NODE_DEAD_SECS`'s
-    // default (600s) swallows ordinary NTP drift; upgrade to an apiserver-relative delta (read the
-    // list's own server timestamp instead of a local `now`) if skew ever gets close to the floor.
-    let now = k8s_openapi::jiff::Timestamp::now();
-    let floor = node_dead_secs();
     let replica_api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
     for r in replicas {
         let dead = node_is_dead(nodes.iter().find(|n| n.name_any() == r.spec.node), floor, now);
@@ -697,17 +721,8 @@ async fn reap_dead_replicas(ctx: &Arc<Ctx>) {
 /// watch picks it back up as unplaced. A Ready node's claim is never touched: this is the ONLY
 /// place besides the claim itself allowed to write `status.nodeName`, per the module doc's
 /// one-fact-one-writer rule.
-async fn unclaim_dead_nodes(ctx: &Arc<Ctx>) {
-    let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
-        Ok(list) => list.items,
-        Err(e) => {
-            tracing::warn!(error = %e, "pull: unclaim: listing nodes; clearing nothing");
-            return;
-        }
-    };
-    let now = k8s_openapi::jiff::Timestamp::now();
-    let floor = node_dead_secs();
-    unclaim_kind::<crd::Workspace>(ctx, "Workspace", &nodes, floor, now, |w| {
+async fn unclaim_dead_nodes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
+    unclaim_kind::<crd::Workspace>(ctx, "Workspace", nodes, floor, now, |w| {
         w.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or("")
     }, |w| {
         let mut st = w.status.clone().unwrap_or_default();
@@ -715,7 +730,7 @@ async fn unclaim_dead_nodes(ctx: &Arc<Ctx>) {
         serde_json::to_value(st).expect("WorkspaceStatus serializes")
     })
     .await;
-    unclaim_kind::<crd::Environment>(ctx, "Environment", &nodes, floor, now, |e| {
+    unclaim_kind::<crd::Environment>(ctx, "Environment", nodes, floor, now, |e| {
         e.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or("")
     }, |e| {
         let mut st = e.status.clone().unwrap_or_default();
@@ -775,6 +790,84 @@ async fn unclaim_kind<K>(
                 }
             }
         }
+    }
+}
+
+/// A copy whose rendezvous slot moved (a node joined, or a dead one came back) is not just
+/// wasted disk: its stale Synced row still wins claims and satisfies stop's flush gate with
+/// data that is no longer being pulled. It goes only once every CURRENT target is Synced, so a
+/// spread never passes through a moment with fewer live copies than before. An unowned volume
+/// is a dead node's mid-takeover: keep everything until someone owns it again.
+fn should_retire(me: &str, owner: &str, targets: &[String], hosted: bool, synced: &HashSet<String>) -> bool {
+    !owner.is_empty() && owner != me && !hosted && !targets.iter().any(|t| t == me) && targets.iter().all(|t| synced.contains(t))
+}
+
+/// Workspaces and Environments whose pod runs on THIS node, by their `status.volumeRef` — same
+/// selector `sync.rs`'s `live_worktrees` uses. A list error here must not retire anything: a
+/// worktree this beat can't see is a worktree `should_retire` would wrongly call unhosted.
+async fn hosted_volumes(ctx: &Arc<Ctx>) -> Option<HashSet<String>> {
+    let mut out = HashSet::new();
+    let mine = ListParams::default().fields(&format!("status.nodeName={}", ctx.node));
+    match Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await {
+        Ok(list) => out.extend(list.items.into_iter().filter_map(|w| w.status.and_then(|s| s.volume_ref))),
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: retire: listing workspaces; retiring nothing");
+            return None;
+        }
+    }
+    match Api::<crd::Environment>::all(ctx.client.clone()).list(&mine).await {
+        Ok(list) => out.extend(list.items.into_iter().filter_map(|e| e.status.and_then(|s| s.volume_ref))),
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: retire: listing environments; retiring nothing");
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Drops this node's copy of any volume whose rendezvous slot over `live` no longer names it —
+/// see `should_retire`. Runs at the end of `pull_beat_with`, after the pull loop, so a new
+/// target's pull lands before anyone retires the copy it just replaced.
+async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
+    let vols = match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: retire: listing volumes; retiring nothing");
+            return;
+        }
+    };
+    let rows = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: retire: listing replicas; retiring nothing");
+            return;
+        }
+    };
+    let Some(hosted) = hosted_volumes(ctx).await else { return };
+    for v in vols {
+        let id = v.name_any();
+        if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() {
+            continue;
+        }
+        let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
+        let targets = replicate::targets(&id, &v.spec.node_name, live, standby_count(owner_alive, v.spec.replicas));
+        let synced: HashSet<String> = rows
+            .iter()
+            .filter(|r| r.spec.volume == id && r.status.as_ref().is_some_and(|s| s.phase == "Synced"))
+            .map(|r| r.spec.node.clone())
+            .collect();
+        if !should_retire(&ctx.node, &v.spec.node_name, &targets, hosted.contains(&id), &synced) {
+            continue;
+        }
+        let rname = crd::replica_name(&id, &ctx.node);
+        if let Err(e) = Api::<crd::VolumeReplica>::all(ctx.client.clone()).delete(&rname, &Default::default()).await {
+            if !matches!(&e, kube::Error::Api(s) if s.code == 404) {
+                tracing::warn!(volume = %id, error = %e, "pull: retire: deleting my replica row; keeping the copy");
+                continue; // row first, copy second: a copy without a row is harmless, a row without a copy is a lie
+            }
+        }
+        janitor::cleanup_local(&ctx.engine, &id);
+        tracing::info!(volume = %id, "pull: retire: slot moved elsewhere, copy dropped");
     }
 }
 
@@ -846,6 +939,14 @@ mod reconcile_tests {
             "metadata": {"name": name},
             "status": {"conditions": [{"type": "Ready", "status": ready, "lastTransitionTime": transitioned_at}]},
         })
+    }
+
+    fn node_ready_obj(name: &str) -> Node {
+        serde_json::from_value(node_json(name, "True", "2000-01-01T00:00:00Z")).unwrap()
+    }
+
+    fn node_dead_obj(name: &str, transitioned_at: &str) -> Node {
+        serde_json::from_value(node_json(name, "False", transitioned_at)).unwrap()
     }
 
     fn list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
@@ -1112,18 +1213,64 @@ fi
             "status": {"phase": "ready"},
         });
         let routes = vec![
-            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![]) },
-            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
             Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, _rec) = test_ctx(tmp.path(), "node-b", routes);
+        let live = vec!["node-b".to_string()];
 
-        let ids = interesting_volumes(&ctx, &["node-b".to_string()]).await;
+        let ids = interesting_volumes(&ctx, &live, &live).await;
 
         assert_eq!(ids, vec!["vol-1".to_string()], "a volume this node owns is always interesting, running or not");
+    }
+
+    /// Rendezvous over the FULL pool keeps electing a corpse forever — `live_nodes` must drop a
+    /// dead node (`node-b`) and a node with no `Node` object at all (`node-c`).
+    #[test]
+    fn dead_nodes_leave_the_candidate_list() {
+        let now = k8s_openapi::jiff::Timestamp::now();
+        let pool = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
+        let old = "2000-01-01T00:00:00Z";
+        let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)]; // node-c: no Node object at all
+        assert_eq!(live_nodes(&pool, &nodes, 600, now), vec!["node-a".to_string()]);
+    }
+
+    /// `targets()` hands back `total - 1` standbys, counting the owner as one of `total`. A dead
+    /// owner holds nothing reachable, so it isn't a copy: one more standby is asked for.
+    #[test]
+    fn a_dead_owner_is_not_a_copy() {
+        assert_eq!(standby_count(true, 2), 2, "targets() subtracts the owner itself");
+        assert_eq!(standby_count(false, 2), 3, "one more standby replaces the dead owner");
+        assert_eq!(standby_count(false, 1), 2);
+    }
+
+    /// `v2` is picked so that rendezvous over the FULL pool elects `node-b` (dead, or here simply
+    /// absent from the live list) as the standby for owner `node-a`: `targets("v2", "node-a",
+    /// [node-a, node-b, node-c], 2) == ["node-b"]`. Over the live-only candidate list a third node,
+    /// `node-c`, is the only standby left to pick — proving placement heals onto it rather than
+    /// sitting one copy short forever.
+    #[tokio::test]
+    async fn a_third_node_finds_a_dead_standbys_volume_interesting() {
+        assert_eq!(replicate::targets("v2", "node-a", &["node-a".into(), "node-b".into(), "node-c".into()], 2), vec!["node-b".to_string()]);
+
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v2"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-c", routes);
+        let live = vec!["node-a".to_string(), "node-c".to_string()];
+
+        assert_eq!(interesting_volumes(&ctx, &live, &live).await, vec!["v2".to_string()]);
     }
 
     /// The reaper: a node absent from a list we DID get, or Ready=false past the age floor, is
@@ -1133,15 +1280,18 @@ fi
     async fn reaper_deletes_dead_keeps_young_keeps_absent_condition() {
         let old = "2000-01-01T00:00:00Z";
         let young = chrono::Utc::now().to_rfc3339();
-        let no_ready_condition = serde_json::json!({
+        let no_ready_condition: Node = serde_json::from_value(serde_json::json!({
             "apiVersion": "v1", "kind": "Node",
             "metadata": {"name": "node-e"},
             "status": {"conditions": []},
-        });
-        let nodes = list_of(
-            "Node",
-            vec![node_json("node-a", "True", old), node_json("node-b", "False", old), node_json("node-c", "False", &young), no_ready_condition],
-        );
+        }))
+        .unwrap();
+        let nodes: Vec<Node> = vec![
+            serde_json::from_value(node_json("node-a", "True", old)).unwrap(),
+            serde_json::from_value(node_json("node-b", "False", old)).unwrap(),
+            serde_json::from_value(node_json("node-c", "False", &young)).unwrap(),
+            no_ready_condition,
+        ];
 
         let replica = |node: &str| {
             serde_json::json!({
@@ -1160,14 +1310,13 @@ fi
         );
 
         let routes = vec![
-            Route { method: "GET", path: NODES.into(), status: 200, body: nodes },
             Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: replicas },
             Route { method: "DELETE", path: format!("{VOLREPLICAS}/vol-1.node-b"), status: 200, body: serde_json::json!({}) },
             Route { method: "DELETE", path: format!("{VOLREPLICAS}/vol-1.node-d"), status: 200, body: serde_json::json!({}) },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
-        reap_dead_replicas(&ctx).await;
+        reap_dead_replicas(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
         assert_eq!(deletes.len(), 2, "{deletes:?}");
@@ -1178,17 +1327,19 @@ fi
         assert!(!deletes.iter().any(|c| c.ends_with("vol-1.node-e")), "no Ready condition at all: kept, not treated as dead");
     }
 
-    /// A nodes-list error must reap nothing at all — a partial view of who is alive is worse than
-    /// no view.
+    /// A nodes-list error must reap, unclaim and place nothing — `pull_beat_with` lists Nodes
+    /// once and bails before any of the three run, so a partial view of who is alive never reaches
+    /// the reaper, the unclaim sweep, or placement.
     #[tokio::test]
-    async fn reaper_reaps_nothing_when_the_node_list_errors() {
+    async fn pull_beat_reaps_unclaims_and_places_nothing_on_a_node_list_error() {
+        std::env::set_var("WS_PEER_SECRET", "s3cret");
         let routes = vec![Route { method: "GET", path: NODES.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        reap_dead_replicas(&ctx).await;
+        pull_beat_with(&ctx, "btrfs").await;
 
-        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a nodes-list error must reap nothing");
+        assert_eq!(rec.calls(), vec![format!("GET {NODES}")], "nothing beyond the failed nodes list should ever be called");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1219,8 +1370,8 @@ fi
     #[tokio::test]
     async fn unclaim_clears_a_dead_nodes_claims_and_never_touches_a_ready_node() {
         let old = "2000-01-01T00:00:00Z";
+        let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
         let routes = vec![
-            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_json("node-a", "True", old), node_json("node-b", "False", old)]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-live", "node-a"), ws_placed("ws-dead", "node-b")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![env_placed("env-dead", "node-b")]) },
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status".into(), status: 200, body: ws_placed("ws-dead", "") },
@@ -1229,7 +1380,7 @@ fi
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        unclaim_dead_nodes(&ctx).await;
+        unclaim_dead_nodes(&ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status");
         assert_eq!(ws_sent.len(), 1, "the dead node's workspace claim is cleared once: {:?}", rec.calls());
@@ -1244,17 +1395,10 @@ fi
         );
     }
 
-    /// Positive evidence only, same as the reaper: a nodes-list error must clear nothing.
-    #[tokio::test]
-    async fn unclaim_clears_nothing_when_the_node_list_errors() {
-        let routes = vec![Route { method: "GET", path: NODES.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
-        let tmp = tempfile::tempdir().unwrap();
-        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
-
-        unclaim_dead_nodes(&ctx).await;
-
-        assert!(rec.calls().iter().all(|c| !c.starts_with("PUT")), "a nodes-list error must clear nothing: {:?}", rec.calls());
-    }
+    // A nodes-list error's effect on both sweeps together is covered by
+    // `pull_beat_reaps_unclaims_and_places_nothing_on_a_node_list_error` above — `reap_dead_replicas`
+    // and `unclaim_dead_nodes` no longer list Nodes themselves, so there is nothing left to error on
+    // in isolation.
 
     // -----------------------------------------------------------------------------------------
     // Task 6: a transient (sync point) is just another `Snapshot` to the pull beat — no separate
@@ -1391,5 +1535,105 @@ fi
         // "sync-ws-1-a" is local but absent from the CR list entirely — its Snapshot was deleted.
         let existing: HashSet<String> = ["vol-1-aaaaaaaa".into()].into_iter().collect();
         assert_eq!(retired(&have, &existing, false), vec!["sync-ws-1-a".to_string()], "a clean pass reclaims it");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Task 0b: `should_retire`, `retire_pass` — dropping a copy whose rendezvous slot moved.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn should_retire_only_an_unwanted_copy_whose_replacements_are_synced() {
+        let t = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let synced = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        assert!(!should_retire("b", "b", &t(&["c"]), false, &synced(&["c"])), "owner never retires");
+        assert!(!should_retire("b", "a", &t(&["b"]), false, &synced(&["b"])), "still a target");
+        assert!(!should_retire("b", "a", &t(&["c"]), true, &synced(&["c"])), "hosting a worktree here");
+        assert!(!should_retire("b", "a", &t(&["c"]), false, &synced(&[])), "replacement not synced yet: keep");
+        assert!(!should_retire("b", "", &t(&["c"]), false, &synced(&["c"])), "unowned (dead owner): keep until taken");
+        assert!(should_retire("b", "a", &t(&["c"]), false, &synced(&["c"])));
+    }
+
+    /// `v1` is picked so that `targets("v1", "node-a", [node-a, node-b, node-c], 2) == ["node-c"]`
+    /// — node-b's slot moved to node-c, and node-c's row is Synced, so node-b's copy is retirable.
+    #[tokio::test]
+    async fn retire_pass_drops_a_copy_whose_slot_moved_once_the_replacement_is_synced() {
+        assert_eq!(
+            replicate::targets("v1", "node-a", &["node-a".into(), "node-b".into(), "node-c".into()], 2),
+            vec!["node-c".to_string()]
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v1")).unwrap();
+
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let replica_c = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": "v1.node-c", "uid": "uid-c"},
+            "spec": {"volume": "v1", "node": "node-c"},
+            "status": {"phase": "Synced", "branches": {}},
+        });
+        let routes = vec![
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![replica_c]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+            Route {
+                method: "DELETE",
+                path: format!("{VOLREPLICAS}/v1.node-b"),
+                status: 200,
+                body: serde_json::json!({
+                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                    "metadata": {"name": "v1.node-b", "uid": "uid-b"},
+                    "spec": {"volume": "v1", "node": "node-b"},
+                    "status": {"phase": "Synced", "branches": {}},
+                }),
+            },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
+
+        retire_pass(&ctx, &live).await;
+
+        assert!(rec.calls().iter().any(|c| c == &format!("DELETE {VOLREPLICAS}/v1.node-b")), "{:?}", rec.calls());
+        assert!(!ctx.engine.pool.voldir("v1").exists(), "the local copy must be gone");
+    }
+
+    /// Same setup, but node-c's row is still `Syncing` — node-b's copy must be kept, on disk and
+    /// in its `VolumeReplica` row, until the replacement actually finishes.
+    #[tokio::test]
+    async fn retire_pass_keeps_a_copy_whose_replacement_is_not_synced_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v1")).unwrap();
+
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let replica_c = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "metadata": {"name": "v1.node-c", "uid": "uid-c"},
+            "spec": {"volume": "v1", "node": "node-c"},
+            "status": {"phase": "Syncing", "branches": {}},
+        });
+        let routes = vec![
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![replica_c]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
+
+        retire_pass(&ctx, &live).await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "{:?}", rec.calls());
+        assert!(ctx.engine.pool.voldir("v1").exists(), "an unsynced replacement must not cost the copy");
     }
 }
