@@ -7,6 +7,10 @@
 //! `nodes`/`floor`/`now` already take in `pull_beat_with`, and for the same reason: every decision
 //! in one beat must agree on one view of the cluster.
 //!
+//! The four listings are four separate round trips with no shared resourceVersion, so a `Beat` is
+//! a consistent view only by convention: a consumer that finds an object present in one list and
+//! absent from another must SKIP it this beat, never delete on the strength of the absence.
+//!
 //! `None` means the cluster could not be fully listed. It is NOT an empty result: every consumer
 //! here decides what to delete, retire or unclaim, and a partial view is exactly the case that
 //! would drop a copy nobody else holds.
@@ -221,6 +225,29 @@ mod tests {
         assert_eq!(rec.calls().iter().filter(|c| c.starts_with("GET /apis")).count(), 4, "{:?}", rec.calls());
         let ws_req = rec.requests().into_iter().find(|r| r.contains("/workspaces?")).expect("a workspace list");
         assert!(ws_req.contains("status.nodeName%3Dnode-a") || ws_req.contains("status.nodeName=node-a"), "{ws_req}");
+    }
+
+    fn parent(kind: &'static str, phase: crd::Phase, pod_ref: Option<&str>) -> Parent {
+        Parent {
+            kind,
+            name: "p".into(),
+            volume: "v1".into(),
+            owner: "alice".into(),
+            head: None,
+            phase,
+            pod_ref: pod_ref.map(Into::into),
+            owner_ref: OwnerReference::default(),
+        }
+    }
+
+    /// A workspace with no pod is writing nothing, so its last sync point is already current; an
+    /// environment has no single `podRef` to lose, so only `Stopped` takes it out of the beat.
+    #[test]
+    fn only_a_running_worktree_with_something_writing_to_it_is_live() {
+        assert!(parent("Workspace", crd::Phase::Ready, Some("ws-alice/p")).is_live_worktree());
+        assert!(!parent("Workspace", crd::Phase::Ready, None).is_live_worktree());
+        assert!(parent("Environment", crd::Phase::Ready, None).is_live_worktree());
+        assert!(!parent("Environment", crd::Phase::Stopped, None).is_live_worktree());
     }
 
     /// Keep-bias: a listing that could not be completed is `None`, never a short list — every
