@@ -91,6 +91,15 @@ impl Engine {
     /// `EnvUp`'s first-ever-mount path (an environment).
     pub fn create_subvol(&self, id: &str) -> Result<(), EngErr> {
         std::fs::create_dir_all(self.pool.voldir(id)).map_err(EngErr::io)?;
+        // A voldir that already holds snapshots is a REPLICA this node pulled, not a volume being
+        // born: its worktree must come from `checkout` of the newest sync point, never from an
+        // empty `live` that `migrate_volume` would then promote into the worktree slot. That
+        // exact sequence re-hosted a taken-over workspace as an empty directory beside a stop
+        // snapshot holding its files.
+        let has_history = std::fs::read_dir(self.pool.snap_dir(id)).map(|mut d| d.next().is_some()).unwrap_or(false);
+        if has_history {
+            return Ok(());
+        }
         // Reconcile is level-triggered and a restarted controller replays it from scratch, so an
         // existing `live` is the expected steady state, not a conflict. Keep-biased: never delete
         // and recreate — that would be data loss dressed up as convergence.
