@@ -16,7 +16,7 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
     // ONE api call before the handshake: the api resolves a name to an id, and the session it
     // mints rides to the ProxyCommand child in ssh's environment rather than being minted again.
     // The host key is pinned here because ssh reads known_hosts in the parent process, before the
-    // proxy has run even once.
+    // proxy has run even once; a change from what's stored is refused, not adopted.
     let s = api::ssh_session(&cfg, target).await.map_err(|e| e.to_string())?;
     let id = &s.id;
     // The id lands in ssh's argv and in a /bin/sh-parsed ProxyCommand; the api is trusted for
