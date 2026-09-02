@@ -164,7 +164,7 @@ spec:
               value: alpine/git:2.45.2@sha256:16ad8e788e1d3b0c30f18da8dde5c0ace3b187445a62d8af893b003ca1e70592
             # `WS_REGION` comes from the `rustic-git-agent` Secret: it names the region whose blob
             # container this node reads and writes, and is half of an `OwnerBinding`'s identity
-            # (controller.rs). A node pointed at the wrong region cannot see snapshots pushed by its
+            # (controller/mod.rs). A node pointed at the wrong region cannot see snapshots pushed by its
             # neighbours. Never set it inline here — an explicit env silently overrides `envFrom`.
             - name: RUST_BACKTRACE
               value: "1"
@@ -201,7 +201,7 @@ spec:
             # How long `stop_push` waits, from the stop transient's creation, for another node's
             # VolumeReplica to report Synced with last_sync_at at or after that listing — past this
             # the stop tears down anyway and records condition reason FlushUnreplicated rather than
-            # hanging a workspace stop on a replica that never shows up (controller.rs).
+            # hanging a workspace stop on a replica that never shows up (controller/stop.rs).
             - name: WS_STOP_FLUSH_TIMEOUT_SECS
               value: "600"
             # Bind address for the peer listener (btrfs send over HTTP, agent-to-agent). Port

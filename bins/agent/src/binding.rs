@@ -96,7 +96,6 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         .await;
     };
     let owner = &b.spec.owner;
-    let mut namespaces = Vec::new();
     for team in teams_in_use(ctx, owner).await? {
         let ns = ws_namespace(owner, &team);
         // No ownerReference on the namespace or the LimitRange: the namespace is shared by every
@@ -129,7 +128,6 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         // And the agent's own: the host-key Secret it reads and creates in `ensure_ssh` is
         // granted here, per namespace, instead of `secrets` cluster-wide.
         ensure(&bindings, &k8s::agent_secret_binding(&ns, owner, &owner_ref), ctx).await?;
-        namespaces.push(ns);
     }
     write_binding_status(b, ctx, gen).await?;
     Ok(Action::await_change())

@@ -2355,4 +2355,61 @@ mod tests {
         let mounts = pod.spec.unwrap().containers[0].volume_mounts.clone().unwrap();
         assert!(mounts.iter().any(|m| m.mount_path == workspace_dir("my-ws")));
     }
+
+    /// ONE peer, always. `namespaceSelector` and `podSelector` in one element of `from`/`to` is an
+    /// AND; split across two elements it is an OR, and every sshd in the cluster becomes reachable
+    /// by any pod that labels itself correctly. The functions say so; this is what holds them to it.
+    #[test]
+    fn every_grant_ands_its_namespace_and_pod_selectors_in_one_peer() {
+        let r = owner_ref();
+        let cases: Vec<(&str, NetworkPolicy, &str)> = vec![
+            ("attach_ingress", attach_ingress("env-1", "ws-alice", "ws-1", "alice", &r), "ingress"),
+            ("allow_gateway_ingress", allow_gateway_ingress("ws-alice", "alice", &r), "ingress"),
+            ("attach_egress", attach_egress("ws-alice", "ws-1", "env-1", "alice", &r), "egress"),
+        ];
+        for (name, pol, dir) in cases {
+            let spec = serde_json::to_value(&pol).unwrap()["spec"].clone();
+            let rules = spec[dir].as_array().unwrap_or_else(|| panic!("{name}: no {dir}"));
+            assert_eq!(rules.len(), 1, "{name}: one rule");
+            let peers = rules[0][if dir == "ingress" { "from" } else { "to" }].as_array().unwrap();
+            assert_eq!(peers.len(), 1, "{name}: two peers is an OR, not an AND: {peers:?}");
+            // And the selectors that must be there ARE there — a single peer with only a
+            // namespaceSelector would pass the count above while opening the whole namespace.
+            if name != "attach_egress" {
+                assert!(peers[0].get("podSelector").is_some(), "{name}: no podSelector");
+            }
+            assert!(peers[0].get("namespaceSelector").is_some(), "{name}: no namespaceSelector");
+        }
+    }
+
+    /// The gateway hole is port 22 and nothing else, from the gateway namespace and nothing else.
+    #[test]
+    fn the_gateway_hole_is_one_port_from_one_place() {
+        let pol = allow_gateway_ingress("ws-alice", "alice", &owner_ref());
+        let spec = serde_json::to_value(&pol).unwrap()["spec"].clone();
+        let rule = &spec["ingress"][0];
+        assert_eq!(rule["ports"], serde_json::json!([{"protocol": "TCP", "port": 22}]));
+        assert_eq!(
+            rule["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+            GATEWAY_NAMESPACE
+        );
+        assert_eq!(rule["from"][0]["podSelector"]["matchLabels"]["app"], "rustic-git-gateway");
+    }
+
+    /// `169.254.0.0/16` is the one that matters: on Azure `169.254.169.254` hands out the NODE's
+    /// managed identity to anything that asks, which is a full escape from the cluster. RFC 1918
+    /// covers pod, service and node networks without this code knowing their numbers.
+    #[test]
+    fn internet_egress_excludes_the_metadata_service_and_all_of_rfc_1918() {
+        let pol = allow_internet_egress("ws-alice", "alice", &owner_ref());
+        let spec = serde_json::to_value(&pol).unwrap()["spec"].clone();
+        let block = &spec["egress"][0]["to"][0]["ipBlock"];
+        assert_eq!(block["cidr"], "0.0.0.0/0");
+        let except: Vec<String> =
+            block["except"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        for want in ["169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
+            assert!(except.contains(&want.to_string()), "{want} is not excluded: {except:?}");
+        }
+        assert_eq!(spec["egress"].as_array().unwrap().len(), 1, "one rule; a second would union it open");
+    }
 }

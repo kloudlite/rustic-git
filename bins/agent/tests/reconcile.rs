@@ -284,7 +284,7 @@ async fn a_reconcile_that_cannot_read_the_pool_deletes_nothing() {
 fn phase_names_the_doc_enum() {
     use rustic_git_workspaces::model::{EnvState, WsState};
 
-    // Grepped from controller.rs. Volume phases are excluded deliberately: a Volume is never
+    // Grepped from controller/workspace.rs. Volume phases are excluded deliberately: a Volume is never
     // projected into a doc, so its vocabulary is its own.
     use rustic_git_workspaces::crd::Phase;
     for p in [Phase::Ready, Phase::Stopped, Phase::Error, Phase::Creating].map(Phase::as_str) {

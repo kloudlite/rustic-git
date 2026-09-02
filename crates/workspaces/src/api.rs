@@ -1743,13 +1743,6 @@ async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
     v
 }
 
-/// The live parents, by volume id, with the kind they are. One list call per kind, never one per
-/// row — and used ONLY for `deleted` and as a provenance fallback.
-///
-/// `None` means the cluster could not be asked, which is NOT the same as "nothing is alive": the
-/// difference decides whether every row on the page is labelled "source deleted" during a kube
-/// blip. The caller keeps `deleted: false` on `None` — the snapshots are what the page is for, and
-/// they are all still there.
 /// `OWNER_LABEL in (…)`, built only from slugs that are single validated segments.
 ///
 /// `in (a,b)` is comma-delimited and paren-terminated, so one slug carrying `,` or `)` widens or
@@ -1757,11 +1750,20 @@ async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
 /// directory-validated today; every other selector in this file takes a single validated value,
 /// and this one now does too.
 pub fn owner_set_selector(owners: &[String]) -> String {
+    // `owners` is always `caller_owners`'s output, and that always starts with the caller's own
+    // (already-validated) owner — so this never filters down to an empty set.
     let safe: Vec<&str> =
         owners.iter().filter(|o| rustic_git_storage::store::valid_owner(o)).map(String::as_str).collect();
     format!("{OWNER_LABEL} in ({})", safe.join(","))
 }
 
+/// The live parents, by volume id, with the kind they are. One list call per kind, never one per
+/// row — and used ONLY for `deleted` and as a provenance fallback.
+///
+/// `None` means the cluster could not be asked, which is NOT the same as "nothing is alive": the
+/// difference decides whether every row on the page is labelled "source deleted" during a kube
+/// blip. The caller keeps `deleted: false` on `None` — the snapshots are what the page is for, and
+/// they are all still there.
 async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BTreeMap<String, (String, String)>> {
     let c = s.kube.as_ref()?;
     let mut live = BTreeMap::new();
