@@ -1750,6 +1750,18 @@ async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
 /// difference decides whether every row on the page is labelled "source deleted" during a kube
 /// blip. The caller keeps `deleted: false` on `None` — the snapshots are what the page is for, and
 /// they are all still there.
+/// `OWNER_LABEL in (…)`, built only from slugs that are single validated segments.
+///
+/// `in (a,b)` is comma-delimited and paren-terminated, so one slug carrying `,` or `)` widens or
+/// breaks the set — on a listing that decides whether a row says "source deleted". Slugs are
+/// directory-validated today; every other selector in this file takes a single validated value,
+/// and this one now does too.
+pub fn owner_set_selector(owners: &[String]) -> String {
+    let safe: Vec<&str> =
+        owners.iter().filter(|o| rustic_git_storage::store::valid_owner(o)).map(String::as_str).collect();
+    format!("{OWNER_LABEL} in ({})", safe.join(","))
+}
+
 async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BTreeMap<String, (String, String)>> {
     let c = s.kube.as_ref()?;
     let mut live = BTreeMap::new();
@@ -1758,7 +1770,7 @@ async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BT
         live.insert(w.name_any(), ("workspace".to_string(), w.spec.name.clone()));
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
-    let lp = ListParams::default().labels(&format!("{OWNER_LABEL} in ({})", owners.join(",")));
+    let lp = ListParams::default().labels(&owner_set_selector(owners));
     for e in envs.list(&lp).await.ok()?.items {
         live.insert(e.name_any(), ("environment".to_string(), e.spec.name.clone()));
     }
