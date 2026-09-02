@@ -60,8 +60,14 @@ async function get<T>(path: string, token?: string, timeoutMs = TIMEOUT_MS): Pro
 }
 
 const seg = (s: string) => encodeURIComponent(s);
-/** A path keeps its slashes — it is many segments — but every segment is escaped. */
-const filePath = (p: string) => p.split("/").filter(Boolean).map(seg).join("/");
+/** A path keeps its slashes — it is many segments — but every segment is escaped.
+ *
+ *  `.` and `..` are dropped rather than escaped: they are unreserved characters, so
+ *  `encodeURIComponent` leaves them alone and the URL parser resolves them away before the
+ *  request goes out, which walks the fetch off this repo's own `/api/{owner}/{repo}/…` prefix.
+ *  Git has no such path anyway, so dropping is exact, not lossy. */
+export const filePath = (p: string) =>
+  p.split("/").filter((s) => s && s !== "." && s !== "..").map(seg).join("/");
 
 export function refs(token: string | undefined, owner: string, repo: string) {
   return get<Ref[]>(`/api/${seg(owner)}/${seg(repo)}/refs`, token);

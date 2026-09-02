@@ -3,7 +3,7 @@ import { describe, expect, mock, test } from "bun:test";
 // `browse` is `server-only`; that guard throws outside a server component, so it is
 // stubbed out before the module loads.
 mock.module("server-only", () => ({}));
-const { decodeBlob, defaultBranch, logPath, resolveRef, shortRef } = await import("./browse");
+const { decodeBlob, defaultBranch, filePath, logPath, resolveRef, shortRef } = await import("./browse");
 
 describe("logPath", () => {
   test("asks the server for a count with the name it reads", () => {
@@ -38,6 +38,25 @@ describe("resolveRef", () => {
     expect(resolveRef(refs, "gone")?.name).toBe("refs/heads/main");
     expect(resolveRef(refs)?.name).toBe("refs/heads/main");
     expect(shortRef("refs/tags/v1")).toBe("v1");
+  });
+});
+
+describe("filePath", () => {
+  test("keeps the slashes, escapes the segments", () => {
+    expect(filePath("src/lib/a b.ts")).toBe("src/lib/a%20b.ts");
+    expect(filePath("")).toBe("");
+  });
+
+  test("drops dot segments", () => {
+    // `.` and `..` are unreserved, so encodeURIComponent passes them through untouched and the
+    // URL parser then normalises them away before the request leaves — landing the fetch on a
+    // different /api endpoint than the page's own. The api tier re-checks visibility either way,
+    // so this is the file's own contract holding, not an authorization fix.
+    expect(filePath("a/../../b")).toBe("a/b");
+    expect(filePath("./a/./b")).toBe("a/b");
+    expect(filePath("..")).toBe("");
+    // A file whose NAME merely starts with dots is not a dot segment and must survive.
+    expect(filePath("...hidden/..x")).toBe("...hidden/..x");
   });
 });
 
