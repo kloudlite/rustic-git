@@ -1404,9 +1404,45 @@ mod reconcile_tests {
     // so they never race each other for the port when the harness runs them concurrently.
     // An async mutex on purpose: the guard is held across the test's awaits (that is the point —
     // the fixed port stays taken for the whole body), and a std guard across an await is a lint.
-    fn peer_port_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    fn peer_port_lock() -> Arc<tokio::sync::Mutex<()>> {
+        static LOCK: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
+
+    /// The port lock and the listener as one thing, because holding the lock is NOT enough on its
+    /// own: a finished test's server task lives until its runtime is dropped, which happens after
+    /// the guard is released, and `bind` sets `SO_REUSEADDR` — so the next test bound `:8444`
+    /// successfully and the kernel kept handing connections to the stale listener. `stop()` closes
+    /// this one before the guard goes.
+    struct PeerServer {
+        stop: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
+        _guard: OwnedMutexGuard<()>,
+    }
+
+    impl PeerServer {
+        async fn stop(self) {
+            let _ = self.stop.send(());
+            let _ = self.task.await;
+        }
+    }
+
+    /// Serve `app` on the fixed production port, exclusively.
+    async fn serve_on_the_peer_port(app: Router) -> PeerServer {
+        let guard = peer_port_lock().lock_owned().await;
+        let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let (stop, rx) = tokio::sync::oneshot::channel::<()>();
+        // Select rather than `with_graceful_shutdown`: a pooled keep-alive connection the test
+        // still holds would keep a graceful shutdown waiting forever.
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                r = axum::serve(tokio_listener, app) => { let _ = r; }
+                _ = rx => {}
+            }
+        });
+        PeerServer { stop, task, _guard: guard }
     }
 
     /// An incremental receive whose `-p` the source never had (this node's nearest held ancestor
@@ -1416,7 +1452,6 @@ mod reconcile_tests {
     /// the source's own `-p` failure surfacing as an incomplete stream) and succeeds call 2.
     #[tokio::test]
     async fn an_incremental_pull_that_fails_falls_back_to_a_full_pull_from_the_same_source() {
-        let _port_guard = peer_port_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
         // I already hold "vol-1-parent" locally — so `my_parent` is `Some`, and the first GET
         // carries `?parent=vol-1-parent`.
@@ -1461,12 +1496,7 @@ fi
         let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin);
         // `agent_pod_addr` hard-codes `:8444` (the peer listener's fixed port in production), so
         // the fake source server must actually listen there for this end-to-end test to reach it.
-        let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(tokio_listener, router(peer_state)).await;
-        });
+        let peer_server = serve_on_the_peer_port(router(peer_state)).await;
 
         let pod = serde_json::json!({
             "apiVersion": "v1", "kind": "Pod",
@@ -1499,6 +1529,8 @@ fi
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["status"]["phase"], "Synced", "the fallback succeeded: nothing is missing any more");
+        // Before the guard: see `PeerServer`.
+        peer_server.stop().await;
     }
 
     /// Catching up on three commits from one source resolves that source's pod address ONCE, not
@@ -1955,7 +1987,6 @@ fi
     /// to pass — that is the point of Task 6.
     #[tokio::test]
     async fn a_ready_transient_is_pulled_and_counts_toward_synced() {
-        let _port_guard = peer_port_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
 
         let bin_dir = tmp.path().join("bin");
@@ -1995,12 +2026,7 @@ fi
                 next.run(req).await
             }
         }));
-        let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(tokio_listener, app).await;
-        });
+        let peer_server = serve_on_the_peer_port(app).await;
 
         let pod = serde_json::json!({
             "apiVersion": "v1", "kind": "Pod",
@@ -2044,6 +2070,8 @@ fi
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["status"]["phase"], "Synced", "and lands Synced once the transient is pulled");
+        // Before the guard: see `PeerServer`.
+        peer_server.stop().await;
     }
 
     /// A transient's `Snapshot` CR being gone is exactly the same "retired" case a deleted commit
@@ -2469,17 +2497,11 @@ fi
     /// dial — so the notify on the far side is the only proof the request was made.
     #[tokio::test]
     async fn a_wake_reaches_a_live_peers_notify() {
-        let _port_guard = peer_port_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let (client, _rec) = mock_client(vec![]);
         let peer_state = PeerState::new(client, tmp.path().to_string_lossy().into(), "node-b".into(), "s3cret".into(), "btrfs".into());
         let peer_notify = peer_state.pull_wake.clone();
-        let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(tokio_listener, router(peer_state)).await;
-        });
+        let peer_server = serve_on_the_peer_port(router(peer_state)).await;
 
         let routes = vec![Route {
             method: "GET",
@@ -2495,6 +2517,8 @@ fi
             tokio::time::timeout(Duration::from_millis(500), peer_notify.notified()).await.is_ok(),
             "the peer's pull notify must have been fired by the POST"
         );
+        // Before the guard: see `PeerServer`.
+        peer_server.stop().await;
     }
 
     /// The coalescing rule itself: a burst of wakes during one pass is ONE more pass, and the pass
