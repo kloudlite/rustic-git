@@ -128,8 +128,8 @@ merge commits — gix-pack drops all-but-last-parent additions on a merge
 `crates/workspaces` + `bins/agent` (`rustic-git-agent`) + `bins/api` (`rustic-git-api`) add a
 second, unrelated control plane: btrfs-backed dev workspaces and multi-service environments,
 separate from git storage, and separate from the registry too: a workspace/environment's pushed
-state is a `Snapshot` CR plus its blobs in the region's Azure container. Nothing about it goes
-through the server tier.
+state is a `Snapshot` CR plus a read-only btrfs subvolume on each node that holds it. Nothing about
+it goes through the server tier, and nothing about it goes to an object store.
 
 **Kubernetes is the reconcile substrate, and the CRDs are the source of truth.**
 `crates/workspaces/src/crd.rs` defines `Volume`/`Workspace`/`Environment` in
@@ -171,9 +171,11 @@ directories left behind by a workspace that is simply gone.
 
 Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests) now
 holds ONLY cross-cluster `Region` metadata — `bins/api` is its only writer, via `/v1/regions`.
-Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob storage, keyed
-`blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one test run or one
-region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
+Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. Snapshot BYTES have
+no object store at all: a snapshot is a read-only btrfs subvolume under `{pool}/vol/{volume}/snap/`,
+and it reaches other nodes as a `btrfs send` streamed over the peer listener between agents
+(`bins/agent/src/peer.rs`) — never uploaded anywhere. Durability is therefore replica count
+(`Volume.spec.replicas`, placed by `replicate::targets`), not a blob container.
 
 Four verbs, no separate commit step: `push` is the single mutating verb — `/v1` writes a
 `Snapshot` CR naming the volume's current head as its parent and the owning node fulfils it:
@@ -199,7 +201,8 @@ falling back to `status.head`. The agent
 (`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
 it watches its own node's objects and converges them (`bins/agent/src/controller.rs`), and its
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
-to the k3s API and to Azure Blob, and to no HTTP service of ours at all.
+to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
+nothing else — no object store, no Azure credential, and no HTTP service of ours.
 Stopping a workspace or environment cuts a `stop-{ws}`/`stop-{env}` sync point (skipped if the pod
 never ran) and waits for another node's `VolumeReplica` to report `Synced` at or after that
 listing, bounded by `WS_STOP_FLUSH_TIMEOUT_SECS`; the Deployment deletes for an environment are

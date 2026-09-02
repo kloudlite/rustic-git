@@ -511,4 +511,6 @@ a leak. `WS_SYNC_SECS` (default 60) is how often the beat checks; `WS_STOP_FLUSH
 before giving up. Condition reason `FlushUnreplicated` on a stopped workspace or environment means
 exactly that: nothing synced the final transient in time, so the stop went through unreplicated —
 check whether the volume has any peers at all (`spec.replicas`) and whether replication is even
-enabled (`WS_PEER_SECRET`, above) before assuming the timeout is too short.
+enabled (`WS_PEER_SECRET`, above) before assuming the timeout is too short. On a SINGLE-NODE region
+the gate is skipped entirely rather than waited out — there is nowhere for the bytes to go, so
+every stop lands at once with message "no other node in the region holds replicas".
