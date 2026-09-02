@@ -72,14 +72,6 @@ const IGNORED = new Set([
   "Cargo.lock", "poetry.lock", "composer.lock", "go.sum",
 ]);
 
-const IGNORED_DIRS = new Set([
-  "node_modules", "vendor", "dist", "build", "target", ".git", "third_party",
-]);
-
-export function isIgnoredDir(name: string) {
-  return IGNORED_DIRS.has(name);
-}
-
 export function languageOf(filename: string): Language | undefined {
   if (IGNORED.has(filename)) return undefined;
   if (filename === "Dockerfile") return { name: "Dockerfile", color: "#384d54" };

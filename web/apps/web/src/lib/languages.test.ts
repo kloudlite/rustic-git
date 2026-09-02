@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { breakdown, isIgnoredDir, languageOf } from "./languages";
+import { breakdown, languageOf } from "./languages";
 
 describe("languageOf", () => {
   test("reads the extension, case-insensitively", () => {
@@ -12,11 +12,6 @@ describe("languageOf", () => {
     expect(languageOf("README")).toBeUndefined();
     expect(languageOf("file.unknownext")).toBeUndefined();
     expect(languageOf("Dockerfile")?.name).toBe("Dockerfile");
-  });
-
-  test("build output is skipped as a directory", () => {
-    expect(isIgnoredDir("node_modules")).toBe(true);
-    expect(isIgnoredDir("src")).toBe(false);
   });
 });
 
