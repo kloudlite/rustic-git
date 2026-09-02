@@ -205,14 +205,20 @@ async fn advance_head(ctx: &Arc<Ctx>, kind: &str, worktree: &str, name: &str) ->
 /// delete, no matter how far back in the keep-window they fall. List errors propagate: a
 /// half-seen head set is exactly the case that would let retention delete a commit someone is
 /// still standing on.
-async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
+async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str, owner: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
     // F4: matched on the commit NAME's `{volume}-` prefix (`crd::snapshot_name`), not on
     // `volume_ref` — a worktree whose status is mid-rebuild has `volumeRef` momentarily unset,
     // and filtering on it there would make its head briefly invisible to retention. The prefix
     // match is exact (commit names are volume-prefixed random hex) and cheap.
+    //
+    // Owner-scoped server-side: this runs on every push, and the unscoped version was a full
+    // cluster scan of both parent kinds each time. A volume's worktrees all belong to one owner,
+    // and the owner comes from the snapshot list the caller already has. NOT node-scoped: a head
+    // must stay protected while its worktree is claimed on another node mid-takeover.
+    let mine = ListParams::default().labels(&format!("{}={owner}", rustic_git_workspaces::k8s::OWNER_LABEL));
     let prefix = format!("{volume}-");
     let mut heads = std::collections::HashSet::new();
-    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
+    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await?.items {
         if let Some(h) = w.status.as_ref().and_then(|s| s.head.clone()) {
             if h.starts_with(&prefix) {
                 heads.insert(h);
@@ -228,7 +234,7 @@ async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections
             }
         }
     }
-    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
+    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&mine).await?.items {
         if let Some(h) = e.status.as_ref().and_then(|s| s.head.clone()) {
             if h.starts_with(&prefix) {
                 heads.insert(h);
@@ -300,7 +306,10 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     // parent, and is never a delete candidate on the commit path.
     let by_name: std::collections::HashMap<String, crd::Snapshot> =
         ready.into_iter().filter(|(_, s)| !s.spec.transient).collect();
-    let heads = match worktree_heads(ctx, volume).await {
+    // The owner comes from the volume's own commits — every `Snapshot` on this volume carries it,
+    // and `retain` has already listed them.
+    let owner = by_name.values().next().map(|s| s.spec.owner.clone()).unwrap_or_default();
+    let heads = match worktree_heads(ctx, volume, &owner).await {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(%volume, error = %e, "retention: listing worktree heads; nothing deleted this pass");
@@ -907,5 +916,24 @@ mod commit_tests {
             "a status-less commit must not be ignored — it is a commit that has never been cut"
         );
         let _ = &rec;
+    }
+
+    /// Retention's head scan is owner-scoped: an unfiltered cluster-wide Workspace and Environment
+    /// list on every push is a full scan for a prefix match it does client-side anyway.
+    #[tokio::test]
+    async fn worktree_heads_selects_by_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![
+            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        worktree_heads(&ctx, "v1", "alice").await.unwrap();
+
+        for kind in ["workspaces", "environments"] {
+            let req = rec.requests().into_iter().find(|r| r.contains(&format!("/{kind}?"))).unwrap_or_default();
+            assert!(req.contains("owner%3Dalice") || req.contains("owner=alice"), "{kind}: {req}");
+        }
     }
 }
