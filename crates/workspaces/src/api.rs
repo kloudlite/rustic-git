@@ -1462,13 +1462,22 @@ async fn delete_env(
     // reconciler treats a missing environment as unattached anyway, so a failure here degrades to a
     // stale field rather than a dangling grant.
     let wss: Api<crd::Workspace> = Api::all(c.clone());
-    if let Ok(list) = wss.list(&ListParams::default()).await {
-        for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
-            let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
-            if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
-                tracing::warn!(workspace = %w.name_any(), error = %e, "clearing an attachment");
+    // Owner-scoped, like every other listing in this file (`owned_by`'s comment says why): an
+    // unfiltered cluster-wide list on every environment delete is a full Workspace scan, and
+    // `attach_ws` refuses a cross-owner or cross-region attachment, so this selector cannot miss
+    // one. The `Err` arm is LOGGED, not dropped: a failed list leaves workspaces pointing at a
+    // deleted environment, and the reconciler treating that as unattached is a degradation
+    // somebody has to be able to find in the logs.
+    match wss.list(&owned_by(&e.spec.owner)).await {
+        Ok(list) => {
+            for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
+                let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
+                if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
+                    tracing::warn!(workspace = %w.name_any(), error = %e, "clearing an attachment");
+                }
             }
         }
+        Err(err) => tracing::warn!(environment = %id, error = %err, "listing workspaces to clear attachments; some may still name this environment"),
     }
     let mut doc = env_doc(&e, &HashSet::new());
     doc.state = EnvState::Deleted;

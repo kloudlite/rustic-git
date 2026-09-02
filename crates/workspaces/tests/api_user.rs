@@ -1361,6 +1361,37 @@ async fn deleting_an_environment_clears_the_attachments_to_it() {
     assert!(s.rec.sent("PATCH", &format!("{API}/workspaces/ws-2")).is_empty());
 }
 
+/// The attachment sweep is OWNER-scoped, not a cluster-wide scan: `attach_ws` refuses cross-region
+/// and requires the caller to own both, so every workspace that could legitimately be attached
+/// already carries this owner's label.
+#[tokio::test]
+async fn delete_env_lists_only_the_owner_s_workspaces() {
+    let s = server(vec![
+        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
+        Route { method: "DELETE", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
+        get(format!("{API}/workspaces"), json!({"apiVersion": "v1", "kind": "WorkspaceList", "items": []})),
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/v1/environments/env-1", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let listed = s
+        .rec
+        .requests()
+        .into_iter()
+        .find(|r| r.starts_with(&format!("GET {API}/workspaces?")))
+        .expect("the attachment sweep listed workspaces");
+    assert!(
+        listed.contains("rustic-git.io%2Fowner%3Dkarthik") || listed.contains("rustic-git.io/owner=karthik"),
+        "{listed}"
+    );
+}
+
 /// Nothing stamps a finalizer on a `Workspace`, so its deletion is pure garbage collection and the
 /// agent never observes it. The workspace-side policy goes with the namespace's ownerReference and
 /// the attach directory is swept by the janitor, but the ENVIRONMENT-side policy lives in another
