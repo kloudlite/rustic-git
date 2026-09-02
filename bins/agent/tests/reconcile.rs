@@ -3970,7 +3970,38 @@ async fn a_movable_volume_whose_preferred_node_is_a_peer_is_released_and_un_plac
     for name in ["ws-1", "ws-2"] {
         let sent = rec.sent("PUT", &format!("/apis/rustic-git.io/v1alpha1/workspaces/{name}/status"));
         assert_eq!(sent[0]["status"]["nodeName"], "", "every parent on the volume follows, not just the started one");
+        let conds = sent[0]["status"]["conditions"].as_array().cloned().unwrap_or_default();
+        // A routine spread is not a failure: `Placed=False/Moving`, never the sweep's `Degraded`.
+        assert!(conds.iter().any(|c| c["type"] == "Placed" && c["status"] == "False" && c["reason"] == "Moving"), "{conds:?}");
+        assert!(!conds.iter().any(|c| c["type"] == "Degraded"), "{conds:?}");
     }
+}
+
+/// The candidate set is the INTERSECTION over every parent, not a union: node-b holds ws-1's stop
+/// cut but not ws-2's, so it would strand ws-2 — and the owner keeps the volume.
+#[tokio::test]
+async fn a_node_up_to_date_for_only_one_of_two_parents_is_no_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let partial = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": "vol-1.node-b"},
+        "spec": {"volume": "vol-1", "node": "node-b"},
+        "status": {"phase": "Synced", "branches": {"ws-1": "stop-ws-1-3"}},
+    });
+    let routes = vec![
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [partial]}) },
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [
+                    transient("stop-ws-1-3", "vol-1", "ws-1", 7), transient("stop-ws-2-1", "vol-1", "ws-2", 4)]}) },
+        Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "NodeList", "items": [node_ready("node-a"), node_ready("node-b")]}) },
+    ];
+    let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
+    let parents = vec![stopped_parent("ws-1", "vol-1"), stopped_parent("ws-2", "vol-1")];
+
+    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap(), None);
+    assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH") || c.starts_with("PUT")), "{:?}", rec.calls());
 }
 
 /// A volume with a RUNNING parent is not movable: a stopped sibling starts on the owner, because

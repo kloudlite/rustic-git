@@ -995,7 +995,7 @@ pub(crate) async fn sweep_volumes(
         // API answers "why will this not start". Last, because on a release the pin is already
         // clear: an un-placed parent is only safe once nothing owns the volume.
         for p in &parents {
-            mark_parent(ctx, p, reason, &why, release).await;
+            mark_parent(ctx, p, ("Degraded", true), reason, &why, release).await;
         }
     }
 }
@@ -1003,23 +1003,30 @@ pub(crate) async fn sweep_volumes(
 /// Clear one parent's claim so the node the volume was just handed to can take it. The same write
 /// the sweep's release arm makes, for the same reason — a parent left pointing at the old owner
 /// would never be looked at by the new one.
+/// `Placed=False`, not `Degraded`: a spread is a routine start-time decision, and writing the word
+/// the dead-node sweep writes would make every healthy move look like a failure in the API and the
+/// web. `Placed` is the condition the claim itself sets, so the next node's claim overwrites it.
 pub(crate) async fn unplace_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent) {
-    mark_parent(ctx, p, "Moving", "released so an up-to-date node can start it", true).await;
+    mark_parent(ctx, p, ("Placed", false), "Moving", "released so an up-to-date node can start it", true).await;
 }
 
 /// One parent's status write for the sweep: the condition always, `nodeName: ""` only on a
 /// release. The same guarded primitive the claim uses (`replace_status`, a PUT carrying
 /// `resourceVersion`, one re-read on a 409) — clearing a claim races the same way winning one does.
-async fn mark_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent, reason: &str, why: &str, release: bool) {
+/// `cond` is the condition TYPE and its truth: the sweep says `Degraded=True`, a spread says
+/// `Placed=False`. Both the idle check and `replaced` key by type, so one type never disturbs the
+/// other's condition.
+async fn mark_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent, cond: (&'static str, bool), reason: &str, why: &str, release: bool) {
     match p.kind {
-        "Workspace" => mark_parent_of::<crd::Workspace>(ctx, &p.name, "Workspace", reason, why, release).await,
-        _ => mark_parent_of::<crd::Environment>(ctx, &p.name, "Environment", reason, why, release).await,
+        "Workspace" => mark_parent_of::<crd::Workspace>(ctx, &p.name, "Workspace", cond, reason, why, release).await,
+        _ => mark_parent_of::<crd::Environment>(ctx, &p.name, "Environment", cond, reason, why, release).await,
     }
 }
 
 /// The generic half. Status is edited as JSON because `Workspace` and `Environment` share no
 /// status type — the same reason `listing::Parent` exists at all.
-async fn mark_parent_of<K>(ctx: &Arc<Ctx>, name: &str, kind: &'static str, reason: &str, why: &str, release: bool)
+#[allow(clippy::too_many_arguments)]
+async fn mark_parent_of<K>(ctx: &Arc<Ctx>, name: &str, kind: &'static str, (cond_type, cond_status): (&'static str, bool), reason: &str, why: &str, release: bool)
 where
     K: kube::Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
 {
@@ -1039,10 +1046,10 @@ where
         }
         let gen = cur.meta().generation.unwrap_or(0);
         let prev: Vec<crd::Condition> = serde_json::from_value(status["conditions"].clone()).unwrap_or_default();
-        let cond = crd::condition_since(prev.iter().find(|c| c.type_ == "Degraded"), "Degraded", true, reason, why, gen);
+        let cond = crd::condition_since(prev.iter().find(|c| c.type_ == cond_type), cond_type, cond_status, reason, why, gen);
         // Idle when nothing changed: this runs on every beat of every node, and rewriting an
         // identical status per volume forever is churn the API server pays for.
-        if !release && prev.iter().any(|c| c.type_ == "Degraded" && c.reason == cond.reason && c.message == cond.message) {
+        if !release && prev.iter().any(|c| c.type_ == cond_type && c.reason == cond.reason && c.message == cond.message) {
             return;
         }
         // Replaced by type, not `kept_conditions`: `Replicated` is what the next beat's second arm

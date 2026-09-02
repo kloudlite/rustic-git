@@ -711,12 +711,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     };
     let id = vol.name_any();
     // Starts spread: the owner is alive (it is running this reconcile) and only the owner may give
-    // a volume away, so this is the one place the decision can be made at all. Gated on THIS
-    // workspace not already running, which is the cheap half of `is_live_worktree` — this function
-    // is also the 15s requeue of every running workspace on the node, and a cluster-wide sibling
-    // listing per workspace per tick is traffic for a decision whose answer is already no. A
-    // listing that could not be completed moves nothing: an unseen sibling may be a running pod.
-    if prev.pod_ref.is_none() || prev.phase == crd::Phase::Stopped {
+    // a volume away, so this is the one place the decision can be made at all. Gated on the START
+    // pass — this workspace's own status still says `Stopped` — because this function
+    // is also the 15s requeue of every workspace on the node, and a cluster-wide sibling listing
+    // per workspace per tick is traffic for a decision whose answer is already no. `Stopped` and
+    // nothing else, matching the environment's: a workspace parked in `Creating` has no bytes
+    // anywhere to spread toward. A listing that could not be completed moves nothing — an unseen
+    // sibling may be a running pod.
+    if prev.phase == crd::Phase::Stopped {
         if let Some(siblings) = crate::listing::parents_on_volume(ctx, &id).await {
             if let Some(node) = super::stop::start_placement(ctx, &vol, &siblings).await? {
                 // Nothing left to do here: this object is unplaced now and `node`'s claim watch

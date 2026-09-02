@@ -96,9 +96,9 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         return stop_environment(e, &vol, &ns, &deployments, prev, gen, ctx).await;
     }
     // Starts spread, exactly as a workspace's does — same decision, same one-caller rule: only the
-    // owner, only when nothing on the volume is running. An environment with any phase but
-    // `Stopped` IS live (it has no single pod to check), so only the first pass after a start can
-    // move it, and every later tick skips the sibling listing entirely.
+    // owner, only when nothing on the volume is running. An environment has no `podRef`, so
+    // `is_live_worktree` reads any non-`Stopped` phase as live: the decision belongs on the START
+    // pass, which is the one moment its status still says `Stopped`, and that is what this gate is.
     if prev.phase == crd::Phase::Stopped {
         if let Some(siblings) = crate::listing::parents_on_volume(ctx, &id).await {
             if let Some(node) = super::stop::start_placement(ctx, &vol, &siblings).await? {
