@@ -1179,12 +1179,18 @@ pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Ve
             owner_ref,
             // To CoreDNS specifically, by its namespace's well-known label. Without this rule
             // every lookup fails, which is the most common way a default-deny namespace looks
-            // like "the network is broken".
+            // like "the network is broken". The namespace label alone admits every kube-system
+            // pod on 53 — the agent's peer listener among them — so `k8s-app: kube-dns` (CoreDNS's
+            // own label in k3s) narrows it; both selectors must stay in ONE peer, or Kubernetes
+            // ORs them back into "all of kube-system OR any k8s-app=kube-dns pod anywhere".
             json!({
                 "podSelector": {},
                 "policyTypes": ["Egress"],
                 "egress": [{
-                    "to": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } } }],
+                    "to": [{
+                        "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } },
+                        "podSelector": { "matchLabels": { "k8s-app": "kube-dns" } },
+                    }],
                     "ports": [
                         { "protocol": "UDP", "port": 53 },
                         { "protocol": "TCP", "port": 53 },
@@ -2204,6 +2210,24 @@ mod tests {
         assert!(
             shared.metadata.owner_references.is_none(),
             "a user's workspace namespace is shared infrastructure and must not be garbage-collected"
+        );
+    }
+
+    /// `allow-dns` reached every pod in kube-system on 53 — the agent's own DaemonSet included —
+    /// where only CoreDNS was ever meant. One peer, both selectors: the two-peer form would mean
+    /// "all of kube-system OR every k8s-app=kube-dns pod anywhere", which is wider than what it
+    /// replaces (see `attach_egress`'s comment on the same trap).
+    #[test]
+    fn allow_dns_reaches_coredns_only() {
+        let p = default_policies("ws-alice", "alice", &owner_ref())
+            .into_iter()
+            .find(|p| p.metadata.name.as_deref() == Some("allow-dns"))
+            .expect("allow-dns");
+        let to = &p.spec.as_ref().unwrap().egress.as_ref().unwrap()[0].to.as_ref().unwrap();
+        assert_eq!(to.len(), 1, "one peer, or the selectors are an OR");
+        assert_eq!(
+            to[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap()["k8s-app"],
+            "kube-dns"
         );
     }
 
