@@ -98,6 +98,14 @@ pub struct Workspace {
     /// here would be a second truth that can disagree with the node's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicated: Option<ConditionDoc>,
+    /// The `Degraded` condition — `NodeDead` is the interrupted case, which the web turns into a
+    /// warning and an offer to clone rather than a start that would be refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<ConditionDoc>,
+    /// The `Decommissioning` condition — `NodeLeaving` says the node is being retired, so a stop
+    /// now costs nothing and the next start lands elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decommissioning: Option<ConditionDoc>,
 }
 
 /// A `meta/v1.Condition` flattened for the web — the shape `packages_status` and `replicated`
@@ -297,6 +305,14 @@ pub struct Environment {
     /// The `Replicated` condition, as on `Workspace`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicated: Option<ConditionDoc>,
+    /// The `Degraded` condition — `NodeDead` is the interrupted case, which the web turns into a
+    /// warning and an offer to clone rather than a start that would be refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<ConditionDoc>,
+    /// The `Decommissioning` condition — `NodeLeaving` says the node is being retired, so a stop
+    /// now costs nothing and the next start lands elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decommissioning: Option<ConditionDoc>,
 }
 
 

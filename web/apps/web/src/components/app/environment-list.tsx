@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import { when } from "@/lib/time";
 import type { ApiEnvironment } from "@/lib/api";
+import { Notices } from "@/components/app/workspace-list";
 
 /** An environment that no longer exists, but whose snapshots do — a volume on the server tier with
  *  history and no live `Environment`. Restoring one is the whole reason the row is here. */
@@ -42,6 +43,7 @@ function LiveRow({ owner, e, latestMs }: { owner: string; e: ApiEnvironment; lat
             {e.services.length} {e.services.length === 1 ? "service" : "services"} · {e.region}
             {latestMs != null && ` · snapshot ${when(latestMs)}`}
           </span>
+          <Notices w={e} />
         </span>
         <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
       </Link>

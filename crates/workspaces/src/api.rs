@@ -419,6 +419,8 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
         }),
         packages_status: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY).map(ConditionDoc::from)),
         replicated: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Replicated").map(ConditionDoc::from)),
+        degraded: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Degraded").map(ConditionDoc::from)),
+        decommissioning: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Decommissioning").map(ConditionDoc::from)),
         id,
     }
 }
@@ -446,6 +448,8 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
             .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Restoring" && c.status == "True"))
             .map(|c| c.reason.clone()),
         replicated: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Replicated").map(ConditionDoc::from)),
+        degraded: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Degraded").map(ConditionDoc::from)),
+        decommissioning: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Decommissioning").map(ConditionDoc::from)),
         id,
     }
 }
@@ -2362,6 +2366,55 @@ mod tests {
         assert!(!ps.ready);
         assert_eq!(ps.reason, "BuildFailed");
         assert!(ps.message.contains("jq2"));
+    }
+
+    /// `Degraded/NodeDead` and `Decommissioning/NodeLeaving` are what the web turns into its two
+    /// non-replication notices, so the doc must carry them or the page silently says nothing.
+    #[test]
+    fn a_workspace_doc_carries_degraded_and_decommissioning() {
+        let mut w = ws_fixture();
+        w.status = Some(crd::WorkspaceStatus {
+            conditions: vec![
+                crd::condition("Degraded", true, "NodeDead", "node n1 is down", 4),
+                crd::condition("Decommissioning", true, "NodeLeaving", "this node is being retired", 4),
+            ],
+            ..Default::default()
+        });
+        let d = ws_doc(&w, &Default::default());
+        let deg = d.degraded.expect("degraded must be shown");
+        assert_eq!(deg.reason, "NodeDead");
+        assert!(deg.message.contains("n1 is down"));
+        let dec = d.decommissioning.expect("decommissioning must be shown");
+        assert_eq!(dec.reason, "NodeLeaving");
+        assert!(dec.message.contains("retired"));
+    }
+
+    #[test]
+    fn an_environment_doc_carries_degraded_and_decommissioning() {
+        let mut e = crd::Environment::new(
+            "env-1",
+            crd::EnvironmentSpec {
+                owner: "karthik".into(),
+                name: "app".into(),
+                region: "centralindia".into(),
+                services: vec![],
+                storage: None,
+                desired_state: crd::DesiredState::Running,
+                restore: None,
+            },
+        );
+        e.status = Some(crd::EnvironmentStatus {
+            conditions: vec![
+                crd::condition("Degraded", true, "NodeDead", "node n1 is down", 4),
+                crd::condition("Decommissioning", true, "NodeLeaving", "this node is being retired", 4),
+            ],
+            ..Default::default()
+        });
+        let d = super::env_doc(&e, &Default::default());
+        assert_eq!(d.degraded.expect("degraded must be shown").reason, "NodeDead");
+        let dec = d.decommissioning.expect("decommissioning must be shown");
+        assert_eq!(dec.reason, "NodeLeaving");
+        assert!(dec.message.contains("retired"));
     }
 
     fn svc(folder: &str, path: &str) -> Service {

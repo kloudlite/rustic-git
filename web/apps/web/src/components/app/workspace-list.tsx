@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
+import { basedOnSentence, noticesFor } from "@/lib/ws-status";
 import { CopyButton } from "@/components/repo/copy-button";
 import { useCopy } from "@/lib/use-copy";
 import { sshConfigBlock, sshOneLiner } from "@/lib/ssh-config";
@@ -159,6 +160,25 @@ function Packages({ w }: { w: ApiWorkspace }) {
         </span>
       )}
     </span>
+  );
+}
+
+/** The waiting-on notices: at most one, rendered where the person is already looking for state.
+ *  `text-warning` only for the interrupted case — everything else here is information, and a page
+ *  where every line is orange is a page nobody reads. Shared with `environment-list.tsx` so the
+ *  two lists cannot drift apart on wording. */
+export function Notices({ w }: { w: Parameters<typeof noticesFor>[0] & { based_on?: ApiWorkspace["based_on"] } }) {
+  const notices = noticesFor(w);
+  if (notices.length === 0 && !w.based_on) return null;
+  return (
+    <>
+      {notices.map((n) => (
+        <span key={n.text} className={`mt-1 block text-sm2 ${n.tone === "warning" ? "text-warning" : "text-muted-foreground"}`}>
+          {n.text}
+        </span>
+      ))}
+      {w.based_on && <span className="mt-1 block text-sm2 text-muted-foreground">{basedOnSentence(w.based_on)}</span>}
+    </>
   );
 }
 
@@ -309,6 +329,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                   {w.region} · {w.quota_gb} GB · {w.image}
                 </span>
                 <Packages w={w} />
+                <Notices w={w} />
               </span>
               <div className="flex shrink-0 items-center gap-2">
                 <ToggleForm owner={owner} id={w.id} running={w.state !== "stopped"} />

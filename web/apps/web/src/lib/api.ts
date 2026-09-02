@@ -715,6 +715,16 @@ export type ApiWorkspace = {
   /** Present once the workspace has an sshd with a host key — i.e. once it can be reached.
    *  Absent while it is coming up, and for a stopped one. */
   ssh?: { gateway: string; host_key: string } | null;
+  /** The `Replicated` condition, verbatim from the node that wrote it — "safe to start anywhere"
+   *  vs "still copying". Absent while running: it is only computed for a stopped parent. */
+  replicated?: { ready: boolean; reason: string; message: string } | null;
+  /** `Degraded/NodeDead` — the source's node is down, so a start is refused and a clone is the way on. */
+  degraded?: { ready: boolean; reason: string; message: string } | null;
+  /** `Decommissioning/NodeLeaving` — the node is being retired; the next start lands elsewhere. */
+  decommissioning?: { ready: boolean; reason: string; message: string } | null;
+  /** What a clone was grafted onto, and whether that cut predates the source's node going down.
+   *  Only a clone response carries it — an environment clone never does. */
+  based_on?: { snapshot: string; at?: string | null; age_seconds: number; interrupted: boolean } | null;
 };
 
 export type ApiMount = { folder: string; path: string };
@@ -737,6 +747,13 @@ export type ApiEnvironment = {
   restore_requested_at?: string | null;
   /** Why this environment is mid-restore (`Draining`, `Restoring`, `Requested`), or absent. */
   restoring?: string | null;
+  /** The `Replicated` condition, verbatim from the node that wrote it — "safe to start anywhere"
+   *  vs "still copying". Absent while running: it is only computed for a stopped parent. */
+  replicated?: { ready: boolean; reason: string; message: string } | null;
+  /** `Degraded/NodeDead` — the source's node is down, so a start is refused and a clone is the way on. */
+  degraded?: { ready: boolean; reason: string; message: string } | null;
+  /** `Decommissioning/NodeLeaving` — the node is being retired; the next start lands elsewhere. */
+  decommissioning?: { ready: boolean; reason: string; message: string } | null;
 };
 
 /** The caller's workspaces in `team`, or their personal ones when it is absent or their own
