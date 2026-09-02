@@ -3530,3 +3530,38 @@ async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_
     assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "nothing was created: {:?}", rec.calls());
     assert!(!tmp.path().join("homecache").exists(), "nothing under the pool root was created");
 }
+
+/// Minimal running Workspace, mirroring `volume_json`'s shape — this test only needs a name to
+/// stand in for the reconcile's target; it never depends on the pass converging.
+fn workspace_json_running(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1",
+        "kind": "Workspace",
+        "metadata": {"name": id, "uid": "ws-uid-1", "generation": 1},
+        "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1",
+                 "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
+        "status": {"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]},
+    })
+}
+
+/// The reactor must stay free while the shared-home mount check runs: `mount_homes` shells out to
+/// `ls`, `umount -f -l` and `nsenter … mount`, up to ~65 s of synchronous syscalls. Asserted by
+/// running a reconcile on a single-threaded runtime beside a timer — a blocking call on the
+/// reactor starves the timer, a `spawn_blocking` one does not.
+#[tokio::test(flavor = "current_thread")]
+async fn a_workspace_reconcile_never_blocks_the_reactor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok("/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status")]);
+    let w = workspace_json_running("ws-1");
+    let w: crd::Workspace = serde_json::from_value(w).unwrap();
+
+    let ticked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = ticked.clone();
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
+    timer.await.unwrap();
+    assert!(ticked.load(std::sync::atomic::Ordering::SeqCst), "the reactor made no progress during the reconcile");
+}

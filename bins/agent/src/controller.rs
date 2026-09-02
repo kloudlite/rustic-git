@@ -2028,7 +2028,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     };
-    ensure_shared_home(&ctx.pool, export, &w.spec.owner, k8s::SSH_UID as u32).map_err(ReconcileErr)?;
+    // `spawn_blocking`, exactly as the `ensure_homecache` call below: `mount_homes` runs
+    // `timeout -s KILL 5 ls`, `umount -f -l` and `timeout -s KILL 60 nsenter … mount`, all
+    // synchronous — up to ~65 s of a reactor thread that every other workspace on this node shares.
+    let (pool, export_owned, owner) = (ctx.pool.clone(), export.to_string(), w.spec.owner.clone());
+    tokio::task::spawn_blocking(move || ensure_shared_home(&pool, &export_owned, &owner, k8s::SSH_UID as u32))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .map_err(ReconcileErr)?;
     let (engine, owner) = (ctx.engine.clone(), w.spec.owner.clone());
     tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32))
         .await
@@ -2179,7 +2186,13 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // Per-WORKSPACE, like the pod that mounts it: `id` is the shared VOLUME for a clone, and
     // writing this file under the volume's name leaves every clone's pod stuck FailedMount on a
     // resolv.conf that does not exist under its own name.
-    write_resolv_conf(&ctx.pool, &w.name_any(), &ns, env_ns.as_deref())?;
+    // Same rule: `create_dir_all` + `read_to_string` + `write`, on the shared home's NFS mount in
+    // the worst case, on every workspace pass.
+    let (pool, ws_id, ns_owned, env_ns_owned) =
+        (ctx.pool.clone(), w.name_any(), ns.clone(), env_ns.clone());
+    tokio::task::spawn_blocking(move || write_resolv_conf(&pool, &ws_id, &ns_owned, env_ns_owned.as_deref()))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))??;
     let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
     match &env {
         Some((env_ns, e)) => {
