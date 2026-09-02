@@ -907,12 +907,12 @@ pub(crate) fn volume_decision(
     }
     // `replicated` is the OWNER's own `Replicated` condition off the listing, never recomputed
     // here: two nodes computing "is it replicated" independently is two truths that can disagree.
-    if let Some(waiting) = parents.iter().find(|p| !p.replicated) {
+    let waiting: Vec<&str> = parents.iter().filter(|p| !p.replicated).map(|p| p.name.as_str()).collect();
+    if !waiting.is_empty() {
+        // Every one of them, not the first: an operator reading this needs to know which parents
+        // are holding the volume, and the set shrinks one name at a time as replicas catch up.
         return VolumeVerdict::Mark {
-            why: format!(
-                "owner {owner} is unavailable; {} on volume {volume} is not replicated to any other node yet",
-                waiting.name
-            ),
+            why: format!("owner {owner} is unavailable; waiting for a replica of: {}", waiting.join(", ")),
         };
     }
     VolumeVerdict::Release {
@@ -946,16 +946,15 @@ pub(crate) async fn sweep_volumes(
             VolumeVerdict::Mark { why } => (why, reason, false),
             VolumeVerdict::Release { why, reason } => (why, reason, true),
         };
-        // Every parent on the volume carries the condition, whatever the verdict — that is how
-        // the API answers "why will this not start", and on a release it is written BEFORE the
-        // un-place so the object is never briefly unplaced with no explanation.
-        for p in &parents {
-            mark_parent(ctx, p, reason, &why, release).await;
-        }
         let mut cur = vol;
         if release {
-            // `test` first: a survivor's takeover landing between our list and this patch must not
-            // be clobbered back to "" — a failed test (409/422) means we lost that race.
+            // The pin FIRST, before anything is un-placed: a failed CAS with parents already
+            // cleared would leave them claimable on a node that does not own the volume — the
+            // exact bug this whole function exists to make impossible.
+            //
+            // `test` proves the owner hadn't already moved (a survivor's takeover landing between
+            // our list and this patch), THEN `replace` clears it; a failed test (409/422) means we
+            // lost that race, so nothing at all is written this beat.
             let ops = json_patch::Patch(vec![
                 json_patch::PatchOperation::Test(json_patch::TestOperation {
                     path: "/spec/nodeName".parse().expect("static pointer parses"),
@@ -978,19 +977,24 @@ pub(crate) async fn sweep_volumes(
             }
         }
         let mut st = cur.status.clone().unwrap_or_default();
-        if st.phase == crd::Phase::Unavailable
+        let idle = st.phase == crd::Phase::Unavailable
             && !release
-            && st.conditions.iter().any(|c| c.type_ == "Available" && c.reason == reason && c.message == why)
-        {
-            continue; // already marked, same reason, still pinned: nothing changed since last beat
+            && st.conditions.iter().any(|c| c.type_ == "Available" && c.reason == reason && c.message == why);
+        if !idle {
+            st.phase = crd::Phase::Unavailable;
+            let gen = cur.metadata.generation.unwrap_or(0);
+            // No `Released` reason: `Unavailable` with an empty pin IS released, and a third word
+            // would restate the pin the object already carries.
+            st.conditions = vec![crd::condition("Available", false, reason, &why, gen)];
+            if let Err(e) = replace_status(&api, &cur, "Volume", serde_json::to_value(st).expect("VolumeStatus serializes")).await {
+                tracing::warn!(volume = %name, error = %e, "sweep: marking an unavailable owner's volume");
+            }
         }
-        st.phase = crd::Phase::Unavailable;
-        let gen = cur.metadata.generation.unwrap_or(0);
-        // No `Released` reason: `Unavailable` with an empty pin IS released, and a third word
-        // would restate the pin the object already carries.
-        st.conditions = vec![crd::condition("Available", false, reason, &why, gen)];
-        if let Err(e) = replace_status(&api, &cur, "Volume", serde_json::to_value(st).expect("VolumeStatus serializes")).await {
-            tracing::warn!(volume = %name, error = %e, "sweep: marking an unavailable owner's volume");
+        // Every parent on the volume carries the condition, whatever the verdict — that is how the
+        // API answers "why will this not start". Last, because on a release the pin is already
+        // clear: an un-placed parent is only safe once nothing owns the volume.
+        for p in &parents {
+            mark_parent(ctx, p, reason, &why, release).await;
         }
     }
 }
@@ -1012,7 +1016,14 @@ where
     K: kube::Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
 {
     let api: Api<K> = Api::all(ctx.client.clone());
-    let Ok(Some(mut cur)) = api.get_opt(name).await else { return };
+    let mut cur = match api.get_opt(name).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return, // deleted between the listing and now: nothing to mark
+        Err(e) => {
+            tracing::warn!(%kind, %name, error = %e, "sweep: reading a parent to mark it");
+            return;
+        }
+    };
     for attempt in 0..2 {
         let mut status = serde_json::to_value(&cur).unwrap_or_default()["status"].take();
         if status.is_null() {
@@ -2091,6 +2102,71 @@ fi
         assert_eq!(vol_sent[0]["status"]["phase"], "unavailable");
         assert_eq!(vol_sent[0]["status"]["conditions"][0]["reason"], "NodeDead");
         assert!(!rec.calls().iter().any(|c| c.contains("/volumes/vol-live")), "{:?}", rec.calls());
+    }
+
+    /// A lost CAS writes NOTHING: a survivor's takeover landed between the listing and the patch,
+    /// so the volume is owned again and un-placing its parents would leave them claimable on a
+    /// node that owns nothing. The pin is therefore attempted FIRST, and its failure ends the beat
+    /// for this volume.
+    #[tokio::test]
+    async fn a_lost_pin_cas_leaves_the_volume_and_its_parents_untouched() {
+        let old = "2000-01-01T00:00:00Z";
+        let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
+        let routes = vec![
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
+            Route {
+                method: "PATCH",
+                path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop".into(),
+                status: 422,
+                body: serde_json::to_value(kube::core::Status::failure("the test operation failed", "Invalid").with_code(422)).unwrap(),
+            },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        let mut beat = beat_of(vec![vol_owned("vol-ws-stop", "node-b")], vec![], vec![]);
+        beat.all_parents = vec![parent_at("Workspace", "ws-stop", "vol-ws-stop", crd::Phase::Stopped, true)];
+
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+
+        assert!(
+            !rec.calls().iter().any(|c| c.starts_with("PUT")),
+            "a failed CAS writes no volume status and un-places no parent: {:?}", rec.calls()
+        );
+    }
+
+    /// Two parents of different kinds on ONE volume, both stopped and both replicated: one pin
+    /// cleared, one volume marked, and BOTH un-placed — the volume is the unit, so no parent on it
+    /// is left behind pinned to a node that no longer owns it.
+    #[tokio::test]
+    async fn a_shared_volume_releases_every_parent_on_it_at_once() {
+        let old = "2000-01-01T00:00:00Z";
+        let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
+        let routes = vec![
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-a", ws_placed_stopped("ws-a", "node-b")),
+            get("/apis/rustic-git.io/v1alpha1/environments/env-b", env_placed_stopped("env-b", "node-b")),
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-a/status".into(), status: 200, body: ws_placed_stopped("ws-a", "") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/environments/env-b/status".into(), status: 200, body: env_placed_stopped("env-b", "") },
+            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        let mut beat = beat_of(vec![vol_owned("vol-1", "node-b")], vec![], vec![]);
+        beat.all_parents = vec![
+            parent_at("Workspace", "ws-a", "vol-1", crd::Phase::Stopped, true),
+            parent_at("Environment", "env-b", "vol-1", crd::Phase::Stopped, true),
+        ];
+
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+
+        assert_eq!(rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/vol-1").len(), 1, "one pin patch for the volume, not one per parent");
+        assert_eq!(rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status").len(), 1);
+        let ws = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-a/status");
+        let env = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/environments/env-b/status");
+        assert_eq!(ws.len(), 1, "{:?}", rec.calls());
+        assert_eq!(env.len(), 1, "{:?}", rec.calls());
+        assert_eq!(ws[0]["status"]["nodeName"], "");
+        assert_eq!(env[0]["status"]["nodeName"], "");
     }
 
     /// `resolve_volume`'s takeover half, `controller::take_volume`: a CAS win writes the same
