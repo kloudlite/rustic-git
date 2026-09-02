@@ -8,9 +8,11 @@
 use super::{owner_ref_of_kind, Ctx, ReconcileErr};
 use crate::sync;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use k8s_openapi::api::core::v1::Node;
 use kube::api::{ListParams, PostParams};
 use kube::{Api, Resource, ResourceExt};
 use rustic_git_workspaces::crd;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// What a fixed-name stop request says about its push: landed, or still being cut. The caller
@@ -119,6 +121,82 @@ where
             Ok(StopPush::Waiting)
         }
     }
+}
+
+/// Where a volume should start next. `None` means "here" — the owner keeps it; `Some(node)` means
+/// this pass has already released the pin and un-placed every parent, so the named node's claim
+/// takes it over.
+///
+/// Only the OWNER runs this, and only when the volume is MOVABLE (no parent on it running).
+/// Nothing is ever moved while running and nothing is copied from a live tree; a stopped sibling
+/// on a volume with a running parent therefore starts on the owner, because that is where the
+/// volume is.
+///
+/// The candidate set is `{owner} ∪ {nodes up to date for EVERY stopped parent on the volume}` —
+/// every parent, because a node that holds one worktree's cut and not another's would strand the
+/// other. The choice is rendezvous on the volume id, so it is deterministic (a retry lands on the
+/// same answer), even by count, and computed identically by every node with no coordinator.
+///
+/// If the preferred node never claims (it died in between), nothing is stuck: the volume is
+/// released, so the dead-node sweep's own rule lets any up-to-date node take it.
+pub async fn start_placement(
+    ctx: &Arc<Ctx>,
+    volume: &crd::Volume,
+    parents: &[crate::listing::Parent],
+) -> Result<Option<String>, ReconcileErr> {
+    let id = volume.name_any();
+    // Not movable: decided locally, with no API calls at all — this runs on every start.
+    if parents.iter().any(|p| p.is_live_worktree()) {
+        return Ok(None);
+    }
+    // Only the owner may give a volume away: it is the one node that certainly is not mid-takeover,
+    // and a non-owner's release would race the owner's own reconcile of the same volume.
+    if volume.spec.node_name != ctx.node {
+        return Ok(None);
+    }
+    let lp = ListParams::default().fields(&format!("spec.volume={id}"));
+    let rows = Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&lp).await?.items;
+    let nodes = Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
+    let (floor, now) = (crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now());
+    // A dead or draining node is no candidate: handing it the volume would strand every parent
+    // until the sweep took it back.
+    let live: Vec<crd::VolumeReplica> = rows
+        .into_iter()
+        .filter(|r| r.spec.node != ctx.node)
+        .filter(|r| !crate::peer::unplaceable(nodes.iter().find(|n| n.name_any() == r.spec.node), floor, now))
+        .collect();
+
+    // Intersection across every parent: a candidate must be up to date for ALL of them.
+    let mut candidates: Option<HashSet<String>> = None;
+    for p in parents {
+        let newest = crate::peer::newest_transient(ctx, &id, &p.name).await?;
+        let ok: HashSet<String> =
+            crate::peer::up_to_date_nodes(&p.name, newest.as_deref(), &live).into_iter().collect();
+        candidates = Some(match candidates {
+            None => ok,
+            Some(prev) => prev.intersection(&ok).cloned().collect(),
+        });
+    }
+    let mut set: Vec<String> = candidates.unwrap_or_default().into_iter().collect();
+    // The owner is always a candidate: it holds the bytes by construction.
+    set.push(ctx.node.clone());
+    set.sort();
+    let Some(preferred) = crate::peer::preferred_node(&id, &set) else { return Ok(None) };
+    if preferred == ctx.node {
+        return Ok(None);
+    }
+    // The two-step move, deliberately kept over an owner-writes-the-target handoff: a handoff
+    // would need the admission policy to allow ANY `nodeName` change, and this reuses the CAS the
+    // takeover path already proved. Pin first, parents second — a cleared pin with placed parents
+    // self-heals through the mismatch branch, the reverse strands them.
+    if !crate::controller::volume::release_volume(ctx, &id, &ctx.node).await? {
+        return Ok(None); // someone else moved it first; next pass re-decides against the new owner
+    }
+    for p in parents {
+        crate::peer::unplace_parent(ctx, p).await;
+    }
+    tracing::info!(volume = %id, to = %preferred, "start: spreading a movable volume");
+    Ok(Some(preferred))
 }
 
 /// THE "is it replicated" truth, computed in exactly one place — the owner's reconcile of a

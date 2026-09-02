@@ -3844,3 +3844,205 @@ fn a_directory_left_by_the_old_subpath_mount_is_replaced_by_the_file() {
     rustic_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
     assert!(std::fs::metadata(&path).unwrap().is_file());
 }
+
+// ── starts spread: the owner gives a movable volume away ─────────────────
+
+/// A bare `Ctx` on a named node with EXACTLY the routes given — no defaults appended, because
+/// these tests assert on the absence of calls as much as on their content.
+fn ctx_with_node(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    let (client, rec) = mock_client(routes);
+    let profiles = pool.join("profiles");
+    let _ = std::fs::create_dir_all(&profiles);
+    std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
+    (
+        Arc::new(Ctx::new(
+            client,
+            Arc::new(Engine::new(Pool::new(pool))),
+            node.into(),
+            pool.to_string_lossy().into(),
+            "r1".into(),
+            vec!["session".into(), "env".into()],
+            Some("test:/".into()),
+            Arc::new(FakeNix::default()),
+            profiles,
+        )),
+        rec,
+    )
+}
+
+fn transient(name: &str, volume: &str, worktree: &str, generation: u64) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": name, "uid": format!("uid-{name}"),
+                     "annotations": {"rustic-git.io/synced-generation": generation.to_string()}},
+        "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "",
+                 "pinned": false, "transient": true},
+        "status": {"phase": "ready"},
+    })
+}
+
+fn node_ready(name: &str) -> serde_json::Value {
+    serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": name},
+                       "status": {"conditions": [{"type": "Ready", "status": "True",
+                                                  "lastTransitionTime": rfc3339_ago(60)}]}})
+}
+
+fn vol_owned(name: &str, node: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1},
+        "spec": {"owner": "alice", "nodeName": node, "region": "r1", "quotaGb": 10},
+    })
+}
+
+fn vol_obj(name: &str, node: &str) -> crd::Volume {
+    serde_json::from_value(vol_owned(name, node)).unwrap()
+}
+
+fn placed_ws(name: &str, node: &str) -> serde_json::Value {
+    let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": node, "volumeRef": name}));
+    o["metadata"] = serde_json::json!({"name": name, "uid": format!("{name}-uid")});
+    o
+}
+
+fn parent_at(name: &str, volume: &str, phase: crd::Phase, pod: Option<&str>) -> rustic_git_agent::listing::Parent {
+    rustic_git_agent::listing::Parent {
+        kind: "Workspace",
+        name: name.into(),
+        volume: volume.into(),
+        owner: "alice".into(),
+        node_name: "node-a".into(),
+        head: None,
+        phase,
+        pod_ref: pod.map(Into::into),
+        owner_ref: Default::default(),
+        replicated: true,
+    }
+}
+
+fn stopped_parent(name: &str, volume: &str) -> rustic_git_agent::listing::Parent {
+    parent_at(name, volume, crd::Phase::Stopped, None)
+}
+
+fn running_parent(name: &str, volume: &str) -> rustic_git_agent::listing::Parent {
+    parent_at(name, volume, crd::Phase::Ready, Some("ws-alice/p"))
+}
+
+/// A movable volume — nothing on it running — spreads: the OWNER computes the preferred node over
+/// {itself} ∪ {nodes up to date for every stopped parent on it}, and hands the volume over when
+/// that is not itself. Only the owner may give a volume away; it is the one node that certainly
+/// is not mid-takeover.
+#[tokio::test]
+async fn a_movable_volume_whose_preferred_node_is_a_peer_is_released_and_un_placed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let peer_holds = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": "vol-1.node-b"},
+        "spec": {"volume": "vol-1", "node": "node-b"},
+        "status": {"phase": "Synced", "branches": {"ws-1": "stop-ws-1-3", "ws-2": "stop-ws-2-1"}},
+    });
+    let routes = vec![
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [peer_holds]}) },
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [
+                    transient("stop-ws-1-3", "vol-1", "ws-1", 7), transient("stop-ws-2-1", "vol-1", "ws-2", 4)]}) },
+        Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "NodeList", "items": [node_ready("node-a"), node_ready("node-b")]}) },
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_owned("vol-1", "") },
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: placed_ws("ws-1", "node-a") },
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-2".into(), status: 200, body: placed_ws("ws-2", "node-a") },
+        Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "") },
+        Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-2/status".into(), status: 200, body: placed_ws("ws-2", "") },
+    ];
+    let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
+    // Both parents stopped: the volume is movable.
+    let parents = vec![stopped_parent("ws-1", "vol-1"), stopped_parent("ws-2", "vol-1")];
+
+    let chosen = rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap();
+
+    // node-b wins the rendezvous for "vol-1" over {node-a, node-b} — deterministic, so this is a
+    // fixed expectation, not a coin flip.
+    assert_eq!(chosen.as_deref(), Some("node-b"));
+    let ops = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/vol-1").remove(0);
+    assert_eq!(ops[0], serde_json::json!({"op": "test", "path": "/spec/nodeName", "value": "node-a"}));
+    assert_eq!(ops[1], serde_json::json!({"op": "replace", "path": "/spec/nodeName", "value": ""}));
+    for name in ["ws-1", "ws-2"] {
+        let sent = rec.sent("PUT", &format!("/apis/rustic-git.io/v1alpha1/workspaces/{name}/status"));
+        assert_eq!(sent[0]["status"]["nodeName"], "", "every parent on the volume follows, not just the started one");
+    }
+}
+
+/// A volume with a RUNNING parent is not movable: a stopped sibling starts on the owner, because
+/// that is where the volume is and nothing is ever moved out from under a running pod.
+#[tokio::test]
+async fn a_volume_with_a_running_sibling_never_moves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", vec![]);
+    let parents = vec![running_parent("ws-1", "vol-1"), stopped_parent("ws-2", "vol-1")];
+
+    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap(), None);
+    assert!(rec.calls().is_empty(), "not movable is decided locally, with no API calls at all: {:?}", rec.calls());
+}
+
+/// Only the OWNER hands a volume away: a node reconciling a parent whose volume is pinned
+/// elsewhere decides nothing and writes nothing.
+#[tokio::test]
+async fn a_node_that_does_not_own_the_volume_releases_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", vec![]);
+    let parents = vec![stopped_parent("ws-1", "vol-1")];
+
+    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-b"), &parents).await.unwrap(), None);
+    assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+}
+
+/// No up-to-date replica: the candidate set is exactly {owner}, so it starts here. This is the
+/// `replicas: 1` case and the "the stop cut has not landed anywhere yet" case, both.
+#[tokio::test]
+async fn with_no_up_to_date_replica_the_owner_keeps_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let behind = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": "vol-1.node-b"}, "spec": {"volume": "vol-1", "node": "node-b"},
+        "status": {"phase": "Synced", "branches": {"ws-1": "sync-ws-1-old"}},
+    });
+    let routes = vec![
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [behind]}) },
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-1", "ws-1", 7)]}) },
+        Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "NodeList", "items": [node_ready("node-a"), node_ready("node-b")]}) },
+    ];
+    let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
+    let parents = vec![stopped_parent("ws-1", "vol-1")];
+
+    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap(), None);
+    assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH")), "nothing is released when there is nowhere to go");
+}
+
+/// Preferred == owner: the common case, and it must cost nothing but the read.
+#[tokio::test]
+async fn when_the_owner_is_preferred_it_starts_here_with_no_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let holds = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": "vol-3.node-b"}, "spec": {"volume": "vol-3", "node": "node-b"},
+        "status": {"phase": "Synced", "branches": {"ws-1": "stop-ws-1-3"}},
+    });
+    let routes = vec![
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [holds]}) },
+        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-3", "ws-1", 7)]}) },
+        Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "NodeList", "items": [node_ready("node-a"), node_ready("node-b")]}) },
+    ];
+    // "vol-3" is the id whose rendezvous over {node-a, node-b} scores node-a top — the same
+    // deterministic hash `preferred_node`'s own test asserts, used here so this stays fixed.
+    let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
+    let parents = vec![stopped_parent("ws-1", "vol-3")];
+    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-3", "node-a"), &parents).await.unwrap(), None);
+    assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH") || c.starts_with("PUT")));
+}

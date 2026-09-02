@@ -710,6 +710,23 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         }
     };
     let id = vol.name_any();
+    // Starts spread: the owner is alive (it is running this reconcile) and only the owner may give
+    // a volume away, so this is the one place the decision can be made at all. Gated on THIS
+    // workspace not already running, which is the cheap half of `is_live_worktree` — this function
+    // is also the 15s requeue of every running workspace on the node, and a cluster-wide sibling
+    // listing per workspace per tick is traffic for a decision whose answer is already no. A
+    // listing that could not be completed moves nothing: an unseen sibling may be a running pod.
+    if prev.pod_ref.is_none() || prev.phase == crd::Phase::Stopped {
+        if let Some(siblings) = crate::listing::parents_on_volume(ctx, &id).await {
+            if let Some(node) = super::stop::start_placement(ctx, &vol, &siblings).await? {
+                // Nothing left to do here: this object is unplaced now and `node`'s claim watch
+                // picks it up. Await the change rather than requeueing at an object that is no
+                // longer ours.
+                tracing::info!(workspace = %w.name_any(), %node, "handed over on start");
+                return Ok(Action::await_change());
+            }
+        }
+    }
     // The namespace is the OwnerBinding reconciler's to make; this one only waits for it. Creating
     // it here as well is how it ended up with two writers.
     //

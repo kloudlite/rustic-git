@@ -95,6 +95,18 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     if e.spec.desired_state == DesiredState::Stopped {
         return stop_environment(e, &vol, &ns, &deployments, prev, gen, ctx).await;
     }
+    // Starts spread, exactly as a workspace's does — same decision, same one-caller rule: only the
+    // owner, only when nothing on the volume is running. An environment with any phase but
+    // `Stopped` IS live (it has no single pod to check), so only the first pass after a start can
+    // move it, and every later tick skips the sibling listing entirely.
+    if prev.phase == crd::Phase::Stopped {
+        if let Some(siblings) = crate::listing::parents_on_volume(ctx, &id).await {
+            if let Some(node) = super::stop::start_placement(ctx, &vol, &siblings).await? {
+                tracing::info!(environment = %e.name_any(), %node, "handed over on start");
+                return Ok(Action::await_change());
+            }
+        }
+    }
     run_environment(e, &vol, &ns, &deployments, &owner_ref, prev, gen, ctx).await
 }
 

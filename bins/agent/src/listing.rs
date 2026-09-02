@@ -88,6 +88,13 @@ pub async fn all_parents(ctx: &Arc<Ctx>) -> Option<Vec<Parent>> {
     parents_matching(ctx, &ListParams::default(), None).await
 }
 
+/// Every parent on ONE volume, cluster-wide — the sibling set a start's placement decision needs.
+/// Cluster-wide because the decision is per volume and a parent of it may still be placed on the
+/// node this one is about to hand the volume to.
+pub async fn parents_on_volume(ctx: &Arc<Ctx>, volume: &str) -> Option<Vec<Parent>> {
+    Some(all_parents(ctx).await?.into_iter().filter(|p| p.volume == volume).collect())
+}
+
 /// Both listings' one body. `on_node` is the local re-check, not the selector: a cluster on an
 /// older CRD would ignore the field selector and hand back every node's objects.
 async fn parents_matching(ctx: &Arc<Ctx>, mine: &ListParams, on_node: Option<&str>) -> Option<Vec<Parent>> {

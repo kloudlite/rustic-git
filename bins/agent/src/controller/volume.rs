@@ -418,6 +418,28 @@ pub(crate) async fn take_volume(ctx: &Arc<Ctx>, name: &str, node: &str) -> Resul
     }
 }
 
+/// The mirror of `take_volume`: compare-and-set the owner pin from `owner` to empty. Same `test`
+/// construction and the same "lost, not broken" reading of a 409/422 — a start that raced the
+/// dead-node sweep just re-decides on its next pass.
+pub(crate) async fn release_volume(ctx: &Arc<Ctx>, name: &str, owner: &str) -> Result<bool, kube::Error> {
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let ops = json_patch::Patch(vec![
+        json_patch::PatchOperation::Test(json_patch::TestOperation {
+            path: "/spec/nodeName".parse().expect("static pointer parses"),
+            value: serde_json::json!(owner),
+        }),
+        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
+            path: "/spec/nodeName".parse().expect("static pointer parses"),
+            value: serde_json::json!(""),
+        }),
+    ]);
+    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
 /// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
 /// this guards is a pod wedged forever on `path … does not exist`.

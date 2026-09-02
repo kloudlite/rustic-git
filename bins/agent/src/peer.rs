@@ -746,6 +746,27 @@ pub(crate) fn up_to_date(replica: &crd::VolumeReplica, worktree: &str, newest_tr
     }
 }
 
+/// Which of these replica rows are up to date for `worktree` — the candidate set a start or a
+/// clone chooses among, the owner being added by the caller (it holds the bytes by construction).
+pub(crate) fn up_to_date_nodes(worktree: &str, newest: Option<&str>, rows: &[crd::VolumeReplica]) -> Vec<String> {
+    let mut out: Vec<String> = rows.iter().filter(|r| up_to_date(r, worktree, newest)).map(|r| r.spec.node.clone()).collect();
+    out.sort();
+    out
+}
+
+/// Rendezvous over the candidate set, keyed by the volume id — `replicate::targets`' own hash, so
+/// the spread is deterministic and even by count and a retry lands on the same answer. Every node
+/// computes the same result with no coordinator.
+///
+/// ponytail: by COUNT, not by load. Weighting by free CPU or pool space is the named upgrade and
+/// needs an input every node computes identically — a per-node metric every agent can read the
+/// same way, not one node's opinion.
+pub(crate) fn preferred_node(volume: &str, candidates: &[String]) -> Option<String> {
+    // `targets(volume, me = "", candidates, total = 2)` is "the top-scoring candidate", which is
+    // the same ordering the replication spread already uses.
+    replicate::targets(volume, "", candidates, 2).into_iter().next()
+}
+
 /// The newest Ready transient of `worktree` ANYWHERE IN THE CLUSTER — one field-selected list, for
 /// a caller with no beat listing of its own. It deliberately ignores what this node holds: it is
 /// the bar `up_to_date` compares a replica's `branches` against, so intersecting it with local
@@ -977,6 +998,13 @@ pub(crate) async fn sweep_volumes(
             mark_parent(ctx, p, reason, &why, release).await;
         }
     }
+}
+
+/// Clear one parent's claim so the node the volume was just handed to can take it. The same write
+/// the sweep's release arm makes, for the same reason — a parent left pointing at the old owner
+/// would never be looked at by the new one.
+pub(crate) async fn unplace_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent) {
+    mark_parent(ctx, p, "Moving", "released so an up-to-date node can start it", true).await;
 }
 
 /// One parent's status write for the sweep: the condition always, `nodeName: ""` only on a
@@ -2603,6 +2631,33 @@ fi
         assert!(up_to_date(&holding, "ws-1", Some("sync-ws-1-bbbb")));
         assert!(!up_to_date(&behind, "ws-1", Some("sync-ws-1-bbbb")));
         assert!(!up_to_date(&holding, "ws-2", Some("sync-ws-2-cccc")), "another worktree's branch is not this one's");
+    }
+
+    /// A running source's clone lands on the OWNER by arithmetic, not by policy: at the instant
+    /// of the cut the owner is the only node up to date for that worktree. There is no same-node
+    /// rule in the code, and this test asserts the reason, not just the result.
+    #[test]
+    fn a_running_sources_clone_lands_on_the_owner_because_nothing_else_is_up_to_date_yet() {
+        let newest = Some("clone-ws-1-cafe");
+        let peer = replica_with_branches("vol-1", "node-b", "Synced", serde_json::json!({"ws-1": "sync-ws-1-old"}));
+        assert!(!up_to_date(&peer, "ws-1", newest), "the peer has not pulled the fresh cut yet");
+        // The owner needs no row at all: it holds the bytes by construction (Task 5's may_claim).
+        assert_eq!(up_to_date_nodes("ws-1", newest, &[peer]), Vec::<String>::new());
+    }
+
+    /// Once the peer HAS pulled the cut, both nodes qualify and rendezvous decides — the same
+    /// deterministic hash a start uses, so a retry lands on the same answer.
+    #[test]
+    fn once_a_peer_holds_the_cut_rendezvous_decides_between_them() {
+        let newest = Some("clone-ws-1-cafe");
+        let peer = replica_with_branches("vol-1", "node-b", "Synced", serde_json::json!({"ws-1": "clone-ws-1-cafe"}));
+        assert_eq!(up_to_date_nodes("ws-1", newest, &[peer]), vec!["node-b".to_string()]);
+        let candidates = vec!["node-a".to_string(), "node-b".to_string()];
+        assert_eq!(
+            preferred_node("vol-1", &candidates),
+            preferred_node("vol-1", &candidates),
+            "deterministic: a retry lands on the same node"
+        );
     }
 
     /// No transient at all (never ran, or a fresh restore): plain `Synced` is the right bar —
