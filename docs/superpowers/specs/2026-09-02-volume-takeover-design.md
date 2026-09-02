@@ -1,4 +1,4 @@
-# Volume takeover — a dead node's volumes become unowned, a Synced node takes them
+# Dead nodes — replicas heal onto a third machine, volumes go Unavailable, only stopped worktrees move
 
 Date: 2026-09-02. Status: approved in discussion, ready for planning.
 
@@ -21,9 +21,34 @@ another node minus the last minutes of edits has been hurt worse than one who fi
 survivors hold the latest sync point, not the live tree; only the person can decide that the
 difference is acceptable. Automatic healing is therefore limited to what has nothing to lose.
 
+## What "heal" means here
+
+Healing is about the COPIES, not the worktree. When a node dies, every volume it held a copy
+of — as owner or as standby — is one replica short of `spec.replicas`. Healing means a third,
+live machine picks up that copy from a survivor so the count is restored, and it must happen
+without anyone's involvement. Moving the LIVE worktree is the separate, person-only decision
+described below.
+
+Today it does not happen. `pull_beat` computes `replicate::targets` over `pool_nodes()`, which
+is every node labelled `rustic-git.io/pool=true` — dead or alive. The rendezvous hash keeps
+pointing at the corpse, `reap_dead_replicas` deletes its row every beat, and no third node ever
+finds itself a target. A cluster with three nodes and `replicas: 2` sits at one live copy until
+the dead node returns.
+
 ## Decision
 
-Three moves, all on paths that already exist.
+Four moves, all on paths that already exist.
+
+0. **Replica placement ignores dead nodes.** `pull_beat_with` filters `pool_nodes()` through
+   the same `node_is_dead` test the reaper and the unclaim sweep use (one Node list per beat,
+   shared by all three), and hands `interesting_volumes` the LIVE candidates. Rendezvous then
+   elects the next live node for every volume the dead one held, that node finds the volume
+   "interesting", and pulls from any survivor with a Synced row — the existing source
+   selection. When the OWNER is the dead node, `targets` is asked for `replicas` standbys
+   instead of `replicas - 1` (the owner no longer counts as a copy), so the live copy count is
+   `replicas` either way. When the node returns it is a candidate again, the hash flips back,
+   and the extra copy on the third machine is retired by `pull_volume`'s existing
+   "not a target any more" pass — the same churn a node join causes today, no new mechanism.
 
 1. **The dead-node sweep heals only what is stopped.** `unclaim_dead_nodes` (pull beat,
    `WS_NODE_DEAD_SECS`, default 600, same `node_is_dead` test) changes in two ways:
@@ -105,4 +130,6 @@ RBAC is already sufficient: the agent has `patch` on `volumes`.
 - `stop` on a live node: the flush gate, timeout and `FlushUnreplicated` are as before.
 - The `NodeMismatch` guard for a non-empty owner. Two places naming a node still refuse rather
   than pick.
-- `may_claim`, placement, the pull protocol, sync points, commits, homes.
+- `replicate::targets` itself, the pull protocol, source selection, sync points, commits, homes.
+- `may_claim`: a healed third node has a Synced row and is therefore claimable — that is the
+  point.

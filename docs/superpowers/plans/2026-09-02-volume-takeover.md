@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A volume owned by a dead node becomes `Unavailable`; a STOPPED workspace or environment on that node is released and re-hosted by a Synced survivor, a RUNNING one is left pinned and marked `NodeDead` until the person stops it.
+**Goal:** A dead node's replicas are re-created on a live third node without anyone acting; a volume owned by a dead node becomes `Unavailable`; a STOPPED workspace or environment on that node is released and re-hosted by a Synced survivor, a RUNNING one is left pinned and marked `NodeDead` until the person stops it.
 
-**Architecture:** Three arms on existing paths: the dead-node sweep in `bins/agent/src/peer.rs` clears `Volume.spec.nodeName`; `resolve_volume` in `bins/agent/src/controller.rs` takes an empty pin with a JSON-patch `test` compare-and-set; the pull beat on a non-owner deletes stale `live/` worktrees. The admission policy allows exactly the two `nodeName` transitions.
+**Architecture:** Four arms on existing paths: the pull beat in `bins/agent/src/peer.rs` drops dead nodes from the replica candidates so rendezvous heals onto a live one; the dead-node sweep in `bins/agent/src/peer.rs` clears `Volume.spec.nodeName`; `resolve_volume` in `bins/agent/src/controller.rs` takes an empty pin with a JSON-patch `test` compare-and-set; the pull beat on a non-owner deletes stale `live/` worktrees. The admission policy allows exactly the two `nodeName` transitions.
 
 **Tech Stack:** Rust (kube-rs, k8s-openapi), CEL admission policy, btrfs.
 
@@ -12,6 +12,7 @@
 
 ## Global Constraints
 
+- Replica candidates for `replicate::targets` are LIVE pool nodes only; a dead owner does not count as a copy.
 - The agent writes spec on a Volume ONLY for `restoreTo` and `nodeName`; `nodeName` may change only `owned -> ""` (sweep) or `"" -> me` (takeover). Never `owned -> other`.
 - Takeover uses a JSON patch whose first op is `{"op":"test","path":"/spec/nodeName","value":""}`. No read-modify-write.
 - Every sweep and takeover is keep-biased: a list error clears nothing; a patch error takes nothing.
@@ -21,6 +22,90 @@
 - Comments say WHY, never what.
 
 ---
+
+### Task 0: Replica placement heals around dead nodes
+
+**Files:**
+- Modify: `bins/agent/src/peer.rs` (`pull_beat_with` ~line 301, `interesting_volumes` ~line 342, `reap_dead_replicas` ~659, `unclaim_dead_nodes` ~700; tests near 1181)
+
+**Interfaces:**
+- Consumes: `pool_nodes`, `node_is_dead`, `node_dead_secs`, `replicate::targets`.
+- Produces: `fn live_nodes(pool: &[String], nodes: &[Node], floor: i64, now: Timestamp) -> Vec<String>`; `fn standby_count(owner_alive: bool, replicas: u32) -> usize`; `reap_dead_replicas` and `unclaim_dead_nodes` take `nodes: &[Node]` instead of listing themselves.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+    #[test]
+    fn dead_nodes_leave_the_candidate_list() {
+        let now = k8s_openapi::jiff::Timestamp::now();
+        let pool = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
+        let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b")]; // node-c: no Node object at all
+        assert_eq!(live_nodes(&pool, &nodes, 600, now), vec!["node-a".to_string()]);
+    }
+
+    #[test]
+    fn a_dead_owner_is_not_a_copy() {
+        assert_eq!(standby_count(true, 2), 2, "targets() subtracts the owner itself");
+        assert_eq!(standby_count(false, 2), 3, "one more standby replaces the dead owner");
+        assert_eq!(standby_count(false, 1), 2);
+    }
+
+    #[tokio::test]
+    async fn a_third_node_finds_a_dead_standbys_volume_interesting() {
+        // node-c is me; rendezvous over the FULL pool would pick node-b for "v1" (pin the id so it
+        // does — pick an id where targets("v1","node-a",[a,b,c],2) == [b]); over live nodes it picks c.
+        let rec = Recorder::default();
+        let ctx = ctx_on_node_with_routes("node-c", &rec, vec![
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned_replicas("v1", "node-a", 2)]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+        ]);
+        let live = vec!["node-a".to_string(), "node-c".to_string()];
+        assert_eq!(interesting_volumes(&ctx, &live, &live).await, vec!["v1".to_string()]);
+    }
+```
+
+Node-object helpers: the existing tests build Node JSON via `node_ready`/`node_dead`; add `_obj` variants that deserialize those into `k8s_openapi::api::core::v1::Node`. If no `ctx_on_node_with_routes` exists, add the node name as a parameter to the existing constructor.
+
+- [ ] **Step 2: Run, expect failure** — `cargo test -p rustic-git-agent -- live_nodes standby_count third_node` — FAIL.
+
+- [ ] **Step 3: Implement**
+
+```rust
+/// Rendezvous over the FULL pool keeps electing a corpse: the reaper deletes its row every beat
+/// and no live node ever becomes a target, so a volume sits one copy short until the node comes
+/// back. Placement therefore sees only nodes that pass the same liveness test the reaper uses —
+/// and a node with no Node object at all is dead, not unknown.
+fn live_nodes(pool: &[String], nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) -> Vec<String> {
+    pool.iter().filter(|n| !node_is_dead(nodes.iter().find(|k| k.name_any() == n.as_str()), floor, now)).cloned().collect()
+}
+
+/// `targets()` counts the owner as one of `total` and hands back `total - 1` standbys. A dead
+/// owner holds nothing anyone can reach, so it is not a copy: ask for one standby more.
+fn standby_count(owner_alive: bool, replicas: u32) -> usize {
+    replicas as usize + usize::from(!owner_alive)
+}
+```
+
+`pull_beat_with`: list Nodes ONCE (`Api::<Node>::all(..).list(..)`; on error warn and return — a partial view of who is alive must reap, unclaim and place nothing), pass `&nodes` into `reap_dead_replicas` and `unclaim_dead_nodes` (delete their own Node lists), then:
+
+```rust
+    let live = live_nodes(&candidates, &nodes, node_dead_secs(), now);
+    for id in interesting_volumes(ctx, &live, &live).await { ... }
+```
+
+`interesting_volumes(ctx, candidates, live)`: compute `owner_alive = live.iter().any(|n| n == &v.spec.node_name)` and call `replicate::targets(&id, &v.spec.node_name, candidates, standby_count(owner_alive, v.spec.replicas))`. Keep the `i_am_owner` arm.
+
+`pull_volume`'s "no longer a target" retirement pass must use the same live list — grep its `targets(` call (there is one more at ~line 1104's doc) and thread `live` through, or it retires the very copy the beat just made.
+
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p rustic-git-agent && cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add bins/agent/src/peer.rs
+git commit -m "Place replicas over live nodes only so a dead node's copies heal elsewhere"
+```
 
 ### Task 1: `Phase::Unavailable` and the admission rule
 
@@ -353,7 +438,7 @@ git commit -m "Drop a lost volume's stale worktrees on the node that lost it"
 - Modify: `crates/workspaces/src/api.rs` (`stop_ws` ~line 900 and the environment stop handler): when the object's status carries a `NodeDead` condition, the 2xx response body includes `"warning": "node {n} is down; edits after the last sync point are only on that node and will not follow the move"` — read the node from `status.nodeName`. One test in the api test module: a stopped workspace with a `NodeDead` condition answers with that warning, one without does not.
 - Modify: `CLAUDE.md` ("Workspaces and environments": one sentence after the `status.nodeName` claim sentence)
 - Modify: `deploy/k3s/README.md` (a "Node death" subsection: what the sweep does, the 600 s floor, the partition caveat, and how to read `Unavailable`)
-- Modify: `tests/ws_e2e.sh` (after the cross-node sync-point assertions: cordon+drain is not available in the harness, so simulate by scaling the agent DaemonSet off one node with a nodeSelector label, wait `WS_NODE_DEAD_SECS`, assert a RUNNING workspace's Volume goes `Unavailable` but keeps `nodeName` and the workspace carries `NodeDead`; then stop the workspace through the API, assert the response carries the warning, the pin clears, the workspace re-claims on the other node and its Volume `spec.nodeName` equals the new `status.nodeName`)
+- Modify: `tests/ws_e2e.sh` (after the cross-node sync-point assertions; needs THREE agent nodes, else skip with a log line: cordon+drain is not available in the harness, so simulate by scaling the agent DaemonSet off one node with a nodeSelector label, wait `WS_NODE_DEAD_SECS`, assert within two pull beats that a `VolumeReplica` row for the volume appears on the third node and reaches `Synced`; assert a RUNNING workspace's Volume goes `Unavailable` but keeps `nodeName` and the workspace carries `NodeDead`; then stop the workspace through the API, assert the response carries the warning, the pin clears, the workspace re-claims on the other node and its Volume `spec.nodeName` equals the new `status.nodeName`)
 
 - [ ] **Step 1: CLAUDE.md sentence**
 
@@ -370,6 +455,6 @@ git commit -m "Document volume takeover and assert it end to end"
 
 ## Self-review
 
-- Spec coverage: sweep with the Running/Stopped split (Task 2), takeover + guard (Task 3), returning node (Task 4), `Unavailable` + admission (Task 1), stop warning + docs/caveats (Task 5). replicas:1 return-path is Task 3's takeover arm plus Task 4's empty-owner keep rule.
+- Spec coverage: replica healing (Task 0), sweep with the Running/Stopped split (Task 2), takeover + guard (Task 3), returning node (Task 4), `Unavailable` + admission (Task 1), stop warning + docs/caveats (Task 5). replicas:1 return-path is Task 3's takeover arm plus Task 4's empty-owner keep rule.
 - The stop handler already writes `desiredState: Stopped`; nothing new fires the move — the next sweep beat does.
 - Names: `take_volume`, `release_dead_volumes`, `drop_stale_worktrees`, `Phase::Unavailable` consistent across tasks.
