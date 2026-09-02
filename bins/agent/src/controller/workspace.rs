@@ -2,7 +2,7 @@
 //! Split out of `controller.rs` unchanged.
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
-use super::{conditions_eq, create_if_absent, delete_ignoring_404, ensure, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
+use super::{i_am_dead, conditions_eq, create_if_absent, delete_ignoring_404, ensure, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
 use crate::binding;
 use std::time::Duration;
 use k8s_openapi::api::core::v1::Pod;
@@ -661,6 +661,12 @@ fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32) -> Result
 }
 
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // FIRST, above every write: see `i_am_dead`. A partitioned agent that keeps reconciling erases
+    // the sweep's `NodeDead` on the very next tick, which is how `/v1` came to accept `start` on a
+    // node the cluster reads as dead.
+    if i_am_dead(ctx).await {
+        return Ok(Action::requeue(TICK));
+    }
     let gen = w.meta().generation.unwrap_or(0);
     // BEFORE `heal_labels`, and before anything reads the spec: the label patch happens to reject
     // a `/` today, which is the only thing standing between `spec.owner` and a root-run

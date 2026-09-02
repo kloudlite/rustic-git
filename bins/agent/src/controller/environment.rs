@@ -3,7 +3,7 @@
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
 use super::workspace::{cleared_node_dead, replaced};
-use super::{delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, migrate_and_seed_baseline, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
+use super::{i_am_dead, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, migrate_and_seed_baseline, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -19,6 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // Above every write, exactly as `apply_workspace` does — see `i_am_dead`.
+    if i_am_dead(ctx).await {
+        return Ok(Action::requeue(TICK));
+    }
     let gen = e.meta().generation.unwrap_or(0);
     // `spec.owner` reaches `ensure_homecache`'s `{pool}/homecache/{owner}` here too. Only the
     // owner: `EnvironmentSpec.name` is display text that reaches no path and no argv — the

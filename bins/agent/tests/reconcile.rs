@@ -1455,7 +1455,9 @@ async fn a_wrong_owner_label_is_re_stamped_from_spec() {
     assert_eq!(sent[0]["metadata"]["labels"]["rustic-git.io/owner"], "alice", "{}", sent[0]);
     assert_eq!(sent[0]["metadata"]["labels"]["rustic-git.io/kind"], "workspace");
     assert!(sent[0].get("spec").is_none(), "labels only — a controller never writes spec: {}", sent[0]);
-    assert_eq!(rec.calls()[0], format!("PATCH {WS}"), "healed before anything else: {:?}", rec.calls());
+    // After the one self-dead read every reconcile now makes (`controller::i_am_dead`), and
+    // before anything else.
+    assert_eq!(rec.calls()[1], format!("PATCH {WS}"), "healed before anything else: {:?}", rec.calls());
 }
 
 /// `ATTACHED_ENV_LABEL` is `spec.attachedEnvironment`'s listing view (`delete_env`'s sweep selects
@@ -2426,7 +2428,12 @@ async fn a_second_reconcile_of_a_settled_workspace_writes_nothing() {
 
     let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(rec.calls().is_empty(), "an already-settled object writes nothing: {:?}", rec.calls());
+    assert_eq!(
+        rec.calls(),
+        vec!["GET /api/v1/nodes/node-a".to_string()],
+        "an already-settled object writes nothing — only the self-dead read: {:?}",
+        rec.calls()
+    );
 }
 
 
@@ -4107,4 +4114,37 @@ async fn a_stopped_parent_reconciled_by_its_owner_drops_node_dead() {
     let conds = st["status"]["conditions"].as_array().unwrap().clone();
     assert!(!conds.iter().any(|c| c["type"] == "Degraded"), "NodeDead must be gone: {conds:?}");
     assert!(conds.iter().any(|c| c["type"] == "Ready" && c["reason"] == "Stopped"), "and the rest kept: {conds:?}");
+}
+
+/// Round 2 of the drill fixes: the self-dead guard was only in the pull beat, so a partitioned
+/// agent (kubelet down, API server reachable) went on reconciling every 15 s — clearing the
+/// sweep's `NodeDead` and letting `/v1` accept `start` on a node the cluster reads as dead. A dead
+/// node writes NOTHING.
+#[tokio::test]
+async fn a_parent_whose_own_node_is_dead_is_not_reconciled_at_all() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = vec![Route {
+        method: "GET",
+        path: "/api/v1/nodes/node-a".into(),
+        status: 200,
+        body: serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"},
+                                 "status": {"conditions": [{"type": "Ready", "status": "False",
+                                                            "lastTransitionTime": "2000-01-01T00:00:00Z"}]}}),
+    }];
+    routes.extend(replicated_routes("stop-ws-1-3"));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let mut j = ws_json(serde_json::json!({
+        "phase": "stopped", "nodeName": "node-a", "volumeRef": "vol-1", "observedGeneration": 1,
+        "conditions": [
+            {"type": "Degraded", "status": "True", "reason": "NodeDead", "message": "owner node-a is unavailable",
+             "lastTransitionTime": "2000-01-01T00:00:00Z"},
+        ],
+    }));
+    j["spec"]["desiredState"] = serde_json::json!("stopped");
+    let w: crd::Workspace = serde_json::from_value(j).unwrap();
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    assert_eq!(rec.calls(), vec!["GET /api/v1/nodes/node-a".to_string()], "one read, no writes: {:?}", rec.calls());
 }

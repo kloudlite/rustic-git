@@ -44,6 +44,33 @@ pub(crate) const TICK: Duration = Duration::from_secs(15);
 /// pass starts the work again — backoff, never give up.
 const RETRY: Duration = Duration::from_secs(60);
 
+/// True when the CLUSTER reads THIS node as dead — one GET on our own Node, per reconcile.
+///
+/// The pull beat already refuses to sweep in that state; this is the other half. A partitioned
+/// agent (kubelet down, API server still reachable) goes on reconciling its own objects every
+/// `TICK`, and every one of those passes rewrites status: the stopped arms clear the sweep's
+/// `Degraded=True/NodeDead` and `apply_volume`'s `Unavailable` re-run rewrites the volume's
+/// conditions. The mark another node just wrote was therefore absent almost all of the time, and
+/// `/v1` accepted `start` on a node the cluster reads as dead. So the guard goes ABOVE
+/// `cleared_node_dead`, not beside it: while we are dead we write nothing at all.
+///
+/// `node_is_dead`, never `unplaceable`: a DECOMMISSIONING node is alive and must keep converging
+/// or its drain never finishes. Keep-biased on a failed read — a Node we cannot fetch is not
+/// evidence of death, and pausing on a hiccup would stall every workspace on the node.
+///
+/// The `WS_NODE_DEAD_SECS` floor (180 s) is the only guard here: a node wrongly NotReady past it
+/// stops reconciling until its Node object recovers. Deliberate — a wrong write corrupts placement,
+/// a paused reconcile only waits.
+pub(crate) async fn i_am_dead(ctx: &Ctx) -> bool {
+    match kube::Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&ctx.node).await {
+        Ok(n) => crate::peer::node_is_dead(n.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+        Err(e) => {
+            tracing::warn!(node = %ctx.node, error = %e, "reconcile: reading my own Node; assuming alive");
+            false
+        }
+    }
+}
+
 /// Keyed by uid, carrying the generation it was started for — see `Ctx::running`.
 ///
 /// The generation is in the VALUE, not the key. Keyed by `{uid, generation}` a spec edit during a
