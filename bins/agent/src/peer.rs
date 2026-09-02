@@ -219,7 +219,7 @@ pub fn replica_interval() -> std::time::Duration {
 
 /// The pool-eligible nodes, `rustic-git.io/pool=true`, name-sorted so `replicate::targets`'
 /// rendezvous scoring is deterministic across every node running this beat.
-async fn pool_nodes(client: &kube::Client) -> Result<Vec<String>, String> {
+pub(crate) async fn pool_nodes(client: &kube::Client) -> Result<Vec<String>, String> {
     let api: kube::Api<Node> = kube::Api::all(client.clone());
     let lp = ListParams::default().labels("rustic-git.io/pool=true");
     let list = api.list(&lp).await.map_err(|e| e.to_string())?;
@@ -403,7 +403,18 @@ fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (Str
 /// Local commits whose CR is gone entirely — retention's disk-side convergence. Pure, so
 /// `pull_volume`'s "which locals to drop" decision is testable without real btrfs (`drop_commit`
 /// itself is the engine's own concern, covered by `engine_commit.rs`'s loopback tests).
-fn retired(have: &HashSet<String>, existing: &HashSet<String>) -> Vec<String> {
+///
+/// `any_pull_failed` reclaims NOTHING. The owner deletes `sync-A`'s CR the instant `sync-B` is
+/// Ready, so a replica that could not reach the owner this pass would drop its local `sync-A` and
+/// gain nothing — going from one sync point to none, in exactly the partition-then-owner-death
+/// case sync points exist for. Deferring the reclaim costs a subvolume until the next clean pass.
+/// ponytail: all-or-nothing rather than transients-only, because a retired name has no CR left to
+/// read `spec.transient` off — telling a swept commit from a swept sync point here would mean
+/// trusting the name prefix. Split it if held-back commits ever cost real space.
+fn retired(have: &HashSet<String>, existing: &HashSet<String>, any_pull_failed: bool) -> Vec<String> {
+    if any_pull_failed {
+        return Vec::new();
+    }
     have.iter().filter(|n| !existing.contains(*n)).cloned().collect()
 }
 
@@ -465,6 +476,12 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
     let mut sources: Vec<&str> = replicas.iter().filter(not_me).filter(synced).map(|r| r.spec.node.as_str()).collect();
     sources.extend(replicas.iter().filter(not_me).filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
 
+    // Any pull that could not be satisfied this pass. It gates the retire pass below, because
+    // the two together would otherwise LOSE a sync point: the owner deletes `sync-A`'s CR the
+    // instant `sync-B` is Ready, so a replica that cannot reach the owner right now would drop
+    // its local `sync-A` and gain nothing — from one sync point to none, in exactly the
+    // partition-then-owner-death case sync points exist for.
+    let mut any_pull_failed = false;
     for name in order {
         if have.contains(&name) {
             continue;
@@ -503,6 +520,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
             }
         }
         if !pulled {
+            any_pull_failed = true;
             tracing::warn!(%volume, %name, "pull: no source could supply this commit this pass");
         }
     }
@@ -510,7 +528,8 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
     // Drop any local commit whose CR is gone entirely (not merely `Working` — `existing` holds
     // every phase). `drop_commit` is Ok-on-absent, so every node that ever held a copy converges
     // on the same disk state without a second round trip to confirm it.
-    for name in retired(&have, &existing) {
+    // Gated on `any_pull_failed` — see `retired`.
+    for name in retired(&have, &existing, any_pull_failed) {
         if let Err(e) = ctx.engine.drop_commit(volume, &name) {
             tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired commit failed; left for the next pass");
         } else {
@@ -946,8 +965,22 @@ mod reconcile_tests {
     fn retired_picks_out_locals_whose_cr_is_gone() {
         let have: HashSet<String> = ["a".into(), "b".into(), "c".into()].into_iter().collect();
         let existing: HashSet<String> = ["a".into(), "c".into()].into_iter().collect();
-        assert_eq!(retired(&have, &existing), vec!["b".to_string()]);
-        assert!(retired(&have, &have).is_empty(), "nothing missing: nothing retired");
+        assert_eq!(retired(&have, &existing, false), vec!["b".to_string()]);
+        assert!(retired(&have, &have, false).is_empty(), "nothing missing: nothing retired");
+    }
+
+    /// C2: a pass that could not pull something reclaims NOTHING. The owner deletes `sync-A`'s CR
+    /// the moment `sync-B` is Ready, so a replica that cannot reach the owner this pass (a
+    /// partition, a peer 500, a `send_timeout`) would drop its only local sync point and gain no
+    /// replacement — one sync point to zero, in the exact case the feature exists for.
+    #[test]
+    fn a_failed_pull_reclaims_nothing_this_pass() {
+        let have: HashSet<String> = ["sync-A".into()].into_iter().collect();
+        // `sync-A`'s CR is gone (retention deleted it when `sync-B` turned Ready); `sync-B` is the
+        // one this pass failed to fetch, so it is not in `have`.
+        let existing: HashSet<String> = ["sync-B".into()].into_iter().collect();
+        assert!(retired(&have, &existing, true).is_empty(), "a failed pull must not drop the last sync point");
+        assert_eq!(retired(&have, &existing, false), vec!["sync-A".to_string()], "a clean pass still reclaims it");
     }
 
     // These two tests each spin up a real peer server on the fixed `:8444` production port
@@ -1355,6 +1388,6 @@ fi
         let have: HashSet<String> = ["vol-1-aaaaaaaa".into(), "sync-ws-1-a".into()].into_iter().collect();
         // "sync-ws-1-a" is local but absent from the CR list entirely — its Snapshot was deleted.
         let existing: HashSet<String> = ["vol-1-aaaaaaaa".into()].into_iter().collect();
-        assert_eq!(retired(&have, &existing), vec!["sync-ws-1-a".to_string()]);
+        assert_eq!(retired(&have, &existing, false), vec!["sync-ws-1-a".to_string()], "a clean pass reclaims it");
     }
 }

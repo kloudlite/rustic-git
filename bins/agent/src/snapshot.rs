@@ -244,6 +244,10 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     // function only runs after `patch_status(Ready)` for `head` itself, any OTHER transient still
     // seen here is either already `Ready` (safe to delete) or not yet `Ready` at all (filtered out
     // of `ready` above, so it is never considered) — never a `Working` cut caught mid-flight.
+    // ponytail: this arm deliberately ignores `heads` (and `spec.pinned`) — a sync point is never
+    // a chain member and nothing user-facing names one, so nothing can hold a reference to it.
+    // If `clone`, `restore` or any other verb ever names a sync point by id, this arm is wrong and
+    // must consult `worktree_heads` the way the commit path below does.
     if ready.get(head).is_some_and(|s| s.spec.transient) {
         let worktree = ready[head].spec.worktree.clone();
         // A replica mid-receive of the older transient just deleted here fails that one pull and
