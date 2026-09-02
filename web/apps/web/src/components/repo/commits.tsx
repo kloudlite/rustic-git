@@ -2,7 +2,7 @@ import Link from "next/link";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { CopyButton } from "@/components/repo/copy-button";
 import { Initials } from "@/components/app/initials";
-import { defaultBranch, log, refs, shortOid, shortRef } from "@/lib/browse";
+import { defaultBranch, log, refs, resolveRef, shortOid, shortRef } from "@/lib/browse";
 import { commitTitle, dayBucket } from "@/components/repo/commit-meta";
 import { whenSeconds } from "@/lib/time";
 import type { Commit } from "@/lib/browse";
@@ -36,7 +36,10 @@ export async function CommitsView({
   if (!all.ok) throw new Error(all.message);
 
   const fallback = defaultBranch(all.value);
-  const head = (refName && all.value.find((r) => shortRef(r.name) === refName)) || fallback;
+  // `resolveRef`, not a find by name: `?ref=` here carries a bare oid as often as a branch —
+  // pull-commits.tsx:74 and file-view.tsx:106 both produce one — and a hand-rolled name match
+  // fell back to the default branch and listed a history nobody asked for.
+  const head = resolveRef(all.value, refName);
   if (!head) {
     return <p className="text-sm2 text-muted-foreground">This repo has no commits yet.</p>;
   }
