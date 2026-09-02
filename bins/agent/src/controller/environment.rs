@@ -539,3 +539,41 @@ pub(crate) async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentS
     })
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn svc(folder: &str) -> model::Service {
+        serde_json::from_value(serde_json::json!({
+            "name": "db", "image": "mongo:7", "command": [], "env": {},
+            "ports": [], "mounts": [{"path": "/data/db", "folder": folder}],
+        }))
+        .unwrap()
+    }
+
+    /// `create_dir_all` on an unvalidated folder IS the escape — it would happily mkdir -p outside
+    /// the subvolume before a pod ever bound it as a subPath. `validate_mount` is tested in
+    /// `model.rs`; this asserts the controller actually calls it, which is where the escape lives.
+    #[test]
+    fn a_traversing_folder_makes_no_directory_and_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        for folder in ["../../etc", "..", "a/b", "/abs", ""] {
+            assert!(mkdir_env_mounts(&live, &[svc(folder)]).is_err(), "accepted {folder:?}");
+        }
+        assert!(!tmp.path().join("etc").exists(), "nothing was created outside the subvolume");
+        assert!(std::fs::read_dir(live.join("volumes")).map(|mut d| d.next().is_none()).unwrap_or(true));
+    }
+
+    /// The ordinary folder is made, once, under `volumes/`.
+    #[test]
+    fn a_valid_folder_is_created_under_volumes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        mkdir_env_mounts(&live, &[svc("dbdata"), svc("dbdata")]).unwrap();
+        assert!(live.join("volumes/dbdata").is_dir());
+    }
+}
