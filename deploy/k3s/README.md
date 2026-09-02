@@ -7,8 +7,8 @@ Files, in the order a cluster is built:
 
 | File | What it does |
 | --- | --- |
-| `env.example.sh` | Copy to `env.sh` (git-ignored) and edit. Sizes, names, operator CIDR. |
-| `provision-azure.sh` | VNet, NSG, control plane, workers, build VM. Idempotent — re-run after a partial failure. |
+| `env.example.sh` | Copy to `env.sh` (git-ignored) and edit. Sizes, names, operator CIDR, `API_CLIENTS` (the api tier's egress, admitted to 6443 by both the NSG and nftables), `CF_IPS_FILE` (defaults to `cloudflare-ips-v4.txt`). |
+| `provision-azure.sh` | VNet, NSG (including the Cloudflare-on-80 and api-tier-on-6443 rules, from `CF_IPS_FILE`/`API_CLIENTS`), control plane, workers, build VM. Idempotent — re-run after a partial failure. |
 | `format-pool.sh` | Run on each worker with the data disk as argument. btrfs at `/wspool-prod`. |
 | `crds.yaml` | **Generated** — do not hand-edit. `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
@@ -139,7 +139,7 @@ Retention, what it does and does not cover, and the Azure-side switches for ever
 Restoring: every `k3s-backup.tgz.enc` blob travels with a detached `k3s-backup.tgz.enc.hmac`,
 because AES-CBC is unauthenticated — a truncated or tampered blob decrypts to garbage rather than
 failing. Download both, recompute the HMAC over the downloaded `.enc` with the same key
-(`openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(xxd -p -c 256 k3s-backup.key)" ...`), `diff` it
+(`openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(od -An -tx1 < k3s-backup.key | tr -d ' \n')" -r ... | cut -d' ' -f1`), `diff` it
 against the downloaded `.hmac`, and only decrypt (`openssl enc -d ...`) once they match. A mismatch
 means do not restore — fetch an older `hourly-*`/`daily-*` slot instead. Full restore steps are the
 comment block at the bottom of `backup-controlplane.sh`.
@@ -174,8 +174,8 @@ kubectl create secret generic rustic-git-k3s-kubeconfig --from-file=config=/tmp/
   --dry-run=client -o yaml | kubectl -n rustic-git apply -f -
 kubectl -n rustic-git rollout restart deploy/rustic-git-api
 
-# 4. Verify with a live read through the new token, then revoke the old one — a bound token has
-#    no separate revoke call, so "the old token stops working" means deleting the Secret entry
+# 4. Verify with a live read through the new token, then let the old token expire — a bound token
+#    has no separate revoke call, so "the old token stops working" means deleting the Secret entry
 #    is not enough; the old token is only dead once its --duration expires or the ServiceAccount
 #    it was bound to is deleted and recreated. Rotating on the schedule below is what keeps that
 #    window short.

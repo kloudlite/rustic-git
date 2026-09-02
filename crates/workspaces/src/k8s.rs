@@ -2225,10 +2225,26 @@ mod tests {
             .expect("allow-dns");
         let to = &p.spec.as_ref().unwrap().egress.as_ref().unwrap()[0].to.as_ref().unwrap();
         assert_eq!(to.len(), 1, "one peer, or the selectors are an OR");
+        let peer = &to[0];
         assert_eq!(
-            to[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap()["k8s-app"],
+            peer.namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap()["kubernetes.io/metadata.name"],
+            "kube-system",
+            "the namespace selector must survive alongside the pod selector, not be replaced by it"
+        );
+        assert_eq!(
+            peer.pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap()["k8s-app"],
             "kube-dns"
         );
+        // Both selectors in one peer are ANDed by Kubernetes: a pod in kube-system without
+        // k8s-app=kube-dns (the agent, say) must not match. Two peers would OR them instead and
+        // let exactly this pod through — the regression this test exists to catch.
+        let ns_labels = std::collections::BTreeMap::from([("kubernetes.io/metadata.name".to_string(), "kube-system".to_string())]);
+        let other_pod_labels = std::collections::BTreeMap::from([("app".to_string(), "rustic-git-agent".to_string())]);
+        let matches = |sel: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector, labels: &std::collections::BTreeMap<String, String>| {
+            sel.match_labels.as_ref().unwrap().iter().all(|(k, v)| labels.get(k) == Some(v))
+        };
+        assert!(matches(peer.namespace_selector.as_ref().unwrap(), &ns_labels), "kube-system namespace must match");
+        assert!(!matches(peer.pod_selector.as_ref().unwrap(), &other_pod_labels), "a non-CoreDNS kube-system pod must not match");
     }
 
     #[test]

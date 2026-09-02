@@ -27,3 +27,10 @@ BUILD_DISK_GB=256
 # 0.0.0.0/0 here is a finding, not a default.
 ADMIN_CIDR=203.0.113.1/32
 
+# CIDRs that may reach 6443 besides the VNet — at least the AKS api tier's egress IP.
+API_CLIENTS=198.51.100.1/32
+
+# One CIDR per line, tr'd into the NSG rule's --source-address-prefixes list. Defaults to the
+# checked-in cloudflare-ips-v4.txt; only set this to point elsewhere.
+CF_IPS_FILE=cloudflare-ips-v4.txt
+

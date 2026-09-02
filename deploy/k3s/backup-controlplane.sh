@@ -66,10 +66,15 @@ tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz objects.yaml
 openssl enc -aes-256-cbc -pbkdf2 -salt -pass "file:$KEY_FILE" -in "$WORK/k3s-backup.tgz" -out "$WORK/k3s-backup.tgz.enc"
 # AES-CBC is unauthenticated: a truncated upload or a tampered blob decrypts to garbage rather than
 # failing, and a restore drill would find out at the worst moment. A detached HMAC over the
-# CIPHERTEXT, keyed by the same file, is the smallest thing that makes a bad blob fail loudly.
+# CIPHERTEXT, keyed by the same file, is the smallest thing that makes a bad blob fail loudly. The
+# HMAC keys off the raw bytes of $KEY_FILE, while `openssl enc` above derives its AES key from that
+# same file via PBKDF2+salt — different derivations, so this is not key reuse.
+# `-r` and `cut` store the bare digest: `-out` alone prefixes it with the input PATH, so the
+# restore's recomputation (over a different path) would never byte-match.
+# `od`, not `xxd`, to hex the key: no vim-common dependency, and no line-wrap to strip.
 # ponytail: encrypt-then-MAC by hand; `age` does both in one tool if this grows a second consumer.
-openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(xxd -p -c 256 "$KEY_FILE")" \
-  -out "$WORK/k3s-backup.tgz.enc.hmac" "$WORK/k3s-backup.tgz.enc"
+openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(od -An -tx1 < "$KEY_FILE" | tr -d ' \n')" \
+  -r "$WORK/k3s-backup.tgz.enc" | cut -d' ' -f1 > "$WORK/k3s-backup.tgz.enc.hmac"
 
 put() {
   # The SAS travels in a curl config file, not argv: argv is world-readable in `ps` and lands in
@@ -106,8 +111,8 @@ exit "$crd_ok"
 #        curl -sS --fail -K /tmp/get.cfg -o /tmp/b.tgz.enc
 #        echo 'url = "https://ACCOUNT.blob.core.windows.net/k3s-backup/daily-Mon.tgz.enc.hmac?SAS"' > /tmp/get-hmac.cfg
 #        curl -sS --fail -K /tmp/get-hmac.cfg -o /tmp/b.tgz.enc.hmac
-#        openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(xxd -p -c 256 /etc/rustic-git/k3s-backup.key)" \
-#          -out /tmp/b.tgz.enc.hmac.check /tmp/b.tgz.enc
+#        openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(od -An -tx1 < /etc/rustic-git/k3s-backup.key | tr -d ' \n')" \
+#          -r /tmp/b.tgz.enc | cut -d' ' -f1 > /tmp/b.tgz.enc.hmac.check
 #        diff /tmp/b.tgz.enc.hmac /tmp/b.tgz.enc.hmac.check   # mismatch => do not restore
 #        openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/rustic-git/k3s-backup.key -in /tmp/b.tgz.enc -out /tmp/b.tgz
 #        tar -xzf /tmp/b.tgz -C /tmp
