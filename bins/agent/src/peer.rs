@@ -1210,6 +1210,21 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
         tracing::info!(volume = %id, "pull: retire: no Volume CR; dropping the orphaned local copy");
         janitor::cleanup_local(&ctx.engine, &id);
     }
+    // The row half of the same orphan. `retire_pass` only ever visits LISTED volumes, so a
+    // `VolumeReplica` whose Volume is gone was never revisited by anything: it outlived the
+    // workspace, and its stale `Synced` still satisfies a stop's flush gate and wins claims.
+    // ponytail: a sweep, not an ownerReference on the row — the sweep has to exist anyway for the
+    // rows already out there, and `write_replica_status` has no Volume UID to hand without a GET
+    // per row it creates. Stamp the ownerReference at creation if row garbage ever outgrows this.
+    for r in beat.replicas.iter().filter(|r| r.spec.node == ctx.node && !known.contains(&r.spec.volume)) {
+        let rname = r.name_any();
+        tracing::info!(volume = %r.spec.volume, row = %rname, "pull: retire: no Volume CR; dropping my orphaned replica row");
+        if let Err(e) = Api::<crd::VolumeReplica>::all(ctx.client.clone()).delete(&rname, &Default::default()).await {
+            if !matches!(&e, kube::Error::Api(s) if s.code == 404) {
+                tracing::warn!(row = %rname, error = %e, "pull: retire: deleting my orphaned replica row");
+            }
+        }
+    }
     for v in vols {
         let id = v.name_any();
         if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() {
@@ -2582,6 +2597,29 @@ fi
         retire_pass(&ctx, &beat_of(vec![volume], vec![], vec![]), &["node-a".to_string()]).await;
         assert!(!ctx.engine.pool.voldir("v-gone").exists(), "no CR: the copy goes");
         assert!(ctx.engine.pool.voldir("v-live").exists(), "listed: untouched");
+    }
+
+    /// F2 (drill, 2026-09-03): `VolumeReplica` rows outlived their deleted workspaces — nothing
+    /// ever revisited them, because every other arm of this pass walks LISTED volumes. Mine go;
+    /// another node's rows are its own business, and it runs this same sweep.
+    #[tokio::test]
+    async fn retire_pass_drops_my_replica_row_whose_volume_cr_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", Vec::new());
+        let beat = beat_of(
+            vec![vol_owned("v-live", "node-a")],
+            vec![
+                replica_of("v-gone", "node-a", "Synced"),
+                replica_of("v-live", "node-a", "Synced"),
+                replica_of("v-gone", "node-b", "Synced"),
+            ],
+            vec![],
+        );
+
+        retire_pass(&ctx, &beat, &["node-a".to_string()]).await;
+
+        let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes, vec![format!("DELETE {VOLREPLICAS}/v-gone.node-a")], "only my orphan: {deletes:?}");
     }
 
     #[tokio::test]
