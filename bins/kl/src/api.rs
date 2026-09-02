@@ -65,8 +65,13 @@ async fn json<T: serde::de::DeserializeOwned>(r: reqwest::Response) -> Result<T,
     serde_json::from_str(&body).map_err(|e| Error::Other(e.to_string()))
 }
 
-pub async fn list(cfg: &crate::config::Config, team: Option<&str>) -> Result<Vec<Workspace>, Error> {
-    let mut req = client().get(format!("{}/v1/workspaces", cfg.api)).bearer_auth(&cfg.token);
+pub async fn list(
+    cfg: &crate::config::Config,
+    team: Option<&str>,
+) -> Result<Vec<Workspace>, Error> {
+    let mut req = client()
+        .get(format!("{}/v1/workspaces", cfg.api))
+        .bearer_auth(&cfg.token);
     if let Some(t) = team {
         req = req.query(&[("team", t)]);
     }

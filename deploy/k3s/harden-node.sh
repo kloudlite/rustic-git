@@ -3,10 +3,14 @@
 #
 # WHY each piece:
 # - nftables default-drop on the public interface. The Azure NSG already gates inbound, but an NSG
-#   is one console click from open; the node's own firewall is the second lock. Intra-VNet and the
-#   pod overlay stay open (k3s, flannel, kubelet, the agent's peer calls), the Azure wire server
-#   too (walinuxagent handshakes on it), everything else from the internet is dropped — including
-#   the future SSH gateway port, which the agent opens per authorized session.
+#   is one console click from open; the node's own firewall is the second lock. Intra-VNet stays
+#   open (k3s, flannel, kubelet), the Azure wire server too (walinuxagent handshakes on it),
+#   everything else from the internet is dropped — including the future SSH gateway port, which
+#   the agent opens per authorized session. The agent's peer listener (8444) is pod-to-pod through
+#   the CNI, not intra-VNet host traffic — it never touches this hook.
+# - The pod bridge (cni0/$POD_CIDR) is NOT trusted: it admits established/related replies only,
+#   never new connections. A change here is the second lock, not the first — the tenant egress
+#   NetworkPolicy is the first, and this file must not widen back to a blanket accept.
 # - unattended-upgrades: security patches without anyone remembering to.
 # - sshd: keys only, no root login. The cloud image already disables passwords; pinning it here
 #   survives a package upgrade rewriting the config.
@@ -58,8 +62,25 @@ table inet node {
     ip saddr 168.63.129.16 accept
     # The cluster's own traffic: control plane, kubelet, flannel VXLAN, the agent's peer calls.
     ip saddr $VNET accept
-    ip saddr $POD_CIDR accept
-    iifname "cni0" accept
+    # The pod bridge is NOT trusted. A blanket accept here admitted every pod — tenant workspace
+    # pods included — to the node's kubelet (10250) and API (6443), leaving the tenant egress
+    # NetworkPolicy (`k8s::allow_internet_egress`) as the only lock where this file was supposed to
+    # be the second one. What the node actually serves pods is: nothing. The agents' peer listener
+    # (8444) and metrics (9464) are pod-to-pod through the CNI, not through the host's input hook,
+    # and flannel's VXLAN arrives on flannel.1 below.
+    #
+    # If a node-served port is ever added, add it here as one line — never widen back to `accept`.
+    #
+    # No `established,related` line for the pod CIDR or cni0: the chain's global est/related accept
+    # above already covers every reply, and a second copy reads like it grants something.
+    # Not a blank exception: kube-proxy DNATs ClusterIP 10.43.0.1:443 to this node's 6443 with the
+    # pod's own saddr preserved, so every pod using in-cluster config (coredns, metrics-server,
+    # every rustic-git-agent pod — the DaemonSet is not hostNetwork — the gateways) reaches the
+    # apiserver this way. RBAC is still the real lock on what that connection can do.
+    tcp dport 6443 ip saddr $POD_CIDR accept
+    # metrics-server scrapes nodeIP:10250 from its pod IP; kubelet's own webhook authn/authz is the
+    # lock here, same as for any other kubelet client.
+    tcp dport 10250 ip saddr $POD_CIDR accept
     iifname "flannel.1" accept
     # Operator SSH, the API, the gateway's 80 — matched on SOURCE only, with no interface name.
     # The public NIC used to be named here from the default route at run time, and on Azure a

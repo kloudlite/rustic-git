@@ -52,10 +52,14 @@ fn gateway_url(gateway: &str) -> String {
 }
 
 async fn pump(url: &str, token: &str) -> Result<(), String> {
-    let mut req = url.into_client_request().map_err(|e| format!("{url}: {e}"))?;
+    let mut req = url
+        .into_client_request()
+        .map_err(|e| format!("{url}: {e}"))?;
     req.headers_mut().insert(
         "Authorization",
-        format!("Bearer {token}").parse().map_err(|_| "bad session token".to_string())?,
+        format!("Bearer {token}")
+            .parse()
+            .map_err(|_| "bad session token".to_string())?,
     );
     let (ws, _) = tokio_tungstenite::connect_async(req)
         .await
@@ -73,7 +77,11 @@ async fn pump(url: &str, token: &str) -> Result<(), String> {
             match stdin.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                    if tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }

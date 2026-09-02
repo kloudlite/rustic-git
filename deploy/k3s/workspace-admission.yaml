@@ -26,9 +26,16 @@
 # The prefixes are deliberately ASYMMETRIC. `/nix` is allowed EXACTLY, because `k8s::nix_volume`
 # mounts `NIX_ROOT` itself and picks the store and the profile out of it by `subPath` — a
 # `startsWith('/nix/')` rule alone rejects every workspace pod this cluster builds. `/wspool-prod`
-# is NOT allowed exactly, only strictly under it: no builder ever mounts the bare pool, and a pod
-# that did would hold every other tenant's subvolume at once. `/wspool-prod` must stay in step with
-# `WS_POOL` in `agent-daemonset.yaml`; a mismatch refuses every pod rather than failing open.
+# is NOT allowed exactly, only its four known subtrees: `vol/` (worktrees), `attach/` (the rendered
+# resolv.conf), `homes/` and `homecache/`. The last two are additionally scoped to the pod's own
+# `rustic-git.io/owner` label, because those two paths are keyed BY OWNER — a builder bug naming
+# another owner is a whole other person's dotfiles and shell history. `vol/` and `attach/` are keyed
+# by volume and workspace id, not by owner, so CEL has nothing to compare there and the pod builders
+# remain the only thing keeping tenants apart on those two; that residual is deliberate and known.
+# A pod with no owner label is refused outright — `k8s::meta` stamps it on every object this system
+# creates, so a pod without it did not come from a builder.
+# `/wspool-prod` must stay in step with `WS_POOL` in `agent-daemonset.yaml`; a mismatch refuses
+# every pod rather than failing open.
 #
 # ORDERING IS THE OPPOSITE OF THE RBAC's: apply this BEFORE any agent rollout, or any time —
 # it is deny-only and requires nothing from the new agent. An old agent building only `emptyDir`/
@@ -61,13 +68,42 @@ spec:
                       && (!has(c.securityContext.allowPrivilegeEscalation) || c.securityContext.allowPrivilegeEscalation == false)))
       message: "workspace/environment containers may not run privileged or with allowPrivilegeEscalation"
     - expression: >-
-        (has(object.spec.volumes) ? object.spec.volumes : [])
-          .all(v, !has(v.hostPath)
-                  || (!v.hostPath.path.contains('..')
-                      && (v.hostPath.path == '/nix'
-                          || v.hostPath.path.startsWith('/nix/')
-                          || v.hostPath.path.startsWith('/wspool-prod/'))))
-      message: "workspace/environment hostPath volumes must be /nix, under /nix/, or under /wspool-prod/ (the Nix store and the btrfs pool)"
+        has(object.metadata.labels) && 'rustic-git.io/owner' in object.metadata.labels
+          && (has(object.spec.volumes) ? object.spec.volumes : [])
+            .all(v, !has(v.hostPath)
+                    || (!v.hostPath.path.contains('..')
+                        && (v.hostPath.path == '/nix'
+                            || v.hostPath.path.startsWith('/nix/')
+                            || v.hostPath.path.startsWith('/wspool-prod/vol/')
+                            || v.hostPath.path.startsWith('/wspool-prod/attach/')
+                            || v.hostPath.path == '/wspool-prod/homes/' + object.metadata.labels['rustic-git.io/owner']
+                            || v.hostPath.path.startsWith('/wspool-prod/homes/' + object.metadata.labels['rustic-git.io/owner'] + '/')
+                            || v.hostPath.path == '/wspool-prod/homecache/' + object.metadata.labels['rustic-git.io/owner']
+                            || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['rustic-git.io/owner'] + '/'))))
+      message: "workspace/environment hostPath volumes must be /nix, under /nix/, under /wspool-prod/vol|attach/, or this owner's own homes/homecache directory"
+    # gVisor is what makes tenant isolation three independent things instead of two. It is live —
+    # `WS_RUNTIME_CLASS=gvisor` in the `rustic-git-agent` Secret, read into `PodContext.runtime_class`
+    # — but until this validation existed the kernel boundary rested on that one env var: unset it
+    # (a Secret edit, a restored backup, a fresh cluster) and every tenant pod silently drops back to
+    # runc, sharing the host kernel, with no alert anywhere. Now the FENCE holds it, and an agent
+    # rolled out against a cluster without gVisor fails loudly at pod create rather than quietly.
+    - expression: "has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'gvisor'"
+      message: "workspace/environment pods must run under the gvisor RuntimeClass"
+    # `k8s::hardened` drops ALL and adds back exactly these seven, and its own comment says the
+    # fixed list is "the only thing" stopping SYS_ADMIN/NET_RAW/SYS_PTRACE now that the namespace
+    # floor is `privileged`. This is the second thing: a pod builder bug or an operator with kubectl
+    # cannot widen the set in a tenant namespace. Keep in step with `crates/workspaces/src/k8s.rs`.
+    - expression: >-
+        (object.spec.containers
+           + (has(object.spec.initContainers) ? object.spec.initContainers : [])
+           + (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : []))
+          .all(c, !has(c.securityContext)
+                  || !has(c.securityContext.capabilities)
+                  || !has(c.securityContext.capabilities.add)
+                  || c.securityContext.capabilities.add.all(a, a in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER',
+                                                                    'SETGID', 'SETUID', 'NET_BIND_SERVICE',
+                                                                    'SYS_CHROOT']))
+      message: "workspace/environment containers may add only the seven capabilities k8s::hardened grants"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

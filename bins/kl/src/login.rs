@@ -46,7 +46,11 @@ pub async fn login(api: String) -> Result<(), String> {
         if std::time::Instant::now() > deadline {
             return Err("timed out waiting for approval".into());
         }
-        let r = match c.get(format!("{api}/v1/cli/token")).query(&[("poll", &dc.poll)]).send().await
+        let r = match c
+            .get(format!("{api}/v1/cli/token"))
+            .query(&[("poll", &dc.poll)])
+            .send()
+            .await
         {
             Ok(r) => r,
             // A dropped connection mid-login is worth retrying: the code is still valid until the
@@ -74,7 +78,10 @@ pub async fn login(api: String) -> Result<(), String> {
                     expires_at: t.expires_at,
                     username: username.clone(),
                 })?;
-                println!("Logged in as {username}. Config: {}", config::path().display());
+                println!(
+                    "Logged in as {username}. Config: {}",
+                    config::path().display()
+                );
                 return Ok(());
             }
             // 410 is the api's one terminal answer: expired, denied, or already spent.
@@ -116,7 +123,9 @@ fn hostname() -> String {
 }
 
 fn username_of(token: &str) -> Option<String> {
-    claim(token, "username").or_else(|| claim(token, "name")).or_else(|| claim(token, "sub"))
+    claim(token, "username")
+        .or_else(|| claim(token, "name"))
+        .or_else(|| claim(token, "sub"))
 }
 
 /// Reads one claim out of the JWT payload. No verification: the signature is the api's business,
@@ -124,7 +133,9 @@ fn username_of(token: &str) -> Option<String> {
 fn claim(token: &str, key: &str) -> Option<String> {
     use base64::Engine;
     let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     v.get(key)?.as_str().map(str::to_string)
 }

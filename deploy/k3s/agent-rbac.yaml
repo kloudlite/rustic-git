@@ -50,9 +50,9 @@
 #                                                                       ONE guarded exception, gated
 #                                                                       on the row's node being
 #                                                                       NotReady past WS_NODE_DEAD_SECS
-#   */status (rustic-git.io, all five)     patch                        patch_status (apply)
+#   */status (rustic-git.io, all six)      patch                        patch_status (apply)
 #                                          update                       replace_status (claim CAS)
-#   */finalizers (rustic-git.io, all five) update                       finalizer on volumes; the
+#   */finalizers (rustic-git.io, all four) update                       finalizer on volumes; the
 #                                                                       parents for OwnerReferences
 #                                                                       PermissionEnforcement on
 #                                                                       their children (Snapshot has

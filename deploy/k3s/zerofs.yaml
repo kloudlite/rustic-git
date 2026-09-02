@@ -106,9 +106,10 @@ spec:
           # silently on different builds).
           #
           # NOTE the tag has NO `v`: upstream's SOURCE tags are `v2.3.2` but the published image
-          # tags are `2.3.2`, and `ghcr.io/barre/zerofs:v2.3.2` 404s. `sha-b66813e` (that
-          # release's commit) is the immutable equivalent if a moved tag ever matters.
-          image: ghcr.io/barre/zerofs:2.3.2
+          # tags are `2.3.2`, and `ghcr.io/barre/zerofs:v2.3.2` 404s. The `@sha256:` suffix — not
+          # the tag — is now the pin: a tag upstream can move would put an unreviewed build in
+          # front of every owner's home directory.
+          image: ghcr.io/barre/zerofs:2.3.2@sha256:3e55849c76a9243253660c3479ac2c96c7e69843dc3432512212650004a821ae
           command: ["zerofs", "run", "-c", "/etc/zerofs/zerofs.toml"]
           envFrom:
             - secretRef:
@@ -117,6 +118,15 @@ spec:
             requests:
               cpu: 500m
               memory: 1Gi
+            limits:
+              # No CPU limit on purpose — a throttled NFS server stalls every home in the region
+              # rather than shedding load. The MEMORY limit is the point: this pod is pinned to the
+              # control plane, so an unbounded working set pushes the node into pressure and takes
+              # the API server with it. zerofs.toml pins memory_size_gb = 1.0 (the process's own
+              # in-memory cache), so a 1Gi limit OOM-kills it as that cache warms — the limit has to
+              # cover the cache PLUS the process's own RSS. 1 GiB cache + ~1 GiB headroom for
+              # SlateDB buffers and NFS I/O = 2Gi.
+              memory: 2Gi
           ports:
             - name: nfs
               containerPort: 2049
@@ -129,6 +139,10 @@ spec:
               port: 2049
             initialDelaySeconds: 5
             periodSeconds: 10
+          # ponytail: no liveness probe — neither rpcinfo nor nc is in this image, and a bare TCP
+          # connect only duplicates the readiness probe above while adding a way to restart the
+          # single pod every home in the region depends on. Add one (a real NULL RPC, e.g.
+          # `rpcinfo -T tcp 127.0.0.1 100003 3`) the day the image carries rpcinfo.
           volumeMounts:
             - name: config
               mountPath: /etc/zerofs

@@ -48,8 +48,8 @@ rules:
 ---
 # Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
 #
-# The API needs to write exactly two Secrets — a short-lived git token for a workspace being seeded
-# from a repository, and the owner's platform-issued git key — into exactly one namespace, theirs. Granting `secrets: create`
+# The API needs to write exactly one Secret — the owner's platform-issued git key
+# (`k8s::USER_KEY_SECRET`) — into exactly one namespace, theirs. Granting `secrets: create`
 # cluster-wide to get that would hand the API every Secret in the cluster, including the agent's
 # own credentials.
 #
@@ -63,9 +63,25 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
+    # Named, not the whole namespace: the same namespace holds the agent's `ws-ssh-{id}` host key,
+    # which the agent creates once and NEVER updates because a host key that changed is
+    # indistinguishable from a man in the middle (see agent-rbac.yaml). Without `resourceNames` the
+    # api could rewrite it, and `kl` adopts whatever key the api hands back — an api compromise
+    # would MITM every workspace ssh session silently. `resourceNames` cannot restrict `create` (the
+    # name is not known at authorization time), so the api may still create an arbitrarily named
+    # Secret in a workspace namespace; it may not touch an existing `ws-ssh-*` one, which is the
+    # finding this closes.
+    resourceNames: ["user-key"]
     # `patch` is what server-side apply needs; without it the key install fails with a 403 that
-    # reads like a missing binding.
-    verbs: ["get", "create", "update", "patch", "delete"]
+    # reads like a missing binding. No `delete`: the Secret carries an ownerReference and is
+    # reclaimed with its namespace.
+    verbs: ["get", "update", "patch"]
+  # `create` is a SEPARATE rule with no `resourceNames`, because a name-restricted rule can never
+  # authorize a create (the object's name does not exist yet at authorization time) — folding it in
+  # above silently removed `create`, so a new owner's very first `user-key` apply 403'd.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

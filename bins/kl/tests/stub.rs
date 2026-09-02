@@ -30,21 +30,27 @@ pub async fn spawn(s: Stub) -> String {
         )
         .route(
             "/v1/workspaces/{id}/ssh-session",
-            post(|State(s): State<Stub>, Path(target): Path<String>| async move {
-                s.api_calls.fetch_add(1, Ordering::SeqCst);
-                // The real api resolves a name to an id; `gh` is ws-1's name above.
-                let id = if target == "gh" { "ws-1".to_string() } else { target };
-                (
-                    axum::http::StatusCode::CREATED,
-                    Json(serde_json::json!({
-                        "id": id,
-                        "token": "sst_test",
-                        "gateway": format!("wss://ws-test.khost.dev/tunnel/{id}"),
-                        "expires_at": "2030-01-01T00:00:00Z",
-                        "host_key": "ssh-ed25519 AAAAKEY",
-                    })),
-                )
-            }),
+            post(
+                |State(s): State<Stub>, Path(target): Path<String>| async move {
+                    s.api_calls.fetch_add(1, Ordering::SeqCst);
+                    // The real api resolves a name to an id; `gh` is ws-1's name above.
+                    let id = if target == "gh" {
+                        "ws-1".to_string()
+                    } else {
+                        target
+                    };
+                    (
+                        axum::http::StatusCode::CREATED,
+                        Json(serde_json::json!({
+                            "id": id,
+                            "token": "sst_test",
+                            "gateway": format!("wss://ws-test.khost.dev/tunnel/{id}"),
+                            "expires_at": "2030-01-01T00:00:00Z",
+                            "host_key": "ssh-ed25519 AAAAKEY",
+                        })),
+                    )
+                },
+            ),
         )
         .route(
             "/tunnel/{id}",

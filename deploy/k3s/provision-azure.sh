@@ -5,8 +5,17 @@
 # Network first, deliberately — the NSG must exist before any NIC, or a VM comes up briefly
 # reachable on rules nobody chose.
 set -euo pipefail
-cd "$(dirname "$0")"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE"
 . ./env.sh
+
+# Required inputs are resolved BEFORE the first `az create`: a missing API_CLIENTS or a missing
+# Cloudflare list must fail on an untouched subscription, not half way through a VNet. CF_CIDRS is
+# the same Cloudflare edge list harden-node.sh admits on 80; API_CLIENTS is the api tier's egress,
+# which needs 6443. Same required-var style as harden-node.sh: no silent 0.0.0.0/0 default.
+CF_IPS_FILE="${CF_IPS_FILE:-$HERE/cloudflare-ips-v4.txt}"
+[ -r "$CF_IPS_FILE" ] || { echo "CF_IPS_FILE $CF_IPS_FILE is not readable" >&2; exit 1; }
+API_CLIENTS="${API_CLIENTS:?comma-separated CIDRs that may reach 6443 besides the VNet — at least the egress IP of the AKS api tier}"
 
 have() { az "$@" >/dev/null 2>&1; }
 
@@ -32,6 +41,19 @@ have network nsg rule show -g "$RG" --nsg-name k3s-nsg -n flannel-vxlan || \
 have network nsg rule show -g "$RG" --nsg-name k3s-nsg -n kubelet || \
   az network nsg rule create -g "$RG" --nsg-name k3s-nsg -n kubelet --priority 220 \
     --source-address-prefixes 10.60.1.0/24 --destination-port-ranges 10250 --protocol Tcp --access Allow -o none
+
+# Two rules that lived only in README prose until now — two firewall layers that can drift silently
+# is the failure this closes.
+#
+# `gateway-cloudflare` at 120 is NOT a new name: it is the hand-made rule already live in the NSG.
+# Creating a second Allow-80 under another name would leave two rules to keep in sync and only one
+# of them in this file — so the script adopts the existing one and stays a no-op on a live NSG.
+have network nsg rule show -g "$RG" --nsg-name k3s-nsg -n gateway-cloudflare || \
+  az network nsg rule create -g "$RG" --nsg-name k3s-nsg -n gateway-cloudflare --priority 120 \
+    --source-address-prefixes $(tr '\n' ' ' < "$CF_IPS_FILE") --destination-port-ranges 80 --protocol Tcp --access Allow -o none
+have network nsg rule show -g "$RG" --nsg-name k3s-nsg -n allow-apiserver-api-tier || \
+  az network nsg rule create -g "$RG" --nsg-name k3s-nsg -n allow-apiserver-api-tier --priority 240 \
+    --source-address-prefixes ${API_CLIENTS//,/ } --destination-port-ranges 6443 --protocol Tcp --access Allow -o none
 
 az network vnet subnet update -g "$RG" --vnet-name k3s-vnet -n nodes --network-security-group k3s-nsg -o none
 

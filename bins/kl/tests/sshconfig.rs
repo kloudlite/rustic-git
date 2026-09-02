@@ -24,7 +24,11 @@ fn renders_a_block_per_workspace_and_includes_once() {
             .env("KL_CONFIG_DIR", cfg.path())
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     run();
 
@@ -52,7 +56,17 @@ fn renders_a_block_per_workspace_and_includes_once() {
     run();
     let ssh_config = std::fs::read_to_string(home.path().join(".ssh/config")).unwrap();
     let include = format!("Include {}/.ssh/kloudlite_config", home.path().display());
-    assert_eq!(ssh_config.matches(&include).count(), 1, "include added once: {ssh_config}");
-    assert!(ssh_config.starts_with(&include), "include must be first: {ssh_config}");
-    assert!(ssh_config.contains("Host old"), "the user's own config is kept: {ssh_config}");
+    assert_eq!(
+        ssh_config.matches(&include).count(),
+        1,
+        "include added once: {ssh_config}"
+    );
+    assert!(
+        ssh_config.starts_with(&include),
+        "include must be first: {ssh_config}"
+    );
+    assert!(
+        ssh_config.contains("Host old"),
+        "the user's own config is kept: {ssh_config}"
+    );
 }
