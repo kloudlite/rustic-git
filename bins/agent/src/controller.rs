@@ -1126,9 +1126,6 @@ where
     }
 }
 
-/// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
-/// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
-/// this guards is a pod wedged forever on `path … does not exist`.
 /// Compare-and-set the owner pin from empty to `node`. The `test` op is what makes two claimants
 /// safe: the API server applies the patch atomically, so exactly one of them sees 200 and the
 /// other a 409/422 it treats as "lost, not broken" — same construction as `peer::release_dead_volumes`.
@@ -1151,6 +1148,9 @@ pub(crate) async fn take_volume(ctx: &Arc<Ctx>, name: &str, node: &str) -> Resul
     }
 }
 
+/// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
+/// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
+/// this guards is a pod wedged forever on `path … does not exist`.
 pub(crate) fn volume_is_ready(v: &crd::Volume) -> bool {
     v.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Ready && s.subvolume_present)
 }

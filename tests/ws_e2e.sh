@@ -1002,7 +1002,7 @@ POOL_NODE_COUNT=$(printf '%s\n' "$POOL_NODES" | grep -c . || true)
 if [ "$POOL_NODE_COUNT" -lt 3 ]; then
   log "volume takeover: skipping (need >=3 rustic-git.io/pool=true nodes, found $POOL_NODE_COUNT)"
 else
-  log "volume takeover: node JOIN — creating a workspace, then dropping a THIRD node's pool label"
+  log "volume takeover: node JOIN — creating a workspace, then dropping the standby's pool label"
   TAKEOVER_WS_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
     -H 'Content-Type: application/json' -d '{"name":"e2e-takeover","region":"'"$REGION_ID"'","quota_gb":5}')
   TAKEOVER_WS_ID=$(echo "$TAKEOVER_WS_JSON" | field id)
@@ -1018,39 +1018,23 @@ else
   done
   [ -n "$STANDBY" ] || fail "takeover workspace $TAKEOVER_WS_ID never got a Synced standby replica"
 
-  # A node the workspace does not already touch — dropping its label must be a real join event
-  # for this volume, not a no-op re-election of the same standby (that node was never a candidate
-  # for it, so nothing here can move onto it and back onto itself).
-  JOIN_NODE=$(printf '%s\n' "$POOL_NODES" | grep -vx "$E2E_NODE" | grep -vx "$STANDBY" | head -1)
-  [ -n "$JOIN_NODE" ] || fail "could not find a third pool node distinct from $E2E_NODE and $STANDBY"
+  # Removing and re-adding a THIRD node's label restores the identical pool set, so rendezvous
+  # re-elects the same standby and nothing has moved — the drill would pass on a no-op. Drop the
+  # STANDBY's label instead: the slot has nowhere to stay and must move to another live node.
+  kubectl label node "$STANDBY" rustic-git.io/pool- >/dev/null
 
-  kubectl label node "$JOIN_NODE" rustic-git.io/pool- >/dev/null
-  # One pull beat (WS_SYNC_SECS=5 above governs this script's own agent; give the real cluster's
-  # agents the same order of magnitude to notice the node is gone) so placement settles onto the
-  # remaining live nodes before the join is measured, or the label add below finds nothing moved.
-  sleep 10
-  kubectl label node "$JOIN_NODE" rustic-git.io/pool=true --overwrite >/dev/null
-
-  # `slot moved elsewhere` is what a node's own pull beat logs (peer.rs) when rendezvous starts
-  # naming it for a volume it did not hold before — reading VolumeReplica rows for a Synced entry
-  # on the joiner is cheaper than re-deriving the same rendezvous hash in a standalone binary.
-  JOINED=""
+  NEW_STANDBY=""
   for i in $(seq 1 90); do
-    JOINED=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
-      -o jsonpath="{.items[?(@.spec.node==\"$JOIN_NODE\")].status.phase}" 2>/dev/null)
-    [ "$JOINED" = "Synced" ] && break
+    NEW_STANDBY=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
+      -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null \
+      | tr ' ' '\n' | grep -vx "$E2E_NODE" | grep -vx "$STANDBY" | head -1)
+    [ -n "$NEW_STANDBY" ] && break
     sleep 4
   done
-  [ "$JOINED" = "Synced" ] || fail "no Synced VolumeReplica for $TAKEOVER_WS_ID appeared on the joining node $JOIN_NODE"
+  [ -n "$NEW_STANDBY" ] || fail "no Synced VolumeReplica for $TAKEOVER_WS_ID appeared on a node other than $E2E_NODE/$STANDBY after dropping $STANDBY's pool label"
 
-  DISPLACED=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
-    -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null \
-    | tr ' ' '\n' | grep -vx "$E2E_NODE" | grep -vx "$JOIN_NODE" | head -1)
-  # replicas defaults to 2 (owner + one standby), so the joiner's new copy must have displaced
-  # exactly the node that used to hold the slot; there must be no Synced standby left besides the
-  # joiner now.
-  [ -z "$DISPLACED" ] || fail "expected only $JOIN_NODE as the standby after the join, but $DISPLACED still has a Synced row"
-
+  # Retire is keep-biased: the old copy goes only on the beat AFTER its replacement reports
+  # Synced, so this poll starts from a state where both rows legitimately exist.
   for i in $(seq 1 30); do
     kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
       -o jsonpath="{.items[?(@.spec.node==\"$STANDBY\")]}" 2>/dev/null | grep -q . || break
@@ -1061,11 +1045,24 @@ else
     && fail "the displaced node $STANDBY's VolumeReplica row for $TAKEOVER_WS_ID is still around"
   # The displaced node's subvolume lives on ITS OWN pool, not this script's loopback $MOUNT, so it
   # can only be checked here when this script's own node happens to be the one that was displaced.
+  TAKEOVER_VOL=$(kubectl get workspace "$TAKEOVER_WS_ID" -o jsonpath='{.status.volumeRef}')
   if [ "$STANDBY" = "$E2E_NODE" ]; then
-    TAKEOVER_VOL=$(kubectl get workspace "$TAKEOVER_WS_ID" -o jsonpath='{.status.volumeRef}')
     [ -e "$MOUNT/vol/$TAKEOVER_VOL" ] && fail "retired subvolume $MOUNT/vol/$TAKEOVER_VOL still present on $STANDBY"
   fi
-  log "volume takeover: node JOIN passed (standby moved $STANDBY -> $JOIN_NODE, old row and subvolume gone)"
+
+  # Give the node its label back and let placement settle: the pool set is the original one again,
+  # so rendezvous elects $STANDBY once more and $NEW_STANDBY retires. Bounded — a cluster left
+  # mid-move by a timeout here is worse than a slow assert.
+  kubectl label node "$STANDBY" rustic-git.io/pool=true --overwrite >/dev/null
+  SETTLED=""
+  for i in $(seq 1 90); do
+    SETTLED=$(kubectl get volumereplicas -l "rustic-git.io/volume=$TAKEOVER_WS_ID" \
+      -o jsonpath="{.items[?(@.spec.node==\"$STANDBY\")].status.phase}" 2>/dev/null)
+    [ "$SETTLED" = "Synced" ] && break
+    sleep 4
+  done
+  [ "$SETTLED" = "Synced" ] || fail "after restoring $STANDBY's pool label, its VolumeReplica for $TAKEOVER_WS_ID never came back Synced"
+  log "volume takeover: node JOIN passed (standby moved $STANDBY -> $NEW_STANDBY, old row and subvolume gone, then settled back to $STANDBY)"
 fi
 echo
 echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history) all passed"

@@ -241,7 +241,7 @@ pub(crate) const SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_
 /// -R` would give a whole tree at once. A plain directory is walked through, not deleted; a
 /// subvolume's own contents are never descended into beyond finding nested subvolumes — btrfs
 /// deletes the rest with the subvolume itself.
-pub(crate) fn subvolumes_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+fn subvolumes_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let p = entry.path();
@@ -309,7 +309,7 @@ pub(crate) fn drop_stale_worktrees(engine: &Engine, volume: &str, owner: &str, m
     count
 }
 
-pub(crate) fn btrfs_delete(path: &std::path::Path, id: &str) {
+fn btrfs_delete(path: &std::path::Path, id: &str) {
     match std::process::Command::new("btrfs").args(["subvolume", "delete", path.to_str().unwrap()]).output() {
         Ok(out) if out.status.success() => {}
         Ok(out) => tracing::warn!(
@@ -318,9 +318,10 @@ pub(crate) fn btrfs_delete(path: &std::path::Path, id: &str) {
             stderr = %String::from_utf8_lossy(&out.stderr),
             "agent: cleanup: btrfs subvolume delete"
         ),
-        // No `btrfs` on PATH means we're not on a real node (dev machine, this crate's own
-        // Mac test run) — a plain `remove_dir_all` is the only sane thing a subvolume path can
-        // mean there, and it's also correct on a real node's plain (non-subvolume) directories.
+        // Test-only: no `btrfs` on PATH means this is the crate's own Mac test run, where a
+        // plain `remove_dir_all` is the only thing a subvolume path can mean. Never in
+        // production — there, a missing `btrfs` is a broken node, not a directory to rm -rf.
+        #[cfg(test)]
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Err(e) = std::fs::remove_dir_all(path) {
                 if e.kind() != std::io::ErrorKind::NotFound {
