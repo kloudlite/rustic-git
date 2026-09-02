@@ -549,3 +549,25 @@ free rewrite — a wrong write is repairable, never silently doubled. On reconne
 sees its object is no longer its own and tears the pod down; whatever was typed during the
 partition and never replicated is gone. There is no lease a pod must renew to prevent this — that
 would be a second liveness system on top of the Node object's own.
+
+### ZeroFS failover (manual, by design)
+
+ZeroFS runs `replicas: 1` with `strategy: Recreate` because it has one SlateDB behind it and
+SlateDB has one writer — a rolling update that let a second pod start before the first stopped
+would be exactly the fenced-handle bug the ownership map exists to prevent elsewhere. It is also
+pinned to the control-plane node by `nodeSelector`/toleration. Put together: if that node is
+lost, every home in the region is unavailable until it comes back — there is no automatic
+failover for this pod.
+
+Recovery is one of:
+
+- Bring the control-plane node back. The pod reschedules there and homes resume.
+- Move ZeroFS to another node: edit its `nodeSelector`/toleration in `zerofs.yaml`, apply, and
+  **first confirm the old pod is gone** — `kubectl -n rustic-git-system get pod -l app=zerofs`
+  must return empty before the new pod is allowed to start. Two ZeroFS pods open against the
+  same SlateDB prefix is exactly the fencing this repo's one-writer rule forbids; a node that is
+  merely unreachable (not actually dead) can still be holding that database open.
+
+Either way, once the (new) ZeroFS pod is `Ready`, restart the agents so their NFS mounts
+re-resolve to it: `kubectl -n kube-system rollout restart ds/rustic-git-agent`. Skipping this
+leaves agents on stale NFS file handles, which answer `EIO` rather than re-mounting on their own.

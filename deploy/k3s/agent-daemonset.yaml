@@ -279,6 +279,17 @@ spec:
           # node. Try it on one node with a workspace create as the test before changing it here.
           securityContext:
             privileged: true
+          # The container that runs builds shares the node with tenant pods, and the agent beside it
+          # already carries a request. Unbounded, a profile build starves the workspaces on the node
+          # it is building for. Measured peak on 2026-09-02 was 9Mi (idle — no build was running in
+          # this environment); 2x that rounds up to 1Gi, same as the request — revisit once a real
+          # nixpkgs evaluation can be sampled.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 1Gi
           volumeMounts:
             - name: nix
               mountPath: /nix
