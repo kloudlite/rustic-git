@@ -691,4 +691,13 @@ async fn a_catalog_marker_without_this_owners_prefix_is_not_used_as_a_name() {
         serde_json::json!(["acme/alpha", "acme/beta", "acme/gamma"]),
         "a marker that is not `{{who}}/{{name}}` must not truncate the catalog"
     );
+
+    // Dropping the marker must not drop `n` with it: the client asked for a page, not the lot.
+    let r = c.get(format!("{base}/v2/_catalog?n=2&last=other/x"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let link = r.headers().get("link").expect("a capped page carries a Link to continue")
+        .to_str().unwrap().to_string();
+    assert!(link.contains("last=acme/beta"), "{link}");
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["repositories"], serde_json::json!(["acme/alpha", "acme/beta"]));
 }

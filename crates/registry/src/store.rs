@@ -201,6 +201,9 @@ pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
 
 /// Drop every hold row for `d`, whatever wrote it. The mirror of `forget_manifest_blobs` on the
 /// blob-delete path: the rows say "this image holds these bytes", so they must not outlive them.
+/// Only THIS image's rows, though — hold rows live in the image's own database, so a sibling image
+/// that holds the same digest keeps a row for bytes that are gone. Harmless: the row only routes a
+/// pull, which then 404s on the missing blob exactly as it would without the row.
 pub async fn forget_blob_rows(db: &Db, d: &Digest) -> Result<()> {
     // Every key ends with the empty suffix, so this is "all rows under the digest's prefix".
     delete_suffixed(db, &format!("{BLOB_PREFIX}{d}/"), "").await

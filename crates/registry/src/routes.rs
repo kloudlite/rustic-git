@@ -159,8 +159,8 @@ async fn catalog(
     // `last` on the wire is `{who}/{name}`; the index knows the name alone. A marker that does
     // not carry this owner's prefix names nothing in the index, so it must not be handed down as
     // one — the page below re-filters against the full `{who}/{name}` strings and is the honest
-    // answer for a foreign or malformed marker. `n` goes with it: an index page truncated
-    // against a marker the index never saw would hide the rows the page then wants.
+    // answer for a foreign or malformed marker. Only `last` is unsafe: `n` stays, or the client
+    // asked for a page of two and got the whole catalog back unpaged, with no Link to continue.
     let mut page_q = q.clone();
     // `final_q` drives the second `paginate` below over the full `{who}/{name}` strings, so a
     // foreign `last` has to be scrubbed there too — leaving it in place would truncate `all`
@@ -173,11 +173,15 @@ async fn catalog(
             }
             None => {
                 page_q.remove("last");
-                page_q.remove("n");
                 final_q.remove("last");
-                final_q.remove("n");
             }
         }
+    }
+    // One row past the page, so the `paginate` below can tell a full page from the last one — an
+    // index page capped at exactly `n` looks identical to an exhausted catalog and emits no Link,
+    // which stops a paging client one page in.
+    if let Some(n) = page_q.get("n").and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0) {
+        page_q.insert("n".into(), (n + 1).to_string());
     }
     let markers = match image_listing(&app, &who, true, &page_q).await {
         Ok(m) => m,

@@ -566,6 +566,10 @@ pub(super) async fn api_pull_mergeability(
         // An UNSTAMPED verdict is still accepted: a worker older than this field, and one that
         // could not resolve either branch, must keep working through a roll — and the next check
         // rewrites the row anyway.
+        // ponytail: an unstamped `Unknown` from a lapsed lane can still overwrite a fresher
+        // `Clean` at unchanged tips, and nothing re-checks until the next push. Upgrade path is a
+        // re-check trigger on that overwrite, not a guard here — a guard would drop the roll
+        // compatibility this leniency exists for.
         if !v.base_oid.is_empty() && (v.base_oid != m.base_oid || v.head_oid != m.head_oid) {
             return Some(
                 (StatusCode::CONFLICT, "this verdict was computed from other tips").into_response(),
