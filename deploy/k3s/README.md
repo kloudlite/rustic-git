@@ -264,9 +264,9 @@ Order:
 ```sh
 # 1. CRDs first — the new kinds (Snapshot, VolumeReplica) and the selectableFields the agent's
 #    watches filter on. Already applied on dev; harmless to re-apply. This now includes
-#    VolumeReplica's `.spec.volume` selector (added 2026-09-02, used by `flush_gate` and
-#    `pull_volume`): apply it BEFORE the agent image that reads it — an agent ahead of the CRD
-#    gets a 400 on every stop's flush gate.
+#    VolumeReplica's `.spec.volume` selector (added 2026-09-02, used only by `flush_gate`):
+#    apply it BEFORE the agent image that reads it — an agent ahead of the CRD gets a 400 on
+#    every stop's flush gate (stop_push parks the teardown), not on replication.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
 # 2. Roll the agent (repin the image tag to the SHA CI built, then apply and wait).
@@ -277,6 +277,11 @@ KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/rustic-git-agent -n kube-sy
 deploy/roll.sh
 kubectl rollout status deploy/rustic-git-api -n rustic-git
 ```
+
+Pre-existing asymmetry, follow-up only: `live_parents` in `crates/workspaces/src/api.rs` selects
+Workspaces by a single owner (`owned_by`) but Environments by the caller's whole owner set
+(`owner_set_selector`), so a team environment shows here while a lone workspace under a teammate's
+name would not.
 
 **Every existing volume's pod restarts once — and, for homes, force it explicitly.** There is no
 bulk migration step: an old-layout volume (`{pool}/vol/{id}/live` is itself the RW subvolume) is

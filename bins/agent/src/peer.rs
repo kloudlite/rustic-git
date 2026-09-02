@@ -968,9 +968,19 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
             // can lag a pod that's actually running here, and deleting a live worktree out from
             // under a running pod is the one thing this pass must never do.
             if !hosted.contains(&id) {
-                let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
-                if dropped > 0 {
-                    tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+                // `v.spec.node_name` is from `beat.volumes`, listed before the pull loop ran; a
+                // takeover landing in that window makes it stale, and against a stale owner this
+                // would delete the worktree this node just created for itself. One fresh GET,
+                // right before the delete, catches that race; a failed GET keeps everything.
+                // Keep-bias: a failed GET, like `mine`, skips the drop rather than risking one
+                // against a node name that may already be stale.
+                if let Ok(Some(fresh)) = Api::<crd::Volume>::all(ctx.client.clone()).get_opt(&id).await {
+                    if fresh.spec.node_name != ctx.node {
+                        let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
+                        if dropped > 0 {
+                            tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+                        }
+                    }
                 }
             }
             continue;
@@ -2045,6 +2055,42 @@ fi
         assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "{:?}", rec.calls());
         assert!(ctx.engine.pool.voldir("v1").exists(), "hosting a worktree here must keep the whole copy");
         assert!(ctx.engine.pool.live("v1").join("ws-1").exists(), "and must not drop the live worktree either");
+    }
+
+    /// `beat.volumes` is listed before the pull loop runs; a takeover landing in that window makes
+    /// `v.spec.node_name` stale. Here the list still says node-a, but a takeover has already moved
+    /// the volume to node-b (me) by the time this pass gets around to it — the fresh GET right
+    /// before the delete must catch that and keep the worktree this node just created for itself.
+    #[tokio::test]
+    async fn retire_pass_rechecks_ownership_before_dropping_a_worktree_a_fresh_takeover_claimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v1/live/ws-1")).unwrap();
+
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let beat = beat_of(vec![volume], vec![], vec![]);
+        let routes = vec![Route {
+            method: "GET",
+            path: format!("{VOLUMES}/v1"),
+            status: 200,
+            body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                "metadata": {"name": "v1"},
+                "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
+                "status": {"phase": "ready"},
+            }),
+        }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let live = vec!["node-a".to_string(), "node-b".to_string()];
+
+        retire_pass(&ctx, &beat, &live).await;
+
+        assert!(ctx.engine.pool.live("v1").join("ws-1").exists(), "a fresh takeover made this worktree mine; it must survive");
+        assert!(rec.calls().iter().any(|c| c == &format!("GET {VOLUMES}/v1")), "{:?}", rec.calls());
     }
 
     /// The listing budget: one pull beat over one volume makes ONE Volume list, ONE VolumeReplica

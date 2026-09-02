@@ -204,6 +204,13 @@ pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> 
     if !spec.team.is_empty() && !rustic_git_storage::store::valid_segment(&spec.team) {
         return Err(format!("team {:?} is not a segment", spec.team));
     }
+    // `write_attach_label` (controller/workspace.rs) patches this verbatim into a label value —
+    // unchecked, a hostile or over-long value 422s that patch and wedges the reconcile forever.
+    if let Some(env) = &spec.attached_environment {
+        if !rustic_git_storage::store::valid_segment(env) || env.len() > 63 {
+            return Err(format!("attachedEnvironment {env:?} is not a segment"));
+        }
+    }
     // Packages are deliberately NOT checked here: the profile build already validates them and
     // reports the far more useful `PackagesReady` condition, which this would pre-empt.
     Ok(())

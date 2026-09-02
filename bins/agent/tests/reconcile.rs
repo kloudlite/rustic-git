@@ -3550,6 +3550,36 @@ async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_dire
     assert_eq!(st["compatibleNodes"], serde_json::json!(["node-a"]));
 }
 
+/// `write_attach_label` patches `spec.attachedEnvironment` verbatim into a label value — unchecked,
+/// a hostile value 422s that patch and wedges the reconcile forever with no Permanent settle.
+#[tokio::test]
+async fn a_workspace_with_a_traversing_attached_environment_settles_permanent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }],
+    );
+    let w: crd::Workspace = serde_json::from_value(serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
+        "spec": {"owner": "alice", "team": "", "name": "ws", "region": "r1",
+                 "image": "", "packages": [], "desiredState": "running", "attachedEnvironment": "../evil"},
+        "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+                   "volumeRef": "vol-1", "conditions": []},
+    }))
+    .unwrap();
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent, never retried");
+    let sent = rec.sent("PATCH", WS_STATUS);
+    let reason = sent.last().expect("a status write")["status"]["conditions"][0]["reason"].clone();
+    assert_eq!(reason, "InvalidSpec");
+    assert!(
+        rec.calls().iter().all(|c| c == &format!("PATCH {WS_STATUS}") || !c.starts_with("PATCH") && !c.starts_with("POST")),
+        "no POST/PATCH beyond the status write: {:?}", rec.calls()
+    );
+}
+
 /// The same guard on an Environment, whose `spec.owner` reaches `{pool}/homecache/{owner}`.
 #[tokio::test]
 async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_placement() {
