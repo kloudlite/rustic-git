@@ -26,7 +26,7 @@ pub(crate) mod workspace;
 pub use workspace::{apply_workspace, cleanup_workspace_worktree, reconcile_workspace};
 // pub so the inode invariant is assertable from the integration suite — see reconcile.rs.
 pub use workspace::write_resolv_conf;
-pub(crate) use workspace::{kept_conditions, migrate_and_seed_baseline, write_ws_status};
+pub(crate) use workspace::{kept_conditions, migrate_and_seed_baseline, replaced, write_ws_status};
 pub(crate) mod volume;
 pub use volume::{apply_volume, cleanup_volume};
 pub(crate) use volume::{heal_labels, owner_ref_of_kind, reconcile_volume, resolve_volume, Resolved};

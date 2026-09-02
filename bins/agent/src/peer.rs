@@ -7,7 +7,7 @@
 //! in this file returns early) — fail-closed: no secret configured means no root-run `btrfs send`
 //! reachable from the network, ever.
 
-use crate::controller::{kept_conditions, replace_status, Ctx};
+use crate::controller::{replace_status, Ctx};
 use crate::janitor;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -377,7 +377,7 @@ pub async fn pull_beat(ctx: &Arc<Ctx>) {
     if ctx.peer_secret.is_empty() {
         return;
     }
-    pull_beat_with(ctx, "btrfs", &ctx.peer_secret.clone()).await
+    pull_beat_with(ctx, "btrfs", &ctx.peer_secret).await
 }
 
 /// The nodes a stopped parent could start on, from this node's own view — the pool minus the
@@ -434,7 +434,9 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     let Some(beat) = crate::listing::beat(ctx).await else { return };
 
     reap_dead_replicas(ctx, &beat, &nodes, floor, now).await;
-    unclaim_dead_nodes(ctx, &beat, &nodes, floor, now).await;
+    // DEAD nodes only, never merely decommissioning ones: a decommissioning node is alive, its
+    // running work keeps running, and it releases its volumes at its own pace from its own beat.
+    sweep_dead_nodes(ctx, &beat, &nodes, floor, now).await;
 
     let candidates = match pool_nodes(&ctx.client).await {
         Ok(v) => v,
@@ -868,176 +870,92 @@ async fn reap_dead_replicas(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, nodes: 
     }
 }
 
-/// The unclaim half of the same dead-node sweep: a Workspace or Environment whose `status.nodeName`
-/// names a node that is dead (same `node_is_dead` rule as the replica reaper) has its claim
-/// cleared — `status.nodeName` alone, everything else in its status preserved — so the placement
-/// watch picks it back up as unplaced. A Ready node's claim is never touched: this is the ONLY
-/// place besides the claim itself allowed to write `status.nodeName`, per the module doc's
-/// one-fact-one-writer rule.
-async fn unclaim_dead_nodes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
-    let mut running_volumes: HashSet<String> = HashSet::new();
-    let ws_ok = unclaim_kind::<crd::Workspace>(ctx, "Workspace", nodes, floor, now, |w| {
-        w.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or("")
-    }, |w| w.spec.desired_state == crd::DesiredState::Stopped, |w| {
-        let mut st = w.status.clone().unwrap_or_default();
-        st.node_name = String::new();
-        serde_json::to_value(st).expect("WorkspaceStatus serializes")
-    }, |w, why| {
-        let mut st = w.status.clone().unwrap_or_default();
-        let gen = w.metadata.generation.unwrap_or(0);
-        let degraded = crd::condition("Degraded", true, "NodeDead", why, gen);
-        st.conditions = kept_conditions(&st.conditions, degraded);
-        serde_json::to_value(st).expect("WorkspaceStatus serializes")
-    }, &mut running_volumes)
-    .await;
-    let envs_ok = unclaim_kind::<crd::Environment>(ctx, "Environment", nodes, floor, now, |e| {
-        e.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or("")
-    }, |e| e.spec.desired_state == crd::DesiredState::Stopped, |e| {
-        let mut st = e.status.clone().unwrap_or_default();
-        st.node_name = String::new();
-        serde_json::to_value(st).expect("EnvironmentStatus serializes")
-    }, |e, why| {
-        let mut st = e.status.clone().unwrap_or_default();
-        let gen = e.metadata.generation.unwrap_or(0);
-        let degraded = crd::condition("Degraded", true, "NodeDead", why, gen);
-        st.conditions = kept_conditions(&st.conditions, degraded);
-        serde_json::to_value(st).expect("EnvironmentStatus serializes")
-    }, &mut running_volumes)
-    .await;
-    // A half-listed parent set means `running_volumes` is missing Running worktrees, and the
-    // release pass would then clear their pins — the one thing the spec forbids. Skip it whole.
-    if ws_ok && envs_ok {
-        release_dead_volumes(ctx, beat, nodes, floor, now, &running_volumes).await;
+/// What a sweep decides about one volume: `Mark` writes the condition and keeps the pin,
+/// `Release` clears the pin and un-places every parent.
+#[derive(Debug)]
+pub(crate) enum VolumeVerdict {
+    Mark { why: String },
+    Release { why: String, reason: &'static str },
+}
+
+/// THE per-volume decision, for both sweeps. Ownership is per volume, so moving is decided per
+/// volume — never per parent, which is exactly the bug this replaces: un-placing a stopped
+/// workspace while a running clone of it kept the same volume pinned left the stopped one
+/// claimable on a node that owns nothing.
+///
+/// The three arms, in the spec's order:
+///   1. any parent Running        → nothing moves, pin kept, every parent marked;
+///   2. some parent not replicated → nothing moves yet, pin kept — every parent must be
+///      covered, or starting elsewhere loses that one's last edits;
+///   3. otherwise                 → pin cleared, parents un-placed, an up-to-date node takes it.
+///
+/// `reason` is the condition reason the caller wants (`NodeDead` for the dead-node sweep,
+/// `Decommissioned` for a drain) — the arms are identical, only the word differs.
+pub(crate) fn volume_decision(
+    volume: &str,
+    owner: &str,
+    parents: &[&crate::listing::Parent],
+    reason: &'static str,
+) -> VolumeVerdict {
+    if let Some(running) = parents.iter().find(|p| p.is_live_worktree()) {
+        return VolumeVerdict::Mark {
+            why: format!(
+                "owner {owner} is unavailable; a Running worktree ({}) still names volume {volume}, so it stays pinned",
+                running.name
+            ),
+        };
+    }
+    // `replicated` is the OWNER's own `Replicated` condition off the listing, never recomputed
+    // here: two nodes computing "is it replicated" independently is two truths that can disagree.
+    if let Some(waiting) = parents.iter().find(|p| !p.replicated) {
+        return VolumeVerdict::Mark {
+            why: format!(
+                "owner {owner} is unavailable; {} on volume {volume} is not replicated to any other node yet",
+                waiting.name
+            ),
+        };
+    }
+    VolumeVerdict::Release {
+        why: format!("owner {owner} is unavailable; released, waiting for an up-to-date node to take it"),
+        reason,
     }
 }
 
-/// One kind's half of `unclaim_dead_nodes`. The write is the SAME guarded primitive
-/// `claim.rs`'s own claim uses (`replace_status`, a PUT carrying `resourceVersion`, one re-read on
-/// a 409) — clearing a claim races the same way winning one does, and losing that race here just
-/// means a peer's own pass (or this node's next tick) clears it instead.
-///
-/// A Running worktree is never moved by the system: its live edits exist only on the dead node
-/// and only the person may decide those are expendable (spec: "the person decides"). It is marked
-/// `NodeDead` so the API can say why, and released the moment `desiredState` turns Stopped.
-///
-/// Returns whether the list succeeded: a failed list contributes no Running parents, and the
-/// caller's release pass would read that emptiness as "no worktree needs this pin".
-#[allow(clippy::too_many_arguments)]
-async fn unclaim_kind<K>(
-    ctx: &Arc<Ctx>,
-    kind: &'static str,
-    nodes: &[Node],
-    floor: i64,
-    now: k8s_openapi::jiff::Timestamp,
-    node_name: impl Fn(&K) -> &str,
-    releasable: impl Fn(&K) -> bool,
-    cleared_status: impl Fn(&K) -> serde_json::Value,
-    degraded_status: impl Fn(&K, &str) -> serde_json::Value,
-    running_volumes: &mut HashSet<String>,
-) -> bool
-where
-    K: kube::Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
-{
-    let api: Api<K> = Api::all(ctx.client.clone());
-    let list = match api.list(&ListParams::default()).await {
-        Ok(l) => l.items,
-        Err(e) => {
-            tracing::warn!(%kind, error = %e, "pull: unclaim: listing; clearing nothing");
-            return false;
-        }
-    };
-    for obj in list {
-        let claimed_by = node_name(&obj).to_string();
-        let release = releasable(&obj);
-        // A Running parent's volume is "in use" whether it is claimed, unplaced (about to
-        // reclaim), on a live node, or on a dead node and therefore kept — the release pass below
-        // must never clear its pin in any of those cases, so this runs before the early-outs.
-        if !release {
-            if let Some(v) = volume_ref_of(&obj) {
-                running_volumes.insert(v);
-            }
-        }
-        if claimed_by.is_empty() {
-            continue; // already unplaced: nothing to clear
-        }
-        if !node_is_dead(nodes.iter().find(|n| n.name_any() == claimed_by), floor, now) {
-            continue; // a Ready node's claim is never touched
-        }
-        if !release && already_marked_dead(&obj) {
-            continue; // no churn every beat: already carries the NodeDead condition
-        }
-        let name = obj.name_any();
-        let mut cur = obj;
-        for attempt in 0..2 {
-            let status = if release {
-                cleared_status(&cur)
-            } else {
-                let why = format!(
-                    "node {claimed_by} is down; edits since the last sync point exist only there — stop and start to move it, or wait for the node"
-                );
-                degraded_status(&cur, &why)
-            };
-            match replace_status(&api, &cur, kind, status).await {
-                Ok(()) => break,
-                Err(kube::Error::Api(s)) if s.code == 409 && attempt == 0 => match api.get(&name).await {
-                    Ok(fresh) => cur = fresh,
-                    Err(e) => {
-                        tracing::warn!(%kind, %name, error = %e, "pull: unclaim: re-read after conflict");
-                        break;
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(%kind, %name, error = %e, "pull: unclaim: clearing a dead node's claim");
-                    break;
-                }
-            }
-        }
-    }
-    true
-}
-
-/// `status.volumeRef`, read the only way both `Workspace` and `Environment` agree on it — through
-/// their common JSON shape, since the generic `K` here has no shared trait for it.
-fn volume_ref_of<K: serde::Serialize>(obj: &K) -> Option<String> {
-    let v = serde_json::to_value(obj).ok()?;
-    v.get("status")?.get("volumeRef")?.as_str().map(str::to_string)
-}
-
-/// Whether this object's status already carries a `NodeDead` condition — the guard that stops the
-/// sweep rewriting the same status every beat for a worktree that stays Running and stays dead.
-fn already_marked_dead<K: serde::Serialize>(obj: &K) -> bool {
-    let Some(v) = serde_json::to_value(obj).ok() else { return false };
-    v.get("status")
-        .and_then(|s| s.get("conditions"))
-        .and_then(|c| c.as_array())
-        .is_some_and(|cs| cs.iter().any(|c| c.get("reason").and_then(|r| r.as_str()) == Some("NodeDead")))
-}
-
-/// A dead node's Volume: phase says Unavailable for every one; the owner pin is cleared ONLY
-/// when no Running parent still names it — a pinned-but-unavailable volume is exactly the
-/// "down, not moved" state the spec asks for. Spec first, status second: a cleared pin with
-/// stale status is taken on the next claim; the reverse is a lie the takeover arm cannot act on.
-async fn release_dead_volumes(
+/// Applies `volume_decision` to every volume whose owner is in `owners`. One place, called by the
+/// dead-node sweep and by the decommission beat with different sets and different reasons — the
+/// arms must never drift, and two copies of them is how they would.
+pub(crate) async fn sweep_volumes(
     ctx: &Arc<Ctx>,
     beat: &crate::listing::Beat,
-    nodes: &[Node],
-    floor: i64,
-    now: k8s_openapi::jiff::Timestamp,
-    running: &HashSet<String>,
+    owners: &HashSet<String>,
+    reason: &'static str,
 ) {
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     for vol in beat.volumes.iter().cloned() {
         let owner = vol.spec.node_name.clone();
-        if owner.is_empty() || !node_is_dead(nodes.iter().find(|n| n.name_any() == owner), floor, now) {
+        if owner.is_empty() || !owners.contains(&owner) {
             continue;
         }
         let name = vol.name_any();
-        let release = !running.contains(&name);
+        // `all_parents`, not `parents`: this volume is owned by another node, so this node's own
+        // scoped list would show none of its parents and every arm would read as "nothing on it".
+        let parents: Vec<&crate::listing::Parent> = beat.all_parents.iter().filter(|p| p.volume == name).collect();
+        // The reason comes back OUT of the verdict, so the word written is the one the decision
+        // made rather than a second copy of the caller's argument.
+        let (why, reason, release) = match volume_decision(&name, &owner, &parents, reason) {
+            VolumeVerdict::Mark { why } => (why, reason, false),
+            VolumeVerdict::Release { why, reason } => (why, reason, true),
+        };
+        // Every parent on the volume carries the condition, whatever the verdict — that is how
+        // the API answers "why will this not start", and on a release it is written BEFORE the
+        // un-place so the object is never briefly unplaced with no explanation.
+        for p in &parents {
+            mark_parent(ctx, p, reason, &why, release).await;
+        }
         let mut cur = vol;
         if release {
-            // A `test` op first: a survivor's takeover claiming this volume between our list and
-            // this patch must not be clobbered back to "" — a failed test (409/422) means we lost
-            // that race, so skip the write entirely rather than overwrite a fresh owner.
+            // `test` first: a survivor's takeover landing between our list and this patch must not
+            // be clobbered back to "" — a failed test (409/422) means we lost that race.
             let ops = json_patch::Patch(vec![
                 json_patch::PatchOperation::Test(json_patch::TestOperation {
                     path: "/spec/nodeName".parse().expect("static pointer parses"),
@@ -1050,34 +968,109 @@ async fn release_dead_volumes(
             ]);
             match api.patch(&name, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<crd::Volume>(ops)).await {
                 // The patched object, not our stale copy: the PUT below carries a
-                // `resourceVersion`, and the patch just bumped it — replaying the pre-patch one
-                // is a guaranteed 409, which would leave the volume released but never marked.
+                // `resourceVersion`, and the patch just bumped it.
                 Ok(v) => cur = v,
-                Err(kube::Error::Api(s)) if s.code == 409 || s.code == 422 => {
-                    continue; // lost the race to a survivor's takeover: skip the status write too
-                }
+                Err(kube::Error::Api(s)) if s.code == 409 || s.code == 422 => continue,
                 Err(e) => {
-                    tracing::warn!(volume = %name, error = %e, "pull: unclaim: releasing a dead node's volume");
+                    tracing::warn!(volume = %name, error = %e, "sweep: releasing an unavailable owner's volume");
                     continue;
                 }
             }
         }
         let mut st = cur.status.clone().unwrap_or_default();
-        if st.phase == crd::Phase::Unavailable && !release {
-            continue; // already marked, still pinned: nothing changed since last beat
+        if st.phase == crd::Phase::Unavailable
+            && !release
+            && st.conditions.iter().any(|c| c.type_ == "Available" && c.reason == reason && c.message == why)
+        {
+            continue; // already marked, same reason, still pinned: nothing changed since last beat
         }
         st.phase = crd::Phase::Unavailable;
         let gen = cur.metadata.generation.unwrap_or(0);
-        let why = if release {
-            format!("owner {owner} is dead; released, waiting for a Synced node to take it")
-        } else {
-            format!("owner {owner} is dead; a Running worktree still names this volume, so it stays pinned")
-        };
-        st.conditions = vec![crd::condition("Available", false, "NodeDead", &why, gen)];
+        // No `Released` reason: `Unavailable` with an empty pin IS released, and a third word
+        // would restate the pin the object already carries.
+        st.conditions = vec![crd::condition("Available", false, reason, &why, gen)];
         if let Err(e) = replace_status(&api, &cur, "Volume", serde_json::to_value(st).expect("VolumeStatus serializes")).await {
-            tracing::warn!(volume = %name, error = %e, "pull: unclaim: marking a dead node's volume unavailable");
+            tracing::warn!(volume = %name, error = %e, "sweep: marking an unavailable owner's volume");
         }
     }
+}
+
+/// One parent's status write for the sweep: the condition always, `nodeName: ""` only on a
+/// release. The same guarded primitive the claim uses (`replace_status`, a PUT carrying
+/// `resourceVersion`, one re-read on a 409) — clearing a claim races the same way winning one does.
+async fn mark_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent, reason: &str, why: &str, release: bool) {
+    match p.kind {
+        "Workspace" => mark_parent_of::<crd::Workspace>(ctx, &p.name, "Workspace", reason, why, release).await,
+        _ => mark_parent_of::<crd::Environment>(ctx, &p.name, "Environment", reason, why, release).await,
+    }
+}
+
+/// The generic half. Status is edited as JSON because `Workspace` and `Environment` share no
+/// status type — the same reason `listing::Parent` exists at all.
+async fn mark_parent_of<K>(ctx: &Arc<Ctx>, name: &str, kind: &'static str, reason: &str, why: &str, release: bool)
+where
+    K: kube::Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let api: Api<K> = Api::all(ctx.client.clone());
+    let Ok(Some(mut cur)) = api.get_opt(name).await else { return };
+    for attempt in 0..2 {
+        let mut status = serde_json::to_value(&cur).unwrap_or_default()["status"].take();
+        if status.is_null() {
+            status = serde_json::json!({});
+        }
+        let gen = cur.meta().generation.unwrap_or(0);
+        let prev: Vec<crd::Condition> = serde_json::from_value(status["conditions"].clone()).unwrap_or_default();
+        let cond = crd::condition_since(prev.iter().find(|c| c.type_ == "Degraded"), "Degraded", true, reason, why, gen);
+        // Idle when nothing changed: this runs on every beat of every node, and rewriting an
+        // identical status per volume forever is churn the API server pays for.
+        if !release && prev.iter().any(|c| c.type_ == "Degraded" && c.reason == cond.reason && c.message == cond.message) {
+            return;
+        }
+        // Replaced by type, not `kept_conditions`: `Replicated` is what the next beat's second arm
+        // reads, and dropping it here would make the volume look unreplicated forever.
+        status["conditions"] =
+            serde_json::to_value(crate::controller::replaced(&prev, cond)).expect("conditions serialize");
+        if release {
+            status["nodeName"] = serde_json::json!("");
+        }
+        match replace_status(&api, &cur, kind, status).await {
+            Ok(()) => return,
+            Err(kube::Error::Api(s)) if s.code == 409 && attempt == 0 => match api.get(name).await {
+                Ok(fresh) => cur = fresh,
+                Err(e) => {
+                    tracing::warn!(%kind, %name, error = %e, "sweep: re-read after conflict");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(%kind, %name, error = %e, "sweep: marking an unavailable node's parent");
+                return;
+            }
+        }
+    }
+}
+
+/// The dead half: the set of owners that are dead, handed to `sweep_volumes`. The parents come
+/// from the beat's own listing, which is why the per-kind list-and-decide plumbing (`unclaim_kind`,
+/// its `releasable` closures, and the `running_volumes` set threaded between it and the release
+/// pass) is gone — the listing already knows every parent on every volume.
+///
+/// `node_is_dead`, deliberately NOT `unplaceable`: a decommissioning node is alive and its running
+/// work keeps running. Task 11's decommission beat calls `sweep_volumes` itself, with its own set.
+async fn sweep_dead_nodes(
+    ctx: &Arc<Ctx>,
+    beat: &crate::listing::Beat,
+    nodes: &[Node],
+    floor: i64,
+    now: k8s_openapi::jiff::Timestamp,
+) {
+    let dead: HashSet<String> = beat
+        .volumes
+        .iter()
+        .map(|v| v.spec.node_name.clone())
+        .filter(|n| !n.is_empty() && node_is_dead(nodes.iter().find(|k| k.name_any() == *n), floor, now))
+        .collect();
+    sweep_volumes(ctx, beat, &dead, "NodeDead").await;
 }
 
 /// A copy whose rendezvous slot moved (a node joined, or a dead one came back) is not just
@@ -1265,22 +1258,32 @@ mod reconcile_tests {
         replicas: Vec<serde_json::Value>,
         parents: Vec<(&'static str, &str, &str)>,
     ) -> crate::listing::Beat {
+        let parents: Vec<crate::listing::Parent> = parents
+            .into_iter()
+            .map(|(kind, name, volume)| parent_at(kind, name, volume, crd::Phase::Ready, false))
+            .collect();
         crate::listing::Beat {
             volumes: volumes.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect(),
             replicas: replicas.into_iter().map(|r| serde_json::from_value(r).unwrap()).collect(),
-            parents: parents
-                .into_iter()
-                .map(|(kind, name, volume)| crate::listing::Parent {
-                    kind,
-                    name: name.into(),
-                    volume: volume.into(),
-                    owner: "alice".into(),
-                    head: None,
-                    phase: crd::Phase::Ready,
-                    pod_ref: Some(format!("ws-alice/{name}")),
-                    owner_ref: Default::default(),
-                })
-                .collect(),
+            parents: parents.clone(),
+            all_parents: parents,
+        }
+    }
+
+    /// One `listing::Parent` as the sweep reads it: the phase and the `Replicated` answer are the
+    /// only two facts the three arms turn on.
+    fn parent_at(kind: &'static str, name: &str, volume: &str, phase: crd::Phase, replicated: bool) -> crate::listing::Parent {
+        crate::listing::Parent {
+            kind,
+            name: name.into(),
+            volume: volume.into(),
+            owner: "alice".into(),
+            node_name: "node-b".into(),
+            head: None,
+            phase,
+            pod_ref: (kind == "Workspace").then(|| format!("ws-alice/{name}")),
+            owner_ref: Default::default(),
+            replicated,
         }
     }
 
@@ -1712,25 +1715,25 @@ fi
         assert_eq!(interesting_volumes(&ctx, &beat, &live), vec!["v0".to_string()]);
     }
 
-    /// A Workspace list error hides every Running worktree, so the release pass would read an
-    /// empty `running_volumes` as "nothing needs these pins" and clear them all. The whole pass is
-    /// skipped instead: no Volume is even listed, let alone patched.
+    /// A Workspace list error hides every parent, so the sweep would read every volume as
+    /// "nothing on it" and release the lot. The listing is `None` and the whole beat stops before
+    /// a single Volume is even listed.
     #[tokio::test]
-    async fn a_parent_list_error_releases_no_volume() {
-        let old = "2000-01-01T00:00:00Z";
-        let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
+    async fn a_parent_list_error_sweeps_no_volume() {
         let routes = vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_json("node-b", "False", "2000-01-01T00:00:00Z")]) },
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-1", "node-b")]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        unclaim_dead_nodes(&ctx, &beat_of(vec![vol_owned("vol-ws-run", "node-b")], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        pull_beat_with(&ctx, "btrfs", "s3cret").await;
 
         assert!(
-            !rec.calls().iter().any(|c| c.contains("/volumes")),
-            "volumes must not even be listed, let alone patched: {:?}", rec.calls()
+            !rec.calls().iter().any(|c| c.starts_with("PUT") || c.starts_with("PATCH")),
+            "a partial listing moves nothing: {:?}", rec.calls()
         );
     }
 
@@ -1799,7 +1802,8 @@ fi
     }
 
     // -----------------------------------------------------------------------------------------
-    // The unclaim sweep: `unclaim_dead_nodes`, beside the reaper, same dead-node rule.
+    // The per-volume sweep: `volume_decision` and `sweep_dead_nodes`, beside the reaper, same
+    // dead-node rule.
     // -----------------------------------------------------------------------------------------
 
     fn ws_placed(name: &str, node: &str) -> serde_json::Value {
@@ -1844,35 +1848,127 @@ fi
         })
     }
 
-    /// A dead node's claim is cleared — `status.nodeName` alone — on both kinds, when the object
-    /// is Stopped; a Ready node's claim is never written at all, which the absence of its status
-    /// route makes provable (the mock 404s any call it did not expect).
+    /// Arm one: a Running parent pins the volume, full stop. Nothing on it moves — stopped
+    /// siblings included, which is the bug this rule exists to make impossible: the parent is
+    /// never looked at alone.
+    #[test]
+    fn a_running_parent_pins_the_whole_volume() {
+        let running = parent_at("Workspace", "ws-run", "vol-1", crd::Phase::Ready, false);
+        let stopped = parent_at("Workspace", "ws-stop", "vol-1", crd::Phase::Stopped, true);
+        match volume_decision("vol-1", "node-b", &[&running, &stopped], "NodeDead") {
+            VolumeVerdict::Mark { why } => assert!(why.contains("Running worktree"), "{why}"),
+            other => panic!("a running sibling must keep the pin, got {other:?}"),
+        }
+    }
+
+    /// Arm two: everything stopped, but one of them is not replicated anywhere — the volume waits
+    /// for the node. Every parent must be covered, or a start elsewhere would lose that one's
+    /// last edits.
+    #[test]
+    fn one_unreplicated_stopped_parent_holds_the_whole_volume() {
+        let ok = parent_at("Workspace", "ws-a", "vol-1", crd::Phase::Stopped, true);
+        let waiting = parent_at("Workspace", "ws-b", "vol-1", crd::Phase::Stopped, false);
+        match volume_decision("vol-1", "node-b", &[&ok, &waiting], "NodeDead") {
+            VolumeVerdict::Mark { why } => assert!(why.contains("ws-b"), "the message names the holder: {why}"),
+            other => panic!("expected a mark, got {other:?}"),
+        }
+    }
+
+    /// Arm three: everything stopped and every one replicated — the pin is cleared and every
+    /// parent un-placed, so an up-to-date node claims them on the next start.
+    #[test]
+    fn a_fully_replicated_stopped_volume_is_released() {
+        let a = parent_at("Workspace", "ws-a", "vol-1", crd::Phase::Stopped, true);
+        let b = parent_at("Environment", "env-b", "vol-1", crd::Phase::Stopped, true);
+        match volume_decision("vol-1", "node-b", &[&a, &b], "NodeDead") {
+            VolumeVerdict::Release { reason, .. } => assert_eq!(reason, "NodeDead"),
+            other => panic!("expected a release, got {other:?}"),
+        }
+        // A volume with no parents at all is releasable too: nothing on it can lose anything.
+        assert!(matches!(volume_decision("vol-1", "node-b", &[], "NodeDead"), VolumeVerdict::Release { .. }));
+    }
+
+    /// The drill from the spec, exactly: one volume, one stopped workspace and one RUNNING clone
+    /// of it. The old code un-placed the stopped one while the running sibling kept the pin —
+    /// which left it claimable on a node that owns nothing. Nothing moves.
     #[tokio::test]
-    async fn unclaim_clears_a_dead_nodes_claims_and_never_touches_a_ready_node() {
+    async fn a_stopped_parent_beside_a_running_clone_on_one_volume_never_moves() {
         let old = "2000-01-01T00:00:00Z";
         let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
         let routes = vec![
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-live", "node-a"), ws_placed_stopped("ws-dead", "node-b")]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![env_placed_stopped("env-dead", "node-b")]) },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status".into(), status: 200, body: ws_placed_stopped("ws-dead", "") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/environments/env-dead/status".into(), status: 200, body: env_placed_stopped("env-dead", "") },
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-clone", ws_placed("ws-clone", "node-b")),
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "node-b") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-clone/status".into(), status: 200, body: ws_placed("ws-clone", "node-b") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "node-b") },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        let mut beat = beat_of(vec![vol_owned("vol-1", "node-b")], vec![], vec![]);
+        beat.all_parents = vec![
+            parent_at("Workspace", "ws-stop", "vol-1", crd::Phase::Stopped, true),
+            // Replicated, so ONLY the running-sibling arm can be what keeps this pin.
+            parent_at("Workspace", "ws-clone", "vol-1", crd::Phase::Ready, true),
+        ];
 
-        unclaim_dead_nodes(&ctx, &beat_of(vec![], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+
+        assert!(
+            !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/rustic-git.io/v1alpha1/volumes/vol-1")),
+            "the pin is never cleared while a sibling runs: {:?}",
+            rec.calls()
+        );
+        let stop_writes = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status");
+        assert!(
+            stop_writes.iter().all(|w| w["status"]["nodeName"] == "node-b"),
+            "the stopped sibling keeps its placement: {stop_writes:?}"
+        );
+        // Both parents carry NodeDead so the API can say why neither will start.
+        for name in ["ws-stop", "ws-clone"] {
+            let sent = rec.sent("PUT", &format!("/apis/rustic-git.io/v1alpha1/workspaces/{name}/status"));
+            assert!(sent.iter().any(|w| w["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "NodeDead")), "{name}");
+        }
+    }
+
+    /// A dead node's parents are un-placed — `status.nodeName` alone — on both kinds, once every
+    /// one of them is stopped and replicated; a live node's volume is never even looked at, which
+    /// the absence of its routes makes provable (the mock 404s any call it did not expect).
+    #[tokio::test]
+    async fn the_sweep_unplaces_a_dead_owners_parents_and_never_touches_a_live_one() {
+        let old = "2000-01-01T00:00:00Z";
+        let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
+        let routes = vec![
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-dead", ws_placed_stopped("ws-dead", "node-b")),
+            get("/apis/rustic-git.io/v1alpha1/environments/env-dead", env_placed_stopped("env-dead", "node-b")),
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status".into(), status: 200, body: ws_placed_stopped("ws-dead", "") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/environments/env-dead/status".into(), status: 200, body: env_placed_stopped("env-dead", "") },
+            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-dead".into(), status: 200, body: vol_at_rv("vol-ws-dead", "", "10") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-dead/status".into(), status: 200, body: vol_owned("vol-ws-dead", "") },
+            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-env-dead".into(), status: 200, body: vol_at_rv("vol-env-dead", "", "10") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-env-dead/status".into(), status: 200, body: vol_owned("vol-env-dead", "") },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        let mut beat = beat_of(
+            vec![vol_owned("vol-ws-dead", "node-b"), vol_owned("vol-env-dead", "node-b"), vol_owned("vol-live", "node-a")],
+            vec![],
+            vec![],
+        );
+        beat.all_parents = vec![
+            parent_at("Workspace", "ws-dead", "vol-ws-dead", crd::Phase::Stopped, true),
+            parent_at("Environment", "env-dead", "vol-env-dead", crd::Phase::Stopped, true),
+        ];
+
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status");
-        assert_eq!(ws_sent.len(), 1, "the dead node's workspace claim is cleared once: {:?}", rec.calls());
+        assert_eq!(ws_sent.len(), 1, "{:?}", rec.calls());
         assert_eq!(ws_sent[0]["status"]["nodeName"], "", "nodeName cleared");
         assert_eq!(ws_sent[0]["status"]["phase"], "ready", "nothing else in status is touched");
         let env_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/environments/env-dead/status");
-        assert_eq!(env_sent.len(), 1, "the dead node's environment claim is cleared once");
+        assert_eq!(env_sent.len(), 1);
         assert_eq!(env_sent[0]["status"]["nodeName"], "");
-        assert!(
-            !rec.calls().iter().any(|c| c == "PUT /apis/rustic-git.io/v1alpha1/workspaces/ws-live/status"),
-            "a Ready node's claim must never be written: {:?}", rec.calls()
-        );
+        assert!(!rec.calls().iter().any(|c| c.contains("/volumes/vol-live")), "{:?}", rec.calls());
     }
 
     /// A Running worktree on a dead node keeps its node — the person decides, not the sweep —
@@ -1882,15 +1978,16 @@ fi
         let old = "2000-01-01T00:00:00Z";
         let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
         let routes = vec![
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-run", "node-b")]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-run", ws_placed("ws-run", "node-b")),
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-b") },
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-run/status".into(), status: 200, body: vol_owned("vol-ws-run", "node-b") },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        let mut beat = beat_of(vec![vol_owned("vol-ws-run", "node-b")], vec![], vec![]);
+        beat.all_parents = vec![parent_at("Workspace", "ws-run", "vol-ws-run", crd::Phase::Ready, false)];
 
-        unclaim_dead_nodes(&ctx, &beat_of(vec![vol_owned("vol-ws-run", "node-b")], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status");
         assert_eq!(ws_sent.len(), 1, "{:?}", rec.calls());
@@ -1907,20 +2004,23 @@ fi
     }
 
     /// A second pass over the same still-Running, still-dead state must write nothing at all —
-    /// neither the parent's status (already carries the `NodeDead` condition) nor the volume's
-    /// (already `Unavailable` and still pinned): a beat every few seconds must not churn either
-    /// object forever while the person has not yet acted.
+    /// neither the parent's status (already carries the same `NodeDead` message) nor the volume's
+    /// (already `Unavailable` with that message, and still pinned): a beat every few seconds must
+    /// not churn either object forever while the person has not yet acted.
     #[tokio::test]
     async fn a_second_pass_over_the_same_running_dead_state_writes_nothing() {
         let old = "2000-01-01T00:00:00Z";
         let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
+        // Verbatim from `volume_decision`'s first arm: the idle guard is a message comparison, so
+        // a drifted message is a rewrite every beat and this is what catches that.
+        let why = "owner node-b is unavailable; a Running worktree (ws-run) still names volume vol-ws-run, so it stays pinned";
         let already_degraded = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "ws-run", "uid": "uid-ws-run", "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "name": "ws-run", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
             "status": {
-                "phase": "ready", "nodeName": "node-b", "compatibleNodes": ["node-b"], "volumeRef": "vol-ws-run",
-                "conditions": [{"type": "Degraded", "status": "True", "reason": "NodeDead", "message": "already marked", "observedGeneration": 1, "lastTransitionTime": "2026-09-01T00:00:00Z"}],
+                "phase": "ready", "nodeName": "node-b", "volumeRef": "vol-ws-run",
+                "conditions": [{"type": "Degraded", "status": "True", "reason": "NodeDead", "message": why, "observedGeneration": 1, "lastTransitionTime": "2026-09-01T00:00:00Z"}],
             },
         });
         let already_unavailable = serde_json::json!({
@@ -1929,17 +2029,16 @@ fi
             "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {
                 "phase": "unavailable",
-                "conditions": [{"type": "Available", "status": "False", "reason": "NodeDead", "message": "already marked", "observedGeneration": 1, "lastTransitionTime": "2026-09-01T00:00:00Z"}],
+                "conditions": [{"type": "Available", "status": "False", "reason": "NodeDead", "message": why, "observedGeneration": 1, "lastTransitionTime": "2026-09-01T00:00:00Z"}],
             },
         });
-        let routes = vec![
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![already_degraded]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
+        let routes = vec![get("/apis/rustic-git.io/v1alpha1/workspaces/ws-run", already_degraded)];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        let mut beat = beat_of(vec![already_unavailable], vec![], vec![]);
+        beat.all_parents = vec![parent_at("Workspace", "ws-run", "vol-ws-run", crd::Phase::Ready, false)];
 
-        unclaim_dead_nodes(&ctx, &beat_of(vec![already_unavailable], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         assert!(
             !rec.calls().iter().any(|c| c.starts_with("PUT") || c.starts_with("PATCH")),
@@ -1947,16 +2046,15 @@ fi
         );
     }
 
-    /// A Stopped worktree on a dead node is unplaced as before, and its Volume is released
-    /// (pin cleared, phase Unavailable) — a sibling Volume with no dead-node worktree naming it
-    /// is left alone entirely.
+    /// A Stopped, replicated worktree on a dead node is un-placed and its Volume released (pin
+    /// cleared with a guarded `test`+`replace`, phase Unavailable, reason still `NodeDead` — an
+    /// empty pin IS the released state) — a sibling Volume on a live node is left alone entirely.
     #[tokio::test]
     async fn a_stopped_worktree_on_a_dead_node_is_released_with_its_volume() {
         let old = "2000-01-01T00:00:00Z";
         let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
         let routes = vec![
-            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed_stopped("ws-stop", "node-b")]) },
-            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
             // The API server bumps resourceVersion on the patch; the status PUT must carry the
             // NEW one or it 409s and the volume never gets marked.
@@ -1965,8 +2063,10 @@ fi
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
+        let mut beat = beat_of(vec![vol_owned("vol-ws-stop", "node-b"), vol_owned("vol-live", "node-a")], vec![], vec![]);
+        beat.all_parents = vec![parent_at("Workspace", "ws-stop", "vol-ws-stop", crd::Phase::Stopped, true)];
 
-        unclaim_dead_nodes(&ctx, &beat_of(vec![vol_owned("vol-ws-stop", "node-b"), vol_owned("vol-live", "node-a")], vec![], vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+        sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status");
         assert_eq!(ws_sent.len(), 1);
