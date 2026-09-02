@@ -128,10 +128,11 @@ async fn deleting_a_tag_leaves_the_manifest_and_deleting_the_manifest_takes_its_
     );
 }
 
-/// Deleting a manifest by digest must also drop its `image/manifest-type/{d}`
-/// row — otherwise it orphans forever (never read again, never swept).
+/// Deleting a manifest by digest must drop its `image/manifest-type/{d}` row — otherwise it
+/// orphans forever — and must leave every blob it named exactly where it is. Siblings share
+/// layers, so only an explicit client DELETE and the GC sweep may ever remove one.
 #[tokio::test]
-async fn deleting_a_manifest_by_digest_drops_its_media_type_row() {
+async fn deleting_a_manifest_by_digest_drops_its_media_type_row_and_spares_its_blobs() {
     let (base, e, c, token, m, d) = pushed().await;
     c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
         .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
@@ -141,9 +142,20 @@ async fn deleting_a_manifest_by_digest_drops_its_media_type_row() {
     let key = format!("image/manifest-type/{d}").into_bytes();
     assert!(db.get(key.clone()).await.unwrap().is_some(), "row exists before delete");
 
+    use slatedb::object_store::ObjectStoreExt;
+    let layer = rustic_git_registry::store::blob_path("acme", &Digest::of(b"layer"));
+    let cfg = rustic_git_registry::store::blob_path("acme", &Digest::of(b"cfg"));
+    assert!(e.store.os.head(&layer).await.is_ok(), "the layer is there before the delete");
+
     let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{d}"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::ACCEPTED);
+
+    assert!(
+        e.store.os.head(&layer).await.is_ok(),
+        "a manifest path must never delete a blob: a sibling image may share this layer"
+    );
+    assert!(e.store.os.head(&cfg).await.is_ok(), "and neither its config");
 
     assert!(db.get(key).await.unwrap().is_none(), "the media-type row must not be orphaned");
 }
@@ -674,7 +686,8 @@ async fn a_referrer_without_an_artifact_type_omits_the_field() {
 }
 
 /// `_catalog` pages exactly like `tags/list`: `n` caps, `last` is exclusive, a truncated page
-/// carries `Link`. `n=0` is an empty page — nothing to continue from, so no `Link` either.
+/// carries `Link`. `n=0` is no page size at all, not an empty page — an empty page with no
+/// `Link` reads as an exhausted catalog to a paging client.
 #[tokio::test]
 async fn the_catalog_paginates() {
     let (base, _e, c, token, m, _d) = pushed().await;
@@ -696,7 +709,7 @@ async fn the_catalog_paginates() {
     let r = c.get(format!("{base}/v2/_catalog?n=0")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert!(r.headers().get("link").is_none());
     let b: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(b["repositories"], serde_json::json!([]));
+    assert_eq!(b["repositories"], serde_json::json!(["acme/api", "acme/nginx", "acme/web"]));
 }
 
 /// A push by digest may name tags as `?tag=` (repeatable). Each valid one resolves; a malformed
@@ -792,4 +805,132 @@ async fn a_manifest_push_is_one_wal_flush() {
     assert_eq!(r.status(), StatusCode::CREATED);
     let after = count().await;
     assert_eq!(after - before, 1, "a manifest push must be one batched write, not {} flushes", after - before);
+}
+
+/// A pull is a manifest that was served. A tag whose manifest object is gone 404s, and a 404 is
+/// not a pull — counting at tag resolution inflated the number the page shows.
+#[tokio::test]
+async fn a_tag_whose_manifest_is_gone_is_not_counted_as_a_pull() {
+    use slatedb::object_store::ObjectStoreExt;
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    // One honest pull first, so the counter is provably live.
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), 1);
+
+    // Take the bytes away behind the tag, and clear the cached copy so the GET reaches the store.
+    e.store.manifests().remove(&format!("acme/nginx/{d}"));
+    e.store.os.delete(&rustic_git_registry::store::manifest_path("acme", "nginx", &d)).await.unwrap();
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        e.store.pulls("acme", "nginx", "latest").await.unwrap(),
+        1,
+        "a 404 is not a pull"
+    );
+}
+
+/// An index may name thousands of children, and every one of them is probed before the push is
+/// accepted. The probe must stay bounded (16, the number `gc` uses and states the reason for) —
+/// an unbounded `join_all` here opened one connection per declared digest. Correctness is the
+/// observable half: every named blob is checked, so a manifest naming one absent child among
+/// many is still refused.
+#[tokio::test]
+async fn an_index_naming_many_children_is_probed_without_fanning_out_unbounded() {
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    // 200 real children plus one that was never pushed.
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    for i in 0..200u32 {
+        bodies.push(format!("child-{i}").into_bytes());
+    }
+    common::seed_blobs(&e, "acme", &bodies.iter().map(|b| b.as_slice()).collect::<Vec<_>>()).await;
+    let mut children: Vec<serde_json::Value> = bodies
+        .iter()
+        .map(|b| serde_json::json!({"mediaType": MEDIA, "digest": Digest::of(b).to_string(), "size": b.len()}))
+        .collect();
+
+    let ok = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": children.clone()
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/wide"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", "application/vnd.oci.image.index.v1+json")
+        .body(ok).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "every child is present");
+
+    children.push(serde_json::json!({
+        "mediaType": MEDIA,
+        "digest": Digest::of(b"never pushed").to_string(),
+        "size": 1
+    }));
+    let bad = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": children
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/wide2"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", "application/vnd.oci.image.index.v1+json")
+        .body(bad).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND, "one absent child among 200 still refuses");
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
+}
+
+/// The two row families a manifest delete has to drop — its blob holds and its referrer entry —
+/// are the same scan-prefix / suffix-match / delete loop, and they must both actually run.
+#[tokio::test]
+async fn deleting_a_manifest_drops_both_its_blob_rows_and_its_referrer_rows() {
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    // A manifest with a `subject`, so a referrer row exists too.
+    let sub = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": Digest::of(b"{}").to_string(), "size": 2},
+        "layers": [],
+        "subject": {"mediaType": MEDIA, "digest": d.to_string(), "size": m.len()}
+    }).to_string().into_bytes();
+    let sd = Digest::of(&sub);
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{sd}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(sub).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let db = e.store.image_db("acme", "nginx").await.unwrap();
+    let rows = |db: std::sync::Arc<slatedb::Db>, prefix: &'static str, suffix: String| async move {
+        let mut it = db.scan_prefix(prefix, ..).await.unwrap();
+        let mut n = 0;
+        while let Some(kv) = it.next().await.unwrap() {
+            if String::from_utf8_lossy(&kv.key).ends_with(&suffix) {
+                n += 1;
+            }
+        }
+        n
+    };
+    assert!(rows(db.clone(), "image/blob/", format!("/{d}")).await > 0, "blob rows before");
+    assert!(rows(db.clone(), "image/referrer/", format!("/{sd}")).await > 0, "referrer row before");
+
+    for target in [&sd, &d] {
+        let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{target}"))
+            .basic_auth("acme", Some(&token)).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED);
+    }
+    assert_eq!(rows(db.clone(), "image/blob/", format!("/{d}")).await, 0, "blob rows after");
+    assert_eq!(rows(db, "image/referrer/", format!("/{sd}")).await, 0, "referrer row after");
 }

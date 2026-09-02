@@ -83,7 +83,8 @@ atomic tag updates).
 - Every `/v2` error is the OCI envelope via `registry::oci_err`; auth flows through
   `registry::auth::allow` (Basic and Bearer both; anonymous ≠ invalid credential — an
   anonymous token from `/v2/token` must keep working for public pulls).
-- Registry blob routes have their own body limit (`max_layer`, default 10 GiB) separate from
+- Registry blob routes have their own body limit (`max_layer`, default 5 GiB, matching S3's
+  single-request CopyObject cap) separate from
   the git `max_body` (2 GiB); manifests have a third. Check which limit applies before assuming
   a 413 is the handler's.
 - The browse API mounts on the **peer listener only**; the public listener 404s `/api/`.

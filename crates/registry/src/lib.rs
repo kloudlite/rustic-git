@@ -123,7 +123,9 @@ pub fn paginate(
         None => 0,
     };
     let rest = &all[start.min(all.len())..];
-    let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(rest.len());
+    // A zero page size is no page size, not a page of nothing: an empty page with no `Link` is
+    // indistinguishable from an exhausted catalog, and a paging client stops on it.
+    let n: usize = q.get("n").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(rest.len());
     let page: Vec<String> = rest.iter().take(n).cloned().collect();
     let truncated = (page.len() < rest.len()).then(|| page.last().cloned()).flatten();
     (page, truncated)
@@ -142,6 +144,19 @@ mod tests {
         assert_eq!(paginate(&all, &q), (all.clone(), None));
         let q = std::collections::HashMap::from([("n".to_string(), "2".to_string())]);
         assert_eq!(paginate(&all, &q), (all[..2].to_vec(), Some("b".to_string())));
+    }
+
+    /// `?n=0` used to return an empty page with no `Link`, which a paging client reads as "the
+    /// catalog is exhausted" and stops on. Treated as an absent `n`, exactly as a non-numeric one
+    /// already is: no page size, not a page of nothing.
+    #[test]
+    fn a_zero_page_size_is_no_page_size() {
+        let all: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let q: std::collections::HashMap<String, String> =
+            [("n".to_string(), "0".to_string())].into_iter().collect();
+        let (page, truncated) = paginate(&all, &q);
+        assert_eq!(page, all, "n=0 lists everything rather than ending the catalog");
+        assert_eq!(truncated, None);
     }
 
     #[test]

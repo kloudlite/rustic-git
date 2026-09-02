@@ -1,5 +1,5 @@
 //! Blob pull and the two single-shot push forms. Chunked upload lives in `uploads.rs`.
-use super::{auth, oci_err, store::blob_path, Digest};
+use super::{auth, oci_err, store::blob_path, store::ImageExt, Digest};
 use crate::Trusted;
 use crate::App;
 use axum::{
@@ -13,6 +13,12 @@ use slatedb::object_store::ObjectStoreExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Largest single layer accepted by default. NOT a taste: the multipart fast path verifies the
+/// assembled blob on its staging key and then `copy`s it into `blobs/`, and that server-side
+/// CopyObject is capped at 5 GiB (see `uploads::complete`) — a bigger default accepts a push,
+/// pays the whole O(N) hash, and dies at the last step.
+pub const DEFAULT_MAX_LAYER: u64 = 5 * 1024 * 1024 * 1024;
+
 /// Largest single layer accepted, checked against the body's size BEFORE it is stored: an
 /// unbounded push must not be able to fill a node's disk. Override with RUSTIC_GIT_MAX_LAYER.
 ///
@@ -22,7 +28,7 @@ pub fn max_layer() -> u64 {
     static LAYER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *LAYER.get_or_init(|| {
         std::env::var("RUSTIC_GIT_MAX_LAYER").ok().and_then(|v| v.parse().ok())
-            .unwrap_or(10 * 1024 * 1024 * 1024)
+            .unwrap_or(DEFAULT_MAX_LAYER)
     })
 }
 
@@ -216,7 +222,23 @@ pub async fn delete_blob(
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
     match app.store.os.delete(&blob_path(&owner, &d)).await {
-        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Ok(()) => {
+            // The rows say this image HOLDS these bytes, so they must not outlive them — the
+            // mirror of `forget_manifest_blobs` on the manifest path. A row cleanup that fails
+            // is logged, never a failed delete: the object is already gone, and a stale row only
+            // ever grants a pull the store then answers 404 for.
+            match app.store.image_db(&owner, &name).await {
+                Ok(db) => {
+                    if let Err(e) = super::store::forget_blob_rows(&db, &d).await {
+                        tracing::warn!(owner = %owner, name = %name, digest = %d, error = %e, "blob delete: hold rows");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(owner = %owner, name = %name, digest = %d, error = %e, "blob delete: hold rows");
+                }
+            }
+            StatusCode::ACCEPTED.into_response()
+        }
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
@@ -236,4 +258,16 @@ pub(super) fn created(owner: &str, name: &str, d: &Digest) -> Response {
         ],
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    /// The default is not a taste: on the multipart fast path a verified blob reaches `blobs/`
+    /// by a server-side CopyObject, which S3 caps at 5 GiB (`uploads::complete`'s ponytail note).
+    /// A default above that accepts a layer, uploads it, hashes it, and only then 500s.
+    #[test]
+    fn the_default_layer_cap_is_the_copy_cap() {
+        assert_eq!(super::DEFAULT_MAX_LAYER, 5 * 1024 * 1024 * 1024);
+        assert_eq!(super::DEFAULT_MAX_LAYER, 5_368_709_120);
+    }
 }

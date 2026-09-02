@@ -182,15 +182,21 @@ pub async fn put_manifest(
     // decides what to probe for), and refusing here turned that leniency into a rejected push.
     let digests: Vec<Digest> = named.iter().filter_map(|s| Digest::parse(s)).collect();
     // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
-    // write. Each probe is independent; blob path first because that is where layers live —
-    // the manifest path is only hit for an index's entries.
+    // write. Bounded at 16 for the same reason `gc` bounds its walk — an index may name
+    // thousands of children, and one push must not open thousands of connections. Each probe is
+    // independent; blob path first because that is where layers live — the manifest path is
+    // only hit for an index's entries.
     // ponytail: a sweep can still delete an old blob between this head and the put below —
     // GC is keep-biased and this window is unchanged from the serial version, so it's not new risk.
-    let present = futures::future::join_all(digests.iter().map(|bd| async {
-        app.store.os.head(&blob_path(&owner, bd)).await.is_ok()
-            || app.store.os.head(&manifest_path(&owner, &name, bd)).await.is_ok()
-    }))
-    .await;
+    let probes: Vec<_> = digests
+        .iter()
+        .map(|bd| async {
+            app.store.os.head(&blob_path(&owner, bd)).await.is_ok()
+                || app.store.os.head(&manifest_path(&owner, &name, bd)).await.is_ok()
+        })
+        .collect();
+    let present: Vec<bool> =
+        futures::StreamExt::collect::<Vec<bool>>(futures::StreamExt::buffered(futures::stream::iter(probes), crate::gc::STAT_CONCURRENCY)).await;
     if present.iter().any(|ok| !ok) {
         return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
     }
@@ -319,16 +325,18 @@ async fn manifest_response(
     let Some(r) = reference(&reference_str) else {
         return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest");
     };
+    // The tag this GET resolved, if any — the pull is counted where the bytes are actually
+    // served, not here: a tag whose manifest object is gone 404s below, and counting at
+    // resolution inflated the number by every one of those.
+    let mut pulled_tag: Option<String> = None;
     let d = match r {
         Reference::Digest(d) => d,
         Reference::Tag(t) => match app.store.tag(&owner, &name, &t).await {
             Ok(Some(d)) => {
-                // The pull counter. GET by tag only — a HEAD is docker probing, and a GET by
-                // digest is docker re-reading what the tag already resolved to; counting either
-                // would inflate. A map increment only — no lock, no write — so a hundred
-                // concurrent pulls of one tag do not queue behind each other here.
+                // GET by tag only — a HEAD is docker probing, and a GET by digest is docker
+                // re-reading what the tag already resolved to; counting either would inflate.
                 if with_body {
-                    app.store.bump_pulls(&owner, &name, &t);
+                    pulled_tag = Some(t);
                 }
                 d
             }
@@ -343,6 +351,11 @@ async fn manifest_response(
             (header::CONTENT_LENGTH, bytes.len().to_string()),
             (header::HeaderName::from_static("docker-content-digest"), d.to_string()),
         ];
+        // A map increment only — no lock, no write — so a hundred concurrent pulls of one tag do
+        // not queue behind each other here.
+        if let Some(t) = &pulled_tag {
+            app.store.bump_pulls(&owner, &name, t);
+        }
         return if with_body { (StatusCode::OK, hdrs, bytes).into_response() } else { (StatusCode::OK, hdrs).into_response() };
     }
     let bytes = match app.store.os.get(&manifest_path(&owner, &name, &d)).await {
@@ -366,6 +379,9 @@ async fn manifest_response(
         Err(e) => return crate::oci_internal(e),
     };
     app.store.manifests().insert(cache_key, (bytes.clone(), media.clone()));
+    if let Some(t) = &pulled_tag {
+        app.store.bump_pulls(&owner, &name, t);
+    }
     let hdrs = [
         (header::CONTENT_TYPE, media),
         (header::CONTENT_LENGTH, bytes.len().to_string()),

@@ -29,7 +29,7 @@ pub async fn image_listing(
     include_private: bool,
     q: &std::collections::HashMap<String, String>,
 ) -> crate::Result<Vec<crate::index::Marker>> {
-    let n = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let n = q.get("n").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(usize::MAX);
     let mut markers =
         crate::index::list_page(&app.store, crate::index::Kind::Img, owner, include_private, q.get("last").map(String::as_str), n)
             .await?;
@@ -43,9 +43,11 @@ pub async fn image_listing(
     } else {
         Vec::new()
     };
-    // One listing per image, fanned out — a serial loop here put the whole catalog page behind
-    // N sequential round trips.
-    let stats = futures::future::join_all(unmarked.iter().map(|n| super::store::manifest_stat(&app.store, owner, n))).await;
+    // One listing per image, bounded at 16 — the same cap and the same reason as
+    // `gc::stats_of`, which this now IS: a serial loop put the catalog page behind N sequential
+    // round trips, and an unbounded fan-out put it behind N simultaneous ones.
+    let names: Vec<&str> = unmarked.iter().map(String::as_str).collect();
+    let stats = crate::gc::stats_of(&app.store, owner, &names).await;
     for (name, stat) in unmarked.into_iter().zip(stats) {
         let (count, newest) = stat.unwrap_or((0, None));
         markers.push(crate::index::Marker {
@@ -154,17 +156,39 @@ async fn catalog(
     };
     // Owner-scoped and already authenticated as `who` above, so `include_private: true` is safe —
     // same source `images` uses (`image_listing`), just re-shaped into repository names.
-    // `last` on the wire is `{who}/{name}`; the index knows the name alone.
+    // `last` on the wire is `{who}/{name}`; the index knows the name alone. A marker that does
+    // not carry this owner's prefix names nothing in the index, so it must not be handed down as
+    // one — the page below re-filters against the full `{who}/{name}` strings and is the honest
+    // answer for a foreign or malformed marker. Only `last` is unsafe: `n` stays, or the client
+    // asked for a page of two and got the whole catalog back unpaged, with no Link to continue.
     let mut page_q = q.clone();
-    if let Some(last) = q.get("last").and_then(|l| l.strip_prefix(&format!("{who}/"))) {
-        page_q.insert("last".into(), last.to_string());
+    // `final_q` drives the second `paginate` below over the full `{who}/{name}` strings, so a
+    // foreign `last` has to be scrubbed there too — leaving it in place would truncate `all`
+    // against a marker the index page above never saw either.
+    let mut final_q = q.clone();
+    if let Some(last) = q.get("last") {
+        match last.strip_prefix(&format!("{who}/")) {
+            Some(name) => {
+                page_q.insert("last".into(), name.to_string());
+            }
+            None => {
+                page_q.remove("last");
+                final_q.remove("last");
+            }
+        }
+    }
+    // One row past the page, so the `paginate` below can tell a full page from the last one — an
+    // index page capped at exactly `n` looks identical to an exhausted catalog and emits no Link,
+    // which stops a paging client one page in.
+    if let Some(n) = page_q.get("n").and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0) {
+        page_q.insert("n".into(), (n + 1).to_string());
     }
     let markers = match image_listing(&app, &who, true, &page_q).await {
         Ok(m) => m,
         Err(e) => return crate::oci_internal(e),
     };
     let all: Vec<String> = markers.into_iter().map(|m| format!("{who}/{}", m.name)).collect();
-    let (page, truncated) = super::paginate(&all, &q);
+    let (page, truncated) = super::paginate(&all, &final_q);
     let mut r = axum::Json(serde_json::json!({"repositories": page})).into_response();
     if let Some(last) = truncated {
         let n = q.get("n").cloned().unwrap_or_default();

@@ -1227,6 +1227,11 @@ mod worker_merges {
         .unwrap();
         assert_eq!(verdict.state, MergeableState::Clean);
         assert!(!verdict.fast_forward);
+        assert_eq!(
+            verdict.base_oid, pending.base_oid,
+            "the worker stamps the verdict with the tips it merged"
+        );
+        assert_eq!(verdict.head_oid, pending.head_oid);
 
         let r = peer(
             &fleet,
@@ -1493,4 +1498,60 @@ mod worker_merges {
             "and not again yet"
         );
     }
+
+    /// The outcome route guards a lapsed worker's late report by matching `?by=` against the claim.
+    /// The verdict route has no claim to match, so it matches the TIPS instead: a slow lane's answer
+    /// is only true of the branches it was computed from, and must not overwrite a newer lane's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_verdict_computed_from_other_tips_is_refused() {
+        if !common::have_git() {
+            eprintln!("skipping: no git");
+            return;
+        }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &open_pr(1)).await.unwrap();
+        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/check", None).await.status(), 200);
+        let pending = pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap();
+        assert_eq!(pending.state, MergeableState::Unknown);
+
+        // A verdict stamped with a head the row never saw: the branch moved on since.
+        let stale = serde_json::json!({
+            "state": "clean",
+            "detail": "from an older lane",
+            "fastForward": false,
+            "baseOid": pending.base_oid,
+            "headOid": "0".repeat(40),
+        });
+        let r = peer(&fleet, "/api/a/r/pulls/1/mergeability", Some(stale)).await;
+        assert_eq!(r.status(), 409, "a verdict about other tips is not this change's answer");
+        assert_eq!(
+            pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap().state,
+            MergeableState::Unknown,
+            "the row is untouched"
+        );
+
+        // The same verdict, honestly stamped, lands.
+        let fresh = serde_json::json!({
+            "state": "clean",
+            "detail": "ok",
+            "fastForward": false,
+            "baseOid": pending.base_oid,
+            "headOid": pending.head_oid,
+        });
+        let r = peer(&fleet, "/api/a/r/pulls/1/mergeability", Some(fresh)).await;
+        assert_eq!(r.status(), 204);
+        assert_eq!(
+            pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap().state,
+            MergeableState::Clean
+        );
+
+        // And an UNSTAMPED verdict still lands, so a worker older than this field keeps working
+        // through a roll.
+        let unstamped = serde_json::json!({"state": "dirty", "detail": "old worker", "fastForward": false});
+        let r = peer(&fleet, "/api/a/r/pulls/1/mergeability", Some(unstamped)).await;
+        assert_eq!(r.status(), 204);
+    }
+
 }

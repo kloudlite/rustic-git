@@ -176,15 +176,14 @@ pub async fn hold_blob(store: &Store, owner: &str, name: &str, d: &Digest) -> Re
     Ok(())
 }
 
-/// Drop the rows manifest `m` contributed. A scan of the whole prefix rather than a re-parse of
-/// the manifest being deleted: this is the rare path, and it must work even when the manifest
-/// bytes are already gone. Rows written `via` another manifest, or by an upload, stay.
-pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
-    let suffix = format!("/{m}");
-    let mut it = db.scan_prefix(BLOB_PREFIX, ..).await?;
+/// Delete every row under `prefix` whose key ends `suffix`. A scan rather than a re-parse of the
+/// thing being deleted: these are the rare paths, and they must work even when the bytes they
+/// would re-parse are already gone.
+pub async fn delete_suffixed(db: &Db, prefix: &str, suffix: &str) -> Result<()> {
+    let mut it = db.scan_prefix(prefix.to_string(), ..).await?;
     let mut doomed = vec![];
     while let Some(kv) = it.next().await? {
-        if String::from_utf8_lossy(&kv.key).ends_with(&suffix) {
+        if String::from_utf8_lossy(&kv.key).ends_with(suffix) {
             doomed.push(kv.key.to_vec());
         }
     }
@@ -192,6 +191,22 @@ pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
         db.delete(k).await?;
     }
     Ok(())
+}
+
+/// Drop the rows manifest `m` contributed. Rows written `via` another manifest, or by an upload,
+/// stay — which is why this matches on the `via` suffix rather than on the digest.
+pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
+    delete_suffixed(db, BLOB_PREFIX, &format!("/{m}")).await
+}
+
+/// Drop every hold row for `d`, whatever wrote it. The mirror of `forget_manifest_blobs` on the
+/// blob-delete path: the rows say "this image holds these bytes", so they must not outlive them.
+/// Only THIS image's rows, though — hold rows live in the image's own database, so a sibling image
+/// that holds the same digest keeps a row for bytes that are gone. Harmless: the row only routes a
+/// pull, which then 404s on the missing blob exactly as it would without the row.
+pub async fn forget_blob_rows(db: &Db, d: &Digest) -> Result<()> {
+    // Every key ends with the empty suffix, so this is "all rows under the digest's prefix".
+    delete_suffixed(db, &format!("{BLOB_PREFIX}{d}/"), "").await
 }
 
 async fn has_blob_row(db: &Db, d: &Digest) -> Result<bool> {
@@ -215,17 +230,65 @@ pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest
     if db.get(BLOB_ROWS_BACKFILLED).await?.is_some() {
         return Ok(false);
     }
+    // One walk per image, not one per concurrent stranger: the first pull of a pre-rows image
+    // used to LIST and GET every manifest inside the blob request, and N simultaneous first
+    // pulls each did the whole walk before any of them wrote the mark.
+    let lock = store.keyed_lock(&format!("blobrows/{owner}/{name}"));
+    let _guard = lock.lock().await;
+    // Re-read under the lock: whoever held it before us may have just finished the walk.
+    if db.get(BLOB_ROWS_BACKFILLED).await?.is_some() {
+        return has_blob_row(&db, d).await;
+    }
+    // Only a COMPLETE walk may claim the image is backfilled. A manifest skipped over a transient
+    // GET blip would otherwise lose its hold rows forever, since the mark stops anyone re-walking.
+    if !backfill_blob_rows(store, owner, name, &db).await? {
+        db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
+    }
+    has_blob_row(&db, d).await
+}
+
+/// The walk itself: every manifest of the image, the blob rows it implies.
+///
+/// Bounded exactly as `gc::referenced` is, and for the same reason — an image with hundreds of
+/// manifests was hundreds of serial round trips. A manifest this cannot READ or PARSE names
+/// nothing and is skipped: under-granting is the safe failure for authorization, unlike the
+/// sweep, where the same manifest must abort. Propagating the store's error here answered a
+/// pull with a 500 where the honest answer is a 404.
+///
+/// Returns whether any manifest was skipped, so the caller can withhold the "done" mark and let a
+/// later pull retry a walk that only failed on a blip.
+async fn backfill_blob_rows(store: &Store, owner: &str, name: &str, db: &Db) -> Result<bool> {
     use slatedb::object_store::ObjectStore;
     let prefix = OsPath::from(format!("manifests/{owner}/{name}"));
     let mut listing = store.os.list(Some(&prefix));
+    let mut paths = vec![];
     while let Some(m) = futures::StreamExt::next(&mut listing).await {
-        let loc = m?.location;
+        paths.push(m?.location);
+    }
+    let mut fetched = futures::StreamExt::buffered(
+        futures::StreamExt::map(futures::stream::iter(paths), |p| async move {
+            let bytes = match store.os.get(&p).await {
+                Ok(r) => r.bytes().await,
+                Err(e) => Err(e),
+            };
+            (p, bytes)
+        }),
+        crate::gc::STAT_CONCURRENCY,
+    );
+    let mut skipped = false;
+    while let Some((loc, bytes)) = futures::StreamExt::next(&mut fetched).await {
         let Some(via) = crate::gc::digest_from_path(&loc) else { continue };
-        let bytes = store.os.get(&loc).await?.bytes().await?;
-        // Unparseable bytes name nothing: under-granting is the safe failure for authorization,
-        // unlike the sweep where the same manifest must abort.
+        let bytes = match bytes {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(owner = %owner, name = %name, manifest = %loc, error = %e, "blob rows: skipping unreadable manifest");
+                skipped = true;
+                continue;
+            }
+        };
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             tracing::warn!(owner = %owner, name = %name, manifest = %loc, "blob rows: skipping unparseable manifest");
+            skipped = true;
             continue;
         };
         let mut named = std::collections::HashSet::new();
@@ -237,8 +300,7 @@ pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest
             db.write(b).await?;
         }
     }
-    db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
-    has_blob_row(&db, d).await
+    Ok(skipped)
 }
 
 /// `(count, newest_ms)` for the image's manifests, kept in the image's own single-writer database

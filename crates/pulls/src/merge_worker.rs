@@ -105,6 +105,14 @@ pub struct Verdict {
     pub detail: Option<String>,
     #[serde(default)]
     pub fast_forward: bool,
+    /// The tips this verdict was computed from. The owner records mergeability against the two
+    /// oids it read, and this is what lets it tell a fresh answer from a lapsed lane's stale one —
+    /// there is no claim on a check to match against. Empty when this worker could not resolve
+    /// either branch, which the owner reads as "unstamped" and accepts.
+    #[serde(default)]
+    pub base_oid: String,
+    #[serde(default)]
+    pub head_oid: String,
 }
 
 /// Is there a `git` to run at all? Checked at worker startup so a missing binary is a loud line in
@@ -844,6 +852,8 @@ fn unknown(why: String) -> Verdict {
         state: crate::directory::MergeableState::Unknown,
         detail: Some(why),
         fast_forward: false,
+        base_oid: String::new(),
+        head_oid: String::new(),
     }
 }
 
@@ -859,19 +869,22 @@ pub fn check_local(job: &Job, cache: &Path) -> Result<Verdict> {
     let dir = cache_of(cache, &job.owner, &job.name);
     let refs = format!("refs/heads/{}", job.base);
     let head_ref = format!("refs/heads/{}", job.head);
-    if !local(
+    let tips = local(
         &dir,
         &[
             "rev-parse",
             &format!("{refs}^{{commit}}"),
             &format!("{head_ref}^{{commit}}"),
         ],
-    )?
-    .status
-    .success()
-    {
+    )?;
+    if !tips.status.success() {
         return Ok(unknown("one of the branches is gone".to_string()));
     }
+    // `rev-parse` prints one oid per argument, in order — the two tips this verdict is about.
+    let out = String::from_utf8_lossy(&tips.stdout);
+    let mut lines = out.lines();
+    let base_oid = lines.next().unwrap_or_default().trim().to_string();
+    let head_oid = lines.next().unwrap_or_default().trim().to_string();
     // A verdict this worker could not actually compute is `Unknown` with the reason, never a guess
     // in either direction: "clean" would offer a button that fails, "dirty" would hide a merge
     // that works.
@@ -883,13 +896,21 @@ pub fn check_local(job: &Job, cache: &Path) -> Result<Verdict> {
                 job.base
             )),
             fast_forward: false,
+            base_oid,
+            head_oid,
         },
         Ok(Err(o)) => Verdict {
             state: MergeableState::Dirty,
             detail: o.detail,
             fast_forward: false,
+            base_oid,
+            head_oid,
         },
-        Err(e) => unknown(e.to_string()),
+        Err(e) => Verdict {
+            base_oid,
+            head_oid,
+            ..unknown(e.to_string())
+        },
     })
 }
 
