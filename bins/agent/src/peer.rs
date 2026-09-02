@@ -294,7 +294,11 @@ fn node_dead_secs() -> i64 {
 /// peer secret, same fail-closed rule every dial in this file follows: no secret, no
 /// authenticated GET to another node's root-run `btrfs send`.
 pub async fn pull_beat(ctx: &Arc<Ctx>) {
-    pull_beat_with(ctx, "btrfs").await
+    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
+    if secret.is_empty() {
+        return;
+    }
+    pull_beat_with(ctx, "btrfs", &secret).await
 }
 
 /// Rendezvous over the FULL pool keeps electing a corpse: the reaper deletes its row every beat
@@ -312,13 +316,9 @@ fn standby_count(owner_alive: bool, replicas: u32) -> usize {
 }
 
 /// Split out so tests can point the receive half at a fake `btrfs` — same shape as
-/// `SendTo::btrfs_bin` on the send side.
-async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
-    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
-    if secret.is_empty() {
-        return;
-    }
-
+/// `SendTo::btrfs_bin` on the send side — and pass the secret directly rather than through
+/// `WS_PEER_SECRET`, which every test in this binary would otherwise share.
+async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     // Listed ONCE and threaded through everything below: a partial view of who is alive must reap,
     // unclaim and place nothing, and every one of those decisions needs to agree on the same list.
     let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
@@ -329,11 +329,16 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
         }
     };
 
+    // One clock and one floor for the whole pass: reap, unclaim and live_nodes must agree on
+    // exactly the same "dead" answer, not three readings a few nanoseconds apart.
+    let now = k8s_openapi::jiff::Timestamp::now();
+    let floor = node_dead_secs();
+
     // Both dead-node sweeps run every pass regardless of what follows: a dead node's stale
     // replica rows and stranded claims must not wait on this node having anything to pull, and
     // they run beside each other so the two never drift onto different dead-node rules.
-    reap_dead_replicas(ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
-    unclaim_dead_nodes(ctx, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    reap_dead_replicas(ctx, &nodes, floor, now).await;
+    unclaim_dead_nodes(ctx, &nodes, floor, now).await;
 
     let candidates = match pool_nodes(&ctx.client).await {
         Ok(v) => v,
@@ -351,9 +356,9 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
         }
     };
 
-    let live = live_nodes(&candidates, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now());
-    for id in interesting_volumes(ctx, &live, &live).await {
-        pull_volume(ctx, btrfs_bin, &http, &secret, &id).await;
+    let live = live_nodes(&candidates, &nodes, floor, now);
+    for id in interesting_volumes(ctx, &live).await {
+        pull_volume(ctx, btrfs_bin, &http, secret, &id).await;
     }
     retire_pass(ctx, &live).await;
 }
@@ -366,12 +371,7 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
 /// the first standby to look finds an empty source list forever. List errors on the
 /// Workspace/Environment half are warned and skipped — a transient API hiccup must not stop the
 /// replication half from pulling.
-///
-/// `candidates` and `live` are both the live-node list — kept as two parameters because
-/// `replicate::targets` takes the placement pool separately from the owner-alive check, and a
-/// caller retiring against a different (e.g. narrower) candidate set than it places against would
-/// be a bug worth a compile error, not a shared name.
-async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String], live: &[String]) -> Vec<String> {
+async fn interesting_volumes(ctx: &Arc<Ctx>, live: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(list) => {
@@ -382,7 +382,7 @@ async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String], live: &[Stri
                 let id = v.name_any();
                 let i_am_owner = v.spec.node_name == ctx.node;
                 let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
-                let targets = replicate::targets(&id, &v.spec.node_name, candidates, standby_count(owner_alive, v.spec.replicas));
+                let targets = replicate::targets(&id, &v.spec.node_name, live, standby_count(owner_alive, v.spec.replicas));
                 if (i_am_owner || targets.iter().any(|t| t == &ctx.node)) && !out.contains(&id) {
                     out.push(id);
                 }
@@ -797,9 +797,17 @@ async fn unclaim_kind<K>(
 /// wasted disk: its stale Synced row still wins claims and satisfies stop's flush gate with
 /// data that is no longer being pulled. It goes only once every CURRENT target is Synced, so a
 /// spread never passes through a moment with fewer live copies than before. An unowned volume
-/// is a dead node's mid-takeover: keep everything until someone owns it again.
+/// is a dead node's mid-takeover: keep everything until someone owns it again. An EMPTY target
+/// list is not "every target is synced" — it's this node itself missing from `live` (its own
+/// Node object flapped NotReady while the agent kept running); `all()` is vacuously true on an
+/// empty iterator, which would otherwise retire every copy on this node in one beat.
 fn should_retire(me: &str, owner: &str, targets: &[String], hosted: bool, synced: &HashSet<String>) -> bool {
-    !owner.is_empty() && owner != me && !hosted && !targets.iter().any(|t| t == me) && targets.iter().all(|t| synced.contains(t))
+    !owner.is_empty()
+        && owner != me
+        && !hosted
+        && !targets.is_empty()
+        && !targets.iter().any(|t| t == me)
+        && targets.iter().all(|t| synced.contains(t))
 }
 
 /// Workspaces and Environments whose pod runs on THIS node, by their `status.volumeRef` — same
@@ -1221,7 +1229,7 @@ fi
         let (ctx, _rec) = test_ctx(tmp.path(), "node-b", routes);
         let live = vec!["node-b".to_string()];
 
-        let ids = interesting_volumes(&ctx, &live, &live).await;
+        let ids = interesting_volumes(&ctx, &live).await;
 
         assert_eq!(ids, vec!["vol-1".to_string()], "a volume this node owns is always interesting, running or not");
     }
@@ -1270,7 +1278,7 @@ fi
         let (ctx, _rec) = test_ctx(tmp.path(), "node-c", routes);
         let live = vec!["node-a".to_string(), "node-c".to_string()];
 
-        assert_eq!(interesting_volumes(&ctx, &live, &live).await, vec!["v2".to_string()]);
+        assert_eq!(interesting_volumes(&ctx, &live).await, vec!["v2".to_string()]);
     }
 
     /// The reaper: a node absent from a list we DID get, or Ready=false past the age floor, is
@@ -1332,12 +1340,11 @@ fi
     /// the reaper, the unclaim sweep, or placement.
     #[tokio::test]
     async fn pull_beat_reaps_unclaims_and_places_nothing_on_a_node_list_error() {
-        std::env::set_var("WS_PEER_SECRET", "s3cret");
         let routes = vec![Route { method: "GET", path: NODES.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
 
-        pull_beat_with(&ctx, "btrfs").await;
+        pull_beat_with(&ctx, "btrfs", "s3cret").await;
 
         assert_eq!(rec.calls(), vec![format!("GET {NODES}")], "nothing beyond the failed nodes list should ever be called");
     }
@@ -1550,6 +1557,7 @@ fi
         assert!(!should_retire("b", "a", &t(&["c"]), true, &synced(&["c"])), "hosting a worktree here");
         assert!(!should_retire("b", "a", &t(&["c"]), false, &synced(&[])), "replacement not synced yet: keep");
         assert!(!should_retire("b", "", &t(&["c"]), false, &synced(&["c"])), "unowned (dead owner): keep until taken");
+        assert!(!should_retire("b", "a", &t(&[]), false, &synced(&[])), "empty targets (me missing from live) must not vacuously retire");
         assert!(should_retire("b", "a", &t(&["c"]), false, &synced(&["c"])));
     }
 
