@@ -95,20 +95,19 @@ additions:
 ### Clone (ruled 2026-09-03)
 
 Clone cuts a snapshot NOW and pokes the peers, instead of leaning on whatever the last beat left:
+the owner cuts a transient (`clone-{ws}-{hex}`, same shape as a sync point) at the moment of the
+request, sends `/peer/v1/wake`, and the clone is created from that cut.
 
-- Clone of a **running** source: the owner cuts a transient (`clone-{ws}-{hex}`, same as a sync
-  point) at the moment of the request, sends `/peer/v1/wake`, and the clone is created on the
-  same node from that cut — the source's data is right there, the clone starts immediately.
-  Placement therefore stays local for a running source (`source_nodes` as today).
-- Clone of a **stopped** source: its stop transient is already the newest cut, and it has been
-  replicated or is being; the clone places like a start — on any node up to date for the source
-  worktree, chosen by the same rendezvous — and is created from that transient there.
-- Clone of an **interrupted** source: from the newest transient an up-to-date node holds, on
-  that node, with the age stated (see above).
-- Clone of a source whose volume is released (owner `""`): same as stopped.
+Placement is the ONE rule used everywhere — the clone starts on a node that is up to date for the
+source worktree, the owner always being one. There is no "same node" rule: at the instant of the
+cut the owner is the only up-to-date node, so a clone of a running source lands there by
+arithmetic, not by policy. A clone of a stopped or released source finds the stop transient
+already replicated, so several nodes qualify and rendezvous picks among them. A clone of an
+interrupted source is the one exception in kind, not in placement: it grafts onto the newest
+transient an up-to-date node holds, with the age stated (see above).
 
-`source_nodes`, which today pins a clone to the source volume's `nodeName` unconditionally,
-becomes the running/stopped split above.
+`source_nodes`, which today pins a clone to the source volume's `nodeName` unconditionally, is
+replaced by that same up-to-date check.
 
 ### Dead-node sweep, per volume
 
@@ -222,5 +221,6 @@ Walked on 2026-09-03 against the rules above; each has an answer in this spec.
    a hurry stops workspaces through `/v1` like anyone else.
 3. No "abandon edits" action exists. An interrupted parent waits for its node; the person is
    shown a clone from the last synced point, with its age, as the way forward.
-4. Clone cuts a snapshot at once and wakes the peers; a running source clones locally, a
-   stopped or released source clones on any up-to-date node.
+4. Clone cuts a snapshot at once and wakes the peers. Placement is the same up-to-date rule as
+   a start; a running source's clone lands on the owner only because nothing else is up to date
+   yet — there is no same-node rule.
