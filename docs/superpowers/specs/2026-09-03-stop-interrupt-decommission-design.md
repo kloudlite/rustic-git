@@ -57,26 +57,58 @@ wait moves out of stop and into placement.
   `/v1`'s stop and get answers include it, so the UI can say "safe to start anywhere" or "still
   copying".
 
-### Where a stopped parent may start
+### Where a stopped parent starts (spread, ruled 2026-09-03)
 
 `may_claim` today admits a node whose replica is `Synced`. It becomes: the owner node always;
-any other node only if its replica is **up to date** for the worktree being claimed (the newest
-Ready transient's `readyAt` versus the replica's `lastSyncAt`). This is the check that used to
-live in `flush_gate`; it now sits where the decision is made.
+any other node only if it is **up to date** for the worktree being claimed. This is the check
+that used to live in `flush_gate`; it now sits where the decision is made.
 
-While the owner node is alive nothing un-places a stopped parent, so a plain stop/start stays on
-the same node as today. The replica option is taken only when the owner is dead or
-decommissioned. (Load-spreading a start across replica nodes is a separate change and is not in
-this spec.)
+Starts spread. When a stopped parent is started and its volume is *movable* — no parent on the
+volume is running — the OWNER's controller (it is alive; only the owner may give a volume away)
+computes the preferred node: rendezvous over `{owner} ∪ {nodes up to date for every stopped
+parent on the volume}`, keyed by the volume id (`replicate::targets`' hash, so the spread is
+deterministic and even by count, and a retry lands on the same answer). If the preferred node is
+the owner, it starts here as today. Otherwise the owner clears the volume's pin (`test`+
+`replace`, the same CAS as the takeover), marks the volume `Released`, and un-places every parent
+on it; the preferred node claims the started parent, takes the volume, and the siblings follow
+on their next start. If the preferred node never claims (it died in between), the dead-node
+sweep's own rule takes over: the volume is released, so any up-to-date node may claim.
+
+A volume with a running parent is not movable, so a stopped sibling starts on the owner. A
+volume with no up-to-date replica has a set of exactly `{owner}`, so it starts on the owner.
+The hash is by count, not by load; weighting by free CPU or pool space is the named upgrade
+(`// ponytail:` at the chooser) and needs an input every node computes identically.
 
 ### Interrupted parents
 
 The dead-node sweep already leaves a Running parent pinned with `Degraded / NodeDead`. Two
 additions:
 
-- `/v1` refuses `clone` (both kinds) and answers `start` with 409 while the parent carries
-  `NodeDead`: `"<kind> is interrupted: its node is down; it resumes when the node returns"`.
-- The web actions show that sentence.
+- `/v1` answers `start` with 409 while the parent carries `NodeDead`: `"<kind> is interrupted:
+  its node is down; it resumes when the node returns"`. There is no way to start it elsewhere
+  and no way to abandon its edits: reaching that state is a system failure, never a workflow.
+- `clone` of an interrupted parent IS allowed, as the one way forward: it grafts onto the
+  newest transient any up-to-date node holds, the clone is placed on such a node, and the
+  response and the web say exactly what it is based on: `"cloned from the sync point of
+  14:32:07, 6 minutes before the node went down"`. The person chooses that, knowing the gap.
+
+### Clone (ruled 2026-09-03)
+
+Clone cuts a snapshot NOW and pokes the peers, instead of leaning on whatever the last beat left:
+
+- Clone of a **running** source: the owner cuts a transient (`clone-{ws}-{hex}`, same as a sync
+  point) at the moment of the request, sends `/peer/v1/wake`, and the clone is created on the
+  same node from that cut — the source's data is right there, the clone starts immediately.
+  Placement therefore stays local for a running source (`source_nodes` as today).
+- Clone of a **stopped** source: its stop transient is already the newest cut, and it has been
+  replicated or is being; the clone places like a start — on any node up to date for the source
+  worktree, chosen by the same rendezvous — and is created from that transient there.
+- Clone of an **interrupted** source: from the newest transient an up-to-date node holds, on
+  that node, with the age stated (see above).
+- Clone of a source whose volume is released (owner `""`): same as stopped.
+
+`source_nodes`, which today pins a clone to the source volume's `nodeName` unconditionally,
+becomes the running/stopped split above.
 
 ### Dead-node sweep, per volume
 
@@ -152,8 +184,8 @@ Walked on 2026-09-03 against the rules above; each has an answer in this spec.
 |---|---|
 | Stop cut done, node dies before any replica pulled it | Pod is already gone, but no node is up to date → the volume waits for the node (`NodeDead / AwaitingReplica`). Nothing moves, nothing lost. |
 | Node dies between the stop request and the cut | Still running from the system's view → interrupted. Waits. |
-| Person stops an interrupted parent | Honoured when the node returns: the cut happens then, and only then can it move. There is no force option; see open point 3. |
-| Clone of a parent whose volume is released (owner `""`) or whose node is dead | Today the clone is pinned to the source volume's `nodeName` and can never start. Now: clone of an interrupted or decommission-pinned source is refused with 409; clone of a released volume claims like a start, on any up-to-date node for the source worktree. |
+| Person stops an interrupted parent | Honoured when the node returns: the cut happens then, and only then can it move. No force option (ruled): the way forward is a clone from the last synced point. |
+| Clone of a parent whose volume is released (owner `""`) or whose node is dead | Today the clone is pinned to the source volume's `nodeName` and can never start. Now: see "Clone" — released or stopped sources place on an up-to-date node; an interrupted source clones from the newest replicated transient with its age stated. |
 | Restore-to-new from a commit | Unchanged: a `Synced` replica holds every Ready commit, so plain `Synced` is the right bar. |
 | `replicas: 1` | No standby can ever be up to date. `Replicated` stays `False / NoReplica` with a message naming it; cross-node start never offered; node death waits for the node. |
 | Two stopped parents on one volume, one replicated and one not | The volume waits (every parent must be covered). Each parent's condition names its own state so the operator sees which one is holding the volume. |
@@ -177,17 +209,18 @@ Walked on 2026-09-03 against the rules above; each has an answer in this spec.
 ## Costs, named
 
 - Stop is seconds instead of minutes; the replica wait moves to the first cross-node start.
-- One `/peer/v1/wake` POST per live node per stop.
+- One `/peer/v1/wake` POST per live node per stop and per clone.
+- A start may move a volume: one CAS on the owner, one on the taker, one un-place per sibling.
 - One VolumeReplica list per reconcile of a stopped parent (field-selected, cheap).
 - `nodes: patch` for the agent (annotations only in practice; RBAC cannot narrow it).
 
-## Open points for the owner
+## Rulings recorded (2026-09-03)
 
-1. Start placement while the owner is alive stays on the owner node. Spreading starts across
-   up-to-date replica nodes is possible later; say if you want it now.
-2. Decommission never stops running work (ruled 2026-09-03). The node drains at the people's
-   pace; an operator in a hurry stops workspaces through `/v1` like anyone else.
-3. An interrupted parent has no "abandon my edits and start from the last sync point" action.
-   A person who wants that today can only wait for the node. If you want it, it is one explicit
-   `/v1` call that releases the volume from the newest replicated transient, and it must say in
-   its response exactly how old that point is.
+1. Starts spread across the owner and the up-to-date replica nodes, by rendezvous on the volume
+   id, decided by the owner. Weighting by load is the named upgrade.
+2. Decommission never stops running work. The node drains at the people's pace; an operator in
+   a hurry stops workspaces through `/v1` like anyone else.
+3. No "abandon edits" action exists. An interrupted parent waits for its node; the person is
+   shown a clone from the last synced point, with its age, as the way forward.
+4. Clone cuts a snapshot at once and wakes the peers; a running source clones locally, a
+   stopped or released source clones on any up-to-date node.
