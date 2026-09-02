@@ -128,7 +128,7 @@ spec:
           # code is running, and `IfNotPresent` on an immutable tag means image GC costs a
           # re-pull rather than a silent version change.
           # No imagePullSecret: the package is public, like the repository.
-          image: ghcr.io/kloudlite/rustic-git-gateway:9f03fe6d545a247cfa60c28e8510e8bb9a97d3ad
+          image: ghcr.io/kloudlite/rustic-git-gateway:885575f75d2768b89b559da4e880313df46f3596
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
