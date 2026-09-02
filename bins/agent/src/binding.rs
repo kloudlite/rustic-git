@@ -135,12 +135,22 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
     Ok(Action::await_change())
 }
 
-/// Whether the owner's binding on this node reports `NamespaceReady`. A missing binding is "not
-/// ready", never an error: it is the ordinary gap between a claim and the binding reconcile.
-pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<bool, ReconcileErr> {
+/// Whether this workspace's OWN namespace exists on this node's view of the cluster.
+///
+/// The `OwnerBinding` condition alone is not enough: `teams_in_use` is scoped to THIS node's
+/// workspaces, so node A can report `NamespaceReady=True` for an owner whose team-B namespace no
+/// node has made yet, and a workspace claimed on B would then fail into `ensure_ssh`'s 60 s retry
+/// instead of waiting here. Both halves are asked — the condition says the binding pass has run at
+/// all, the namespace says it ran for THIS team. A missing binding or namespace is "not ready",
+/// never an error: it is the ordinary gap between a claim and the binding reconcile.
+pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str, team: &str) -> Result<bool, ReconcileErr> {
     let Some(b) = get_binding(ctx, region, owner).await? else { return Ok(false) };
-    Ok(b.status
-        .is_some_and(|s| s.conditions.iter().any(|c| c.type_ == NAMESPACE_READY && c.status == "True")))
+    if !b.status.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == NAMESPACE_READY && c.status == "True")) {
+        return Ok(false);
+    }
+    let ns = ws_namespace(owner, team);
+    let api: Api<Namespace> = Api::all(ctx.client.clone());
+    Ok(api.get_opt(&ns).await?.is_some())
 }
 
 /// The owner's binding in this region, if any.

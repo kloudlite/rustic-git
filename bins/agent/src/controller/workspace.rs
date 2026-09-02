@@ -695,7 +695,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // mapping one binding to every waiting Workspace of that owner is a list per binding event, and
     // the wait is bounded by one tick. Wire a `spec.owner`-indexed reflector if first-workspace
     // latency ever shows up as a complaint.
-    if !binding::namespace_ready(ctx, &w.spec.region, &w.spec.owner).await? {
+    if !binding::namespace_ready(ctx, &w.spec.region, &w.spec.owner, &w.spec.team).await? {
         let st = crd::WorkspaceStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,

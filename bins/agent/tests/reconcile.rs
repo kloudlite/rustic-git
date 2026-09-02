@@ -383,6 +383,15 @@ fn ready_binding() -> Route {
     )
 }
 
+/// The owner's own namespace, present — the other half `namespace_ready` now checks alongside the
+/// binding condition.
+fn ready_namespace() -> Route {
+    rustic_git_workspaces::kube_test::get(
+        format!("/api/v1/namespaces/{}", crd::ws_namespace("alice", "")),
+        serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ws-alice"}}),
+    )
+}
+
 fn binding_route() -> Route {
     rustic_git_workspaces::kube_test::post(
         BINDINGS,
@@ -1405,6 +1414,7 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
             ready_binding(),
+            ready_namespace(),
             rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
             rustic_git_workspaces::kube_test::post(
                 "/api/v1/namespaces/ws-alice/secrets",
@@ -2404,6 +2414,7 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
     routes.extend(vec![
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
         ready_binding(),
+        ready_namespace(),
         rustic_git_workspaces::kube_test::post(
             "/api/v1/namespaces/ws-alice/pods",
             serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}),
@@ -2856,6 +2867,7 @@ async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a
     let routes = vec![
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
         ready_binding(),
+        ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx_without_homes_export(tmp.path(), routes);
@@ -3367,6 +3379,7 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
         ready_binding(),
+        ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
@@ -3397,6 +3410,7 @@ async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-gone"),
         ready_binding(),
+        ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
@@ -3563,3 +3577,31 @@ async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_
     assert!(!tmp.path().join("homecache").exists(), "nothing under the pool root was created");
 }
 
+
+/// The gate is a per-NODE fact read off a cluster-scoped condition: node A's pass sets
+/// `NamespaceReady=True` after creating the namespaces ITS workspaces need, and a workspace in a
+/// team this node has never seen would sail past it into a 60 s `ensure_ssh` retry. The namespace
+/// itself is what must answer.
+#[tokio::test]
+async fn the_namespace_gate_asks_about_this_workspace_s_own_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let binding = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+        "metadata": {"name": "r1-alice", "uid": "b-uid", "generation": 1},
+        "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"},
+        "status": {"observedGeneration": 1,
+                   "conditions": [{"type": "NamespaceReady", "status": "True", "reason": "Converged",
+                                   "message": "", "lastTransitionTime": "2000-01-01T00:00:00Z"}]},
+    });
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice", binding),
+        rustic_git_workspaces::kube_test::not_found(format!(
+            "/api/v1/namespaces/{}",
+            rustic_git_workspaces::crd::ws_namespace("alice", "eng")
+        )),
+    ];
+    let (ctx, _rec) = ctx(tmp.path(), routes);
+
+    assert!(!rustic_git_agent::binding::namespace_ready(&ctx, "r1", "alice", "eng").await.unwrap(),
+            "a True condition from another node must not pass a namespace this node has not made");
+}
