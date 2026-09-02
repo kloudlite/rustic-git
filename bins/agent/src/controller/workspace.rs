@@ -377,7 +377,7 @@ async fn write_ws_status_tracking(
 ///
 /// Before the pod, never after: the mount is `type: File`, so a missing target is not created —
 /// it is a mount failure, and the pod sits in `ContainerCreating` until this file exists.
-pub(crate) fn write_resolv_conf(pool: &str, ws_id: &str, ws_ns: &str, env_ns: Option<&str>) -> Result<(), ReconcileErr> {
+pub fn write_resolv_conf(pool: &str, ws_id: &str, ws_ns: &str, env_ns: Option<&str>) -> Result<(), ReconcileErr> {
     let dir = k8s::attach_dir(pool, ws_id);
     std::fs::create_dir_all(&dir).map_err(|e| ReconcileErr(format!("attach dir {dir}: {e}")))?;
     let path = k8s::attach_file(pool, ws_id);

@@ -3605,3 +3605,44 @@ async fn the_namespace_gate_asks_about_this_workspace_s_own_namespace() {
     assert!(!rustic_git_agent::binding::namespace_ready(&ctx, "r1", "alice", "eng").await.unwrap(),
             "a True condition from another node must not pass a namespace this node has not made");
 }
+
+/// The pod bind-mounts this file BY INODE (`type: File`, no subPath), so a rewrite that replaces
+/// the inode — `rename(2)`, the usual way to write a file atomically — leaves every running pod
+/// reading the old one and attachment silently stops working. Verified on a live cluster; this
+/// test is what stops someone "fixing" it into an atomic write.
+#[test]
+fn rewriting_a_resolv_conf_keeps_the_same_inode() {
+    use std::os::unix::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = tmp.path().to_string_lossy().to_string();
+    // The template the agent reads is its own `/etc/resolv.conf`; skip where that is unreadable.
+    if std::fs::read_to_string("/etc/resolv.conf").is_err() {
+        return;
+    }
+
+    rustic_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
+    let path = rustic_git_workspaces::k8s::attach_file(&pool, "ws-1");
+    let before = std::fs::metadata(&path).unwrap().ino();
+
+    rustic_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", Some("env-abc")).unwrap();
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(before, after.ino(), "the file was replaced, not truncated: every running pod now reads the old inode");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("env-abc"), "and the new content did land");
+}
+
+/// A pre-migration pod mounted this path with a `subPath`, which kubernetes created as a
+/// DIRECTORY. A node upgraded from that shape must clear it rather than leave the workspace with
+/// no DNS for as long as the pod lives.
+#[test]
+fn a_directory_left_by_the_old_subpath_mount_is_replaced_by_the_file() {
+    if std::fs::read_to_string("/etc/resolv.conf").is_err() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = tmp.path().to_string_lossy().to_string();
+    let path = rustic_git_workspaces::k8s::attach_file(&pool, "ws-1");
+    std::fs::create_dir_all(&path).unwrap();
+
+    rustic_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
+    assert!(std::fs::metadata(&path).unwrap().is_file());
+}
