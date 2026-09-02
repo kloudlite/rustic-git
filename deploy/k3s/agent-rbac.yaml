@@ -22,8 +22,10 @@
 #                                          create                       ensure_child_volume (a
 #                                                                       parent's child)
 #                                          patch                        finalizer (metadata),
-#                                                                       restore_gate (spec.restoreTo)
-#                                                                       — the ONE spec field, see
+#                                                                       restore_gate (spec.restoreTo),
+#                                                                       resolve_volume (spec.nodeName
+#                                                                       owned->'' or ''->node) — the
+#                                                                       two spec field exceptions, see
 #                                                                       the policy
 #   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
@@ -90,9 +92,10 @@
 #
 #   1. `patch` on a main resource is `patch` on all of it. `heal_labels` needs to write
 #      `metadata.labels` on the parents, the finalizer helper writes `metadata.finalizers` on the
-#      children, and `restore_gate` copies the parent's restore wish into `Volume.spec.restoreTo`.
-#      Kubernetes has no field-level verb, so the policy refuses any other spec change from this
-#      account — that is what makes "the controller cannot edit desired state" mechanical.
+#      children, and `restore_gate` copies the parent's restore wish into `Volume.spec.restoreTo`;
+#      `resolve_volume` clears `spec.nodeName` to pin a takeover or claims it. Kubernetes has no
+#      field-level verb, so the policy refuses any other spec change from this account — that is
+#      what makes "the controller cannot edit desired state" mechanical.
 #   2. `bind` + `rolebindings: create` is "grant these roles to anyone, anywhere". The policy
 #      pins the namespace prefix, the roleRef and the subjects of every RoleBinding this account
 #      writes.

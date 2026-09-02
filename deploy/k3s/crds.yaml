@@ -259,6 +259,7 @@
                           "ready",
                           "running",
                           "working",
+                          "unavailable",
                           "done"
                         ],
                         "type": "string"
@@ -639,6 +640,7 @@
                           "ready",
                           "running",
                           "working",
+                          "unavailable",
                           "done"
                         ],
                         "type": "string"
@@ -1033,6 +1035,7 @@
                           "ready",
                           "running",
                           "working",
+                          "unavailable",
                           "done"
                         ],
                         "type": "string"
@@ -1332,6 +1335,7 @@
                           "ready",
                           "running",
                           "working",
+                          "unavailable",
                           "done"
                         ],
                         "type": "string"

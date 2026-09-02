@@ -400,6 +400,10 @@ pub enum Phase {
     Stopped,
     /// A btrfs operation is in flight.
     Working,
+    /// The owning node is dead and the pin has been cleared: no node may write this subvolume
+    /// until one takes it (`resolve_volume`'s takeover arm). Distinct from `Error` so an
+    /// operator can tell "waiting for a Synced survivor" from "something is broken".
+    Unavailable,
     /// Historical: a pre-cutover `SnapshotRequest` whose record was in the registry, never
     /// re-run past this. The kind is gone; the variant stays for CRs written before the cutover.
     Done,
@@ -417,6 +421,7 @@ impl Phase {
             Phase::Running => "running",
             Phase::Stopped => "stopped",
             Phase::Working => "working",
+            Phase::Unavailable => "unavailable",
             Phase::Done => "done",
             Phase::Error => "error",
         }
