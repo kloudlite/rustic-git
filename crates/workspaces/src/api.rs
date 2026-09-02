@@ -1074,23 +1074,32 @@ pub struct BasedOn {
     pub interrupted: bool,
 }
 
-/// The newest Ready transient of `worktree`, as the whole object: a clone's parent when the owner
-/// can cut, and the clone's own base when it cannot. `crd::newest_transient_of` is the ordering,
-/// shared with the agent so `/v1` and placement can never disagree about which cut is newest.
+/// Every `Snapshot` of `volume`, and the newest Ready transient of `worktree` among them as the
+/// whole object: a clone's parent when the owner can cut, and the clone's own base when it cannot.
+/// `crd::newest_transient_of` is the ordering, shared with the agent so `/v1` and placement can
+/// never disagree about which cut is newest.
 async fn newest_transient(c: &kube::Client, volume: &str, worktree: &str) -> Result<(Option<crd::Snapshot>, Vec<crd::Snapshot>), Response> {
     let api: Api<crd::Snapshot> = Api::all(c.clone());
     let list = api
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
         .await
         .map_err(kube_err)?;
-    // Same one-cut-in-flight rule `create_commit` enforces: a second Working cut of one worktree
-    // forks the transient chain, and the loser then misdescribes what it holds.
-    if list.items.iter().any(|sn| sn.spec.worktree == worktree && sn.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Working)) {
-        return Err((StatusCode::CONFLICT, "a snapshot is already being cut for this workspace").into_response());
-    }
     let newest = crd::newest_transient_of(&list.items, worktree);
     let found = newest.and_then(|n| list.items.iter().find(|s| s.name_any() == n).cloned());
     Ok((found, list.items))
+}
+
+/// Same one-cut-in-flight rule `create_commit` enforces: a second Working cut of one worktree
+/// forks the transient chain, and the loser then misdescribes what it holds.
+///
+/// Only where a cut is about to be TAKEN. An interrupted source's Working cut belongs to the node
+/// that died holding it: it will never converge and nothing will ever clear it, so refusing on it
+/// would close the one door left open — cloning off a copy a peer already holds.
+fn refuse_cut_in_flight(all: &[crd::Snapshot], worktree: &str) -> Result<(), Response> {
+    if all.iter().any(|sn| sn.spec.worktree == worktree && sn.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Working)) {
+        return Err((StatusCode::CONFLICT, "a snapshot is already being cut for this workspace").into_response());
+    }
+    Ok(())
 }
 
 /// Every transient of `worktree` that some node's `VolumeReplica` reports HOLDING — the candidate
@@ -1154,6 +1163,7 @@ async fn clone_base(
         let at = held.status.as_ref().and_then(|st| st.ready_at.clone());
         return Ok(BasedOn { snapshot: held.name_any(), age_seconds: age_seconds(at.as_deref()), at, interrupted: true });
     }
+    refuse_cut_in_flight(&all, worktree)?;
     let name = format!("clone-{worktree}-{}", crd::short_hex());
     let mut snap = crd::Snapshot::new(
         &name,

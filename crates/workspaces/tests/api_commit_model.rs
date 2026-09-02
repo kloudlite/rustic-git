@@ -696,6 +696,41 @@ async fn an_interrupted_clone_skips_a_transient_no_live_node_holds() {
     assert_eq!(body["based_on"]["snapshot"], "sync-ws-1-old", "the newest a LIVE node can serve, not the newest that exists");
 }
 
+/// The one-cut-in-flight guard must not reach the interrupted path. The `Working` cut belongs to
+/// the node that died holding it: nothing will ever converge or clear it, so refusing on it would
+/// shut the only door left — a clone off the copy a live peer already holds.
+#[tokio::test]
+async fn an_interrupted_clone_ignores_a_working_cut_the_dead_node_left_behind() {
+    let mut stuck = snapshot("sync-ws-1-stuck", "ws-1", "karthik", "ws-1", "", "working");
+    stuck["spec"]["transient"] = json!(true);
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
+        no_workspaces(),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1"),
+            stuck
+        ]})),
+        replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-bbbb")]),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+            "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let r = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "copy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["based_on"]["snapshot"], "sync-ws-1-bbbb");
+    assert_eq!(body["based_on"]["interrupted"], true);
+}
+
 /// A replica row that names another worktree's branch, or none at all, holds nothing of this one.
 #[tokio::test]
 async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
