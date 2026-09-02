@@ -334,12 +334,11 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
     let now = k8s_openapi::jiff::Timestamp::now();
     let floor = node_dead_secs();
 
-    // Both dead-node sweeps run every pass regardless of what follows: a dead node's stale
-    // replica rows and stranded claims must not wait on this node having anything to pull, and
-    // they run beside each other so the two never drift onto different dead-node rules.
-    // And one LISTING for the whole pass, for the same reason the node list is threaded: reap,
+    // One LISTING for the whole pass, for the same reason the node list is threaded: reap,
     // unclaim, place and retire each decide what to delete, and two of them acting on different
-    // views of the cluster is how a copy nobody else holds gets dropped.
+    // views of the cluster is how a copy nobody else holds gets dropped. The sweeps below run
+    // once this has succeeded, beside each other so the two never drift onto different dead-node
+    // rules; a partial listing bails the whole beat rather than let any of them act on it.
     let Some(beat) = crate::listing::beat(ctx).await else { return };
 
     reap_dead_replicas(ctx, &beat, &nodes, floor, now).await;
@@ -373,7 +372,9 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) {
 /// the volume behind a Workspace/Environment whose pod runs here right now, OR a volume this node
 /// itself owns (`spec.nodeName == me`) — the owner's row is a source for every standby, and a
 /// STOPPED volume (no pod, nothing in `Workspace/Environment.status.nodeName`) still needs one, or
-/// the first standby to look finds an empty source list forever.
+/// the first standby to look finds an empty source list forever. A Volume-list hiccup now idles
+/// the whole beat (keep-biased — see `beat`'s bail-out above) instead of falling back to only the
+/// worktree-hosted volumes it used to still pull.
 fn interesting_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for v in &beat.volumes {
@@ -485,6 +486,18 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     let mut sources: Vec<&str> = replicas.iter().filter(not_me).filter(synced).map(|r| r.spec.node.as_str()).collect();
     sources.extend(replicas.iter().filter(not_me).filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
 
+    // Resolved ONCE per pass, before the commit loop: `agent_pod_addr` is a namespaced pod LIST
+    // with two selectors, and a node catching up on N commits was making N of them per source to
+    // learn the same IP. A source whose pod cannot be found now is skipped for the whole pass —
+    // which is what the per-commit `continue` amounted to anyway, one list at a time.
+    let mut addrs: Vec<(&str, String)> = Vec::new();
+    for &source in &sources {
+        match agent_pod_addr(&ctx.client, source).await {
+            Ok(a) => addrs.push((source, a)),
+            Err(e) => tracing::warn!(%volume, source, error = %e, "pull: no peer address; skipping this source"),
+        }
+    }
+
     // Any pull that could not be satisfied this pass. It gates the retire pass below, because
     // the two together would otherwise LOSE a sync point: the owner deletes `sync-A`'s CR the
     // instant `sync-B` is Ready, so a replica that cannot reach the owner right now would drop
@@ -499,14 +512,8 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
         let my_parent = nearest_held_ancestor(parent, &by_name, &have);
 
         let mut pulled = false;
-        for &source in &sources {
-            let addr = match agent_pod_addr(&ctx.client, source).await {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::warn!(%volume, %name, source, error = %e, "pull: no peer address; trying next source");
-                    continue;
-                }
-            };
+        for (source, addr) in &addrs {
+            let source = *source;
             // `my_parent` is MY nearest held ancestor — the source may never have had it (it can
             // have pulled a different, shorter chain, or dropped an old commit already). A `-p`
             // the source doesn't recognize fails ITS `btrfs send`, which surfaces here as a
@@ -514,10 +521,10 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
             // `send_to_target` already handles on the push side. One retry against the SAME
             // source with no parent at all before moving on, so a single bad guess costs one
             // extra full pull instead of losing this commit (and every descendant) forever.
-            let mut result = pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, my_parent.as_deref()).await;
+            let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref()).await;
             if result.is_err() && my_parent.is_some() {
                 tracing::warn!(%volume, %name, source, "pull: incremental receive failed, falling back to a full pull from the same source");
-                result = pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, None).await;
+                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None).await;
             }
             match result {
                 Ok(()) => {
@@ -911,9 +918,6 @@ fn should_retire(me: &str, owner: &str, targets: &[String], hosted: bool, synced
         && targets.iter().all(|t| synced.contains(t))
 }
 
-/// Drops this node's copy of any volume whose rendezvous slot over `live` no longer names it —
-/// see `should_retire`. Runs at the end of `pull_beat_with`, after the pull loop, so a new
-/// target's pull lands before anyone retires the copy it just replaced.
 /// Directories under `{pool}/vol` that no listed Volume names. Files beside them (`{id}.owner`,
 /// `{id}.lock`) are not volumes and are cleaned with their directory by `cleanup_local`.
 fn orphan_voldirs(vol_root: &std::path::Path, known: &HashSet<String>) -> Vec<String> {
@@ -928,6 +932,9 @@ fn orphan_voldirs(vol_root: &std::path::Path, known: &HashSet<String>) -> Vec<St
     out
 }
 
+/// Drops this node's copy of any volume whose rendezvous slot over `live` no longer names it —
+/// see `should_retire`. Runs at the end of `pull_beat_with`, after the pull loop, so a new
+/// target's pull lands before anyone retires the copy it just replaced.
 async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String]) {
     let vols = &beat.volumes;
     let rows = &beat.replicas;
@@ -1328,6 +1335,30 @@ fi
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["status"]["phase"], "Synced", "the fallback succeeded: nothing is missing any more");
+    }
+
+    /// Catching up on three commits from one source resolves that source's pod address ONCE, not
+    /// once per commit: a full namespaced pod list with two selectors is not a per-commit cost.
+    #[tokio::test]
+    async fn pull_volume_resolves_a_source_address_once_per_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/v1/snap")).unwrap();
+        let snaps = vec![
+            ready_snapshot("v1-aaaa", "v1", ""),
+            ready_snapshot("v1-bbbb", "v1", "v1-aaaa"),
+            ready_snapshot("v1-cccc", "v1", "v1-bbbb"),
+        ];
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", snaps) },
+            Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, &beat_of(vec![], vec![replica_of("v1", "node-b", "Synced")], vec![]), "btrfs", &http, "s3cret", "v1").await;
+
+        let pod_lists = rec.calls().iter().filter(|c| c.as_str() == "GET /api/v1/namespaces/kube-system/pods").count();
+        assert_eq!(pod_lists, 1, "one address lookup per source per pass, not per commit: {:?}", rec.calls());
     }
 
     /// The owner of a STOPPED volume (no pod, so no Workspace/Environment names it in
