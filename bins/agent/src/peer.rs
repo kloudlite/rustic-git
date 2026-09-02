@@ -925,11 +925,19 @@ pub(crate) fn volume_decision(
 /// Applies `volume_decision` to every volume whose owner is in `owners`. One place, called by the
 /// dead-node sweep and by the decommission beat with different sets and different reasons — the
 /// arms must never drift, and two copies of them is how they would.
+///
+/// `mark_running` is what separates the two callers' Mark arms. The dead sweep marks (true): the
+/// node is gone, so `Unavailable`/`Degraded` is the literal truth and the only place the API can
+/// say why nothing will start there. A drain does NOT (false): the node is alive and the workspace
+/// is happily running, so writing `Degraded` would libel a healthy worktree — and `/v1`'s
+/// `interrupted()` keys on exactly that condition, which would start 409ing clones of it. The
+/// drain's `Decommissioning=True/NodeLeaving` on the parent already carries the whole message.
 pub(crate) async fn sweep_volumes(
     ctx: &Arc<Ctx>,
     beat: &crate::listing::Beat,
     owners: &HashSet<String>,
     reason: &'static str,
+    mark_running: bool,
 ) {
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     for vol in beat.volumes.iter().cloned() {
@@ -944,6 +952,7 @@ pub(crate) async fn sweep_volumes(
         // The reason comes back OUT of the verdict, so the word written is the one the decision
         // made rather than a second copy of the caller's argument.
         let (why, reason, release) = match volume_decision(&name, &owner, &parents, reason) {
+            VolumeVerdict::Mark { .. } if !mark_running => continue,
             VolumeVerdict::Mark { why } => (why, reason, false),
             VolumeVerdict::Release { why, reason } => (why, reason, true),
         };
@@ -1096,7 +1105,7 @@ async fn sweep_dead_nodes(
         .map(|v| v.spec.node_name.clone())
         .filter(|n| !n.is_empty() && node_is_dead(nodes.iter().find(|k| k.name_any() == *n), floor, now))
         .collect();
-    sweep_volumes(ctx, beat, &dead, "NodeDead").await;
+    sweep_volumes(ctx, beat, &dead, "NodeDead", true).await;
 }
 
 /// A copy whose rendezvous slot moved (a node joined, or a dead one came back) is not just

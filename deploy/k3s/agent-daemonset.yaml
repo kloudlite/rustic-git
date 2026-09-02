@@ -209,6 +209,13 @@ spec:
             # VolumeReplica rows and takes over — positive evidence only (peer.rs).
             - name: WS_NODE_DEAD_SECS
               value: "180"
+            # How often a node labelled `rustic-git.io/decommission=true` runs the drain beat
+            # (decommission.rs): tell its running worktrees the next start lands elsewhere, release
+            # each volume as it becomes stopped-and-replicated, and rewrite its own
+            # `rustic-git.io/decommission-status` annotation. Every other node pays one node LIST
+            # per interval and nothing else, which is why it can be this hot.
+            - name: WS_DECOMMISSION_SECS
+              value: "30"
             # Ceiling on one btrfs send to a peer; the escape hatch for a stream that hangs rather
             # than fails, so the beat moves on to the next source (peer.rs).
             - name: WS_PEER_SEND_TIMEOUT_SECS

@@ -70,8 +70,11 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
 
     // 2. Release owned volumes as they become releasable — the dead-node sweep's own three arms,
     //    the same function, called with this node as the "unavailable" owner and a different word.
+    //    Release ONLY (`mark_running: false`): this node is alive, so a volume the arms say to
+    //    Mark is a volume somebody is happily using, and `Unavailable`/`Degraded` on it would be
+    //    a lie the API and `/v1`'s `interrupted()` both act on.
     let mine: HashSet<String> = [ctx.node.clone()].into_iter().collect();
-    crate::peer::sweep_volumes(ctx, &beat, &mine, "Decommissioned").await;
+    crate::peer::sweep_volumes(ctx, &beat, &mine, "Decommissioned", false).await;
 
     // 3. Copies settle on their own: `unplaceable` already dropped this node from every other
     //    node's rendezvous, and its own retire pass drops each copy once the replacement is
@@ -84,6 +87,17 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
     let owned = beat.volumes.iter().filter(|v| v.spec.node_name == ctx.node).count();
     let copies = beat.replicas.iter().filter(|r| r.spec.node == ctx.node).count();
     let status = drain_status(running, owned, copies, &chrono::Utc::now().to_rfc3339());
+    // Sticky: the stamp answers "when did this node drain", so the FIRST beat that saw nothing
+    // left is the one that owns it. Rewriting a fresh `now` every 30 s would turn the operator's
+    // gate into "when did we last look", and lose the only timestamp anyone wants. A node that
+    // starts hosting work again writes `draining …` over it immediately.
+    if status.starts_with("drained ")
+        && me.and_then(|n| n.metadata.annotations.as_ref())
+            .and_then(|a| a.get(DECOMMISSION_STATUS))
+            .is_some_and(|v| v.starts_with("drained "))
+    {
+        return;
+    }
     let patch = serde_json::json!({"metadata": {"annotations": {DECOMMISSION_STATUS: status}}});
     if let Err(e) = Api::<Node>::all(ctx.client.clone())
         .patch(&ctx.node, &PatchParams::default(), &Patch::Merge(&patch))
@@ -154,6 +168,12 @@ mod tests {
         let mut n = node_ready_json(name);
         n["metadata"]["labels"] =
             serde_json::json!({ rustic_git_workspaces::crd::DECOMMISSION_LABEL: "true" });
+        n
+    }
+
+    fn node_drained(name: &str, status: &str) -> serde_json::Value {
+        let mut n = node_decommissioning(name);
+        n["metadata"]["annotations"] = serde_json::json!({ DECOMMISSION_STATUS: status });
         n
     }
 
@@ -252,6 +272,17 @@ mod tests {
         assert_eq!(cond["reason"], "NodeLeaving");
         assert_eq!(cond["message"], "this node is being retired; stop when convenient and the next start lands elsewhere");
         assert_eq!(sent["status"]["nodeName"], "node-a", "a running worktree never moves");
+        // The node is ALIVE and the workspace is happily running: nothing about it is degraded or
+        // unavailable, and saying so would make `/v1`'s `interrupted()` 409 a clone of it.
+        assert!(
+            !rec.calls().iter().any(|c| c == "PUT /apis/rustic-git.io/v1alpha1/volumes/vol-1/status"),
+            "a drain never marks a running volume Unavailable: {:?}",
+            rec.calls()
+        );
+        assert!(
+            !sent["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Degraded"),
+            "a running workspace is not Degraded by a drain: {sent}"
+        );
         let ann = rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0);
         assert_eq!(ann["metadata"]["annotations"]["rustic-git.io/decommission-status"], "draining running=1 owned=1 copies=0");
     }
@@ -314,5 +345,48 @@ mod tests {
         let vol = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status").remove(0);
         assert_eq!(vol["status"]["conditions"][0]["reason"], "Decommissioned");
         assert_eq!(rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status")[0]["status"]["nodeName"], "");
+    }
+
+    /// The stamp answers "when did this node drain", so only the first beat that saw nothing left
+    /// writes it — and a node that picks work back up says so at once.
+    #[tokio::test]
+    async fn the_drained_stamp_is_written_once_and_overwritten_only_by_progress() {
+        let stamped = "drained 2026-01-01T00:00:00Z";
+        let empty = |name: &str| {
+            vec![
+                Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![]) },
+                Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
+                Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+                Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+                Route { method: "PATCH", path: format!("/api/v1/nodes/{name}"), status: 200, body: node_drained(name, stamped) },
+            ]
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut routes = vec![Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_drained("node-a", stamped)]) }];
+        routes.extend(empty("node-a"));
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        decommission_beat(&ctx).await;
+        assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH")), "an already-drained node keeps its stamp: {:?}", rec.calls());
+
+        // Work landed back on it (a person restarted something the drain never stopped): the
+        // stamp is wrong now and must go, on the very next beat.
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_drained("node-a", stamped)]) },
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-1", "node-a")]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
+            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
+            Route { method: "PATCH", path: "/api/v1/nodes/node-a".into(), status: 200, body: node_drained("node-a", stamped) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        decommission_beat(&ctx).await;
+        assert_eq!(
+            rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0)["metadata"]["annotations"][DECOMMISSION_STATUS],
+            "draining running=0 owned=1 copies=0"
+        );
     }
 }
