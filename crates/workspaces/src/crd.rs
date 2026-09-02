@@ -692,6 +692,12 @@ pub struct OwnerBindingStatus {
 /// authorization.
 pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
 
+/// Set on a `Node` by an operator (`kubectl label node <n> rustic-git.io/decommission=true`) to
+/// retire it. A LABEL and not an annotation because it is a selector-worthy fact about the node,
+/// and because removing it is the documented abort. Only the exact value `"true"` counts: a
+/// half-typed label must never drain a node.
+pub const DECOMMISSION_LABEL: &str = "rustic-git.io/decommission";
+
 /// Labels every `Snapshot`/`VolumeReplica` create site stamps: `spec.volume`/`spec.owner` restated
 /// as labels so a watch or a list (the e2e's `-l rustic-git.io/volume=...`, `/v1`'s own reads) can
 /// select on them — a label cannot be queried out of an arbitrary spec field. A VIEW, same rule as

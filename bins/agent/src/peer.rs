@@ -383,14 +383,14 @@ pub async fn pull_beat(ctx: &Arc<Ctx>) {
 
 /// Rendezvous over the FULL pool keeps electing a corpse: the reaper deletes its row every beat
 /// and no live node ever becomes a target, so a volume sits one copy short until the node comes
-/// back. Placement therefore sees only nodes that pass the same liveness test the reaper uses —
+/// back. Placement therefore sees only nodes that pass `unplaceable` — dead, or decommissioning —
 /// and a node with no Node object at all is dead, not unknown.
 fn live_nodes(pool: &[String], nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) -> Vec<String> {
-    pool.iter().filter(|n| !node_is_dead(nodes.iter().find(|k| k.name_any() == n.as_str()), floor, now)).cloned().collect()
+    pool.iter().filter(|n| !unplaceable(nodes.iter().find(|k| k.name_any() == n.as_str()), floor, now)).cloned().collect()
 }
 
-/// `targets()` counts the owner as one of `total` and hands back `total - 1` standbys. A dead
-/// owner holds nothing anyone can reach, so it is not a copy: ask for one standby more.
+/// `targets()` counts the owner as one of `total` and hands back `total - 1` standbys. A dead or
+/// decommissioning owner holds nothing anyone can reach, so it is not a copy: ask for one standby more.
 fn standby_count(owner_alive: bool, replicas: u32) -> usize {
     replicas as usize + usize::from(!owner_alive)
 }
@@ -824,6 +824,23 @@ fn node_is_dead(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timesta
             .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
             .is_some_and(|c| c.status != "True" && c.last_transition_time.as_ref().is_some_and(|t| now.as_second() - t.0.as_second() > floor)),
     }
+}
+
+/// Whether an operator has asked for this node to be retired. Exact value only — see the constant.
+pub(crate) fn decommissioning(node: Option<&Node>) -> bool {
+    node.and_then(|n| n.metadata.labels.as_ref()).and_then(|l| l.get(crd::DECOMMISSION_LABEL)).is_some_and(|v| v == "true")
+}
+
+/// "Not a place to run", the ONE predicate every placement decision uses. Dead (NotReady past the
+/// floor, or absent from a listing we did get) and decommissioning are the same answer here: both
+/// mean nothing new may land, and keeping them as two tests is how the rendezvous and the sweep
+/// eventually disagree about whether a node still owns anything.
+///
+/// It is deliberately NOT `node_is_dead`, which stays the reaper's rule: a decommissioning node is
+/// alive, keeps serving pulls, and its replica rows must not be reaped out from under a peer that
+/// is mid-transfer from it.
+pub(crate) fn unplaceable(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timestamp) -> bool {
+    node_is_dead(node, floor, now) || decommissioning(node)
 }
 
 // ponytail: `now` is THIS node's own clock against another node's `lastTransitionTime`
@@ -1596,6 +1613,52 @@ fi
         assert_eq!(standby_count(true, 2), 2, "targets() subtracts the owner itself");
         assert_eq!(standby_count(false, 2), 3, "one more standby replaces the dead owner");
         assert_eq!(standby_count(false, 1), 2);
+    }
+
+    fn node_decommissioning(name: &str) -> Node {
+        let mut n = node_ready_obj(name);
+        n.metadata.labels.get_or_insert_with(Default::default).insert(crd::DECOMMISSION_LABEL.into(), "true".into());
+        n
+    }
+
+    /// Dead and decommissioning are the SAME thing to placement, and nothing downstream is allowed
+    /// to tell them apart: one predicate, or the sweep and the rendezvous eventually disagree
+    /// about whether a node is a place to run and a volume ends up owned by nobody.
+    #[test]
+    fn decommissioning_is_unplaceable_but_not_dead() {
+        let now = k8s_openapi::jiff::Timestamp::now();
+        let floor = 180;
+        let leaving = node_decommissioning("node-b");
+        assert!(unplaceable(Some(&leaving), floor, now), "a decommissioning node takes no new work");
+        assert!(!node_is_dead(Some(&leaving), floor, now), "but it is alive: its rows are not reaped and it still serves pulls");
+        assert!(unplaceable(Some(&node_dead_obj("node-c", "2000-01-01T00:00:00Z")), floor, now));
+        assert!(unplaceable(None, floor, now), "absent from a positive listing is unplaceable");
+        assert!(!unplaceable(Some(&node_ready_obj("node-a")), floor, now));
+    }
+
+    /// A label value other than exactly "true" is not a decommission: a half-typed `kubectl label`
+    /// must not silently drain a node.
+    #[test]
+    fn only_the_exact_true_value_decommissions() {
+        let mut n = node_ready_obj("node-b");
+        n.metadata.labels.get_or_insert_with(Default::default).insert(crd::DECOMMISSION_LABEL.into(), "yes".into());
+        assert!(!decommissioning(Some(&n)));
+        assert!(!decommissioning(Some(&node_ready_obj("node-a"))));
+        assert!(decommissioning(Some(&node_decommissioning("node-b"))));
+    }
+
+    /// Rendezvous must stop naming a decommissioning node, or its copies never re-home: the whole
+    /// "copies settle on their own" half of a drain is this one line.
+    #[test]
+    fn a_decommissioning_node_leaves_the_candidate_list_and_is_not_a_copy() {
+        let pool: Vec<String> = ["node-a", "node-b", "node-c"].iter().map(|s| s.to_string()).collect();
+        let nodes = vec![node_ready_obj("node-a"), node_decommissioning("node-b"), node_ready_obj("node-c")];
+        let live = live_nodes(&pool, &nodes, 180, k8s_openapi::jiff::Timestamp::now());
+        assert_eq!(live, vec!["node-a".to_string(), "node-c".to_string()]);
+        // A decommissioning OWNER is not a copy either, so the volume asks for one standby more
+        // and rendezvous places the replacement while the original is still serving pulls.
+        assert_eq!(standby_count(false, 2), 3);
+        assert_eq!(standby_count(true, 2), 2);
     }
 
     /// `v2` is picked so that rendezvous over the FULL pool elects `node-b` (dead, or here simply
