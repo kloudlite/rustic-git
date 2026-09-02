@@ -241,7 +241,7 @@ pub(crate) const SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_
 /// -R` would give a whole tree at once. A plain directory is walked through, not deleted; a
 /// subvolume's own contents are never descended into beyond finding nested subvolumes — btrfs
 /// deletes the rest with the subvolume itself.
-fn subvolumes_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+pub(crate) fn subvolumes_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let p = entry.path();
@@ -281,7 +281,35 @@ pub fn cleanup_local(engine: &Engine, id: &str) {
     }
 }
 
-fn btrfs_delete(path: &std::path::Path, id: &str) {
+/// A worktree only exists on the owner; one on any other node is what a takeover left behind.
+/// An EMPTY owner is the window between release and takeover — keep everything then, because
+/// the returning node may be about to take the volume back (replicas: 1).
+pub(crate) fn drop_stale_worktrees(engine: &Engine, volume: &str, owner: &str, me: &str) -> usize {
+    if owner.is_empty() || owner == me {
+        return 0;
+    }
+    let live = engine.pool.live(volume);
+    let Ok(entries) = std::fs::read_dir(&live) else { return 0 };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        // Each `live/{ws}` entry is itself the worktree subvolume — nested subvolumes (if any)
+        // must go first, same "children before parents" order `cleanup_local` uses.
+        let mut nested = Vec::new();
+        subvolumes_under(&p, &mut nested);
+        for n in &nested {
+            btrfs_delete(n, volume);
+        }
+        btrfs_delete(&p, volume);
+        count += 1;
+    }
+    count
+}
+
+pub(crate) fn btrfs_delete(path: &std::path::Path, id: &str) {
     match std::process::Command::new("btrfs").args(["subvolume", "delete", path.to_str().unwrap()]).output() {
         Ok(out) if out.status.success() => {}
         Ok(out) => tracing::warn!(
@@ -290,6 +318,16 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
             stderr = %String::from_utf8_lossy(&out.stderr),
             "agent: cleanup: btrfs subvolume delete"
         ),
+        // No `btrfs` on PATH means we're not on a real node (dev machine, this crate's own
+        // Mac test run) — a plain `remove_dir_all` is the only sane thing a subvolume path can
+        // mean there, and it's also correct on a real node's plain (non-subvolume) directories.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(e) = std::fs::remove_dir_all(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%id, path = %path.display(), error = %e, "agent: cleanup: remove_dir_all fallback");
+                }
+            }
+        }
         Err(e) => tracing::warn!(%id, path = %path.display(), error = %e, "agent: cleanup: btrfs subvolume delete"),
     }
 }
@@ -333,6 +371,14 @@ mod janitor_tests {
 
     fn bare_engine(pool_root: std::path::PathBuf) -> Engine {
         Engine::new(Pool::new(pool_root))
+    }
+
+    /// A plain-directory pool (no loopback mount, no real btrfs) for tests that only exercise
+    /// `subvolumes_under`/`btrfs_delete`'s no-btrfs fallback, not an actual subvolume tree.
+    fn fake_engine() -> (Engine, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+        (bare_engine(tmp.path().to_path_buf()), tmp)
     }
 
     /// The mechanism Task 6's ruling replaced a (dead) Workspace finalizer branch with: no
@@ -486,6 +532,15 @@ mod janitor_tests {
 
         cleanup_local(&engine, "v1");
         assert!(!engine.pool.voldir("v1").exists());
+    }
+
+    #[test]
+    fn stale_worktrees_go_only_when_this_node_is_not_the_owner() {
+        let (engine, _tmp) = fake_engine();
+        std::fs::create_dir_all(engine.pool.live("v1").join("ws-1")).unwrap();
+        assert_eq!(drop_stale_worktrees(&engine, "v1", "node-b", "node-b"), 0, "owner keeps its worktrees");
+        assert_eq!(drop_stale_worktrees(&engine, "v1", "", "node-b"), 0, "unowned: the takeover has not settled, keep");
+        assert_eq!(drop_stale_worktrees(&engine, "v1", "node-a", "node-b"), 1);
     }
 }
 

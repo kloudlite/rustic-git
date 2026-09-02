@@ -990,6 +990,13 @@ async fn retire_pass(ctx: &Arc<Ctx>, live: &[String]) {
             .map(|r| r.spec.node.clone())
             .collect();
         if !should_retire(&ctx.node, &v.spec.node_name, &targets, hosted.contains(&id), &synced) {
+            // Still a target/replica, just not the owner: keep the volume but a `live/{ws}`
+            // worktree under it belongs only to the owner — anything there is what a takeover
+            // away from this node left behind.
+            let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
+            if dropped > 0 {
+                tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+            }
             continue;
         }
         let rname = crd::replica_name(&id, &ctx.node);
