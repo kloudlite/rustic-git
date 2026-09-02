@@ -6,6 +6,7 @@ import { AutoRefresh } from "@/components/app/auto-refresh";
 import { loadEnvPage } from "@/lib/env-page";
 import { apiToken } from "@/lib/api-token";
 import { when } from "@/lib/time";
+import { snapshotTime } from "@/lib/snapshot";
 import { requireToken } from "@/lib/session";
 
 /** An environment is a SUBJECT, like a repo or an image: entering one swaps the chrome's tab row
@@ -79,7 +80,7 @@ export default async function Layout({
                   {" · at "}
                   <span className={at.message ? "" : "text-muted-foreground"}>&ldquo;{at.message || "snapshot"}&rdquo;</span>
                   {" · "}
-                  {when(new Date(at.created_at).getTime())}
+                  {when(snapshotTime(at))}
                 </>
               )}
             </>

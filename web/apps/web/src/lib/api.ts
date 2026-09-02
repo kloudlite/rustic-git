@@ -933,7 +933,10 @@ export type ApiCommitRecord = {
   parent?: string | null;
   region: string;
   message?: string;
-  created_at: string;
+  /** RFC3339. camelCase because `/history` builds its rows by hand rather than serializing
+   *  `CommitRecord` (`crates/workspaces/src/api.rs:2027`); `null` when the object carries no
+   *  creation timestamp. Read it through `snapshotTime` (`lib/snapshot.ts`), never by hand. */
+  createdAt: string | null;
 };
 
 /** Drops a volume's whole snapshot index — every commit record and the ref. What the environment

@@ -11,11 +11,12 @@ import { AutoRefresh } from "@/components/app/auto-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { stamp, when } from "@/lib/time";
 import { pendingPush } from "@/lib/pending-push";
+import { snapshotTime } from "@/lib/snapshot";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
 
-export type SnapshotNode = { id: string; message?: string; created_at: string; parent: string | null };
+export type SnapshotNode = { id: string; message?: string; createdAt: string | null; parent: string | null };
 
 /** The rail's geometry, lifted from the landing page's environment panel so the two read as one
  *  drawing: the main lane 27px in, a branch lane every 18px further, a 12px ring on the lane. */
@@ -125,7 +126,7 @@ function RestoreDialog({
   const [keep, setKeep] = useState(false);
   const label = snapshot.message || "snapshot";
   const since = current
-    ? `\u201c${current.message || "snapshot"}\u201d (${when(new Date(current.created_at).getTime())})`
+    ? `\u201c${current.message || "snapshot"}\u201d (${when(snapshotTime(current))})`
     : null;
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -244,7 +245,7 @@ function DeleteSnapshotDialog({
           <DialogHeader>
             <DialogTitle>Delete snapshot &ldquo;{label}&rdquo;</DialogTitle>
             <DialogDescription>
-              Delete snapshot &ldquo;{label}&rdquo; ({when(new Date(snapshot.created_at).getTime())})? The
+              Delete snapshot &ldquo;{label}&rdquo; ({when(snapshotTime(snapshot))})? The
               record is removed from the lineage; the environment&rsquo;s disk is not affected.
               {isCurrent && (
                 <>
@@ -346,7 +347,7 @@ export function EnvSnapshots({
         ? (history[0] ?? null)
         : restored === null
           ? null
-          : (history.find((h) => Date.parse(h.created_at) > since && descends(h, restored.id)) ?? restored);
+          : (history.find((h) => snapshotTime(h) > since && descends(h, restored.id)) ?? restored);
   // A `restoredTo` that names no record here: a restore grafted ANOTHER volume's snapshot in
   // place. Saying so is the honest answer — badging any record `current` would claim the
   // environment is on a snapshot it is not.
@@ -359,7 +360,7 @@ export function EnvSnapshots({
       .filter((h) => (h.parent && byId.has(h.parent) ? h.parent : null) === parent)
       .sort((a, b) => {
         const onPath = (n: SnapshotNode) => (current && descends(current, n.id) ? 1 : 0);
-        return onPath(a) - onPath(b) || Date.parse(a.created_at) - Date.parse(b.created_at);
+        return onPath(a) - onPath(b) || snapshotTime(a) - snapshotTime(b);
       });
 
   // Flatten the tree into rows, NEWEST first like a log, assigning lanes: the branch the
@@ -433,8 +434,8 @@ export function EnvSnapshots({
                   ) : current ? (
                     <>
                       changes since <span>&ldquo;{current.message || "snapshot"}&rdquo;</span> (
-                      <span title={stamp(new Date(current.created_at).getTime())}>
-                        {when(new Date(current.created_at).getTime())}
+                      <span title={stamp(snapshotTime(current))}>
+                        {when(snapshotTime(current))}
                       </span>
                       ) are not snapshotted
                     </>
@@ -484,7 +485,7 @@ export function EnvSnapshots({
             );
           }
           const c = f.node!;
-          const ts = new Date(c.created_at);
+          const ts = new Date(snapshotTime(c));
           const isCurrent = c === current;
           return (
             <Node key={row.key} row={row} lanes={lanes} variant={isCurrent ? "current" : "past"}>
