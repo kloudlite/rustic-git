@@ -971,4 +971,55 @@ mod commit_tests {
             rec.calls()
         );
     }
+
+    fn snap(name: &str, volume: &str, worktree: &str, transient: bool, parent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": name, "uid": format!("{name}-uid")},
+            "spec": {"volume": volume, "owner": "alice", "worktree": worktree,
+                     "parent": parent, "pinned": false, "transient": transient},
+            "status": {"phase": "ready"},
+        })
+    }
+
+    /// One Ready transient per worktree, and NOTHING else: a commit is not a sync point, and
+    /// another worktree's sync point belongs to that worktree. The arm ignores `heads` and
+    /// `pinned` deliberately (see its ponytail note), so this scoping is its whole safety argument.
+    #[tokio::test]
+    async fn the_transient_arm_spares_commits_and_other_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let items = vec![
+            snap("v1-newsync", "v1", "ws-1", true, "v1-oldsync"),
+            snap("v1-oldsync", "v1", "ws-1", true, ""),
+            snap("v1-commit", "v1", "ws-1", false, ""),
+            snap("v1-otherws", "v1", "ws-2", true, ""),
+        ];
+        let routes = vec![Route {
+            method: "GET",
+            path: "/apis/rustic-git.io/v1alpha1/snapshots".into(),
+            status: 200,
+            body: list_of("Snapshot", items),
+        }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        retain(&ctx, "v1", "v1-newsync").await;
+
+        let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deleted, vec!["DELETE /apis/rustic-git.io/v1alpha1/snapshots/v1-oldsync".to_string()], "{deleted:?}");
+    }
+
+    /// Keep-bias: a snapshot list this pass could not make deletes nothing at all.
+    #[tokio::test]
+    async fn a_snapshot_list_error_deletes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![Route {
+            method: "GET",
+            path: "/apis/rustic-git.io/v1alpha1/snapshots".into(),
+            status: 500,
+            body: serde_json::json!({}),
+        }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        retain(&ctx, "v1", "v1-newsync").await;
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
 }
