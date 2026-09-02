@@ -7,7 +7,7 @@ use crate::{binding, claim, snapshot};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::Pod;
 use rustic_git_workspaces::k8s;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::watcher;
 use kube::{Api, Resource, ResourceExt};
@@ -317,14 +317,30 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
     });
 }
 
-/// The commit model's puller: its own beat, so a slow pull never delays a reconcile.
+/// The commit model's puller: its own beat, so a slow pull never delays a reconcile — plus the
+/// wake, so a stop or a clone is replicated in seconds instead of at the next tick. A pass already
+/// running finishes and then runs ONCE more (the pending flag), never concurrently: two receives of
+/// the same volume buy nothing but disk contention.
 fn spawn_pull(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(crate::peer::replica_interval());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let wake = ctx.pull_wake.clone();
+        let mut pending = false;
         loop {
-            tick.tick().await;
+            if !pending {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = wake.notified() => {}
+                }
+            }
+            pending = false;
             crate::peer::pull_beat(&ctx).await;
+            // Wakes that arrived DURING the pass: `notify_one` left one permit, so this takes it
+            // without waiting and runs exactly one more pass however many arrived.
+            if wake.notified().now_or_never().is_some() {
+                pending = true;
+            }
         }
     });
 }

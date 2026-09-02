@@ -121,3 +121,35 @@ async fn commit_get_streams_the_send_output() {
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     assert_eq!(&body[..], b"snapshot-bytes");
 }
+
+// -------------------------------------------------------------------------------------------
+// POST /peer/v1/wake — the poke that makes a peer pull now.
+// -------------------------------------------------------------------------------------------
+
+/// The wake route is authenticated exactly like the commit route, and answers 204 with no body:
+/// it is a poke, not a transfer. An unauthenticated wake is a 401, or any pod on the cluster
+/// could drive every agent's pull beat at will.
+#[tokio::test]
+async fn wake_requires_the_peer_secret_and_answers_204() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (state, _rec) = state(tmp.path(), "btrfs".into(), vec![]);
+    let notify = state.pull_wake.clone();
+    let app = router(state);
+
+    let req = |secret: Option<&str>| {
+        let mut req = Request::builder().method("POST").uri("/peer/v1/wake");
+        if let Some(s) = secret {
+            req = req.header("x-peer-secret", s);
+        }
+        req.body(Body::empty()).unwrap()
+    };
+    let bad = app.clone().oneshot(req(None)).await.unwrap();
+    assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+
+    let ok = app.oneshot(req(Some("s3cret"))).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::NO_CONTENT);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), notify.notified()).await.is_ok(),
+        "an authenticated wake fires the pull notify"
+    );
+}

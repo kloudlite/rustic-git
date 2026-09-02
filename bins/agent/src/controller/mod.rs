@@ -128,6 +128,10 @@ pub struct Ctx {
     /// A converged parent reconciles on every child event and re-applied ~10 objects each time;
     /// an apply whose body has not changed is skipped. See `ensure` for the ceiling.
     pub applied: Mutex<HashMap<String, (u64, std::time::Instant)>>,
+    /// Fired by `/peer/v1/wake` and awaited by `spawn_pull`. A `Notify` and not a channel because
+    /// the payload is nothing at all: "something changed, pull now". `notify_one` stores exactly
+    /// one permit, so a burst of stops coalesces into one extra pass instead of N.
+    pub pull_wake: Arc<tokio::sync::Notify>,
 }
 
 impl Ctx {
@@ -153,6 +157,7 @@ impl Ctx {
             volumes,
             volume_writer: Mutex::new(Some(volume_writer)),
             applied: Mutex::new(HashMap::new()),
+            pull_wake: Arc::new(tokio::sync::Notify::new()),
             wake_volume,
             wake_workspace,
             wakes: Mutex::new(Some((vol_rx, ws_rx))),

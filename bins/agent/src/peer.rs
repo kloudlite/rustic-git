@@ -48,6 +48,8 @@ pub struct PeerState {
     /// nothing but disk contention. The puller's own ancestor-first ordering already wants one
     /// volume's transfers sequential.
     sends: StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    /// Shared with `Ctx::pull_wake`, so `/peer/v1/wake` reaches the puller's own beat.
+    pub pull_wake: Arc<tokio::sync::Notify>,
 }
 
 impl PeerState {
@@ -55,11 +57,21 @@ impl PeerState {
     /// way, so nothing outside this module (tests included) builds a `PeerState` by struct
     /// literal.
     pub fn new(client: kube::Client, pool: String, node: String, secret: String, btrfs_bin: String) -> PeerState {
-        PeerState { client, pool, node, secret, btrfs_bin, sends: StdMutex::new(HashMap::new()) }
+        PeerState {
+            client,
+            pool,
+            node,
+            secret,
+            btrfs_bin,
+            sends: StdMutex::new(HashMap::new()),
+            pull_wake: Arc::new(tokio::sync::Notify::new()),
+        }
     }
 
     pub fn from_ctx(ctx: &Ctx, secret: String) -> PeerState {
-        PeerState::new(ctx.client.clone(), ctx.pool.clone(), ctx.node.clone(), secret, "btrfs".into())
+        // The listener's notify must be the PULLER's, not a fresh one: a wake that fired a
+        // private `Notify` would be a 204 nobody is waiting on.
+        PeerState { pull_wake: ctx.pull_wake.clone(), ..PeerState::new(ctx.client.clone(), ctx.pool.clone(), ctx.node.clone(), secret, "btrfs".into()) }
     }
 
     fn send_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
@@ -70,6 +82,9 @@ impl PeerState {
 pub fn router(state: PeerState) -> Router {
     Router::new()
         .route("/peer/v1/commit/{volume}/{name}", get(commit))
+        // A poke, not a transfer: the body is empty and the answer is 204. Same secret as the
+        // commit route and the same NetworkPolicy, because it drives the same root-run machinery.
+        .route("/peer/v1/wake", axum::routing::post(wake))
         .with_state(Arc::new(state))
 }
 
@@ -257,6 +272,43 @@ fn send_timeout() -> Duration {
 /// wrongly cap the send.
 fn peer_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())
+}
+
+/// "Something you replicate just changed; pull now." The whole handler is one `notify_one`: the
+/// puller decides what to fetch, exactly as it does on its own ticker. Nothing here is trusted
+/// beyond the secret — a wake can only make a pass happen sooner, never change what it pulls.
+async fn wake(State(state): State<Arc<PeerState>>, headers: HeaderMap) -> impl IntoResponse {
+    if !secret_ok(&headers, &state.secret) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    state.pull_wake.notify_one();
+    StatusCode::NO_CONTENT
+}
+
+/// POST `/peer/v1/wake` to every placeable node but me. Every failure is a warn and never an
+/// error: the wake is an optimisation on top of the ticker, and a stop that failed because a peer
+/// was unreachable would be strictly worse than a stop that replicates a beat later.
+pub async fn wake_peers(ctx: &Arc<Ctx>, live: &[String]) {
+    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
+    if secret.is_empty() {
+        return; // fail-closed, same rule as every other dial in this file
+    }
+    let Ok(http) = peer_http_client() else { return };
+    for node in live.iter().filter(|n| *n != &ctx.node) {
+        let addr = match agent_pod_addr(&ctx.client, node).await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(%node, error = %e, "wake: no peer address; the ticker will get it");
+                continue;
+            }
+        };
+        let url = format!("http://{addr}/peer/v1/wake");
+        match http.post(&url).header("x-peer-secret", &secret).timeout(Duration::from_secs(5)).send().await {
+            Ok(r) if r.status().is_success() => {}
+            Ok(r) => tracing::warn!(%node, status = %r.status(), "wake: peer refused"),
+            Err(e) => tracing::warn!(%node, error = %e, "wake: peer unreachable; the ticker will get it"),
+        }
+    }
 }
 
 /// Last `n` bytes of a possibly-binary buffer, lossily decoded — enough to see the actual btrfs
@@ -2353,6 +2405,55 @@ fi
             sent[0]["status"]["branches"].as_object().is_none_or(|b| b.is_empty()),
             "a transient this node does not hold must never appear in branches: {:?}",
             sent[0]["status"]["branches"]
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Task 2: the wake. A stop or a clone pokes every placeable peer so the pull happens in
+    // seconds instead of at the next `WS_REPLICA_SECS` beat.
+    // ---------------------------------------------------------------------------------------
+
+    /// One POST per live peer, never to myself, and an unreachable peer is a warn — the ticker
+    /// still comes, so a wake that cannot be delivered must never fail the stop that sent it.
+    #[tokio::test]
+    async fn wake_peers_posts_once_per_live_peer_and_skips_me() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pod = |node: &str, ip: &str| {
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": format!("agent-{node}"), "namespace": "kube-system"},
+                "spec": {"nodeName": node},
+                "status": {"podIP": ip},
+            })
+        };
+        let routes = vec![Route {
+            method: "GET",
+            path: "/api/v1/namespaces/kube-system/pods".into(),
+            status: 200,
+            body: list_of("Pod", vec![pod("node-a", "127.0.0.1"), pod("node-b", "127.0.0.1")]),
+        }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        std::env::set_var("WS_PEER_SECRET", "s3cret");
+
+        wake_peers(&ctx, &["node-a".to_string(), "node-b".to_string()]).await;
+
+        // node-a is me: no address is ever resolved for it, so exactly one pod lookup happens.
+        let looked_up = rec.requests().into_iter().filter(|r| r.contains("/pods?")).count();
+        assert_eq!(looked_up, 1, "one address lookup, for the peer only: {:?}", rec.requests());
+    }
+
+    /// The notify coalesces: N wakes arriving during one pass produce exactly one more pass, not
+    /// N. `Notify::notify_one` stores a single permit, which is the whole mechanism.
+    #[tokio::test]
+    async fn many_wakes_in_a_burst_coalesce_into_one_more_pass() {
+        let n = Arc::new(tokio::sync::Notify::new());
+        for _ in 0..5 {
+            n.notify_one();
+        }
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), n.notified()).await.is_ok());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), n.notified()).await.is_err(),
+            "five wakes are one pending permit, not five passes"
         );
     }
 }
