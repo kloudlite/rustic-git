@@ -888,7 +888,10 @@ async fn start_ws(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
-    my_ws(&s, &owner, &id).await?;
+    let w = my_ws(&s, &owner, &id).await?;
+    if w.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
+        return Err(interrupted_409("workspace"));
+    }
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Running).await?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -901,6 +904,19 @@ fn node_dead_warning(node_name: &str, conditions: &[crd::Condition]) -> Option<S
         .iter()
         .find(|c| c.reason == "NodeDead" && c.status == "True")
         .map(|_| format!("node {node_name} is down; edits after the last sync point are only on that node and will not follow the move"))
+}
+
+/// Interrupted: the node died while this was RUNNING, so its live edits exist only there. The
+/// sweep writes `Degraded/NodeDead` and keeps the pin; nothing in the system may move it.
+fn interrupted(conditions: &[crd::Condition]) -> bool {
+    conditions.iter().any(|c| c.reason == "NodeDead" && c.status == "True")
+}
+
+/// The one answer a start gets while a parent is interrupted. There is deliberately no force
+/// flag: abandoning someone's edits is not a thing this API can offer, and the way forward is a
+/// clone from the last synced point — which `clone` allows, with its age stated.
+fn interrupted_409(kind: &str) -> Response {
+    (StatusCode::CONFLICT, format!("{kind} is interrupted: its node is down; it resumes when the node returns")).into_response()
 }
 
 async fn stop_ws(
@@ -1436,6 +1452,9 @@ async fn start_env(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
+    if e.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
+        return Err(interrupted_409("environment"));
+    }
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Running).await?;
     Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
 }

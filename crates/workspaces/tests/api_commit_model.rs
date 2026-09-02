@@ -480,3 +480,70 @@ async fn get_and_stop_expose_the_replicated_condition() {
     let stopped: Value = http.post(format!("{}/v1/workspaces/ws-1/stop", s.base)).bearer_auth(&tok).send().await.unwrap().json().await.unwrap();
     assert_eq!(stopped["replicated"]["reason"], "AwaitingReplica");
 }
+
+fn interrupted_ws(name: &str, owner: &str) -> Value {
+    let mut w = placed_ws(name, owner);
+    w["status"]["conditions"] = json!([{
+        "type": "Degraded", "status": "True", "reason": "NodeDead",
+        "message": "node node-a is down", "lastTransitionTime": "2026-09-03T10:00:00Z"
+    }]);
+    w
+}
+
+/// There is no way to start an interrupted parent elsewhere and no way to abandon its edits:
+/// reaching that state is a system failure, never a workflow. The 409 says what will happen
+/// instead of leaving a start silently pending forever.
+#[tokio::test]
+async fn starting_an_interrupted_workspace_is_a_409_that_explains_itself() {
+    let routes = vec![get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik"))];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let r = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/start", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(
+        r.text().await.unwrap(),
+        "workspace is interrupted: its node is down; it resumes when the node returns"
+    );
+    assert!(
+        !s.rec.calls().iter().any(|c| c.starts_with("PATCH")),
+        "and desiredState is never flipped: {:?}",
+        s.rec.calls()
+    );
+}
+
+#[tokio::test]
+async fn starting_an_interrupted_environment_is_a_409_too() {
+    let mut e = placed_env("env-1", "karthik");
+    e["status"]["conditions"] = json!([{
+        "type": "Degraded", "status": "True", "reason": "NodeDead",
+        "message": "node node-a is down", "lastTransitionTime": "2026-09-03T10:00:00Z"
+    }]);
+    let routes = vec![get(format!("{API}/environments/env-1"), e)];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let r = reqwest::Client::new().post(format!("{}/v1/environments/env-1/start", s.base)).bearer_auth(&tok).send().await.unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.text().await.unwrap(), "environment is interrupted: its node is down; it resumes when the node returns");
+}
+
+/// A stopped parent on a dead node is NOT interrupted — it was flushed on the way down, so it
+/// starts as soon as an up-to-date node claims it. Only a parent carrying `NodeDead` is refused.
+#[tokio::test]
+async fn a_plain_stopped_workspace_still_starts() {
+    let mut w = placed_ws("ws-1", "karthik");
+    w["status"]["phase"] = json!("stopped");
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), w.clone()),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: w },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let r = reqwest::Client::new().post(format!("{}/v1/workspaces/ws-1/start", s.base)).bearer_auth(&tok).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+}
