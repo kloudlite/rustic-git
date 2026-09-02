@@ -33,6 +33,19 @@ have network nsg rule show -g "$RG" --nsg-name k3s-nsg -n kubelet || \
   az network nsg rule create -g "$RG" --nsg-name k3s-nsg -n kubelet --priority 220 \
     --source-address-prefixes 10.60.1.0/24 --destination-port-ranges 10250 --protocol Tcp --access Allow -o none
 
+# Two rules that lived only in README prose until now — two firewall layers that can drift silently
+# is the failure this closes. CF_CIDRS is the same Cloudflare edge list harden-node.sh admits on
+# 80; API_CLIENTS is the api tier's egress, which needs 6443. Same required-var style as
+# harden-node.sh: no silent 0.0.0.0/0 default.
+CF_IPS_FILE="${CF_IPS_FILE:-cloudflare-ips-v4.txt}"
+API_CLIENTS="${API_CLIENTS:?comma-separated CIDRs that may reach 6443 besides the VNet — at least the egress IP of the AKS api tier}"
+have network nsg rule show -g "$RG" --nsg-name k3s-nsg -n allow-http-cloudflare || \
+  az network nsg rule create -g "$RG" --nsg-name k3s-nsg -n allow-http-cloudflare --priority 230 \
+    --source-address-prefixes $(tr '\n' ' ' < "$CF_IPS_FILE") --destination-port-ranges 80 --protocol Tcp --access Allow -o none
+have network nsg rule show -g "$RG" --nsg-name k3s-nsg -n allow-apiserver-api-tier || \
+  az network nsg rule create -g "$RG" --nsg-name k3s-nsg -n allow-apiserver-api-tier --priority 240 \
+    --source-address-prefixes ${API_CLIENTS//,/ } --destination-port-ranges 6443 --protocol Tcp --access Allow -o none
+
 az network vnet subnet update -g "$RG" --vnet-name k3s-vnet -n nodes --network-security-group k3s-nsg -o none
 
 for spec in "$CP:$CP_SIZE:0" "$SESSION:$SESSION_SIZE:$POOL_DISK_GB" "$ENVN:$ENV_SIZE:$POOL_DISK_GB"; do

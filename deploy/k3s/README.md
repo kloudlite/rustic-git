@@ -443,13 +443,10 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
    `kubectl apply -f gateway.yaml`, then `kubectl -n kube-system delete deploy,svc,sa
    rustic-git-gateway`. SSH sessions drop once, between the agent roll and the new gateway
    coming up.
-5. The Azure NSG in front of the pool nodes (`k3s-nsg`, resource group `rustic-git-k3s`) needs the
-   same admission — it sits before nftables and drops 80 otherwise. One rule, TCP 80 from
-   Cloudflare's v4 ranges (the list in `cloudflare-ips-v4.txt`, spelled out as separate prefixes):
-   `az network nsg rule create -g rustic-git-k3s --nsg-name k3s-nsg -n gateway-cloudflare
-   --priority 120 --direction Inbound --access Allow --protocol Tcp --destination-port-ranges 80
-   --source-address-prefixes <cidr> <cidr> …`. Not created by `provision-azure.sh`; when the
-   list changes, `../cf-sync.sh` prints the matching `az network nsg rule update` — run it.
+5. The Azure NSG in front of the pool nodes needs the same admission — it sits before nftables and
+   drops 80 otherwise. Both the `allow-http-cloudflare` and `allow-apiserver-api-tier` NSG rules
+   are created by `provision-azure.sh`; the NSG and nftables are two layers of the same list, and
+   neither is edited by hand.
 6. `harden-node.sh` on each pool node so the node's 80 admits only Cloudflare's edge. The script
    is streamed over ssh (`sudo bash -s <`), so it has no file of its own on the remote box to read
    a CIDR list from — build `CF_CIDRS` locally and pass it as an env var on the remote command:
