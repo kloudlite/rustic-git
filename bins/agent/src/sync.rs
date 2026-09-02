@@ -10,8 +10,7 @@
 //! Keep-biased throughout: every per-object failure warns and moves on, and an unreadable
 //! generation cuts NOTHING rather than cutting a redundant snapshot on every pass.
 
-use crate::controller::{owner_ref_of_kind, Ctx};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use crate::controller::Ctx;
 use kube::api::{Api, ListParams, PostParams};
 use kube::ResourceExt;
 use rustic_git_workspaces::crd;
@@ -46,63 +45,18 @@ pub fn sync_name(worktree: &str) -> String {
     format!("sync-{worktree}-{}", crd::short_hex())
 }
 
-/// A worktree running on this node right now, with everything the create needs.
-struct Live {
-    volume: String,
-    worktree: String,
-    owner: String,
-    owner_ref: OwnerReference,
-}
-
 /// One pass, spawned beside `pull_beat`. Lists what runs here, then cuts at most one sync point per
 /// worktree.
 pub async fn sync_beat(ctx: &Arc<Ctx>) {
-    for live in live_worktrees(ctx).await {
-        sync_one(ctx, &live).await;
+    // Keep-biased like every other beat: a half-listed cluster cuts nothing. A missed sync point
+    // costs one `WS_SYNC_SECS` of freshness on a replica; acting on a partial view costs more.
+    let Some(parents) = crate::listing::parents_on_node(ctx).await else { return };
+    for p in parents.iter().filter(|p| p.is_live_worktree()) {
+        sync_one(ctx, p).await;
     }
 }
 
-/// Workspaces and Environments whose pod runs on THIS node — the same `status.nodeName == me` plus
-/// `status.volume_ref` rule `peer::interesting_volumes` uses, minus its replication half: a standby
-/// has no worktree to read a generation from. A workspace also needs a pod (`pod_ref`): without one
-/// nothing is writing, so its last sync point is already current.
-async fn live_worktrees(ctx: &Arc<Ctx>) -> Vec<Live> {
-    let mut out = Vec::new();
-    // Server-side scoping, the same selector the parent watches use: this beat has no business
-    // pulling every workspace in the cluster over the wire once a minute. The `node_name` check
-    // below stays anyway — a field selector narrows a query, and is never the thing that decides
-    // whether this node may act on an object.
-    let mine = ListParams::default().fields(&format!("status.nodeName={}", ctx.node));
-    match Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await {
-        Ok(list) => {
-            for w in &list.items {
-                let Some(st) = w.status.as_ref() else { continue };
-                if st.node_name != ctx.node || st.phase == crd::Phase::Stopped || st.pod_ref.is_none() {
-                    continue;
-                }
-                let (Some(volume), Ok(owner_ref)) = (st.volume_ref.clone(), owner_ref_of_kind(w)) else { continue };
-                out.push(Live { volume, worktree: w.name_any(), owner: w.spec.owner.clone(), owner_ref });
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "sync: listing workspaces"),
-    }
-    match Api::<crd::Environment>::all(ctx.client.clone()).list(&mine).await {
-        Ok(list) => {
-            for e in &list.items {
-                let Some(st) = e.status.as_ref() else { continue };
-                if st.node_name != ctx.node || st.phase == crd::Phase::Stopped {
-                    continue;
-                }
-                let (Some(volume), Ok(owner_ref)) = (st.volume_ref.clone(), owner_ref_of_kind(e)) else { continue };
-                out.push(Live { volume, worktree: e.name_any(), owner: e.spec.owner.clone(), owner_ref });
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "sync: listing environments"),
-    }
-    out
-}
-
-async fn sync_one(ctx: &Arc<Ctx>, live: &Live) {
+async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let list = match api.list(&ListParams::default().fields(&format!("spec.volume={}", live.volume))).await {
         Ok(l) => l,
@@ -115,14 +69,14 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &Live) {
     let mut recorded: Option<u64> = None;
     let mut parent = String::new();
     for s in &list.items {
-        if !s.spec.transient || s.spec.worktree != live.worktree {
+        if !s.spec.transient || s.spec.worktree != live.name {
             continue;
         }
         match s.status.as_ref().map(|st| st.phase) {
             // One cut in flight at a time — the same rule `create_commit` applies, and the reason
             // this beat can run on a tick without piling snapshots onto a slow btrfs.
             Some(crd::Phase::Working) => {
-                tracing::debug!(worktree = %live.worktree, snapshot = %s.name_any(), "sync: a transient is Working, skipping this pass");
+                tracing::debug!(worktree = %live.name, snapshot = %s.name_any(), "sync: a transient is Working, skipping this pass");
                 return;
             }
             Some(crd::Phase::Ready) => {
@@ -136,17 +90,17 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &Live) {
         }
     }
 
-    let (engine, volume, worktree) = (ctx.engine.clone(), live.volume.clone(), live.worktree.clone());
+    let (engine, volume, worktree) = (ctx.engine.clone(), live.volume.clone(), live.name.clone());
     let gen = match tokio::task::spawn_blocking(move || engine.generation(&volume, &worktree)).await {
         Ok(Ok(g)) => g,
         // Keep-biased: an unreadable generation is "we do not know", and cutting on "we do not
         // know" would cut on every single pass. A node without btrfs never syncs at all.
         Ok(Err(e)) => {
-            tracing::warn!(worktree = %live.worktree, error = %e, "sync: reading the worktree generation");
+            tracing::warn!(worktree = %live.name, error = %e, "sync: reading the worktree generation");
             return;
         }
         Err(e) => {
-            tracing::warn!(worktree = %live.worktree, error = %e, "sync: generation task panicked");
+            tracing::warn!(worktree = %live.name, error = %e, "sync: generation task panicked");
             return;
         }
     };
@@ -154,13 +108,13 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &Live) {
         return;
     }
 
-    let name = sync_name(&live.worktree);
+    let name = sync_name(&live.name);
     let mut snap = crd::Snapshot::new(
         &name,
         crd::SnapshotSpec {
             volume: live.volume.clone(),
             owner: live.owner.clone(),
-            worktree: live.worktree.clone(),
+            worktree: live.name.clone(),
             // The previous sync point, so the puller can send a delta against what a replica
             // already holds. Empty on the first one, exactly as a root commit is.
             parent,
@@ -176,16 +130,51 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &Live) {
     snap.metadata.labels = Some(crd::commit_labels(&live.owner, &live.volume));
     snap.metadata.annotations.get_or_insert_with(Default::default).insert(SYNCED_GENERATION.to_string(), gen.to_string());
     match api.create(&PostParams::default(), &snap).await {
-        Ok(_) => tracing::info!(%name, worktree = %live.worktree, generation = gen, "sync: cut a sync point"),
+        Ok(_) => tracing::info!(%name, worktree = %live.name, generation = gen, "sync: cut a sync point"),
         // Lost a race with our own previous pass; the CR is there either way.
         Err(kube::Error::Api(s)) if s.code == 409 => {}
-        Err(e) => tracing::warn!(worktree = %live.worktree, error = %e, "sync: creating the sync point"),
+        Err(e) => tracing::warn!(worktree = %live.name, error = %e, "sync: creating the sync point"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
+    use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
+
+    struct NoopNix;
+    #[async_trait::async_trait]
+    impl crate::nix::Nix for NoopNix {
+        async fn build(&self, _e: &str, _t: std::time::Duration) -> Result<std::path::PathBuf, String> {
+            Ok(std::path::PathBuf::from("/tmp"))
+        }
+        async fn ping(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn collect_garbage(&self) -> Result<u64, String> {
+            Ok(0)
+        }
+    }
+
+    fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+        let (client, rec) = mock_client(routes);
+        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
+        (
+            Arc::new(Ctx::new(
+                client,
+                Arc::new(Engine::new(EnginePool::new(pool))),
+                node.into(),
+                pool.to_string_lossy().into(),
+                "r1".into(),
+                vec![],
+                Some("test:/".into()),
+                Arc::new(NoopNix),
+                pool.join("profiles"),
+            )),
+            rec,
+        )
+    }
 
     #[test]
     fn due_only_when_the_generation_moved() {
@@ -193,5 +182,21 @@ mod tests {
         assert!(due(6, Some(5)));
         assert!(!due(5, Some(5)));
         assert!(!due(4, Some(5)));
+    }
+
+    /// The sync beat reads this node's parents through the shared listing — and a listing that
+    /// could not be completed cuts nothing, rather than treating an empty view as "no worktrees".
+    #[tokio::test]
+    async fn a_failed_parent_listing_cuts_no_sync_points() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![Route {
+            method: "GET",
+            path: "/apis/rustic-git.io/v1alpha1/workspaces".into(),
+            status: 500,
+            body: serde_json::json!({}),
+        }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        sync_beat(&ctx).await;
+        assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "{:?}", rec.calls());
     }
 }
