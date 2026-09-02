@@ -97,8 +97,12 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     // exactly the write-amplifying scan the sync-before-snapshot comment in `commit.rs` warns
     // about paying for on the hot path. Add it as a background sweep (or read the qgroup, which
     // this pool already maintains for quota) if the UI ever needs it.
+    let api = Api::<crd::Snapshot>::all(ctx.client.clone());
+    if s.spec.transient {
+        record_post_cut_generation(&ctx, &api, &name, &s.spec.volume, &s.spec.worktree).await;
+    }
     patch_status(
-        &Api::<crd::Snapshot>::all(ctx.client.clone()),
+        &api,
         &name,
         "Snapshot",
         serde_json::json!({"phase": crd::Phase::Ready, "readyAt": chrono::Utc::now().to_rfc3339()}),
@@ -113,6 +117,34 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     retain(&ctx, &s.spec.volume, &name).await;
 
     Ok(Action::await_change())
+}
+
+/// Re-stamp a sync point's `SYNCED_GENERATION` with the generation the worktree has AFTER the cut.
+///
+/// Taking a read-only snapshot of a subvolume bumps that subvolume's own generation by one, so the
+/// value the beat stamped before cutting is always one behind reality — and `due` then finds every
+/// idle worktree due, forever. Re-reading here is the only place the post-cut value exists.
+///
+/// Keep-biased: a failed re-read leaves the pre-cut value, which costs one redundant cut next tick
+/// and nothing else. A metadata merge patch — annotations are not spec, so the agent's
+/// spec-is-read-only admission policy has nothing to say about it.
+async fn record_post_cut_generation(ctx: &Arc<Ctx>, api: &Api<crd::Snapshot>, name: &str, volume: &str, worktree: &str) {
+    let (engine, vol, wt) = (ctx.engine.clone(), volume.to_string(), worktree.to_string());
+    let gen = match tokio::task::spawn_blocking(move || engine.generation(&vol, &wt)).await {
+        Ok(Ok(g)) => g,
+        Ok(Err(e)) => {
+            tracing::warn!(snapshot = %name, error = %e.0, "commit: re-reading the post-cut generation");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(snapshot = %name, error = %e, "commit: post-cut generation task panicked");
+            return;
+        }
+    };
+    let body = serde_json::json!({"metadata": {"annotations": {crate::sync::SYNCED_GENERATION: gen.to_string()}}});
+    if let Err(e) = api.patch(name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&body)).await {
+        tracing::warn!(snapshot = %name, error = %e, "commit: recording the post-cut generation");
+    }
 }
 
 /// The newest sync point of `(volume, worktree)`: the `Ready` transient carrying the highest
@@ -696,6 +728,41 @@ mod commit_tests {
 
         assert_eq!(rec.sent("PATCH", SNAP_STATUS).len(), 1, "the cut still goes Ready");
         assert!(rec.sent("PATCH", WS_STATUS).is_empty(), "no head write for a transient: {:?}", rec.calls());
+    }
+
+    /// Keep-biased post-cut re-stamp: the test engine is a tmpdir with no btrfs, so `generation`
+    /// errors, and the annotation patch must simply not happen — the pre-cut value the beat wrote
+    /// survives, costing one redundant cut and nothing else. The SUCCESS path (a PATCH carrying
+    /// `synced-generation`) needs a real `btrfs subvolume show`: `Engine` is concrete here, with no
+    /// seam to inject a generation reader, so it is covered by `tests/ws_e2e.sh` and the live
+    /// cluster check, not here — faking a reader would only assert that the fake was called.
+    #[tokio::test]
+    async fn an_unreadable_post_cut_generation_leaves_the_annotation_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-a")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/live/ws-1")).unwrap();
+        let ready = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-a", "vol-1", None) },
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: ready.clone() },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![ready]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Working);
+
+        reconcile_commit(s, ctx).await.unwrap();
+
+        assert_eq!(rec.sent("PATCH", SNAP_STATUS).len(), 1, "the cut still goes Ready");
+        assert!(
+            rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/snapshots/vol-1-a").is_empty(),
+            "no annotation write when the generation cannot be read: {:?}",
+            rec.calls()
+        );
     }
 
     /// One sync point per worktree: cutting a new `Ready` transient deletes the previous `Ready`

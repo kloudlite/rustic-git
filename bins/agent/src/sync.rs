@@ -20,6 +20,11 @@ use std::sync::Arc;
 /// The generation the sync point was cut FROM, on the `Snapshot` itself. An annotation rather than
 /// a spec field because it is this beat's private bookkeeping — nothing else in the commit model
 /// has any use for a btrfs transaction id.
+///
+/// The value is the generation read AFTER the cut (`snapshot::record_post_cut_generation`
+/// re-stamps it), not the one this beat writes here: taking a read-only snapshot bumps its SOURCE
+/// subvolume's generation by one, so recording the pre-cut value leaves every idle worktree
+/// permanently "due" and cutting once per interval forever.
 pub const SYNCED_GENERATION: &str = "rustic-git.io/synced-generation";
 
 /// `WS_SYNC_SECS`, default 60. Lives beside the beat, as `peer::replica_interval` does.
