@@ -157,7 +157,7 @@ pub(crate) struct RestoreEnvBody {
 /// New environment grafted onto an explicit past snapshot — `restore_ws`'s twin, resolving the
 /// snapshot the same way (server-tier history, caller/team scoping) and differing only in which
 /// kind of object it writes. The agent needs no new path: `resolve_volume` already materializes a
-/// `restoreOf` source for an Environment.
+/// `cloneOf { commit }` source for an Environment.
 ///
 /// The services default to what the snapshot froze beside the bytes (`SnapshotState`), because an
 /// environment's data without its services is not the environment. A non-empty body list overrides

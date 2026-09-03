@@ -18,7 +18,7 @@ use std::time::Duration;
 /// Today every failure is `Action::requeue(RETRY)`, which makes a spec that can never work look
 /// exactly like a registry that is briefly down — the same line in the log, forever, at one a
 /// minute. The new `storage.source` inputs make that untenable: a `cloneOf` naming a workspace that
-/// does not exist, a `restoreOf` whose snapshot no `done` request carries, a Volume pinned to
+/// does not exist, a `cloneOf` whose snapshot no `Ready` `Snapshot` carries, a Volume pinned to
 /// another node — none of these get better by being retried.
 pub enum Outcome {
     /// Nothing will change this without a new spec. Write the condition, stop.

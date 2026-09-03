@@ -535,7 +535,7 @@ pub(crate) fn volume_is_ready(v: &crd::Volume) -> bool {
 ///
 /// These never get better by being retried: a live `cloneOf` naming a workspace that does not
 /// exist, a restore naming a `Volume` that does not exist, a
-/// `restoreOf` whose snapshot id no `Ready` `Snapshot` carries. Without this branch each of
+/// `cloneOf { commit }` whose snapshot id no `Ready` `Snapshot` carries. Without this branch each of
 /// them requeues at `RETRY` forever, and the log line is indistinguishable from a registry outage.
 async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(), Outcome> {
     match source {
