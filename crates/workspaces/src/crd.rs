@@ -876,7 +876,7 @@ fn pair_tail(a: &str, b: &str) -> String {
 
 fn hex_prefix(raw: &str, bytes: usize) -> String {
     use sha2::Digest;
-    sha2::Sha256::digest(raw.as_bytes()).iter().take(bytes).map(|b| format!("{b:02x}")).collect()
+    hex::encode(&sha2::Sha256::digest(raw.as_bytes())[..bytes])
 }
 
 /// The namespace ALL of an owner's workspace pods live in — one per user, not one per workspace.
@@ -1049,6 +1049,13 @@ pub fn newest_transient_of(snaps: &[Snapshot], worktree: &str) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `hex` is already a workspace dependency; a hand-rolled `format!("{b:02x}")` fold is the same
+    /// bytes with more places to get it wrong. The tail must not move — it is in stored object names.
+    #[test]
+    fn the_namespace_tail_is_unchanged_by_the_hex_swap() {
+        assert_eq!(ws_namespace("bob", "acme"), "wt-bob-2e737765961a");
+    }
 
     /// The backoff on a repeatedly failing build reads `lastTransitionTime` to know how long it
     /// has been failing — so an identical condition written again must keep the earlier stamp,

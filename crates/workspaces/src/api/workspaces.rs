@@ -4,7 +4,7 @@
 use super::scope::{find_env, may_act_on, mine, my_ws, owned_by, owned_in, owners_namespaces, refuse_over_cap, refuse_taken_name};
 use super::{caller, check_region, is_missing, kube, kube_err, not_found, not_ready, phase, rid, ApiState};
 use super::push::{clone_base, with_based_on};
-use super::volumes::{find_commit_model_snapshot_for_restore, volume_region};
+use super::volumes::{find_snapshot, volume_region};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::{labels, ATTACHED_ENV_LABEL, TEAM_LABEL};
 use crate::model::*;
@@ -64,9 +64,6 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
             .filter(|v| pushed.contains(*v))
             .map(|_| format!("vol/{}/{id}", w.spec.owner)),
         quota_gb: w.spec.storage.as_ref().map(|s| s.quota_gb).unwrap_or(0),
-        // Free-form live state was a job-era field the agent wrote back into the doc; the pod and
-        // its status are the live state now. Kept in the body so the web app's parse is unchanged.
-        live_state: serde_json::Value::Null,
         packages: w.spec.packages.clone(),
         base_packages: st.and_then(|s| s.packages.as_ref()).map(|p| p.base.clone()).unwrap_or_default(),
         // Filled in only once the pod has reported a host key: the web's ssh snippet is the same
@@ -764,7 +761,7 @@ pub(crate) struct RestoreBody {
     name: String,
     // The `snapshot_id` alone is a Snapshot CR name (Task 8) — the old registry-scoped `volume`
     // hint that used to turn a multi-volume scan into one read no longer means anything, since
-    // `find_commit_model_snapshot_for_restore` looks the CR up by name directly.
+    // `find_snapshot` looks the CR up by name directly.
     snapshot_id: String,
     // All optional and all overrides: absent means "whatever the snapshot froze", not "the
     // default" — restoring last month's files with today's image is not last month's workspace.
@@ -800,10 +797,10 @@ pub(crate) async fn restore_ws(
     // registry to fetch from any more, so this resolves the request's `snapshot_id` — a `Snapshot`
     // CR name — straight against the CRD, and the new workspace's source becomes
     // `CloneOf{volume, commit: Some(id)}`, exactly `Engine::clone_local_ids`/`checkout`'s own
-    // shared-worktree path (Task 6b). `find_commit_model_snapshot_for_restore` is the owner check:
+    // shared-worktree path (Task 6b). `find_snapshot` is the owner check:
     // CR exists, Ready, and the caller may read `spec.owner` — anything else is a 404, same as a
     // missing snapshot, so a caller learns nothing about volumes that are not theirs.
-    let snap = find_commit_model_snapshot_for_restore(&s, &owner, &body.snapshot_id).await?;
+    let snap = find_snapshot(&s, &owner, None, &body.snapshot_id).await?;
     let volume = snap.spec.volume.clone();
 
     // A `state` from the other kind is a request to refuse, not to half-honour: restoring an

@@ -5767,6 +5767,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "hex",
  "http",
  "http-body-util",
  "k8s-openapi",

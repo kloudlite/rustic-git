@@ -215,6 +215,27 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
     assert_eq!(w["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
 }
 
+/// `live_state` was always `null` and existed only because a web type named it. The web type goes
+/// in the web plan; the field goes here, so the two cannot outlive the reason together.
+#[tokio::test]
+async fn a_workspace_doc_has_no_live_state_field() {
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+    ])
+    .await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body.get("live_state").is_none(), "{body}");
+}
+
 /// A `for` loop over POST /v1/workspaces used to reserve the cluster's whole schedulable memory
 /// and fill the btrfs pool from one ordinary account. The cap is counted over workspaces AND
 /// environments together — they cost the same node and the same pool.

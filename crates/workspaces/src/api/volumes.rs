@@ -446,15 +446,19 @@ async fn snapshots_on_volume(s: &ApiState, name: &str) -> Result<Vec<crd::Snapsh
         .items)
 }
 
-/// A single `Ready` commit-model snapshot of `volume`, scoped by `caller_owners` exactly like
-/// `commit_model_snapshots`. Used by restore: a 404 here is "unknown", "not yours", "not this
-/// volume's", or "not cut yet" alike — the caller only needs to know it cannot restore onto it,
-/// never which of those it was, the same way `find_snapshot`'s registry twin already collapses
-/// "no such snapshot" and "not yours" into one 404.
-pub(crate) async fn find_commit_model_snapshot(
+/// A single `Ready` commit-model snapshot, scoped by `caller_owners` exactly like
+/// `commit_model_snapshots`. A 404 here is "unknown", "not yours", "not this volume's" (when
+/// `volume` is given), or "not cut yet" alike — the caller only needs to know it cannot restore
+/// onto it, never which of those it was — "no such snapshot" and "not yours" collapse into one
+/// 404, same as everywhere else in this API.
+///
+/// `Some(volume)` is restore-in-place, which already knows the volume and must stay on it;
+/// `None` is restore-to-new (`restore_ws`/`restore_env`), where the snapshot id is all the client
+/// has and `spec.volume` is exactly what this resolves.
+pub(crate) async fn find_snapshot(
     s: &ApiState,
     caller_id: &str,
-    volume: &str,
+    volume: Option<&str>,
     snapshot_id: &str,
 ) -> Result<crd::Snapshot, Response> {
     check_path_segment(snapshot_id)?;
@@ -462,22 +466,7 @@ pub(crate) async fn find_commit_model_snapshot(
     let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
     let snap = api.get_opt(snapshot_id).await.map_err(kube_err)?.ok_or_else(not_found)?;
     let ready = snap.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
-    if snap.spec.volume != volume || !owners.contains(&snap.spec.owner) || !ready {
-        return Err(not_found());
-    }
-    Ok(snap)
-}
-
-/// Same ownership/readiness check as `find_commit_model_snapshot`, for a caller that does not yet
-/// know the volume — restore-to-new (`restore_ws`/`restore_env`), where the snapshot id is all the
-/// client has and `spec.volume` is exactly what this resolves.
-pub(crate) async fn find_commit_model_snapshot_for_restore(s: &ApiState, caller_id: &str, snapshot_id: &str) -> Result<crd::Snapshot, Response> {
-    check_path_segment(snapshot_id)?;
-    let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
-    let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
-    let snap = api.get_opt(snapshot_id).await.map_err(kube_err)?.ok_or_else(not_found)?;
-    let ready = snap.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
-    if !owners.contains(&snap.spec.owner) || !ready {
+    if volume.is_some_and(|v| snap.spec.volume != v) || !owners.contains(&snap.spec.owner) || !ready {
         return Err(not_found());
     }
     Ok(snap)

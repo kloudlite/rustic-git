@@ -224,23 +224,11 @@ async fn create_snapshot(
     // reaches, and `worktree_heads`/retention only walks the WINNER's chain, so the loser is never
     // revisited: an unbounded CR+disk leak, with a `parent` that misdescribes what it holds. A
     // worktree may have at most one `Working` cut in flight at a time — refuse the second here,
-    // before it exists, rather than reconcile two winners later.
+    // before it exists, rather than reconcile two winners later. Same guard `clone_base` uses
+    // (`refuse_cut_in_flight`), whose own `// ponytail:` names the TOCTOU sliver this still has.
     let api: Api<crd::Snapshot> = Api::all(c.clone());
-    let racing = api
-        .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
-        .await
-        .map_err(kube_err)?
-        .items
-        .into_iter()
-        .any(|sn| sn.spec.worktree == worktree && sn.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Working));
-    // ponytail: list-then-create leaves a TOCTOU sliver — two pushes landing between each
-    // other's list and create both slip through and fork the chain. The 409 closes the common
-    // case (a user double-clicking, a retrying client); the sliver's cost is one orphan commit,
-    // and the upgrade path is a deterministic Working-CR name per worktree so the second create
-    // itself collides.
-    if racing {
-        return Err((StatusCode::CONFLICT, "a snapshot is already being cut for this workspace").into_response());
-    }
+    let all = api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await.map_err(kube_err)?.items;
+    refuse_cut_in_flight(&all, worktree)?;
     let name = crd::snapshot_name(volume);
     let mut snap = crd::Snapshot::new(
         &name,

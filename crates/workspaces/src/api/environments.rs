@@ -2,7 +2,7 @@
 //! restore-in-place.
 
 use super::scope::{find_env, may_act_on, mine, owned_by, refuse_over_cap, resolve_new_owner, teams_for};
-use super::volumes::{find_commit_model_snapshot, find_commit_model_snapshot_for_restore, volume_region};
+use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
     set_desired, storage_quota, CloneBody,
@@ -183,9 +183,9 @@ pub(crate) async fn restore_env(
         check_region(&s, r).await?;
     }
     // Restore-to-new is a clone at a named commit under the commit model (Task 8) — see
-    // `restore_ws`'s matching comment. `find_commit_model_snapshot_for_restore` is the ownership
+    // `restore_ws`'s matching comment. `find_snapshot` is the ownership
     // check: CR exists, Ready, and the caller may read `spec.owner`.
-    let snap = find_commit_model_snapshot_for_restore(&s, &caller_id, &body.snapshot_id).await?;
+    let snap = find_snapshot(&s, &caller_id, None, &body.snapshot_id).await?;
     let (volume, src_owner) = (snap.spec.volume.clone(), snap.spec.owner.clone());
     // Twin of restore_ws's guard: a workspace's frozen state under an environment restore would
     // mount nothing and silently ignore the image/packages it froze. `None` stays "absent means
@@ -491,7 +491,7 @@ pub(crate) async fn restore_env_in_place(
     // The wish names a `Snapshot` CR of this environment's OWN volume — validated Ready and
     // same-volume BEFORE the wish is written, so a bad id is a fast 4xx here rather than a silent
     // hang in `restore_gate` (which reads the wish uncritically, per its own doc comment).
-    let snap = find_commit_model_snapshot(&s, &caller_id, &volume, &body.snapshot_id).await?;
+    let snap = find_snapshot(&s, &caller_id, Some(&volume), &body.snapshot_id).await?;
     let (src_owner, volume) = (snap.spec.owner, snap.spec.volume);
     let wish = crd::RestoreWish {
         snapshot_id: body.snapshot_id,

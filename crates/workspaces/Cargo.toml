@@ -26,6 +26,7 @@ futures = { workspace = true }
 object_store = { workspace = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
 libc = { workspace = true }
 reqwest = { workspace = true }
 # Only `kube_test` needs these — it is compiled into the library (not behind `#[cfg(test)]`)
