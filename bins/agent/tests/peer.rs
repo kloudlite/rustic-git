@@ -304,7 +304,7 @@ async fn serve_one_body(body: &'static [u8]) -> OneShotServer {
 
 /// The receive half against a fake `btrfs receive`: a truncated body must delete the partial and
 /// return an error, so the puller tries the next source rather than keeping a half-received
-/// subvolume that `local_commits` would then advertise. The real `btrfs receive` is only ever
+/// subvolume that `local_snapshots` would then advertise. The real `btrfs receive` is only ever
 /// exercised by `tests/ws_e2e.sh`; this covers the code AROUND it, which is where the bugs were.
 #[tokio::test]
 async fn a_truncated_receive_deletes_the_partial_and_fails() {

@@ -1,5 +1,5 @@
 //! The snapshot model: a volume's history is local btrfs subvolumes under `snap/`, one per
-//! `Snapshot` CR, replicated peer-to-peer (`bins/agent/src/peer.rs`) — never an object store,
+//! `Snapshot` CR, replicated peer-to-peer (`bins/agent/src/peer/`) — never an object store,
 //! never uploaded anywhere. `snapshot.rs` holds the snapshot/checkout primitives; `ops.rs` holds
 //! what predates and still serves both the snapshot model and the old single-subvolume layout
 //! (subvolume creation, quota) plus the one clone path environments still use.

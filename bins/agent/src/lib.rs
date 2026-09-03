@@ -5,7 +5,7 @@
 //!
 //! # Tests that do not run in CI
 //!
-//! CI has no loopback btrfs and no root. `janitor::cleanup_local_deletes_nested_commit_model_subvolumes`
+//! CI has no loopback btrfs and no root. `janitor::cleanup_local_deletes_nested_worktree_subvolumes`
 //! is the only test gated explicitly on `have_btrfs()` and the only one exercising `cleanup_local`
 //! against real subvolumes; every other test of that path proves `btrfs_delete`'s test-only
 //! `remove_dir_all` fallback instead. Several more pass on a Mac only because the code

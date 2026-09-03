@@ -586,7 +586,7 @@ starts on its own node.
 
 ### Node death
 
-A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` (code default 600; the DaemonSet sets 180, enough for a reboot to finish without healing around it) —
+A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` (default 180, enough for a reboot to finish without healing around it; the DaemonSet no longer overrides it) —
 that floor, not a shorter probe, is what keeps a brief kubelet hiccup from tearing anything down.
 `WS_MAX_PER_OWNER` (code default 20, set on the `rustic-git-api` container) is the unrelated runaway-loop
 knob: `/v1` refuses a create, clone, or restore with 429 once one owner's live Workspaces plus Environments

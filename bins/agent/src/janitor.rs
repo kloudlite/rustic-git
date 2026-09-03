@@ -528,7 +528,7 @@ mod janitor_tests {
     #[test]
     fn cleanup_local_deletes_nested_worktree_subvolumes() {
         if !have_btrfs() {
-            eprintln!("SKIPPED (needs loopback btrfs + root): cleanup_local_deletes_nested_commit_model_subvolumes");
+            eprintln!("SKIPPED (needs loopback btrfs + root): cleanup_local_deletes_nested_worktree_subvolumes");
             return;
         }
         let lp = LoopbackPool::new();

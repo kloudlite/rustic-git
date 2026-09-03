@@ -202,10 +202,10 @@ spec:
             # Bind address for the peer listener (btrfs send over HTTP, agent-to-agent). Port
             # 8444 is a plain hostPath-style pod IP; discovery is by pod IP from the API (agent-peer
             # .yaml), so no ClusterIP Service exists for it. Fail-closed even if this changes: the
-            # listener only starts when WS_PEER_SECRET (below) is non-empty — see peer.rs.
+            # listener only starts when WS_PEER_SECRET (below) is non-empty — see peer/mod.rs.
             - name: WS_PEER_ADDR
               value: 0.0.0.0:8444
-            # WS_NODE_DEAD_SECS (peer.rs) defaults to 180 s — how long another node must be
+            # WS_NODE_DEAD_SECS (peer/placement.rs) defaults to 180 s — how long another node must be
             # observed NotReady before this one reaps its VolumeReplica rows and takes over.
             # No override here: the code default is the value the cluster runs.
             # How often a node labelled `rustic-git.io/decommission=true` runs the drain beat
@@ -216,7 +216,7 @@ spec:
             - name: WS_DECOMMISSION_SECS
               value: "30"
             # Ceiling on one btrfs send to a peer; the escape hatch for a stream that hangs rather
-            # than fails, so the beat moves on to the next source (peer.rs).
+            # than fails, so the beat moves on to the next source (peer/pull.rs).
             - name: WS_PEER_SEND_TIMEOUT_SECS
               value: "3600"
             # The SOURCE-side bound on one streamed `btrfs send`. Shorter than the puller's
@@ -231,7 +231,7 @@ spec:
             #
             # WS_PEER_SECRET lives here too, not as a plain env value: it authenticates the peer
             # listener (btrfs send) AND gates the puller — unset, `lib.rs` never spawns the
-            # listener and `peer.rs`'s beat sends nothing, so replication is fail-closed by the
+            # listener and `peer/pull.rs`'s beat sends nothing, so replication is fail-closed by the
             # same key that would otherwise let any pod on the cluster (peer 8444 is reachable from
             # every namespace absent the NetworkPolicy in agent-peer.yaml) drive a btrfs send.
             #

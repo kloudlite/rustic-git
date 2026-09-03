@@ -176,7 +176,7 @@ points, and detach the Volume — remove the parent's owner entry — only if a 
 the volume survives detached with its snapshots; with none left the entry stays and Kubernetes GC
 takes the Volume and its records — the bytes go on the agent's next beat, when the orphan-voldir
 sweep finds a tree with no Volume behind it. A lost detach is an error, never a completed
-finalizer. `retire_pass` in `bins/agent/src/peer.rs` is the safety net at both ends: it deletes
+finalizer. `retire_pass` in `bins/agent/src/peer/sweeps.rs` is the safety net at both ends: it deletes
 `snap/` subvolumes whose record is gone (re-read before every delete, keep on any error) and
 deletes a Volume that has no owner entry and no snapshot. Containers live in
 a namespace per owner or environment (`crd::ws_namespace` → `ws-{owner}` / `wt-{owner}-…` for a
@@ -206,7 +206,7 @@ writer, via `/v1/regions` (server-side apply, so a second POST of the same id re
 rather than 409ing). Snapshot BYTES have
 no object store at all: a snapshot is a read-only btrfs subvolume under `{pool}/vol/{volume}/snap/`,
 and it reaches other nodes as a `btrfs send` streamed over the peer listener between agents
-(`bins/agent/src/peer.rs`) — never uploaded anywhere. Durability is therefore replica count
+(`bins/agent/src/peer/pull.rs`) — never uploaded anywhere. Durability is therefore replica count
 (`Volume.spec.replicas`, placed by `replicate::targets`), not a blob container.
 
 Four verbs — push, restore, clone, delete — and no separate commit step. `push` is the single
