@@ -289,7 +289,10 @@ fn preserve_unknown_state(_generator: &mut schemars::SchemaGenerator) -> schemar
 /// that doesn't parse as `SnapshotState` — hand-edited, or written by some future variant this
 /// build doesn't know — must not fail the whole `Snapshot` read. Every reader already treats
 /// `None` as "no frozen state, fall back to defaults", which is exactly right for "couldn't read
-/// it" too.
+/// it" too. The trap this sets for tests: a PARTIAL value (`resources: {}` with `PodResources`'
+/// required fields missing) also becomes `None`, silently — a fixture that meant "a workspace
+/// state" reads as "no state", and a test asserting on the kind passes or fails for the wrong
+/// reason. Build fixtures with every field.
 fn lenient_state<'de, D>(deserializer: D) -> Result<Option<SnapshotState>, D::Error>
 where
     D: serde::Deserializer<'de>,
