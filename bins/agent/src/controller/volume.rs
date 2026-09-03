@@ -3,9 +3,9 @@
 //! — a workspace and an environment both own exactly one volume with identical semantics.
 //! Split out of `controller.rs` unchanged.
 
-use super::{my_node, 
-    conditions_eq, kept_conditions, replace_status, running_contains, settle, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr,
-    Work, RETRY, TICK,
+use super::{
+    conditions_eq, kept_conditions, my_node, replace_status, running_contains, settle, wake_on_finish, write_status, Ctx, Done,
+    Outcome, ReconcileErr, Work, RETRY, TICK,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use rustic_git_workspaces::k8s;

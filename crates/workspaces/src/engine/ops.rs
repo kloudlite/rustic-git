@@ -281,11 +281,17 @@ impl Engine {
     /// replica names it, so a missing one means the claim and the disk disagree — permanent (see
     /// `permanent_reason`), never a retry against a path that will not appear.
     pub async fn seed_from_snapshot(&self, src_volume: &str, snapshot: &str, dst_id: &str) -> Result<(), EngErr> {
+        // Lock BEFORE the existence check, as `clone_local_ids` does: retention deleting the cut
+        // between a passing check and the snapshot turns a clean `NO_SUCH_RECORD` into an opaque
+        // btrfs failure the reconciler reads as transient and retries forever. `ws_lock`'s file
+        // lives under the source's voldir, so that has to exist before we can lock — same opening
+        // line `checkout` has, and it creates nothing for the destination.
+        std::fs::create_dir_all(self.pool.voldir(src_volume)).map_err(EngErr::io)?;
+        let _lock = ws_lock(&self.pool, src_volume).map_err(EngErr::other)?;
         let src = self.pool.snap(src_volume, snapshot);
         if !src.exists() {
             return Err(EngErr::other(NO_SUCH_RECORD));
         }
-        let _lock = ws_lock(&self.pool, src_volume).map_err(EngErr::other)?;
         std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
         // Converge on a replayed reconcile, exactly as `clone_local_ids` does.
         if !self.pool.live(dst_id).exists() {
