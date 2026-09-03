@@ -173,6 +173,15 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as rustic_git_api::KeysChanged
     });
-    rustic_git_api::serve(store, cache, directory, jwt, upstream, secret, l, workspaces, on_keys_changed)
+    // Same binary, same image, one env choosing which surface it exposes. The admin role mounts
+    // ONLY `/admin` — no `/v1` route is compiled into that router at all, so a `/v1` authorization
+    // bug literally cannot reach an admin handler on that process; the user role mounts ONLY
+    // `/v1` and never sees an admin route (design doc §5).
+    let role = std::env::var("RUSTIC_GIT_API_ROLE").unwrap_or_else(|_| "user".into());
+    let workspaces_router = workspaces.map(|ws| match role.as_str() {
+        "admin" => rustic_git_workspaces::api::admin::router(ws),
+        _ => rustic_git_workspaces::api::router(ws),
+    });
+    rustic_git_api::serve(store, cache, directory, jwt, upstream, secret, l, workspaces_router, on_keys_changed)
         .await
 }

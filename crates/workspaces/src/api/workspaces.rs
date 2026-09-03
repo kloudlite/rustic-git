@@ -342,12 +342,11 @@ pub(crate) async fn list_ws(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
-    let c = kube(&s)?;
-    // `?team=` scopes the list to the caller's workspaces IN that team; absent means personal.
-    // Membership is checked so the answer for a team the caller is not in is 404, not an empty
-    // list that says the team exists.
+    // `?team=` scopes the list to the caller's workspaces IN that team; absent means personal —
+    // `list_for_owner` is exactly that default case, shared with `/admin`, whose ?owner= names an
+    // exact owner and never a team-narrowed view of one.
     let team = match q.get("team").map(|t| t.trim()).filter(|t| !t.is_empty() && *t != owner.name) {
-        None => String::new(),
+        None => return list_for_owner(&s, &headers, &owner.name).await,
         // Same casing fix as `create_ws`: lowercase before the membership check, not after.
         Some(t) => {
             let t = t.to_lowercase();
@@ -358,6 +357,7 @@ pub(crate) async fn list_ws(
             }
         }
     };
+    let c = kube(&s)?;
     // No "filter out the deleted ones": a deleted object is gone from the API server.
     let api: Api<crd::Workspace> = Api::all(c.clone());
     let items = mine(api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.name));
@@ -371,6 +371,34 @@ pub(crate) async fn list_ws(
             Api::namespaced(c.clone(), &crd::ws_namespace(&owner, &team));
         if matches!(secrets.get_opt(crate::k8s::USER_KEY_SECRET).await, Ok(None)) {
             write_user_key(&s, c, &crd::ws_namespace(&owner, &team), &owner).await;
+        }
+    }
+    Ok(Json(list).into_response())
+}
+
+/// The shared body of `list_ws`'s no-`?team=` (personal) branch and `/admin/workspaces`'s
+/// `?owner=`: an exact owner, authorized with `may_act_on` — the caller's own always passes, a
+/// team member passes for a team-owned filter (workspaces have none today, but the check costs
+/// nothing to keep uniform), and a superadmin passes for anyone, logged there.
+pub(crate) async fn list_for_owner(
+    s: &ApiState,
+    headers: &axum::http::HeaderMap,
+    owner: &str,
+) -> Result<Response, Response> {
+    let caller_id = caller(s, headers).await?;
+    if !may_act_on(s, &caller_id, owner).await {
+        return Err(not_found());
+    }
+    let c = kube(s)?;
+    let api: Api<crd::Workspace> = Api::all(c.clone());
+    let items = mine(api.list(&owned_in(owner, "")).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
+    let pushed = pushed_volumes(s, c, owner).await?;
+    let list: Vec<_> = items.iter().map(|w| ws_doc(w, &pushed)).collect();
+    if !items.is_empty() && s.keys.is_some() {
+        let secrets: Api<k8s_openapi::api::core::v1::Secret> =
+            Api::namespaced(c.clone(), &crd::ws_namespace(owner, ""));
+        if matches!(secrets.get_opt(crate::k8s::USER_KEY_SECRET).await, Ok(None)) {
+            write_user_key(s, c, &crd::ws_namespace(owner, ""), owner).await;
         }
     }
     Ok(Json(list).into_response())
@@ -468,9 +496,20 @@ pub(crate) async fn delete_ws(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
-    let w = my_ws(&s, &owner, &id).await?;
-    let c = kube(&s)?;
+    delete_as(&s, &headers, &id).await
+}
+
+/// Shared by `/v1/workspaces/{id}` (caller as owner, via `my_ws`) and
+/// `/admin/workspaces/{id}` (any owner, `my_ws`'s superadmin arm) — one delete, one caller either
+/// way, `my_ws` is what decides whether this request may touch it at all.
+pub(crate) async fn delete_as(
+    s: &ApiState,
+    headers: &axum::http::HeaderMap,
+    id: &str,
+) -> Result<Response, Response> {
+    let owner = caller(s, headers).await?;
+    let w = my_ws(s, &owner, id).await?;
+    let c = kube(s)?;
     let ws: Api<crd::Workspace> = Api::all(c.clone());
     // Nothing stamps a finalizer on a Workspace, so its deletion is pure garbage collection and the
     // agent never observes it. The workspace-side policy goes with its ownerReference and the
@@ -482,12 +521,12 @@ pub(crate) async fn delete_ws(
     // A 404 here is the desired state already reached — another caller raced us to delete the
     // same Workspace — and must fall through to collect the policy below, not short-circuit and
     // orphan it (same idea as `delete_ignoring_404` in the agent).
-    if let Err(e) = ws.delete(&id, &DeleteParams::default()).await {
+    if let Err(e) = ws.delete(id, &DeleteParams::default()).await {
         if !is_missing(&e) {
             return Err(kube_err(e));
         }
     }
-    drop_attach_policy(c, &id, env.as_deref()).await;
+    drop_attach_policy(c, id, env.as_deref()).await;
     let mut doc = ws_doc(&w, &HashSet::new());
     doc.state = WsState::Deleted;
     Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
@@ -536,9 +575,18 @@ pub(crate) async fn stop_ws(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
-    let w = my_ws(&s, &owner, &id).await?;
-    set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Stopped).await?;
+    stop_as(&s, &headers, &id).await
+}
+
+/// Shared by `/v1/workspaces/{id}/stop` and `/admin/workspaces/{id}/stop` — see `delete_as`.
+pub(crate) async fn stop_as(
+    s: &ApiState,
+    headers: &axum::http::HeaderMap,
+    id: &str,
+) -> Result<Response, Response> {
+    let owner = caller(s, headers).await?;
+    let w = my_ws(s, &owner, id).await?;
+    set_desired::<crd::Workspace>(kube(s)?, id, DesiredState::Stopped).await?;
     // Every non-204 success is `res.json()`'d by the web client (web/apps/web/src/lib/api.ts) —
     // a body-less 202 throws there, so this always emits an object, `warning` present only when
     // there is one to give.
@@ -547,8 +595,9 @@ pub(crate) async fn stop_ws(
     let warning = w.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
     // The real pushed set, not `HashSet::new()`: an empty one made `volume` null on every mutation
     // response even for a volume with fifty pushes, and a client reading that as "never pushed" got
-    // a wrong answer from all seven of these handlers.
-    let pushed = pushed_volumes(&s, kube(&s)?, &owner).await?;
+    // a wrong answer from all seven of these handlers. The WORKSPACE's owner, not the caller — the
+    // two differ on `/admin`, and the caller's own pushed set would answer the wrong question.
+    let pushed = pushed_volumes(s, kube(s)?, &w.spec.owner).await?;
     let mut doc = ws_doc(&w, &pushed);
     doc.state = WsState::Stopped;
     let mut body = serde_json::to_value(&doc).expect("Workspace doc always serializes");

@@ -110,7 +110,10 @@ pub async fn serve(
     upstream: String,
     secret: String,
     listener: tokio::net::TcpListener,
-    workspaces: Option<Arc<rustic_git_workspaces::api::ApiState>>,
+    // Pre-built rather than an `ApiState`: which router (`api::router` vs `api::admin::router`)
+    // is `bins/api`'s call via `RUSTIC_GIT_API_ROLE`, made once at startup — this crate only
+    // merges whatever it is handed and never itself decides between a user and an admin surface.
+    workspaces: Option<axum::Router>,
     on_keys_changed: Option<KeysChanged>,
 ) -> Result<()> {
     // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
@@ -279,7 +282,7 @@ pub async fn serve(
     // this one's git-repo machinery. Only mounted when a jwt signer is configured, same
     // precondition the routes' bearer-token auth already requires.
     let app = match workspaces {
-        Some(ws) => app.merge(rustic_git_workspaces::api::router(ws)),
+        Some(ws) => app.merge(ws),
         None => app,
     };
     axum::serve(listener, app).await?;

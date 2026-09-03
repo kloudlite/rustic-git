@@ -35,6 +35,7 @@ use rustic_git_core::httpx::bearer_token;
 use rustic_git_core::jwt::Jwt;
 use std::sync::Arc;
 
+pub mod admin;
 mod environments;
 mod push;
 mod scope;
@@ -42,7 +43,9 @@ mod volumes;
 mod workspaces;
 
 // The crate's public surface is unchanged by the split: `bins/api` and the tests name
-// `api::{router, ApiState, Directory, …}` and must keep doing so.
+// `api::{router, ApiState, Directory, …}` and must keep doing so. `admin` is `pub` (unlike its
+// siblings) because its handlers are reached from `bins/api/src/main.rs` choosing which router to
+// mount, not only through `router()` here.
 pub use scope::{owner_set_selector, Owned};
 pub use workspaces::refresh_user_keys;
 
@@ -196,9 +199,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/quota", get(get_quota))
         .route("/v1/quota-requests", post(create_quota_request).get(list_quota_requests))
-        .route("/v1/quota-requests/{id}/approve", post(approve_quota_request))
-        .route("/v1/quota-requests/{id}/deny", post(deny_quota_request))
-        .route("/v1/regions", post(create_region).get(list_regions))
+        .route("/v1/regions", get(list_regions))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws).patch(patch_ws_packages))
@@ -403,104 +404,6 @@ struct Decision {
     note: Option<String>,
 }
 
-/// Overlay a request onto a limit. Only the dimensions the request NAMED move; approving must not
-/// silently reset a limit somebody has already granted on another axis.
-fn overlay(base: crd::QuotaSpec, want: &crd::RequestedQuota) -> crd::QuotaSpec {
-    crd::QuotaSpec {
-        workspaces: want.workspaces.unwrap_or(base.workspaces),
-        environments: want.environments.unwrap_or(base.environments),
-        snapshots: want.snapshots.unwrap_or(base.snapshots),
-        disk_gb: want.disk_gb.unwrap_or(base.disk_gb),
-        cpu: want.cpu.unwrap_or(base.cpu),
-        memory_gb: want.memory_gb.unwrap_or(base.memory_gb),
-    }
-}
-
-async fn pending_request(s: &ApiState, id: &str) -> Result<crd::QuotaRequest, Response> {
-    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
-    let r = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
-    if !is_pending(&r) {
-        return Err((StatusCode::CONFLICT, "that request has already been decided").into_response());
-    }
-    Ok(r)
-}
-
-/// Stamp the outcome. `status`, not spec: the request is what was asked, the decision is what
-/// happened to it, and only this tier ever writes it (no controller reconciles a request).
-async fn decide(s: &ApiState, id: &str, state: crd::RequestState, by: &str, note: Option<String>) -> Result<Response, Response> {
-    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
-    let patch = serde_json::json!({"status": {
-        "state": state,
-        "decidedBy": by,
-        "decidedAt": chrono::Utc::now().to_rfc3339(),
-        "note": note,
-    }});
-    let out = api
-        .patch_status(id, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .map_err(kube_err)?;
-    Ok(Json(request_doc(&out)).into_response())
-}
-
-/// Approve: write the `Quota` FIRST, then mark the request.
-///
-/// That order, always. A request marked approved whose quota never landed leaves a person told yes
-/// and still refused, with nothing left pending to retry; a quota that landed under a request
-/// still marked pending is merely a second approval that changes nothing.
-///
-/// Task 9 relocates this handler (body unchanged) to `api::admin` under `/admin/quota-requests`;
-/// it is here for now because that router does not exist yet.
-async fn approve_quota_request(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    body: axum::body::Bytes,
-) -> Result<Response, Response> {
-    let c = caller(&s, &headers).await?;
-    require_admin(&c)?;
-    let note: Decision = if body.is_empty() { Default::default() } else {
-        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
-    };
-    let r = pending_request(&s, &id).await?;
-    let owner = r.spec.owner.clone();
-    let client = kube(&s)?;
-    let api: Api<crd::Quota> = Api::all(client.clone());
-    let team = scope::is_team(&s, &owner).await;
-    let existing = api.get_opt(&owner).await.map_err(kube_err)?;
-    let base = match &existing {
-        Some(q) => q.spec.clone(),
-        None => crate::quota::effective(client, &owner, team).await.map_err(kube_err)?,
-    };
-    let spec = overlay(base, &r.spec.requested);
-    match existing {
-        Some(_) => {
-            api.patch(&owner, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": spec})))
-                .await
-                .map_err(kube_err)?;
-        }
-        None => {
-            api.create(&PostParams::default(), &crd::Quota::new(&owner, spec)).await.map_err(kube_err)?;
-        }
-    }
-    decide(&s, &id, crd::RequestState::Approved, &c.name, note.note).await
-}
-
-/// Deny: mark the request only, no `Quota` write. Task 9 relocates this handler too.
-async fn deny_quota_request(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    body: axum::body::Bytes,
-) -> Result<Response, Response> {
-    let c = caller(&s, &headers).await?;
-    require_admin(&c)?;
-    let note: Decision = if body.is_empty() { Default::default() } else {
-        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
-    };
-    pending_request(&s, &id).await?;
-    decide(&s, &id, crd::RequestState::Denied, &c.name, note.note).await
-}
-
 /// The ONE place `/v1` refuses an allocation.
 ///
 /// Every route that brings a new working copy, a new disk or a new snapshot into existence goes
@@ -591,31 +494,10 @@ fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response()
 }
 
-/// The admin gate, now the CLAIM rather than an email allowlist. `/v1/regions` moved under it too.
-fn require_admin(c: &Caller) -> Result<(), Response> {
-    if c.superadmin {
-        Ok(())
-    } else {
-        Err((StatusCode::FORBIDDEN, "admin only").into_response())
-    }
-}
-
 // ── regions ──────────────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct NewRegion {
-    id: String,
-    name: String,
-    /// `active` or `inactive`. Re-registering a region is the only way to retire one — there is
-    /// no delete — and a retired region must stop being offered to new workspaces while its
-    /// existing records stay readable.
-    #[serde(default = "active_status")]
-    status: String,
-}
-
-fn active_status() -> String {
-    "active".into()
-}
+//
+// The write half (`create_region`) lives in `api::admin` now — a region is a platform decision.
+// `list_regions` stays here: reading which regions exist is not superadmin-gated.
 
 /// What a caller sees: the three fields `check_region` and the web consume, and nothing about
 /// where the region's infrastructure lives.
@@ -628,31 +510,6 @@ struct RegionDoc {
 
 fn region_doc(r: &crd::Region) -> RegionDoc {
     RegionDoc { id: r.name_any(), name: r.spec.name.clone(), status: r.spec.status.clone() }
-}
-
-async fn create_region(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    Json(body): Json<NewRegion>,
-) -> Result<Response, Response> {
-    // The claim, not an email: a region write is a platform decision, so it goes through the same
-    // gate the quota decisions do. An administrator now needs a handle like everyone else, which
-    // is what `caller` enforces — every admin surface is reached from a signed-in session.
-    let c = caller(&s, &headers).await?;
-    require_admin(&c)?;
-    // The id becomes an object name and a gateway hostname label, so it goes through the same
-    // segment check every other path segment here does.
-    check_path_segment(&body.id)?;
-    let status = if body.status == "inactive" { "inactive" } else { "active" };
-    let r = crd::Region::new(&body.id, crd::RegionSpec { name: body.name, status: status.into() });
-    // Apply, not create: re-registering IS how a region is retired or renamed, so a second POST of
-    // the same id must not be a 409.
-    let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
-    let saved = api
-        .patch(&body.id, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&r))
-        .await
-        .map_err(kube_err)?;
-    Ok((StatusCode::CREATED, Json(region_doc(&saved))).into_response())
 }
 
 async fn list_regions(

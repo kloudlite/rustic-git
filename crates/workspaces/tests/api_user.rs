@@ -688,28 +688,6 @@ async fn workspace_routes_without_a_cluster_are_503() {
     assert_eq!(resp.status(), 503);
 }
 
-/// Regions are a CRD like everything else in this control plane: an admin POST writes one object,
-/// and a create reads it back by name. No Cosmos, and no in-memory fallback that a restart forgets.
-#[tokio::test]
-async fn registering_a_region_writes_one_custom_resource() {
-    let s = server_with(
-        Some(vec![Route { method: "PATCH", path: format!("{API}/regions/centralindia"), status: 201, body: region_obj("centralindia") }]),
-    )
-    .await;
-    let resp = reqwest::Client::new()
-        .post(format!("{}/v1/regions", s.base))
-        .bearer_auth(s.jwt.mint_admin("admin@example.com", "Admin", Some("admin"), true).unwrap())
-        .json(&json!({"id": "centralindia", "name": "Central India"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
-    let r = &s.rec.sent("PATCH", &format!("{API}/regions/centralindia"))[0];
-    assert_eq!(r["metadata"]["name"], "centralindia");
-    assert_eq!(r["spec"]["name"], "Central India");
-    assert_eq!(r["spec"]["status"], "active", "a new region is active unless it says otherwise");
-}
-
 /// An inactive region must stop being offered to new workspaces while its existing records stay
 /// readable — the one rule the region routes have ever had.
 #[tokio::test]
@@ -725,35 +703,6 @@ async fn creating_in_an_inactive_region_is_refused() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 422, "{}", resp.text().await.unwrap());
-}
-
-#[tokio::test]
-async fn region_create_requires_admin() {
-    let s = server_with(
-        Some(vec![Route { method: "PATCH", path: format!("{API}/regions/centralindia"), status: 201, body: region_obj("centralindia") }]),
-    )
-    .await;
-    let client = reqwest::Client::new();
-
-    let non_admin = token(&s.jwt, "karthik");
-    let resp = client
-        .post(format!("{}/v1/regions", s.base))
-        .bearer_auth(&non_admin)
-        .json(&json!({"id": "centralindia", "name": "Central India"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 403);
-
-    let admin = s.jwt.mint_admin("admin@example.com", "Admin", Some("admin"), true).unwrap();
-    let resp = client
-        .post(format!("{}/v1/regions", s.base))
-        .bearer_auth(&admin)
-        .json(&json!({"id": "centralindia", "name": "Central India"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
 }
 
 /// Snapshot bytes have had no object store since the durable-snapshots cutover, so the storage
@@ -2146,7 +2095,7 @@ async fn every_v1_route_is_still_mounted() {
     let s = server(vec![]).await;
     let c = reqwest::Client::new();
     let routes: &[(&str, &str)] = &[
-        ("POST", "/v1/regions"), ("GET", "/v1/regions"),
+        ("GET", "/v1/regions"),
         ("POST", "/v1/workspaces"), ("GET", "/v1/workspaces"),
         ("POST", "/v1/workspaces/restore"),
         ("GET", "/v1/workspaces/ws-1"), ("DELETE", "/v1/workspaces/ws-1"), ("PATCH", "/v1/workspaces/ws-1"),
