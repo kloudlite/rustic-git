@@ -5,6 +5,9 @@ declare module "next-auth" {
     user: {
       /** The handle they picked. Absent until they have. */
       username?: string;
+      /** Read off the api token's own payload — gates what the web RENDERS only; /v1 re-checks
+       *  the claim on every admin call. */
+      superadmin?: boolean;
     } & DefaultSession["user"];
   }
 }
@@ -14,5 +17,6 @@ declare module "next-auth/jwt" {
     /** Minted at sign-in and never refreshed: the session's `maxAge` is the token's life. */
     apiToken?: string;
     username?: string;
+    superadmin?: boolean;
   }
 }

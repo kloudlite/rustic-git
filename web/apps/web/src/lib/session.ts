@@ -1,6 +1,6 @@
 import "server-only";
 import { cache } from "react";
-import { redirect } from "next/navigation";
+import { redirect, notFound } from "next/navigation";
 import { auth } from "@/auth";
 import { apiToken } from "@/lib/api-token";
 
@@ -13,6 +13,9 @@ export type Session = {
     username?: string;
     /** Kept for the pages still reading it; the same value as `username`. */
     owner: string;
+    /** The `superadmin` JWT claim — gates whether `/admin` exists for this person. Not an
+     *  access decision: /v1 re-checks the claim on every call the admin area makes. */
+    superadmin: boolean;
   };
 } | null;
 
@@ -37,6 +40,7 @@ export const getSession = cache(async function getSession(): Promise<Session> {
         // Falls back to the email local-part only so pages render before a handle
         // is chosen; it is not a namespace and nothing may be created under it.
         owner: user.username ?? user.email.split("@")[0],
+        superadmin: user.superadmin ?? false,
       },
     };
   }
@@ -65,6 +69,17 @@ export async function requireToken(next: string): Promise<{ session: NonNullable
   const session = await requireSession(next);
   const token = await apiToken();
   if (!token) redirect(loginFor(next));
+  return { session, token };
+}
+
+/** Identity, a token, and the admin claim — or 404 for anyone without it.
+ *
+ *  Still not an access decision: /v1 re-checks the claim on every call this area makes. This only
+ *  decides whether the page exists for this person, and 404 rather than 403 because whether an
+ *  admin area is here is not a non-admin's to learn. */
+export async function requireSuperadmin(next: string) {
+  const { session, token } = await requireToken(next);
+  if (!session.user.superadmin) notFound();
   return { session, token };
 }
 

@@ -181,6 +181,10 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
         if (r.ok) {
           token.apiToken = r.value.token ?? undefined;
           token.username = r.value.user.username;
+          // Read from the api token's own payload: the api decided it at sign-in, and the web must
+          // never decide it. This gates what is SHOWN; every admin action is re-authorized by /v1
+          // against the same claim, so a tampered cookie reveals a page and grants nothing.
+          token.superadmin = readSuperadmin(r.value.token ?? "");
         } else {
           // Signing in must not fail because the directory is briefly down. The
           // session exists with no api token, and the pages that need one say so.
@@ -197,8 +201,20 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
     async session({ session, token }) {
       if (session.user) {
         session.user.username = token.username as string | undefined;
+        session.user.superadmin = token.superadmin === true;
       }
       return session;
     },
   },
 });
+
+/** The api token is a JWS whose payload is readable without the key — the api already decided the
+ *  claim at sign-in, this just reads it back to decide what the web RENDERS. */
+function readSuperadmin(jws: string): boolean {
+  try {
+    const payload = jws.split(".")[1];
+    return JSON.parse(Buffer.from(payload, "base64url").toString()).superadmin === true;
+  } catch {
+    return false;
+  }
+}
