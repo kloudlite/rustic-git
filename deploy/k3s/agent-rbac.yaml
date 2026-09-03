@@ -46,8 +46,9 @@
 #                                          patch                        record_post_cut_generation
 #                                                                       (the synced-generation
 #                                                                       annotation, metadata only)
-#                                          delete                       snapshot::retain (retention
-#                                                                       sweep past WS_SNAPSHOT_KEEP);
+#                                          delete                       snapshot::retain (one sync
+#                                                                       point per worktree; a push
+#                                                                       is never pruned);
 #                                                                       stop_push teardown cleanup;
 #                                                                       retire_pass's orphan sweep
 #                                                                       (spec.volume names no Volume);

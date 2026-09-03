@@ -87,7 +87,6 @@ where
                     worktree: worktree.to_string(),
                     parent: parent_sync,
                     message: Some("stopping".to_string()),
-                    pinned: false,
                     transient: true,
                     state: Some(state),
                 },

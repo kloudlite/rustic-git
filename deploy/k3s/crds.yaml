@@ -1322,11 +1322,6 @@
                         "description": "The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing\nreads creation timestamps to reconstruct history.",
                         "type": "string"
                       },
-                      "pinned": {
-                        "default": false,
-                        "description": "Keeps this commit out of any future retention sweep. Never cleared by a controller.",
-                        "type": "boolean"
-                      },
                       "state": {
                         "description": "Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.\n\nSchema is hand-written as free-form JSON (`preserve_unknown_state`), not `SnapshotState`'s\nown derived schema: kube-core's CRD generation flattens an internally-tagged enum's `oneOf`\nbranches into one object and panics when a shared property (`kind`) carries a different\n`const` per branch — which is the entire point of a tag. A hand-written *discriminated*\nschema would drift from the type the moment a variant changes, so this stays a plain\n`x-kubernetes-preserve-unknown-fields` object instead of trying to describe the union.\n`serde`'s view of the Rust type is untouched, so round-tripping is exact; only the\n*published* OpenAPI schema for this field is permissive. Because the schema can't validate\nit, a value that doesn't parse as `SnapshotState` must not fail the whole `Snapshot` read —\n`lenient_state` drops it to `None` (with a `tracing::warn!`) rather than taking the agent's\nlist/watch down with it.",
                         "type": "object",
@@ -1334,7 +1329,7 @@
                       },
                       "transient": {
                         "default": false,
-                        "description": "A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a\nreplica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and\nretained ONE per worktree — see `snapshot::retain`. `push` never sets this.",
+                        "description": "A sync point, not a push: cut by the agent's sync beat (or a stop) from a live worktree so a\nreplica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and\nretained ONE per worktree — see `snapshot::retain`. `push` never sets this, which is the\nwhole distinction: `!transient` IS a snapshot (`Snapshot::is_snapshot`). There used to be a\nseparate `pinned` flag saying the same thing about the same records; serde ignores it on\nobjects stored while it existed.",
                         "type": "boolean"
                       },
                       "volume": {

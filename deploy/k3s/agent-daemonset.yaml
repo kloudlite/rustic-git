@@ -220,10 +220,6 @@ spec:
             # than fails, so the beat moves on to the next source (peer.rs).
             - name: WS_PEER_SEND_TIMEOUT_SECS
               value: "3600"
-            # How many Ready commits of a chain survive the post-push sweep; the rest are pruned
-            # unless pinned (snapshot.rs). Floors at 1 whatever is set here.
-            - name: WS_SNAPSHOT_KEEP
-              value: "10"
           envFrom:
             # `WS_REGION` (which region's blob container this node uses) and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its

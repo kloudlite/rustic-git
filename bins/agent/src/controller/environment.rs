@@ -258,18 +258,17 @@ async fn run_environment(
     // the name `sync.rs`'s `live_worktrees` writes into `Snapshot.spec.worktree`, so every path
     // below — checkout, mount, mkdir, stop cut, drop — uses this one string.
     let wt = e.name_any();
-    let synced = if ctx.engine.pool.worktree(&id, &wt).exists() {
-        None
-    } else {
-        crate::snapshot::latest_transient(ctx, &id, &wt).await?
-    };
+    let have_worktree = ctx.engine.pool.worktree(&id, &wt).exists();
+    let synced = if have_worktree { None } else { crate::snapshot::latest_transient(ctx, &id, &wt).await? };
     // A restore/clone pinned to a commit already knows its head — grafted by `/v1` at restore
     // time, not guessed here. Without this an environment restored onto a commit parked forever in
     // `HeadUnknown` below: the volume HAS commits, and nothing else ever wrote this environment's
     // head. `apply_workspace`'s twin arm, verbatim in shape.
     let clone_commit = super::clone_commit(&e.spec.storage);
     let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
-    if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+    // `!have_worktree`: `apply_workspace`'s twin — a migrated volume's baseline is a sync point,
+    // so it has records and no head, and its worktree is already on disk. See there.
+    if effective_head.is_none() && !have_worktree && crate::claim::has_commits(ctx, &id).await? {
         let st = crd::EnvironmentStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,

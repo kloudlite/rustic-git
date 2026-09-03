@@ -587,11 +587,10 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 /// requeues the whole thing:
 ///   1. drop the parent's worktree — `{pool}/vol/{volume}/live/{id}`, the LIVE subvolume only;
 ///      `snap/` (the commits) is never touched, which is the whole point of the exercise.
-///   2. delete every UNPINNED `Snapshot` record of that worktree — transients and ordinary
-///      commits alike, whatever their phase. "Snapshot" in the owner's sense means a PINNED
-///      commit; the rest is history of a worktree that no longer exists, and nothing else ever
-///      reclaims it. A pinned record is never touched here, by any parent, for any reason.
-///   3. if a PINNED commit remains on the Volume — this worktree's or another's — detach it so that
+///   2. delete every SYNC POINT of that worktree, whatever its phase — replication state for a
+///      worktree that no longer exists, which nothing else ever reclaims. A snapshot (a push) is
+///      never touched here, by any parent, for any reason.
+///   3. if a snapshot remains on the Volume — this worktree's or another's — detach it so that
 ///      snapshot outlives its parent; otherwise leave the ownerReference and let GC delete the
 ///      Volume as it always did.
 async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
@@ -604,28 +603,28 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
         .map_err(|e| ReconcileErr(e.to_string()))?
         .map_err(|e| ReconcileErr(e.0))?;
 
-    // One list serves both remaining steps: what to delete, and whether a pinned snapshot remains.
+    // One list serves both remaining steps: what to delete, and whether a snapshot remains.
     // `spec.volume` is a selectable field, so this is a server-side filter. The two sets cannot
-    // overlap — one is `!pinned`, the other `pinned` — so the check needs no re-read.
+    // overlap — one is `transient`, the other is not — so the check needs no re-read.
     let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let items = snaps
         .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
         .await
         .map_err(|e| ReconcileErr(e.to_string()))?
         .items;
-    for s in items.iter().filter(|s| !s.spec.pinned && s.spec.worktree == id) {
+    for s in items.iter().filter(|s| !s.is_snapshot() && s.spec.worktree == id) {
         delete_ignoring_404(&snaps, &s.name_any()).await?;
     }
-    // Not scoped to this worktree: a pinned snapshot of a SIBLING worktree is just as good a reason
+    // Not scoped to this worktree: a snapshot of a SIBLING worktree is just as good a reason
     // to keep the Volume alive — the bytes it names live on the same subvolume tree.
     //
-    // Any phase but `Error`, NOT just `Ready`: a pinned push still being cut when its parent was
+    // Any phase but `Error`, NOT just `Ready`: a push still being cut when its parent was
     // deleted is exactly the case that must not lose the Volume — GC would take the subvolume out
-    // from under the cut and leave an orphan pinned record naming a Volume that is gone. A
+    // from under the cut and leave an orphan record naming a Volume that is gone. A
     // status-less record has never been cut at all and counts the same way; only `Error` is a
     // record that will never name bytes.
     let has_snapshot = items.iter().any(|s| {
-        s.spec.pinned && !s.spec.transient && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
+        s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
     });
     if has_snapshot
         && !super::volume::detach_volume(ctx, &volume, uid).await.map_err(|e| ReconcileErr(e.to_string()))?
@@ -644,21 +643,23 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
 /// physical rename and returns `true` only the one time it actually moved anything; that's the
 /// signal to mint the migration-baseline `Snapshot` CR (CR-first, same shape `create_commit` in
 /// `api.rs` uses for a normal push) — the EXISTING `reconcile_commit`/`advance_head` machinery
-/// then cuts it, marks it Ready and writes `status.head`, so this function only ever needs to run
-/// once per volume, not re-implement any of that.
+/// then cuts it and marks it Ready, so this function only ever needs to run once per volume, not
+/// re-implement any of that. It does NOT advance `status.head` — a sync point never does — which is
+/// why the `HeadUnknown` guard below has to let a migrated volume through on the worktree it
+/// already has on disk rather than on a head.
 ///
 /// A worktree named after the volume's own id is exactly what a pre-model workspace already is
 /// (workspace id == volume id, module doc in `commit.rs`) and exactly what `checkout`'s
 /// `WORKTREE_EXISTS` guard converges on right below this call — so the caller needs no branch for
 /// "just migrated" vs. "always was commit-model-native".
 ///
-/// Owned by the PARENT (Workspace/Environment), not the Volume, unlike a push commit (`api.rs`):
+/// Owned by the PARENT (Workspace/Environment), not the Volume, unlike a push (`api.rs`):
 /// a baseline only ever exists because a pre-model volume was migrated under one specific parent,
 /// and a Volume that only ever had its baseline is not worth keeping once that parent is gone — so
 /// the baseline dies with the parent rather than outliving it as an orphan CR for a workspace that
 /// no longer exists (13 were found on the cluster that way before this had an owner at all). A
-/// real push commit is different: it is worth keeping across a re-clone/re-attach of the same
-/// volume, so it stays owned by the Volume.
+/// A push is different: it is worth keeping across a re-clone/re-attach of the same volume, so it
+/// stays owned by the Volume.
 pub(crate) async fn migrate_and_seed_baseline(
     ctx: &Arc<Ctx>,
     vol: &crd::Volume,
@@ -684,9 +685,12 @@ pub(crate) async fn migrate_and_seed_baseline(
             owner: owner.to_string(),
             worktree: id.to_string(),
             parent: String::new(),
-            message: Some("migration baseline".to_string()),
-            pinned: false,
-            transient: false,
+            // A SYNC POINT, not a push: nobody asked for it, so it must not show up in history as
+            // a snapshot the person took, and it must not keep the Volume alive after its parent
+            // is deleted (`cleanup_parent` keeps snapshots, drops sync points). It exists only so
+            // a peer has something of a pre-model volume to replicate.
+            message: None,
+            transient: true,
             state: Some(state),
         },
     );
@@ -895,13 +899,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // Resolved BEFORE the `HeadUnknown` guard below: a transient IS a Snapshot CR, so `has_commits`
     // is true when a sync point is all this volume has, and parking there would strand a workspace
     // that has perfectly good state to start from.
-    let synced = if ctx.engine.pool.worktree(&id, &w.name_any()).exists() {
-        None
-    } else {
-        crate::snapshot::latest_transient(ctx, &id, &w.name_any()).await?
-    };
+    let have_worktree = ctx.engine.pool.worktree(&id, &w.name_any()).exists();
+    let synced = if have_worktree { None } else { crate::snapshot::latest_transient(ctx, &id, &w.name_any()).await? };
     let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
-    if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+    // `!have_worktree` is part of the guard, not an optimization: a MIGRATED volume has its
+    // worktree on disk already and its baseline is a sync point, so it has records and no head
+    // forever. Parking it would be permanent. The guard is about never checking out an EMPTY
+    // worktree next to real history, and a worktree that is already here is not empty.
+    if effective_head.is_none() && !have_worktree && crate::claim::has_commits(ctx, &id).await? {
         // F2 guard: the volume has commits but this workspace's own `head` is still `None` —
         // checking out `None` here would hand it an EMPTY worktree next to real history,
         // which is the never-started-dataless bug in worktree form. Wait for Task 5/6 to

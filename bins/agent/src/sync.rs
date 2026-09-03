@@ -68,7 +68,6 @@ fn build_sync_spec(live: &crate::listing::Parent, parent: String) -> crd::Snapsh
         // already holds. Empty on the first one, exactly as a root commit is.
         parent,
         message: None,
-        pinned: false,
         transient: true,
         state: Some(live.state.clone()),
     }

@@ -18,8 +18,6 @@
 
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::labels;
-use crate::registry::CommitRecord;
-use futures::StreamExt;
 use crate::model::*;
 use crate::store::MetaStore;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
@@ -1179,7 +1177,6 @@ async fn clone_base(
             // never been snapshotted at all, exactly as a root commit is.
             parent: newest.map(|s| s.name_any()).unwrap_or_default(),
             message: Some("cloning".to_string()),
-            pinned: false,
             transient: true,
             state: Some(state),
         },
@@ -1910,7 +1907,9 @@ async fn create_commit(
             worktree: worktree.to_string(),
             parent: parent.unwrap_or_default(),
             message,
-            pinned: false,
+            // Not transient: a push IS a snapshot (`Snapshot::is_snapshot`). It is kept until
+            // someone deletes it by hand (`delete_snapshot`), never pruned by retention, and it
+            // keeps its Volume alive after the workspace is gone (`cleanup_parent`).
             transient: false,
             state: Some(state),
         },
@@ -2008,15 +2007,14 @@ struct VolumeSummary {
     /// The workspace/environment is gone. The snapshots are not, and this listing is the only way
     /// back to them.
     deleted: bool,
-    /// Epoch millis of the volume's last write. Approximate by construction — see the
-    /// `volumes` handler on the server tier.
+    /// Epoch millis of the volume's last write. Approximate by construction — the newest
+    /// `Snapshot` CR's creation time, sync points included.
     latest_ms: Option<i64>,
-}
-
-fn upstream(s: &ApiState) -> Result<&Arc<crate::upstream::Upstream>, Response> {
-    s.upstream
-        .as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "registry upstream not configured").into_response())
+    /// How many pushes are on this volume. Any phase but `Error`, matching `cleanup_parent`'s
+    /// rule: a push still being cut is a snapshot the person is waiting for, not one to hide.
+    snapshots: u64,
+    /// `readyAt` of the newest push, RFC3339; `None` while the only push is still being cut.
+    last_push_at: Option<String>,
 }
 
 fn upstream_err(e: String) -> Response {
@@ -2047,24 +2045,45 @@ pub fn owner_set_selector(owners: &[String]) -> String {
     format!("{OWNER_LABEL} in ({})", safe.join(","))
 }
 
-/// The live parents, by volume id, with the kind they are. One list call per kind, never one per
-/// row — and used ONLY for `deleted` and as a provenance fallback.
+/// A live Workspace/Environment, reduced to what the volume routes need of it.
+struct Parent {
+    kind: String,
+    display: String,
+    /// `status.head` — the snapshot it is standing on, which `delete_snapshot` refuses to remove.
+    head: Option<String>,
+}
+
+/// The live parents, by the volume they are ON, with the kind they are. One list call per kind,
+/// never one per row.
 ///
 /// `None` means the cluster could not be asked, which is NOT the same as "nothing is alive": the
 /// difference decides whether every row on the page is labelled "source deleted" during a kube
 /// blip. The caller keeps `deleted: false` on `None` — the snapshots are what the page is for, and
-/// they are all still there.
-async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BTreeMap<String, (String, String)>> {
+/// they are all still there. The delete routes treat `None` as "cannot prove nothing is running"
+/// and refuse, which is the opposite bias and the right one there.
+///
+/// Keyed on `status.volumeRef` where there is one, the parent's own name otherwise: a restored
+/// environment holds a SECOND worktree on the source's volume, and keying on the name alone made
+/// it invisible to both the listing and the head check.
+///
+/// Both kinds are selected by the caller's whole owner set, not just their own label: a team's
+/// workspace is one they may read, and a head check that could not see it would let a delete take
+/// a running worktree's base out from under it.
+async fn live_parents(s: &ApiState, owners: &[String]) -> Option<BTreeMap<String, Parent>> {
     let c = s.kube.as_ref()?;
+    let lp = ListParams::default().labels(&owner_set_selector(owners));
     let mut live = BTreeMap::new();
     let ws: Api<crd::Workspace> = Api::all(c.clone());
-    for w in ws.list(&owned_by(owner)).await.ok()?.items {
-        live.insert(w.name_any(), ("workspace".to_string(), w.spec.name.clone()));
+    for w in ws.list(&lp).await.ok()?.items {
+        let st = w.status.as_ref();
+        let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| w.name_any());
+        live.insert(vol, Parent { kind: "workspace".into(), display: w.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
-    let lp = ListParams::default().labels(&owner_set_selector(owners));
     for e in envs.list(&lp).await.ok()?.items {
-        live.insert(e.name_any(), ("environment".to_string(), e.spec.name.clone()));
+        let st = e.status.as_ref();
+        let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| e.name_any());
+        live.insert(vol, Parent { kind: "environment".into(), display: e.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
     }
     Some(live)
 }
@@ -2102,94 +2121,70 @@ async fn list_volumes(
     Query(q): Query<ListVolQuery>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    let up = upstream(&s)?;
     let owners = match &q.owner {
         Some(o) if may_act_on(&s, &caller_id, o).await => vec![o.clone()],
         Some(_) => return Err(not_found()),
         None => caller_owners(&s, &caller_id).await,
     };
 
-    // The cluster answers only "does a parent still exist", so a kube outage degrades the page to
-    // bare ids rather than emptying it — the snapshots themselves do not live there. `None` is an
-    // unanswered question, never an answer of "nothing": labelling every row "source deleted"
-    // during a blip, and then fanning out a history read per row to name them, is the failure mode
-    // this distinction exists to prevent.
-    // `owners[0]` rather than the caller: with an `owner` filter this is the team being listed, and
-    // asking for the caller's own workspaces would name rows that are not on this page.
-    let live = live_parents(&s, owners.first().map(String::as_str).unwrap_or(&caller_id), &owners).await;
+    // The rows ARE the snapshots: one label-selected list, grouped by `spec.volume`. The registry
+    // volume index is not consulted at all any more — a push writes a `Snapshot` CR and nothing
+    // else, so a listing that read the index would have gone blind on everything pushed since.
+    let api: Api<crd::Snapshot> = Api::all(kube(&s)?.clone());
+    let snaps = api.list(&ListParams::default().labels(&owner_set_selector(&owners))).await.map_err(kube_err)?.items;
+
+    // The cluster answers only "does a parent still exist", so this degrades the page rather than
+    // emptying it. `None` is an unanswered question, never an answer of "nothing": labelling every
+    // row "source deleted" during a blip is the failure mode this distinction exists to prevent.
+    let live = live_parents(&s, &owners).await;
     let known = live.is_some();
     let live = live.unwrap_or_default();
 
-    let mut out: Vec<VolumeSummary> = vec![];
-    for owner in &owners {
-        let Some(rows) = up.volumes(owner, owner).await.map_err(upstream_err)? else { continue };
-        for row in rows {
-            let parent = live.get(&row.name);
-            out.push(VolumeSummary {
-                kind: parent.map(|(k, _)| k.clone()).unwrap_or_default(),
-                display_name: parent.map(|(_, n)| n.clone()).unwrap_or_default(),
-                deleted: known && parent.is_none(),
-                volume: Some(format!("vol/{owner}/{}", row.name)),
-                latest_ms: row.latest_ms,
-                name: row.name,
-            });
-        }
+    let mut by_volume: BTreeMap<String, Vec<&crd::Snapshot>> = BTreeMap::new();
+    for sn in &snaps {
+        by_volume.entry(sn.spec.volume.clone()).or_default().push(sn);
     }
 
-    // Provenance for the rows a live parent could not name — the deleted ones, which is exactly the
-    // case this whole listing exists for. One history read each, and only for those.
-    // ponytail: N reads for N deleted volumes, bounded at 8 in flight. The upgrade is provenance in
-    // the listing itself, which needs a per-push marker under `index/` since the listing handler
-    // may never open a volume database.
-    let jobs: Vec<(String, String, bool)> = out
-        .iter()
-        .map(|v| {
-            let owner = v.volume.as_deref().unwrap_or_default().split('/').nth(1).unwrap_or_default().to_string();
-            (owner, v.name.clone(), v.deleted)
-        })
-        .collect();
-    // `Some(None)` is a deleted volume whose history came back EMPTY: a database that exists
-    // because something opened it (an aborted first push, a probe) but never received a commit.
-    // It has no snapshot to show or restore, so it is dropped from the listing rather than
-    // shown as a ghost "source deleted" row with nothing behind it.
-    let named: Vec<Option<Option<crate::upstream::Provenance>>> = futures::stream::iter(jobs)
-        .map(|(owner, name, deleted)| {
-            let up = up.clone();
-            async move {
-                if !deleted {
-                    return None;
-                }
-                let recs = up.history(&owner, &owner, &name).await.ok()??;
-                Some(recs.first().map(|r| crate::upstream::Provenance::of(&r.state)))
-            }
-        })
-        .buffered(8)
-        .collect()
-        .await;
-
-    let mut keep = Vec::with_capacity(out.len());
-    for (mut v, p) in out.into_iter().zip(named) {
-        if let Some(None) = p {
+    let mut keep: Vec<VolumeSummary> = vec![];
+    for (name, rows) in by_volume {
+        // Any phase but `Error`, and never a sync point — `cleanup_parent`'s rule, so what keeps a
+        // volume alive there is exactly what this counts.
+        let pushes: Vec<&&crd::Snapshot> = rows
+            .iter()
+            .filter(|sn| {
+                sn.is_snapshot() && sn.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
+            })
+            .collect();
+        // A volume whose only records are sync points has nothing to show or restore — it is a
+        // live worktree's replication state, not history, and was never a row on this page.
+        if pushes.is_empty() {
             continue;
         }
-        if let Some(Some(p)) = p {
-            if let Some(k) = p.kind {
-                v.kind = k;
-            }
-            if let Some(n) = p.name {
-                v.display_name = n;
-            }
-        }
-        if v.kind.is_empty() {
-            v.kind = kind_of(&v.name);
-        }
-        if v.display_name.is_empty() {
-            v.display_name = v.name.clone();
-        }
-        keep.push(v);
+        let owner = rows.first().map(|sn| sn.spec.owner.clone()).unwrap_or_default();
+        let parent = live.get(&name);
+        let kind = parent
+            .map(|p| p.kind.clone())
+            // The frozen `spec.state` is tagged by kind, so a deleted parent still says what it
+            // was without a second read; the id prefix is the last resort for a legacy record.
+            .or_else(|| {
+                pushes.first().and_then(|sn| sn.spec.state.as_ref()).map(|st| match st {
+                    crd::SnapshotState::Environment { .. } => "environment".to_string(),
+                    crd::SnapshotState::Workspace { .. } => "workspace".to_string(),
+                })
+            })
+            .unwrap_or_else(|| kind_of(&name));
+        keep.push(VolumeSummary {
+            kind,
+            display_name: parent.map(|p| p.display.clone()).unwrap_or_else(|| name.clone()),
+            deleted: known && parent.is_none(),
+            volume: Some(format!("vol/{owner}/{name}")),
+            latest_ms: rows.iter().filter_map(|sn| sn.creation_timestamp()).map(|t| t.0.as_millisecond()).max(),
+            snapshots: pushes.len() as u64,
+            last_push_at: pushes.iter().filter_map(|sn| sn.status.as_ref()?.ready_at.clone()).max(),
+            name,
+        });
     }
-    // Filtered here, after provenance and the id-prefix fallback have decided what each row IS —
-    // filtering earlier would drop rows on the empty kind they start with.
+
     if let Some(kind) = &q.kind {
         keep.retain(|v| &v.kind == kind);
     }
@@ -2207,53 +2202,59 @@ fn check_path_segment(s: &str) -> Result<(), Response> {
     }
 }
 
-/// The owner label a volume is readable under, or 404. Ownership is the SERVER tier's answer: it
-/// refuses a volume that is not the named owner's, and this tier only decides which owners the
-/// caller may ask as. No live parent is required — that is the whole fix.
-async fn volume_owner(s: &ApiState, caller_id: &str, name: &str) -> Result<(String, Vec<CommitRecord>), Response> {
-    check_path_segment(name)?;
-    let up = upstream(s)?;
-    // Every label at once, bounded: a member of many teams paid one round trip per team, in order.
-    let mut answers = futures::stream::iter(caller_owners(s, caller_id).await)
-        .map(|owner| async move {
-            let recs = up.history(&owner, &owner, name).await;
-            (owner, recs)
-        })
-        .buffer_unordered(8);
-    while let Some((owner, recs)) = answers.next().await {
-        if let Some(recs) = recs.map_err(upstream_err)? {
-            if !recs.is_empty() {
-                return Ok((owner, recs));
-            }
-        }
-    }
-    Err(not_found())
-}
-
-/// `DELETE /v1/volumes/{name}` — drop a volume's snapshots. What the environment Delete dialog
-/// calls when "Also delete its snapshots" is checked, and what an archived row's "Delete
-/// snapshots" calls on its own.
+/// `DELETE /v1/volumes/{name}` — delete a volume and every snapshot on it. What the environment
+/// Delete dialog calls when "Also delete its snapshots" is checked, and what an archived row's
+/// "Delete snapshots" calls on its own.
 ///
-/// Scoped exactly like `history`: `volume_owner` decides which owner label the caller may read it
-/// under, and a volume that is not theirs is a 404 rather than a 403 — they learn nothing about
-/// volumes that are not theirs.
+/// A volume the caller may not read is a 404 rather than a 403 — they learn nothing about volumes
+/// that are not theirs. A volume that still has a live parent is a 409: its bytes are somebody's
+/// working copy, and deleting the Volume out from under a running worktree is not a snapshot
+/// operation. Deleting the Volume CR takes every `Snapshot` on it (they are its children) and the
+/// agent's byte sweep reclaims the subvolumes.
 async fn delete_volume(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
-    match upstream(&s)?.delete_volume(&owner, &owner, &name).await.map_err(upstream_err)? {
-        true => Ok(StatusCode::NO_CONTENT.into_response()),
-        false => Err(not_found()),
+    // The ownership check IS the snapshot listing: a volume with no `Snapshot` under a label the
+    // caller may read is indistinguishable from one that does not exist.
+    commit_model_snapshots(&s, &caller_id, &name).await?;
+    let owners = caller_owners(&s, &caller_id).await;
+    // A cluster that could not be listed is "cannot prove nothing is running" — the opposite bias
+    // to the listing's, and the right one for a delete.
+    let live = live_parents(&s, &owners).await.ok_or_else(|| kube_unavailable())?;
+    if live.contains_key(&name) {
+        return Err((StatusCode::CONFLICT, "this volume still belongs to a workspace or environment").into_response());
+    }
+    delete_volume_cr(&s, &name).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+fn kube_unavailable() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, "the cluster could not be reached").into_response()
+}
+
+/// 404 on an already-gone object: two clicks on the same Delete button is a race, not an error.
+async fn delete_volume_cr(s: &ApiState, name: &str) -> Result<(), Response> {
+    let api: Api<crd::Volume> = Api::all(kube(s)?.clone());
+    match api.delete(name, &Default::default()).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
+        Err(e) => Err(kube_err(e)),
     }
 }
 
-/// `DELETE /v1/volumes/{name}/snapshots/{snapshot}` — drop ONE snapshot record from the lineage.
+/// `DELETE /v1/volumes/{name}/snapshots/{snapshot}` — delete ONE snapshot.
 ///
-/// Scoped exactly like `history`, and 404 for the same two cases the server tier collapses: a
-/// volume the caller may not read, and a snapshot id that is not in it.
+/// 404 for the two cases that must stay indistinguishable: a volume the caller may not read, and
+/// an id that is not on it. 409 for the two that are refusals rather than absences: a sync point
+/// (the agent owns those — deleting one by hand deletes a replica's send parent), and a snapshot a
+/// running worktree is standing on.
+///
+/// Deleting the LAST snapshot of a volume nothing owns any more deletes the volume too: that is
+/// what Task 1-3 detached it for, and leaving it behind would leak a subvolume nothing can ever
+/// reach again.
 async fn delete_snapshot(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -2261,11 +2262,38 @@ async fn delete_snapshot(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     check_path_segment(&snapshot)?;
-    let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
-    match upstream(&s)?.delete_snapshot(&owner, &owner, &name, &snapshot).await.map_err(upstream_err)? {
-        true => Ok(StatusCode::NO_CONTENT.into_response()),
-        false => Err(not_found()),
+    let items = commit_model_snapshots(&s, &caller_id, &name).await?;
+    let target = items.iter().find(|sn| sn.name_any() == snapshot).ok_or_else(not_found)?;
+    if target.spec.transient {
+        return Err((StatusCode::CONFLICT, "a sync point cannot be deleted by hand").into_response());
     }
+    let owners = caller_owners(&s, &caller_id).await;
+    let live = live_parents(&s, &owners).await.ok_or_else(|| kube_unavailable())?;
+    // Any live parent's head, not just this volume's: a restored parent holds a second worktree on
+    // the SAME volume, and its head is just as much a base as the volume's own parent's.
+    if live.values().any(|p| p.head.as_deref() == Some(snapshot.as_str())) {
+        return Err((StatusCode::CONFLICT, "this snapshot is the base of a running worktree").into_response());
+    }
+    let api: Api<crd::Snapshot> = Api::all(kube(&s)?.clone());
+    match api.delete(&snapshot, &Default::default()).await {
+        Ok(_) => {}
+        // Already gone: someone got there first, which is the outcome the caller asked for.
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(e) => return Err(kube_err(e)),
+    }
+    // The same rule `cleanup_parent` detached the Volume under (Task 2d), read from the other end:
+    // it survives its parent only for as long as a snapshot needs it. Computed from the list this
+    // handler already made, minus the one just deleted — a re-read would race the API server's own
+    // deletion anyway.
+    let remaining = items.iter().any(|sn| {
+        sn.name_any() != snapshot
+            && sn.is_snapshot()
+            && sn.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
+    });
+    if !remaining && !live.contains_key(&name) {
+        delete_volume_cr(&s, &name).await?;
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// The commit-model reads for `/history` and `/refs`: `Snapshot` CRs instead of registry

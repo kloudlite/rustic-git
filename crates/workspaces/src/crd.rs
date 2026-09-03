@@ -251,12 +251,12 @@ pub struct SnapshotSpec {
     pub parent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Keeps this commit out of any future retention sweep. Never cleared by a controller.
-    #[serde(default)]
-    pub pinned: bool,
-    /// A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a
+    /// A sync point, not a push: cut by the agent's sync beat (or a stop) from a live worktree so a
     /// replica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and
-    /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this.
+    /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this, which is the
+    /// whole distinction: `!transient` IS a snapshot (`Snapshot::is_snapshot`). There used to be a
+    /// separate `pinned` flag saying the same thing about the same records; serde ignores it on
+    /// objects stored while it existed.
     #[serde(default)]
     pub transient: bool,
     /// Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.
@@ -407,6 +407,14 @@ pub struct VolumeReplicaStatus {
     /// `head` claim against this replica.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branches: BTreeMap<String, String>,
+}
+
+impl Snapshot {
+    /// A push, as opposed to a sync point — the one distinction there is. Everything that keeps a
+    /// record (retention, `cleanup_parent`, the volume listing, `delete_snapshot`) asks this.
+    pub fn is_snapshot(&self) -> bool {
+        !self.spec.transient
+    }
 }
 
 /// `{volume}-{8 hex}` — CR-first naming: minted before the btrfs snapshot is cut, so a retried
