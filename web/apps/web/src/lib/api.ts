@@ -899,9 +899,8 @@ export function restoreWorkspace(
 }
 
 /** New environment grafted onto a past snapshot — `restore_env`'s twin of `restoreWorkspace`.
- *  A snapshot freezes the service list beside the data, so OMITTING `services` restores what was
- *  pushed. An explicit `[]` is a different, legal choice — the data back with no services — so it
- *  must reach the wire, and an absent list must stay off it entirely. */
+ *  A snapshot freezes the service list beside the data, so omitting `services` restores what was
+ *  pushed; an empty list means the same on the server. Only a non-empty list overrides. */
 export function restoreEnvironment(token: string, name: string, snapshotId: string, services?: ApiService[]) {
   return call<ApiEnvironment>(`/v1/environments/restore`, {
     method: "POST",

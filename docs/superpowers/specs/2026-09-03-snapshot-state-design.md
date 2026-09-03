@@ -98,9 +98,11 @@ snapshot first (they already do), then build the new object's spec by precedence
 2. the snapshot's `state`;
 3. today's fallback: the live source's spec when it still exists, else the kind's defaults.
 
-`RestoreBody` (workspace) gains optional `image`, `packages`, `resources`, `quota_gb`,
-`attached_environment`; `RestoreEnvBody.services` becomes `Option<Vec<Service>>` (absent ⇒ the
-snapshot's services; `[]` explicitly ⇒ no services, today's "data only" restore). Every value that
+`RestoreBody` (workspace) gains optional `image`, `packages`, `quota_gb`, `attached_environment`
+(not `resources`: no create or clone path lets a caller pick pod resources, so restore takes them
+from the snapshot, the live source, or the default only); `RestoreEnvBody.services` becomes `Option<Vec<Service>>` (absent ⇒ the
+snapshot's services; an empty list means the same — an environment always has services, so a
+snapshot that froze none needs them in the request or the restore is refused). Every value that
 reaches the spec passes the same validation create applies (`check_services`, package and image
 checks) whether it came from the body or from the snapshot — a snapshot written by an older
 build is data, not an authorization.
@@ -143,7 +145,8 @@ are restoring and can change it before submitting.
 |---|---|
 | restore a workspace whose source was deleted, snapshot has state | image, packages, resources, quota, attachment from the snapshot; team empty, region from the request or `default` as today |
 | restore an environment with no `services` in the body, snapshot has state | the snapshot's services, validated by `check_services` |
-| restore with `services: []` explicitly | no services (today's data-only restore) |
+| restore an environment with no services in the body and none frozen | refused with 400; the person passes `services` |
+| restore with `services: []` explicitly | the snapshot's services (an empty list is not a choice; an environment always has services) |
 | restore from a pre-change snapshot, source alive | today's behaviour (source spec) |
 | restore from a pre-change snapshot, source gone | today's behaviour (defaults) |
 | clone of an interrupted workspace | seeds bytes from the held sync cut; spec from the source Workspace CR; the sync cut's state is present but unused here |

@@ -1622,7 +1622,7 @@ async fn restoring_an_environment_without_services_takes_the_snapshots() {
 /// An explicit empty list is a choice — the data back, no services — and must not be read as
 /// "absent, so take the snapshot's".
 #[tokio::test]
-async fn restoring_an_environment_with_empty_services_restores_data_only() {
+async fn restoring_an_environment_with_empty_services_takes_the_snapshots_too() {
     let s = server_with_env_snapshot_only("snap-env", Some(environment_state(2, 9))).await;
     let r = restore(
         &s,
@@ -1632,8 +1632,18 @@ async fn restoring_an_environment_with_empty_services_restores_data_only() {
     .await;
     assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
     let e = &s.rec.sent("POST", &format!("{API}/environments"))[0];
-    assert_eq!(e["spec"]["services"].as_array().unwrap().len(), 0);
+    assert_eq!(e["spec"]["services"].as_array().unwrap().len(), 2, "an empty list is not a choice: the snapshot's services apply");
     assert_eq!(e["spec"]["storage"]["quotaGb"], 9, "quota still comes from the snapshot");
+}
+
+/// A pre-change snapshot froze no services; with none in the body either there is nothing to run,
+/// and an environment is never created without services.
+#[tokio::test]
+async fn restoring_an_environment_with_no_services_anywhere_is_refused() {
+    let s = server_with_env_snapshot_only("snap-env", None).await;
+    let r = restore(&s, "/v1/environments/restore", json!({"name": "back", "snapshot_id": "snap-env"})).await;
+    assert_eq!(r.status(), 400, "{}", r.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty());
 }
 
 /// A frozen service list is no more trusted than a body one — `check_services` is the trust

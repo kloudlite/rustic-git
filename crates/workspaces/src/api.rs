@@ -1550,8 +1550,8 @@ struct RestoreEnvBody {
 /// `restoreOf` source for an Environment.
 ///
 /// The services default to what the snapshot froze beside the bytes (`SnapshotState`), because an
-/// environment's data without its services is not the environment. A body list overrides it, and
-/// an explicit `[]` restores the DATA alone — still legal, now a choice rather than the only door.
+/// environment's data without its services is not the environment. A non-empty body list overrides
+/// it; an empty one means the same as none. An environment always has services.
 async fn restore_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -1593,7 +1593,17 @@ async fn restore_env(
         Some(crd::SnapshotState::Environment { services, quota_gb }) => Some((services.clone(), *quota_gb)),
         _ => None,
     };
-    let services = body.services.clone().or_else(|| frozen.as_ref().map(|f| f.0.clone())).unwrap_or_default();
+    // An environment always has services: an empty body list is "use the snapshot's", never
+    // "restore the data with nothing running" — the owner ruled the latter out on 2026-09-03.
+    let services = body
+        .services
+        .clone()
+        .filter(|l| !l.is_empty())
+        .or_else(|| frozen.as_ref().map(|f| f.0.clone()))
+        .unwrap_or_default();
+    if services.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "an environment needs at least one service; this snapshot froze none, so pass `services`").into_response());
+    }
     check_services(&services)?;
     let quota = match (body.quota_gb, &frozen) {
         (Some(q), _) => clamp_quota(q),

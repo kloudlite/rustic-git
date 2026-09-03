@@ -206,8 +206,8 @@ snapshot + upload + mark `Ready` + advance `status.head`, with an optional messa
 Every cut also records `spec.state` (`crd::SnapshotState`), the parent's own definition — image,
 packages, resources, quota, attached environment for a workspace; services and quota for an
 environment — frozen at that instant, and `restore` defaults to whatever it froze (the request
-body's fields override it; an environment restore with `services: []` explicit is data-only, not
-"take the frozen services too"). A
+body's fields override it; an environment always has services, so an empty `services` list means
+the snapshot's, and a snapshot that froze none needs them in the request). A
 workspace created with `repo`/`branch` is seeded by an init container that clones it over SSH with
 the owner's platform key, inside the workspace pod itself — no credential Secret is minted for it.
 There is no user-facing un-pushed state; internally
