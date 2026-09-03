@@ -244,7 +244,10 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             }
         });
     // The `Snapshot` kind: no finalizer (see `snapshot::reconcile_snapshot`'s module doc), so a
-    // plain watch over every one in the cluster is enough.
+    // plain watch over every one in the cluster is enough — and it has to be one: a Snapshot
+    // carries no node of its own, so there is no field to select on, and a label would be a second
+    // copy of `Volume.spec.nodeName` that some write path forgets to stamp. `reconcile_snapshot`
+    // filters against the node-scoped Volume store instead, at no API cost.
     let snapshots = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), watcher::Config::default())
         .shutdown_on_signal()
         .run(|s, c| timed("snapshot", async move { snapshot::reconcile_snapshot(s, c).await }), error_policy, ctx.clone())

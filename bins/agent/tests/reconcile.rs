@@ -4109,7 +4109,7 @@ async fn snapshot_model_clone_checks_out_its_graft_snapshot_and_records_it_as_he
     assert!(!rec.calls().iter().any(|c| c.contains("POST") && c.contains("/volumes")), "a shared-volume clone creates no child Volume");
 }
 
-/// An environment RESTORED onto a commit (`/v1`'s `CloneOf { volume, commit }`) records that
+/// An environment RESTORED onto a snapshot (`/v1`'s `CloneOf { volume, commit }`) records that
 /// snapshot as its own `status.head` instead of parking forever in `HeadUnknown` — the live repro of
 /// 2026-09-03. The workspace twin is
 /// `snapshot_model_clone_checks_out_its_graft_snapshot_and_records_it_as_head`.
@@ -5026,4 +5026,80 @@ async fn deleting_a_restored_workspace_removes_only_its_own_owner_entry() {
     assert_eq!(patches[0][1]["op"], "replace");
     assert_eq!(patches[0][1]["value"].as_array().unwrap().len(), 1, "only mine goes: {:?}", patches[0]);
     assert_eq!(patches[0][1]["value"][0]["uid"], "src-uid");
+}
+
+// ── I6: filter foreign Snapshots against the node's Volume store, not a GET ────────────────
+
+fn snapshot_working(name: &str, volume: &str, worktree: &str) -> Arc<crd::Snapshot> {
+    Arc::new(
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": name, "uid": "snap-uid"},
+            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": ""},
+        }))
+        .unwrap(),
+    )
+}
+
+/// I6: a Snapshot on another node's volume costs NO API calls. Every node watches every
+/// Snapshot, so the ~(N-1)/N that are not ours were each paying a Workspace GET (and an
+/// Environment GET on the miss) just to discover that.
+#[tokio::test]
+async fn a_snapshot_on_another_nodes_volume_makes_no_api_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    // The node-scoped Volume store holds only this node's volumes; `vol-elsewhere` is absent.
+    ctx.remember_volume(volume(1));
+
+    let action = rustic_git_agent::snapshot::reconcile_snapshot(snapshot_working("push-1", "vol-elsewhere", "ws-1"), ctx.clone())
+        .await
+        .expect("no error");
+
+    assert!(rec.calls().is_empty(), "a foreign volume's snapshot must cost nothing: {:?}", rec.calls());
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+}
+
+/// The volume IS ours but the worktree cannot be resolved yet (a push racing `volumeRef`
+/// visibility): still a requeue, still through `worktree_node`. The pre-filter must not turn a
+/// racing push into a silently hung one.
+#[tokio::test]
+async fn a_snapshot_on_my_volume_still_resolves_its_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/workspaces/ws-1"),
+            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1"),
+        ],
+    );
+    ctx.remember_volume(volume(1)); // "vol-1", this node
+
+    let action = rustic_git_agent::snapshot::reconcile_snapshot(snapshot_working("push-1", "vol-1", "ws-1"), ctx.clone())
+        .await
+        .expect("no error");
+
+    assert!(rec.calls().iter().any(|c| c == "GET /apis/rustic-git.io/v1alpha1/workspaces/ws-1"));
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+}
+
+/// A volume the store has not seen yet is NOT "not mine": the store is a cache, and a Volume
+/// created seconds ago may not have reached it. Keep-biased — fall through to the real lookup.
+#[tokio::test]
+async fn an_unknown_volume_falls_through_to_the_worktree_lookup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/workspaces/ws-1"),
+            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1"),
+        ],
+    );
+    // Store deliberately EMPTY — not yet populated, which is not evidence of anything.
+
+    let _ = rustic_git_agent::snapshot::reconcile_snapshot(snapshot_working("push-1", "vol-x", "ws-1"), ctx.clone()).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c == "GET /apis/rustic-git.io/v1alpha1/workspaces/ws-1"),
+        "an empty store must not be read as 'not mine'"
+    );
 }

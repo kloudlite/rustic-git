@@ -62,6 +62,22 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
     if phase != crd::Phase::Working {
         return Ok(Action::await_change());
     }
+    // Every node watches every Snapshot in the cluster (a Snapshot carries no node of its own, so
+    // there is nothing for a field selector to select on), and the ~(N-1)/N that are not ours were
+    // each paying a Workspace GET — plus an Environment GET on the miss — purely to discover that.
+    // The shared Volume store is ALREADY scoped to this node's volumes (`run.rs`'s
+    // `spec.nodeName={me}` watch), so the same answer is an in-memory read.
+    //
+    // Keep-biased: a store that has not SEEN the volume is not a store that says it is foreign — a
+    // Volume created seconds ago may not have reached the cache — so only a store holding at least
+    // one volume, and not this one, short-circuits. `worktree_node` stays as the second check, and
+    // it is the one that decides.
+    {
+        let store = ctx.volumes.state();
+        if !store.is_empty() && !store.iter().any(|v| v.name_any() == s.spec.volume) {
+            return Ok(Action::await_change());
+        }
+    }
     let Some((kind, node)) = worktree_node(&ctx, &s.spec.volume, &s.spec.worktree).await? else {
         // F1: NOT `await_change()`. Every node runs this same reconcile, so "not mine" is usually
         // right — but the snapshots controller watches ONLY Snapshots, so if this is a push racing
