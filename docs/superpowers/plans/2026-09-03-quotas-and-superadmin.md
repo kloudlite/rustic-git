@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give every owner (person or team) a per-owner allocation ceiling enforced by `/v1` and by Kubernetes, a request/approve path for raising it, and a real superadmin claim to replace the email-allowlist env var.
+**Goal:** Give every owner (person or team) a per-owner allocation ceiling enforced by `/v1` and by Kubernetes, a request/approve path for raising it, a real superadmin claim to replace the email-allowlist env var, and every superadmin-only surface served by a SEPARATE `rustic-git-api` process that a `/v1` authorization bug cannot reach.
 
-**Architecture:** Two new cluster-scoped CRDs — `Quota` (name = owner slug, plus two `default-*` fallbacks) and `QuotaRequest` — written only by `/v1`. Usage is computed on every request by listing the owner's already-label-indexed `Workspace`/`Environment`/`Volume`/`Snapshot` objects; nothing is cached and no counter is stored. `/v1` refuses over-quota allocation with a 409 sentence naming the dimension; the agent additionally writes a Kubernetes `ResourceQuota` into each owner namespace as the platform-side cap on cpu/memory. Superadmin becomes a boolean claim in the session JWT, minted at sign-in from a `superadmins` collection in the mongo directory (bootstrapped from `RUSTIC_GIT_WORKSPACES_ADMINS`), read by `/v1` and by the web's new `/admin` area.
+**Architecture:** Two new cluster-scoped CRDs — `Quota` (name = owner slug, plus two `default-*` fallbacks) and `QuotaRequest`. Usage is computed on every request by listing the owner's already-label-indexed `Workspace`/`Environment`/`Volume`/`Snapshot` objects; nothing is cached and no counter is stored. `/v1` refuses over-quota allocation with a 409 sentence naming the dimension; the agent additionally writes a Kubernetes `ResourceQuota` into each owner namespace as the platform-side cap on cpu/memory. Superadmin becomes a boolean claim in the session JWT, minted at sign-in from a `superadmins` collection in the mongo directory (bootstrapped from `RUSTIC_GIT_WORKSPACES_ADMINS`), read by two routers built from the same `rustic-git-api` binary and gated by one env var, `RUSTIC_GIT_API_ROLE=user|admin`: `api::router` (`/v1/*` — own quota read, own request create/read, regions list-active, every ordinary workspace/environment/volume route) and `api::admin::router` (`/admin/*` — regions create, quota defaults, quota request decide, superadmin list, every owner's usage, node decommission status, cross-owner list/stop/delete), the latter refusing every request without `superadmin: true` in the JWT before it is routed at all. Each is its own Deployment, Service, Ingress host and ServiceAccount; the admin ClusterRole is the only one with `create`/`patch`/`delete` on `Quota`, `QuotaRequest` and `Region`. The web's `/admin` area calls the admin host through an env var; everything else keeps calling `/v1`.
 
 **Tech Stack:** Rust (`kube`/`k8s-openapi`, `axum`, `serde`, `jsonwebtoken`, `mongodb`), Kubernetes CRDs + RBAC, Next.js app router + `bun:test`.
 
@@ -49,12 +49,27 @@ These apply to every task; they are not repeated per task.
 
 ## Ordering note: this plan runs AFTER the review-fix plans
 
-Two things the review-fix plans (`docs/superpowers/plans/2026-09-03-review-server-deploy.md` and its siblings) do first, which change where you type:
+The review-fix plans (`docs/superpowers/plans/2026-09-03-review-server-deploy.md`,
+`2026-09-03-review-workspaces-api.md` and siblings) land first and have already changed where you
+type, as of the `review-api` branch:
 
-1. **`crates/workspaces/src/api.rs` may already be a module directory.** If `crates/workspaces/src/api.rs` still exists as one file, all `/v1` edits below go in it. If it is now `crates/workspaces/src/api/` with submodules, then: the new quota routes and handlers go in a new `crates/workspaces/src/api/quota.rs` declared from `api/mod.rs`, `Caller`/`caller`/`may_act_on`/`require_admin`/`Directory` stay in `api/mod.rs` (they are shared), and each enforcement call goes in whichever submodule holds that handler. **The handler and helper function names below are unchanged either way** — locate by name (`rg -n "async fn create_ws" crates/workspaces/src`), not by line number.
-2. **The per-owner creation cap (review item C2) is a stopgap this plan replaces.** Those plans add a fixed per-owner cap on `create_ws`/`create_env` as a holding measure. Task 3 deletes it: `rg -n "C2|creation cap|MAX_WORKSPACES|per-owner cap" crates/workspaces/src` and remove the constant, the check and its tests in the same commit that lands `quota::check`. The `Quota` object is the cap now, and two caps that can disagree is the bug.
+1. **`crates/workspaces/src/api.rs` is now `crates/workspaces/src/api/{mod,scope,workspaces,environments,volumes,push}.rs`.**
+   `mod.rs` holds `ApiState`, `Caller`/`caller`, `may_act_on`, `require_admin`, `trait Directory`,
+   `router()`, `rid`, the regions handlers, and every `use`/re-export the submodules share.
+   `scope.rs` holds the owner/team resolution helpers (`teams_for`, `caller_owners`,
+   `resolve_new_owner`, `may_act_on`'s callers outside `mod.rs`). `workspaces.rs`, `environments.rs`,
+   `volumes.rs` and `push.rs` hold that kind's handlers. Task 9 below adds a sixth submodule,
+   `api/admin.rs`, for the superadmin-only handlers, plus `api::admin::router()` beside
+   `api::router()`. **The handler and helper function names in every task below are unchanged
+   either way** — locate by name (`rg -rn "async fn create_ws" crates/workspaces/src/api`), not by
+   line number, and put a new handler in the submodule its kind already lives in (a new quota
+   handler goes in `mod.rs` beside the other cross-cutting routes, exactly as Tasks 2, 3 and 4 below
+   write it).
+2. **The per-owner creation cap (review item C2) is a stopgap this plan replaces.** Those plans add a fixed per-owner cap on `create_ws`/`create_env` as a holding measure. Task 3 deletes it: `rg -rn "C2|creation cap|MAX_WORKSPACES|per-owner cap" crates/workspaces/src` and remove the constant, the check and its tests in the same commit that lands `quota::check`. The `Quota` object is the cap now, and two caps that can disagree is the bug.
+3. **`ApiState::new` already takes `(jwt, admins)`, not `(store, jwt, admins)`** — the review plans dropped the unused store argument first. Task 5b's step 4 sweep target is `ApiState::new(jwt, admins)` → `ApiState::new(jwt)`; Task 9 below removes the `admins: HashSet<String>` field itself once the claim and the admin router replace it, so a caller written against `ApiState::new(jwt)` in Task 5b needs no further change in Task 9 — only the field's removal, which the compiler will point at.
+4. **`Region` has no store of its own; `ApiState::new(jwt, admins)` reflects that already** — `crd::Region` is written by `/v1/regions` today and Task 9 relocates the write (not the type) to `/admin/regions`.
 
-Also: the review plans make `trait Directory`'s methods **required** (no default bodies). Task 4 adds `team_role` as a required method, so every stub implementing `Directory` must gain it. The stubs, at the time of writing: `crates/workspaces/tests/api_teams.rs` (`StubMembership`), `crates/workspaces/tests/api_user.rs` (four), and one in-module `Stub` inside `api.rs`. Let the compiler enumerate them.
+Also: the review plans make `trait Directory`'s methods **required** (no default bodies). Task 4 adds `team_role` as a required method, so every stub implementing `Directory` must gain it. The stubs, at the time of writing: `crates/workspaces/tests/api_teams.rs` (`StubMembership`), `crates/workspaces/tests/api_user.rs` (four), and one in-module `Stub` inside `api/mod.rs`. Let the compiler enumerate them.
 
 ## File Structure
 
@@ -81,7 +96,13 @@ Also: the review plans make `trait Directory`'s methods **required** (no default
 | `web/apps/web/src/app/(shell)/[owner]/(org)/page.tsx` | Modify | Show the bar |
 | `web/apps/web/src/app/(shell)/admin/*` | Create | The admin area |
 | `web/apps/web/src/components/app/shell-nav.tsx` | Modify | `admin` is a root page |
-| `tests/ws_e2e.sh` | Modify | Limit → request → approve → succeed |
+| `crates/workspaces/src/api/admin.rs` | Create | `api::admin::router()`, the superadmin-only handlers, the pre-route claim refusal |
+| `bins/api/src/main.rs` | Modify | `RUSTIC_GIT_API_ROLE`, mount `api::router` or `api::admin::router`, bootstrap only on `admin` |
+| `deploy/rustic-git.yaml` | Modify | `rustic-git-admin` Deployment, Service, Ingress, ServiceAccount |
+| `deploy/k3s/api-rbac.yaml` | Modify | Split into `rustic-git-api` (user) and `rustic-git-admin` ClusterRoles |
+| `web/apps/web/src/lib/api.ts` | Modify | `adminCall`, an `RUSTIC_GIT_ADMIN_API_URL`-based base |
+| `web/apps/web/.env.example` (or the deploy env block) | Modify | `NEXT_PUBLIC_ADMIN_API_URL` / `RUSTIC_GIT_ADMIN_API_URL` |
+| `tests/ws_e2e.sh` | Modify | Limit → request → approve → succeed; admin calls against the admin base |
 
 ---
 
@@ -1752,7 +1773,7 @@ git commit -m "Mint a superadmin claim from a directory list bootstrapped by the
   - `api::require_admin(c: &Caller) -> Result<(), Response>`
   - `api::may_act_on(s, c: &Caller, owner: &str) -> bool` — third arm is the claim
   - `POST /v1/quota-requests/{id}/approve`, `POST /v1/quota-requests/{id}/deny`
-  - `ApiState::new(store, jwt)` — two arguments; the `admins` field is gone
+  - `ApiState::new(jwt)` — one argument; the `admins: HashSet<String>` field is gone, replaced by the `superadmin` claim on `Caller` (Task 9 relocates the routes that used to need it)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1954,7 +1975,7 @@ Fix each error by class, and nothing else:
 - `expected String, found Caller` where a value is stored into a spec → `c.name.clone()`.
 - `binary operation == cannot be applied` → compare `c.name == owner`.
 - `may_act_on(&s, &caller_id, …)` where `caller_id` is a `&str` from somewhere other than `caller()` → thread the `Caller` down instead; `find_env`, `my_ws`, `resolve_new_owner`, `caller_owners` and `find_commit_model_snapshot*` all take the caller and become `&Caller`.
-- Test harnesses calling `ApiState::new(store, jwt, HashSet::new())` → drop the third argument.
+- Test harnesses calling `ApiState::new(jwt, HashSet::new())` → drop the second argument.
 
 - [ ] **Step 5: Approve and deny**
 
@@ -2079,6 +2100,15 @@ Simplify the `team` line if the compiler or a reviewer finds it convoluted: the 
     // fallback number, never an authorization.
     let team = s.directory.as_ref().is_some_and(|_| owner != c.name);
 ```
+
+**Where this lands, ahead of Task 9:** `approve_quota_request`, `deny_quota_request`, `pending_request`,
+`decide` and `overlay` are written into `crates/workspaces/src/api/mod.rs` in this task, routed on
+`/v1`, exactly as above — Task 9 has not run yet and there is no `api::admin` module for them to go
+in. Task 9 **moves** these five items (function bodies unchanged) into the new
+`crates/workspaces/src/api/admin.rs`, deletes their `/v1` routes and re-adds them under
+`api::admin::router()`'s `/admin/quota-requests/{id}/approve|deny`. Nothing about their logic
+changes between the two tasks — only which router mounts them and which host answers them — so this
+task's tests keep passing unmodified once ported to the admin harness in Task 9's own test file.
 
 - [ ] **Step 6: Run the tests**
 
@@ -2487,6 +2517,10 @@ git commit -m "Show quota use on the org page and offer a request from the refus
 
 ### Task 7b: Web — the `/admin` area
 
+**Runs after Task 12** (not before it, despite the number): every call this task's pages make goes
+through `adminCall` against the admin host, which Task 12 introduces. Do Tasks 9-12 first if working
+this plan in task order; §5's admin split is a prerequisite of the admin area, not a follow-on to it.
+
 **Files:**
 - Create: `web/apps/web/src/app/(shell)/admin/layout.tsx`, `page.tsx` (queue), `usage/page.tsx`, `defaults/page.tsx`, `regions/page.tsx`, `nodes/page.tsx`, `actions.ts`
 - Modify: `web/apps/web/src/components/app/shell-nav.tsx` (`ROOT_PAGES`) and `shell-nav.test.ts`
@@ -2572,27 +2606,39 @@ export async function requireSuperadmin(next: string) {
 
 `app/(shell)/admin/page.tsx` — the queue: `listQuotaRequests(undefined, token)`, filtered to `state === "pending"` first and the last few decided ones below, each row showing owner, the dimensions asked for, the reason and the age (`lib/time.ts` for the age — do not format a date by hand). Two buttons per pending row calling a server action in `admin/actions.ts` that wraps `decideQuotaRequest`, with a note field. Copy the destructive-action pattern from a repo `settings/` page rather than inventing one.
 
-`admin/usage/page.tsx` — every owner's usage against their limit. There is no "list every owner" call, so the owners come from the requests and quotas the api already returns: list every `QuotaRequest` for the owner names, `getQuota` per owner. Mark it:
+`admin/usage/page.tsx` — every owner's usage against their limit, fetched from the admin host
+(`adminCall`, Task 12). There is no "list every owner" call, so the owners come from the requests
+and quotas the admin api already returns: `GET /admin/quota-requests` (Task 9) for the owner names,
+`GET /admin/quota/{owner}` per owner. Mark it:
 
 ```tsx
 {/* ponytail: the owner list is derived from who has ever had a Quota or a request; an owner who
-    has neither is not shown. A `GET /v1/quota/all` is the upgrade when the list has to be
-    complete. */}
+    has neither is not shown. A `GET /admin/quota` (no owner) listing every Quota plus every
+    distinct owner label is the upgrade when the list has to be complete. */}
 ```
 
-`admin/defaults/page.tsx` — the two `default-user` / `default-team` objects, shown and editable. Editing them is a `POST /v1/quota-requests` + immediate approve, which is a hack; instead, add the one route this page needs to `/v1` in this task: `PUT /v1/quota/{owner}` taking a `QuotaSpec`, `require_admin`-gated, applying the same create-or-patch `approve_quota_request` uses. Factor that body out of Task 5b's handler into `async fn write_quota(s, owner, spec)` and call it from both — one writer, so the two can never disagree about how a quota lands.
+`admin/defaults/page.tsx` — the two `default-user` / `default-team` objects, shown and editable
+through `PUT /admin/quota/{owner}` (Task 9's `write_quota`, the same function
+`approve_quota_request` calls — one writer, so the two can never disagree about how a quota lands).
 
-`admin/regions/page.tsx` — the existing region list and the create form, moved under the claim (the route is already admin-gated as of Task 5b).
+`admin/regions/page.tsx` — the region list (still `GET /v1/regions`, unmoved — Task 9 keeps
+list-active on `/v1`) and the create form, which now posts to `POST /admin/regions` on the admin
+host.
 
-`admin/nodes/page.tsx` — each node's `rustic-git.io/decommission-status` annotation. There is no `/v1` route for nodes today; add `GET /v1/nodes` to `crates/workspaces/src/api.rs`, `require_admin`-gated, returning `[{name, ready, decommission, decommissionStatus}]` read from the `Node` list. `deploy/k3s/api-rbac.yaml` gains:
+`admin/nodes/page.tsx` — each node's `rustic-git.io/decommission-status` annotation, from
+`GET /admin/nodes` (Task 9), returning `[{name, ready, decommission, decommissionStatus}]` read
+from the `Node` list. `deploy/k3s/api-rbac.yaml`'s **admin** ClusterRole (Task 10) gains:
 
 ```yaml
   # Read-only, for the admin area's decommission view: `rustic-git.io/decommission-status` is the
-  # annotation an operator watches a drain through, and it is on the Node.
+  # annotation an operator watches a drain through, and it is on the Node. Admin-only: a node name
+  # and its decommission state are platform topology, not something an ordinary owner needs.
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list"]
 ```
+
+Every call this page and the three above make goes through `adminCall`, not `call` — see Task 12.
 
 - [ ] **Step 6: Run the gates and commit**
 
@@ -2605,7 +2651,7 @@ bun test; echo exit=$?
 ```
 
 ```bash
-git add web/apps/web/src crates/workspaces/src/api.rs deploy/k3s/api-rbac.yaml
+git add web/apps/web/src crates/workspaces/src/api/admin.rs deploy/k3s/api-rbac.yaml
 git commit -m "Add an admin area for the quota queue, usage, defaults, regions and nodes"
 ```
 
@@ -2690,6 +2736,11 @@ not touched — a quota blocks new allocation only, never an existing working co
 ```
 
 - [ ] **Step 3: The e2e block**
+
+Write this against `$BASE` as shown — Tasks 9-13 have not run yet at this point in numeric task
+order. Task 13 repoints the two admin calls this step adds (`.../approve`, and the region create it
+does not add but `deploy/k3s/README.md`'s note now mentions) at a second base, `$ADMIN_BASE`, once
+the admin server exists; nothing else in this step changes.
 
 In `tests/ws_e2e.sh`, extend `mint_jwt` with a fourth argument:
 
@@ -2813,10 +2864,1014 @@ git commit -m "Document quotas and superadmin and cover the request loop end to 
 
 ---
 
+### Task 9: `api::admin` — a separate router, and the superadmin-only handlers moved into it
+
+**Files:**
+- Create: `crates/workspaces/src/api/admin.rs`
+- Modify: `crates/workspaces/src/api/mod.rs` — declare `pub mod admin;`, delete `create_region`,
+  `approve_quota_request`, `deny_quota_request`, `pending_request`, `decide`, `overlay` and their
+  `/v1` routes; `require_admin` gains a second, pre-routing use
+- Modify: `bins/api/src/main.rs` — `RUSTIC_GIT_API_ROLE`, mount `api::router` or
+  `api::admin::router`, not both
+- Test: new `crates/workspaces/tests/api_admin.rs`; `crates/workspaces/tests/api_quota.rs` (the
+  approve/deny tests move here, unmodified apart from the base URL)
+
+**Interfaces:**
+- Consumes: `Caller`, `caller`, `require_admin`, `may_act_on`, `kube`, `kube_err`, `ApiState`
+  (Task 5b); `crd::{Quota, QuotaRequest, RequestState}`, `quota::effective` (Tasks 1, 2).
+- Produces:
+  - `api::admin::router(state: Arc<ApiState>) -> Router` — mounts `/admin/*` only.
+  - `api::admin::refuse_without_claim` — a `axum::middleware::from_fn` layer that 401/403s before
+    any handler runs.
+  - `POST /admin/regions`, `PUT /admin/quota/{owner}`, `POST /admin/quota-requests/{id}/approve`,
+    `POST /admin/quota-requests/{id}/deny`, `GET /admin/quota-requests` (every request, no owner
+    filter), `GET /admin/usage`, `GET /admin/nodes`, `GET/POST/DELETE /admin/superadmins[/{user}]`,
+    `GET/POST /admin/workspaces`, `POST /admin/workspaces/{id}/stop`,
+    `DELETE /admin/workspaces/{id}` (and the same three verbs for environments) as thin
+    claim-gated wrappers over the existing owner-scoped handlers with the owner taken from the
+    query/body rather than the caller.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `crates/workspaces/tests/api_admin.rs`. Copy the `Server`/`server()`/`token()` harness from
+`crates/workspaces/tests/api_teams.rs:26-83` verbatim, but build the router with
+`rustic_git_workspaces::api::admin::router` instead of `api::router`, and add an `admin_token`
+helper identical to the one in `api_quota.rs` (`jwt.mint_admin("root@example.com", "Root",
+Some("root"), true)`):
+
+```rust
+//! `api::admin::router` in isolation: every request answers 401/403 without the claim, and every
+//! `/v1` path 404s here — the two routers must never both answer the same URL.
+
+const API: &str = "/apis/rustic-git.io/v1alpha1";
+
+/// The one property this whole task exists to guarantee: a `/v1`-shaped path finds nothing on the
+/// admin router, so a routing bug cannot make an admin process answer an ordinary user's request
+/// with an ordinary user's authorization.
+#[tokio::test]
+async fn the_admin_router_has_never_heard_of_v1() {
+    let s = admin_server(vec![]).await;
+    for path in ["/v1/workspaces", "/v1/quota", "/v1/regions", "/v1/quota-requests"] {
+        let code = reqwest::Client::new()
+            .get(format!("{}{path}", s.base))
+            .bearer_auth(admin_token(&s.jwt))
+            .send().await.unwrap()
+            .status();
+        assert_eq!(code, 404, "{path}");
+    }
+}
+
+/// No token, and a token with no claim, are both refused before any handler runs — the recorder
+/// has zero calls either way, which is the "before routing" half of the spec sentence.
+#[tokio::test]
+async fn every_admin_path_refuses_without_the_claim() {
+    let s = admin_server(vec![]).await;
+    let code = reqwest::Client::new()
+        .get(format!("{}/admin/quota-requests", s.base))
+        .send().await.unwrap()
+        .status();
+    assert_eq!(code, 401);
+
+    let code = reqwest::Client::new()
+        .get(format!("{}/admin/quota-requests", s.base))
+        .bearer_auth(token(&s.jwt, "karthik")) // an ordinary session, no claim
+        .send().await.unwrap()
+        .status();
+    assert_eq!(code, 403);
+    assert!(s.rec.calls().is_empty(), "no handler must run before the claim check: {:?}", s.rec.calls());
+}
+
+#[tokio::test]
+async fn a_superadmin_may_register_a_region_on_the_admin_host() {
+    let routes = vec![Route {
+        method: "PATCH",
+        path: format!("{API}/regions/us"),
+        status: 200,
+        body: json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+                      "metadata": {"name": "us"}, "spec": {"name": "US", "status": "active"}}),
+    }];
+    let s = admin_server(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/regions", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"id": "us", "name": "US"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+}
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cargo test -p rustic-git-workspaces --test api_admin -- --test-threads=1; echo exit=$?`
+Expected: FAIL — `api::admin` does not exist (compile error).
+
+- [ ] **Step 3: Write `api/admin.rs`**
+
+```rust
+//! Everything that needs the `superadmin` claim, on its OWN router — never mounted alongside
+//! `api::router`. A `/v1` authorization bug cannot reach a handler here because the handler is not
+//! in that binary's router at all; that separation is the whole reason this module exists rather
+//! than a `require_admin` check inside `api::router` (design doc §5).
+//!
+//! Every handler below re-derives the owner from the request (a query param, a path segment, the
+//! object being acted on) rather than from the caller — the caller here is never the owner, they
+//! are the person acting ON an owner, and `may_act_on`'s claim arm is what makes that legitimate.
+
+use super::*;
+
+/// Runs before ANY handler on this router. A token that fails to verify is 401; one that verifies
+/// but carries no claim is 403 — both before the request reaches a handler, which is what makes
+/// `every_admin_path_refuses_without_the_claim`'s "zero calls" assertion true by construction
+/// rather than by every handler remembering to check.
+pub async fn refuse_without_claim(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let tok = match bearer_token(&headers) {
+        Some(t) => t,
+        None => return unauthorized(),
+    };
+    match s.jwt.verify_any_user(tok.trim()) {
+        Ok((c, _)) if c.superadmin => next.run(req).await,
+        Ok(_) => (StatusCode::FORBIDDEN, "admin only").into_response(),
+        Err(_) => unauthorized(),
+    }
+}
+
+pub fn router(state: Arc<ApiState>) -> Router {
+    Router::new()
+        .route("/admin/regions", post(create_region))
+        .route("/admin/quota/{owner}", axum::routing::put(write_quota_route))
+        .route("/admin/quota-requests", get(list_all_quota_requests))
+        .route("/admin/quota-requests/{id}/approve", post(approve_quota_request))
+        .route("/admin/quota-requests/{id}/deny", post(deny_quota_request))
+        .route("/admin/usage", get(usage_all))
+        .route("/admin/nodes", get(list_nodes))
+        .route("/admin/superadmins", get(list_superadmins_route))
+        .route(
+            "/admin/superadmins/{user}",
+            post(add_superadmin_route).delete(remove_superadmin_route),
+        )
+        .route("/admin/workspaces", get(admin_list_ws))
+        .route("/admin/workspaces/{id}", axum::routing::delete(admin_delete_ws))
+        .route("/admin/workspaces/{id}/stop", post(admin_stop_ws))
+        .route("/admin/environments", get(admin_list_env))
+        .route("/admin/environments/{id}", axum::routing::delete(admin_delete_env))
+        .route("/admin/environments/{id}/stop", post(admin_stop_env))
+        // The claim check runs BEFORE every route above, not per-handler: `route_layer` wraps only
+        // the routes already added, so a route added after this line would run unguarded — there
+        // are none, and `every_admin_path_refuses_without_the_claim` is the tripwire if one is
+        // ever added below it by mistake.
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), refuse_without_claim))
+        .with_state(state)
+}
+
+// ── regions (moved from api::router; body unchanged) ───────────────────────
+
+async fn create_region(
+    State(s): State<Arc<ApiState>>,
+    Json(body): Json<NewRegion>,
+) -> Result<Response, Response> {
+    // The claim already gated this request in `refuse_without_claim`; no second check here — the
+    // one place that decides is the layer every route on this router shares.
+    check_path_segment(&body.id)?;
+    let status = if body.status == "inactive" { "inactive" } else { "active" };
+    let r = crd::Region::new(&body.id, crd::RegionSpec { name: body.name, status: status.into() });
+    let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
+    let saved = api
+        .patch(&body.id, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&r))
+        .await
+        .map_err(kube_err)?;
+    Ok((StatusCode::CREATED, Json(region_doc(&saved))).into_response())
+}
+
+// ── quota decisions (moved from api::mod, Task 5b; bodies unchanged except the
+//    `caller`/`require_admin` calls, redundant under this router's layer, are dropped) ──────────
+
+/// The one writer of a `Quota` object — `approve_quota_request` and `PUT /admin/quota/{owner}`
+/// both call this, so the two paths that can set a limit can never disagree about how it lands.
+async fn write_quota(s: &ApiState, owner: &str, spec: crd::QuotaSpec) -> Result<crd::Quota, Response> {
+    let api: Api<crd::Quota> = Api::all(kube(s)?.clone());
+    match api.get_opt(owner).await.map_err(kube_err)? {
+        Some(_) => api
+            .patch(owner, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": spec})))
+            .await
+            .map_err(kube_err),
+        None => api.create(&PostParams::default(), &crd::Quota::new(owner, spec)).await.map_err(kube_err),
+    }
+}
+
+async fn write_quota_route(
+    State(s): State<Arc<ApiState>>,
+    Path(owner): Path<String>,
+    Json(spec): Json<crd::QuotaSpec>,
+) -> Result<Response, Response> {
+    let q = write_quota(&s, &owner, spec).await?;
+    Ok(Json(q.spec).into_response())
+}
+
+async fn pending_request(s: &ApiState, id: &str) -> Result<crd::QuotaRequest, Response> {
+    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
+    let r = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    if !is_pending(&r) {
+        return Err((StatusCode::CONFLICT, "that request has already been decided").into_response());
+    }
+    Ok(r)
+}
+
+fn overlay(base: crd::QuotaSpec, want: &crd::RequestedQuota) -> crd::QuotaSpec {
+    crd::QuotaSpec {
+        workspaces: want.workspaces.unwrap_or(base.workspaces),
+        environments: want.environments.unwrap_or(base.environments),
+        snapshots: want.snapshots.unwrap_or(base.snapshots),
+        disk_gb: want.disk_gb.unwrap_or(base.disk_gb),
+        cpu: want.cpu.unwrap_or(base.cpu),
+        memory_gb: want.memory_gb.unwrap_or(base.memory_gb),
+    }
+}
+
+async fn decide(s: &ApiState, id: &str, state: crd::RequestState, by: &str, note: Option<String>) -> Result<Response, Response> {
+    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
+    let patch = serde_json::json!({"status": {
+        "state": state, "decidedBy": by, "decidedAt": chrono::Utc::now().to_rfc3339(), "note": note,
+    }});
+    let out = api.patch_status(id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    Ok(Json(request_doc(&out)).into_response())
+}
+
+async fn approve_quota_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    // The DECIDING caller's name is still read here (for `decidedBy` and the base-quota guess
+    // below), even though the claim itself was already checked by the layer.
+    let c = caller(&s, &headers).await?;
+    let note: Decision = if body.is_empty() { Default::default() } else {
+        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
+    };
+    let r = pending_request(&s, &id).await?;
+    let owner = r.spec.owner.clone();
+    let client = kube(&s)?;
+    let api: Api<crd::Quota> = Api::all(client.clone());
+    let existing = api.get_opt(&owner).await.map_err(kube_err)?;
+    // A slug does not say which it is, so ask the directory: a team is an owner that has members.
+    // Only used to pick which `default-*` object is the starting point for a brand-new owner, so a
+    // wrong guess costs a fallback number, never an authorization.
+    let team = s.directory.as_ref().is_some_and(|_| owner != c.name);
+    let base = match &existing {
+        Some(q) => q.spec.clone(),
+        None => crate::quota::effective(client, &owner, team).await.map_err(kube_err)?,
+    };
+    write_quota(&s, &owner, overlay(base, &r.spec.requested)).await?;
+    decide(&s, &id, crd::RequestState::Approved, &c.name, note.note).await
+}
+
+async fn deny_quota_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let note: Decision = if body.is_empty() { Default::default() } else {
+        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
+    };
+    pending_request(&s, &id).await?;
+    decide(&s, &id, crd::RequestState::Denied, &c.name, note.note).await
+}
+
+/// The whole queue, every owner — the admin list has no `owner` filter, unlike `/v1`'s.
+async fn list_all_quota_requests(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    let api: Api<crd::QuotaRequest> = Api::all(kube(&s)?.clone());
+    let mut rows = api.list(&ListParams::default()).await.map_err(kube_err)?.items;
+    rows.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
+    Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
+}
+
+// ── usage across every owner ────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct OwnerUsage {
+    owner: String,
+    limit: crd::QuotaSpec,
+    used: crate::quota::Usage,
+}
+
+/// ponytail: the owner list is derived from who has an explicit `Quota` or has ever opened a
+/// `QuotaRequest` — an owner using only the defaults and who has never asked for more is not
+/// listed. A `Node`-free way to enumerate every owner would need a third index (every distinct
+/// `rustic-git.io/owner` label value); add one if the admin usage page has to be exhaustive.
+async fn usage_all(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    let client = kube(&s)?;
+    let quotas: Api<crd::Quota> = Api::all(client.clone());
+    let reqs: Api<crd::QuotaRequest> = Api::all(client.clone());
+    let mut owners: std::collections::BTreeSet<String> = quotas
+        .list(&ListParams::default()).await.map_err(kube_err)?.items.into_iter()
+        .map(|q| q.name_any())
+        .filter(|n| n != crd::DEFAULT_USER_QUOTA && n != crd::DEFAULT_TEAM_QUOTA)
+        .collect();
+    owners.extend(reqs.list(&ListParams::default()).await.map_err(kube_err)?.items.into_iter().map(|r| r.spec.owner));
+    let mut rows = Vec::new();
+    for owner in owners {
+        let team = s.directory.as_ref().is_some_and(|_| true); // best-effort; see the ponytail on `default_quota`'s caller in `binding.rs`
+        let limit = crate::quota::effective(client, &owner, team).await.map_err(kube_err)?;
+        let used = crate::quota::usage(client, &owner).await.map_err(kube_err)?;
+        rows.push(OwnerUsage { owner, limit, used });
+    }
+    Ok(Json(rows).into_response())
+}
+
+// ── nodes ────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct NodeDoc {
+    name: String,
+    ready: bool,
+    decommission: bool,
+    decommission_status: Option<String>,
+}
+
+async fn list_nodes(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    let api: Api<k8s_openapi::api::core::v1::Node> = Api::all(kube(&s)?.clone());
+    let rows: Vec<NodeDoc> = api
+        .list(&ListParams::default()).await.map_err(kube_err)?.items.into_iter()
+        .map(|n| {
+            let ready = n.status.as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .into_iter().flatten()
+                .any(|c| c.type_ == "Ready" && c.status == "True");
+            let labels = n.metadata.labels.clone().unwrap_or_default();
+            let annotations = n.metadata.annotations.clone().unwrap_or_default();
+            NodeDoc {
+                name: n.name_any(),
+                ready,
+                decommission: labels.get("rustic-git.io/decommission").map(String::as_str) == Some("true"),
+                decommission_status: annotations.get("rustic-git.io/decommission-status").cloned(),
+            }
+        })
+        .collect();
+    Ok(Json(rows).into_response())
+}
+
+// ── superadmin list management (moved here from crates/api/src/teams.rs's
+//    /api/admin/* routes, which stay for now — see the note in Task 10) ────
+
+async fn list_superadmins_route(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    let Some(dir) = &s.directory else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "no directory configured").into_response());
+    };
+    Ok(Json(dir.superadmins().await.map_err(kube_err)?).into_response())
+}
+
+async fn add_superadmin_route(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(user): Path<String>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let Some(dir) = &s.directory else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "no directory configured").into_response());
+    };
+    dir.add_superadmin(&user, &c.name).await.map_err(kube_err)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn remove_superadmin_route(
+    State(s): State<Arc<ApiState>>,
+    Path(user): Path<String>,
+) -> Result<Response, Response> {
+    let Some(dir) = &s.directory else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "no directory configured").into_response());
+    };
+    dir.remove_superadmin(&user).await.map_err(kube_err)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ── cross-owner list / stop / delete ────────────────────────────────────────
+//
+// Every one of these is the SAME handler `api::workspaces`/`api::environments` already exports for
+// the owner-scoped `/v1` route, called with the owner taken from a query param instead of the
+// caller. `may_act_on`'s claim arm is what makes that legitimate — see `super::may_act_on` — and
+// every call is logged with the caller there, which is the whole audit trail this needs.
+
+#[derive(serde::Deserialize)]
+struct OwnerQuery {
+    owner: String,
+}
+
+async fn admin_list_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<OwnerQuery>,
+) -> Result<Response, Response> {
+    super::workspaces::list_for_owner(&s, &headers, &q.owner).await
+}
+
+async fn admin_stop_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    super::workspaces::stop_as(&s, &headers, &id).await
+}
+
+async fn admin_delete_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    super::workspaces::delete_as(&s, &headers, &id).await
+}
+
+async fn admin_list_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<OwnerQuery>,
+) -> Result<Response, Response> {
+    super::environments::list_for_owner(&s, &headers, &q.owner).await
+}
+
+async fn admin_stop_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    super::environments::stop_as(&s, &headers, &id).await
+}
+
+async fn admin_delete_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    super::environments::delete_as(&s, &headers, &id).await
+}
+```
+
+`super::workspaces::{list_for_owner, stop_as, delete_as}` and the `environments` equivalents likely
+do not exist yet by these names — `list_ws`/`stop_ws`/`delete_ws` currently read the owner from
+`caller(...)` internally. Split each into a thin `pub(crate)` `..._as(s, headers, id_or_owner)` that
+takes the resolved owner/id and does the work, with the existing `/v1` handler becoming a one-line
+wrapper that calls it with `caller(...)`'s own name — the same shape `guard_alloc` already gave
+`workspace_cost`/`environment_cost`: one function holds the logic, two callers supply the owner.
+Do this split in `workspaces.rs`/`environments.rs`, not in `admin.rs` — `admin.rs` only calls it.
+
+In `crates/workspaces/src/api/mod.rs`:
+- Add `pub mod admin;` beside the other `mod` declarations, but make it `pub` (the others are
+  private — a submodule's handlers are reached only through `router()`; `admin`'s are reached
+  through `bins/api/src/main.rs` choosing which router to mount).
+- Delete `create_region`'s `/v1/regions` `post(...)` half from `router()` — keep the `get`
+  (`list_regions` stays; §5's table keeps regions list-active on `/v1`) — and delete the function
+  body from `mod.rs` (it moved above).
+- Delete `approve_quota_request`, `deny_quota_request`, `pending_request`, `decide`, `overlay` and
+  their two `/v1/quota-requests/{id}/...` routes from `router()` — same reasoning.
+- `list_quota_requests`'s `None if c.superadmin => { ...whole queue... }` arm (Task 4/5b) is now
+  dead code on `/v1`: a non-admin caller never has the claim, and an admin caller uses
+  `GET /admin/quota-requests` instead. Delete that arm; `/v1`'s handler answers only the caller's
+  own and their teams' requests, matching §5's table exactly (`own request: create, read own`).
+
+- [ ] **Step 4: `RUSTIC_GIT_API_ROLE` in `bins/api/src/main.rs`**
+
+Right where `workspaces` (the `Router` built from `ApiState`) is assembled — after `state` is built
+and `.with_kube(...)`/`.with_directory(...)` are applied, replace the single `router(state)` call:
+
+```rust
+            // Same binary, same image, one env choosing which surface it exposes. The admin role
+            // mounts ONLY /admin — no /v1 route is compiled into that router at all, so a /v1
+            // authorization bug literally cannot reach an admin handler on that process; the user
+            // role mounts ONLY /v1 and never sees an admin route (design doc §5).
+            let role = std::env::var("RUSTIC_GIT_API_ROLE").unwrap_or_else(|_| "user".into());
+            let state = Arc::new(state);
+            let router = match role.as_str() {
+                "admin" => rustic_git_workspaces::api::admin::router(state),
+                _ => rustic_git_workspaces::api::router(state),
+            };
+```
+
+and thread `router` into wherever `router(state)`'s result was previously merged into the app's
+`Router` — read the ~10 lines below the current call site to match the existing merge (`.merge(...)`
+or `.nest(...)`) exactly; only the right-hand side changes.
+
+The bootstrap two lines above (`RUSTIC_GIT_WORKSPACES_ADMINS` → `ensure_superadmins`, Task 5a) moves
+inside `if role == "admin"` — Task 10 makes that change explicitly; this step only introduces `role`
+so Task 10 has something to branch on. Leave the bootstrap unconditional here if Task 5a already
+landed it unconditionally; do not duplicate the branch twice.
+
+- [ ] **Step 5: Run the tests**
+
+Run: `cargo test -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Expected: PASS. The approve/deny/second-pending-request tests that lived in `api_quota.rs` under
+Task 5b now target `/v1/quota-requests/{id}/approve` which 404s — move them into `api_admin.rs`,
+changing only the base path to `/admin/quota-requests/{id}/approve` and the router the harness
+builds; the assertions are otherwise identical, per the note left in Task 5b.
+
+- [ ] **Step 6: Run the gates and commit**
+
+```bash
+cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
+git add crates/workspaces/src bins/api/src/main.rs crates/workspaces/tests
+git commit -m "Serve the superadmin-only routes from their own router"
+```
+
+---
+
+### Task 10: RBAC split, and the bootstrap moves to the admin role only
+
+**Files:**
+- Modify: `deploy/k3s/api-rbac.yaml` — split `rustic-git-api`'s ClusterRole in two
+- Modify: `bins/api/src/main.rs` — the `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap runs only under
+  `RUSTIC_GIT_API_ROLE=admin`
+
+**Interfaces:**
+- Consumes: `role` (Task 9).
+- Produces: nothing new in Rust; two ClusterRoles and one ServiceAccount in the manifest
+  (`rustic-git-admin`'s Deployment binds to it — see Task 11).
+
+- [ ] **Step 1: Split the ClusterRole**
+
+In `deploy/k3s/api-rbac.yaml`, rename the existing `quotas`/`quotarequests`/`regions` rules (added
+by Task 1 and the existing regions rule) OUT of the `rustic-git-api` ClusterRole and into a new
+`rustic-git-admin` one; leave every other rule (`workspaces`, `environments`, `snapshots`,
+`volumes`, `volumereplicas`, `networkpolicies`, namespace list, `nodes` from Task 7b) on
+`rustic-git-api`, downgraded to read where the write was only ever for the admin surfaces:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustic-git-admin
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-admin
+rules:
+  # The only role that may create, patch or delete a Quota, a QuotaRequest or a Region — the
+  # design doc's whole point: RBAC, not a claim check inside a shared process, is what stops the
+  # user-role process writing one of these, because that process's ServiceAccount cannot.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotas"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotarequests"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotarequests/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["regions"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # The decommission view and the cross-owner list/stop/delete surfaces both need the full object,
+  # not the read the user role keeps for its own owner-scoped routes.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["workspaces", "environments"]
+    verbs: ["get", "list", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+```
+
+and, in the `rustic-git-api` (user-role) ClusterRole, replace its existing `quotas`/
+`quotarequests`/`regions` rules with the read-only + create-your-own-request shape §5's table
+specifies:
+
+```yaml
+  # Read for enforcement (`guard_alloc` needs the owner's effective limit) and for `GET /v1/quota`;
+  # no create, patch or delete — writing a Quota is the admin role's alone.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotas"]
+    verbs: ["get", "list"]
+  # A person or a team admin may open a request for themselves; deciding it is not a /v1 verb.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotarequests"]
+    verbs: ["get", "list", "create"]
+  # Read-only: registering a region is `POST /admin/regions` now, and `/v1/regions` keeps only the
+  # active-region GET every workspace/environment create already calls to validate `region`.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["regions"]
+    verbs: ["get", "list"]
+```
+
+Everything else in `rustic-git-api`'s rules (`workspaces`/`environments` full verbs, `snapshots`,
+`volumes`, `volumereplicas`, `networkpolicies` delete, namespace list) is unchanged — those are
+owner-scoped `/v1` routes, not admin ones, and stay exactly as they are today.
+
+- [ ] **Step 2: Move the bootstrap**
+
+In `bins/api/src/main.rs`, wrap the `RUSTIC_GIT_WORKSPACES_ADMINS` → `ensure_superadmins` block
+(Task 5a) in the role check Task 9 introduced:
+
+```rust
+            // Only the admin process seeds the directory: the bootstrap is additive and harmless
+            // to run twice, but running it from the user role too would mean an operator who
+            // scales the user Deployment to zero and only runs `admin` still gets it seeded —
+            // reversed, running it here only, a fleet with no admin replica up yet simply has no
+            // bootstrap run until one is, which is the safe direction to be wrong in.
+            if role == "admin" {
+                let seed: Vec<String> = std::env::var("RUSTIC_GIT_WORKSPACES_ADMINS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                match d.ensure_superadmins(&seed).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(added = n, "superadmins seeded from RUSTIC_GIT_WORKSPACES_ADMINS"),
+                    Err(e) => tracing::warn!(error = %e, "superadmin bootstrap skipped"),
+                }
+            }
+```
+
+`role` must be read before this point rather than where Task 9 placed it (right before building the
+router) — hoist the one `std::env::var("RUSTIC_GIT_API_ROLE")` read to right after `jwt` is
+resolved, and have Task 9's router-selection `match` reuse that same binding rather than reading the
+env var twice.
+
+- [ ] **Step 3: Run the gates and commit**
+
+```bash
+cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
+git add deploy/k3s/api-rbac.yaml bins/api/src/main.rs
+git commit -m "Split api RBAC by role and bootstrap superadmins on the admin process only"
+```
+
+---
+
+### Task 11: Deploy the admin server as its own Deployment, Service and Ingress
+
+**Files:**
+- Modify: `deploy/rustic-git.yaml` — `rustic-git-admin` Deployment, Service, Ingress
+- Modify: `deploy/pin.sh` — repin the admin Deployment's image alongside `rustic-git-api`'s (same
+  SHA, same image — see the note below)
+
+**Interfaces:**
+- Consumes: `RUSTIC_GIT_API_ROLE` (Task 9), the split RBAC and `rustic-git-admin` ServiceAccount
+  (Task 10).
+- Produces: nothing Rust; three new manifest objects plus one repin site.
+
+- [ ] **Step 1: The Deployment**
+
+Copy `rustic-git-api`'s Deployment (`deploy/rustic-git.yaml`, `name: rustic-git-api`) as the
+template — same image, same env block, same `command: ["rustic-git-api"]` (one binary, two
+processes) — and change exactly: the name, `replicas: 1` (design doc §5: one replica, an admin
+outage is a paged incident, not a capacity problem), the pod anti-affinity's `matchLabels` (there is
+only ever one pod, so drop the `podAntiAffinity` block entirely rather than keep a rule that can
+never fire), `RUSTIC_GIT_API_ROLE: admin`, and `automountServiceAccountToken` stays `false` for the
+same reason it is on the user Deployment — this process reaches the k3s cluster with its own mounted
+kubeconfig Secret, not a projected ServiceAccount token:
+
+```yaml
+# The superadmin-only surface. Same image and binary as rustic-git-api, one env apart
+# (RUSTIC_GIT_API_ROLE=admin) — see CLAUDE.md "Admin APIs live on their own server". One replica:
+# losing this pod for a few minutes during a roll is acceptable (nothing here is on any ordinary
+# request's path), and two would mean two places `RUSTIC_GIT_WORKSPACES_ADMINS` seeds from, which
+# is harmless but pointless.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-admin
+  namespace: rustic-git
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: rustic-git-admin }
+  template:
+    metadata:
+      labels: { app: rustic-git-admin }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: admin
+          image: ghcr.io/kloudlite/rustic-git:1f24e39cc8182345f04e2e69d52e071db8d82e37
+          command: ["rustic-git-api"]
+          ports:
+            - { name: http, containerPort: 8090 }
+          env:
+            - name: TOKIO_WORKER_THREADS
+              value: "2"
+            - name: RUSTIC_GIT_API_ROLE
+              value: admin
+            - name: RUSTIC_GIT_S3_URL
+              value: az://rustic-git
+            - name: AZURE_STORAGE_ACCOUNT_NAME
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+            - name: AZURE_STORAGE_ACCOUNT_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+            - name: RUSTIC_GIT_UPSTREAM
+              value: http://rustic-git:8081
+            - name: RUSTIC_GIT_API_ADDR
+              value: 0.0.0.0:8090
+            - name: RUSTIC_GIT_METRICS_ADDR
+              value: 0.0.0.0:9464
+            # The bootstrap: seeds these addresses into the directory's superadmins collection at
+            # boot (Task 10). Unset here and the admin process starts with no administrator except
+            # whoever the directory already lists — fine after the first boot, fatal on a fresh
+            # cluster, so this must be set on THIS Deployment's first rollout.
+            - name: RUSTIC_GIT_WORKSPACES_ADMINS
+              value: karthik@kloudlite.io
+            - name: RUSTIC_GIT_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
+            - name: RUSTIC_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
+          envFrom:
+            - secretRef: { name: rustic-git-kubeconfig }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+```
+
+Read the actual `rustic-git-api` Deployment in full (`deploy/rustic-git.yaml:352-495`) before
+writing this — copy every env var and volume it has that this list omits (kubeconfig mount details,
+any `envFrom`/`volumeMounts` your read finds), matching its exact names; the list above is the
+DELTA, not the complete env block.
+
+- [ ] **Step 2: The Service**
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustic-git-admin
+  namespace: rustic-git
+spec:
+  type: ClusterIP
+  selector: { app: rustic-git-admin }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+```
+
+- [ ] **Step 3: The Ingress, with a source allowlist**
+
+```yaml
+# The admin host. Nothing on it is reachable by an ordinary user's browser session — the web's
+# /admin pages call it from the server side (Task 12), never from the client — so this Ingress
+# additionally restricts the SOURCE, the same pattern `rustic-git-registry`'s peer allowlist uses,
+# rather than relying on the superadmin claim alone to be the only thing standing between the
+# public internet and these routes.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rustic-git-admin
+  namespace: rustic-git
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    # Same reasoning as the app ingress: verify with `dig admin.khost.dev` before assuming this
+    # host is Cloudflare-proxied. If it is not, this stays "false" for the same loop reason the
+    # registry's does.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Source allowlist: only the office/VPN range and the web app's own egress may reach this
+    # host at all, ahead of and independent of the superadmin claim. Replace with the real ranges
+    # before applying — a placeholder here must fail closed, not open.
+    nginx.ingress.kubernetes.io/whitelist-source-range: "<admin-source-cidrs>"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [admin.khost.dev]
+      secretName: rustic-git-admin-tls
+  rules:
+    - host: admin.khost.dev
+      http:
+        paths:
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: rustic-git-admin
+                port:
+                  number: 80
+```
+
+- [ ] **Step 4: Repin**
+
+`deploy/pin.sh` currently repins `rustic-git-api`'s image by matching `name: rustic-git-api` (or
+similar) in `deploy/rustic-git.yaml`. Read the script (`rg -n "rustic-git-api" deploy/pin.sh`) and
+extend whatever selector it uses so the same SHA lands on `rustic-git-admin` too — same image, same
+build, so there is exactly one pin site conceptually even though two Deployments read it. Do not
+give `rustic-git-admin` an independent pin: two admin processes running different SHAs of the same
+router code is a state nobody should be able to reach.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add deploy/rustic-git.yaml deploy/pin.sh
+git commit -m "Deploy the admin api as its own Deployment, Service and Ingress"
+```
+
+(No cargo/clippy gate — this task is manifests and a shell script only. `bash -n deploy/pin.sh` is
+the one check to run before committing if the script's shape changed.)
+
+---
+
+### Task 12: Web — the admin host
+
+**Files:**
+- Modify: `web/apps/web/src/lib/api.ts` — `adminCall`
+- Modify: whatever env-var surface the web already uses for `RUSTIC_GIT_API_URL`
+  (`rg -n "RUSTIC_GIT_API_URL" web/apps/web` names it) — add the admin equivalent beside it
+
+**Interfaces:**
+- Consumes: nothing from earlier web tasks (this task is a prerequisite of Task 7b, not a
+  follow-on — see the note atop Task 7b).
+- Produces: `adminCall<T>(path, opts)` in `lib/api.ts`, same shape as `call<T>` but against a
+  second base URL.
+
+- [ ] **Step 1: `adminCall`**
+
+In `web/apps/web/src/lib/api.ts`, beside the existing `BASE`/`call`:
+
+```ts
+// A second base, because the admin surface is a SEPARATE process on a separate host (design doc
+// §5) — pointing this at the same host as `BASE` would be a silent way to lose the whole point of
+// the split, so there is no fallback to `RUSTIC_GIT_API_URL` here.
+const ADMIN_BASE = (process.env.RUSTIC_GIT_ADMIN_API_URL ?? "http://rustic-git-admin").replace(/\/$/, "");
+
+/** Every call the /admin area makes. Same shape as `call<T>`, against the admin host — never the
+ *  ordinary one, so an admin page cannot accidentally fall back to a route that does not exist
+ *  there (it would 404, not silently authorize as an ordinary user, but the intent is clearer
+ *  with its own function). */
+export function adminCall<T>(path: string, opts: Parameters<typeof call>[1]): Promise<T> {
+  return callAgainst<T>(ADMIN_BASE, path, opts);
+}
+```
+
+`callAgainst` is `call<T>`'s body with `BASE` parameterized — read `call`'s current implementation
+and factor the fetch/error-handling body out into `callAgainst(base, path, opts)`, then have `call`
+become `(path, opts) => callAgainst(BASE, path, opts)`. Do not duplicate the fetch logic between the
+two.
+
+- [ ] **Step 2: Wire the six admin api functions onto it**
+
+`getQuota`'s admin uses (Task 7b's usage page) and `write_quota`'s `PUT /admin/quota/{owner}`,
+`decideQuotaRequest` when called from the queue page, `listQuotaRequests(undefined, token)` from
+the admin host instead of `/v1`, and the two node/superadmin-list calls Task 7b's pages need, all
+move to `adminCall` — Task 7a's versions (`getQuota`, `listQuotaRequests`, `decideQuotaRequest`)
+stay as they are for the OWNER-scoped `/v1` uses (the org page's bar, the request dialog); add
+sibling functions rather than branching the existing ones on a boolean, matching this file's
+existing one-function-per-call style:
+
+```ts
+export function adminListQuotaRequests(token: string) {
+  return adminCall<QuotaRequestDoc[]>("/admin/quota-requests", { method: "GET", token });
+}
+
+export function adminDecideQuotaRequest(id: string, decision: "approve" | "deny", note: string, token: string) {
+  return adminCall<QuotaRequestDoc>(`/admin/quota-requests/${encodeURIComponent(id)}/${decision}`, {
+    method: "POST", token, body: JSON.stringify({ note }),
+  });
+}
+
+export function adminWriteQuota(owner: string, spec: Record<QuotaDim, number>, token: string) {
+  return adminCall<Record<QuotaDim, number>>(`/admin/quota/${encodeURIComponent(owner)}`, {
+    method: "PUT", token, body: JSON.stringify(spec),
+  });
+}
+
+export function adminUsage(token: string) {
+  return adminCall<{ owner: string; limit: Record<QuotaDim, number>; used: Record<QuotaDim, number> }[]>(
+    "/admin/usage", { method: "GET", token },
+  );
+}
+
+export function adminListNodes(token: string) {
+  return adminCall<{ name: string; ready: boolean; decommission: boolean; decommissionStatus: string | null }[]>(
+    "/admin/nodes", { method: "GET", token },
+  );
+}
+
+export function createRegion(body: { id: string; name: string }, token: string) {
+  return adminCall<{ id: string; name: string; status: string }>("/admin/regions", {
+    method: "POST", token, body: JSON.stringify(body),
+  });
+}
+```
+
+- [ ] **Step 3: The env var**
+
+Add `RUSTIC_GIT_ADMIN_API_URL` beside `RUSTIC_GIT_API_URL` wherever the web's server-side runtime
+env is declared (a `.env.example`, or the web Deployment's env block in `deploy/rustic-git.yaml`
+if the web reads it server-side only, which `adminCall`'s use inside server actions/RSCs requires —
+this must NOT be `NEXT_PUBLIC_...`: the admin host is never fetched from the browser). Point it at
+`http://rustic-git-admin` in-cluster, matching `RUSTIC_GIT_API_URL`'s own pattern.
+
+- [ ] **Step 4: Run the web gates and commit**
+
+```bash
+cd web && bun run lint; echo exit=$?
+bunx tsc --noEmit -p apps/web/tsconfig.json; echo exit=$?
+bun test; echo exit=$?
+git add web/apps/web/src deploy/rustic-git.yaml
+git commit -m "Add an admin-host client for the web /admin area"
+```
+
+---
+
+### Task 13: Tests that the two routers can never answer each other's paths, and the e2e admin base
+
+**Files:**
+- Modify: `crates/workspaces/tests/api_admin.rs` (the 404-cross-check test already exists from
+  Task 9 — this task extends it) and `crates/workspaces/tests/api_quota.rs`
+- Modify: `tests/ws_e2e.sh` — `$ADMIN_BASE`
+
+**Interfaces:**
+- Consumes: `api::router`, `api::admin::router` (Task 9).
+- Produces: nothing new — this task is entirely tests plus the e2e's admin base.
+
+- [ ] **Step 1: The mirror-image recorder test**
+
+`api_admin.rs`'s `the_admin_router_has_never_heard_of_v1` (Task 9) proves the admin router 404s on
+`/v1` paths. Add the other half to `crates/workspaces/tests/api_quota.rs`, which builds the ORDINARY
+`api::router`:
+
+```rust
+/// The mirror of `api_admin.rs`'s `the_admin_router_has_never_heard_of_v1`: an ordinary /v1 process
+/// has no admin route compiled into it at all, so a routing bug on that side cannot reach one
+/// either. Both halves together are the design doc's whole guarantee.
+#[tokio::test]
+async fn the_user_router_has_never_heard_of_admin() {
+    let s = server(true, vec![]).await;
+    for path in ["/admin/regions", "/admin/quota-requests", "/admin/usage", "/admin/nodes"] {
+        let code = reqwest::Client::new()
+            .get(format!("{}{path}", s.base))
+            .bearer_auth(admin_token(&s.jwt))
+            .send().await.unwrap()
+            .status();
+        assert_eq!(code, 404, "{path}");
+    }
+}
+```
+
+(`admin_token` is already in this file from Task 5b.)
+
+- [ ] **Step 2: Run to verify both pass**
+
+Run: `cargo test -p rustic-git-workspaces --test api_quota --test api_admin -- --test-threads=1; echo exit=$?`
+Expected: PASS — both routers were already built with disjoint route tables by Task 9; this task
+only pins that fact down as a test so a future route added to the wrong module fails CI instead of
+being noticed in a security review.
+
+- [ ] **Step 3: The e2e admin base**
+
+In `tests/ws_e2e.sh`, near where `BASE` is set from the deployed api's URL, add:
+
+```sh
+# The admin host, set independently — see deploy/k3s/README.md's release note for this feature.
+# Falls back to $BASE only for a single-process local run where RUSTIC_GIT_API_ROLE was never
+# split (the admin routes still exist there under /admin during local dev, since main.rs mounts
+# whichever router the role says — this fallback exists for that convenience, not for prod).
+ADMIN_BASE="${ADMIN_BASE:-$BASE}"
+```
+
+Repoint the two calls Task 8 wrote against `$BASE` that are now admin-only:
+
+```sh
+log "approving as a superadmin"
+curl -fsS -X POST "$ADMIN_BASE/admin/quota-requests/$REQ_ID/approve" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"note":"e2e"}' >/dev/null || fail "approve failed"
+```
+
+(replacing Task 8's `"$BASE/v1/quota-requests/$REQ_ID/approve"` line) and, if the script registers
+its test region anywhere earlier via `POST /v1/regions`, repoint that one call to
+`"$ADMIN_BASE/admin/regions"` too — `rg -n "regions" tests/ws_e2e.sh` finds it.
+
+Add one more assertion right after, proving the split rather than assuming it:
+
+```sh
+log "checking /v1 refuses the same approve path the admin host just accepted"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/quota-requests/$REQ_ID/approve" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{}')
+[ "$CODE" = "404" ] || fail "the user-role process must not answer an admin path, got $CODE"
+```
+
+- [ ] **Step 4: Run every gate one last time and commit**
+
+```bash
+cargo test -p rustic-git-workspaces -p rustic-git-agent-bin -- --test-threads=1; echo exit=$?
+cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
+bash -n tests/ws_e2e.sh; echo exit=$?
+git add crates/workspaces/tests tests/ws_e2e.sh
+git commit -m "Prove the user and admin routers cannot answer each other's paths"
+```
+
+---
+
 ## Self-Review
 
-**Spec coverage.** §1 One quota per owner → Tasks 1 (CRD, defaults table), 2 (usage, `GET /v1/quota`). §2 Enforcement → Task 3 (`/v1`, all six live routes plus the note on the two that have no route), Task 6 (`ResourceQuota`). §3 Quota requests → Tasks 1 (CRD), 4 (create/list, the role rule, the one-pending rule), 5b (approve/deny, the decided-once rule). §4 Superadmin → Task 5a (directory list, bootstrap, JWT claim), 5b (`require_admin`, `may_act_on`'s third arm with the audit line, `/v1/regions` moved under it), 7b (`/admin`: queue, usage, defaults, regions, node decommission status). Rules → the Global Constraints block. Cases table → the recorder tests in Tasks 3, 4 and 5b, plus the e2e in Task 8. Testing → Tasks 2/3/4/5b (`/v1` recorder), 6 (agent recorder), 7a (`bun:test`), 8 (live).
+**Spec coverage.** §1 One quota per owner → Tasks 1 (CRD, defaults table), 2 (usage, `GET /v1/quota`). §2 Enforcement → Task 3 (`/v1`, all six live routes plus the note on the two that have no route), Task 6 (`ResourceQuota`). §3 Quota requests → Tasks 1 (CRD), 4 (create/list, the role rule, the one-pending rule), 5b/9 (approve/deny, the decided-once rule — written in 5b, relocated to the admin router in 9 with the note in 5b marking exactly what moves). §4 Superadmin → Task 5a (directory list, bootstrap, JWT claim), 5b (`Caller`, `require_admin`, `may_act_on`'s third arm with the audit line), 7b (`/admin`: queue, usage, defaults, regions, node decommission status). §5 Admin APIs live on their own server → Task 9 (`api::admin` router, the pre-routing claim refusal, every handler the spec's table lists moved out of `/v1`), Task 10 (the RBAC split — only the admin ClusterRole may write `Quota`/`QuotaRequest`/`Region` — and the bootstrap gated to the admin role), Task 11 (separate Deployment/Service/Ingress/ServiceAccount, the source allowlist, one shared image pin), Task 12 (the web's `NEXT_PUBLIC`-free `RUSTIC_GIT_ADMIN_API_URL` and `adminCall`), Task 13 (the two-router 404 tests and the e2e's `$ADMIN_BASE` proof). Rules → the Global Constraints block, plus "Admin writes only happen on the admin server" → Task 10's RBAC split is what makes that literally true rather than a convention. Cases table → the recorder tests in Tasks 3, 4, 5b/9 and 13, plus the e2e in Tasks 8 and 13. Testing → Tasks 2/3/4/5b (`/v1` recorder), 6 (agent recorder), 7a (`bun:test`), 9/13 (admin recorder, the cross-router 404s), 8/13 (live).
 
-**Placeholders.** None: every code step carries the code, every test step the assertions. The three places that say "copy the sibling" name the exact sibling file and line range (`api_teams.rs:26-83`, `reconcile.rs:386-500`, `new-token-dialog.tsx`), because the harnesses are long and duplicating them here would be the drift.
+**Placeholders.** None: every code step carries the code, every test step the assertions. The three places that say "copy the sibling" name the exact sibling file and line range (`api_teams.rs:26-83`, `reconcile.rs:386-500`, `new-token-dialog.tsx`), because the harnesses are long and duplicating them here would be the drift. Task 9's `list_for_owner`/`stop_as`/`delete_as` split is named as a refactor with the exact shape to copy (`guard_alloc`'s owner-as-parameter pattern), not a placeholder — the existing `list_ws`/`stop_ws`/`delete_ws` bodies are what move, unchanged in logic.
 
-**Type consistency.** `QuotaSpec` field names are `workspaces/environments/snapshots/disk_gb/cpu/memory_gb` throughout, serialized camelCase, and `Dim::word` returns exactly those camelCase words — which is also `QuotaDim` in `lib/quota.ts`, so the 409 sentence, the CRD field and the web key are one vocabulary. `quota::check`, `quota::refuse` and `guard_alloc` are the only producers of the sentence. `Caller { name, superadmin }` is introduced in 5b and used by name in Tasks 2, 4 and 5b, each with the pre-5b fallback spelled out. `TeamRole`'s ordering is the rank rule and there is no `rank()` anywhere.
+**Type consistency.** `QuotaSpec` field names are `workspaces/environments/snapshots/disk_gb/cpu/memory_gb` throughout, serialized camelCase, and `Dim::word` returns exactly those camelCase words — which is also `QuotaDim` in `lib/quota.ts`, so the 409 sentence, the CRD field and the web key are one vocabulary. `quota::check`, `quota::refuse` and `guard_alloc` are the only producers of the sentence. `Caller { name, superadmin }` is introduced in 5b and used by name in Tasks 2, 4, 5b and 9, each with the pre-5b fallback spelled out. `TeamRole`'s ordering is the rank rule and there is no `rank()` anywhere. `write_quota` (Task 9) is the one writer of a `Quota` object, called by both `approve_quota_request` and `PUT /admin/quota/{owner}` — the same "one function, several callers" shape as `refuse`/`decide`, so approving a request and hand-editing a default can never disagree about how a quota lands. `api::router` and `api::admin::router` share every helper (`kube`, `kube_err`, `caller`, `may_act_on`, `Caller`) from `api/mod.rs` but share NO route table entry — Tasks 9 and 13 both assert that disjointness, from each side.
