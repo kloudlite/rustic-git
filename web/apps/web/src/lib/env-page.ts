@@ -2,16 +2,6 @@ import { cache } from "react";
 import { getEnvironment, listVolumes, volumeHistory } from "@/lib/api";
 import type { ApiCommitRecord, ApiEnvironment, ApiService, ApiVolumeSummary } from "@/lib/api";
 
-/** What a push wrote into a snapshot record's free-form `state` — see
- *  `crates/workspaces/src/upstream.rs::Provenance`. Once the environment is deleted this is the
- *  only thing left that can say what the snapshot was OF, which is why an archived page reads its
- *  name and its services from here rather than from an object that no longer exists. */
-export type Provenance = { kind?: string; name?: string; services?: ApiService[] };
-
-export function provenanceOf(state: unknown): Provenance {
-  return state && typeof state === "object" ? (state as Provenance) : {};
-}
-
 export type EnvPage = {
   id: string;
   /** `null` for an ARCHIVED environment: the object is gone, its snapshots are not. */
@@ -50,13 +40,12 @@ export const loadEnvPage = cache(async function loadEnvPage(
     const vols = await listVolumes(token, "environment", owner);
     volume = vols.ok ? (vols.value.find((v) => v.name === id) ?? null) : null;
   }
-  const newest = provenanceOf(history[0]?.state);
   return {
     id,
     env,
     volume,
     history,
-    name: env?.name ?? volume?.display_name ?? newest.name ?? id,
+    name: env?.name ?? volume?.display_name ?? id,
     services: env?.services ?? [],
   };
 });
