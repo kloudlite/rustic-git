@@ -272,3 +272,53 @@ the source voldir is created before the lock because `ws_lock`'s file lives unde
 cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1  → exit 0
 cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
 ```
+
+# Round 4
+
+## F7 was written but never reached (`416616a6`)
+
+Round 3 put the drain notice in the right place and it still did not appear on the cluster: a
+converged running workspace ends its reconcile in `Action::await_change()`, so when the
+decommission label landed on its Node nothing re-queued it and `with_drain_notice` never ran.
+Observed on the `87a1db2b` build: annotation `running=1`, no `Decommissioning` condition on the
+workspace for 3+ minutes. Removing the label was stuck the same way — a notice already written
+would have outlived it forever.
+
+The missing half was a WATCH, not a write. Each parent `Controller` (Workspace and Environment) now
+also watches this node's own object, `watcher::Config::default().fields("metadata.name={me}")`,
+with a mapper that turns one Node event into an `ObjectRef` for every object in that controller's
+own reflector store (`all_in_store`, reading `ctl.store()` captured before the `.watches` call).
+"My node changed" is not about one workspace, it is about all of them. The mapper is a sync
+`FnMut` that must not do I/O; reading the store is a lock, not a request.
+
+Two things follow for free: a readiness change reaches `my_node`'s dead-guard immediately instead
+of on the next 15 s tick, and removing the label clears the notice on the spot — the running arm
+rebuilds the condition list wholesale and `kept_conditions` carries only `PackagesReady`/`Attached`
+forward, which is the same property that made the beat's own mark unkeepable in the first place.
+
+The Volume controller gets no Node watch, deliberately: `apply_volume` reads the node only through
+the dead-guard, which returns `requeue(TICK)` rather than `await_change()`, and nothing a Volume
+writes depends on the decommission label. The decommission beat is unchanged — it still only
+counts, and `mark_parent` stays deleted.
+
+Tests: `a_node_event_maps_to_every_object_the_controller_holds` (the mapper, over a real reflector
+store: two objects in, two refs out; empty store before sync enqueues nothing rather than
+panicking) and `a_running_workspace_drops_a_stale_drain_notice_once_the_label_is_gone`.
+
+That second test asserts the LAST write of the pass, and the reason is worth writing down: the
+packages step's interim writes use `replaced`, which preserves every condition by type, so a stale
+notice does ride along for as long as a profile build runs. The running arm below it is what clears
+it and no pass ends there, so the staleness is bounded by one build rather than unbounded — but a
+workspace parked in a long build will show the notice for that window.
+
+RBAC: `nodes` gains `watch` in `deploy/k3s/agent-rbac.yaml`, table row and rule, with the reason on
+the rule. A field selector narrows the stream, never the grant, so the row reads cluster-wide like
+the `list` beside it and for the same reason.
+
+## Gates (round 4)
+
+```
+cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1  → exit 0
+cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
+```
+
