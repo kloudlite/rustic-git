@@ -5,7 +5,6 @@ use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory, TeamRole};
 use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 const API: &str = "/apis/rustic-git.io/v1alpha1";
@@ -48,7 +47,7 @@ struct Server {
 
 async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(jwt.clone(), HashSet::new());
+    let mut state = ApiState::new(jwt.clone());
     if with_membership {
         state = state.with_directory(Arc::new(StubMembership));
     }
@@ -337,4 +336,86 @@ async fn a_denied_request_does_not_block_the_next_one() {
         .send().await.unwrap()
         .status();
     assert_eq!(code, 201);
+}
+
+/// A superadmin token, minted the way the api tier mints one at sign-in.
+fn admin_token(jwt: &Jwt) -> String {
+    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
+}
+
+/// The claim's third arm on `may_act_on`: support can read another owner's objects without
+/// impersonating them, and the access is logged with the caller.
+#[tokio::test]
+async fn a_superadmin_may_list_another_owners_workspaces() {
+    let routes = vec![
+        get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-1", "karthik", "running")])),
+    ];
+    let s = server(true, routes).await;
+    let code = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces?owner=karthik", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap()
+        .status();
+    assert_eq!(code, 200);
+}
+
+/// Approving writes the Quota FIRST and only then marks the request: a request marked approved
+/// whose quota never landed is the one ordering that leaves a person told yes and still refused.
+#[tokio::test]
+async fn approving_writes_the_quota_then_marks_the_request() {
+    let routes = vec![
+        get(format!("{API}/quotarequests/qr-1"), req_obj("qr-1", "karthik", Some("pending"))),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+        post(format!("{API}/quotas"), json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": "karthik"},
+            "spec": {"workspaces": 10, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 8, "memoryGb": 32}
+        })),
+        Route { method: "PATCH", path: format!("{API}/quotarequests/qr-1/status"), status: 200, body: req_obj("qr-1", "karthik", Some("approved")) },
+    ];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests/qr-1/approve", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "ok"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let written = s.rec.sent("POST", &format!("{API}/quotas")).remove(0);
+    // Only the dimension the request named moved; the other five stay at the default they had.
+    assert_eq!(written["spec"]["workspaces"], 10);
+    assert_eq!(written["spec"]["environments"], 2);
+    let calls = s.rec.calls();
+    let quota_at = calls.iter().position(|c| c == &format!("POST {API}/quotas")).expect("quota written");
+    let mark_at = calls.iter().position(|c| c.contains("quotarequests/qr-1/status")).expect("request marked");
+    assert!(quota_at < mark_at, "the quota must land before the request is marked: {calls:?}");
+}
+
+/// Deciding is the claim's, not the owner's: the person who asked cannot approve their own.
+#[tokio::test]
+async fn an_owner_may_not_approve_their_own_request() {
+    let s = server(true, vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests/qr-1/approve", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.text().await.unwrap(), "admin only");
+}
+
+/// A request that is already decided is not re-decidable: the record of who said what stands.
+#[tokio::test]
+async fn a_decided_request_cannot_be_decided_again() {
+    let routes = vec![get(format!("{API}/quotarequests/qr-1"), req_obj("qr-1", "karthik", Some("denied")))];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests/qr-1/deny", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "no"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "that request has already been decided");
 }

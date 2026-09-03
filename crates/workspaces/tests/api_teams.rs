@@ -6,7 +6,6 @@ use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory};
 use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 const API: &str = "/apis/rustic-git.io/v1alpha1";
@@ -100,7 +99,7 @@ fn create_routes() -> Vec<Route> {
 
 async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(jwt.clone(), HashSet::new());
+    let mut state = ApiState::new(jwt.clone());
     if with_membership {
         state = state.with_directory(Arc::new(StubMembership));
     }

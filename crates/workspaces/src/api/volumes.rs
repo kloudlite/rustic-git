@@ -8,7 +8,7 @@
 //! authorization one.
 
 use super::scope::{caller_owners, may_act_on, mine, owner_set_selector};
-use super::{caller, check_path_segment, kube, kube_err, kube_unavailable, not_found, ApiState};
+use super::{caller, check_path_segment, kube, kube_err, kube_unavailable, not_found, ApiState, Caller};
 use crate::crd::{self, VolumeSource};
 use kube::api::{Api, ListParams};
 use kube::ResourceExt;
@@ -405,7 +405,7 @@ pub(crate) async fn delete_snapshot(
 /// The snapshot-model reads for `/history` and `/refs`: `Snapshot` CRs instead of registry
 /// records. Scoped by `caller_owners` exactly like `volume_owner` — a volume under a label the
 /// caller may not read is a 404, same as the registry path.
-async fn snapshots_for_caller(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
+async fn snapshots_for_caller(s: &ApiState, caller_id: &Caller, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
     let items = snapshots_for_caller_maybe_empty(s, caller_id, name).await?;
     if items.is_empty() {
         return Err(not_found());
@@ -417,7 +417,7 @@ async fn snapshots_for_caller(s: &ApiState, caller_id: &str, name: &str) -> Resu
 /// pushed has zero `Snapshot` CRs, which is a real, ownable volume with no snapshots yet, not an
 /// unknown one; the registry path answers that with `{"main": null}`, never 404, and this is what
 /// lets `volume_refs` match it.
-async fn snapshots_for_caller_maybe_empty(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
+async fn snapshots_for_caller_maybe_empty(s: &ApiState, caller_id: &Caller, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
     check_path_segment(name)?;
     let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
     let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
@@ -457,7 +457,7 @@ async fn snapshots_on_volume(s: &ApiState, name: &str) -> Result<Vec<crd::Snapsh
 /// has and `spec.volume` is exactly what this resolves.
 pub(crate) async fn find_snapshot(
     s: &ApiState,
-    caller_id: &str,
+    caller_id: &Caller,
     volume: Option<&str>,
     snapshot_id: &str,
 ) -> Result<crd::Snapshot, Response> {

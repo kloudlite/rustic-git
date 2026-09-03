@@ -136,15 +136,7 @@ async fn run() -> Result<()> {
     // kube client every other route here uses — no separate store to wire up.
     let workspaces = match jwt.clone() {
         Some(jwt) => {
-            // No admin-role system exists yet anywhere in this codebase (checked); a static
-            // allowlist of emails is the whole mechanism for the region routes until one does.
-            let admins = std::env::var("RUSTIC_GIT_WORKSPACES_ADMINS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let mut state = rustic_git_workspaces::api::ApiState::new(jwt, admins);
+            let mut state = rustic_git_workspaces::api::ApiState::new(jwt);
             // So a new workspace comes up with the owner's platform-issued git key already mounted.
             state = state.with_keys(store.clone());
             if let Some(dir) = directory.clone() {

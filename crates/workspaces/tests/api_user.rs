@@ -8,7 +8,6 @@ use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory};
 use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 const API: &str = "/apis/rustic-git.io/v1alpha1";
@@ -137,10 +136,9 @@ fn create_routes() -> Vec<Route> {
     r
 }
 
-async fn server_with(admins: &[&str], routes: Option<Vec<Route>>) -> Server {
+async fn server_with(routes: Option<Vec<Route>>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state =
-        ApiState::new(jwt.clone(), admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+    let mut state = ApiState::new(jwt.clone());
     let rec = match routes {
         Some(routes) => {
             let (client, rec) = mock_client(with_region(routes));
@@ -157,7 +155,7 @@ async fn server_with(admins: &[&str], routes: Option<Vec<Route>>) -> Server {
 }
 
 async fn server(routes: Vec<Route>) -> Server {
-    server_with(&[], Some(routes)).await
+    server_with(Some(routes)).await
 }
 
 /// `karthik` is the only member of team `acme` — enough to prove that team membership does not
@@ -190,7 +188,7 @@ impl Directory for StubMembership {
 async fn server_with_teams(routes: Vec<Route>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(with_region(routes));
-    let state = ApiState::new(jwt.clone(), HashSet::new())
+    let state = ApiState::new(jwt.clone())
         .with_kube(client)
         .with_directory(Arc::new(StubMembership));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -666,7 +664,7 @@ async fn wrong_token_is_unauthorized() {
 /// would read as "this feature doesn't exist".
 #[tokio::test]
 async fn workspace_routes_without_a_cluster_are_503() {
-    let s = server_with(&[], None).await;
+    let s = server_with(None).await;
     let tok = token(&s.jwt, "karthik");
     let client = reqwest::Client::new();
 
@@ -691,13 +689,12 @@ async fn workspace_routes_without_a_cluster_are_503() {
 #[tokio::test]
 async fn registering_a_region_writes_one_custom_resource() {
     let s = server_with(
-        &["admin@example.com"],
         Some(vec![Route { method: "PATCH", path: format!("{API}/regions/centralindia"), status: 201, body: region_obj("centralindia") }]),
     )
     .await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/regions", s.base))
-        .bearer_auth(s.jwt.mint("admin@example.com", "Admin", Some("admin")).unwrap())
+        .bearer_auth(s.jwt.mint_admin("admin@example.com", "Admin", Some("admin"), true).unwrap())
         .json(&json!({"id": "centralindia", "name": "Central India"}))
         .send()
         .await
@@ -729,7 +726,6 @@ async fn creating_in_an_inactive_region_is_refused() {
 #[tokio::test]
 async fn region_create_requires_admin() {
     let s = server_with(
-        &["admin@example.com"],
         Some(vec![Route { method: "PATCH", path: format!("{API}/regions/centralindia"), status: 201, body: region_obj("centralindia") }]),
     )
     .await;
@@ -745,7 +741,7 @@ async fn region_create_requires_admin() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 
-    let admin = token(&s.jwt, "admin");
+    let admin = s.jwt.mint_admin("admin@example.com", "Admin", Some("admin"), true).unwrap();
     let resp = client
         .post(format!("{}/v1/regions", s.base))
         .bearer_auth(&admin)
@@ -1007,7 +1003,7 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
     ];
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
-    let state = ApiState::new(jwt.clone(), HashSet::new())
+    let state = ApiState::new(jwt.clone())
         .with_kube(client)
         .with_keys(keys)
         .with_directory(Arc::new(StubKeys));
@@ -1140,7 +1136,7 @@ impl Directory for StubCliTokens {
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(with_region(routes));
-    let state = ApiState::new(jwt.clone(), HashSet::new())
+    let state = ApiState::new(jwt.clone())
         .with_kube(client)
         .with_directory(Arc::new(StubCliTokens(live)));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1386,7 +1382,6 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     ]);
     let state = ApiState::new(
         Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
-        HashSet::new(),
     )
     .with_kube(client)
     .with_keys(keys)

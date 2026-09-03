@@ -5,7 +5,7 @@
 //! means the rule cannot be half-remembered. `snapshots_on_volume` in `volumes.rs` is the
 //! deliberate exception and says so — a decision that destroys data counts everyone's rows.
 
-use super::{kube, kube_err, not_found, ApiState};
+use super::{kube, kube_err, not_found, ApiState, Caller};
 use crate::crd;
 use crate::k8s::{OWNER_LABEL, TEAM_LABEL};
 use kube::api::{Api, ListParams};
@@ -19,10 +19,24 @@ pub(crate) async fn teams_for(s: &ApiState, caller: &str) -> Vec<String> {
     }
 }
 
-/// `owner` is the environment's actual owner field (a username or a team slug). Personal envs
-/// (`owner == caller`) always pass; a team env passes when the caller is a member.
-pub(crate) async fn may_act_on(s: &ApiState, caller: &str, owner: &str) -> bool {
-    caller == owner || teams_for(s, caller).await.iter().any(|t| t == owner)
+/// `owner` is the object's actual owner field (a username or a team slug). Their own always
+/// passes; a team's passes for a member; and a platform administrator passes for anyone — so
+/// support can clean up without impersonating the person.
+pub(crate) async fn may_act_on(s: &ApiState, c: &Caller, owner: &str) -> bool {
+    if c.name == owner {
+        return true;
+    }
+    if teams_for(s, &c.name).await.iter().any(|t| t == owner) {
+        return true;
+    }
+    if c.superadmin {
+        // Every cross-owner access a claim allows is recorded with the caller: the point of the
+        // claim is that support never has to impersonate, and an un-logged one would be worse than
+        // impersonation, not better.
+        tracing::info!(caller = %c.name, %owner, "superadmin acting on another owner");
+        return true;
+    }
+    false
 }
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
@@ -99,10 +113,12 @@ pub(crate) async fn owners_namespaces(s: &ApiState, owner: &str) -> HashSet<Stri
 
 /// Workspaces are strictly personal — no team ownership — so ownership is a field comparison, and
 /// someone else's workspace is a 404, never a 403.
-pub(crate) async fn my_ws(s: &ApiState, owner: &str, id: &str) -> Result<crd::Workspace, Response> {
+/// Workspaces are strictly personal — no team ownership — but a platform administrator may still
+/// act on any owner's, the claim's whole point.
+pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Workspace, Response> {
     let api: Api<crd::Workspace> = Api::all(kube(s)?.clone());
     let w = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
-    if w.spec.owner != owner {
+    if w.spec.owner != c.name && !c.superadmin {
         return Err(not_found());
     }
     Ok(w)
@@ -111,9 +127,9 @@ pub(crate) async fn my_ws(s: &ApiState, owner: &str, id: &str) -> Result<crd::Wo
 /// Resolve `NewEnvironment.owner` against the caller: personal (`None` or `caller`) always
 /// passes; a different owner must be a team the caller belongs to, which needs a directory —
 /// 503 rather than silently creating an environment nobody but this caller can ever see again.
-pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &str, owner: Option<String>) -> Result<String, Response> {
-    let Some(owner) = owner else { return Ok(caller.to_string()) };
-    if owner == caller {
+pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &Caller, owner: Option<String>) -> Result<String, Response> {
+    let Some(owner) = owner else { return Ok(caller.name.clone()) };
+    if owner == caller.name {
         return Ok(owner);
     }
     match &s.directory {
@@ -124,9 +140,10 @@ pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &str, owner: Option<
 }
 
 /// Finds an environment by id and authorizes the caller against its owner: their own always
-/// passes, a team's passes when they are a member. An environment they may not act on is a 404,
-/// never a 403 — the caller learns nothing about environments that are not theirs.
-pub(crate) async fn find_env(s: &ApiState, caller: &str, id: &str) -> Result<crd::Environment, Response> {
+/// passes, a team's passes when they are a member, and a platform administrator's claim passes
+/// for anyone. An environment they may not act on is a 404, never a 403 — the caller learns
+/// nothing about environments that are not theirs.
+pub(crate) async fn find_env(s: &ApiState, caller: &Caller, id: &str) -> Result<crd::Environment, Response> {
     let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
     let e = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
     if !may_act_on(s, caller, &e.spec.owner).await {
@@ -138,9 +155,9 @@ pub(crate) async fn find_env(s: &ApiState, caller: &str, id: &str) -> Result<crd
 /// Every owner label the caller may read volumes under: themselves, plus each team they belong to
 /// (team-owned environments). Membership is verified HERE — the server tier trusts whatever owner
 /// this tier names in `OWNER_HEADER`, so an unverified value would be a data leak.
-pub(crate) async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
-    let mut v = vec![owner.to_string()];
-    v.extend(teams_for(s, owner).await);
+pub(crate) async fn caller_owners(s: &ApiState, caller: &Caller) -> Vec<String> {
+    let mut v = vec![caller.name.clone()];
+    v.extend(teams_for(s, &caller.name).await);
     v
 }
 
@@ -197,7 +214,6 @@ mod tests {
         }
         let state = ApiState::new(
             Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
-            Default::default(),
         )
         .with_directory(Arc::new(Stub(long.clone())));
 

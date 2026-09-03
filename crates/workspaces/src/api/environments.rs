@@ -111,7 +111,7 @@ pub(crate) async fn create_env(
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let c = kube(&s)?;
     let quota_gb = clamp_quota(body.quota_gb);
-    guard_alloc(&s, &owner, owner != caller_id, &environment_cost(quota_gb, body.services.len())).await?;
+    guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(quota_gb, body.services.len())).await?;
     let id = rid("env");
     let e = create_environment(
         c,
@@ -207,7 +207,7 @@ pub(crate) async fn restore_env(
     // owner is refused even when the caller is a member of it: a snapshot found under team A is
     // A's data, and a restore into team B would carry it past A's membership boundary to everyone
     // in B. The caller's own account is the one legitimate elsewhere — their own copy.
-    if body.owner.as_deref().is_some_and(|o| o != src_owner && o != caller_id) {
+    if body.owner.as_deref().is_some_and(|o| o != src_owner && o != caller_id.name) {
         return Err((StatusCode::FORBIDDEN, "a snapshot restores under its own owner, or under you").into_response());
     }
     let owner = resolve_new_owner(&s, &caller_id, body.owner.or(Some(src_owner.clone()))).await?;
@@ -232,7 +232,7 @@ pub(crate) async fn restore_env(
         (None, None) => default_env_quota(),
     };
     let c = kube(&s)?;
-    guard_alloc(&s, &owner, owner != caller_id, &environment_cost(quota, services.len())).await?;
+    guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(quota, services.len())).await?;
     // The source environment may be long gone; the Volume holding the bytes still names its region.
     let region = match body.region {
         Some(r) => r,
@@ -280,8 +280,8 @@ pub(crate) async fn list_env(
         Some(o) if may_act_on(&s, &caller_id, &o).await => vec![o],
         Some(_) => return Err(not_found()),
         None => {
-            let mut owners = vec![caller_id.clone()];
-            owners.extend(teams_for(&s, &caller_id).await);
+            let mut owners = vec![caller_id.name.clone()];
+            owners.extend(teams_for(&s, &caller_id.name).await);
             owners
         }
     };
@@ -442,7 +442,7 @@ pub(crate) async fn clone_env(
     // ponytail: the ceiling is that an environment clone is LOCAL-ONLY. The upgrade is the
     // workspace's shared-worktree path (a `clone-{env}-{hex}` cut, `commit: Some(_)`, and the
     // `SnapshotPending` guard in this controller that `resolve_volume` would then need).
-    guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id, &environment_cost(quota, src.spec.services.len())).await?;
+    guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id.name, &environment_cost(quota, src.spec.services.len())).await?;
     let e = create_environment(
         c,
         &new_id,

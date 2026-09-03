@@ -4,7 +4,6 @@ use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
 use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 const API: &str = "/apis/rustic-git.io/v1alpha1";
@@ -108,7 +107,7 @@ async fn server(routes: Vec<Route>) -> Server {
     let mut routes = routes;
     routes.extend(quota_gate_routes());
     let (client, rec) = mock_client(routes);
-    let state = ApiState::new(jwt.clone(), HashSet::new()).with_kube(client);
+    let state = ApiState::new(jwt.clone()).with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));

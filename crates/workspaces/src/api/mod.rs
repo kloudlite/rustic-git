@@ -7,11 +7,10 @@
 //! nature, but registered rarely enough that the cluster this tier already talks to is the
 //! cheapest correct home for it.
 //!
-//! Auth mirrors `crates/api`'s `caller()`: a Bearer JWT identifies the owner. There is no
-//! existing "is this caller an admin" check anywhere in the codebase to reuse (grepped for one —
-//! none exists), so region routes gate on a small static allowlist of emails passed in at
-//! construction (`RUSTIC_GIT_WORKSPACES_ADMINS` in the api bin). Upgrade path: a real roles
-//! table, if more than one admin-gated surface ever shows up.
+//! Auth mirrors `crates/api`'s `caller()`: a Bearer JWT identifies the owner. Admin-gated routes
+//! (`/v1/regions` and the quota decisions) read the `superadmin` claim on the session token,
+//! minted at sign-in from the directory's own list. The static email allowlist this used to carry
+//! is gone; `RUSTIC_GIT_WORKSPACES_ADMINS` is a bootstrap for that list and nothing reads it here.
 //!
 //! Split across `scope` (who the caller is, what they may act on), `workspaces`, `environments`,
 //! `volumes` and `push` (I7) — one module per resource, this file keeps only what is shared by
@@ -23,7 +22,7 @@
 #![allow(clippy::result_large_err)]
 
 use crate::crd;
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::ResourceExt;
 use axum::{
     extract::{Query, State},
@@ -34,7 +33,6 @@ use axum::{
 };
 use rustic_git_core::httpx::bearer_token;
 use rustic_git_core::jwt::Jwt;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 mod environments;
@@ -58,6 +56,32 @@ use workspaces::{
     attach_ws, clone_ws, create_ws, delete_ws, detach_ws, get_ws, list_ws, patch_ws_packages,
     restore_ws, ssh_session, start_ws, stop_ws,
 };
+
+/// Who is calling, and whether they hold the platform-administrator claim.
+///
+/// A struct rather than the bare handle because two facts travel together everywhere: the owner
+/// name every path is scoped by, and the claim `may_act_on` reads as its third arm. `Deref` and
+/// `Display` are so the sites that only want the handle read unchanged.
+#[derive(Debug, Clone)]
+pub struct Caller {
+    pub name: String,
+    /// A CLAIM from the session token, minted at sign-in from the directory's list. Never an
+    /// ownership: it decides who may act, never who owns anything, and it never widens a quota.
+    pub superadmin: bool,
+}
+
+impl std::ops::Deref for Caller {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for Caller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
 
 /// What every workspace of an owner carries about them, from the directory the api tier owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -120,8 +144,6 @@ pub trait Directory: Send + Sync {
 
 pub struct ApiState {
     pub jwt: Arc<Jwt>,
-    /// Emails allowed to hit the admin-gated region routes. See module docs.
-    pub admins: HashSet<String>,
     /// Team membership, CLI-token revocation and the owner's ssh keys. `None` means no directory
     /// is wired (dev, or the directory tier is down): team envs answer 503 rather than silently
     /// behaving as if the caller has no teams, CLI tokens are refused outright, and a workspace
@@ -137,10 +159,9 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    pub fn new(jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
+    pub fn new(jwt: Arc<Jwt>) -> Self {
         ApiState {
             jwt,
-            admins,
             directory: None,
             kube: None,
             keys: None,
@@ -168,6 +189,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/quota", get(get_quota))
         .route("/v1/quota-requests", post(create_quota_request).get(list_quota_requests))
+        .route("/v1/quota-requests/{id}/approve", post(approve_quota_request))
+        .route("/v1/quota-requests/{id}/deny", post(deny_quota_request))
         .route("/v1/regions", post(create_region).get(list_regions))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
@@ -218,12 +241,12 @@ async fn get_quota(
     Query(q): Query<QuotaQuery>,
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
-    let owner = q.owner.unwrap_or_else(|| c.clone());
+    let owner = q.owner.unwrap_or_else(|| c.name.clone());
     if !scope::may_act_on(&s, &c, &owner).await {
         return Err(not_found());
     }
     let client = kube(&s)?;
-    let team = owner != c;
+    let team = owner != c.name;
     let limit = crate::quota::effective(client, &owner, team).await.map_err(kube_err)?;
     let used = crate::quota::usage(client, &owner).await.map_err(kube_err)?;
     Ok(Json(serde_json::json!({"owner": owner, "limit": limit, "used": used})).into_response())
@@ -285,7 +308,7 @@ async fn create_quota_request(
     Json(body): Json<NewQuotaRequest>,
 ) -> Result<Response, Response> {
     let caller = caller(&s, &headers).await?;
-    let owner = body.owner.unwrap_or_else(|| caller.clone());
+    let owner = body.owner.unwrap_or_else(|| caller.name.clone());
     may_request_for(&s, &caller, &owner).await?;
     let client = kube(&s)?;
     // One at a time, so the queue is a list of decisions rather than a list of the same ask.
@@ -367,6 +390,117 @@ async fn list_quota_requests(
     Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
 }
 
+#[derive(serde::Deserialize, Default)]
+struct Decision {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// Overlay a request onto a limit. Only the dimensions the request NAMED move; approving must not
+/// silently reset a limit somebody has already granted on another axis.
+fn overlay(base: crd::QuotaSpec, want: &crd::RequestedQuota) -> crd::QuotaSpec {
+    crd::QuotaSpec {
+        workspaces: want.workspaces.unwrap_or(base.workspaces),
+        environments: want.environments.unwrap_or(base.environments),
+        snapshots: want.snapshots.unwrap_or(base.snapshots),
+        disk_gb: want.disk_gb.unwrap_or(base.disk_gb),
+        cpu: want.cpu.unwrap_or(base.cpu),
+        memory_gb: want.memory_gb.unwrap_or(base.memory_gb),
+    }
+}
+
+async fn pending_request(s: &ApiState, id: &str) -> Result<crd::QuotaRequest, Response> {
+    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
+    let r = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    if !is_pending(&r) {
+        return Err((StatusCode::CONFLICT, "that request has already been decided").into_response());
+    }
+    Ok(r)
+}
+
+/// Stamp the outcome. `status`, not spec: the request is what was asked, the decision is what
+/// happened to it, and only this tier ever writes it (no controller reconciles a request).
+async fn decide(s: &ApiState, id: &str, state: crd::RequestState, by: &str, note: Option<String>) -> Result<Response, Response> {
+    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
+    let patch = serde_json::json!({"status": {
+        "state": state,
+        "decidedBy": by,
+        "decidedAt": chrono::Utc::now().to_rfc3339(),
+        "note": note,
+    }});
+    let out = api
+        .patch_status(id, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .map_err(kube_err)?;
+    Ok(Json(request_doc(&out)).into_response())
+}
+
+/// Approve: write the `Quota` FIRST, then mark the request.
+///
+/// That order, always. A request marked approved whose quota never landed leaves a person told yes
+/// and still refused, with nothing left pending to retry; a quota that landed under a request
+/// still marked pending is merely a second approval that changes nothing.
+///
+/// Task 9 relocates this handler (body unchanged) to `api::admin` under `/admin/quota-requests`;
+/// it is here for now because that router does not exist yet.
+async fn approve_quota_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    require_admin(&c)?;
+    let note: Decision = if body.is_empty() { Default::default() } else {
+        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
+    };
+    let r = pending_request(&s, &id).await?;
+    let owner = r.spec.owner.clone();
+    let client = kube(&s)?;
+    let api: Api<crd::Quota> = Api::all(client.clone());
+    // A slug does not say which it is, and the admin deciding is never the requester, so comparing
+    // against the CALLER (as the personal-quota routes do) tells us nothing here. The `Directory`
+    // trait has no "is this a team" lookup to ask instead. Only used to pick which `default-*`
+    // object an owner with no `Quota` of their own starts from, so a wrong guess costs a fallback
+    // number, never an authorization.
+    // ponytail: always guesses "person"; add a real team lookup if a team's approval is ever seen
+    // starting from the wrong bootstrap default.
+    let team = false;
+    let existing = api.get_opt(&owner).await.map_err(kube_err)?;
+    let base = match &existing {
+        Some(q) => q.spec.clone(),
+        None => crate::quota::effective(client, &owner, team).await.map_err(kube_err)?,
+    };
+    let spec = overlay(base, &r.spec.requested);
+    match existing {
+        Some(_) => {
+            api.patch(&owner, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": spec})))
+                .await
+                .map_err(kube_err)?;
+        }
+        None => {
+            api.create(&PostParams::default(), &crd::Quota::new(&owner, spec)).await.map_err(kube_err)?;
+        }
+    }
+    decide(&s, &id, crd::RequestState::Approved, &c.name, note.note).await
+}
+
+/// Deny: mark the request only, no `Quota` write. Task 9 relocates this handler too.
+async fn deny_quota_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    require_admin(&c)?;
+    let note: Decision = if body.is_empty() { Default::default() } else {
+        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
+    };
+    pending_request(&s, &id).await?;
+    decide(&s, &id, crd::RequestState::Denied, &c.name, note.note).await
+}
+
 /// The ONE place `/v1` refuses an allocation.
 ///
 /// Every route that brings a new working copy, a new disk or a new snapshot into existence goes
@@ -433,7 +567,7 @@ pub(crate) fn rid(prefix: &str) -> String {
 /// not the email: volume paths (`vol/{owner}/{name}`) go through the same owner-name
 /// validation as git repos, and an email's `@`/`.` can never route there. A token without a
 /// chosen username cannot own workspaces yet — same rule the web app enforces for repos.
-pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<String, Response> {
+pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<Caller, Response> {
     let tok = bearer_token(headers).ok_or_else(unauthorized)?;
     let (c, jti) = state.jwt.verify_any_user(tok.trim()).map_err(|_| unauthorized())?;
     // Only a CLI token carries a `jti`, and only a CLI token is revocable: a session's lifetime
@@ -446,17 +580,20 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
             _ => return Err(unauthorized()),
         }
     }
-    c.username.filter(|u| !u.is_empty()).ok_or_else(|| {
+    let superadmin = c.superadmin;
+    let name = c.username.filter(|u| !u.is_empty()).ok_or_else(|| {
         (StatusCode::FORBIDDEN, "pick a username before using workspaces").into_response()
-    })
+    })?;
+    Ok(Caller { name, superadmin })
 }
 
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response()
 }
 
-fn require_admin(state: &ApiState, email: &str) -> Result<(), Response> {
-    if state.admins.contains(email) {
+/// The admin gate, now the CLAIM rather than an email allowlist. `/v1/regions` moved under it too.
+fn require_admin(c: &Caller) -> Result<(), Response> {
+    if c.superadmin {
         Ok(())
     } else {
         Err((StatusCode::FORBIDDEN, "admin only").into_response())
@@ -498,11 +635,11 @@ async fn create_region(
     headers: axum::http::HeaderMap,
     Json(body): Json<NewRegion>,
 ) -> Result<Response, Response> {
-    // Admin gating keys on the EMAIL (the allowlist's identity), not the username `caller`
-    // resolves — an admin needs no username to register regions.
-    let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
-    let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
-    require_admin(&s, &email)?;
+    // The claim, not an email: a region write is a platform decision, so it goes through the same
+    // gate the quota decisions do. An administrator now needs a handle like everyone else, which
+    // is what `caller` enforces — every admin surface is reached from a signed-in session.
+    let c = caller(&s, &headers).await?;
+    require_admin(&c)?;
     // The id becomes an object name and a gateway hostname label, so it goes through the same
     // segment check every other path segment here does.
     check_path_segment(&body.id)?;

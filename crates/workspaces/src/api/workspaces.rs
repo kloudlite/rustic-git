@@ -161,7 +161,7 @@ pub(crate) async fn create_ws(
     let c = kube(&s)?;
     check_ws_name(&body.name)?;
     check_region(&s, &body.region).await?;
-    let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner) {
+    let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner.name) {
         None => String::new(),
         // Lowercased BEFORE `may_act_on`: the directory's team slugs are lowercase, so a `may_act_on`
         // on the raw casing 404'd a real member of `acme` who typed `Acme`. 404, not 403, on a miss:
@@ -180,7 +180,7 @@ pub(crate) async fn create_ws(
     let quota_gb = clamp_quota(body.quota_gb);
     // The object's owner is the team when one is given — a team's workspaces count against the
     // team, never against whoever happened to click create.
-    let owner_of = if team.is_empty() { owner.clone() } else { team.clone() };
+    let owner_of = if team.is_empty() { owner.name.clone() } else { team.clone() };
     guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota_gb, &crd::PodResources::default())).await?;
     let id = rid("ws");
     let source = match (&body.repo, &body.branch) {
@@ -213,7 +213,7 @@ pub(crate) async fn create_ws(
         c,
         &id,
         crd::WorkspaceSpec {
-            owner: owner.clone(),
+            owner: owner.name.clone(),
             team: team.clone(),
             name: body.name,
             region: body.region,
@@ -346,7 +346,7 @@ pub(crate) async fn list_ws(
     // `?team=` scopes the list to the caller's workspaces IN that team; absent means personal.
     // Membership is checked so the answer for a team the caller is not in is 404, not an empty
     // list that says the team exists.
-    let team = match q.get("team").map(|t| t.trim()).filter(|t| !t.is_empty() && *t != owner) {
+    let team = match q.get("team").map(|t| t.trim()).filter(|t| !t.is_empty() && *t != owner.name) {
         None => String::new(),
         // Same casing fix as `create_ws`: lowercase before the membership check, not after.
         Some(t) => {
@@ -360,7 +360,7 @@ pub(crate) async fn list_ws(
     };
     // No "filter out the deleted ones": a deleted object is gone from the API server.
     let api: Api<crd::Workspace> = Api::all(c.clone());
-    let items = mine(api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner));
+    let items = mine(api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.name));
     let pushed = pushed_volumes(&s, c, &owner).await?;
     let list: Vec<_> = items.iter().map(|w| ws_doc(w, &pushed)).collect();
     // The retry the create's 5 s ceiling defers to: cheap, idempotent, and the only place a user
@@ -419,7 +419,7 @@ pub(crate) async fn ssh_session(
                 .map_err(kube_err)?
                 .items
                 .into_iter()
-                .filter(|w| w.spec.owner == owner)
+                .filter(|w| w.spec.owner == owner.name)
                 .find(|w| w.spec.name == target)
                 .ok_or_else(not_found)?
         }
@@ -695,7 +695,7 @@ pub(crate) async fn clone_ws(
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
-    let owner_of = if src.spec.team.is_empty() { owner.clone() } else { src.spec.team.clone() };
+    let owner_of = if src.spec.team.is_empty() { owner.name.clone() } else { src.spec.team.clone() };
     guard_alloc(&s, &owner_of, !src.spec.team.is_empty(), &workspace_cost(quota, &src.spec.resources)).await?;
     // A clone is a second worktree of the SOURCE's own volume, pinned to a cut taken NOW — resolved
     // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
@@ -716,7 +716,7 @@ pub(crate) async fn clone_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
-            owner: owner.clone(),
+            owner: owner.name.clone(),
             // A clone lives where its source lives: same team, same namespace.
             team: src.spec.team.clone(),
             name: body.name,
@@ -881,14 +881,14 @@ pub(crate) async fn restore_ws(
     };
     // A restore is an allocation like any other: the snapshot survives the refusal untouched, so
     // the person can raise their quota and try the same id again.
-    let owner_of = if team.is_empty() { owner.clone() } else { team.clone() };
+    let owner_of = if team.is_empty() { owner.name.clone() } else { team.clone() };
     guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota, &resources)).await?;
     let new_id = rid("ws");
     let w = create_workspace(
         c,
         &new_id,
         crd::WorkspaceSpec {
-            owner: owner.clone(),
+            owner: owner.name.clone(),
             team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,
             // No per-snapshot region under the snapshot model (single-pool, replica-based; cross-

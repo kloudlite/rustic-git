@@ -9,7 +9,6 @@ use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
 use rustic_git_workspaces::kube_test::{get as kget, mock_client, Recorder, Route};
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 const API: &str = "/apis/rustic-git.io/v1alpha1";
@@ -74,7 +73,7 @@ fn ok(method: &'static str, path: String) -> Route {
 async fn server(routes: Vec<Route>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
-    let state = ApiState::new(jwt.clone(), HashSet::new()).with_kube(client);
+    let state = ApiState::new(jwt.clone()).with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });

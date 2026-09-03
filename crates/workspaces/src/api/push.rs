@@ -205,7 +205,7 @@ pub(crate) async fn push_env(
     let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body)?;
     let volume = env_volume(&e).ok_or_else(not_ready)?;
-    guard_alloc(&s, &e.spec.owner, e.spec.owner != caller_id, &[(crate::quota::Dim::Snapshots, 1)]).await?;
+    guard_alloc(&s, &e.spec.owner, e.spec.owner != caller_id.name, &[(crate::quota::Dim::Snapshots, 1)]).await?;
     let head = e.status.as_ref().and_then(|st| st.head.clone());
     let state = crd::SnapshotState::of_environment(&e);
     create_snapshot(kube(&s)?, volume, &e.spec.owner, &id, head, msg, state).await
