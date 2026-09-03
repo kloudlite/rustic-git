@@ -39,6 +39,17 @@ pub(crate) use status::{conditions_eq, create_if_absent, delete_ignoring_404, en
 
 /// While an operation runs, and while a stop is waiting for its push to land. Short on purpose:
 /// these are progress checks, not retries.
+/// The commit a `cloneOf` is pinned to, if any — the graft the API recorded at clone/restore time.
+/// Shared because a Workspace and an Environment carry the identical `WorkspaceStorage`, and both
+/// reconcilers have to resolve it into `status.head` before they check anything out (an
+/// environment that never did parked forever in `HeadUnknown`).
+pub(crate) fn clone_commit(storage: &Option<rustic_git_workspaces::crd::WorkspaceStorage>) -> Option<&str> {
+    match storage.as_ref()?.source.as_ref()? {
+        rustic_git_workspaces::crd::VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
+        _ => None,
+    }
+}
+
 pub(crate) const TICK: Duration = Duration::from_secs(15);
 /// After a failure. The reconcile that observes it does not stamp `observedGeneration`, so the next
 /// pass starts the work again — backoff, never give up.

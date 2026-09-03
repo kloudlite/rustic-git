@@ -3829,6 +3829,82 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
     assert!(!rec.calls().iter().any(|c| c.contains("POST") && c.contains("/volumes")), "a shared-volume clone creates no child Volume");
 }
 
+/// An environment RESTORED onto a commit (`/v1`'s `CloneOf { volume, commit }`) records that
+/// commit as its own `status.head` instead of parking forever in `HeadUnknown` — the live repro of
+/// 2026-09-03. The workspace twin is
+/// `commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head`.
+#[tokio::test]
+async fn a_restored_environment_records_its_graft_commit_as_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The worktree already exists, so `checkout` converges on WORKTREE_EXISTS instead of shelling
+    // out to btrfs — same trick the workspace twin uses.
+    std::fs::create_dir_all(tmp.path().join("vol/env-src/live/env-src")).unwrap();
+    let (ctx, rec) = ctx(tmp.path(), restored_env_routes(ready_commit("env-src-aaaa", "env-src")));
+
+    // Runs past the checkout arm and then fails on the next unmocked route — the head write has
+    // already landed by then, same as the workspace twin.
+    let _ = rustic_git_agent::controller::apply_environment(&restored_env(), &ctx).await;
+
+    let sent = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert!(
+        sent.iter().any(|s| s["status"]["head"] == "env-src-aaaa"),
+        "the graft commit must be recorded as this environment's head: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|s| s["status"]["conditions"][0]["reason"] == "HeadUnknown"),
+        "never HeadUnknown: the head is known from the spec: {sent:?}"
+    );
+}
+
+/// The cut `/v1` made microseconds before the object is almost always still `Working` on the first
+/// reconcile: `Creating` + `Ready=False/CommitPending` and a requeue, never a checkout and never a
+/// permanent settle.
+#[tokio::test]
+async fn a_restored_environment_waits_while_its_commit_is_still_working() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut working = ready_commit("env-src-aaaa", "env-src");
+    working["status"]["phase"] = serde_json::json!("working");
+    let (ctx, rec) = ctx(tmp.path(), restored_env_routes(working));
+
+    let action = rustic_git_agent::controller::apply_environment(&restored_env(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)), "requeued, not settled");
+
+    let last = rec.sent("PATCH", ENV_STATUS_PATH).pop().expect("a status write");
+    assert_eq!(last["status"]["phase"], "creating");
+    assert_eq!(last["status"]["conditions"][0]["reason"], "CommitPending");
+    assert!(last["status"]["head"].is_null(), "no head recorded while the commit is uncut: {last}");
+}
+
+/// An environment whose `cloneOf` carries a graft commit — what `POST /v1/environments/restore`
+/// writes — claimed on this node, with no head of its own yet.
+fn restored_env() -> crd::Environment {
+    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    e.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::CloneOf { volume: "env-src".into(), commit: Some("env-src-aaaa".into()) }),
+    });
+    e
+}
+
+/// `check_source` (Workspace 404 then Environment), the SOURCE's Volume, and the graft commit in
+/// whatever state the test wants it.
+fn restored_env_routes(commit: serde_json::Value) -> Vec<Route> {
+    vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/workspaces/env-src"),
+        rustic_git_workspaces::kube_test::get(
+            "/apis/rustic-git.io/v1alpha1/environments/env-src",
+            serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
+                               "metadata": {"name": "env-src"},
+                               "spec": {"owner": "acme", "name": "src", "region": "r1", "services": [],
+                                        "storage": {"quotaGb": 20}, "desiredState": "running"}}),
+        ),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-src", ready_source_volume("env-src")),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/env-src-aaaa", commit),
+        Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+    ]
+}
+
 /// A clone naming a commit that is not a `Ready` `Snapshot` of its source volume — swept by
 /// retention, or simply never existed — settles PERMANENTLY with its own reason, distinct from a
 /// bad clone SOURCE (`NoSuchSource`, settled earlier by `check_source`): retrying at TICK would

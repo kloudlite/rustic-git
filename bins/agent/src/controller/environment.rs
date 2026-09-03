@@ -250,14 +250,26 @@ async fn run_environment(
     // `has_commits` sees it too.
     // `e.name_any()`, not `id`: `spec.worktree` on a Snapshot is what `sync.rs`'s
     // `live_worktrees` wrote there, which is the Environment's own name. They are the same string
-    // for every environment today — the volume is named after the environment — and this arm is
-    // simply keyed on the field that actually names the worktree.
+    // for every environment on its OWN volume, and this arm is simply keyed on the field that
+    // actually names the worktree.
+    //
+    // ponytail: an environment RESTORED onto a source's volume (`resolve_volume`'s `shared` arm
+    // makes `id` the SOURCE volume) still checks out and mounts worktree `id`, so it shares the
+    // source's live worktree instead of getting its own — the same collision a workspace clone
+    // avoids by using its own name. Not fixed here because the pod mount hard-codes the same
+    // assumption (`k8s.rs`'s `service_pod`: `live_worktree_volume(pool, env_id, env_id)`), so the
+    // fix is a signature change through `k8s.rs` and `mkdir_env_mounts`, not a name swap here.
     let synced = if ctx.engine.pool.worktree(&id, &id).exists() {
         None
     } else {
         crate::snapshot::latest_transient(ctx, &id, &e.name_any()).await?
     };
-    let effective_head = synced.or_else(|| prev.head.clone());
+    // A restore/clone pinned to a commit already knows its head — grafted by `/v1` at restore
+    // time, not guessed here. Without this an environment restored onto a commit parked forever in
+    // `HeadUnknown` below: the volume HAS commits, and nothing else ever wrote this environment's
+    // head. `apply_workspace`'s twin arm, verbatim in shape.
+    let clone_commit = super::clone_commit(&e.spec.storage);
+    let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
     if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
         let st = crd::EnvironmentStatus {
             phase: crd::Phase::Creating,
@@ -269,6 +281,50 @@ async fn run_environment(
         };
         write_env_status(e, st, ctx).await?;
         return Ok(Action::requeue(TICK));
+    }
+    // Keyed on `effective_head`, not `prev.head`, for the same reason as the workspace arm: a
+    // volume that is going to check out a sync point instead was never going to touch the clone
+    // commit, so a swept one must not kill it.
+    if let Some(commit) = clone_commit {
+        let phase = if effective_head.as_deref() == Some(commit) {
+            crate::claim::commit_phase(ctx, &id, commit).await?
+        } else {
+            Some(crd::Phase::Ready)
+        };
+        // `/v1` creates the cut microseconds before the object, so the first reconcile almost
+        // always finds it still `Working` — one tick away, never Permanent.
+        if crate::claim::commit_pending(phase) {
+            let st = crd::EnvironmentStatus {
+                phase: crd::Phase::Creating,
+                observed_generation: None,
+                conditions: kept_conditions(
+                    &prev.conditions,
+                    crd::condition("Ready", false, "CommitPending", &format!("waiting for snapshot {commit} to be cut"), gen),
+                ),
+                ..prev.clone()
+            };
+            write_env_status(e, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
+        if phase != Some(crd::Phase::Ready) {
+            let prev = prev.clone();
+            return settle(
+                Outcome::Permanent(format!("clone commit {commit} is not a ready snapshot of volume {id}"), "NoSuchCommit"),
+                e,
+                "Environment",
+                gen,
+                move |cond| {
+                    serde_json::json!({
+                        "phase": crd::Phase::Error,
+                        "nodeName": prev.node_name,
+                        "volumeRef": prev.volume_ref,
+                        "conditions": kept_conditions(&prev.conditions, cond),
+                    })
+                },
+                ctx,
+            )
+            .await;
+        }
     }
     let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), effective_head);
     let quota_gb = vol.spec.quota_gb;
@@ -283,6 +339,16 @@ async fn run_environment(
         Ok(()) => {}
         Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
         Err(e) => return Err(ReconcileErr(e.0)),
+    }
+    // First graft: nothing else will ever write this head — a restored environment gets
+    // `advance_head` only if it pushes itself. The preserve pattern, same as the workspace's.
+    let mut prev = prev;
+    if prev.head.is_none() {
+        if let Some(commit) = clone_commit {
+            let prev2 = prev.clone();
+            write_env_status(e, crd::EnvironmentStatus { head: Some(commit.to_string()), ..prev2 }, ctx).await?;
+            prev.head = Some(commit.to_string());
+        }
     }
 
     ensure(

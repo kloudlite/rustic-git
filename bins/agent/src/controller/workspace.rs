@@ -12,7 +12,7 @@ use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd::{self, DesiredState, VolumeSource};
+use rustic_git_workspaces::crd::{self, DesiredState};
 use rustic_git_workspaces::k8s;
 use rustic_git_workspaces::model;
 use std::sync::Arc;
@@ -873,15 +873,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // A clone pinned to a commit already knows its head — grafted by the API at clone time,
     // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
     // the source's real history, even on the very first pass.
-    let clone_commit = w
-        .spec
-        .storage
-        .as_ref()
-        .and_then(|s| s.source.as_ref())
-        .and_then(|src| match src {
-            VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
-            _ => None,
-        });
+    let clone_commit = super::clone_commit(&w.spec.storage);
     // Re-host: a node that has never run this worktree checks out its LATEST SYNC POINT in
     // preference to `head`, because the sync beat replicated it after the last commit — the
     // data-loss window on a node death is one `WS_SYNC_SECS`, not everything since the last push.
