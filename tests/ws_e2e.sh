@@ -462,6 +462,17 @@ REQ_JSON=$(curl -fsS -X POST "$BASE/v1/quota-requests" -H "Authorization: Bearer
 REQ_ID=$(echo "$REQ_JSON" | field id)
 [ -n "$REQ_ID" ] || fail "no id in quota request response: $REQ_JSON"
 
+log "checking a second pending request is refused"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/quota-requests" \
+  -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"requested":{"workspaces":99},"reason":"again"}')
+[ "$CODE" = "409" ] || fail "a second pending request must 409, got $CODE"
+
+log "checking the owner cannot approve their own request without the superadmin claim"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_BASE/admin/quota-requests/$REQ_ID/approve" \
+  -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d '{}')
+[ "$CODE" = "403" ] || fail "an approve without the superadmin claim must 403, got $CODE"
+
 log "approving as a superadmin"
 curl -fsS -X POST "$ADMIN_BASE/admin/quota-requests/$REQ_ID/approve" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' -d '{"note":"e2e"}' >/dev/null || fail "approve failed"
@@ -1393,4 +1404,4 @@ else
   log "volume takeover: node JOIN passed (standby moved $STANDBY -> $NEW_STANDBY, old row and subvolume gone, then settled back to $STANDBY)"
 fi
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds) passed"

@@ -859,3 +859,56 @@ No migration script, and nothing to run afterwards:
 - `spec.pinned` and `WS_SNAPSHOT_KEEP` are gone. Stored `pinned` values are ignored by serde and
   pruned by the regenerated schema; retention now prunes sync points only, and a push is never
   pruned by anything.
+
+## Release: quotas and the admin server
+
+Two new CRDs (`Quota`, `QuotaRequest`) and a second `bins/api` process — the same binary started
+with `RUSTIC_GIT_API_ROLE=admin` instead of the default `user` — that mounts `api::admin::router()`
+and serves the superadmin-only surfaces (region creation, quota decisions,
+`/api/admin/superadmins`) from its own host. Apply in this order:
+
+```sh
+# 1. The CRDs — adds `quotas` and `quotarequests`. Additive; existing objects are untouched.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
+
+# 2. api-rbac.yaml now defines TWO roles: the existing rustic-git-api SA keeps its read-only quota
+#    surfaces, and a new rustic-git-admin SA/ClusterRole gets the only write access to
+#    Quota/QuotaRequest/Region. Apply both here — the admin kubeconfig minted next needs the SA to
+#    already exist.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
+
+# 3. Mint the rustic-git-admin-k3s-kubeconfig Secret for the rustic-git-admin SA, the same recipe
+#    as "Rotating the api tier's kubeconfig" above, adjusted to the admin SA and Secret name:
+KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create token rustic-git-admin --duration=8760h > /tmp/admin.token
+KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
+  | base64 -d > /tmp/admin-ca.crt
+API_SERVER=$(KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
+kubectl config set-cluster k3s --server="$API_SERVER" --certificate-authority=/tmp/admin-ca.crt --embed-certs=true --kubeconfig=/tmp/admin.kubeconfig
+kubectl config set-credentials rustic-git-admin --token="$(cat /tmp/admin.token)" --kubeconfig=/tmp/admin.kubeconfig
+kubectl config set-context default --cluster=k3s --user=rustic-git-admin --kubeconfig=/tmp/admin.kubeconfig
+kubectl config use-context default --kubeconfig=/tmp/admin.kubeconfig
+kubectl create secret generic rustic-git-admin-k3s-kubeconfig --from-file=config=/tmp/admin.kubeconfig \
+  --dry-run=client -o yaml | kubectl -n rustic-git apply -f -
+rm -f /tmp/admin.token /tmp/admin-ca.crt /tmp/admin.kubeconfig
+
+# 4. The agent's role — no spec write changed (the agent creates/patches its namespace's
+#    ResourceQuota, an ordinary namespaced object, not a Quota CR), but re-apply for the reworded
+#    descriptions in the regenerated CRD.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml
+```
+
+Then the AKS roll: `deploy/rustic-git.yaml` adds the `rustic-git-admin` Deployment, Service and
+Ingress — **the `admin.khost.dev` DNS record must exist first**, or the Ingress's certificate
+request stalls the same way the app ingress's would. Repin and roll it with the rest of the tier
+(`deploy/pin.sh`, `deploy/roll.sh`), then `deploy/rustic-git-web.yaml` for the web app's
+`RUSTIC_GIT_ADMIN_API_URL` wiring to the new host.
+
+Set `RUSTIC_GIT_WORKSPACES_ADMINS` on the admin-role Deployment before its first boot: it seeds
+those addresses into the directory's `superadmins` collection once, additively — after that boot
+the list is managed only through `/api/admin/superadmins`, and removing an address from the env
+revokes nobody.
+
+**What existing owners see:** nothing changes until they cross a limit — `default-user`/
+`default-team` apply to every owner with no `Quota` object of their own, and those numbers match
+the compiled-in table, so a missing object was never a wider allowance. A quota blocks new
+allocation only; nothing already running is touched.

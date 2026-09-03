@@ -141,7 +141,39 @@ stops a controller editing desired state: the agent's ClusterRole (`deploy/k3s/a
 whose header table IS the role) keeps `patch` on the main resources only for labels, finalizers
 and the two spec fields a parent's reconciler copies into its own child (`Volume.spec.restoreTo`,
 and `Volume.spec.quotaGb` on the home volume an `OwnerBinding` owns),
-and the policy refuses it any other spec change. Apply both files. There is no job queue, no lease,
+and the policy refuses it any other spec change. Apply both files.
+
+**Allocation is bounded by a `Quota` per owner.** A cluster-scoped `Quota` CR named by the owner
+slug (a person or a team) caps six dimensions — workspaces, environments, snapshots, diskGb, cpu,
+memoryGb — with `default-user`/`default-team` as the fallback for an owner who has none and a
+compiled-in table (`crd::default_quota`) behind those, so a missing object is never "unlimited".
+**Usage is computed from the CRDs on every request and never cached** (`crates/workspaces/src/quota.rs`):
+a stored counter can only be wrong in the direction that hands out allocation nobody has. `/v1`
+refuses an over-quota create, restore, clone or push with `409` and one sentence — `"{dimension}:
+{used} of {limit} in use; request more under Quota"` — from `quota::refuse`, through the single
+gate `guard_alloc`; the check is read-then-write, so two concurrent creates can overshoot by one
+and the agent's per-namespace `ResourceQuota` (named `owner-quota`, written on every `OwnerBinding` and environment
+reconcile, from the same effective `Quota`) is the hard stop for cpu and memory. A raise is a
+`QuotaRequest` CR: the owner, or a team member whose directory role is at least admin, opens ONE
+pending request at a time; only a superadmin approves, which writes the `Quota` **before** marking
+the request.
+
+**Superadmin is a claim, not an owner.** `superadmin: true` in the session JWT, minted at sign-in
+from a `superadmins` collection in the directory that `RUSTIC_GIT_WORKSPACES_ADMINS` merely
+bootstraps at boot (additive only — dropping an address from the env revokes nobody; the list is
+managed from then on through `/api/admin/superadmins`). The admin surfaces run as a SEPARATE
+process, `bins/api` started with `RUSTIC_GIT_API_ROLE=admin` instead of the default `user`, which
+mounts `api::admin::router()` in place of `api::router()` — the user router has no admin handler
+at all, so there is no code path in the ordinary process that could leak one. `refuse_without_claim`
+(`crates/workspaces/src/api/admin.rs`) 403s a token without the `superadmin` claim before any route
+runs, and region creation, quota decisions and `/api/admin/superadmins` all live only behind it.
+RBAC mirrors the split: `api-rbac.yaml` gives the `rustic-git-admin` ServiceAccount write on
+`Quota`/`QuotaRequest`/`Region` and keeps the ordinary `rustic-git-api` ServiceAccount to reads,
+so a bug that mounted the wrong router would still 403 at the Kubernetes layer. The web's `/admin`
+area calls this second process at `RUSTIC_GIT_ADMIN_API_URL`, never the ordinary API base — mixing
+them up would silently point an admin page at `/v1` instead.
+
+There is no job queue, no lease,
 no agent registration and no long poll: `/v1` writes ONE unplaced object and establishes no facts
 about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, admitted for the owner
 node always and for any other node only while it is up to date for that worktree), so two nodes can never contend for the same subvolume and the API never
