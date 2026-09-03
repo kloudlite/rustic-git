@@ -78,7 +78,8 @@
 #                                                                       their children (Snapshot has
 #                                                                       none — see its module doc)
 #   namespaces                             get,create,patch             ensure (server-side apply); get for the per-node gate
-#   limitranges, services                  create,patch                 ensure (server-side apply)
+#   limitranges                            create,patch                 ensure (server-side apply)
+#   services                               create,patch,delete          ensure; delete removes the ClusterIP of a service whose definition lost its ports
 #   networkpolicies                        create,patch                 ensure (incl. both halves of
 #                                                                       an attachment grant)
 #                                          delete                       delete_ignoring_404 — the
@@ -211,8 +212,14 @@ rules:
   # in THIS rule is ever deleted by the agent — an ownerReference does that — so no `delete`, and
   # nothing is read back, so no `get`.
   - apiGroups: [""]
-    resources: ["services", "limitranges"]
+    resources: ["limitranges"]
     verbs: ["create", "patch"]
+  # `delete` on services only: a service whose definition dropped its ports gets no ClusterIP any
+  # more, and the stale one from the earlier definition has to go — nothing else the agent writes
+  # is ever removed except by its owner's garbage collection.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "patch", "delete"]
   # Namespaces are the one thing read back: `namespace_ready` GETs the workspace's own namespace
   # so a node that has never seen a team is gated on the namespace's existence, not on a
   # cluster-scoped condition another node wrote. `get`, never `list` — the agent has no reason to
