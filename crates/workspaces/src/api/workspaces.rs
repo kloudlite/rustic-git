@@ -1,7 +1,7 @@
 //! `/v1/workspaces` — create, list, read, delete, start/stop, attach/detach, package edits,
 //! clone and restore-to-new, plus the ssh connect ticket and the owner's platform key install.
 
-use super::scope::{find_env, may_act_on, mine, my_ws, owned_by, owned_in, owners_namespaces, refuse_taken_name};
+use super::scope::{find_env, may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, owners_namespaces, refuse_taken_name};
 use super::{caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
 use super::push::{clone_base, with_based_on};
 use super::volumes::{find_snapshot, volume_region};
@@ -163,12 +163,14 @@ pub(crate) async fn create_ws(
     check_region(&s, &body.region).await?;
     let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner.name) {
         None => String::new(),
-        // Lowercased BEFORE `may_act_on`: the directory's team slugs are lowercase, so a `may_act_on`
+        // Lowercased BEFORE `may_allocate_for`: the directory's team slugs are lowercase, so a check
         // on the raw casing 404'd a real member of `acme` who typed `Acme`. 404, not 403, on a miss:
         // whether a team exists is not a non-member's to learn, same as every other owner-scoped route.
+        // `may_allocate_for`, not `may_act_on`: this NAMES the new workspace's billed owner, and a
+        // superadmin claim must never spend a team's quota without being a member.
         Some(t) => {
             let t = t.to_lowercase();
-            if may_act_on(&s, &owner, &t).await {
+            if may_allocate_for(&s, &owner, &t).await {
                 t
             } else {
                 return Err((StatusCode::NOT_FOUND, "no such team").into_response());
@@ -745,6 +747,12 @@ pub(crate) async fn clone_ws(
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
     let owner_of = if src.spec.team.is_empty() { owner.name.clone() } else { src.spec.team.clone() };
+    // `my_ws` above let a superadmin claim fetch ANY owner's source workspace (list/get, allowed);
+    // this is the ALLOCATING step, and that claim must not spend a team's quota it is not a member
+    // of. A 404 here matches `my_ws`'s own refusal shape for someone else's workspace.
+    if !may_allocate_for(&s, &owner, &owner_of).await {
+        return Err(not_found());
+    }
     guard_alloc(&s, &owner_of, !src.spec.team.is_empty(), &workspace_cost(quota, &src.spec.resources)).await?;
     // A clone is a second worktree of the SOURCE's own volume, pinned to a cut taken NOW — resolved
     // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
@@ -931,6 +939,11 @@ pub(crate) async fn restore_ws(
     // A restore is an allocation like any other: the snapshot survives the refusal untouched, so
     // the person can raise their quota and try the same id again.
     let owner_of = if team.is_empty() { owner.name.clone() } else { team.clone() };
+    // Same reasoning as `clone_ws`: `find_snapshot`/`my_ws` above admit a superadmin claim to READ
+    // someone else's history, but that claim must not spend a team's quota it is not a member of.
+    if !may_allocate_for(&s, &owner, &owner_of).await {
+        return Err(not_found());
+    }
     guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota, &resources)).await?;
     let new_id = rid("ws");
     let w = create_workspace(

@@ -11,8 +11,12 @@
 //! only lives on this router: region creation, quota decisions and every cross-owner surface are
 //! in `admin` (`/admin/*`, its own process under `RUSTIC_GIT_API_ROLE=admin`), which refuses a
 //! token without the `superadmin` claim before routing. Here the claim is read only by
-//! `may_act_on`'s third arm. The static email allowlist this used to carry is gone;
-//! `RUSTIC_GIT_WORKSPACES_ADMINS` is a bootstrap for the directory's list and nothing reads it here.
+//! `may_act_on`'s third arm, and only for list/stop/delete/get — every ALLOCATING path (create,
+//! clone, restore, push) decides its new object's owner through `scope::may_allocate_for`
+//! instead, which never reads it: a superadmin is a claim, never an owner, and must not be able
+//! to spend a team's quota without being a member. The static email allowlist this used to carry
+//! is gone; `RUSTIC_GIT_WORKSPACES_ADMINS` is a bootstrap for the directory's list and nothing
+//! reads it here.
 //!
 //! Split across `scope` (who the caller is, what they may act on), `workspaces`, `environments`,
 //! `volumes` and `push` (I7) — one module per resource, this file keeps only what is shared by

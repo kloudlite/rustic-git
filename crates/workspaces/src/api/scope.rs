@@ -48,6 +48,15 @@ pub(crate) async fn may_act_on(s: &ApiState, c: &Caller, owner: &str) -> bool {
     false
 }
 
+/// Whether `caller` may spend `owner`'s quota: themself, or real directory membership — NEVER a
+/// superadmin claim. Every allocating `/v1` path (create/clone/restore/push) decides its new
+/// object's owner through this, not `may_act_on`: a superadmin's cross-owner power is list/stop/
+/// delete/get only (CLAUDE.md), and `may_act_on`'s superadmin arm let a claim spend an arbitrary
+/// owner's — even a non-team slug's — quota.
+pub(crate) async fn may_allocate_for(s: &ApiState, caller: &Caller, owner: &str) -> bool {
+    caller.name == owner || teams_for(s, &caller.name).await.iter().any(|t| t == owner)
+}
+
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
 /// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
 /// and adding one per query axis is how a CRD becomes a database.
@@ -136,6 +145,8 @@ pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Wor
 /// Resolve `NewEnvironment.owner` against the caller: personal (`None` or `caller`) always
 /// passes; a different owner must be a team the caller belongs to, which needs a directory —
 /// 503 rather than silently creating an environment nobody but this caller can ever see again.
+/// `may_allocate_for`, not `may_act_on`: this NAMES the owner of a new allocation, and a
+/// superadmin claim must never let a caller spend a team's quota without being a member.
 pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &Caller, owner: Option<String>) -> Result<String, Response> {
     let Some(owner) = owner else { return Ok(caller.name.clone()) };
     if owner == caller.name {
@@ -143,7 +154,7 @@ pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &Caller, owner: Opti
     }
     match &s.directory {
         None => Err((StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response()),
-        Some(_) if may_act_on(s, caller, &owner).await => Ok(owner),
+        Some(_) if may_allocate_for(s, caller, &owner).await => Ok(owner),
         Some(_) => Err((StatusCode::FORBIDDEN, "not a member of that team").into_response()),
     }
 }

@@ -229,6 +229,98 @@ fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
+/// A superadmin token, minted the way the api tier mints one at sign-in — same helper as
+/// `api_admin.rs`'s, but this file exercises the ordinary `/v1` router, where a superadmin is
+/// still just a caller.
+fn admin_token(jwt: &Jwt, username: &str) -> String {
+    jwt.mint_admin(&format!("{username}@example.com"), "Root", Some(username), true).unwrap()
+}
+
+/// The quota-gate routes for an allocation billed to a TEAM owner, as `guard_alloc` reads them
+/// once the object's owner has been resolved to `owner` (a team slug, never the caller).
+fn team_quota_gate_routes(owner: &str) -> Vec<Route> {
+    vec![
+        no_volumes(),
+        no_snapshots(),
+        not_found(format!("{API}/quotas/{owner}")),
+        not_found(format!("{API}/quotas/default-team")),
+    ]
+}
+
+/// The blocking finding this fix closes: a superadmin claim is list/stop/delete/get, never an
+/// owner (CLAUDE.md), so it must not be able to spend `acme`'s quota by naming it as the `team` on
+/// a create just because the JWT carries `superadmin: true`. `root` is nobody's teammate here.
+#[tokio::test]
+async fn a_superadmin_creating_a_workspace_for_a_team_they_are_not_a_member_of_is_not_found() {
+    let s = server_with_teams(vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(admin_token(&s.jwt, "root"))
+        .json(&json!({"name": "web", "region": "centralindia", "team": "acme", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "{}", resp.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+}
+
+/// The other side: a superadmin who genuinely IS a member of `acme` (real directory membership,
+/// not the claim) may still create under it — the claim adds nothing and takes nothing away from
+/// their own membership.
+#[tokio::test]
+async fn a_superadmin_who_is_really_an_acme_member_may_create_for_the_team() {
+    let mut routes = vec![no_workspaces(), no_environments(), post(format!("{API}/workspaces"), {
+        let mut w = ws_obj("ws-new", "karthik");
+        w["spec"]["team"] = json!("acme");
+        w
+    })];
+    routes.extend(team_quota_gate_routes("acme"));
+    let s = server_with_teams(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(admin_token(&s.jwt, "karthik"))
+        .json(&json!({"name": "web", "region": "centralindia", "team": "acme", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let w = s.rec.sent("POST", &format!("{API}/workspaces")).remove(0);
+    assert_eq!(w["spec"]["team"], "acme");
+}
+
+/// Same finding, on the environment side: `create_env`'s `owner` field resolves through
+/// `resolve_new_owner`, which must refuse the claim exactly as the workspace path does.
+#[tokio::test]
+async fn a_superadmin_creating_an_environment_for_a_team_they_are_not_a_member_of_is_refused() {
+    let s = server_with_teams(vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments", s.base))
+        .bearer_auth(admin_token(&s.jwt, "root"))
+        .json(&json!({"name": "app", "region": "centralindia", "services": [], "owner": "acme"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error(), "{}", resp.status());
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+}
+
+#[tokio::test]
+async fn a_superadmin_who_is_really_an_acme_member_may_create_an_environment_for_the_team() {
+    let mut routes = vec![no_workspaces(), no_environments(), post(format!("{API}/environments"), new_env("env-new", "acme"))];
+    routes.extend(team_quota_gate_routes("acme"));
+    let s = server_with_teams(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments", s.base))
+        .bearer_auth(admin_token(&s.jwt, "karthik"))
+        .json(&json!({"name": "app", "region": "centralindia", "services": [], "owner": "acme"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
+    assert_eq!(e["spec"]["owner"], "acme");
+}
+
 /// One object per user action. The API used to write two and pick a node; both are the
 /// controllers' now, and the node it would have picked is a fact it has no way to know yet.
 #[tokio::test]

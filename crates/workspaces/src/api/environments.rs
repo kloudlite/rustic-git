@@ -1,7 +1,7 @@
 //! `/v1/environments` — create, list, read, delete, start/stop, clone, restore-to-new and
 //! restore-in-place.
 
-use super::scope::{find_env, may_act_on, mine, owned_by, resolve_new_owner, teams_for};
+use super::scope::{find_env, may_act_on, may_allocate_for, mine, owned_by, resolve_new_owner, teams_for};
 use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
@@ -442,6 +442,13 @@ pub(crate) async fn clone_env(
     // ponytail: the ceiling is that an environment clone is LOCAL-ONLY. The upgrade is the
     // workspace's shared-worktree path (a `clone-{env}-{hex}` cut, `commit: Some(_)`, and the
     // `SnapshotPending` guard in this controller that `resolve_volume` would then need).
+    //
+    // `find_env` above admits a superadmin claim to reach any owner's environment (get, allowed);
+    // the clone is the allocation, and that claim must not spend a team's quota it is not a
+    // member of.
+    if !may_allocate_for(&s, &caller_id, &src.spec.owner).await {
+        return Err(not_found());
+    }
     guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id.name, &environment_cost(quota, src.spec.services.len())).await?;
     let e = create_environment(
         c,
