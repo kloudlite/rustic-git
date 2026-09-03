@@ -606,11 +606,14 @@ async fn drain_services(
         }
     }
     let mut remaining = writing_pods(ns, ctx).await?;
-    for _ in 0..40 {
+    // 20 × 500 ms, not 40 × 250: the same 10 s ceiling at half the pod LISTs. A service that
+    // finishes its writes 250 ms sooner is not worth a doubled API cost on every stop and every
+    // restore of every environment.
+    for _ in 0..20 {
         if remaining == 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         remaining = writing_pods(ns, ctx).await?;
     }
     Ok(remaining)
