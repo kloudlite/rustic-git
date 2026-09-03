@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
-import { Camera, Loader2, RotateCcw, Trash2 } from "lucide-react";
+import { Camera, Loader2, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -13,8 +13,8 @@ import { stamp, when } from "@/lib/time";
 import { pendingPush } from "@/lib/pending-push";
 import { snapshotTime } from "@/lib/snapshot";
 import { stateSummary, type SnapshotState } from "@/lib/snapshot-state";
-import { deleteVolumeCopy } from "@/lib/archived";
 import { envCurrent } from "@/lib/env-current";
+import { DeleteSnapshotDialog } from "@/components/app/restore-dialog";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
@@ -209,63 +209,6 @@ function RestoreDialog({
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
             <Button type="submit" disabled={pending}>
               {pending && <Loader2 className="animate-spin" />}Restore
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** Delete ONE snapshot — the explicit delete a snapshot is kept until, bytes included. The live
- *  environment is not affected; the current node says the one extra thing that IS lost, which is
- *  the lineage still showing where the environment sits. */
-function DeleteSnapshotDialog({
-  owner,
-  id,
-  snapshot,
-  isCurrent,
-}: {
-  owner: string;
-  id: string;
-  snapshot: SnapshotNode;
-  isCurrent: boolean;
-}) {
-  const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironmentSnapshot, null);
-  const [open, setOpen] = useDialogUntilSuccess(state);
-  // The id, not the word "snapshot": the dialog names ONE record among several that may all be
-  // message-less, and "Delete snapshot “snapshot”?" names none of them.
-  const label = snapshot.message || snapshot.id.slice(0, 8);
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" className="text-destructive" aria-label={`Delete snapshot ${label}`}>
-          <Trash2 />
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
-        <form action={action} className="grid gap-4">
-          <DialogHeader>
-            <DialogTitle>Delete snapshot &ldquo;{label}&rdquo;</DialogTitle>
-            <DialogDescription>
-              {deleteVolumeCopy(1)} The environment itself is not affected.
-              {isCurrent && (
-                <>
-                  {" "}
-                  This is the snapshot the environment currently sits on; its disk does not change,
-                  but the snapshots will no longer show where it is.
-                </>
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          <input type="hidden" name="owner" value={owner} />
-          <input type="hidden" name="id" value={id} />
-          <input type="hidden" name="snapshotId" value={snapshot.id} />
-          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button type="submit" variant="destructive" disabled={pending}>
-              {pending && <Loader2 className="animate-spin" />}Delete
             </Button>
           </DialogFooter>
         </form>
@@ -511,7 +454,27 @@ export function EnvSnapshots({
                   ) : (
                     <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={current} />
                   )}
-                  <DeleteSnapshotDialog owner={owner} id={id} snapshot={c} isCurrent={isCurrent} />
+                  <DeleteSnapshotDialog
+                    owner={owner}
+                    id={id}
+                    snapshotId={c.id}
+                    // The id, not the word "snapshot": the dialog names ONE record among several
+                    // that may all be message-less, and "Delete snapshot “snapshot”?" names none.
+                    label={c.message || c.id.slice(0, 8)}
+                    action={deleteEnvironmentSnapshot}
+                    note={
+                      isCurrent ? (
+                        <>
+                          {" "}
+                          The environment itself is not affected. This is the snapshot the
+                          environment currently sits on; its disk does not change, but the
+                          snapshots will no longer show where it is.
+                        </>
+                      ) : (
+                        <> The environment itself is not affected.</>
+                      )
+                    }
+                  />
                 </div>
               </div>
             </Node>

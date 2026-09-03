@@ -6,6 +6,7 @@ import { when } from "@/lib/time";
 import { snapshotTime } from "@/lib/snapshot";
 import { stateSummary } from "@/lib/snapshot-state";
 import { DeleteSnapshotDialog, RestoreDialog } from "@/components/app/restore-dialog";
+import { deleteWorkspaceSnapshot } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 import { requireToken } from "@/lib/session";
 
 /** A workspace's OWN snapshots — the only user-facing surface for them, reached from that
@@ -73,6 +74,8 @@ export default async function Page({
                   id={id}
                   snapshotId={c.id}
                   label={c.message || c.id.slice(0, 8)}
+                  action={deleteWorkspaceSnapshot}
+                  note={<> The workspace itself is not affected.</>}
                 />
               </div>
             </li>

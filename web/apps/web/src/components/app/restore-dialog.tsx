@@ -9,7 +9,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import {
-  deleteWorkspaceSnapshot, restoreWorkspace, type WsActionState,
+  restoreWorkspace, type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 import type { SnapshotState } from "@/lib/snapshot-state";
 import { deleteVolumeCopy } from "@/lib/archived";
@@ -83,14 +83,24 @@ export function RestoreDialog({
   );
 }
 
+/** Both kinds' action states are `{ ok?, error? }` plus fields this dialog never reads, so one
+ *  shape drives both — the same idiom `archived-snapshots.tsx` uses. */
+type DialogState = { ok?: true; error?: string } | null;
+type DialogAction = (prev: DialogState, fd: FormData) => Promise<DialogState>;
+
 /** Delete ONE snapshot. A snapshot is kept until it is explicitly deleted, and this is that
  *  delete: the bytes go with it, which is why the copy says so plainly rather than talking about
- *  a record. The workspace's own live disk, if it still has one, is untouched. */
+ *  a record. The live disk, if there still is one, is untouched.
+ *
+ *  One component for a workspace's and an environment's snapshots: same trigger, same label rule,
+ *  same body, differing only in the action bound and one trailing sentence. */
 export function DeleteSnapshotDialog({
   owner,
   id,
   snapshotId,
   label,
+  action: act,
+  note,
 }: {
   owner: string;
   id: string;
@@ -98,8 +108,11 @@ export function DeleteSnapshotDialog({
   /** The message, or the short id when there is none — the dialog has to name ONE of several
    *  snapshots that may all be message-less. */
   label: string;
+  action: DialogAction;
+  /** One extra sentence after the standard body: what else this particular delete costs. */
+  note?: React.ReactNode;
 }) {
-  const [state, action, pending] = useActionState<WsActionState, FormData>(deleteWorkspaceSnapshot, null);
+  const [state, action, pending] = useActionState<DialogState, FormData>(act, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -113,7 +126,8 @@ export function DeleteSnapshotDialog({
           <DialogHeader>
             <DialogTitle>Delete snapshot &ldquo;{label}&rdquo;?</DialogTitle>
             <DialogDescription>
-              {deleteVolumeCopy(1)} The workspace itself is not affected.
+              {deleteVolumeCopy(1)}
+              {note}
             </DialogDescription>
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
