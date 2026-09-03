@@ -227,7 +227,8 @@ that holds it, so it cuts nothing, carries no `based_on`, and refuses an interru
 409 — there is nothing on a live node to copy from. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
 an explicit past **snapshot** — a PUSHED commit record, named by id. Between pushes, a background
 sync beat (`WS_SYNC_SECS`, `bins/agent/src/sync.rs`) cuts a TRANSIENT `Snapshot` — never a parent,
-never advancing `status.head` — from each running worktree whose btrfs generation has moved, so a
+never advancing `status.head` — from each running worktree whose btrfs generation has moved or
+whose definition (`spec.state`) has changed since its newest sync point, so a
 peer node's replica always has something recent to fetch; retain keeps exactly one Ready transient
 per worktree, and a node re-hosting a worktree checks out the newest one it holds locally before
 falling back to `status.head`. The agent
