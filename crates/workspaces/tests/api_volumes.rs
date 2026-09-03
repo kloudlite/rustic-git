@@ -567,3 +567,21 @@ async fn a_foreign_snapshot_keeps_the_volume_after_my_last_snapshot_goes() {
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is alice's too: {deletes:?}");
 }
+
+/// `list_volumes` derives the row's `vol/{owner}/{name}` from the first snapshot's `spec.owner`,
+/// so a mislabelled snapshot both appears in the wrong person's list and mislabels who owns it.
+#[tokio::test]
+async fn list_volumes_drops_a_mislabelled_snapshot() {
+    let mut foreign = push("ws-2-a", "ws-2", "alice", "2026-08-27T09:00:00Z");
+    foreign["metadata"]["labels"]["rustic-git.io/owner"] = json!("karthik");
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z"), foreign])),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+    let (status, body) = get_json(&s, &token(&s.jwt, "karthik"), "/v1/volumes").await;
+    assert_eq!(status, 200, "{body}");
+    let names: Vec<&str> = body.as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["ws-1"], "alice's volume is not karthik's: {body}");
+}

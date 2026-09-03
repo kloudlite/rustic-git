@@ -320,6 +320,35 @@ fn owned_in(owner: &str, team: &str) -> ListParams {
     ListParams::default().labels(&format!("{OWNER_LABEL}={owner},{TEAM_LABEL}={team}"))
 }
 
+/// The `spec.owner` of anything this API lists. One trait so "narrow by label, DECIDE on spec" is
+/// a single function instead of a rule seven handlers each remembered or forgot.
+pub trait Owned {
+    fn owner(&self) -> &str;
+}
+
+impl Owned for crd::Workspace {
+    fn owner(&self) -> &str {
+        &self.spec.owner
+    }
+}
+impl Owned for crd::Environment {
+    fn owner(&self) -> &str {
+        &self.spec.owner
+    }
+}
+impl Owned for crd::Snapshot {
+    fn owner(&self) -> &str {
+        &self.spec.owner
+    }
+}
+
+/// Keep only what `owners` actually owns. The label selector stays as the INDEX; this is the
+/// answer. An object whose label disagrees with its spec — a restored backup, a migration, an
+/// operator with kubectl, the window before the controller re-stamps — is somebody else's.
+pub fn mine<K: Owned>(items: Vec<K>, owners: &[String]) -> Vec<K> {
+    items.into_iter().filter(|k| owners.iter().any(|o| o == k.owner())).collect()
+}
+
 /// A name is unique per (owner, team): it is also the directory the workspace mounts at inside
 /// the person's shared home (`~/workspaces/<name>`), and two workspaces on one path would be two
 /// workspaces one editor session cannot tell apart. The selector narrows the list; the decision
@@ -400,11 +429,8 @@ async fn pushed_volumes(s: &ApiState, c: &kube::Client, owner: &str) -> Result<H
     // by this label, deduplicated to their volume — the commit-model equivalent of the browse
     // tier's per-owner volume list.
     let api: Api<crd::Snapshot> = Api::all(c.clone());
-    Ok(api
-        .list(&owned_by(owner))
-        .await
-        .map_err(kube_err)?
-        .items
+    let items = mine(api.list(&owned_by(owner)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
+    Ok(items
         .into_iter()
         .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
         .map(|s| s.spec.volume)
@@ -763,7 +789,7 @@ async fn list_ws(
     };
     // No "filter out the deleted ones": a deleted object is gone from the API server.
     let api: Api<crd::Workspace> = Api::all(c.clone());
-    let items = api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items;
+    let items = mine(api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner));
     let pushed = pushed_volumes(&s, c, &owner).await?;
     let list: Vec<_> = items.iter().map(|w| ws_doc(w, &pushed)).collect();
     // The retry the create's 5 s ceiling defers to: cheap, idempotent, and the only place a user
@@ -833,6 +859,7 @@ async fn ssh_session(
                 .map_err(kube_err)?
                 .items
                 .into_iter()
+                .filter(|w| w.spec.owner == owner)
                 .find(|w| w.spec.name == target)
                 .ok_or_else(not_found)?
         }
@@ -1709,7 +1736,7 @@ async fn list_env(
     let mut list = vec![];
     for owner in owners {
         let pushed = pushed_volumes(&s, c, &owner).await?;
-        for e in api.list(&owned_by(&owner)).await.map_err(kube_err)?.items {
+        for e in mine(api.list(&owned_by(&owner)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner)) {
             list.push(env_doc(&e, &pushed));
         }
     }
@@ -2123,13 +2150,13 @@ async fn live_parents(s: &ApiState, owners: &[String]) -> Option<BTreeMap<String
     let lp = ListParams::default().labels(&owner_set_selector(owners));
     let mut live = BTreeMap::new();
     let ws: Api<crd::Workspace> = Api::all(c.clone());
-    for w in ws.list(&lp).await.ok()?.items {
+    for w in mine(ws.list(&lp).await.ok()?.items, owners) {
         let st = w.status.as_ref();
         let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| w.name_any());
         live.insert(vol, Parent { kind: "workspace".into(), display: w.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
-    for e in envs.list(&lp).await.ok()?.items {
+    for e in mine(envs.list(&lp).await.ok()?.items, owners) {
         let st = e.status.as_ref();
         let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| e.name_any());
         live.insert(vol, Parent { kind: "environment".into(), display: e.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
@@ -2210,7 +2237,7 @@ async fn list_volumes(
     // volume index is not consulted at all any more — a push writes a `Snapshot` CR and nothing
     // else, so a listing that read the index would have gone blind on everything pushed since.
     let api: Api<crd::Snapshot> = Api::all(kube(&s)?.clone());
-    let snaps = api.list(&ListParams::default().labels(&owner_set_selector(&owners))).await.map_err(kube_err)?.items;
+    let snaps = mine(api.list(&ListParams::default().labels(&owner_set_selector(&owners))).await.map_err(kube_err)?.items, &owners);
 
     // The cluster answers only "does a parent still exist", so this degrades the page rather than
     // emptying it. `None` is an unanswered question, never an answer of "nothing": labelling every

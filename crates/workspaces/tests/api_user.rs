@@ -1817,3 +1817,49 @@ async fn a_frozen_service_with_an_escaping_mount_is_refused() {
     assert_eq!(r.status(), 400, "{}", r.text().await.unwrap());
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
+
+/// A mislabelled object — a restored backup, a migration, an operator with kubectl, or the window
+/// before the controller re-stamps — must not become an ssh session into someone else's workspace.
+/// `ssh_session` mints a token off whatever this lookup returns, so the name fallback rechecks
+/// `spec.owner` exactly as `my_ws` does.
+#[tokio::test]
+async fn the_ssh_name_fallback_refuses_a_mislabelled_workspace() {
+    let mut foreign = placed_ws("ws-bob", "bob");
+    // The label says karthik; the spec says bob. The spec is the truth.
+    foreign["metadata"]["labels"]["rustic-git.io/owner"] = json!("karthik");
+    foreign["spec"]["name"] = json!("target");
+    foreign["status"]["sshHostKey"] = json!("ssh-ed25519 AAAA");
+    let s = server(vec![
+        get(format!("{API}/workspaces/target"), json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign]})),
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/target/ssh-session", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "{}", resp.text().await.unwrap());
+}
+
+/// Same class, in the listing: a label is an index, never an answer.
+#[tokio::test]
+async fn list_ws_drops_a_mislabelled_workspace() {
+    let mut foreign = placed_ws("ws-bob", "bob");
+    foreign["metadata"]["labels"]["rustic-git.io/owner"] = json!("karthik");
+    let s = server(vec![
+        get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign, placed_ws("ws-mine", "karthik")]})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|w| w["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["ws-mine"], "bob's workspace is not karthik's: {body}");
+}
