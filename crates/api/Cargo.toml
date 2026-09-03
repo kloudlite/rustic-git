@@ -27,6 +27,7 @@ form_urlencoded = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 mongodb = { workspace = true }
+chrono = { workspace = true }
 # Only `ssh_fingerprint` (in `credentials.rs`) needs this — computing an OpenSSH key's
 # fingerprint before it is stored. Not in the brief's dependency list; added because that one
 # function has no `russh`-free way to do it.

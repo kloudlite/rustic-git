@@ -675,8 +675,12 @@ pub(crate) async fn cli_token(
 }
 
 /// Epoch milliseconds as RFC3339. One spelling for every instant these routes answer with.
+/// `chrono`, not `mongodb::bson::DateTime` — nothing else in this module is about mongo, and an
+/// out-of-range instant answers empty here exactly as bson's fallible conversion did.
 fn rfc3339(ms: i64) -> String {
-    mongodb::bson::DateTime::from_millis(ms).try_to_rfc3339_string().unwrap_or_default()
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
 }
 
 /// The signed-in person's CLI logins.
@@ -906,6 +910,14 @@ mod tests {
             fingerprints: Vec::new(),
             created_at: mongodb::bson::DateTime::now(),
         }
+    }
+
+    #[test]
+    fn rfc3339_formats_epoch_millis_and_survives_a_nonsense_input() {
+        // The four call sites feed it `timestamp_millis()` and `exp * 1000`; a bad value must not
+        // panic a route, it must answer the empty string the old bson path answered.
+        assert_eq!(super::rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(super::rfc3339(i64::MAX), "");
     }
 
     /// An ssh key has to keep its public line now — `authorized_keys` cannot be rebuilt from a
