@@ -1254,13 +1254,15 @@ fn orphan_snaps(local: &[String], records: &HashSet<String>) -> Vec<String> {
 /// snapshot's volume outlives its workspace and is not one of them.
 ///
 /// Keep-biased throughout: only volumes whose bytes are actually here (a voldir), never one
-/// mid-delete, and a per-volume listing error skips that volume rather than guessing it empty.
+/// mid-delete, a per-volume listing error skips that volume rather than guessing it empty, and a
+/// fresh GET per candidate closes the window between the beat's listing and this delete.
 /// Returns what it DECIDED to drop — the decision, not the btrfs outcome, is what a test on a
 /// machine without btrfs can read, and a failed delete is retried by the next beat anyway.
 ///
 /// ponytail: one full snap listing per held volume per beat; index records by name if a volume
 /// ever grows past thousands of commits.
-fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshots: &[crd::Snapshot]) -> Vec<(String, String)> {
+async fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshots: &[crd::Snapshot]) -> Vec<(String, String)> {
+    let api = Api::<crd::Snapshot>::all(ctx.client.clone());
     let mut dropped = Vec::new();
     for v in &beat.volumes {
         let id = v.name_any();
@@ -1278,9 +1280,20 @@ fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshot
         };
         let records: HashSet<String> = snapshots.iter().filter(|s| s.spec.volume == id).map(|s| s.name_any()).collect();
         for name in orphan_snaps(&local, &records) {
+            // The list is already stale by the time we get here — the record sweep makes a GET per
+            // candidate between it and this loop, and a push started in that window has its CR
+            // Ready and its bytes on disk. One fresh GET per candidate, exactly as the record
+            // sweep does; a present record OR a failed GET keeps the bytes.
+            if !matches!(api.get_opt(&name).await, Ok(None)) {
+                continue;
+            }
             tracing::info!(volume = %id, snapshot = %name, "pull: retire: no Snapshot CR; dropping the orphaned commit bytes");
-            if let Err(e) = ctx.engine.drop_commit(&id, &name) {
-                tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: dropping orphaned commit bytes; left for the next pass");
+            // btrfs delete takes a blocking flock and shells out — never on the reactor thread.
+            let (engine, vol, cname) = (ctx.engine.clone(), id.clone(), name.clone());
+            match tokio::task::spawn_blocking(move || engine.drop_commit(&vol, &cname)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: dropping orphaned commit bytes; left for the next pass"),
+                Err(e) => tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: the orphan-bytes drop task panicked"),
             }
             dropped.push((id.clone(), name));
         }
@@ -1325,7 +1338,7 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
     match Api::<crd::Snapshot>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(l) => {
             sweep_orphan_snapshots(ctx, &known, &l.items).await;
-            sweep_orphan_snap_bytes(ctx, beat, &l.items);
+            sweep_orphan_snap_bytes(ctx, beat, &l.items).await;
         }
         Err(e) => tracing::warn!(error = %e, "pull: retire: listing snapshots; sweeping none"),
     }
@@ -2819,9 +2832,10 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", Vec::new());
         let beat = beat_of(vec![vol_owned("v1", "node-a")], vec![], vec![]);
 
-        let dropped = sweep_orphan_snap_bytes(&ctx, &beat, &[serde_json::from_value(snap_of("v1-aaaa", "v1")).unwrap()]);
+        let dropped = sweep_orphan_snap_bytes(&ctx, &beat, &[serde_json::from_value(snap_of("v1-aaaa", "v1")).unwrap()]).await;
 
         assert_eq!(dropped, vec![("v1".to_string(), "v1-bbbb".to_string())]);
+        assert!(ctx.engine.pool.snap("v1", "v1-aaaa").exists(), "the recorded commit's bytes stay put");
         // The BYTE sweep never touches a record: only an explicit delete kills a Snapshot CR.
         assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     }
@@ -2835,7 +2849,19 @@ fi
         let (ctx, _rec) = test_ctx(tmp.path(), "node-a", Vec::new());
         let beat = beat_of(vec![vol_owned("v1", "node-a"), vol_owned("v2", "node-a")], vec![], vec![]);
 
-        assert!(sweep_orphan_snap_bytes(&ctx, &beat, &[]).is_empty());
+        assert!(sweep_orphan_snap_bytes(&ctx, &beat, &[]).await.is_empty());
+    }
+
+    /// The beat's listing is stale by the time the bytes are swept — a push that created its CR
+    /// and cut its subvolume in that window must survive on the strength of the fresh GET.
+    #[tokio::test]
+    async fn the_byte_sweep_keeps_a_snap_whose_record_appeared_after_the_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        snap_pool(tmp.path(), "v1", &["v1-fresh"]);
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", vec![get(format!("{SNAPSHOTS}/v1-fresh"), snap_of("v1-fresh", "v1"))]);
+        let beat = beat_of(vec![vol_owned("v1", "node-a")], vec![], vec![]);
+
+        assert!(sweep_orphan_snap_bytes(&ctx, &beat, &[]).await.is_empty(), "present on the fresh GET: kept");
     }
 
     /// Keep-biased at the top: a failed Snapshot listing skips both sweeps, so the bytes stay.

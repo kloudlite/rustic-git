@@ -138,6 +138,11 @@ impl Engine {
         if !path.exists() {
             return Ok(());
         }
+        // A plain directory under `snap/` is not a commit and `btrfs subvolume delete` only ever
+        // errors on it — skipping it once beats warning about it on every beat forever.
+        if !is_subvolume(&path) {
+            return Ok(());
+        }
         run(&["btrfs", "subvolume", "delete", path.to_str().unwrap()])
     }
 
