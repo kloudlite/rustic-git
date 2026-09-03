@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn snapshot_spec_round_trips_with_empty_parent_and_no_message() {
         let spec = SnapshotSpec {
-            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false, transient: false, state: None,
+            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, transient: false, state: None,
         };
         let v = serde_json::to_value(&spec).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
@@ -1117,7 +1117,7 @@ mod tests {
     #[test]
     fn a_snapshot_spec_without_state_still_deserializes() {
         let s: SnapshotSpec = serde_json::from_value(serde_json::json!({
-            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "pinned": false, "transient": false
+            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "transient": false
         }))
         .unwrap();
         assert!(s.state.is_none());
@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn a_malformed_snapshot_state_is_dropped_not_a_deserialize_error() {
         let s: SnapshotSpec = serde_json::from_value(serde_json::json!({
-            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "pinned": false,
+            "volume": "v", "owner": "o", "worktree": "v", "parent": "",
             "transient": false, "state": {"kind": "bogus"}
         }))
         .unwrap();

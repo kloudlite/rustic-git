@@ -279,3 +279,7 @@ admission policy to allow any `nodeName` change, and the two-step reuses the rev
 4. Clone cuts a snapshot at once and wakes the peers. Placement is the same up-to-date rule as
    a start; a running source's clone lands on the owner only because nothing else is up to date
    yet — there is no same-node rule.
+
+## Vocabulary note (2026-09-03, later the same day)
+
+This document predates the final vocabulary in `2026-09-03-durable-snapshots-design.md` ("Revision"): where it says **commit** read **snapshot** (a push, `transient: false`, kept until explicitly deleted); **pinned** no longer exists as a flag; **transient** cuts (sync, stop, clone, migration baseline) are **sync points**. The mechanics described here are unchanged.

@@ -173,3 +173,7 @@ are restoring and can change it before submitting.
 - Web: `bun test` for the summary line; `tsc` and `lint` clean.
 - Live: push, restore from that snapshot with the source deleted, and confirm the new workspace's
   image and packages equal the snapshot's; same for an environment with two services.
+
+## Vocabulary note (2026-09-03, later the same day)
+
+This document predates the final vocabulary in `2026-09-03-durable-snapshots-design.md` ("Revision"): where it says **commit** read **snapshot** (a push, `transient: false`, kept until explicitly deleted); **pinned** no longer exists as a flag; **transient** cuts (sync, stop, clone, migration baseline) are **sync points**. The mechanics described here are unchanged.
