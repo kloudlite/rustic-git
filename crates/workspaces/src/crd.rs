@@ -567,6 +567,10 @@ impl Phase {
     // a legal selectable field (only metadata is forbidden, and arrays are not allowed). An empty
     // value is what the unplaced watch selects on.
     selectable = ".status.nodeName",
+    // `parents_of_volume` asks "what is running on this volume" on every snapshot and volume
+    // delete; without this it was two full-cluster lists per question. An unset value indexes as
+    // the empty string, which is what makes "not placed yet" its own queryable set.
+    selectable = ".status.volumeRef",
     printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
     printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
@@ -692,6 +696,10 @@ pub struct ServiceStatus {
     // a legal selectable field (only metadata is forbidden, and arrays are not allowed). An empty
     // value is what the unplaced watch selects on.
     selectable = ".status.nodeName",
+    // `parents_of_volume` asks "what is running on this volume" on every snapshot and volume
+    // delete; without this it was two full-cluster lists per question. An unset value indexes as
+    // the empty string, which is what makes "not placed yet" its own queryable set.
+    selectable = ".status.volumeRef",
     printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
     printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,

@@ -47,7 +47,7 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
         let want: &[&str] = match crd.spec.names.kind.as_str() {
             "OwnerBinding" => &[],
             "Volume" => &[".spec.nodeName"],
-            "Workspace" | "Environment" => &[".status.nodeName"],
+            "Workspace" | "Environment" => &[".status.nodeName", ".status.volumeRef"],
             "Snapshot" => &[".spec.volume"],
             // `.spec.volume`: `replicated_condition` and `pull_volume` both filtered client-side
             // because a selector on it was a 400. Dropping it makes both a full-cluster scan again.

@@ -608,3 +608,32 @@ async fn list_volumes_drops_a_mislabelled_snapshot() {
     let names: Vec<&str> = body.as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["ws-1"], "alice's volume is not karthik's: {body}");
 }
+
+/// Two unfiltered cluster-wide LISTs per delete — four for a snapshot delete, which re-reads on
+/// purpose — deserialized every Workspace and Environment in the cluster to answer one question.
+/// The selectable field makes both reads indexed; the empty-value selector is what keeps an
+/// unplaced parent visible.
+#[tokio::test]
+async fn the_delete_paths_select_on_the_volume_ref() {
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z")])),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+        ok("DELETE", format!("{SNAPS}/ws-1-a")),
+        ok("DELETE", format!("{API}/volumes/ws-1")),
+    ])
+    .await;
+    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+
+    let listed: Vec<String> = s
+        .rec
+        .requests()
+        .into_iter()
+        .filter(|r| r.contains("/workspaces?") || r.contains("/environments?"))
+        .collect();
+    assert!(!listed.is_empty(), "the parents are still consulted: {listed:?}");
+    assert!(
+        listed.iter().all(|r| r.contains("fieldSelector=status.volumeRef")),
+        "every parent read is indexed: {listed:?}"
+    );
+}

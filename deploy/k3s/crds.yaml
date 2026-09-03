@@ -706,6 +706,9 @@
             "selectableFields": [
               {
                 "jsonPath": ".status.nodeName"
+              },
+              {
+                "jsonPath": ".status.volumeRef"
               }
             ],
             "served": true,
@@ -1133,6 +1136,9 @@
             "selectableFields": [
               {
                 "jsonPath": ".status.nodeName"
+              },
+              {
+                "jsonPath": ".status.volumeRef"
               }
             ],
             "served": true,

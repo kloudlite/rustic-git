@@ -2202,39 +2202,48 @@ async fn live_parents(s: &ApiState, owners: &[String]) -> Option<BTreeMap<String
 /// callers turn into a refusal rather than a delete.
 async fn parents_of_volume(s: &ApiState, volume: &str) -> Option<Vec<Parent>> {
     let c = s.kube.as_ref()?;
-    let on_volume = |vref: Option<String>, name: String, storage: &Option<crd::WorkspaceStorage>| {
-        // Three ways to be on this volume: the node said so, the parent IS the volume (an owned
-        // one shares its id), or its spec grafts onto it and no node has answered yet.
-        vref.clone().unwrap_or(name) == volume
-            || matches!(
-                storage.as_ref().and_then(|s| s.source.as_ref()),
-                Some(VolumeSource::CloneOf { volume: v, .. } | VolumeSource::SeededFrom { volume: v, .. }) if v == volume
-            )
-    };
+    // Placed parents come back by the indexed field. Unplaced ones — created seconds ago, or
+    // waiting on a node that is down — have no `volumeRef` at all, and the API server indexes that
+    // as the empty string: a small, bounded set whose `spec.storage.source` says what they graft
+    // onto. Both, because Task 5's protection depends on the second.
+    let placed = ListParams::default().fields(&format!("status.volumeRef={volume}"));
+    let unplaced = ListParams::default().fields("status.volumeRef=");
     let mut out = vec![];
-    for w in Api::<crd::Workspace>::all(c.clone()).list(&ListParams::default()).await.ok()?.items {
-        let st = w.status.as_ref();
-        if on_volume(st.and_then(|s| s.volume_ref.clone()), w.name_any(), &w.spec.storage) {
-            out.push(Parent {
-                kind: "workspace".into(),
-                display: w.spec.name.clone(),
-                head: st.and_then(|s| s.head.clone()),
-                base: source_snapshot(&w.spec.storage),
-            });
+    for lp in [&placed, &unplaced] {
+        for w in Api::<crd::Workspace>::all(c.clone()).list(lp).await.ok()?.items {
+            let st = w.status.as_ref();
+            if on_volume(volume, st.and_then(|s| s.volume_ref.clone()), w.name_any(), &w.spec.storage) {
+                out.push(Parent {
+                    kind: "workspace".into(),
+                    display: w.spec.name.clone(),
+                    head: st.and_then(|s| s.head.clone()),
+                    base: source_snapshot(&w.spec.storage),
+                });
+            }
         }
-    }
-    for e in Api::<crd::Environment>::all(c.clone()).list(&ListParams::default()).await.ok()?.items {
-        let st = e.status.as_ref();
-        if on_volume(st.and_then(|s| s.volume_ref.clone()), e.name_any(), &e.spec.storage) {
-            out.push(Parent {
-                kind: "environment".into(),
-                display: e.spec.name.clone(),
-                head: st.and_then(|s| s.head.clone()),
-                base: source_snapshot(&e.spec.storage),
-            });
+        for e in Api::<crd::Environment>::all(c.clone()).list(lp).await.ok()?.items {
+            let st = e.status.as_ref();
+            if on_volume(volume, st.and_then(|s| s.volume_ref.clone()), e.name_any(), &e.spec.storage) {
+                out.push(Parent {
+                    kind: "environment".into(),
+                    display: e.spec.name.clone(),
+                    head: st.and_then(|s| s.head.clone()),
+                    base: source_snapshot(&e.spec.storage),
+                });
+            }
         }
     }
     Some(out)
+}
+
+/// On this volume: the node said so, the parent IS the volume (an owned one shares its id), or its
+/// spec grafts onto it and no node has answered yet.
+fn on_volume(volume: &str, vref: Option<String>, name: String, storage: &Option<crd::WorkspaceStorage>) -> bool {
+    vref.unwrap_or(name) == volume
+        || matches!(
+            storage.as_ref().and_then(|s| s.source.as_ref()),
+            Some(VolumeSource::CloneOf { volume: v, .. } | VolumeSource::SeededFrom { volume: v, .. }) if v == volume
+        )
 }
 
 /// What a volume is, when nothing named it: no live parent, and a record written before provenance
