@@ -37,6 +37,9 @@ pub(crate) fn ws_volume(w: &crd::Workspace) -> Option<&str> {
 pub(crate) async fn pushed_volumes(_s: &ApiState, c: &kube::Client, owner: &str) -> Result<HashSet<String>, Response> {
     let api: Api<crd::Snapshot> = Api::all(c.clone());
     let items = mine(api.list(&owned_by(owner)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
+    // Any phase but Error, on purpose: the same predicate the finalizer uses to decide a snapshot
+    // still references the volume, so a push that is still uploading already shows the volume it
+    // will keep alive. The old registry path answered only after the upload landed.
     Ok(items
         .into_iter()
         .filter(|s| s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error))
