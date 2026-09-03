@@ -52,7 +52,7 @@ flowchart TB
   API -- "writes spec via KUBECONFIG" --> APIS
 
   OS[(Object store<br/>Azure Blob / S3 / file://<br/>SlateDB per repo, image, volume;<br/>packs, registry blobs+manifests,<br/>index markers, auth records)]
-  COS[(Cosmos DB<br/>Mongo API: users, teams,<br/>members, invites<br/>Core API: Region metadata)]
+  COS[(Cosmos DB<br/>Mongo API: users, teams,<br/>members, invites)]
   RED[(Redis<br/>events stream + read cache)]
 
   SRV --> OS
@@ -62,7 +62,6 @@ flowchart TB
   API --> RED
   WRK --> RED
   API --> COS
-  SRV --> COS
 
   RES[Resend<br/>invite + sign-in mail]
   OAUTH[GitHub / Google /<br/>Microsoft Entra ID OAuth]
@@ -78,15 +77,15 @@ flowchart TB
 
 | Component | Binary / package | Runs where | Owns | Talks to | Source of truth it holds |
 | --- | --- | --- | --- | --- | --- |
-| Server tier | `rustic-git` (`bins/server`, args `serve`) | AKS, StatefulSet `rustic-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases; the ownership map, on whichever pod holds the lease at `cluster/leader` | Object store, Redis, Cosmos (Mongo URI; workspaces Cosmos optional), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
-| Read/team API | `rustic-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos, Redis cache, k3s API server (mounted KUBECONFIG) | None for repos — writes CR **spec** and Cosmos `Region` |
+| Server tier | `rustic-git` (`bins/server`, args `serve`) | AKS, StatefulSet `rustic-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases; the ownership map, on whichever pod holds the lease at `cluster/leader` | Object store, Redis, Cosmos (Mongo URI, pull migration read), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
+| Read/team API | `rustic-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos (directory), Redis cache, k3s API server (mounted KUBECONFIG, writer of every CRD incl. `Region`) | None for repos — writes CR **spec**, `Region` included |
 | Merge worker | `rustic-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
 | Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot cut, sync-point beat, per-owner home directories | k3s API (watch/status), peer agents (btrfs send over HTTP) — and nothing else | CR **status** only; snapshot bytes as local btrfs subvolumes |
 | Web app | `rustic-git-web` (`web/apps/web`, Next.js app router) | AKS Deployment, 2 replicas, :3000, `/api/health` probe | Browser UI, Auth.js session | `rustic-git-api` only (server-side), Resend, OAuth providers | None — no DB connection, no signing key |
-| CRDs (6) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment` (API-written), `Volume`, `OwnerBinding`, `Snapshot`, `VolumeReplica` (controller-written children) | — | The truth for workspaces, environments, volumes and snapshots alike |
+| CRDs (7) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment`, `Region` (API-written), `Volume`, `OwnerBinding`, `Snapshot`, `VolumeReplica` (controller-written children) | — | The truth for workspaces, environments, regions, volumes and snapshots alike |
 | SlateDB per repo / image / volume | `crates/storage`, `crates/gitbase` | inside the server tier process, backed by the object store | `repo/{owner}/{name}`, `repo/img/{owner}/{name}`, `repo/vol/{owner}/{id}` | object store | Everything per-repo/image/volume; exactly one opener |
 | Object store | Azure Blob `az://rustic-git` (prod), `s3://`, `file://`, `mem://` | external | packs, SlateDB files, `blobs/{owner}/{algo}/{hex}`, `manifests/{owner}/{name}/{algo}/{hex}`, `index/{public,private}/...` markers, `auth/...` records | — | Bytes; credentials live here as plain keys so any node can authenticate |
-| Cosmos DB | Mongo API (`RUSTIC_GIT_MONGO_URI`, db `kloudlite`) + Core API (`COSMOS_*`, db `workspaces`) | external, Azure | Directory (users, teams, memberships, invites) and cross-cluster `Region` metadata | api tier (writer), server tier (pull migration read) | Directory; `Region` only. Where a CRD and Cosmos could disagree, the CRD wins |
+| Cosmos DB | Mongo API (`RUSTIC_GIT_MONGO_URI`, db `kloudlite`) | external, Azure | Directory (users, teams, memberships, invites) | api tier (writer), server tier (pull migration read) | Directory only |
 | Redis | `RUSTIC_GIT_REDIS_URL` (Azure Managed Redis) | external | one `events` stream + the api tier's read cache | server, api, worker | Nothing — a nudge and a view, never the record |
 | The region's btrfs pools | `{pool}/vol/{volume}/snap/` on every pool node | in-cluster | snapshot bytes as read-only btrfs subvolumes, replicated node-to-node by `btrfs send` over the peer listener | agent | Snapshot bytes (the records are the `Snapshot`/`Volume` CRs) |
 | GHCR | `ghcr.io/kloudlite/{rustic-git,rustic-git-web,rustic-git-agent}` | external | container images, pinned by commit SHA | CI pushes, kubelets pull | — |
@@ -101,7 +100,6 @@ flowchart TB
 | --- | --- | --- | --- | --- |
 | Object store (Azure Blob / S3) | every byte: SlateDB, packs, registry blobs, index markers, auth records | server, api, worker | `RUSTIC_GIT_S3_URL` + `AZURE_STORAGE_ACCOUNT_NAME`/`_KEY` (Secret `rustic-git-storage`), or AWS env | Nothing works |
 | Cosmos DB (Mongo API) | directory: users, teams, invites; server tier's pull-request migration read | api (writer), server | `RUSTIC_GIT_MONGO_URI`, `RUSTIC_GIT_MONGO_DB` (Secret `rustic-git-mongo`) | api: team routes report unavailable, browse reads keep working. server: **not** optional — pod must not start without it, or pull requests get orphaned |
-| Cosmos DB (Core API, db `workspaces`) | cross-cluster `Region` metadata | api, server | `COSMOS_ENDPOINT`, `COSMOS_KEY`, `COSMOS_DB` (Secret `rustic-git-cosmos`, optional) | Workspace routes 503, feature dark; pods still boot |
 | Redis | `events` nudge stream + api read cache | server, api, worker | `RUSTIC_GIT_REDIS_URL` (Secret `rustic-git-redis`, optional) | No data loss: merges fall back to the owner's periodic lanes, the feed's PR half goes quiet (only `repo_created` survives), cache disabled (reads still correct) |
 | Peer agents (btrfs send over HTTP) | replicating snapshot bytes between the region's pool nodes | agent | `WS_PEER_SECRET` (Secret `rustic-git-agent`, created by hand) | Replication goes idle: pushes and restores still work on the owning node, but nothing is held anywhere else |
 | k3s API server | the CRDs = truth for workspaces | api (spec), agent (status) | `KUBECONFIG` mounted secret on api; ServiceAccount `rustic-git-agent` on the agent | No workspaces or environments at all |
@@ -138,8 +136,8 @@ cluster, nothing here reads it.
   controller out of desired state. Every `/v1` read is a projection of a CR.
 - **Snapshot bytes and their commit records live on the server tier / region blob store**, not in
   etcd — the only workspace state outside the cluster.
-- **Cosmos holds the directory and `Region` metadata, nothing else.** Where a CRD and Cosmos could
-  disagree about a workspace, the CRD wins.
+- **Cosmos holds only the directory** (users, teams, memberships, invites). `Region` is a CRD like
+  every other kind here, written by `/v1/regions`.
 - **Views, never authorization:** `index/` markers, the `rustic-git.io/owner` and `/kind` labels
   (`spec.owner` is the truth; controllers re-stamp labels on reconcile), and the Redis `events`
   stream. Every consumer of `events` keeps a fallback that works with Redis down.
@@ -226,7 +224,7 @@ NetworkPolicies open the path; detaching, or attaching elsewhere, removes them.
 | `crates/registry` | OCI Distribution v1.1 registry, auth, GC sweep |
 | `crates/api` | the read/browse API served by `bins/api` |
 | `crates/app` | shared server application state and lanes |
-| `crates/workspaces` | CRDs, `/v1` routes, Cosmos `Region` store, snapshot engine |
+| `crates/workspaces` | CRDs, `/v1` routes, snapshot engine |
 | `bins/server` | `rustic-git` — git + registry, routing, ownership |
 | `bins/api` | `rustic-git-api` — `/v1` and browse, cannot open a repo for writing |
 | `bins/worker` | `rustic-git-worker` — merges and blob GC |
@@ -249,9 +247,9 @@ RUSTIC_GIT_S3_URL=file://./x cargo run -p rustic-git-server -- serve   # no S3; 
 cd web && bun install && bun run dev         # lint / typecheck / build / test also available
 
 ./tests/registry_e2e.sh                      # real docker push/pull; exit 77 = docker half skipped, not a pass
-./tests/ws_e2e.sh                            # server+api+agent+Cosmos+Azure+btrfs against k3s;
+./tests/ws_e2e.sh                            # server+api+agent+Azure+btrfs against k3s;
                                              # exit 77 = a prerequisite was missing (root btrfs,
-                                             # reachable cluster with CRDs, COSMOS_*/AZURE_* env)
+                                             # reachable cluster with CRDs, AZURE_* env)
 ```
 
 Deploying: CI builds on push to master, but `web.yml` only runs when `web/**` changed, so the two

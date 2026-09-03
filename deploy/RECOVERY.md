@@ -11,13 +11,13 @@ What survives a cluster loss, and is the input to this page:
 | --- | --- | --- |
 | Blob container `rustic-git` (SlateDB, packs, registry, credentials, `index/`) | storage account (Secret `rustic-git-storage` named it; the portal still does) | nothing to recover — this is the product |
 | `wslayers*` containers, one per region | per-region storage accounts | workspace history is gone; live subvolumes on surviving pool nodes are not |
-| Cosmos `rustic-git-mongo` (directory, PRs) and `rustic-git-cosmos` (`Region` rows) | Cosmos accounts | re-create `Region` rows by hand (Part C); the directory cannot be rebuilt |
-| `k3s-backup` container (hourly encrypted control-plane bundles) | same account as `rustic-git` | the k3s region is rebuilt from `objects.yaml`-less scratch: subvolumes on the pool are orphans until re-adopted |
+| Cosmos `rustic-git-mongo` (directory, PRs) | Cosmos account | the directory cannot be rebuilt |
+| `k3s-backup` container (hourly encrypted control-plane bundles) | same account as `rustic-git` | the k3s region is rebuilt from `objects.yaml`-less scratch: subvolumes on the pool are orphans until re-adopted, and every `Region` CR (there is no other copy) must be re-registered by hand via `POST /v1/regions` (Part C) |
 | `/etc/rustic-git/k3s-backup.key` copy | password manager | every bundle in `k3s-backup` is noise |
 | Cloudflare zones `kloudlite.io`, `khost.dev`; GitHub org (GHCR packages, Actions) | their consoles | — |
 
 Nothing else needs to exist beforehand. Every Secret is re-minted below; the values that cannot
-be re-minted (storage/Cosmos keys) come from the portal.
+be re-minted (storage key, Mongo connection string) come from the portal.
 
 Alerts to re-arm as each tier comes back: `deploy/alerts.md`. The backup switches to re-verify
 once the clusters serve: `deploy/BACKUPS.md`.
@@ -85,7 +85,6 @@ exists in Azure and is copied. A `(cross)` Secret must hold the same value in bo
 | `rustic-git-hostkey` | `host_key` | minted: `ssh-keygen -q -t ed25519 -N '' -f host_key` (the file, not `.pub`). One key fleet-wide — per-pod keys make every pod a different host. **Every user's `known_hosts` entry for `git.khost.dev` changes**; announce it | srv | no |
 | `rustic-git-mongo` | `uri` | portal: `az cosmosdb keys list -n rustic-git-mongo -g <rg> --type connection-strings` | srv, api, worker | no on srv (PRs orphan) |
 | `rustic-git-redis` | `url` | the managed instance's `rediss://` URL with its access key | srv, api, worker | yes — slower, never wrong |
-| `rustic-git-cosmos` | `endpoint`, `key` | portal: `az cosmosdb show -n rustic-git-cosmos --query documentEndpoint`, `az cosmosdb keys list --type keys` | srv, api | yes — region routes 503 |
 | `rustic-git-k3s-kubeconfig` **(cross)** | `config` | a kubeconfig whose user is the k3s `rustic-git-api` ServiceAccount token — B.3 mints it | api | no — /v1 workspace routes 503 |
 | `rustic-git-web` | `auth-secret` (required); `github-id`/`-secret`, `google-id`/`-secret`, `allowed-emails`, `shared-password` (optional) | `auth-secret` minted: `openssl rand -hex 32`; OAuth values from the provider consoles (callback `https://dev.kloudlite.io/api/auth/callback/<provider>`) | web | providers optional |
 | `rustic-git-mail` | `resend-api-key`, `from` | Resend console | web | yes — invites shown as links |
@@ -97,7 +96,6 @@ kubectl -n rustic-git create secret generic rustic-git-peer  --from-literal=secr
 ssh-keygen -q -t ed25519 -N '' -f host_key && kubectl -n rustic-git create secret generic rustic-git-hostkey --from-file=host_key && rm host_key host_key.pub
 kubectl -n rustic-git create secret generic rustic-git-mongo --from-literal=uri='<connection string>'
 kubectl -n rustic-git create secret generic rustic-git-redis --from-literal=url='rediss://:<key>@<host>:10000'
-kubectl -n rustic-git create secret generic rustic-git-cosmos --from-literal=endpoint=<url> --from-literal=key=<key>
 kubectl -n rustic-git create secret generic rustic-git-k3s-kubeconfig --from-file=config=<kubeconfig from B.3>
 kubectl -n rustic-git create secret generic rustic-git-web --from-literal=auth-secret=$(openssl rand -hex 32) [--from-literal=github-id=... ...]
 kubectl -n rustic-git create secret generic rustic-git-mail --from-literal=resend-api-key=... --from-literal=from='...'
@@ -323,18 +321,19 @@ then the units. Verify: `systemctl list-timers backup-controlplane.timer` and a 
 
 ## Part C — the region record
 
-`rustic-git-cosmos` (Core API, db `workspaces`) holds one `Region` row per region and nothing
-else. If the account survived, the row is already there; if not, re-register. Both go through the api tier (A.3 must be serving) as a workspaces admin
-(`RUSTIC_GIT_WORKSPACES_ADMINS`):
+`Region` is a cluster-scoped CRD (`crd::Region`) — it lives in the k3s control plane, not Cosmos,
+so it comes back with the rest of the CRDs when `k3s-backup` is restored (Part B). Only re-register
+by hand if that backup is unavailable or the row is missing; this goes through the api tier
+(A.3 must be serving) as a workspaces admin (`RUSTIC_GIT_WORKSPACES_ADMINS`):
 
 ```sh
 ADMIN_JWT=<session token of an admin, from the web app's cookie or `kl` login>
-# re-register (only when the row is gone; re-registering an existing id is also how one is retired):
+# re-register (only when the CR is gone; re-registering an existing id is also how one is retired):
 curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' https://dev.kloudlite.io/v1/regions \
-  -d '{"id":"centralindia-k3s","name":"Central India (k3s)","storage_account":"<wslayers account>","blob_container":"wslayers-k3s"}'
+  -d '{"id":"centralindia-k3s","name":"Central India (k3s)"}'
 ```
 
-Verify end to end — this is the only check that exercises both clusters and Cosmos together:
+Verify end to end — this is the only check that exercises both clusters together:
 
 ```sh
 # "Open in a workspace" on a repository in the web app, or the same two calls the CLI cannot make yet:

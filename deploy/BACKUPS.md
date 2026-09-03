@@ -12,8 +12,7 @@ Tick the boxes with the `az` output pasted underneath; a box without output is a
 | Blob container `rustic-git` (`RUSTIC_GIT_S3_URL: az://rustic-git`) | Every git repo, registry manifest and tag, PR row (SlateDB per repo/image/volume), credentials as plain keys, `index/` markers, registry blobs and manifests | storage account named in Secret `rustic-git-storage` | one (LRS unless changed) |
 | Blob containers `wslayers`, `wslayers-k3s` (one per region) | Every pushed workspace/environment snapshot (btrfs send streams), content-addressed `blobs/{owner}/{algo}/{hex}` | one storage account per region; agent Secret `AZURE_*` | one per region |
 | Cosmos DB, Mongo API (`rustic-git-mongo`) | Pull-request store used by the server tier | Cosmos account | Cosmos-managed periodic backup (default: 2 copies, 8 h interval, 8 h retention) |
-| Cosmos DB, SQL/Core (`rustic-git-cosmos`, db `workspaces`) | `Region` metadata only — nothing else lives here any more; the CRD wins on any disagreement | Cosmos account | same default |
-| k3s SQLite `state.db` on `k3s-cp` | The CRDs: every Workspace, Environment, Volume, Snapshot, VolumeReplica, OwnerBinding — the record of what the subvolumes and snapshots ARE | one VM | hourly tarball to container `k3s-backup` (this repo's timer) |
+| k3s SQLite `state.db` on `k3s-cp` | The CRDs: every Workspace, Environment, Region, Volume, Snapshot, VolumeReplica, OwnerBinding — the record of what the subvolumes and snapshots ARE, and (`Region`) what regions exist | one VM | hourly tarball to container `k3s-backup` (this repo's timer) |
 | Blob container `k3s-backup` | 24 hourly + 7 daily slots of the above, fixed names that overwrite, AES-256 encrypted with `/etc/rustic-git/k3s-backup.key` on `k3s-cp` (a copy of that key must live in the password manager) | same account as `rustic-git` | one |
 | Redis | `events` stream, caches, generation counters | managed instance | **none, deliberately** — a nudge and a view, never the record (CLAUDE.md) |
 | btrfs pools on the pool nodes | Live workspace subvolumes | node data disks | **none** — the pushed snapshot is the backup; unpushed work on a lost node is gone |
@@ -68,14 +67,13 @@ to any second in the last week, which is the only way back from a bad write to t
 It is a one-way migration per account and cannot be turned off.
 
 ```sh
-for A in rustic-git-mongo rustic-git-cosmos; do
-  az cosmosdb update -g <rg> -n "$A" --backup-policy-type Continuous --continuous-tier Continuous7Days
-  az cosmosdb show -g <rg> -n "$A" --query 'backupPolicy'
-done
+az cosmosdb update -g <rg> -n rustic-git-mongo --backup-policy-type Continuous --continuous-tier Continuous7Days
+az cosmosdb show -g <rg> -n rustic-git-mongo --query 'backupPolicy'
 ```
 
-`rustic-git-cosmos` holds only `Region` rows (a handful, rebuilt by hand in minutes via
-`/v1/regions`); it is on this list for uniformity, not necessity. Paste output:
+`Region` is a CRD now, not a Cosmos row — it is covered by the k3s SQLite tarball in the store
+table above (a handful of objects, rebuildable by hand in minutes via `POST /v1/regions` even
+without that backup). Paste output:
 
 ```
 (pending)
@@ -136,8 +134,8 @@ Last drill: `(never)`.
 - **Secrets.** The ten `rustic-git-*` Secrets on AKS and `rustic-git-agent` on k3s are created
   by hand and exist nowhere else (the k3s backup's `identity.tgz` covers the cluster CA and join
   token, not these). A from-scratch rebuild re-mints them — `deploy/RECOVERY.md` is that
-  procedure, every Secret with its keys and where each value comes from; the values that cannot
-  be re-minted (the storage account key, Cosmos keys) are recoverable from the Azure portal.
+  procedure, every Secret with its keys and where each value comes from; the value that cannot
+  be re-minted (the storage account key) is recoverable from the Azure portal.
   Keep it that way rather than adding a backup that is itself a secret store.
 - **Cross-region.** Every mechanism here is single-region. A region loss is a rebuild from the
   other region's `wslayers` plus whatever GRS was enabled in step 4.
@@ -156,7 +154,6 @@ with each store, which is the table any narrowing has to preserve:
 | `rustic-git-storage` | worker | read + write + delete (the GC sweep, marker reconcile) | account key |
 | `rustic-git-storage` | api | read (browse, `/api/{owner}/images`, `_catalog`), write of `auth/`/`index/` keys | account key |
 | `rustic-git-agent` `AZURE_*` (historical — the agent no longer holds Azure credentials at all; see Task 8) | k3s agent | read + write on the region's `wslayers*` (push uploads, restore reads); never delete | account key |
-| `rustic-git-cosmos` | api | read + write on db `workspaces` (`/v1/regions`) | account key |
 | `rustic-git-mongo` | srv, api, worker | read + write (directory, PRs) | connection string |
 | `rustic-git-jwt`, `rustic-git-peer` | as `deploy/RECOVERY.md` A.2 | symmetric — the same value everywhere by design | minted value |
 
@@ -165,10 +162,9 @@ the state this file asks for: `rustic-git-storage` stays the key-holding Secret 
 and worker; the api tier gets its own `rustic-git-storage-api`, and the agent's `AZURE_KEY`
 becomes a container-scoped SAS (`racw` on `wslayers-k3s`, one-year expiry, minted by
 `az storage container generate-sas`) so a leaked agent Secret cannot read `rustic-git` or
-delete anything. The Cosmos key on the server tier can be the account's READ-ONLY key
-(`az cosmosdb keys list --type read-only-keys`) — srv only ever reads `Region`.
+delete anything.
 None of this needs the binaries to change: the storage crate authenticates with whatever
-`AZURE_STORAGE_ACCOUNT_KEY`/SAS it is given, and Cosmos accepts either key. Blocked on: the
+`AZURE_STORAGE_ACCOUNT_KEY`/SAS it is given. Blocked on: the
 api tier's `auth/` and `index/` writes, which need a `w` in its scope, so "reader" is not
 literally true for it — the split it gets is *no delete*, not read-only.
 
@@ -177,17 +173,15 @@ Microsoft Entra Workload ID on the cluster, a user-assigned managed identity per
 server+worker, api, and the k3s agents via a federated credential on their ServiceAccount),
 role assignments `Storage Blob Data Contributor` (server/worker), `Storage Blob Data Reader` +
 a scoped exception for `auth/`/`index/` writes (api), `Storage Blob Data Contributor` on the
-region account only (agent), and `Cosmos DB Built-in Data Reader`/`Contributor` for the two
-Cosmos tiers. For blob storage there may be NO code change: `crates/storage/src/config.rs`
+region account only (agent), and `Cosmos DB Built-in Data Reader`/`Contributor` for the
+directory. For blob storage there may be NO code change: `crates/storage/src/config.rs`
 builds its client with `MicrosoftAzureBuilder::from_env()`, and object_store 0.14 reads
 `AZURE_FEDERATED_TOKEN_FILE` + `AZURE_CLIENT_ID` + `AZURE_TENANT_ID` through that same path
 (`azure/builder.rs`, `AzureConfigKey::FederatedTokenFile`) — exactly the three variables the
 workload-identity webhook injects when the pod's ServiceAccount carries the
 `azure.workload.identity/client-id` annotation. Dropping the `AZURE_STORAGE_ACCOUNT_KEY` env
-from the specs is the switch. Cosmos is the code change: `azure_data_cosmos` is constructed
-with a key today (`cosmos.rs`) and would take a `TokenCredential` instead. Not implemented; the
-verify line when it is: `kubectl -n rustic-git get secret rustic-git-storage` returns NotFound
-and the fleet still serves.
+from the specs is the switch. Verify line when it is: `kubectl -n rustic-git get secret
+rustic-git-storage` returns NotFound and the fleet still serves.
 
 ## Rotation
 
@@ -199,7 +193,7 @@ outage window is the gap between the two halves — do them in one sitting.
 | --- | --- | --- |
 | Storage account key | `az storage account keys renew -n <acct> --key key2` → patch the Secret(s) with key2 → `deploy/roll.sh` → renew key1 once every pod is on key2. Two keys exist precisely so rotation is never a gap | none, if key2 is rolled before key1 is renewed |
 | `wslayers*` key or SAS (agent) — historical, the agent holds no Azure credential any more | same two-key dance on the region account; patch `rustic-git-agent` `AZURE_KEY`; `kubectl -n kube-system rollout restart ds/rustic-git-agent`. Only this region's own agents hold the key, so there is no second cluster to patch | in-flight pushes retry |
-| Cosmos keys (both accounts) | `az cosmosdb keys regenerate --key-kind secondary` → patch `rustic-git-cosmos`/`rustic-git-mongo` to the secondary → roll → regenerate primary | none, same reason |
+| Cosmos key (`rustic-git-mongo`) | `az cosmosdb keys regenerate --key-kind secondary` → patch `rustic-git-mongo` to the secondary → roll → regenerate primary | none, same reason |
 | `rustic-git-jwt` **(two clusters)** | new value → `kubectl -n rustic-git patch secret rustic-git-jwt` on AKS AND `kubectl -n rustic-git-system patch secret rustic-git-jwt` on k3s → `deploy/roll.sh` → `kubectl -n rustic-git-system rollout restart deploy/rustic-git-gateway`. Every signed-in session and every `docker login` bearer is invalidated: users sign in again, clients `docker login` again | every session, once |
 | `rustic-git-peer` | new value → patch → `deploy/roll.sh`. During the roll, old and new pods cannot forward to each other: 421s until the last pod is on the new value | minutes of misdirected writes |
 | SSH host key | do not, unless compromised: every user's `known_hosts` breaks. If forced: `deploy/RECOVERY.md` A.2, then announce the new fingerprint | every SSH user, once |

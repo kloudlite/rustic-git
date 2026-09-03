@@ -221,9 +221,9 @@ spec:
             - name: WS_PEER_SEND_TIMEOUT_SECS
               value: "3600"
           envFrom:
-            # `WS_REGION` (which region's blob container this node uses) and the Azure/Cosmos
-            # credentials the snapshot engine pushes through. Absent keys leave the engine in its
-            # dev fallbacks, which is why this is a Secret and not inline.
+            # `WS_REGION` (which region this node belongs to, matched against the `Region` CRD)
+            # and WS_PEER_SECRET below. Absent keys leave the engine in its dev fallbacks, which is
+            # why this is a Secret and not inline.
             #
             # WS_PEER_SECRET lives here too, not as a plain env value: it authenticates the peer
             # listener (btrfs send) AND gates the puller — unset, `lib.rs` never spawns the

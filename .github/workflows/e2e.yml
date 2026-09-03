@@ -47,12 +47,12 @@ jobs:
 
   workspaces:
     # ws_e2e.sh needs what no GitHub-hosted runner has: passwordless root, btrfs tools, a reachable
-    # k3s cluster with deploy/k3s/crds.yaml and gateway.yaml applied, and COSMOS_*/AZURE_*
+    # k3s cluster with deploy/k3s/crds.yaml and gateway.yaml applied, and AZURE_*
     # credentials. That is a self-hosted runner on the k3s build VM (deploy/k3s/README.md,
     # "Iterating" — it already has the toolchain and a warm target dir, and it is NOT a pool node,
     # which the script refuses to share with the DaemonSet). Register it with the label
     # `btrfs-k3s` (Settings → Actions → Runners → New self-hosted runner, Linux x64, on the VM,
-    # `./config.sh --labels btrfs-k3s`), put the four credentials in repository secrets, and set
+    # `./config.sh --labels btrfs-k3s`), put the three credentials in repository secrets, and set
     # the repository variable WS_E2E_RUNNER=btrfs-k3s. Until that variable exists this job is
     # skipped, not failed — a `runs-on` label nobody serves would sit queued for the whole
     # timeout, every night, and read as red for the wrong reason.
@@ -60,8 +60,6 @@ jobs:
     runs-on: [self-hosted, linux, btrfs-k3s]
     timeout-minutes: 90
     env:
-      COSMOS_ENDPOINT: ${{ secrets.WS_E2E_COSMOS_ENDPOINT }}
-      COSMOS_KEY: ${{ secrets.WS_E2E_COSMOS_KEY }}
       AZURE_ACCOUNT: ${{ secrets.WS_E2E_AZURE_ACCOUNT }}
       AZURE_KEY: ${{ secrets.WS_E2E_AZURE_KEY }}
       AZURE_CONTAINER: ${{ secrets.WS_E2E_AZURE_CONTAINER }}

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Back up the k3s control plane to Azure Blob storage.
 #
-# WHY this exists: the CRDs are the source of truth for every workspace and environment, and with
-# the SQLite datastore that truth is one file on one node. The btrfs subvolumes and the pushed
-# blobs survive losing this node; the record of what they ARE does not. Cosmos used to be a managed,
-# replicated store — `state.db` is not, so the replication has to be done here.
+# WHY this exists: the CRDs are the source of truth for every workspace, environment and region,
+# and with the SQLite datastore that truth is one file on one node. The btrfs subvolumes and the
+# pushed blobs survive losing this node; the record of what they ARE does not. A managed,
+# replicated store would do this for free — `state.db` is not one, so the replication has to be
+# done here.
 #
 # Consistency: `VACUUM INTO` is used rather than `cp`. SQLite in WAL mode is being written while we
 # run, so a plain copy can capture a torn page or miss committed transactions sitting in the WAL.
