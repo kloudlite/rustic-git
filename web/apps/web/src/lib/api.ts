@@ -15,6 +15,10 @@ import type { QuotaDim, QuotaReport } from "@/lib/quota";
  */
 
 const BASE = (process.env.RUSTIC_GIT_API_URL ?? "http://rustic-git-api").replace(/\/$/, "");
+// A second base, because the admin surface is a SEPARATE process on a separate host (design doc
+// §5) — pointing this at the same host as `BASE` would be a silent way to lose the whole point of
+// the split, so there is no fallback to `RUSTIC_GIT_API_URL` here.
+const ADMIN_BASE = (process.env.RUSTIC_GIT_ADMIN_API_URL ?? "http://rustic-git-admin").replace(/\/$/, "");
 const PEER_SECRET = process.env.RUSTIC_GIT_PEER_SECRET ?? "";
 /** How long a call may take before it is answered `unavailable` instead. */
 export const TIMEOUT_MS = 5_000;
@@ -42,7 +46,8 @@ export type ApiResult<T> =
   | { ok: true; value: T }
   | { ok: false; kind: "conflict" | "invalid" | "unauthorized" | "forbidden" | "notFound" | "unavailable"; message: string };
 
-async function call<T>(
+async function callAgainst<T>(
+  base: string,
   path: string,
   init: RequestInit & { token?: string; asUser?: string },
 ): Promise<ApiResult<T>> {
@@ -62,7 +67,7 @@ async function call<T>(
     // Bounded: a hung api pod must not pin a render, or every refresh stacks another one until
     // the heap is gone. A timeout is the same answer as an unreachable server. Callers that do
     // real work upstream (a compare, a commit) pass a longer `signal`.
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetch(`${base}${path}`, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
       ...init,
       headers,
@@ -102,6 +107,18 @@ async function call<T>(
   // whether it exists is not theirs to learn. The page renders it as one too.
   if (res.status === 404) return { ok: false, kind: "notFound", message };
   return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
+}
+
+function call<T>(path: string, init: RequestInit & { token?: string; asUser?: string }): Promise<ApiResult<T>> {
+  return callAgainst<T>(BASE, path, init);
+}
+
+/** Every call the /admin area makes. Same shape as `call`, against the admin host — never the
+ *  ordinary one, so an admin page cannot accidentally fall back to a route that does not exist
+ *  there (it would 404, not silently authorize as an ordinary user, but the intent is clearer
+ *  with its own function). */
+function adminCall<T>(path: string, init: RequestInit & { token?: string; asUser?: string }): Promise<ApiResult<T>> {
+  return callAgainst<T>(ADMIN_BASE, path, init);
 }
 
 /** Records the person and returns their token. Called once, at sign-in. */
@@ -1026,5 +1043,65 @@ export function createQuotaRequest(
 export function listQuotaRequests(owner: string | undefined, token: string) {
   const q = owner ? `?owner=${encodeURIComponent(owner)}` : "";
   return call<QuotaRequestDoc[]>(`/v1/quota-requests${q}`, { method: "GET", token });
+}
+
+// ── /admin (a separate host — crates/workspaces/src/api/admin.rs) ──────────
+
+/** The whole queue, every owner — unlike `listQuotaRequests`, there is no `owner` filter to ask for
+ *  only your own. */
+export function adminListQuotaRequests(token: string) {
+  return adminCall<QuotaRequestDoc[]>("/admin/quota-requests", { method: "GET", token });
+}
+
+export function adminDecideQuotaRequest(id: string, decision: "approve" | "deny", note: string, token: string) {
+  return adminCall<QuotaRequestDoc>(`/admin/quota-requests/${encodeURIComponent(id)}/${decision}`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ note }),
+  });
+}
+
+export function adminWriteQuota(owner: string, spec: Record<QuotaDim, number>, token: string) {
+  return adminCall<Record<QuotaDim, number>>(`/admin/quota/${encodeURIComponent(owner)}`, {
+    method: "PUT",
+    token,
+    body: JSON.stringify(spec),
+  });
+}
+
+export type OwnerUsage = { owner: string; limit: Record<QuotaDim, number>; used: Record<QuotaDim, number> };
+
+export function adminUsage(token: string) {
+  return adminCall<OwnerUsage[]>("/admin/usage", { method: "GET", token });
+}
+
+export type AdminNode = { name: string; ready: boolean; decommission: boolean; decommissionStatus: string | null };
+
+export function adminListNodes(token: string) {
+  return adminCall<AdminNode[]>("/admin/nodes", { method: "GET", token });
+}
+
+export function createRegion(body: { id: string; name: string }, token: string) {
+  return adminCall<{ id: string; name: string; status: string }>("/admin/regions", {
+    method: "POST",
+    token,
+    body: JSON.stringify(body),
+  });
+}
+
+// ── superadmins (server tier, not the admin host — crates/api/src/teams.rs) ─
+
+export type SuperAdmin = { _id: string; addedAt: string; addedBy: string };
+
+export function listSuperadmins(token: string) {
+  return call<SuperAdmin[]>("/api/admin/superadmins", { method: "GET", token });
+}
+
+export function addSuperadmin(user: string, token: string) {
+  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, { method: "POST", token });
+}
+
+export function removeSuperadmin(user: string, token: string) {
+  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, { method: "DELETE", token });
 }
 

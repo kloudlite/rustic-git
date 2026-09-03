@@ -86,6 +86,10 @@ spec:
               value: "22"
             - name: RUSTIC_GIT_API_URL
               value: http://rustic-git-api
+            # The admin surface (`/admin`) is a separate process on a separate host — never the
+            # same URL as above, or an admin page would silently reach ordinary `/v1` instead.
+            - name: RUSTIC_GIT_ADMIN_API_URL
+              value: http://rustic-git-admin
             - name: RUSTIC_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
             # Team invitations go out through Resend. Both optional: unset, the invite is still
