@@ -65,12 +65,12 @@ pub enum DesiredState {
 pub enum VolumeSource {
     /// A local snapshot of a sibling on the same pool — no registry round trip.
     ///
-    /// Under the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a
+    /// With `commit: Some(_)`, `volume` names the SOURCE'S OWN volume (not a
     /// destination this object owns) and no child `Volume` is ever created for it: the clone is a
-    /// second worktree of the same volume, checked out at `commit` — the head the API resolved
-    /// ONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting
-    /// with the source's later pushes. `None` is every clone written before the commit model (and
-    /// flag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.
+    /// second worktree of the same volume, checked out at `commit` — the graft point the API
+    /// resolved ONCE at clone time, so the clone stays on what the caller saw rather than drifting
+    /// with the source's later pushes. `None` is every clone written before shared-volume clones
+    /// existed, which still copies bytes into a fresh child `Volume` via `clone_local_ids`.
     CloneOf {
         volume: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,8 +168,8 @@ pub struct VolumeSpec {
     pub node_name: String,
     pub region: String,
     pub quota_gb: u64,
-    /// How many nodes should hold a synced copy of this volume's commit history — the commit
-    /// model's replacement for "one node has the only bytes". Defaulted so every `Volume` written
+    /// How many nodes should hold a synced copy of this volume's snapshots — the replacement
+    /// for "one node has the only bytes". Defaulted so every `Volume` written
     /// before this field existed keeps parsing; the reconciler that creates `VolumeReplica`
     /// children treats a missing field the same as an explicit 2.
     #[serde(default = "default_replicas")]
@@ -213,7 +213,7 @@ pub struct VolumeStatus {
     pub conditions: Vec<Condition>,
 }
 
-/// One immutable commit: a btrfs RO snapshot, recorded as a CR before the snapshot is cut so a
+/// One immutable cut — a snapshot or a sync point: a btrfs RO subvolume, recorded as a CR before the snapshot is cut so a
 /// retry finds the object and continues rather than orphaning a subvolume.
 ///
 /// Never patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the
@@ -238,14 +238,14 @@ pub struct VolumeStatus {
 pub struct SnapshotSpec {
     pub volume: String,
     pub owner: String,
-    /// The Workspace/Environment id whose worktree this commit is cut FROM — a volume can have
+    /// The Workspace/Environment id whose worktree this cut is taken FROM — a volume can have
     /// more than one worktree (a workspace plus a clone still attached, say), so `spec.volume`
     /// alone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The
-    /// commit reconciler only acts when THIS field's worktree is the one running on its node.
+    /// snapshot reconciler only acts when THIS field's worktree is the one running on its node.
     /// Required, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored
     /// objects predating this field, so the usual back-compat exemption does not apply here.
     pub worktree: String,
-    /// The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing
+    /// The parent cut's name, or empty for a root. Order comes ONLY from this chain — nothing
     /// reads creation timestamps to reconstruct history.
     #[serde(default)]
     pub parent: String,
@@ -254,9 +254,9 @@ pub struct SnapshotSpec {
     /// A sync point, not a push: cut by the agent's sync beat (or a stop) from a live worktree so a
     /// replica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and
     /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this, which is the
-    /// whole distinction: `!transient` IS a snapshot (`Snapshot::is_snapshot`). There used to be a
-    /// separate `pinned` flag saying the same thing about the same records; serde ignores it on
-    /// objects stored while it existed.
+    /// whole distinction: `!transient` IS a snapshot (`Snapshot::is_snapshot`), and it is the only
+    /// one — an older build wrote a second flag alongside it, which serde ignores on the objects
+    /// stored while it existed.
     #[serde(default)]
     pub transient: bool,
     /// Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.
@@ -364,8 +364,7 @@ pub struct SnapshotStatus {
     pub ready_at: Option<String>,
 }
 
-/// One node's copy of a volume's commit history — the per-node replica state the commit model
-/// tracks in place of "the object store has the only bytes".
+/// One node's copy of a volume's snapshots — the per-node replica state kept in place of "the object store has the only bytes".
 ///
 /// Written only by `spec.node`'s own controller, with two guarded exceptions: deleting a dead
 /// node's replica row and clearing a dead node's claims, both gated on that node being NotReady
@@ -403,7 +402,7 @@ pub struct VolumeReplicaStatus {
     /// "Synced" | "Syncing" — a plain `String`, not `Phase`: this is a `selectableField` and the
     /// API server only accepts a string type there, never an enum's underlying representation.
     pub phase: String,
-    /// Branch name to commit id, this node's own view — what a reader checks before trusting a
+    /// Branch name to snapshot id, this node's own view — what a reader checks before trusting a
     /// `head` claim against this replica.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branches: BTreeMap<String, String>,
@@ -644,7 +643,7 @@ pub struct WorkspaceStatus {
     /// it in `known_hosts`, so an absent one means "no session yet", never "trust on first use".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host_key: Option<String>,
-    /// The commit id this worktree is checked out on right now. Written ONLY by the node actually
+    /// The snapshot id this worktree is checked out on right now. Written ONLY by the node actually
     /// running the pod — no other node can observe it, and a stale value here is exactly what
     /// "the pod moved and hasn't reconciled yet" looks like, never a fact anyone else may act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -743,7 +742,7 @@ pub struct EnvironmentStatus {
     pub service_status: Vec<ServiceStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
-    /// Same meaning and same one-writer rule as `WorkspaceStatus::head` — the commit id this
+    /// Same meaning and same one-writer rule as `WorkspaceStatus::head` — the snapshot id this
     /// environment's worktree is checked out on, written only by the node running it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
@@ -754,7 +753,7 @@ pub struct EnvironmentStatus {
     ///
     /// It exists because a granted wish stays in the spec forever — a controller does not edit the
     /// user's desired state. Without a record of having applied it, `restore_gate` re-derives
-    /// `head` from the wish on EVERY pass, which silently undoes every push: the commit
+    /// `head` from the wish on EVERY pass, which silently undoes every push: the snapshot
     /// reconciler advances `head`, the next reconcile stamps it back to the restore point, and the
     /// environment's history can never move past the snapshot it was last restored to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -799,7 +798,7 @@ pub struct OwnerBindingStatus {
     pub conditions: Vec<Condition>,
 }
 
-/// The label a commit-model `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
+/// The label a `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
 /// call rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
 /// authorization.
 pub const VOLUME_LABEL: &str = "rustic-git.io/volume";

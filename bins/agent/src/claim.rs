@@ -382,7 +382,7 @@ mod tests {
         let mut v = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "clone-ws-1-cafe"},
-            "spec": {"volume": volume, "owner": "karthik", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "spec": {"volume": volume, "owner": "karthik", "worktree": "ws-1", "parent": "", "transient": true},
         });
         if let Some(p) = phase {
             v["status"] = serde_json::json!({"phase": p});

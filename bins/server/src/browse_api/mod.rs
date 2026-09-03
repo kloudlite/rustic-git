@@ -100,7 +100,7 @@ use pulls::{
     api_pull, api_pull_check, api_pull_claim, api_pull_close, api_pull_comment, api_pull_merge,
     api_pull_mergeability, api_pull_open, api_pull_outcome, api_pulls,
 };
-use volumes::{snapshotdelete, volumedelete, volumehistory, volumes};
+use volumes::{volumehistory, volumes};
 use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_signature, api_tree, api_tree_root};
 
 /// Every route here is peer-only. All but `images` and `volumes` are repo-scoped; those two are
@@ -114,11 +114,6 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/images", get(images))
         .route("/api/{owner}/volumes", get(volumes))
         .route("/api/{owner}/{name}/volumehistory", get(volumehistory))
-        .route("/api/{owner}/{name}/volumedelete", axum::routing::delete(volumedelete))
-        .route(
-            "/api/{owner}/{name}/snapshotdelete/{snapshot}",
-            axum::routing::delete(snapshotdelete),
-        )
         .route("/api/{owner}/{name}/imagetags", get(imagetags))
         .route("/api/{owner}/{name}/imagetagdelete", post(imagetagdelete))
         .route("/api/{owner}/{name}/imagedelete", post(imagedelete))

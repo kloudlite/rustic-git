@@ -641,7 +641,7 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
 /// OLD layout (`live` itself is the single RW subvolume, pre-dating this whole feature) — the
 /// pod that's about to mount it needs `live/{volume}` instead. `Engine::migrate_volume` does the
 /// physical rename and returns `true` only the one time it actually moved anything; that's the
-/// signal to mint the migration-baseline `Snapshot` CR (CR-first, same shape `create_commit` in
+/// signal to mint the migration-baseline `Snapshot` CR (CR-first, same shape `create_snapshot` in
 /// `api.rs` uses for a normal push) — the EXISTING `reconcile_commit`/`advance_head` machinery
 /// then cuts it and marks it Ready, so this function only ever needs to run once per volume, not
 /// re-implement any of that. It does NOT advance `status.head` — a sync point never does — which is

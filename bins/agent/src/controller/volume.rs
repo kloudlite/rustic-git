@@ -852,7 +852,7 @@ mod tests {
             serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": "vol-1.aaaa"},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "vol-1", "parent": "", "pinned": false, "transient": false},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "vol-1", "parent": "", "transient": false},
             }),
         )]);
 

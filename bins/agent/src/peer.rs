@@ -1504,7 +1504,7 @@ mod reconcile_tests {
             "apiVersion": "rustic-git.io/v1alpha1",
             "kind": "Snapshot",
             "metadata": {"name": name, "uid": "snap-uid"},
-            "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": false},
+            "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent},
             "status": {"phase": "ready"},
         })
     }
@@ -2545,7 +2545,7 @@ fi
             "apiVersion": "rustic-git.io/v1alpha1",
             "kind": "Snapshot",
             "metadata": {"name": name, "uid": "snap-uid-transient"},
-            "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": false, "transient": true},
+            "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent, "transient": true},
             "status": {"phase": "ready"},
         })
     }
@@ -2807,7 +2807,7 @@ fi
         serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": name, "uid": format!("uid-{name}")},
-            "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": "", "pinned": false, "transient": false},
+            "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": "", "transient": false},
             "status": {"phase": "ready"},
         })
     }
@@ -3147,7 +3147,7 @@ fi
             "metadata": {"name": name, "uid": format!("uid-{name}"),
                          "annotations": {"rustic-git.io/synced-generation": generation.to_string()}},
             "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "",
-                     "pinned": false, "transient": true},
+                     "transient": true},
             "status": {"phase": "ready"},
         })
     }

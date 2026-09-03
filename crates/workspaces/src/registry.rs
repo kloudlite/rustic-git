@@ -102,24 +102,6 @@ pub trait VolExt {
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>>;
     /// The region that owns this volume, or `None` if nothing has been written to it yet.
     async fn region(&self, owner: &str, name: &str) -> Result<Option<String>>;
-    /// Deletes every commit record and every ref in this volume's database — the whole snapshot
-    /// index for it. The region stamp stays: it is one key, it is what scopes an agent token, and
-    /// a volume that is pushed to again must not be re-claimable by a different region.
-    ///
-    /// The layer BLOBS are deliberately not touched here; see `browse_api::volumes::volumedelete`.
-    async fn delete_volume(&self, owner: &str, name: &str) -> Result<()>;
-    /// Deletes ONE commit record, reporting `false` for an unknown id (the caller answers 404).
-    ///
-    /// Any ref pointing at it walks BACK — to the newest surviving record older than the deleted
-    /// one, or dropped when there is none. A ref naming a deleted commit would fail `move_ref`'s
-    /// existence check forever and read back as a tip that is not in the history; walking to the
-    /// GLOBAL newest instead would silently move a ref that was deliberately parked on an older
-    /// record forward. The ref moves BEFORE the record goes, so a crash in between leaves an
-    /// orphaned record (invisible, harmless) rather than a dangling ref. Descendants are safe by
-    /// construction — a `CommitRecord` carries its whole lineage and never references another.
-    ///
-    /// Layer blobs are left alone, for the same reason `delete_volume` leaves them.
-    async fn delete_commit(&self, owner: &str, name: &str, id: &str) -> Result<bool>;
 }
 
 impl VolExt for Store {
@@ -182,53 +164,6 @@ impl VolExt for Store {
         let db = self.vol_db(owner, name).await?;
         let Some(v) = db.get(commit_key(id)).await? else { return Ok(None) };
         Ok(Some(serde_json::from_slice(&v).map_err(|e| rustic_git_core::err(e.to_string()))?))
-    }
-
-    async fn delete_volume(&self, owner: &str, name: &str) -> Result<()> {
-        let db = self.vol_db(owner, name).await?;
-        for prefix in [COMMIT_PREFIX, REF_PREFIX] {
-            let mut keys = vec![];
-            let mut it = db.scan_prefix(prefix, ..).await?;
-            while let Some(kv) = it.next().await? {
-                keys.push(kv.key);
-            }
-            // Collected first: deleting while the iterator is open mutates what it is walking.
-            for k in keys {
-                db.delete(k).await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn delete_commit(&self, owner: &str, name: &str, id: &str) -> Result<bool> {
-        let db = self.vol_db(owner, name).await?;
-        let Some(doomed) = self.commit(owner, name, id).await? else { return Ok(false) };
-        // The predecessor by TIME, not the newest overall: a ref parked on an older record must
-        // walk back, never jump forward past records it was deliberately behind.
-        let successor = self
-            .history(owner, name)
-            .await?
-            .into_iter()
-            .find(|r| r.id != id && r.created_at < doomed.created_at)
-            .map(|r| r.id);
-        let mut refs = vec![];
-        let mut it = db.scan_prefix(REF_PREFIX, ..).await?;
-        while let Some(kv) = it.next().await? {
-            if String::from_utf8_lossy(&kv.value) == id {
-                refs.push(kv.key);
-            }
-        }
-        // Collected first: writing while the iterator is open mutates what it is walking.
-        for k in refs {
-            match &successor {
-                Some(next) => db.put(k, next.as_bytes().to_vec()).await?,
-                None => db.delete(k).await?,
-            };
-        }
-        // Last: every ref already points somewhere real, so a crash before this leaves only an
-        // orphaned record.
-        db.delete(commit_key(id)).await?;
-        Ok(true)
     }
 
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>> {

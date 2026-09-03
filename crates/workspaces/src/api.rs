@@ -1087,7 +1087,7 @@ async fn newest_transient(c: &kube::Client, volume: &str, worktree: &str) -> Res
     Ok((found, list.items))
 }
 
-/// Same one-cut-in-flight rule `create_commit` enforces: a second Working cut of one worktree
+/// Same one-cut-in-flight rule `create_snapshot` enforces: a second Working cut of one worktree
 /// forks the transient chain, and the loser then misdescribes what it holds.
 ///
 /// Only where a cut is about to be TAKEN. An interrupted source's Working cut belongs to the node
@@ -1847,7 +1847,7 @@ async fn push_ws(
     let volume = ws_volume(&w).ok_or_else(not_ready)?;
     let head = w.status.as_ref().and_then(|st| st.head.clone());
     let state = crd::SnapshotState::of_workspace(&w);
-    create_commit(kube(&s)?, volume, &w.spec.owner, &id, head, msg, state).await
+    create_snapshot(kube(&s)?, volume, &w.spec.owner, &id, head, msg, state).await
 }
 
 async fn push_env(
@@ -1862,12 +1862,12 @@ async fn push_env(
     let volume = env_volume(&e).ok_or_else(not_ready)?;
     let head = e.status.as_ref().and_then(|st| st.head.clone());
     let state = crd::SnapshotState::of_environment(&e);
-    create_commit(kube(&s)?, volume, &e.spec.owner, &id, head, msg, state).await
+    create_snapshot(kube(&s)?, volume, &e.spec.owner, &id, head, msg, state).await
 }
 
 /// A `Snapshot` CR, created `Working` so the agent's `reconcile_commit` can act on the very first
 /// pass — CR-first (module doc).
-async fn create_commit(
+async fn create_snapshot(
     c: &kube::Client,
     volume: &str,
     owner: &str,
@@ -2393,7 +2393,7 @@ async fn find_commit_model_snapshot_for_restore(s: &ApiState, caller_id: &str, s
 /// Every row is a SNAPSHOT. A sync point is the agent's replication state, not something the
 /// person took, and the migration baseline is not either — showing them as history offers a
 /// restore onto a record that can vanish on the next sync beat.
-fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {
+fn snapshot_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {
     items
         .iter()
         .filter(|sn| sn.is_snapshot())
@@ -2407,7 +2407,7 @@ fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> 
                 "message": sn.spec.message,
                 // F3: `jiff::Timestamp`'s `Display` IS RFC3339 (`2026-01-01T00:00:00Z`), the
                 // same shape `chrono::DateTime<Utc>`'s serde impl gives the registry path's
-                // `created_at` — asserted directly in `commit_model_history_rows_createdat_is_rfc3339`
+                // `created_at` — asserted directly in `history_created_at_is_rfc3339`
                 // rather than trusted, since a jiff/chrono formatting drift would be silent otherwise.
                 "createdAt": sn.creation_timestamp().map(|t| t.0.to_string()),
                 "parent": if sn.spec.parent.is_empty() { serde_json::Value::Null } else { serde_json::json!(sn.spec.parent) },
@@ -2424,7 +2424,7 @@ async fn volume_history(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     let items = commit_model_snapshots(&s, &caller_id, &name).await?;
-    Ok(Json(commit_model_history_rows(&items)).into_response())
+    Ok(Json(snapshot_rows(&items)).into_response())
 }
 
 /// There is exactly one ref per volume ("main") and its value is always the newest snapshot — the

@@ -684,7 +684,7 @@ fn snapshot_cr(name: &str, volume: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name, "uid": "snap-uid"},
-        "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+        "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": ""},
         "status": {"phase": "ready"},
     })
 }
@@ -3878,7 +3878,7 @@ fn ready_commit(name: &str, volume: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name, "uid": "commit-uid"},
-        "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": "", "pinned": false},
+        "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": ""},
         "status": {"phase": "ready"},
     })
 }
@@ -4426,7 +4426,7 @@ fn transient(name: &str, volume: &str, worktree: &str, generation: u64) -> serde
         "metadata": {"name": name, "uid": format!("uid-{name}"),
                      "annotations": {"rustic-git.io/synced-generation": generation.to_string()}},
         "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "",
-                 "pinned": false, "transient": true},
+                 "transient": true},
         "status": {"phase": "ready"},
     })
 }

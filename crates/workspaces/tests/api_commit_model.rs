@@ -169,7 +169,7 @@ async fn a_push_commit_is_owned_by_the_volume_not_the_workspace() {
 }
 
 /// The Volume named by `status.volumeRef` can be gone (deleted out from under a stale workspace
-/// object) — `create_commit` must not panic or 500 on a missing owner, it must say so plainly.
+/// object) — `create_snapshot` must not panic or 500 on a missing owner, it must say so plainly.
 #[tokio::test]
 async fn push_404s_with_a_sentence_when_the_volume_is_missing() {
     let routes = vec![

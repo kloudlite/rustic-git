@@ -366,11 +366,11 @@ mod commit_tests {
         (Arc::new(ctx), rec)
     }
 
-    fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, pinned: bool, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
+    fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
         let v = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": name, "uid": format!("{name}-uid"), "generation": 1},
-            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "pinned": pinned, "transient": transient},
+            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "transient": transient},
             "status": {"phase": phase},
         });
         Arc::new(serde_json::from_value(v).unwrap())
@@ -418,7 +418,7 @@ mod commit_tests {
                 body: serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                     "status": {"phase": "ready"},
                 }),
             },
@@ -428,7 +428,7 @@ mod commit_tests {
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -451,7 +451,7 @@ mod commit_tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-b", "vol-1", None) }];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -467,7 +467,7 @@ mod commit_tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![not_found(WS_GET), not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1")];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK), "must requeue, not await a watch that never fires");
@@ -501,7 +501,7 @@ mod commit_tests {
                 body: serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                     "status": {"phase": "ready"},
                 }),
             },
@@ -511,7 +511,7 @@ mod commit_tests {
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -532,7 +532,7 @@ mod commit_tests {
             not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1"),
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK));
@@ -552,7 +552,7 @@ mod commit_tests {
             items.push(serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": name(i), "uid": format!("{}-uid", name(i))},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": true},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": parent},
                 "status": {"phase": "ready"},
             }));
         }
@@ -596,7 +596,7 @@ mod commit_tests {
                 body: serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
                     "status": {"phase": "ready"},
                 }),
             },
@@ -607,13 +607,13 @@ mod commit_tests {
                 body: list_of("Snapshot", vec![serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
                     "status": {"phase": "ready"},
                 })]),
             },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", true, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -636,7 +636,7 @@ mod commit_tests {
         let ready = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
             "status": {"phase": "ready"},
         });
         let routes = vec![
@@ -645,7 +645,7 @@ mod commit_tests {
             Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![ready]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", true, crd::Phase::Working);
 
         reconcile_commit(s, ctx).await.unwrap();
 
@@ -662,11 +662,11 @@ mod commit_tests {
     #[tokio::test]
     async fn a_new_ready_transient_deletes_the_previous_one_for_its_worktree_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Ready);
-        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", false, true, crd::Phase::Ready);
-        let other = snapshot("sync-ws-2-c", "vol-1", "ws-2", "", false, true, crd::Phase::Ready);
+        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", true, crd::Phase::Ready);
+        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", true, crd::Phase::Ready);
+        let other = snapshot("sync-ws-2-c", "vol-1", "ws-2", "", true, crd::Phase::Ready);
         // A commit is not a sync point — the transient arm must spare it too.
-        let commit = snapshot("vol-1-commit", "vol-1", "ws-1", "", false, false, crd::Phase::Ready);
+        let commit = snapshot("vol-1-commit", "vol-1", "ws-1", "", false, crd::Phase::Ready);
         let items: Vec<serde_json::Value> = [&old, &new, &other, &commit]
             .into_iter()
             .map(|s| serde_json::to_value(s.as_ref()).unwrap())
@@ -694,8 +694,8 @@ mod commit_tests {
     #[tokio::test]
     async fn a_cut_a_seeded_clone_still_needs_survives_a_newer_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Ready);
-        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", false, true, crd::Phase::Ready);
+        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", true, crd::Phase::Ready);
+        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", true, crd::Phase::Ready);
         let items: Vec<serde_json::Value> =
             [&old, &new].into_iter().map(|s| serde_json::to_value(s.as_ref()).unwrap()).collect();
         let seeded_volume = |phase: &str, present: bool| {
@@ -746,13 +746,13 @@ mod commit_tests {
         let old = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "sync-ws-1-a", "uid": "a-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
             "status": {"phase": "working"},
         });
         let new = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "sync-ws-1-b", "uid": "b-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "pinned": false, "transient": true},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "transient": true},
             "status": {"phase": "ready"},
         });
         let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![old, new]) }];
@@ -776,7 +776,7 @@ mod commit_tests {
             let mut v = serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": name, "uid": format!("{name}-uid")},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "pinned": false, "transient": transient},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "transient": transient},
                 "status": {"phase": phase},
             });
             if let Some(g) = gen {
@@ -815,7 +815,7 @@ mod commit_tests {
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                 "status": {"phase": "ready"},
             })},
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_status_json("node-a", "vol-1", Some("vol-1-a")) },
@@ -825,7 +825,7 @@ mod commit_tests {
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         // The shape the API server actually stores on create: no status at all.
-        let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working)).clone();
+        let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working)).clone();
         s.status = None;
         let action = reconcile_commit(std::sync::Arc::new(s), ctx).await.unwrap();
         // The cut itself needs btrfs, which this box has not got — it fails and takes the
