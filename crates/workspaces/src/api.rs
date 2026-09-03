@@ -2312,9 +2312,12 @@ async fn delete_snapshot(
         Err(e) => return Err(kube_err(e)),
     }
     // The same rule `cleanup_parent` detached the Volume under (Task 2d), read from the other end:
-    // it survives its parent only for as long as a snapshot needs it. Computed from the list this
-    // handler already made, minus the one just deleted — a re-read would race the API server's own
-    // deletion anyway.
+    // it survives its parent only for as long as a snapshot needs it. Both halves are RE-READ
+    // here rather than reused from above: a restore or a clone can attach a working copy, and
+    // another push can land, in the window between those reads and this delete — deciding on the
+    // stale view would delete a volume somebody just started using.
+    let items = commit_model_snapshots_maybe_empty(&s, &caller_id, &name).await?;
+    let live = parents_of_volume(&s, &name).await.ok_or_else(kube_unavailable)?;
     let remaining = items.iter().any(|sn| {
         sn.name_any() != snapshot
             && sn.is_snapshot()

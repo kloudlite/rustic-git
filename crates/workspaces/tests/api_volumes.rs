@@ -500,3 +500,24 @@ async fn a_legacy_migration_baseline_cannot_be_deleted_by_hand() {
     assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1").await, 409);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
+
+/// The last-snapshot volume delete decides on a SECOND read: a restore can attach a working copy
+/// in the window between the first read and the record delete, and the volume it just started
+/// using must not be collected under it.
+#[tokio::test]
+async fn a_working_copy_appearing_mid_delete_keeps_the_volume() {
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z")])),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        // The restore lands here — the second read sees it, the first did not.
+        kget(format!("{API}/workspaces"), ws_list(vec![ws_obj("ws-1", "karthik", "web")])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+        ok("DELETE", format!("{SNAPS}/ws-1-a")),
+    ])
+    .await;
+
+    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+
+    let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+    assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is in use again: {deletes:?}");
+}
