@@ -491,7 +491,7 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) -> bool {
 
     let live = live_nodes(&candidates, &nodes, floor, now);
     let mut missed = false;
-    for id in interesting_volumes(ctx, &beat, &live) {
+    for id in interesting_volumes(ctx, &beat, &live).await {
         missed |= pull_volume(ctx, &beat, btrfs_bin, &http, secret, &id, &live).await;
     }
     retire_pass(ctx, &beat, &live).await;
@@ -506,7 +506,17 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) -> bool {
 /// the first standby to look finds an empty source list forever. A Volume-list hiccup now idles
 /// the whole beat (keep-biased — see `beat`'s bail-out above) instead of falling back to only the
 /// worktree-hosted volumes it used to still pull.
-fn interesting_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String]) -> Vec<String> {
+async fn interesting_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String]) -> Vec<String> {
+    // One hop off the reactor for every probe this pass needs, rather than a `stat` per volume on
+    // the reactor thread: the answer is a set, and the pool does not change under this beat.
+    let ids: Vec<String> = beat.volumes.iter().map(|v| v.name_any()).collect();
+    let engine = ctx.engine.clone();
+    let held: HashSet<String> = tokio::task::spawn_blocking(move || {
+        ids.into_iter().filter(|id| engine.pool.voldir(id).exists()).collect::<HashSet<String>>()
+    })
+    .await
+    .unwrap_or_default();
+
     let mut out: Vec<String> = Vec::new();
     for v in &beat.volumes {
         if v.metadata.deletion_timestamp.is_some() {
@@ -519,7 +529,7 @@ fn interesting_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[Stri
         // Holding a copy on disk is interesting on its own: with `replicas: 1` a returning node's
         // replica row was reaped while it was dead and rendezvous elected someone else who has no
         // source at all, so nothing would ever re-register the one copy that exists.
-        let hold_a_copy = ctx.engine.pool.voldir(&id).exists();
+        let hold_a_copy = held.contains(&id);
         if (i_am_owner || hold_a_copy || targets.iter().any(|t| t == &ctx.node)) && !out.contains(&id) {
             out.push(id);
         }
@@ -1351,7 +1361,13 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
     let known: HashSet<String> = vols.iter().map(|v| v.name_any()).collect();
     for id in orphan_voldirs(&ctx.engine.pool.root.join("vol"), &known) {
         tracing::info!(volume = %id, "pull: retire: no Volume CR; dropping the orphaned local copy");
-        janitor::cleanup_local(&ctx.engine, &id);
+        // A voldir walk plus one `btrfs subvolume delete` per subvolume under it: seconds to
+        // minutes of a thread, and this beat shares its reactor with every reconcile and every
+        // peer send on the node. Same rule `sweep_orphan_snap_bytes` follows two functions up.
+        let (engine, vol) = (ctx.engine.clone(), id.clone());
+        if let Err(e) = tokio::task::spawn_blocking(move || janitor::cleanup_local(&engine, &vol)).await {
+            tracing::warn!(volume = %id, error = %e, "pull: retire: the orphan-voldir cleanup task panicked");
+        }
     }
     // The row half of the same orphan. `retire_pass` only ever visits LISTED volumes, so a
     // `VolumeReplica` whose Volume is gone was never revisited by anything: it outlived the
@@ -1378,9 +1394,18 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
         }
         Err(e) => tracing::warn!(error = %e, "pull: retire: listing snapshots; sweeping none"),
     }
+    // Same batching as `interesting_volumes`: one hop off the reactor for every probe this loop
+    // needs instead of a `stat` per volume on it.
+    let ids: Vec<String> = vols.iter().map(|v| v.name_any()).collect();
+    let engine = ctx.engine.clone();
+    let held: HashSet<String> = tokio::task::spawn_blocking(move || {
+        ids.into_iter().filter(|id| engine.pool.voldir(id).exists()).collect::<HashSet<String>>()
+    })
+    .await
+    .unwrap_or_default();
     for v in vols {
         let id = v.name_any();
-        if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() {
+        if v.metadata.deletion_timestamp.is_some() || !held.contains(&id) {
             continue;
         }
         let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
@@ -1405,9 +1430,14 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
                 // against a node name that may already be stale.
                 if let Ok(Some(fresh)) = Api::<crd::Volume>::all(ctx.client.clone()).get_opt(&id).await {
                     if fresh.spec.node_name != ctx.node {
-                        let dropped = janitor::drop_stale_worktrees(&ctx.engine, &id, &v.spec.node_name, &ctx.node);
-                        if dropped > 0 {
-                            tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover");
+                        let (engine, vol, owner, me) =
+                            (ctx.engine.clone(), id.clone(), v.spec.node_name.clone(), ctx.node.clone());
+                        match tokio::task::spawn_blocking(move || janitor::drop_stale_worktrees(&engine, &vol, &owner, &me)).await {
+                            Ok(dropped) if dropped > 0 => {
+                                tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover")
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(volume = %id, error = %e, "pull: the stale-worktree drop task panicked"),
                         }
                     }
                 }
@@ -1421,7 +1451,11 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
                 continue; // row first, copy second: a copy without a row is harmless, a row without a copy is a lie
             }
         }
-        janitor::cleanup_local(&ctx.engine, &id);
+        let (engine, vol) = (ctx.engine.clone(), id.clone());
+        if let Err(e) = tokio::task::spawn_blocking(move || janitor::cleanup_local(&engine, &vol)).await {
+            tracing::warn!(volume = %id, error = %e, "pull: retire: the copy-drop task panicked");
+            continue;
+        }
         tracing::info!(volume = %id, "pull: retire: slot moved elsewhere, copy dropped");
     }
 }
@@ -2077,7 +2111,7 @@ fi
         let (ctx, _rec) = test_ctx(tmp.path(), "node-b", Vec::new());
         let live = vec!["node-b".to_string()];
 
-        let ids = interesting_volumes(&ctx, &beat_of(vec![volume], vec![], vec![]), &live);
+        let ids = interesting_volumes(&ctx, &beat_of(vec![volume], vec![], vec![]), &live).await;
 
         assert_eq!(ids, vec!["vol-1".to_string()], "a volume this node owns is always interesting, running or not");
     }
@@ -2167,7 +2201,7 @@ fi
         let (ctx, _rec) = test_ctx(tmp.path(), "node-c", Vec::new());
         let live = vec!["node-a".to_string(), "node-c".to_string()];
 
-        assert_eq!(interesting_volumes(&ctx, &beat_of(vec![volume], vec![], vec![]), &live), vec!["v2".to_string()]);
+        assert_eq!(interesting_volumes(&ctx, &beat_of(vec![volume], vec![], vec![]), &live).await, vec!["v2".to_string()]);
     }
 
     /// `replicas: 1` return path: the reaper deleted this node's replica row while it was dead,
@@ -2185,10 +2219,10 @@ fi
         let (ctx, _rec) = test_ctx(tmp.path(), "node-c", Vec::new());
         let live = vec!["node-a".to_string(), "node-b".to_string(), "node-c".to_string()];
         let beat = beat_of(vec![volume], vec![], vec![]);
-        assert!(interesting_volumes(&ctx, &beat, &live).is_empty(), "no local copy: nothing to do");
+        assert!(interesting_volumes(&ctx, &beat, &live).await.is_empty(), "no local copy: nothing to do");
 
         std::fs::create_dir_all(ctx.engine.pool.voldir("v0")).unwrap();
-        assert_eq!(interesting_volumes(&ctx, &beat, &live), vec!["v0".to_string()]);
+        assert_eq!(interesting_volumes(&ctx, &beat, &live).await, vec!["v0".to_string()]);
     }
 
     /// A Workspace list error hides every parent, so the sweep would read every volume as
@@ -2965,6 +2999,35 @@ fi
         retire_pass(&ctx, &beat_of(vec![volume], vec![], vec![]), &["node-a".to_string()]).await;
         assert!(!ctx.engine.pool.voldir("v-gone").exists(), "no CR: the copy goes");
         assert!(ctx.engine.pool.voldir("v-live").exists(), "listed: untouched");
+    }
+
+    /// I1: the retire's btrfs work must not run on the reactor. Driven on a single-threaded
+    /// runtime with a concurrent task that must make progress WHILE the retire runs: with
+    /// `cleanup_local` called inline the sleeper cannot be polled until the walk finishes, and
+    /// with it on `spawn_blocking` it can. The orphan voldir is a real directory tree, so the
+    /// walk is real work either way.
+    #[test]
+    fn the_retire_pass_does_not_walk_the_pool_on_the_reactor() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 200 nested directories: enough walking that an inline call is unambiguously ordered
+        // before the sleeper, without making the test slow.
+        for i in 0..200 {
+            std::fs::create_dir_all(tmp.path().join("vol").join("orphan").join("snap").join(format!("c{i}"))).unwrap();
+        }
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (ctx, _rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, list_of("Snapshot", vec![]))]);
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let f = flag.clone();
+            let ticker = tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                f.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            retire_pass(&ctx, &beat_of(vec![], vec![], vec![]), &[]).await;
+            ticker.await.unwrap();
+            assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(!tmp.path().join("vol").join("orphan").exists(), "the orphan voldir is still reclaimed");
+        });
     }
 
     /// F2 (drill, 2026-09-03): `VolumeReplica` rows outlived their deleted workspaces — nothing
