@@ -1484,6 +1484,19 @@ fn ws_in_team(team: &str, node: &str) -> serde_json::Value {
     o
 }
 
+/// No `Quota` object for this owner/team and none for its kind's default either: `quota::effective`
+/// falls all the way through to the compiled-in table, which is what most binding tests want —
+/// they are not testing quota sizing, and this is the fallback that exercises without needing one.
+fn quota_fallback_routes(name: &str, team: bool) -> Vec<Route> {
+    vec![
+        rustic_git_workspaces::kube_test::not_found(format!("/apis/rustic-git.io/v1alpha1/quotas/{name}")),
+        rustic_git_workspaces::kube_test::not_found(format!(
+            "/apis/rustic-git.io/v1alpha1/quotas/{}",
+            if team { "default-team" } else { "default-user" }
+        )),
+    ]
+}
+
 /// Every object the binding ensures in one namespace, answered with itself.
 fn ns_routes(ns: &str) -> Vec<Route> {
     let ok = |path: String, api: &str, kind: &str| Route {
@@ -1495,7 +1508,7 @@ fn ns_routes(ns: &str) -> Vec<Route> {
     let mut r = vec![
         ok(format!("/api/v1/namespaces/{ns}"), "v1", "Namespace"),
         ok(format!("/api/v1/namespaces/{ns}/limitranges/slot"), "v1", "LimitRange"),
-        ok(format!("/api/v1/namespaces/{ns}/resourcequotas/owner"), "v1", "ResourceQuota"),
+        ok(format!("/api/v1/namespaces/{ns}/resourcequotas/owner-quota"), "v1", "ResourceQuota"),
         ok(
             format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings/api-secrets"),
             "rbac.authorization.k8s.io/v1",
@@ -1549,6 +1562,8 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
         ]
         .into_iter()
+        .chain(quota_fallback_routes("alice", false))
+        .chain(quota_fallback_routes("acme", true))
         .chain(ns_routes("ws-alice"))
         .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
         .collect(),
@@ -1599,6 +1614,7 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
         tmp.path(),
         vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list)]
             .into_iter()
+                .chain(quota_fallback_routes("alice", false))
                 .chain(ns_routes("ws-alice"))
             .collect(),
     );
@@ -1620,6 +1636,43 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
     );
 }
 
+/// The owner's ceiling is projected into their namespace on every binding pass, so a raise takes
+/// effect without a roll and a namespace made before quotas existed gets one on its next reconcile.
+#[tokio::test]
+async fn a_binding_pass_writes_the_owners_resource_quota() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+    });
+    let quota = rustic_git_workspaces::kube_test::get(
+        "/apis/rustic-git.io/v1alpha1/quotas/alice",
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": "alice"},
+            "spec": {"workspaces": 5, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 12, "memoryGb": 48}
+        }),
+    );
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            quota,
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
+        ]
+        .into_iter()
+        .chain(ns_routes("ws-alice"))
+        .collect(),
+    );
+    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
+
+    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/resourcequotas/owner-quota");
+    assert!(!sent.is_empty(), "{:?}", rec.calls());
+    assert_eq!(sent[0]["spec"]["hard"]["limits.cpu"], "12");
+    assert_eq!(sent[0]["spec"]["hard"]["limits.memory"], "48Gi");
+}
 
 fn home_vol_json(quota: u64) -> serde_json::Value {
     serde_json::json!({
@@ -2448,6 +2501,9 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{}/rolebindings/api-secrets", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
         Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/limitranges/slot", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/quotas/acme"),
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/quotas/default-user"),
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/resourcequotas/owner-quota", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "ResourceQuota"}) },
         Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/web".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
         Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/web".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
         Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/worker".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
@@ -4234,6 +4290,7 @@ fn restored_env_routes(snapshot: serde_json::Value) -> Vec<Route> {
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{}/rolebindings/api-secrets", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
         Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/limitranges/slot", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/resourcequotas/owner-quota", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "ResourceQuota"}) },
     ]
 }
 

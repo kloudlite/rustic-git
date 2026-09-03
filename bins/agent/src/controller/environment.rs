@@ -5,7 +5,7 @@ use super::stop::{replicated_condition, running_condition, stop_name, stop_push,
 use super::workspace::{cleared_node_dead, replaced};
 use super::{my_node, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, Service};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, ResourceQuota, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
@@ -342,6 +342,20 @@ async fn run_environment(
     ensure(
         &Api::<LimitRange>::namespaced(ctx.client.clone(), ns),
         &k8s::limit_range(ns, &e.spec.owner, "environment", &k8s::env_unit_resources(), Some(owner_ref)),
+        ctx,
+    )
+    .await?;
+    // The same ceiling, in the environment's own namespace: an environment's services are its
+    // owner's capacity too, and the namespace is where Kubernetes can enforce it.
+    //
+    // `false`: the agent has no directory to ask whether this slug is a team, so an owner with no
+    // `Quota` object of their own falls back to the SMALLER table. A team whose quota has ever
+    // been set has an object, and that object is what is read — the fallback is the only case that
+    // guesses, and it guesses conservatively.
+    let q = rustic_git_workspaces::quota::effective(&ctx.client, &e.spec.owner, false).await?;
+    ensure(
+        &Api::<ResourceQuota>::namespaced(ctx.client.clone(), ns),
+        &k8s::resource_quota(ns, &e.spec.owner, "environment", &q),
         ctx,
     )
     .await?;

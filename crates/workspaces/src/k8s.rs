@@ -164,49 +164,37 @@ pub fn limit_range(ns: &str, owner: &str, kind: &str, res: &PodResources, owner_
     }
 }
 
-/// The namespace's aggregate ceiling: `LimitRange` bounds one container, this bounds all of them.
+/// The namespace's TOTAL ceiling, as against `limit_range`'s per-container one.
 ///
-/// Sized as `max_pods` × the slot's DEFAULT REQUEST, because capacity is priced on the request
-/// (see `PodResources::default`) — so this quota and `/v1`'s per-owner count refuse at the same
-/// point instead of one silently shadowing the other. Requests only, never limits: bursting to the
-/// limit is what the slot is for.
-pub fn resource_quota(ns: &str, owner: &str, kind: &str, res: &PodResources, max_pods: usize) -> ResourceQuota {
-    let cpu = res.cpu_request.trim_end_matches('m').parse::<f64>().unwrap_or(0.0);
-    // `cpu_request` is either whole cores ("2") or millicores ("500m"); normalise to millicores so
-    // the multiplication is integer and the rendered quantity is exact.
-    let milli = if res.cpu_request.ends_with('m') { cpu } else { cpu * 1000.0 };
-    let total_milli = (milli * max_pods as f64) as u64;
-    let mem = parse_gi(&res.memory_request) * max_pods as u64;
+/// Enforced by the API server at admission, so it holds for a pod created by any path — a future
+/// code path that forgets, a debug pod, an operator with kubectl. That is what makes it the hard
+/// stop behind `/v1`'s read-then-write check, which can overshoot by one under concurrency.
+///
+/// Only cpu and memory: disk is bounded per volume by its own btrfs qgroup, and counts have no
+/// Kubernetes expression at all.
+///
+/// ponytail: the cap is PER NAMESPACE, and a person in several teams has one namespace per team,
+/// so the platform-side ceiling repeats per team while `/v1`'s count is the exact per-owner
+/// number. Collapse to one namespace per team, or sum across namespaces here, if the platform side
+/// ever has to be exact too.
+pub fn resource_quota(ns: &str, owner: &str, kind: &str, q: &crate::crd::QuotaSpec) -> ResourceQuota {
     ResourceQuota {
         metadata: ObjectMeta {
-            name: Some("owner".to_string()),
+            name: Some("owner-quota".to_string()),
             namespace: Some(ns.to_string()),
             labels: Some(labels(owner, kind)),
-            // No ownerReference, same rule as `limit_range`: the namespace outlives any one object
-            // in it, and a ceiling that vanished with a rewrite is not a ceiling.
+            // None, for the same reason the namespace and the LimitRange carry none: this is the
+            // shared ceiling of everything in here, not a possession of any one object.
             ..Default::default()
         },
         spec: Some(ResourceQuotaSpec {
             hard: Some(BTreeMap::from([
-                ("pods".to_string(), Quantity(max_pods.to_string())),
-                ("requests.cpu".to_string(), Quantity(format!("{}", total_milli / 1000))),
-                ("requests.memory".to_string(), Quantity(format!("{mem}Gi"))),
+                ("limits.cpu".to_string(), Quantity(q.cpu.to_string())),
+                ("limits.memory".to_string(), Quantity(format!("{}Gi", q.memory_gb))),
             ])),
             ..Default::default()
         }),
-        status: None,
-    }
-}
-
-/// Gibibytes out of a `PodResources` memory string ("4Gi", "2730Mi"). Rounds Mi DOWN to whole Gi:
-/// a quota that overstated the ceiling would let the twenty-first pod schedule.
-fn parse_gi(q: &str) -> u64 {
-    if let Some(g) = q.strip_suffix("Gi") {
-        g.parse().unwrap_or(0)
-    } else if let Some(m) = q.strip_suffix("Mi") {
-        m.parse::<u64>().unwrap_or(0) / 1024
-    } else {
-        0
+        ..Default::default()
     }
 }
 
@@ -1869,18 +1857,16 @@ mod tests {
         assert_eq!(env_item.default_request.as_ref().unwrap().get("memory").unwrap().0, "2730Mi");
     }
 
-    /// The `/v1` count check is the readable refusal; this is the one that holds for a pod created by
-    /// any path. Sized from the SAME two numbers the slot and the cap are, so the three cannot drift.
     #[test]
-    fn the_namespace_caps_aggregate_consumption_not_just_container_size() {
-        let q = resource_quota("ws-alice", "alice", "workspace", &PodResources::default(), 20);
-        let hard = q.spec.unwrap().hard.unwrap();
-        assert_eq!(hard.get("pods").unwrap().0, "20");
-        assert_eq!(hard.get("requests.cpu").unwrap().0, "40");
-        assert_eq!(hard.get("requests.memory").unwrap().0, "80Gi");
-        // Shared user namespace: no ownerReference, exactly as the LimitRange has none — deleting one
-        // workspace must not drop the ceiling for every sibling.
-        assert!(q.metadata.owner_references.is_none());
+    fn a_resource_quota_caps_the_namespaces_limits() {
+        let rq = resource_quota("ws-alice", "alice", "workspace", &crate::crd::default_quota(false));
+        let hard = rq.spec.unwrap().hard.unwrap();
+        assert_eq!(hard["limits.cpu"].0, "8");
+        assert_eq!(hard["limits.memory"].0, "32Gi");
+        assert_eq!(rq.metadata.labels.unwrap()["rustic-git.io/owner"], "alice");
+        // No ownerReference, the same reason the namespace and the LimitRange have none: the cap
+        // is shared by every workspace in here and must not vanish with any one of them.
+        assert!(rq.metadata.owner_references.is_none());
     }
 
     /// The API's Secret access must be namespaced, never cluster-wide: a cluster-wide grant would

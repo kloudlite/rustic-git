@@ -111,11 +111,17 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
             ctx,
         )
         .await?;
-        // Aggregate ceiling beside the per-container one: see `k8s::resource_quota`'s doc comment
-        // for why it's sized from the same numbers `/v1`'s per-owner count is.
+        // The owner's ceiling, projected. A TEAM namespace gets the TEAM's quota: the working
+        // copies in it are the team's, so the team's number is the one that bounds them.
+        let q = rustic_git_workspaces::quota::effective(
+            &ctx.client,
+            if team.is_empty() { owner } else { &team },
+            !team.is_empty(),
+        )
+        .await?;
         ensure(
             &Api::<ResourceQuota>::namespaced(ctx.client.clone(), &ns),
-            &k8s::resource_quota(&ns, owner, "workspace", &crd::PodResources::default(), rustic_git_workspaces::model::max_per_owner()),
+            &k8s::resource_quota(&ns, owner, "workspace", &q),
             ctx,
         )
         .await?;

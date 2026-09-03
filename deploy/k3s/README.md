@@ -590,9 +590,6 @@ starts on its own node.
 
 A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` (default 180, enough for a reboot to finish without healing around it; the DaemonSet no longer overrides it) —
 that floor, not a shorter probe, is what keeps a brief kubelet hiccup from tearing anything down.
-`WS_MAX_PER_OWNER` (code default 20, set on the `rustic-git-api` container) is the unrelated runaway-loop
-knob: `/v1` refuses a create, clone, or restore with 429 once one owner's live Workspaces plus Environments
-already total that many.
 Every surviving agent's pull beat then does two things to that node's volumes: replicas heal onto
 a third live node automatically (rendezvous stops naming the dead node as a candidate, so a
 survivor picks up the missing copy on its own), and the sweep decides what happens to each `Volume`
