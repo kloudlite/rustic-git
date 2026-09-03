@@ -107,6 +107,7 @@ TMPD=""
 # supported shape anyway.
 COSMOS_DB="${WS_E2E_COSMOS_DB:-wse2e}"
 ENV_ID=""
+DELETED_ENV_ID=""
 WS_ID=""
 WS_NS=""
 PROBE_NS=""
@@ -122,7 +123,9 @@ cleanup() {
   # The CRDs are cluster-scoped and OWN everything namespaced they produced (namespace, pod,
   # deployments, services, policies), so deleting the four objects is the whole teardown —
   # garbage collection does the rest. The probe namespace is ours, not the controller's.
-  [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
+  for eid in "$ENV_ID" "$DELETED_ENV_ID"; do
+    [ -n "$eid" ] && kubectl delete environment "$eid" --ignore-not-found --wait=false >/dev/null 2>&1
+  done
   for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$OTHER_NODE_WS_ID" "$SNAP_STATE_RESTORE_ID"; do
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
@@ -380,6 +383,30 @@ wait_env_stopped() {
 
 live_dir() { echo "$MOUNT/vol/$1/live"; }
 
+# The worktree of a restored working copy is `{pool}/vol/{volume}/live/{id}` — a RESTORE grafts
+# onto the snapshot's own volume, so the path is not `live_dir <id>`. A volume migrated from the
+# single-worktree layout keeps its bytes directly under `live/`, so take whichever exists.
+worktree_dir() {
+  wt_vol=$(kubectl get workspace "$1" -o jsonpath='{.status.volumeRef}' 2>/dev/null)
+  [ -n "$wt_vol" ] || wt_vol=$(kubectl get environment "$1" -o jsonpath='{.status.volumeRef}' 2>/dev/null)
+  [ -n "$wt_vol" ] || fail "$1 has no status.volumeRef"
+  if [ -d "$MOUNT/vol/$wt_vol/live/$1" ]; then echo "$MOUNT/vol/$wt_vol/live/$1"; else echo "$MOUNT/vol/$wt_vol/live"; fi
+}
+
+# One `/v1/volumes` row on one line. The rows are flat objects, so splitting on `}` hands `field`
+# a single row — `name` is the row's last key, so `field name` cannot pick up `display_name`.
+volume_row() {
+  curl -fsS "$BASE/v1/volumes" -H "Authorization: Bearer $USER_TOKEN" | tr '}' '\n' | grep "\"name\":\"$1\"" || true
+}
+
+# `curl -fsS` throws a refusal's body away, and the 409 TEXTS are the assertion here — this keeps
+# the code and the body both, in $DEL_CODE and $DEL_BODY.
+api_delete() {
+  DEL_BODY=$(curl -sS -X DELETE "$1" -H "Authorization: Bearer $USER_TOKEN" -w '\n%{http_code}')
+  DEL_CODE=$(printf '%s' "$DEL_BODY" | tail -1)
+  DEL_BODY=$(printf '%s' "$DEL_BODY" | sed '$d')
+}
+
 # ---------------------------------------------------------------------------
 # Create workspace, wait ready, write into live
 # ---------------------------------------------------------------------------
@@ -454,6 +481,26 @@ for i in $(seq 1 60); do
 done
 [ "$COUNT" -eq 1 ] || fail "expected exactly one Ready transient for $WS_ID, found $COUNT: $LIST"
 [ "$SYNC2" != "$SYNC1" ] || fail "the previous transient $SYNC1 is still around; retain did not delete it"
+
+# A definition change with NO byte change must cut too (`sync_one` compares the derived
+# `spec.state` against the newest sync point's, not just the btrfs generation). Only a real
+# generation read can tell the two triggers apart, so this cannot be asserted off-cluster: PATCH
+# the packages, touch NOTHING on disk, and require a new sync point carrying the new list within
+# two beats (WS_SYNC_SECS is 5 for this run).
+log "sync points: a packages change with no write must cut a new sync point carrying it"
+curl -fsS -X PATCH "$BASE/v1/workspaces/$WS_ID" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"packages":["hello"]}' >/dev/null || fail "PATCH packages"
+SYNC3=""
+for i in $(seq 1 10); do
+  SYNC3=$(ready_transients | head -1)
+  if [ -n "$SYNC3" ] && [ "$SYNC3" != "$SYNC2" ] \
+    && [ "$(kubectl get snapshot "$SYNC3" -o jsonpath='{.spec.state.packages[0]}' 2>/dev/null)" = "hello" ]; then
+    break
+  fi
+  SYNC3=""
+  sleep 1
+done
+[ -n "$SYNC3" ] || fail "no new sync point carrying packages=[hello] within two sync beats of the PATCH; the definition-change trigger is not firing"
 
 # ---------------------------------------------------------------------------
 # Push: the one mutating verb — `/v1` writes a `Snapshot` CR and the owning node cuts it (btrfs
@@ -964,6 +1011,27 @@ done
 kubectl -n "$WS_NS" exec "$WS_ID" -- getent hosts "db.$ENV_NS" >/dev/null \
   || fail "the exec itself is broken; the detach assertion proves nothing"
 
+# Pushed while it is still RUNNING: only the node running the worktree fulfils a cut, so a push
+# to a stopped environment would sit Working forever. Everything the twin below asserts hangs off
+# this one snapshot.
+log "durable snapshots (environment): pushing the running environment"
+curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/push" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"message":"env snapshot"}' >/dev/null
+ENV_SNAP=""
+for i in $(seq 1 60); do
+  # Sorted, so `tail -1` is the cut this push just made and not the create-time one.
+  ENV_SNAP=$(kubectl get snapshots -l "rustic-git.io/volume=$ENV_ID" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[?(@.status.phase=="Ready")]}{.metadata.name}{" "}{.spec.transient}{"\n"}{end}' \
+    2>/dev/null | awk '$2 == "false" {print $1}' | tail -1)
+  [ -n "$ENV_SNAP" ] && break
+  sleep 2
+done
+[ -n "$ENV_SNAP" ] || fail "no Ready snapshot on the environment's volume $ENV_ID after push"
+ENV_FROZEN_IMAGE=$(kubectl get snapshot "$ENV_SNAP" -o jsonpath='{.spec.state.services[0].image}')
+[ "$ENV_FROZEN_IMAGE" = "busybox:1.36" ] || fail "the environment snapshot froze no service list: '$ENV_FROZEN_IMAGE'"
+ENV_VOLUME=$(kubectl get environment "$ENV_ID" -o jsonpath='{.status.volumeRef}')
+[ -n "$ENV_VOLUME" ] || fail "environment $ENV_ID has no status.volumeRef"
+
 log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_env_stopped "$ENV_ID"
@@ -985,6 +1053,59 @@ for i in $(seq 1 30); do
   sleep 1
   [ "$i" -eq 30 ] && fail "env volume history is still empty after stop: $ENV_HISTORY"
 done
+
+# ---------------------------------------------------------------------------
+# Durable snapshots, the environment twin: the same delete -> detached -> restore -> collect
+# round trip the workspace makes below, with the services coming from the snapshot rather than
+# from the request.
+# ---------------------------------------------------------------------------
+log "durable snapshots (environment): deleting the environment, snapshot and all"
+curl -fsS -X DELETE "$BASE/v1/environments/$ENV_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+kubectl wait --for=delete "environment/$ENV_ID" --timeout=300s || fail "environment $ENV_ID still present after delete"
+DELETED_ENV_ID="$ENV_ID"
+ENV_ID=""
+
+log "durable snapshots (environment): the volume is still listed, detached, with its snapshots"
+ENV_ROW=""
+for i in $(seq 1 30); do
+  ENV_ROW=$(volume_row "$ENV_VOLUME")
+  [ -n "$ENV_ROW" ] && [ "$(echo "$ENV_ROW" | field deleted)" = "true" ] && break
+  sleep 2
+done
+[ -n "$ENV_ROW" ] || fail "the deleted environment's volume $ENV_VOLUME is not in /v1/volumes any more"
+[ "$(echo "$ENV_ROW" | field snapshots)" -ge 1 ] || fail "detached volume $ENV_VOLUME lists no snapshots: $ENV_ROW"
+[ "$(echo "$ENV_ROW" | field kind)" = "environment" ] || fail "the detached row is not an environment: $ENV_ROW"
+
+# No `services` in the body: an environment restored from a snapshot runs what the snapshot froze.
+log "durable snapshots (environment): restoring runs the snapshot's own services"
+ENV_RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/environments/restore" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"e2e-env-restore","snapshot_id":"'"$ENV_SNAP"'"}')
+ENV_ID=$(echo "$ENV_RESTORE_JSON" | field id)
+[ -n "$ENV_ID" ] || fail "no id in environment restore response: $ENV_RESTORE_JSON"
+wait_env_ready "$ENV_ID"
+[ "$(kubectl get environment "$ENV_ID" -o jsonpath='{.spec.services[0].image}')" = "$ENV_FROZEN_IMAGE" ] \
+  || fail "the restored environment's services did not come from the snapshot"
+[ "$(kubectl get environment "$ENV_ID" -o jsonpath='{.status.volumeRef}')" = "$ENV_VOLUME" ] \
+  || fail "the restored environment is not a worktree of the snapshot's volume $ENV_VOLUME"
+[ -f "$(worktree_dir "$ENV_ID")/volumes/data/marker.txt" ] || fail "the restored environment is missing the pushed marker"
+
+log "durable snapshots (environment): deleting the restored environment and its snapshots collects the volume"
+curl -fsS -X DELETE "$BASE/v1/environments/$ENV_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+kubectl wait --for=delete "environment/$ENV_ID" --timeout=300s || fail "restored environment $ENV_ID still present after delete"
+ENV_ID=""
+kubectl get volume "$ENV_VOLUME" >/dev/null 2>&1 || fail "the Volume CR $ENV_VOLUME went with its second working copy; its snapshots should have kept it"
+for sn in $(kubectl get snapshots -l "rustic-git.io/volume=$ENV_VOLUME" \
+  -o jsonpath='{range .items[?(@.spec.transient==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+  api_delete "$BASE/v1/volumes/$ENV_VOLUME/snapshots/$sn"
+  [ "$DEL_CODE" = 204 ] || fail "deleting environment snapshot $sn answered $DEL_CODE: $DEL_BODY"
+done
+kubectl wait --for=delete "volume/$ENV_VOLUME" --timeout=120s \
+  || fail "the Volume CR $ENV_VOLUME survived the delete of its last snapshot"
+for i in $(seq 1 60); do
+  [ ! -e "$MOUNT/vol/$ENV_VOLUME" ] && break
+  sleep 2
+done
+[ ! -e "$MOUNT/vol/$ENV_VOLUME" ] || fail "the volume tree $MOUNT/vol/$ENV_VOLUME is still on the node after its last snapshot was deleted"
 
 # ---------------------------------------------------------------------------
 # Task 7b: the commit model itself, minimal. The commit model is the only model now (WS_COMMIT_MODEL
@@ -1039,8 +1160,27 @@ fi
 # ---------------------------------------------------------------------------
 log "restore (explicit snapshot): asserting the restored workspace keeps the source's frozen image after the source is deleted"
 SRC_IMAGE=$(kubectl get workspace "$WS_ID" -o jsonpath='{.spec.image}')
+SRC_PACKAGES=$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.packages}')
+# The volume outlives the workspace from here on, and it is what every assertion below names.
+WS_VOLUME=$(kubectl get workspace "$WS_ID" -o jsonpath='{.status.volumeRef}')
+[ -n "$WS_VOLUME" ] || fail "workspace $WS_ID has no status.volumeRef"
 curl -fsS -X DELETE "$BASE/v1/workspaces/$WS_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_ws_gone "$WS_ID"
+
+# Durable snapshots: the push outlived the workspace. The Volume is DETACHED — no working copy
+# owns it any more — and it is still listed, with its snapshots, which is the only reason the
+# restore below has anything to graft onto.
+log "durable snapshots: the deleted workspace's volume is still listed, detached, with its snapshots"
+DETACHED_ROW=""
+for i in $(seq 1 30); do
+  DETACHED_ROW=$(volume_row "$WS_VOLUME")
+  [ -n "$DETACHED_ROW" ] && [ "$(echo "$DETACHED_ROW" | field deleted)" = "true" ] && break
+  sleep 2
+done
+[ -n "$DETACHED_ROW" ] || fail "the deleted workspace's volume $WS_VOLUME is not in /v1/volumes any more; its snapshots went with it"
+[ "$(echo "$DETACHED_ROW" | field deleted)" = "true" ] || fail "volume $WS_VOLUME is not marked as having no working copy: $DETACHED_ROW"
+[ "$(echo "$DETACHED_ROW" | field snapshots)" -ge 1 ] || fail "detached volume $WS_VOLUME lists no snapshots: $DETACHED_ROW"
+kubectl get volume "$WS_VOLUME" >/dev/null 2>&1 || fail "the Volume CR $WS_VOLUME was collected even though a snapshot references it"
 SNAP_STATE_RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/restore" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"e2e-restore-state","snapshot_id":"'"$SNAP_NAME"'"}')
@@ -1060,8 +1200,66 @@ FROZEN_IMAGE=$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.image
 [ "$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.kind}')" = workspace ] \
   || fail "snapshot carries no state"
 
+# The restore RE-ATTACHED: the new workspace is a worktree of the SOURCE's volume (not a fresh
+# one), it is an owner of that Volume again, and the pushed bytes are there.
+[ "$(kubectl get workspace "$SNAP_STATE_RESTORE_ID" -o jsonpath='{.status.volumeRef}')" = "$WS_VOLUME" ] \
+  || fail "the restored workspace is not a worktree of the snapshot's volume $WS_VOLUME"
+[ -f "$(worktree_dir "$SNAP_STATE_RESTORE_ID")/hello.txt" ] || fail "the restored workspace is missing the pushed file"
+[ "$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.packages}')" = "$SRC_PACKAGES" ] \
+  || fail "the snapshot's frozen packages changed under us"
+[ "$(kubectl get workspace "$SNAP_STATE_RESTORE_ID" -o jsonpath='{.spec.packages}')" = "$SRC_PACKAGES" ] \
+  || fail "restore did not take the snapshot's frozen packages: $(kubectl get workspace "$SNAP_STATE_RESTORE_ID" -o jsonpath='{.spec.packages}') != $SRC_PACKAGES"
+ROW=$(volume_row "$WS_VOLUME")
+[ "$(echo "$ROW" | field deleted)" = "false" ] || fail "the volume is still listed as having no working copy after the restore: $ROW"
+
+# The three refusals, all of them exercised against the live objects: delete is the only explicit
+# verb on a snapshot, and it refuses exactly two things; a volume with a working copy refuses too.
+log "durable snapshots: the refusals (a running worktree's base, a sync point, an attached volume)"
+api_delete "$BASE/v1/volumes/$WS_VOLUME/snapshots/$SNAP_NAME"
+[ "$DEL_CODE" = 409 ] || fail "deleting the base of the running restored workspace answered $DEL_CODE, not 409: $DEL_BODY"
+echo "$DEL_BODY" | grep -q "this snapshot is the base of a running worktree" \
+  || fail "wrong refusal for a running worktree's base: $DEL_BODY"
+api_delete "$BASE/v1/volumes/$WS_VOLUME"
+[ "$DEL_CODE" = 409 ] || fail "deleting a volume that still has a workspace answered $DEL_CODE, not 409: $DEL_BODY"
+echo "$DEL_BODY" | grep -q "the volume still has a workspace or environment" \
+  || fail "wrong refusal for an attached volume: $DEL_BODY"
+SYNC_POINT=""
+for i in $(seq 1 30); do
+  SYNC_POINT=$(kubectl get snapshots -l "rustic-git.io/volume=$WS_VOLUME" \
+    -o jsonpath='{range .items[?(@.spec.transient==true)]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1)
+  [ -n "$SYNC_POINT" ] && break
+  sleep 2
+done
+[ -n "$SYNC_POINT" ] || fail "no sync point on $WS_VOLUME to try deleting by hand"
+api_delete "$BASE/v1/volumes/$WS_VOLUME/snapshots/$SYNC_POINT"
+[ "$DEL_CODE" = 409 ] || fail "deleting a sync point by hand answered $DEL_CODE, not 409: $DEL_BODY"
+echo "$DEL_BODY" | grep -q "a sync point cannot be deleted by hand" \
+  || fail "wrong refusal for a sync point: $DEL_BODY"
+kubectl get snapshot "$SYNC_POINT" >/dev/null 2>&1 || fail "the refused sync-point delete removed it anyway"
+
+# And the end of the line: delete the working copy again, then every snapshot. The last one takes
+# the Volume with it, and the agent's byte sweep reclaims the tree.
+log "durable snapshots: deleting the restored workspace and then its snapshots collects the volume"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$SNAP_STATE_RESTORE_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$SNAP_STATE_RESTORE_ID"
+SNAP_STATE_RESTORE_ID=""
+kubectl get volume "$WS_VOLUME" >/dev/null 2>&1 || fail "the Volume CR $WS_VOLUME went with its second working copy; its snapshots should have kept it"
+for sn in $(kubectl get snapshots -l "rustic-git.io/volume=$WS_VOLUME" \
+  -o jsonpath='{range .items[?(@.spec.transient==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+  api_delete "$BASE/v1/volumes/$WS_VOLUME/snapshots/$sn"
+  [ "$DEL_CODE" = 204 ] || fail "deleting snapshot $sn answered $DEL_CODE: $DEL_BODY"
+done
+kubectl wait --for=delete "volume/$WS_VOLUME" --timeout=120s \
+  || fail "the Volume CR $WS_VOLUME survived the delete of its last snapshot"
+for i in $(seq 1 60); do
+  [ ! -e "$MOUNT/vol/$WS_VOLUME" ] && break
+  sleep 2
+done
+[ ! -e "$MOUNT/vol/$WS_VOLUME" ] || fail "the volume tree $MOUNT/vol/$WS_VOLUME is still on the node after its last snapshot was deleted"
+
 echo "OK (commit model): push -> Ready Snapshot, clone from head, restore to a named commit, replica on a second node all passed"
 echo "OK (snapshot state): restore with the source deleted kept the frozen image, and the Snapshot CR carries spec.state"
+echo "OK (durable snapshots): a push outlived its workspace and its environment — detached volume listed with its snapshots, restore re-attached with the frozen definition and the pushed bytes, the three 409s refused, and the last snapshot's delete collected the Volume and the tree on the node"
 
 # ---------------------------------------------------------------------------
 # Volume takeover: node JOIN (spread + retire). Node DEATH is verified by hand on the cluster —
@@ -1137,4 +1335,4 @@ else
   log "volume takeover: node JOIN passed (standby moved $STANDBY -> $NEW_STANDBY, old row and subvolume gone, then settled back to $STANDBY)"
 fi
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history) all passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed"

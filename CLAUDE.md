@@ -167,8 +167,17 @@ candidates and retires a copy once its replacement is Synced (`live_nodes`/`reti
 healing a COPY risks nothing, unlike moving the live worktree. A released volume's pin is cleared,
 and the node that then claims the parent takes it with a JSON-patch `test` on the empty value
 (`take_volume`), the one other spec write the admission policy allows. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
-exactly one btrfs subvolume with identical semantics — and it is a CHILD: the parent's controller
-creates it with an ownerReference, so deleting the parent is the whole delete. Containers live in
+exactly one btrfs subvolume with identical semantics — and it is REFERENCE-COUNTED, in
+ownerReferences: the parent's controller creates it as an owner of it, and a `Snapshot` a push
+writes is owned by the Volume. A volume lives while a working copy or a snapshot references it
+and is collected when neither does. Deleting a workspace or an environment therefore runs the
+`WORKTREE_FINALIZER` (`cleanup_parent`): drop the worktree, delete that working copy's sync
+points, and detach the Volume — remove the parent's owner entry — only if a snapshot remains, so
+the volume survives detached with its snapshots; with none left the entry stays and Kubernetes GC
+takes the Volume, its records and its bytes. A lost detach is an error, never a completed
+finalizer. `retire_pass` in `bins/agent/src/peer.rs` is the safety net at both ends: it deletes
+`snap/` subvolumes whose record is gone (re-read before every delete, keep on any error) and
+deletes a Volume that has no owner entry and no snapshot. Containers live in
 a namespace per owner or environment (`crd::ws_namespace` → `ws-{owner}` / `wt-{owner}-…` for a
 team, `env-{id}`): a workspace is one bare Pod, an environment's services are StatefulSets.
 `desiredState: Stopped` deletes the workspace pod (and, for an environment, its StatefulSets once
@@ -199,8 +208,11 @@ and it reaches other nodes as a `btrfs send` streamed over the peer listener bet
 (`bins/agent/src/peer.rs`) — never uploaded anywhere. Durability is therefore replica count
 (`Volume.spec.replicas`, placed by `replicate::targets`), not a blob container.
 
-Four verbs, no separate commit step: `push` is the single mutating verb — `/v1` writes a
-`Snapshot` CR naming the volume's current head as its parent and the owning node fulfils it:
+Four verbs — push, restore, clone, delete — and no separate commit step. `push` is the single
+mutating verb: it takes a **snapshot** of the working copy, kept until somebody deletes it, and it
+is the only thing that keeps a volume alive once its workspace or environment is gone. `/v1` writes
+a `Snapshot` CR (`spec.transient: false`, owned by the Volume) naming the volume's current head as
+its parent and the owning node fulfils it:
 snapshot + upload + mark `Ready` + advance `status.head`, with an optional message
 (`GET /v1/volumes/{name}/history|refs` on `bins/api` reads the chain of `Ready` `Snapshot`s back).
 Every cut also records `spec.state` (`crd::SnapshotState`), the parent's own definition — image,
@@ -225,20 +237,30 @@ holds and `based_on` states that age — the one way forward, chosen knowingly. 
 is the exception in kind: it still copies bytes from the source's own live subvolume on the node
 that holds it, so it cuts nothing, carries no `based_on`, and refuses an interrupted source with a
 409 — there is nothing on a live node to copy from. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
-an explicit past **snapshot** — a PUSHED commit record, named by id. Between pushes, a background
-sync beat (`WS_SYNC_SECS`, `bins/agent/src/sync.rs`) cuts a TRANSIENT `Snapshot` — never a parent,
+an explicit past **snapshot**, named by id, and RE-ATTACHES: the new working copy is a worktree of
+that snapshot's volume and an owner of the Volume again, even when the volume was detached and the
+source is long gone. `delete` is the only explicit verb on a snapshot —
+`DELETE /v1/volumes/{name}/snapshots/{id}` refuses a sync point and a running worktree's base
+(409 both), and deleting a detached volume's last snapshot deletes the volume;
+`DELETE /v1/volumes/{name}` takes a detached volume with all its snapshots and refuses one that
+still has a working copy. Everything else the agent cuts is a **sync point** — internally
+`spec.transient: true`, owned by the working copy rather than the Volume, never listed as history,
+never a restore target, and gone with the working copy. Between pushes, a background
+sync beat (`WS_SYNC_SECS`, `bins/agent/src/sync.rs`) cuts one — never a parent,
 never advancing `status.head` — from each running worktree whose btrfs generation has moved or
 whose definition (`spec.state`) has changed since its newest sync point, so a
-peer node's replica always has something recent to fetch; retain keeps exactly one Ready transient
-per worktree, and a node re-hosting a worktree checks out the newest one it holds locally before
-falling back to `status.head`. The agent
+peer node's replica always has something recent to fetch; retain prunes sync points only (exactly
+one Ready per worktree — a push is never pruned), and a node re-hosting a worktree checks out the
+newest one it holds locally before falling back to `status.head`. The migration baseline is a sync
+point too, and one written by an older build is recognised by its shape
+(`crd::Snapshot::is_snapshot`), so nothing had to be migrated. The agent
 (`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
 it watches its own node's objects and converges them (`bins/agent/src/controller/`), and its
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
 to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
 nothing else — no object store, no Azure credential, and no HTTP service of ours.
 Stopping a workspace or environment cuts a `stop-{ws}-{gen}`/`stop-{env}-{gen}` sync point, named by
-the parent's generation so every stop is a fresh snapshot (skipped if the pod never ran), and tears
+the parent's generation so every stop is a fresh cut (skipped if the pod never ran), and tears
 the pod (or the StatefulSets) down as soon as that cut is Ready — a stop is seconds, and it never
 waits for a replica. Right after the cut the owner POSTs `/peer/v1/wake` to every placeable node
 (`peer::wake_peers`) so the peers pull within seconds instead of at the next replication beat. Stop,
