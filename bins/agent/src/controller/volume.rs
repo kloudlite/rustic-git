@@ -397,24 +397,26 @@ where
 /// broken" rather than as a failure. That reading is the safety property, which is why there is
 /// one of these and not five.
 ///
-/// `Ok(false)` is a lost race and the caller re-decides on its next pass. An `Err` is an outage —
+/// `Ok(None)` is a lost race and the caller re-decides on its next pass. An `Err` is an outage —
 /// never "lost": a caller that treated an unreachable API server as a lost race would silently
-/// skip work forever.
+/// skip work forever. `Ok(Some(_))` carries the patched object back — the API server bumped its
+/// `resourceVersion`, and a caller about to PUT `/status` on it needs that fresh copy or its own
+/// write 409s.
 pub(crate) async fn cas(
     api: &Api<crd::Volume>,
     name: &str,
     path: &str,
     from: serde_json::Value,
     to: serde_json::Value,
-) -> Result<bool, kube::Error> {
+) -> Result<Option<crd::Volume>, kube::Error> {
     let pointer = || path.parse().expect("callers pass static pointers");
     let ops = json_patch::Patch(vec![
         json_patch::PatchOperation::Test(json_patch::TestOperation { path: pointer(), value: from }),
         json_patch::PatchOperation::Replace(json_patch::ReplaceOperation { path: pointer(), value: to }),
     ]);
     match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
-        Ok(_) => Ok(true),
-        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+        Ok(v) => Ok(Some(v)),
+        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -423,14 +425,18 @@ pub(crate) async fn cas(
 /// safe: the API server applies the patch atomically, so exactly one of them sees 200 and the
 /// other a 409/422 it treats as "lost, not broken" — same construction as `peer::release_dead_volumes`.
 pub(crate) async fn take_volume(ctx: &Arc<Ctx>, name: &str, node: &str) -> Result<bool, kube::Error> {
-    cas(&Api::all(ctx.client.clone()), name, "/spec/nodeName", serde_json::json!(""), serde_json::json!(node)).await
+    cas(&Api::all(ctx.client.clone()), name, "/spec/nodeName", serde_json::json!(""), serde_json::json!(node))
+        .await
+        .map(|v| v.is_some())
 }
 
 /// The mirror of `take_volume`: compare-and-set the owner pin from `owner` to empty. Same `test`
 /// construction and the same "lost, not broken" reading of a 409/422 — a start that raced the
 /// dead-node sweep just re-decides on its next pass.
 pub(crate) async fn release_volume(ctx: &Arc<Ctx>, name: &str, owner: &str) -> Result<bool, kube::Error> {
-    cas(&Api::all(ctx.client.clone()), name, "/spec/nodeName", serde_json::json!(owner), serde_json::json!("")).await
+    cas(&Api::all(ctx.client.clone()), name, "/spec/nodeName", serde_json::json!(owner), serde_json::json!(""))
+        .await
+        .map(|v| v.is_some())
 }
 
 /// Remove `parent_uid`'s entry from the Volume's `ownerReferences` so Kubernetes GC stops seeing
@@ -459,6 +465,7 @@ pub(crate) async fn detach_volume(ctx: &Arc<Ctx>, name: &str, parent_uid: &str) 
         serde_json::to_value(&kept).expect("owner references serialize"),
     )
     .await
+    .map(|v| v.is_some())
 }
 
 /// The mirror of `detach_volume`: add `parent`'s entry to a Volume it did NOT create, so a
@@ -504,6 +511,7 @@ where
     } else {
         cas(&api, name, path, serde_json::to_value(&current).expect("owner references serialize"), value)
             .await
+            .map(|v| v.is_some())
             .map_err(Into::into)
     }
 }
@@ -820,12 +828,12 @@ mod tests {
     async fn cas_reads_a_conflict_as_lost_and_anything_else_as_an_error() {
         let ok = mock_client(vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 200, body: volume_json("v1", "node-a") }]);
         let api: Api<crd::Volume> = Api::all(ok.0);
-        assert!(cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.unwrap());
+        assert!(cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.unwrap().is_some());
 
         let lost_body = serde_json::to_value(kube::core::Status::failure("test failed", "Invalid").with_code(422)).unwrap();
         let lost = mock_client(vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 422, body: lost_body }]);
         let api: Api<crd::Volume> = Api::all(lost.0);
-        assert!(!cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.unwrap());
+        assert!(cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.unwrap().is_none());
 
         let broken_body = serde_json::to_value(kube::core::Status::failure("etcd is down", "InternalError").with_code(500)).unwrap();
         let broken = mock_client(vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 500, body: broken_body }]);
