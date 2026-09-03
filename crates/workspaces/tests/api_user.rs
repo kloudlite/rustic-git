@@ -141,6 +141,17 @@ impl Directory for StubMembership {
     async fn teams_for(&self, user: &str) -> Vec<String> {
         if user == "karthik" { vec!["acme".into()] } else { vec![] }
     }
+
+    // This stub exercises team membership only; a CLI token is not part of its case, and an
+    // unwired revocation list must refuse rather than admit.
+    async fn is_live(&self, _jti: &str) -> bool {
+        false
+    }
+
+    // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
+    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+        None
+    }
 }
 
 async fn server_with_teams(routes: Vec<Route>) -> Server {
@@ -1035,6 +1046,16 @@ impl Directory for StubCliTokens {
     async fn is_live(&self, _jti: &str) -> bool {
         self.0
     }
+
+    // This stub exercises CLI token liveness only; team membership is not part of its case.
+    async fn teams_for(&self, _user: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
+    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+        None
+    }
 }
 
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
@@ -1194,6 +1215,17 @@ impl Directory for StubKeys {
             git_email: "karthik@example.com".into(),
         })
     }
+
+    // This stub exercises ssh key material only; team membership is not part of its case.
+    async fn teams_for(&self, _user: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    // This stub exercises ssh key material only; CLI tokens are not part of its case, and an
+    // unwired revocation list must refuse rather than admit.
+    async fn is_live(&self, _jti: &str) -> bool {
+        false
+    }
 }
 
 fn ns_obj(name: &str, owner: &str) -> Value {
@@ -1215,6 +1247,12 @@ impl Directory for KeyTeams {
 
     async fn for_owner(&self, owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         StubKeys.for_owner(owner).await
+    }
+
+    // This stub exercises team membership and ssh keys; CLI tokens are not part of its case, and
+    // an unwired revocation list must refuse rather than admit.
+    async fn is_live(&self, _jti: &str) -> bool {
+        false
     }
 }
 

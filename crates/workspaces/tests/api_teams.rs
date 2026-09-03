@@ -20,6 +20,17 @@ impl Directory for StubMembership {
     async fn teams_for(&self, user: &str) -> Vec<String> {
         if user == "karthik" { vec!["acme".into()] } else { vec![] }
     }
+
+    // This stub exercises team membership only; a CLI token is not part of its case, and an
+    // unwired revocation list must refuse rather than admit.
+    async fn is_live(&self, _jti: &str) -> bool {
+        false
+    }
+
+    // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
+    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+        None
+    }
 }
 
 struct Server {

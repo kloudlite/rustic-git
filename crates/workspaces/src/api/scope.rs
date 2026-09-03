@@ -201,6 +201,18 @@ mod tests {
             async fn teams_for(&self, _user: &str) -> Vec<String> {
                 vec![self.0.clone()]
             }
+
+            // This stub exercises namespace-to-owner matching only; CLI tokens and ssh keys are
+            // not part of its case, and an unwired revocation list must refuse rather than admit.
+            async fn is_live(&self, _jti: &str) -> bool {
+                false
+            }
+
+            // No keys in this case: `None` is "the lookup failed", which is what an unwired
+            // directory is.
+            async fn for_owner(&self, _owner: &str) -> Option<crate::api::OwnerMaterial> {
+                None
+            }
         }
         let state = ApiState::new(
             Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),

@@ -74,33 +74,26 @@ pub struct OwnerMaterial {
 /// construct) so unit tests can supply a stub instead. Production wires `Directory` in via an
 /// adapter in `bins/api`.
 ///
-/// Every method defaults to the UNWIRED answer, so a test stub implements only the lookups its
-/// case exercises. That is NOT the same as a missing directory: `teams_for`'s default returns an
-/// empty Vec, which `resolve_new_owner` reads as "asked and answered", so a partial stub gets a
-/// 403 "not a member" where no directory at all gets a 503. Only test stubs are partial —
-/// production wires the full `Dir` adapter in `bins/api`.
+/// Every method is REQUIRED. A defaulted one made a partial test stub read as a live-but-empty
+/// directory — `teams_for` returning an empty Vec is "asked and answered" to `resolve_new_owner`,
+/// which is a 403 "not a member", where no directory at all is a 503. A stub must say which it
+/// means.
 #[async_trait::async_trait]
 pub trait Directory: Send + Sync {
     /// Every team slug `user` belongs to. Called once per request, no cache —
     /// ponytail: an in-process cache would cut the N+1 here, add one if this ever shows up hot.
-    async fn teams_for(&self, _user: &str) -> Vec<String> {
-        Vec::new()
-    }
+    async fn teams_for(&self, user: &str) -> Vec<String>;
 
     /// Is this CLI login still valid? A `cli` JWT carries a `jti` whose row in the directory IS
     /// the revocation list — the same rule `crates/api`'s `user_identity` enforces. `false`
     /// refuses the token, which is what an unwired directory must do: a 30-day token nobody can
     /// cancel is the worse failure.
-    async fn is_live(&self, _jti: &str) -> bool {
-        false
-    }
+    async fn is_live(&self, jti: &str) -> bool;
 
     /// The owner's ssh keys and git identity. `None` when the lookup FAILED — distinct from `Some`
     /// with an empty `authorized_keys`, which is a user with no keys and is written as an empty
     /// file.
-    async fn for_owner(&self, _owner: &str) -> Option<OwnerMaterial> {
-        None
-    }
+    async fn for_owner(&self, owner: &str) -> Option<OwnerMaterial>;
 }
 
 pub struct ApiState {
