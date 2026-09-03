@@ -521,3 +521,49 @@ async fn a_working_copy_appearing_mid_delete_keeps_the_volume() {
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is in use again: {deletes:?}");
 }
+
+/// A volume genuinely holds snapshots from more than one owner: a restore grafts the caller's new
+/// workspace onto a team's volume, and `create_snapshot` stamps the PUSHING worktree's owner. The
+/// owner-filtered list is what the caller may SEE; it must never be what decides whether the
+/// volume is empty, or one team member's delete takes the team's whole history.
+#[tokio::test]
+async fn a_foreign_snapshot_on_the_volume_refuses_the_volume_delete() {
+    let s = server(vec![
+        kget(
+            SNAPS,
+            snap_list(vec![
+                push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z"),
+                push("ws-1-b", "ws-1", "alice", "2026-08-27T10:00:00Z"),
+            ]),
+        ),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+
+    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1").await, 409);
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
+}
+
+/// The same split, from the other end: deleting my own last snapshot must not collect a volume
+/// that still holds somebody else's.
+#[tokio::test]
+async fn a_foreign_snapshot_keeps_the_volume_after_my_last_snapshot_goes() {
+    let s = server(vec![
+        kget(
+            SNAPS,
+            snap_list(vec![
+                push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z"),
+                push("ws-1-b", "ws-1", "alice", "2026-08-27T10:00:00Z"),
+            ]),
+        ),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+        ok("DELETE", format!("{SNAPS}/ws-1-a")),
+    ])
+    .await;
+
+    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+    let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+    assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is alice's too: {deletes:?}");
+}

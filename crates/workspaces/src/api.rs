@@ -2270,6 +2270,17 @@ async fn delete_volume(
     // The ownership check IS the snapshot listing: a volume with no `Snapshot` under a label the
     // caller may read is indistinguishable from one that does not exist.
     commit_model_snapshots(&s, &caller_id, &name).await?;
+    // Deleting the Volume CR cascades to every Snapshot on it, so a volume carrying somebody
+    // else's push is not this caller's to collect — the owner-filtered listing above cannot even
+    // see those, which is how one team member's delete used to take the team's whole history.
+    let owners: HashSet<String> = caller_owners(&s, &caller_id).await.into_iter().collect();
+    if snapshots_on_volume(&s, &name).await?.iter().any(|sn| !owners.contains(&sn.spec.owner)) {
+        return Err((
+            StatusCode::CONFLICT,
+            "this volume also holds snapshots owned by someone else; delete your own snapshots instead",
+        )
+            .into_response());
+    }
     // A cluster that could not be listed is "cannot prove nothing is running" — the opposite bias
     // to the listing's, and the right one for a delete.
     if !parents_of_volume(&s, &name).await.ok_or_else(kube_unavailable)?.is_empty() {
@@ -2335,7 +2346,7 @@ async fn delete_snapshot(
     // here rather than reused from above: a restore or a clone can attach a working copy, and
     // another push can land, in the window between those reads and this delete — deciding on the
     // stale view would delete a volume somebody just started using.
-    let items = commit_model_snapshots_maybe_empty(&s, &caller_id, &name).await?;
+    let items = snapshots_on_volume(&s, &name).await?;
     let live = parents_of_volume(&s, &name).await.ok_or_else(kube_unavailable)?;
     let remaining = items.iter().any(|sn| {
         sn.name_any() != snapshot
@@ -2376,6 +2387,20 @@ async fn commit_model_snapshots_maybe_empty(s: &ApiState, caller_id: &str, name:
     // tip) — a consumer rendering history the old way would show it backwards otherwise.
     items.sort_by_key(|sn| std::cmp::Reverse(sn.creation_timestamp().map(|t| t.0)));
     Ok(items)
+}
+
+/// Every snapshot on `volume`, whoever owns it — the same bias `parents_of_volume` takes, and for
+/// the same reason: a restore or a shared clone puts another owner's snapshots on this volume, and
+/// a decision that DESTROYS data must see them. The owner-filtered listings above stay what the
+/// caller may read; this one is only ever counted, never returned.
+async fn snapshots_on_volume(s: &ApiState, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
+    check_path_segment(name)?;
+    let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
+    Ok(api
+        .list(&ListParams::default().fields(&format!("spec.volume={name}")))
+        .await
+        .map_err(kube_err)?
+        .items)
 }
 
 /// A single `Ready` commit-model snapshot of `volume`, scoped by `caller_owners` exactly like
