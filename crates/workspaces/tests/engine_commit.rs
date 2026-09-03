@@ -123,8 +123,14 @@ fn drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry() {
     e.checkout("v1", None, "ws1").unwrap();
     assert!(e.pool.worktree("v1", "ws1").exists());
 
+    // Durable snapshots rule 1: the commits under `snap/` must outlive the parent whose delete
+    // path calls this — and an owned workspace's worktree is named after the volume itself, so
+    // "drop the worktree" and "drop the commits" are one character apart in the pool.
+    e.commit_worktree("v1", "ws1", "c1").unwrap();
+
     e.drop_worktree("v1", "ws1").unwrap();
     assert!(!e.pool.worktree("v1", "ws1").exists(), "the worktree subvolume must be gone");
+    assert!(e.pool.snap("v1", "c1").exists(), "the commit must survive its worktree");
 
     // Retried (a reconcile after this already landed, or a worktree never checked out at all).
     e.drop_worktree("v1", "ws1").unwrap();

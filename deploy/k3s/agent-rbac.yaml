@@ -15,13 +15,21 @@
 #                                                                       policy); workspaces only:
 #                                                                       reconcile_workspace's
 #                                                                       finalizer (metadata.
-#                                                                       finalizers) on a shared-
-#                                                                       volume clone (Task 7a's F5
-#                                                                       fix)
+#                                                                       finalizers) on EVERY
+#                                                                       workspace and environment
+#                                                                       (the delete path decides
+#                                                                       whether the Volume detaches
+#                                                                       or is collected)
 #   volumes (rustic-git.io)                get,list,watch               Controller + heartbeat list
 #                                          create                       ensure_child_volume (a
 #                                                                       parent's child)
 #                                          patch                        finalizer (metadata),
+#                                                                       detach_volume (metadata.
+#                                                                       ownerReferences: a deleted
+#                                                                       parent whose Volume still
+#                                                                       holds a Ready commit drops
+#                                                                       its own ownerReference so
+#                                                                       GC keeps the commits),
 #                                                                       restore_gate (spec.restoreTo),
 #                                                                       resolve_volume (spec.nodeName
 #                                                                       owned->'' or ''->node) — the

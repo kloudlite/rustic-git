@@ -451,6 +451,41 @@ pub(crate) async fn release_volume(ctx: &Arc<Ctx>, name: &str, owner: &str) -> R
     }
 }
 
+/// Remove `parent_uid`'s entry from the Volume's `ownerReferences` so Kubernetes GC stops seeing
+/// the Volume as that parent's child. Called only when the Volume still holds a Ready commit: a
+/// pushed commit must outlive the workspace it was taken from, and a commit lives on the Volume's
+/// subvolume — so the Volume has to survive its parent's delete, detached, rather than being
+/// collected with it. `ownerReferences` is METADATA, which is why the agent's admission policy
+/// (spec-only) needs nothing for this and its existing `patch` on volumes is enough.
+///
+/// Guarded like `take_volume`: `test` on the list we read, so a concurrent writer's change turns
+/// into `Ok(false)` — "lost, not broken" — and the finalizer simply requeues. An empty result is
+/// written as an empty list, which IS the detached state (no owners), not an error.
+pub(crate) async fn detach_volume(ctx: &Arc<Ctx>, name: &str, parent_uid: &str) -> Result<bool, kube::Error> {
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let current = api.get(name).await?.metadata.owner_references.unwrap_or_default();
+    if !current.iter().any(|o| o.uid == parent_uid) {
+        // Already detached (a requeue after a successful patch, or an object that never had us).
+        return Ok(true);
+    }
+    let kept: Vec<_> = current.iter().filter(|o| o.uid != parent_uid).cloned().collect();
+    let ops = json_patch::Patch(vec![
+        json_patch::PatchOperation::Test(json_patch::TestOperation {
+            path: "/metadata/ownerReferences".parse().expect("static pointer parses"),
+            value: serde_json::to_value(&current).expect("owner references serialize"),
+        }),
+        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
+            path: "/metadata/ownerReferences".parse().expect("static pointer parses"),
+            value: serde_json::to_value(&kept).expect("owner references serialize"),
+        }),
+    ]);
+    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
 /// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
 /// this guards is a pod wedged forever on `path … does not exist`.

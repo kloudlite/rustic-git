@@ -10,7 +10,10 @@
 #    labels, the finalizer on the children) and ONE spec field: `restore_gate` copies the
 #    Environment's restore wish into `Volume.spec.restoreTo` once the services are down — the
 #    child is the agent's own object, authored by it, and the wish is desired state by nature (the
-#    API cannot write the child; see `crd::RestoreWish`). There used to be a second exception —
+#    API cannot write the child; see `crd::RestoreWish`).
+#    (`detach_volume` needs nothing here either: it edits `metadata.ownerReferences`, and the rule
+#    below compares `spec` alone — metadata is the agent's already, same as labels and finalizers.)
+#    There used to be a second exception —
 #    `Volume.spec.quotaGb` on a Volume an `OwnerBinding` owns, for the per-node btrfs home's
 #    quota — and it is gone with the home itself: the shared NFS home has no Volume and no qgroup,
 #    so no agent writes that field any more. Everything else in spec is `/v1`'s, and

@@ -534,31 +534,11 @@ fn replicas_of(ctx: &Arc<Ctx>, id: &str) -> u32 {
         .unwrap_or(crd::DEFAULT_REPLICAS)
 }
 
-/// A shared-volume clone (`spec.storage.source` is `CloneOf { commit: Some(_), .. }`) checks out
-/// a worktree under the SOURCE volume's `live/`, not its own — it owns no `Volume` child, so
-/// nothing's ownerReference GC ever reclaims that worktree. An owned-volume workspace needs
-/// nothing here: its `Volume`'s own `SUBVOLUME_FINALIZER` deletes the whole voldir, worktree
-/// included.
-fn is_shared_clone(w: &crd::Workspace) -> bool {
-    w.spec
-        .storage
-        .as_ref()
-        .and_then(|s| s.source.as_ref())
-        .is_some_and(|src| matches!(src, VolumeSource::CloneOf { commit: Some(_), .. }))
-}
-
-fn has_worktree_finalizer(w: &crd::Workspace) -> bool {
-    w.metadata.finalizers.as_ref().is_some_and(|fs| fs.iter().any(|f| f == crd::WORKTREE_FINALIZER))
-}
-
-/// `WORKTREE_FINALIZER` is added ONLY to a shared-volume clone — an owned workspace never grows
-/// one. A finalizer already present from before this workspace's spec stopped reading as a
-/// shared clone (a rollback, or a respec) must still be REMOVABLE: the guard is "nothing to add
-/// AND nothing to remove", not just "not a clone".
+/// EVERY workspace carries `WORKTREE_FINALIZER`, not just a shared-volume clone: a delete now has
+/// to decide whether the Volume goes with the parent (no commits — ownerReference GC as before) or
+/// survives it detached (a pushed commit outlives the workspace it came from), and that decision
+/// can only be made while the parent's own spec and status are still readable.
 pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    if !is_shared_clone(&w) && !has_worktree_finalizer(&w) {
-        return apply_workspace(&w, &ctx).await;
-    }
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
     finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {
         match event {
@@ -570,19 +550,69 @@ pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Resul
     .map_err(|e| ReconcileErr(e.to_string()))
 }
 
-/// F5: drop a shared-volume clone's worktree on delete — the only thing that ever reclaims it
-/// (see `is_shared_clone`'s doc comment).
-pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    if is_shared_clone(w) {
-        // `volumeRef` names the SOURCE volume (see `resolve_volume`'s `shared` arm); the worktree
-        // under it is named by this workspace's own id, same as every checkout call.
-        if let Some(volume) = w.status.as_ref().and_then(|s| s.volume_ref.clone()) {
-            let (engine, ws_id) = (ctx.engine.clone(), w.name_any());
-            tokio::task::spawn_blocking(move || engine.drop_worktree(&volume, &ws_id))
-                .await
-                .map_err(|e| ReconcileErr(e.to_string()))?
-                .map_err(|e| ReconcileErr(e.0))?;
+/// The same wrapper for an environment, whose worktree is its own id — see `reconcile_workspace`.
+pub async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    let api: Api<crd::Environment> = Api::all(ctx.client.clone());
+    finalizer(&api, crd::WORKTREE_FINALIZER, e, |event| async {
+        match event {
+            FinalizerEvent::Cleanup(e) => {
+                let volume = e.status.as_ref().and_then(|s| s.volume_ref.clone());
+                cleanup_parent(&e.name_any(), &e.uid().unwrap_or_default(), volume, &ctx).await
+            }
+            FinalizerEvent::Apply(e) => super::apply_environment(&e, &ctx).await,
         }
+    })
+    .await
+    .map_err(|e| ReconcileErr(e.to_string()))
+}
+
+pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // `volumeRef` names the volume this worktree lives under — its OWN volume normally, the
+    // SOURCE volume for a shared clone (see `resolve_volume`'s `shared` arm). Either way the
+    // worktree under it is named by this workspace's own id, same as every checkout call.
+    let volume = w.status.as_ref().and_then(|s| s.volume_ref.clone());
+    cleanup_parent(&w.name_any(), &w.uid().unwrap_or_default(), volume, ctx).await
+}
+
+/// The delete path shared by both parents. Every step is idempotent, because a failed detach
+/// requeues the whole thing:
+///   1. drop the parent's worktree — `{pool}/vol/{volume}/live/{id}`, the LIVE subvolume only;
+///      `snap/` (the commits) is never touched, which is the whole point of the exercise.
+///   2. delete this parent's transient `Snapshot`s — sync/stop/clone cuts are worthless once the
+///      worktree they were cut from is gone, and nothing else ever reclaims them.
+///   3. if the Volume still holds a Ready commit, detach it; otherwise leave the ownerReference
+///      and let GC delete the Volume as it always did.
+async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    let Some(volume) = volume else { return Ok(Action::await_change()) };
+    let id = id.to_string();
+    let (engine, wt) = (ctx.engine.clone(), id.clone());
+    let vol = volume.clone();
+    tokio::task::spawn_blocking(move || engine.drop_worktree(&vol, &wt))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .map_err(|e| ReconcileErr(e.0))?;
+
+    // One list serves both remaining steps: the transients to delete and the "is there a commit"
+    // question. `spec.volume` is a selectable field, so this is a server-side filter.
+    let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let items = snaps
+        .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .items;
+    for s in items.iter().filter(|s| s.spec.transient && s.spec.worktree == id) {
+        delete_ignoring_404(&snaps, &s.name_any()).await?;
+    }
+    let has_commit = items
+        .iter()
+        .any(|s| !s.spec.transient && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready));
+    if has_commit
+        && !super::volume::detach_volume(ctx, &volume, uid).await.map_err(|e| ReconcileErr(e.to_string()))?
+    {
+        // Someone else rewrote the owner list under us. An Err, not a requeue: the finalizer
+        // combinator REMOVES the finalizer on any Ok from Cleanup, which would let GC take the
+        // Volume — and the commits — while we were still trying to detach it.
+        return Err(ReconcileErr(format!("volume {volume}: owner references changed under the detach")));
     }
     Ok(Action::await_change())
 }

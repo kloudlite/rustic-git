@@ -1011,15 +1011,15 @@ async fn a_clone_reconcile_adds_the_worktree_finalizer() {
     assert_eq!(rec.sent("PATCH", WS_CLONE_OBJ).len(), 1, "the finalizer-add patch");
 }
 
-/// (ii) An OWNED workspace (no `cloneOf`, or one with no `commit` — the pre-commit-model
-/// full-copy clone) never grows the finalizer: `reconcile_workspace` must route it straight to
-/// `apply_workspace` without ever touching `WS_1_OBJ` — no route is registered for it, so a
-/// mistaken PATCH there would 404 and fail this test on its own.
+/// (ii) An OWNED workspace grows the finalizer too, now that a delete has to decide whether its
+/// Volume survives: without one the parent would be gone before anything could look at its
+/// commits, and the Volume — commits and all — would go with it.
 #[tokio::test]
-async fn an_owned_workspace_reconcile_does_not_add_the_finalizer() {
+async fn an_owned_workspace_reconcile_adds_the_finalizer() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = ws_stop_routes();
     routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
+    routes.push(Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) });
     let (ctx, rec) = ctx(tmp.path(), routes);
     let mut w = stopping_ws();
     w.status.as_mut().unwrap().pod_ref = None;
@@ -1027,7 +1027,7 @@ async fn an_owned_workspace_reconcile_does_not_add_the_finalizer() {
 
     rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
 
-    assert!(rec.calls().iter().all(|c| c != &format!("PATCH {WS_1_OBJ}")), "no finalizer patch: {:?}", rec.calls());
+    assert_eq!(rec.sent("PATCH", WS_1_OBJ).len(), 1, "the finalizer-add patch: {:?}", rec.calls());
 }
 
 /// (iii) A deleting clone that already carries the finalizer: `reconcile_workspace` runs the
@@ -1056,11 +1056,14 @@ async fn a_deleting_clones_reconcile_drops_its_worktree_then_removes_the_finaliz
 /// (iv) A non-clone workspace that still carries a finalizer left by an earlier pass (a rollback,
 /// or a respec away from `cloneOf`) and is deleting: `reconcile_workspace` must still enter the
 /// wrapper — the guard is "nothing to add AND nothing to remove", not "not a clone" alone — run
-/// the no-op-on-disk Cleanup arm (`cleanup_workspace_worktree` skips anything that isn't a shared
-/// clone), and remove the finalizer, or the object is stranded in Terminating forever.
+/// the Cleanup arm (nothing on disk here, and no snapshots for this volume), and remove the
+/// finalizer, or the object is stranded in Terminating forever.
 #[tokio::test]
 async fn a_reconcile_of_an_already_finalized_deleting_non_clone_workspace_removes_it() {
     let tmp = tempfile::tempdir().unwrap();
+    // `ws_lock` needs `vol/` to exist to create its lock file; the cleanup now runs for every
+    // parent, not only a shared clone.
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
     let route = Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) };
     let (ctx, rec) = ctx(tmp.path(), vec![route]);
     let mut w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"}));
@@ -1071,6 +1074,97 @@ async fn a_reconcile_of_an_already_finalized_deleting_non_clone_workspace_remove
     rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
 
     assert_eq!(rec.sent("PATCH", WS_1_OBJ).len(), 1, "the finalizer-remove patch");
+}
+
+const VOL_WS1: &str = "/apis/rustic-git.io/v1alpha1/volumes/ws-1";
+const SNAPS: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
+
+/// A Volume owned by `uid`, as the API server returns it.
+fn owned_volume(name: &str, uid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "uid": "vol-uid",
+                     "ownerReferences": [{"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+                                          "name": name, "uid": uid, "controller": true}]},
+        "spec": {"owner": "alice", "nodeName": "node-a", "region": "r1", "quotaGb": 10},
+    })
+}
+
+fn ready_transient(name: &str, volume: &str, worktree: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": name, "uid": "t-uid"},
+        "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "", "transient": true},
+        "status": {"phase": "ready"},
+    })
+}
+
+fn snap_list(items: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList",
+                       "metadata": {"resourceVersion": "1"}, "items": items})
+}
+
+fn deleting_ws(mut w: crd::Workspace) -> crd::Workspace {
+    w.metadata.finalizers = Some(vec![crd::WORKTREE_FINALIZER.to_string()]);
+    w.metadata.deletion_timestamp =
+        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
+    w
+}
+
+/// Deleting a workspace that pushed keeps its commits: the worktree goes, the transients go, and
+/// the Volume is DETACHED (this parent's ownerReference removed) rather than left for GC to take
+/// the commits with it.
+#[tokio::test]
+async fn deleting_a_workspace_with_a_commit_detaches_its_volume() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(
+            SNAPS,
+            snap_list(vec![ready_commit("ws-1-aaaaaaaa", "ws-1"), ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")]),
+        ),
+        Route { method: "DELETE", path: format!("{SNAPS}/sync-ws-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        rustic_git_workspaces::kube_test::get(VOL_WS1, owned_volume("ws-1", "ws-uid-1")),
+        Route { method: "PATCH", path: VOL_WS1.into(), status: 200, body: owned_volume("ws-1", "ws-uid-1") },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    let patches = rec.sent("PATCH", VOL_WS1);
+    assert_eq!(patches.len(), 1, "one detach patch: {:?}", rec.calls());
+    // The guarded shape: `test` on the list we read, then `replace` with that list minus us —
+    // here empty, which IS the detached state.
+    assert_eq!(patches[0][0]["op"], "test");
+    assert_eq!(patches[0][0]["path"], "/metadata/ownerReferences");
+    assert_eq!(patches[0][0]["value"][0]["uid"], "ws-uid-1");
+    assert_eq!(patches[0][1]["op"], "replace");
+    assert_eq!(patches[0][1]["value"], serde_json::json!([]));
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-ws-1-aaaa")), "the transient goes: {:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE /apis/rustic-git.io/v1alpha1/volumes/")), "the Volume itself is never deleted");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/ws-1-aaaaaaaa")), "the commit stays");
+}
+
+/// No commit on the Volume: the ownerReference stays and ownerReference GC deletes the Volume with
+/// its parent, exactly as before this existed.
+#[tokio::test]
+async fn deleting_a_workspace_without_a_commit_leaves_the_volume_to_gc() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(SNAPS, snap_list(vec![ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")])),
+        Route { method: "DELETE", path: format!("{SNAPS}/sync-ws-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "ownerReference kept so GC deletes the Volume: {:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-ws-1-aaaa")), "the transient still goes");
 }
 
 fn env_json(status: serde_json::Value) -> serde_json::Value {
@@ -1089,6 +1183,43 @@ fn env_json(status: serde_json::Value) -> serde_json::Value {
 
 fn environment(status: serde_json::Value) -> crd::Environment {
     serde_json::from_value(env_json(status)).unwrap()
+}
+
+/// The environment twin of `deleting_a_workspace_with_a_commit_detaches_its_volume`: same rule,
+/// same cleanup, and the worktree is the environment's own id.
+#[tokio::test]
+async fn deleting_an_environment_with_a_commit_detaches_its_volume() {
+    const ENV_OBJ: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
+    const VOL_ENV1: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let owner_ref = serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
+                                       "name": "env-1", "uid": "env-uid-1", "controller": true});
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "env-1", "uid": "vol-uid", "ownerReferences": [owner_ref]},
+        "spec": {"owner": "acme", "nodeName": "node-a", "region": "r1", "quotaGb": 10}});
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(
+            SNAPS,
+            snap_list(vec![ready_commit("env-1-aaaaaaaa", "env-1"), ready_transient("sync-env-1-aaaa", "env-1", "env-1")]),
+        ),
+        Route { method: "DELETE", path: format!("{SNAPS}/sync-env-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        rustic_git_workspaces::kube_test::get(VOL_ENV1, vol.clone()),
+        Route { method: "PATCH", path: VOL_ENV1.into(), status: 200, body: vol },
+        Route { method: "PATCH", path: ENV_OBJ.into(), status: 200, body: env_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "env-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let mut e = environment(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "env-1"}));
+    e.metadata.finalizers = Some(vec![crd::WORKTREE_FINALIZER.to_string()]);
+    e.metadata.deletion_timestamp =
+        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
+
+    rustic_git_agent::controller::reconcile_environment(Arc::new(e), ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", VOL_ENV1).len(), 1, "the detach patch: {:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-env-1-aaaa")), "the transient goes");
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE /apis/rustic-git.io/v1alpha1/volumes/")), "the Volume itself is never deleted");
 }
 
 /// The environment claim is the workspace claim with a different opening phase — an environment has
