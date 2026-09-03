@@ -33,7 +33,11 @@ const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite"];
  *
  *  The owner is the first segment whenever there is one. The shell is a layout
  *  that stays mounted across navigations, so it cannot be handed the owner by a
- *  page; reading the URL is the only way a team's pages get the team's chrome. */
+ *  page; reading the URL is the only way a team's pages get the team's chrome.
+ *
+ *  `/{owner}/workspaces/{id}/…` deliberately does NOT get a branch of its own: a workspace's
+ *  snapshots are a leaf, not a subject with tabs, and the page draws its own back link and
+ *  heading (`workspaces/[id]/snapshots/page.tsx`). Three segments there stay `org` on purpose. */
 export function place(pathname: string, me: string) {
   const parts = pathname.split("/").filter(Boolean);
   const owner = parts[0] && !ROOT_PAGES.includes(parts[0]) ? parts[0] : me;
