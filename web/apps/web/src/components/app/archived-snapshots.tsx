@@ -67,8 +67,15 @@ function RestoreDialog({ owner, kind, row }: { owner: string; kind: ArchivedKind
   // this dialog does not build — omitting `services` restores exactly what the push froze.
   const def = chosen?.state?.kind === "workspace" ? chosen.state : null;
 
+  // The effect only reads while the error is unset, so "try again" is a lie unless closing the
+  // dialog clears it; a fresh open then re-reads.
+  const onOpenChange = (o: boolean) => {
+    if (!o) setSnapsError(null);
+    setOpen(o);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm"><RotateCcw />Restore</Button>
       </DialogTrigger>

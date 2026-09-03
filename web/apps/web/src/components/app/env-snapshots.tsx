@@ -275,7 +275,7 @@ export function EnvSnapshots({
   const byId = new Map(history.map((h) => [h.id, h]));
   // Full ancestry, no restore cutoff — used below only to lay out the rail (which branch is
   // "on the way to" current), not to decide what current IS (that's `envCurrent`).
-  const descends = (n: SnapshotNode, anc: string): boolean => {
+  const isAncestor = (n: SnapshotNode, anc: string): boolean => {
     for (let p: SnapshotNode | undefined = n; p; p = p.parent ? byId.get(p.parent) : undefined) {
       if (p.id === anc) return true;
     }
@@ -295,7 +295,7 @@ export function EnvSnapshots({
     history
       .filter((h) => (h.parent && byId.has(h.parent) ? h.parent : null) === parent)
       .sort((a, b) => {
-        const onPath = (n: SnapshotNode) => (current && descends(current, n.id) ? 1 : 0);
+        const onPath = (n: SnapshotNode) => (current && isAncestor(current, n.id) ? 1 : 0);
         return onPath(a) - onPath(b) || snapshotTime(a) - snapshotTime(b);
       });
 
