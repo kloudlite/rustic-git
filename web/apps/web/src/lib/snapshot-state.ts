@@ -10,7 +10,8 @@ export type SnapshotState =
       packages: string[];
       quotaGb: number;
       attachedEnvironment?: string | null;
-      resources: { cpu?: string; memory?: string };
+      /** `crd::PodResources` — four required Kubernetes quantity strings, camelCase on the wire. */
+      resources: { cpuRequest: string; cpuLimit: string; memoryRequest: string; memoryLimit: string };
     }
   | {
       kind: "environment";
