@@ -60,10 +60,9 @@ pub struct CentralSettings {
     pub max_manifest: u64,
     /// How long an unfinished upload session is kept before GC reclaims it. 3600..=604800 seconds.
     pub upload_grace_secs: u64,
-    /// Registry GC sweep interval. 300..=86400 seconds.
-    // ponytail: default mirrors `bins/worker/src/main.rs`'s `GC_PASS_GAP` (60s) — below this
-    // field's own stated range floor of 300, a pre-existing mismatch between the spec's table
-    // and the real constant, not something this task invents. Unread by any beat until Task 4.
+    /// Registry GC sweep interval. 30..=86400 seconds — the floor is 30, not the spec table's
+    /// 300, because the built-in default mirrors `bins/worker/src/main.rs`'s `GC_PASS_GAP` (60 s)
+    /// and a default outside its own range would be refused by the very validation it seeds.
     pub gc_interval_secs: u64,
     /// Merge-worker lease TTL. 30..=3600 seconds.
     // ponytail: default mirrors `App::MERGE_LEASE` (`crates/app/src/lib.rs`). Unread by any beat
