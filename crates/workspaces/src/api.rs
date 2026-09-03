@@ -2293,7 +2293,9 @@ async fn delete_snapshot(
     check_path_segment(&snapshot)?;
     let items = commit_model_snapshots(&s, &caller_id, &name).await?;
     let target = items.iter().find(|sn| sn.name_any() == snapshot).ok_or_else(not_found)?;
-    if target.spec.transient {
+    // `is_snapshot`, not `spec.transient`: a legacy migration baseline is a sync point by shape
+    // rather than by flag, and deleting one by hand still removes a replica's send parent.
+    if !target.is_snapshot() {
         return Err((StatusCode::CONFLICT, "a sync point cannot be deleted by hand").into_response());
     }
     let live = parents_of_volume(&s, &name).await.ok_or_else(kube_unavailable)?;

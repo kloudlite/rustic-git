@@ -479,3 +479,24 @@ async fn a_traversing_volume_name_or_snapshot_id_is_refused() {
     assert_eq!(send(get, "/v1/volumes/a%2Fb/history".into()).await, 400);
     assert_eq!(send(del, "/v1/volumes/env-1/snapshots/env-1-a".into()).await, 204, "a plain id still works");
 }
+
+/// A legacy migration baseline is a sync point by SHAPE, not by `spec.transient` — it predates the
+/// flag. Deleting one by hand takes a replica's btrfs send parent away just as the flagged kind
+/// does, so it is the same 409.
+#[tokio::test]
+async fn a_legacy_migration_baseline_cannot_be_deleted_by_hand() {
+    let mut baseline = push("ws-1", "ws-1", "karthik", "2026-08-01T09:00:00Z");
+    baseline["spec"]["message"] = json!("migration baseline");
+    let s = server(vec![
+        kget(
+            SNAPS,
+            snap_list(vec![baseline, push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z")]),
+        ),
+        kget(format!("{API}/workspaces"), ws_list(vec![ws_obj("ws-1", "karthik", "web")])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+
+    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1").await, 409);
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
+}
