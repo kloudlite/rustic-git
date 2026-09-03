@@ -68,6 +68,12 @@ fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
+/// A superadmin token, minted the way the api tier mints one at sign-in — used only to prove the
+/// ordinary router has no route for it to land on, not to exercise any admin behavior here.
+fn admin_token(jwt: &Jwt) -> String {
+    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
+}
+
 fn region_route() -> Route {
     get(
         format!("{API}/regions/centralindia"),
@@ -342,3 +348,19 @@ async fn a_denied_request_does_not_block_the_next_one() {
     assert_eq!(code, 201);
 }
 
+
+/// The mirror of `api_admin.rs`'s `the_admin_router_has_never_heard_of_v1`: an ordinary /v1 process
+/// has no admin route compiled into it at all, so a routing bug on that side cannot reach one
+/// either. Both halves together are the design doc's whole guarantee.
+#[tokio::test]
+async fn the_user_router_has_never_heard_of_admin() {
+    let s = server(true, vec![]).await;
+    for path in ["/admin/regions", "/admin/quota-requests", "/admin/usage", "/admin/nodes"] {
+        let code = reqwest::Client::new()
+            .get(format!("{}{path}", s.base))
+            .bearer_auth(admin_token(&s.jwt))
+            .send().await.unwrap()
+            .status();
+        assert_eq!(code, 404, "{path}");
+    }
+}

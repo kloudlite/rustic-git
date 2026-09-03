@@ -89,6 +89,7 @@ fi
 # ---------------------------------------------------------------------------
 SERVER_PID=""
 API_PID=""
+API_ADMIN_PID=""
 AGENT_PID=""
 MOUNT=""
 IMG=""
@@ -121,9 +122,11 @@ cleanup() {
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
   [ -n "$AGENT_PID" ] && kill "$AGENT_PID" >/dev/null 2>&1
   [ -n "$API_PID" ] && kill "$API_PID" >/dev/null 2>&1
+  [ -n "$API_ADMIN_PID" ] && kill "$API_ADMIN_PID" >/dev/null 2>&1
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1
   [ -n "$AGENT_PID" ] && wait "$AGENT_PID" 2>/dev/null
   [ -n "$API_PID" ] && wait "$API_PID" 2>/dev/null
+  [ -n "$API_ADMIN_PID" ] && wait "$API_ADMIN_PID" 2>/dev/null
   [ -n "$SERVER_PID" ] && wait "$SERVER_PID" 2>/dev/null
   [ -n "$MOUNT" ] && sudo umount "$MOUNT" >/dev/null 2>&1
   # Regions are a CRD now, not a Cosmos database: no admin-delete route exists (see api.rs — only
@@ -168,10 +171,18 @@ SERVER_PEER_ADDR="127.0.0.1:8181"
 SERVER_SSH_ADDR="0.0.0.0:8183"
 SERVER_SSH_PORT="8183"
 API_ADDR="127.0.0.1:8190"
+ADMIN_API_ADDR="127.0.0.1:8191"
 ADMIN_EMAIL="ws-e2e-admin@example.test"
 USER_EMAIL="ws-e2e-user@example.test"
 SERVER_BASE="http://$SERVER_HTTP_ADDR"
 BASE="http://$API_ADDR"
+# The admin host, set independently — see deploy/k3s/README.md's release note for this feature.
+# Falls back to $BASE only for a single-process local run where RUSTIC_GIT_API_ROLE was never
+# split (the admin routes still exist there under /admin during local dev, since main.rs mounts
+# whichever router the role says — this fallback exists for that convenience, not for prod). This
+# script always starts both roles as separate processes (below), so ADMIN_BASE is set here to its
+# own listener rather than relying on the fallback.
+ADMIN_BASE="${ADMIN_BASE:-http://$ADMIN_API_ADDR}"
 
 # curl prints 000 on a refused connection everywhere below — 000 means "not up yet", never
 # "answered". Using `curl -f` here would also be wrong: an unauthenticated probe answering 401 (or
@@ -233,6 +244,24 @@ log "waiting for the api to answer"
 wait_for_listener "$BASE/v1/regions" "rustic-git-api"
 
 # ---------------------------------------------------------------------------
+# Start a second api process, admin role: `/admin/*` only, no `/v1` route compiled in at all
+# (design doc §5, Task 9/13). A real separate process, not the same one wearing two hats, so this
+# is the same split prod runs (Task 11's separate Deployment) rather than a stand-in for it.
+# ---------------------------------------------------------------------------
+log "starting rustic-git-api (admin role) on $ADMIN_API_ADDR"
+RUSTIC_GIT_CACHE_DIR="$TMPD/cache-api-admin" \
+RUSTIC_GIT_S3_URL="$STORE_URL" \
+RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
+RUSTIC_GIT_PEER_SECRET="$PEER_SECRET" \
+RUSTIC_GIT_API_ADDR="$ADMIN_API_ADDR" \
+RUSTIC_GIT_API_ROLE="admin" \
+"$API_BIN" &
+API_ADMIN_PID=$!
+
+log "waiting for the admin api to answer"
+wait_for_listener "$ADMIN_BASE/admin/quota-requests" "rustic-git-api (admin)"
+
+# ---------------------------------------------------------------------------
 # Mint HS256 session JWTs by hand: there is no CLI in this repo that mints one (checked
 # bins/server's `admin` subcommands — those are registry tokens, a different mechanism), and this
 # script owns the signing secret it just started the api with, so it can sign the same tokens the
@@ -243,12 +272,15 @@ b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 mint_jwt() {
   # Workspace/volume ownership keys on the USERNAME claim (vol/{owner}/... paths validate it
   # as an owner name; an email's @/. can never route), so every minted token carries one.
-  local email="$1" name="$2" username="$3"
+  # `superadmin`, if passed "true", is what `api::admin::refuse_without_claim` checks — a plain
+  # session token, however it names ADMIN_EMAIL, is not enough to reach an /admin route any more
+  # (Task 9's claim, not an email allowlist).
+  local email="$1" name="$2" username="$3" superadmin="${4:-false}"
   local now exp header payload signing_input sig
   now=$(date +%s)
   exp=$((now + 43200))
   header=$(printf '{"typ":"JWT","alg":"HS256"}' | b64url)
-  payload=$(printf '{"sub":"%s","name":"%s","username":"%s","typ":"session","iat":%d,"exp":%d}' "$email" "$name" "$username" "$now" "$exp" | b64url)
+  payload=$(printf '{"sub":"%s","name":"%s","username":"%s","typ":"session","superadmin":%s,"iat":%d,"exp":%d}' "$email" "$name" "$username" "$superadmin" "$now" "$exp" | b64url)
   signing_input="$header.$payload"
   sig=$(printf '%s' "$signing_input" | openssl dgst -sha256 -hmac "$JWT_SECRET" -binary | b64url)
   echo "$signing_input.$sig"
@@ -257,7 +289,7 @@ mint_jwt() {
 # The username is also the workspace NAMESPACE's name (crd.rs's `ws_namespace` lowercases it), so
 # every kubectl below is scoped by this one value rather than by workspace id.
 USER_NAME="e2euser"
-ADMIN_TOKEN=$(mint_jwt "$ADMIN_EMAIL" "E2E Admin" "e2eadmin")
+ADMIN_TOKEN=$(mint_jwt "$ADMIN_EMAIL" "E2E Admin" "e2eadmin" true)
 USER_TOKEN=$(mint_jwt "$USER_EMAIL" "E2E User" "$USER_NAME")
 
 log "verifying the minted admin token is accepted"
@@ -268,7 +300,7 @@ curl -fsS "$BASE/v1/regions" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null 
 # ---------------------------------------------------------------------------
 REGION_ID="e2e-$RANDOM"
 log "registering region $REGION_ID"
-REGION_JSON=$(curl -fsS -X POST "$BASE/v1/regions" -H "Authorization: Bearer $ADMIN_TOKEN" \
+REGION_JSON=$(curl -fsS -X POST "$ADMIN_BASE/admin/regions" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{\"id\":\"$REGION_ID\",\"name\":\"E2E Region\"}")
 echo "$REGION_JSON" | grep -q "\"$REGION_ID\"" || fail "region create did not echo the region: $REGION_JSON"
@@ -406,6 +438,42 @@ WS_ID=$(echo "$WS_JSON" | field id)
 [ -n "$WS_ID" ] || fail "no id in workspace create response: $WS_JSON"
 wait_ws_ready "$WS_ID"
 WS_NS="ws-$(echo "$USER_NAME" | tr '[:upper:]' '[:lower:]')"
+
+# ---------------------------------------------------------------------------
+# Quota round trip: hit a limit as the user, request more, approve as a superadmin on the admin
+# host, and confirm the limit moved — the live proof that the two-router split (Task 9/13) still
+# lets the one legitimate path through end to end, not just that the wrong host 404s.
+# ---------------------------------------------------------------------------
+log "pinning $USER_NAME's workspace quota to what is already in use, as a superadmin"
+curl -fsS -X PUT "$ADMIN_BASE/admin/quota/$USER_NAME" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"workspaces":1,"environments":2,"snapshots":20,"diskGb":100,"cpu":8,"memoryGb":32}' >/dev/null \
+  || fail "admin quota write failed"
+
+log "checking a second workspace create now hits the quota"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/workspaces" \
+  -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-ws-over-quota","region":"'"$REGION_ID"'","quota_gb":5,"image":"'"$WS_IMAGE"'"}')
+[ "$CODE" = "409" ] || fail "expected 409 at the workspace quota, got $CODE"
+
+log "requesting more quota as the user"
+REQ_JSON=$(curl -fsS -X POST "$BASE/v1/quota-requests" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"requested":{"workspaces":2},"reason":"e2e"}')
+REQ_ID=$(echo "$REQ_JSON" | field id)
+[ -n "$REQ_ID" ] || fail "no id in quota request response: $REQ_JSON"
+
+log "approving as a superadmin"
+curl -fsS -X POST "$ADMIN_BASE/admin/quota-requests/$REQ_ID/approve" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"note":"e2e"}' >/dev/null || fail "approve failed"
+
+log "checking /v1 refuses the same approve path the admin host just accepted"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/quota-requests/$REQ_ID/approve" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{}')
+[ "$CODE" = "404" ] || fail "the user-role process must not answer an admin path, got $CODE"
+
+log "checking the approval raised the limit"
+LIMIT_JSON=$(curl -fsS "$BASE/v1/quota" -H "Authorization: Bearer $USER_TOKEN")
+echo "$LIMIT_JSON" | grep -q '"workspaces":2' || fail "approval did not raise the workspace limit: $LIMIT_JSON"
 
 log "checking the workspace pod is running with its live subvolume mounted from the node"
 kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s \

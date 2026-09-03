@@ -258,3 +258,29 @@ async fn a_superadmin_listing_by_owner_gets_that_owners_workspaces() {
     assert_eq!(rows[0]["owner"], "karthik");
     assert_eq!(rows[0]["id"], "ws-1");
 }
+
+/// `NodeDoc` must serialize camelCase like every other doc in this router — the web reads
+/// `decommissionStatus`, and a snake_case field is a silently-blank column, not a compile error.
+#[tokio::test]
+async fn admin_nodes_reports_decommission_status_camel_case() {
+    let node = json!({
+        "apiVersion": "v1", "kind": "Node",
+        "metadata": {
+            "name": "node-1",
+            "labels": {"rustic-git.io/decommission": "true"},
+            "annotations": {"rustic-git.io/decommission-status": "drained 2026-09-04T00:00:00Z"}
+        },
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]}
+    });
+    let routes = vec![get("/api/v1/nodes".to_string(), list_of("Node", vec![node]))];
+    let s = admin_server(routes).await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{}/admin/nodes", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let rows = body.as_array().expect("a list");
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["decommissionStatus"], "drained 2026-09-04T00:00:00Z", "{body}");
+    assert!(rows[0].get("decommission_status").is_none(), "must not also emit snake_case: {body}");
+}

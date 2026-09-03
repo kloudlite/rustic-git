@@ -115,6 +115,10 @@ pub async fn serve(
     // merges whatever it is handed and never itself decides between a user and an admin surface.
     workspaces: Option<axum::Router>,
     on_keys_changed: Option<KeysChanged>,
+    // Same `RUSTIC_GIT_API_ROLE` read that picks `workspaces`' router: the superadmin roster
+    // routes are as admin-only as `/admin/*` is, so a user-role process must not compile them in
+    // either, not just refuse them at auth time.
+    admin_role: bool,
 ) -> Result<()> {
     // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
     // an empty secret is a misconfiguration, not a valid deployment.
@@ -163,12 +167,8 @@ pub async fn serve(
         // Team routes sit under /v1/, which `api_route` never parses, so they can
         // never collide with a repo path. Registered before the fallback because
         // the fallback is GET-only and would swallow the POST as a 405.
-        .route("/api/admin/superadmins", axum::routing::get(list_superadmins))
-        .route(
-            "/api/admin/superadmins/{user}",
-            axum::routing::post(add_superadmin).delete(remove_superadmin),
-        )
         .route("/v1/teams", axum::routing::post(create_team).get(list_teams))
+        // (superadmin roster routes are appended below, conditionally, before `.with_state`)
         // Anonymous on purpose: the public face of a team. The handler itself refuses a team
         // that has not opted in, so registering it without `caller` is not a hole.
         .route("/v1/teams/{slug}/profile", axum::routing::get(team_profile))
@@ -275,8 +275,19 @@ pub async fn serve(
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
         .layer(tower_http::compression::CompressionLayer::new())
-        .layer(axum::middleware::from_fn_with_state("api", rustic_git_core::metrics::http_metrics))
-        .with_state(api);
+        .layer(axum::middleware::from_fn_with_state("api", rustic_git_core::metrics::http_metrics));
+    // Only the admin process compiles the superadmin roster routes in at all — same reasoning as
+    // `workspaces_router` in `bins/api`'s main.rs: a user-role process must not be able to answer
+    // them even if a future auth bug forgets to check the claim.
+    let app = if admin_role {
+        app.route("/api/admin/superadmins", axum::routing::get(list_superadmins)).route(
+            "/api/admin/superadmins/{user}",
+            axum::routing::post(add_superadmin).delete(remove_superadmin),
+        )
+    } else {
+        app
+    };
+    let app = app.with_state(api);
     // Workspaces/environments/regions: a separate crate, a separate `MetaStore`, a separate
     // router state — merged in rather than folded into `Api` so that crate stays independent of
     // this one's git-repo machinery. Only mounted when a jwt signer is configured, same

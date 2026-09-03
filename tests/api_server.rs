@@ -52,7 +52,7 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
     let cache = Arc::new(rustic_git_storage::cache::Cache::connect(None).await);
     let jwt = Arc::new(rustic_git_core::jwt::Jwt::new(secret).unwrap());
     tokio::spawn(async move {
-        rustic_git_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None)
+        rustic_git_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None, false)
             .await
             .unwrap()
     });
@@ -69,7 +69,7 @@ async fn api_with_dir(e: &common::TestEnv, up: &Upstream, d: &common::TestDirect
     let jwt = Arc::new(rustic_git_core::jwt::Jwt::new(KEY).unwrap());
     let dir = d.dir.clone();
     tokio::spawn(async move {
-        rustic_git_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None)
+        rustic_git_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, false)
             .await
             .unwrap()
     });
@@ -86,7 +86,7 @@ async fn api_with(
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
     tokio::spawn(async move {
-        rustic_git_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None)
+        rustic_git_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None, false)
             .await
             .unwrap()
     });
@@ -376,6 +376,25 @@ async fn team_routes_refuse_an_anonymous_caller() {
     let base = api_with_jwt(&e, &up, KEY).await;
     let r = reqwest::Client::new().get(format!("{base}/v1/teams")).send().await.unwrap();
     assert_eq!(r.status(), 401, "no token and no peer secret must not be a caller");
+}
+
+/// The superadmin roster routes are compiled in only for the admin role (`bins/api`'s
+/// `RUSTIC_GIT_API_ROLE`) — `api_with_jwt` starts a user-role process, so a GET must 404 rather
+/// than reach the auth check and answer 401/403. GET, not POST: an unrouted path still falls
+/// through to the (GET-only) repo-browse fallback, which answers a non-GET method with 405
+/// rather than 404 — that fallback behavior is unrelated to this gate and not what this test
+/// is pinning down.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_role_process_has_never_heard_of_the_superadmin_roster() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let r = reqwest::Client::new()
+        .get(format!("{base}/api/admin/superadmins"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
 }
 
 /// A token this server did not sign proves nothing.

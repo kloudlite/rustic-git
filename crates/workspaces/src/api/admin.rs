@@ -237,6 +237,7 @@ async fn usage_all(State(s): State<Arc<ApiState>>) -> Result<Response, Response>
 // ── nodes ────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct NodeDoc {
     name: String,
     ready: bool,

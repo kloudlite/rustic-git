@@ -196,6 +196,17 @@ async fn run() -> Result<()> {
         "admin" => rustic_git_workspaces::api::admin::router(ws),
         _ => rustic_git_workspaces::api::router(ws),
     });
-    rustic_git_api::serve(store, cache, directory, jwt, upstream, secret, l, workspaces_router, on_keys_changed)
-        .await
+    rustic_git_api::serve(
+        store,
+        cache,
+        directory,
+        jwt,
+        upstream,
+        secret,
+        l,
+        workspaces_router,
+        on_keys_changed,
+        role == "admin",
+    )
+    .await
 }
