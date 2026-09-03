@@ -2688,6 +2688,30 @@ async fn a_running_workspace_on_an_ordinary_node_carries_no_drain_notice() {
     assert_eq!(drain_notice(&rec.sent("PATCH", WS_STATUS)), None);
 }
 
+/// Round 4: the reverse of the notice landing. The parents now watch their own Node, so removing
+/// the decommission label re-reconciles every workspace here — and this pass must DROP the notice
+/// it was carrying. It does because the running arm rebuilds the condition list wholesale and
+/// `kept_conditions` carries only `PackagesReady`/`Attached` forward, which is the same property
+/// that made the beat's own mark unkeepable.
+#[tokio::test]
+async fn a_running_workspace_drops_a_stale_drain_notice_once_the_label_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _) = ws_ctx_with_nix(tmp.path());
+    let mut w = ready_workspace("ws-1", vec![]);
+    let mut st = w.status.clone().unwrap_or_default();
+    st.conditions.push(crd::condition("Decommissioning", true, "NodeLeaving", "this node is being retired; stop when convenient and the next start lands elsewhere", 1));
+    w.status = Some(st);
+
+    apply_until_settled(&w, &ctx).await;
+
+    // The LAST write of the pass — the steady state a person reads. The packages step's own
+    // interim writes use `replaced`, which preserves every condition by type and so carries the
+    // stale one for as long as a build runs; the running arm below it is what clears it, and no
+    // pass ends there.
+    let last = rec.sent("PATCH", WS_STATUS).pop().expect("a status write");
+    assert_eq!(drain_notice(std::slice::from_ref(&last)), None, "the notice must not outlive the label: {last}");
+}
+
 /// A STOPPED workspace never carries it, on any node. The notice asks the person to stop when
 /// convenient; on one they have already stopped it is a message with nothing behind it.
 #[tokio::test]

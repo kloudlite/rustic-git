@@ -87,6 +87,10 @@
 #                                                                       (peer.rs) — every agent must
 #                                                                       see the same candidate list;
 #                                                                       the decommission label
+#                                          watch                        each parent Controller
+#                                                                       watches THIS node only, so a
+#                                                                       label change re-queues every
+#                                                                       parent it hosts (run.rs)
 #                                          patch                        decommission_beat, THIS
 #                                                                       node's own
 #                                                                       `rustic-git.io/decommission-
@@ -224,9 +228,14 @@ rules:
   # do anything a node can do regardless of this line. The narrowing that WOULD work — an
   # admission policy binding `request.name` to the agent's own node — is the upgrade if the
   # agent ever stops being root.
+  # `watch` is the Workspace and Environment controllers' watch on THIS node's own object
+  # (`metadata.name={me}`): a converged parent ends in `await_change()`, so without it a
+  # decommission label landing on the Node reached no workspace at all — and removing the label
+  # left a stale notice. A field selector narrows the stream, never the grant, so this reads as
+  # cluster-wide like the `list` above it and for the same reason.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "patch"]
+    verbs: ["get", "list", "watch", "patch"]
   # The controller creates two RoleBindings in each workspace namespace: one so the API can write
   # that namespace's git-token Secret (see api-rbac.yaml), one so the agent itself can read and
   # create that namespace's host-key Secret (see `rustic-git-agent-ws-secrets` below). Kubernetes

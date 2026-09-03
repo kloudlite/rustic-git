@@ -5,7 +5,7 @@
 use super::{apply_environment, reconcile_volume, reconcile_workspace, Ctx, Done, ReconcileErr, RETRY};
 use crate::{binding, claim, snapshot};
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Node, Pod};
 use rustic_git_workspaces::k8s;
 use futures::StreamExt;
 use kube::runtime::controller::{Action, Controller};
@@ -35,6 +35,18 @@ where
         .find(|r| r.controller.unwrap_or(false) && r.kind == P::kind(&()))
         // Deliberately no `.within(..)`: the parent has no namespace to be within.
         .map(|r| kube::runtime::reflector::ObjectRef::<P>::new(&r.name))
+}
+
+/// Every object a controller currently holds, as reconcile requests.
+///
+/// The mapper for the Node watch below: a change to THIS node is not about one workspace, it is
+/// about all of them, and a controller's own reflector store is exactly "the objects I host". The
+/// mapper is a sync `FnMut` that must not do I/O — reading the store is a lock, not a request.
+fn all_in_store<K>(store: &kube::runtime::reflector::Store<K>) -> Vec<kube::runtime::reflector::ObjectRef<K>>
+where
+    K: Resource<DynamicType = ()> + Clone + 'static,
+{
+    store.state().iter().map(|o| kube::runtime::reflector::ObjectRef::from_obj(o.as_ref())).collect()
 }
 
 /// An mpsc receiver as the `Stream` `reconcile_on` wants — `futures` already has the adapter, so
@@ -93,6 +105,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             })
     };
+    // No Node watch on this controller, deliberately: `apply_volume` reads the node only through
+    // `my_node`'s dead-guard, which returns `requeue(TICK)` rather than `await_change()` — it
+    // re-reads on its own within 15 s. Nothing a Volume writes depends on the decommission label.
     let volumes = Controller::for_shared_stream(vol_self, ctx.volumes.clone())
         .reconcile_on(wake_stream(vol_wakes))
         .shutdown_on_signal()
@@ -105,6 +120,13 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Placement is a status fact now, so the node's own Workspaces and Environments are selected
     // by `status.nodeName` — `mine` (`spec.nodeName`) stays for the kinds the API still places.
     let placed = watcher::Config::default().fields(&format!("status.nodeName={}", ctx.node));
+    // THIS node's own object, nothing else in the cluster. A converged parent ends in
+    // `await_change()`, so without this watch a decommission label landing on the Node reached
+    // nobody: the annotation said `running=1` while every workspace on it carried no
+    // `Decommissioning` condition, for as long as nothing else happened to touch them. Removing
+    // the label was just as stuck, leaving a stale notice forever. Readiness moves the same way,
+    // so `my_node`'s dead-guard sees a change at once instead of on the next 15s tick.
+    let my_node_only = watcher::Config::default().fields(&format!("metadata.name={}", ctx.node));
     // Label-selected, not every Pod in the cluster: a controller that streams every pod event in
     // the cluster to filter for its own is the cheapest way to peg an API server.
     let our_pods = watcher::Config::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
@@ -127,7 +149,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
             |r| owned_by::<crd::Workspace, _>(&r),
-        )
+        );
+    // Every workspace this node hosts wakes on its own Node changing — see `my_node_only`. The
+    // store is read at mapper time, not now, so a workspace claimed later is included too.
+    let ws_store = workspaces.store();
+    let workspaces = workspaces
+        .watches(Api::<Node>::all(ctx.client.clone()), my_node_only.clone(), move |_: Node| all_in_store(&ws_store))
         .shutdown_on_signal()
         .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -160,7 +187,10 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
             |r| owned_by::<crd::Environment, _>(&r),
-        )
+        );
+    let env_store = environments.store();
+    let environments = environments
+        .watches(Api::<Node>::all(ctx.client.clone()), my_node_only, move |_: Node| all_in_store(&env_store))
         .shutdown_on_signal()
         .run(|e, c| timed("environment", async move { apply_environment(&e, &c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -404,4 +434,37 @@ pub fn wake_on_finish<T: Send + 'static>(
 
 pub fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).contains_key(uid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kube::runtime::reflector::{store, ObjectRef};
+
+    fn ws(name: &str) -> crd::Workspace {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": name, "uid": format!("{name}-uid")},
+            "spec": {"owner": "alice", "team": "", "name": name, "region": "r1",
+                     "image": "nginx:alpine", "desiredState": "running", "packages": []},
+        }))
+        .unwrap()
+    }
+
+    /// One Node event is not about one workspace, it is about every workspace this node hosts —
+    /// a converged parent sits in `await_change()`, so the label reaches it only if the mapper
+    /// names it. Empty in, empty out: a node event before the store has synced enqueues nothing
+    /// rather than panicking, and the next sync brings its own events.
+    #[test]
+    fn a_node_event_maps_to_every_object_the_controller_holds() {
+        let (reader, mut writer) = store::<crd::Workspace>();
+        assert!(all_in_store(&reader).is_empty(), "nothing hosted yet, nothing to reconcile");
+
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(ws("ws-1")));
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(ws("ws-2")));
+
+        let mut refs = all_in_store(&reader);
+        refs.sort_by_key(|r| r.name.clone());
+        assert_eq!(refs, vec![ObjectRef::new("ws-1"), ObjectRef::new("ws-2")]);
+    }
 }
