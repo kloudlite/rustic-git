@@ -110,7 +110,7 @@ pub(crate) async fn create_env(
     check_region(&s, &body.region).await?;
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let c = kube(&s)?;
-    let quota_gb = clamp_quota(body.quota_gb);
+    let quota_gb = clamp_quota(&s, body.quota_gb);
     guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(quota_gb, body.services.len())).await?;
     let id = rid("env");
     let e = create_environment(
@@ -227,8 +227,8 @@ pub(crate) async fn restore_env(
     }
     check_services(&services)?;
     let quota = match (body.quota_gb, &frozen) {
-        (Some(q), _) => clamp_quota(q),
-        (None, Some(f)) => clamp_quota(f.1),
+        (Some(q), _) => clamp_quota(&s, q),
+        (None, Some(f)) => clamp_quota(&s, f.1),
         (None, None) => default_env_quota(),
     };
     let c = kube(&s)?;

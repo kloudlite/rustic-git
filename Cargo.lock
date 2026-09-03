@@ -5528,6 +5528,7 @@ dependencies = [
 name = "rustic-git-core"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "base64",
  "hex",
@@ -5538,6 +5539,7 @@ dependencies = [
  "reqwest",
  "russh",
  "rustls",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",

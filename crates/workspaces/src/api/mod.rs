@@ -39,6 +39,8 @@ use axum::{
 };
 use rustic_git_core::httpx::bearer_token;
 use rustic_git_core::jwt::Jwt;
+use rustic_git_core::settings::LiveSettings;
+use crate::settings::AgentSettings;
 use std::sync::Arc;
 
 pub mod admin;
@@ -172,6 +174,12 @@ pub struct ApiState {
     /// into their namespace. `None` in dev and in tests: workspaces still create, they just come
     /// up without a key.
     pub keys: Option<Arc<rustic_git_storage::store::Store>>,
+    /// This tier's own region's `default_replicas`/`quota_gb_ceiling` — Task 3 gives the agent
+    /// its own handle from a `ClusterSettings` reflector; this one seeds from env only, since
+    /// `/v1` has no per-region watch of its own yet. Read-mostly today (no refresh beat wired
+    /// here in this task), but the field exists so `clamp_quota` has a live ceiling to read
+    /// instead of a compiled-in number.
+    pub settings: LiveSettings<AgentSettings>,
 }
 
 impl ApiState {
@@ -181,6 +189,7 @@ impl ApiState {
             directory: None,
             kube: None,
             keys: None,
+            settings: LiveSettings::new(AgentSettings::from_env()),
         }
     }
 

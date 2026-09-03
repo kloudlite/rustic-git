@@ -144,12 +144,11 @@ pub(crate) fn check_ws_name(name: &str) -> Result<(), Response> {
         .into_response())
 }
 
-/// `0` is a qgroup nothing can start on, and the upper end is more than the pool node can back.
-/// Clamped rather than refused: the web sends a fixed default, and a client that asks for more
-/// than the ceiling gets the ceiling.
-/// ponytail: one global ceiling; make it per-region node capacity if a region ever has more.
-pub(crate) fn clamp_quota(gb: u64) -> u64 {
-    gb.clamp(1, 500)
+/// `0` is a qgroup nothing can start on; the upper end is `settings.quota_gb_ceiling`, live
+/// per-region rather than a compiled-in number. Clamped rather than refused: the web sends a
+/// fixed default, and a client that asks for more than the ceiling gets the ceiling.
+pub(crate) fn clamp_quota(s: &ApiState, gb: u64) -> u64 {
+    gb.clamp(1, s.settings.load().quota_gb_ceiling as u64)
 }
 
 pub(crate) async fn create_ws(
@@ -179,7 +178,7 @@ pub(crate) async fn create_ws(
     };
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
-    let quota_gb = clamp_quota(body.quota_gb);
+    let quota_gb = clamp_quota(&s, body.quota_gb);
     // The object's owner is the team when one is given — a team's workspaces count against the
     // team, never against whoever happened to click create.
     let owner_of = if team.is_empty() { owner.name.clone() } else { team.clone() };
@@ -915,8 +914,8 @@ pub(crate) async fn restore_ws(
         .or_else(|| src.as_ref().map(|w| w.spec.resources.clone()))
         .unwrap_or_default();
     let quota = match (body.quota_gb, &frozen, &src) {
-        (Some(q), _, _) => clamp_quota(q),
-        (None, Some(f), _) => clamp_quota(f.3),
+        (Some(q), _, _) => clamp_quota(&s, q),
+        (None, Some(f), _) => clamp_quota(&s, f.3),
         (None, None, Some(w)) => storage_quota(c, &w.spec.storage, &volume).await,
         // A deleted source cannot be asked its size, and nothing user-facing offers to name one:
         // someone recovering a lost workspace is not sizing a disk. The standard quota, which is
