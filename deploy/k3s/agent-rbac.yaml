@@ -46,8 +46,7 @@
 #                                                                       diff against local_commits);
 #                                                                       Controller (cut, retention,
 #                                                                       stop-push watch)
-#                                          create                       home_commit_beat, stop_push
-#                                                                       (stop-{env}, stop-home-{ws})
+#                                          create                       stop_push (stop-{env})
 #                                          patch                        record_post_cut_generation
 #                                                                       (the synced-generation
 #                                                                       annotation, metadata only)
@@ -100,7 +99,6 @@
 #   statefulsets (apps)                    get,list,watch               deployment_status; watch
 #                                          create,patch                 ensure; restore_gate scale
 #                                          delete                       stop
-#   deployments (apps)                     get,delete                   legacy migration only
 #   secrets                                get,create                   ensure_ssh — NOT here: bound
 #                                                                       per `ws-*` namespace by the
 #                                                                       agent itself (below)
@@ -166,9 +164,9 @@ rules:
     verbs: ["get", "list", "watch", "create"]
   # `snapshots`: mostly created by `/v1` (Task 6's `/push`), CR-first per the brief — the agent
   # only cuts the btrfs snapshot and reports status, and `pull_beat` diffs the Ready set against
-  # `local_commits` to decide what to fetch. `create` is also `home_commit_beat`'s own beat and
-  # `stop_push`'s fixed-name `stop-{env}`/`stop-home-{ws}` CR (Task 8: the stop-before-teardown
-  # push is a `Snapshot` now, not the deleted `SnapshotRequest`). `delete` is retention (the
+  # `local_commits` to decide what to fetch. `create` is also `stop_push`'s fixed-name `stop-{env}`
+  # CR (Task 8: the stop-before-teardown push is a `Snapshot` now, not the deleted
+  # `SnapshotRequest`). `delete` is retention (the
   # worktree's own node keeps ONE sync point per worktree and drops the older ones, converging the
   # subvolume away too — a push is never pruned, only deleted by hand through `/v1`)
   # and `stop_push`'s own teardown cleanup — left behind, the NEXT stop would find the same
@@ -241,13 +239,10 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete"]
   # StatefulSets are applied, scaled (a merge patch on replicas), read back, watched, and deleted on
-  # stop. `deployments` only to find and delete the legacy ones a StatefulSet replaced.
+  # stop.
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "delete"]
   # `get` is read-only, once, at startup: which pools this node advertises
   # (`rustic-git.io/session|env`).
   # `list` joined `get` for replication: the sender computes standby targets by rendezvous over
