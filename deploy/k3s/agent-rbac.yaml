@@ -40,7 +40,9 @@
 #                                                                       annotation, metadata only)
 #                                          delete                       snapshot::retain (retention
 #                                                                       sweep past WS_SNAPSHOT_KEEP);
-#                                                                       stop_push teardown cleanup
+#                                                                       stop_push teardown cleanup;
+#                                                                       retire_pass's orphan sweep
+#                                                                       (spec.volume names no Volume)
 #   volumereplicas (rustic-git.io)         get,list,watch               pull_beat (source selection,
 #                                                                       reaper)
 #                                          create,patch                 write_replica_status (this
@@ -147,7 +149,9 @@ rules:
   # push is a `Snapshot` now, not the deleted `SnapshotRequest`). `delete` is retention (the
   # worktree's own node drops CRs beyond `WS_SNAPSHOT_KEEP`, converging the subvolume away too)
   # and `stop_push`'s own teardown cleanup — left behind, the NEXT stop would find the same
-  # fixed-name object already `Ready` and tear down without pushing again.
+  # fixed-name object already `Ready` and tear down without pushing again. `delete` is also
+  # `retire_pass`'s orphan sweep, which clears the ownerless baselines minted before
+  # `migrate_and_seed_baseline` stamped one; every snapshot made today is GC'd by its owner.
   # `patch` is metadata only (rule 1 below: on a main resource it is `patch` on all of it, and spec
   # stays read-only — agent-admission.yaml does not even match `snapshots`): the commit reconciler
   # re-stamps a sync point's `rustic-git.io/synced-generation` with the generation the worktree has

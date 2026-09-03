@@ -600,7 +600,13 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 /// (workspace id == volume id, module doc in `commit.rs`) and exactly what `checkout`'s
 /// `WORKTREE_EXISTS` guard converges on right below this call — so the caller needs no branch for
 /// "just migrated" vs. "always was commit-model-native".
-pub(crate) async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Result<bool, ReconcileErr> {
+///
+/// Takes the `Volume` and not its id because the baseline needs an ownerReference to it: a
+/// cluster-scoped object may own another cluster-scoped one, so Kubernetes GC reclaims the record
+/// with the volume. Without it the baseline outlived every workspace it was cut for — 13 were on
+/// the cluster for volumes that no longer exist. Push commits have carried one all along (`api.rs`).
+pub(crate) async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, vol: &crd::Volume, owner: &str) -> Result<bool, ReconcileErr> {
+    let id = &vol.name_any();
     let (engine, vol_id) = (ctx.engine.clone(), id.to_string());
     let migrated = tokio::task::spawn_blocking(move || engine.migrate_volume(&vol_id))
         .await
@@ -624,6 +630,7 @@ pub(crate) async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, id: &str, owner: &
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, id));
+    snap.metadata.owner_references = Some(vec![owner_ref_of_kind(vol)?]);
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     // Same convergence rule as everything else in this cutover: a retry that finds the CR already
     // there (crash between the rename above landing and this create) is not an error.
@@ -813,7 +820,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // the claim itself does, by asking whether the VOLUME has any commits at all.
     // Lazy per-volume migration, before anything mounts (the pod must be recreated to pick up
     // the new path, same as the hostpath cutover) — a no-op every pass after the first.
-    migrate_and_seed_baseline(ctx, &id, &w.spec.owner).await?;
+    migrate_and_seed_baseline(ctx, &vol, &w.spec.owner).await?;
     // A clone pinned to a commit already knows its head — grafted by the API at clone time,
     // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
     // the source's real history, even on the very first pass.

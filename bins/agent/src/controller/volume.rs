@@ -692,7 +692,7 @@ where
 mod tests {
     use super::*;
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use rustic_git_workspaces::kube_test::{get, mock_client, Recorder, Route};
+    use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
 
     struct NoopNix;
     #[async_trait::async_trait]
@@ -785,5 +785,40 @@ mod tests {
         let sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-2/status").remove(0);
         assert_eq!(sent["status"]["nodeName"], "", "un-placed, so the live draining owner reclaims it");
         assert_ne!(sent["status"]["phase"], "error", "a live owner is not an error: {sent}");
+    }
+
+    /// The migration baseline is the ONE Snapshot nothing owned, so 13 of them outlived their
+    /// volumes on the cluster. Cluster-scoped may own cluster-scoped: the Volume's own uid is the
+    /// whole fix, and Kubernetes GC does the rest.
+    #[tokio::test]
+    async fn the_migration_baseline_is_owned_by_its_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The mid-migration staging dir: `migrate_volume`'s recovery arm reports a real migration
+        // without needing btrfs, which is what mints the baseline CR.
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/live-migrating")).unwrap();
+        let vol: crd::Volume = serde_json::from_value(serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "vol-1", "uid": "uid-vol-1", "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        }))
+        .unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![post(
+            "/apis/rustic-git.io/v1alpha1/snapshots",
+            serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": "vol-1.aaaa"},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "vol-1", "parent": "", "pinned": false, "transient": false},
+            }),
+        )]);
+
+        assert!(super::super::migrate_and_seed_baseline(&ctx, &vol, "alice").await.unwrap(), "the staging dir is a real migration");
+
+        let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots").remove(0);
+        let owner = &sent["metadata"]["ownerReferences"][0];
+        assert_eq!(owner["kind"], "Volume");
+        assert_eq!(owner["name"], "vol-1");
+        assert_eq!(owner["uid"], "uid-vol-1");
+        assert_eq!(owner["controller"], true);
     }
 }

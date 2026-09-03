@@ -1210,6 +1210,43 @@ fn orphan_voldirs(vol_root: &std::path::Path, known: &HashSet<String>) -> Vec<St
     out
 }
 
+/// `Snapshot` CRs whose `spec.volume` names no Volume at all. Every snapshot minted today carries
+/// an ownerReference — to its parent (`api.rs`, `sync.rs`) or, since `migrate_and_seed_baseline`
+/// gained one, to its Volume — so Kubernetes GC is the real answer; this sweep is for the records
+/// already out there (13 on the cluster), and the backstop for any future path that forgets one.
+///
+/// Keep-biased twice over. `known` comes from the beat's Volume list, which is the only reason this
+/// pass runs at all — a failed one bails before here — but that list and this one are separate
+/// round trips, so a Volume created between them looks absent while its brand-new baseline does
+/// not. One fresh GET per candidate, right before the delete, closes that window, exactly as the
+/// stale-worktree drop below does; a failed GET keeps the snapshot. An unlistable snapshot set
+/// deletes nothing.
+///
+/// Every node runs this and no node owns it: the race is three DELETEs for one object, of which two
+/// answer 404, which this already tolerates. Electing one node (rendezvous over `live`) would buy
+/// nothing an idempotent delete does not already give.
+async fn sweep_orphan_snapshots(ctx: &Arc<Ctx>, known: &HashSet<String>) {
+    let api = Api::<crd::Snapshot>::all(ctx.client.clone());
+    let list = match api.list(&ListParams::default()).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(error = %e, "pull: retire: listing snapshots; sweeping none");
+            return;
+        }
+    };
+    for s in list.items.iter().filter(|s| !known.contains(&s.spec.volume)) {
+        if !matches!(Api::<crd::Volume>::all(ctx.client.clone()).get_opt(&s.spec.volume).await, Ok(None)) {
+            continue;
+        }
+        let name = s.name_any();
+        match api.delete(&name, &Default::default()).await {
+            Ok(_) => tracing::info!(volume = %s.spec.volume, snapshot = %name, "pull: retire: no Volume CR; dropping the orphaned snapshot"),
+            Err(e) if matches!(&e, kube::Error::Api(st) if st.code == 404) => {}
+            Err(e) => tracing::warn!(snapshot = %name, error = %e, "pull: retire: deleting an orphaned snapshot"),
+        }
+    }
+}
+
 /// Drops this node's copy of any volume whose rendezvous slot over `live` no longer names it —
 /// see `should_retire`. Runs at the end of `pull_beat_with`, after the pull loop, so a new
 /// target's pull lands before anyone retires the copy it just replaced.
@@ -1242,6 +1279,7 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
             }
         }
     }
+    sweep_orphan_snapshots(ctx, &known).await;
     for v in vols {
         let id = v.name_any();
         if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() {
@@ -2637,6 +2675,68 @@ fi
 
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
         assert_eq!(deletes, vec![format!("DELETE {VOLREPLICAS}/v-gone.node-a")], "only my orphan: {deletes:?}");
+    }
+
+    fn snap_of(name: &str, volume: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": name, "uid": format!("uid-{name}")},
+            "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": "", "pinned": false, "transient": false},
+            "status": {"phase": "ready"},
+        })
+    }
+
+    fn snap_list(items: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {"resourceVersion": "1"}, "items": items})
+    }
+
+    /// The baseline `Snapshot` used to carry no ownerReference at all, so it outlived its volume
+    /// forever. The sweep is what clears the ones already out there.
+    #[tokio::test]
+    async fn retire_pass_drops_a_snapshot_whose_volume_cr_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(
+            tmp.path(),
+            "node-a",
+            vec![
+                get(SNAPSHOTS, snap_list(vec![snap_of("v-gone.aaaa", "v-gone"), snap_of("v-live.bbbb", "v-live")])),
+                // The confirming GET: really gone, not merely younger than the beat's volume list.
+                not_found(format!("{VOLUMES}/v-gone")),
+            ],
+        );
+
+        retire_pass(&ctx, &beat_of(vec![vol_owned("v-live", "node-a")], vec![], vec![]), &["node-a".to_string()]).await;
+
+        let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS}/v-gone.aaaa")], "only the orphan: {deletes:?}");
+    }
+
+    /// The two listings are separate round trips: a Volume created after the beat's list looks
+    /// absent, and its brand-new baseline must survive on the strength of the fresh GET.
+    #[tokio::test]
+    async fn retire_pass_keeps_a_snapshot_whose_volume_appeared_after_the_beats_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(
+            tmp.path(),
+            "node-a",
+            vec![get(SNAPSHOTS, snap_list(vec![snap_of("v-new.aaaa", "v-new")])), get(format!("{VOLUMES}/v-new"), vol_owned("v-new", "node-b"))],
+        );
+
+        retire_pass(&ctx, &beat_of(vec![], vec![], vec![]), &["node-a".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    /// Keep-biased: an unlistable snapshot set is "we do not know", never "there are none".
+    #[tokio::test]
+    async fn retire_pass_deletes_no_snapshot_on_a_list_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No `SNAPSHOTS` route at all: the mock answers 404, which is a list failure.
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", Vec::new());
+
+        retire_pass(&ctx, &beat_of(vec![], vec![], vec![]), &["node-a".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     }
 
     #[tokio::test]
