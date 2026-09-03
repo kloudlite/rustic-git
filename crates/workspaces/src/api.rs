@@ -1303,8 +1303,10 @@ struct RestoreBody {
     image: Option<String>,
     #[serde(default)]
     packages: Option<Vec<String>>,
-    #[serde(default)]
-    resources: Option<crd::PodResources>,
+    // No `resources` rung on purpose: nothing user-facing offers to size a restore (create and
+    // clone both hardcode the default), and an unclamped body field here would let a caller
+    // reserve a node's whole capacity. Resources come from the frozen state, then the live
+    // source, then the default.
     #[serde(default)]
     quota_gb: Option<u64>,
     #[serde(default)]
@@ -1362,10 +1364,9 @@ async fn restore_ws(
         .or_else(|| src.as_ref().map(|w| w.spec.packages.clone()))
         .unwrap_or_default();
     crate::packages::validate_list(&packages).map_err(bad_packages)?;
-    let resources = body
-        .resources
-        .clone()
-        .or_else(|| frozen.as_ref().map(|f| f.2.clone()))
+    let resources = frozen
+        .as_ref()
+        .map(|f| f.2.clone())
         .or_else(|| src.as_ref().map(|w| w.spec.resources.clone()))
         .unwrap_or_default();
     let quota = match (body.quota_gb, &frozen, &src) {

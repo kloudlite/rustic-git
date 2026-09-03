@@ -1556,6 +1556,24 @@ async fn a_restore_body_field_overrides_the_snapshot_state() {
     assert_eq!(w["spec"]["packages"], json!(["ripgrep"]));
 }
 
+/// There is no `resources` rung: sizing a restore is not offered anywhere, and an unclamped body
+/// field would let a caller reserve a node's whole capacity. Serde drops the unknown field and the
+/// created spec keeps the snapshot's frozen resources.
+#[tokio::test]
+async fn a_restore_body_cannot_override_the_frozen_resources() {
+    let s = server_with_snapshot_only("snap-ws", Some(workspace_state("alpine:3.19", &[], 7))).await;
+    let r = restore(
+        &s,
+        "/v1/workspaces/restore",
+        json!({"name": "back", "snapshot_id": "snap-ws",
+               "resources": {"cpuRequest": "64", "cpuLimit": "64", "memoryRequest": "512Gi", "memoryLimit": "512Gi"}}),
+    )
+    .await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["resources"], json!({"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"}));
+}
+
 /// A snapshot cut before this existed carries no `state`, and must restore exactly as it used to.
 #[tokio::test]
 async fn a_pre_change_snapshot_restores_as_before() {
