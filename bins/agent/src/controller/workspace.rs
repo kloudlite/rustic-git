@@ -12,7 +12,7 @@ use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd::{self, DesiredState, VolumeSource};
+use rustic_git_workspaces::crd::{self, DesiredState};
 use rustic_git_workspaces::k8s;
 use rustic_git_workspaces::model;
 use std::sync::Arc;
@@ -534,31 +534,20 @@ fn replicas_of(ctx: &Arc<Ctx>, id: &str) -> u32 {
         .unwrap_or(crd::DEFAULT_REPLICAS)
 }
 
-/// A shared-volume clone (`spec.storage.source` is `CloneOf { commit: Some(_), .. }`) checks out
-/// a worktree under the SOURCE volume's `live/`, not its own — it owns no `Volume` child, so
-/// nothing's ownerReference GC ever reclaims that worktree. An owned-volume workspace needs
-/// nothing here: its `Volume`'s own `SUBVOLUME_FINALIZER` deletes the whole voldir, worktree
-/// included.
-fn is_shared_clone(w: &crd::Workspace) -> bool {
-    w.spec
-        .storage
-        .as_ref()
-        .and_then(|s| s.source.as_ref())
-        .is_some_and(|src| matches!(src, VolumeSource::CloneOf { commit: Some(_), .. }))
-}
-
-fn has_worktree_finalizer(w: &crd::Workspace) -> bool {
-    w.metadata.finalizers.as_ref().is_some_and(|fs| fs.iter().any(|f| f == crd::WORKTREE_FINALIZER))
-}
-
-/// `WORKTREE_FINALIZER` is added ONLY to a shared-volume clone — an owned workspace never grows
-/// one. A finalizer already present from before this workspace's spec stopped reading as a
-/// shared clone (a rollback, or a respec) must still be REMOVABLE: the guard is "nothing to add
-/// AND nothing to remove", not just "not a clone".
+/// EVERY workspace carries `WORKTREE_FINALIZER`, not just a shared-volume clone: a delete now has
+/// to decide whether the Volume goes with the parent (no commits — ownerReference GC as before) or
+/// survives it detached (a pushed commit outlives the workspace it came from), and that decision
+/// can only be made while the parent's own spec and status are still readable.
+///
+/// Two windows this deliberately does not close. (1) The rollout: a parent deleted between the
+/// upgrade landing and its first post-upgrade reconcile carries no finalizer yet, so GC takes its
+/// Volume the old way, commits included — one pass per object closes it, and there is no way to
+/// stamp a finalizer on an object that is already gone. (2) An unclaimed Terminating parent:
+/// a node-death sweep that cleared `status.nodeName` leaves nothing watching it (every parent
+/// watch is `status.nodeName`-selected), so it waits in Terminating until a node re-claims it —
+/// which converges, because the claim path ignores `deletionTimestamp` and places a deleting
+/// object like any other.
 pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    if !is_shared_clone(&w) && !has_worktree_finalizer(&w) {
-        return apply_workspace(&w, &ctx).await;
-    }
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
     finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {
         match event {
@@ -570,19 +559,80 @@ pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Resul
     .map_err(|e| ReconcileErr(e.to_string()))
 }
 
-/// F5: drop a shared-volume clone's worktree on delete — the only thing that ever reclaims it
-/// (see `is_shared_clone`'s doc comment).
-pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    if is_shared_clone(w) {
-        // `volumeRef` names the SOURCE volume (see `resolve_volume`'s `shared` arm); the worktree
-        // under it is named by this workspace's own id, same as every checkout call.
-        if let Some(volume) = w.status.as_ref().and_then(|s| s.volume_ref.clone()) {
-            let (engine, ws_id) = (ctx.engine.clone(), w.name_any());
-            tokio::task::spawn_blocking(move || engine.drop_worktree(&volume, &ws_id))
-                .await
-                .map_err(|e| ReconcileErr(e.to_string()))?
-                .map_err(|e| ReconcileErr(e.0))?;
+/// The same wrapper for an environment, whose worktree is its own id — see `reconcile_workspace`.
+pub async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    let api: Api<crd::Environment> = Api::all(ctx.client.clone());
+    finalizer(&api, crd::WORKTREE_FINALIZER, e, |event| async {
+        match event {
+            FinalizerEvent::Cleanup(e) => {
+                let volume = e.status.as_ref().and_then(|s| s.volume_ref.clone());
+                cleanup_parent(&e.name_any(), &e.uid().unwrap_or_default(), volume, &ctx).await
+            }
+            FinalizerEvent::Apply(e) => super::apply_environment(&e, &ctx).await,
         }
+    })
+    .await
+    .map_err(|e| ReconcileErr(e.to_string()))
+}
+
+pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // `volumeRef` names the volume this worktree lives under — its OWN volume normally, the
+    // SOURCE volume for a shared clone (see `resolve_volume`'s `shared` arm). Either way the
+    // worktree under it is named by this workspace's own id, same as every checkout call.
+    let volume = w.status.as_ref().and_then(|s| s.volume_ref.clone());
+    cleanup_parent(&w.name_any(), &w.uid().unwrap_or_default(), volume, ctx).await
+}
+
+/// The delete path shared by both parents. Every step is idempotent, because a failed detach
+/// requeues the whole thing:
+///   1. drop the parent's worktree — `{pool}/vol/{volume}/live/{id}`, the LIVE subvolume only;
+///      `snap/` (the commits) is never touched, which is the whole point of the exercise.
+///   2. delete every SYNC POINT of that worktree, whatever its phase — replication state for a
+///      worktree that no longer exists, which nothing else ever reclaims. A snapshot (a push) is
+///      never touched here, by any parent, for any reason.
+///   3. if a snapshot remains on the Volume — this worktree's or another's — detach it so that
+///      snapshot outlives its parent; otherwise leave the ownerReference and let GC delete the
+///      Volume as it always did.
+async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    let Some(volume) = volume else { return Ok(Action::await_change()) };
+    let id = id.to_string();
+    let (engine, wt) = (ctx.engine.clone(), id.clone());
+    let vol = volume.clone();
+    tokio::task::spawn_blocking(move || engine.drop_worktree(&vol, &wt))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .map_err(|e| ReconcileErr(e.0))?;
+
+    // One list serves both remaining steps: what to delete, and whether a snapshot remains.
+    // `spec.volume` is a selectable field, so this is a server-side filter. The two sets cannot
+    // overlap — one is `transient`, the other is not — so the check needs no re-read.
+    let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let items = snaps
+        .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .items;
+    for s in items.iter().filter(|s| !s.is_snapshot() && s.spec.worktree == id) {
+        delete_ignoring_404(&snaps, &s.name_any()).await?;
+    }
+    // Not scoped to this worktree: a snapshot of a SIBLING worktree is just as good a reason
+    // to keep the Volume alive — the bytes it names live on the same subvolume tree.
+    //
+    // Any phase but `Error`, NOT just `Ready`: a push still being cut when its parent was
+    // deleted is exactly the case that must not lose the Volume — GC would take the subvolume out
+    // from under the cut and leave an orphan record naming a Volume that is gone. A
+    // status-less record has never been cut at all and counts the same way; only `Error` is a
+    // record that will never name bytes.
+    let has_snapshot = items.iter().any(|s| {
+        s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
+    });
+    if has_snapshot
+        && !super::volume::detach_volume(ctx, &volume, uid).await.map_err(|e| ReconcileErr(e.to_string()))?
+    {
+        // Someone else rewrote the owner list under us. An Err, not a requeue: the finalizer
+        // combinator REMOVES the finalizer on any Ok from Cleanup, which would let GC take the
+        // Volume — and the commits — while we were still trying to detach it.
+        return Err(ReconcileErr(format!("volume {volume}: owner references changed under the detach")));
     }
     Ok(Action::await_change())
 }
@@ -591,23 +641,29 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 /// OLD layout (`live` itself is the single RW subvolume, pre-dating this whole feature) — the
 /// pod that's about to mount it needs `live/{volume}` instead. `Engine::migrate_volume` does the
 /// physical rename and returns `true` only the one time it actually moved anything; that's the
-/// signal to mint the migration-baseline `Snapshot` CR (CR-first, same shape `create_commit` in
+/// signal to mint the migration-baseline `Snapshot` CR (CR-first, same shape `create_snapshot` in
 /// `api.rs` uses for a normal push) — the EXISTING `reconcile_commit`/`advance_head` machinery
-/// then cuts it, marks it Ready and writes `status.head`, so this function only ever needs to run
-/// once per volume, not re-implement any of that.
+/// then cuts it and marks it Ready, so this function only ever needs to run once per volume, not
+/// re-implement any of that. It does NOT advance `status.head` — a sync point never does — which is
+/// why the `HeadUnknown` guard below has to let a migrated volume through on the worktree it
+/// already has on disk rather than on a head.
 ///
 /// A worktree named after the volume's own id is exactly what a pre-model workspace already is
 /// (workspace id == volume id, module doc in `commit.rs`) and exactly what `checkout`'s
 /// `WORKTREE_EXISTS` guard converges on right below this call — so the caller needs no branch for
 /// "just migrated" vs. "always was commit-model-native".
 ///
-/// Takes the `Volume` and not its id because the baseline needs an ownerReference to it: a
-/// cluster-scoped object may own another cluster-scoped one, so Kubernetes GC reclaims the record
-/// with the volume. Without it the baseline outlived every workspace it was cut for — 13 were on
-/// the cluster for volumes that no longer exist. Push commits have carried one all along (`api.rs`).
+/// Owned by the PARENT (Workspace/Environment), not the Volume, unlike a push (`api.rs`): a
+/// baseline only ever exists because a pre-model volume was migrated under one specific parent,
+/// and a Volume that only ever had its baseline is not worth keeping once that parent is gone — so
+/// the baseline dies with the parent rather than outliving it as an orphan CR for a workspace that
+/// no longer exists (13 were found on the cluster that way before this had an owner at all). A
+/// A push is different: it is worth keeping across a re-clone/re-attach of the same volume, so it
+/// stays owned by the Volume.
 pub(crate) async fn migrate_and_seed_baseline(
     ctx: &Arc<Ctx>,
     vol: &crd::Volume,
+    parent_ref: OwnerReference,
     owner: &str,
     state: crd::SnapshotState,
 ) -> Result<bool, ReconcileErr> {
@@ -629,14 +685,17 @@ pub(crate) async fn migrate_and_seed_baseline(
             owner: owner.to_string(),
             worktree: id.to_string(),
             parent: String::new(),
-            message: Some("migration baseline".to_string()),
-            pinned: false,
-            transient: false,
+            // A SYNC POINT, not a push: nobody asked for it, so it must not show up in history as
+            // a snapshot the person took, and it must not keep the Volume alive after its parent
+            // is deleted (`cleanup_parent` keeps snapshots, drops sync points). It exists only so
+            // a peer has something of a pre-model volume to replicate.
+            message: None,
+            transient: true,
             state: Some(state),
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, id));
-    snap.metadata.owner_references = Some(vec![owner_ref_of_kind(vol)?]);
+    snap.metadata.owner_references = Some(vec![parent_ref]);
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     // Same convergence rule as everything else in this cutover: a retry that finds the CR already
     // there (crash between the rename above landing and this create) is not an error.
@@ -826,19 +885,11 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // the claim itself does, by asking whether the VOLUME has any commits at all.
     // Lazy per-volume migration, before anything mounts (the pod must be recreated to pick up
     // the new path, same as the hostpath cutover) — a no-op every pass after the first.
-    migrate_and_seed_baseline(ctx, &vol, &w.spec.owner, crd::SnapshotState::of_workspace(w)).await?;
+    migrate_and_seed_baseline(ctx, &vol, owner_ref_of_kind(w)?, &w.spec.owner, crd::SnapshotState::of_workspace(w)).await?;
     // A clone pinned to a commit already knows its head — grafted by the API at clone time,
     // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
     // the source's real history, even on the very first pass.
-    let clone_commit = w
-        .spec
-        .storage
-        .as_ref()
-        .and_then(|s| s.source.as_ref())
-        .and_then(|src| match src {
-            VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
-            _ => None,
-        });
+    let clone_commit = super::clone_commit(&w.spec.storage);
     // Re-host: a node that has never run this worktree checks out its LATEST SYNC POINT in
     // preference to `head`, because the sync beat replicated it after the last commit — the
     // data-loss window on a node death is one `WS_SYNC_SECS`, not everything since the last push.
@@ -848,13 +899,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // Resolved BEFORE the `HeadUnknown` guard below: a transient IS a Snapshot CR, so `has_commits`
     // is true when a sync point is all this volume has, and parking there would strand a workspace
     // that has perfectly good state to start from.
-    let synced = if ctx.engine.pool.worktree(&id, &w.name_any()).exists() {
-        None
-    } else {
-        crate::snapshot::latest_transient(ctx, &id, &w.name_any()).await?
-    };
+    let have_worktree = ctx.engine.pool.worktree(&id, &w.name_any()).exists();
+    let synced = if have_worktree { None } else { crate::snapshot::latest_transient(ctx, &id, &w.name_any()).await? };
     let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
-    if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+    // `!have_worktree` is part of the guard, not an optimization: a MIGRATED volume has its
+    // worktree on disk already and its baseline is a sync point, so it has records and no head
+    // forever. Parking it would be permanent. The guard is about never checking out an EMPTY
+    // worktree next to real history, and a worktree that is already here is not empty.
+    if effective_head.is_none() && !have_worktree && crate::claim::has_commits(ctx, &id).await? {
         // F2 guard: the volume has commits but this workspace's own `head` is still `None` —
         // checking out `None` here would hand it an EMPTY worktree next to real history,
         // which is the never-started-dataless bug in worktree form. Wait for Task 5/6 to

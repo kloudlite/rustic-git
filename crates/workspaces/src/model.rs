@@ -77,7 +77,7 @@ pub struct Workspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshDoc>,
     /// Unused: the per-snapshot definition now lives on the history rows' `state`
-    /// (`commit_model_history_rows`, from `crd::SnapshotSpec.state`), frozen at push time by the
+    /// (`snapshot_rows`, from `crd::SnapshotSpec.state`), frozen at push time by the
     /// owning node rather than read back here. This field stays `null` and is kept only because
     /// the web types still name it.
     #[serde(default)]

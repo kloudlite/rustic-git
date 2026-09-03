@@ -88,7 +88,10 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     };
     let id = vol.name_any();
 
-    let ns = crd::env_namespace(&id);
+    // The environment's OWN id, never the volume's: a restored environment resolves to the
+    // SOURCE's volume (`resolve_volume`'s `shared` arm), and running it in the source's namespace
+    // would collide every StatefulSet name with the source's.
+    let ns = crd::env_namespace(&e.name_any());
     let deployments: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
 
     // Before anything else, including the stop path: an environment that is being restored has no
@@ -243,22 +246,29 @@ async fn run_environment(
     // HeadUnknown guard: an environment claimed onto this node for a volume with commits but no
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
     // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
-    migrate_and_seed_baseline(ctx, vol, &e.spec.owner, crd::SnapshotState::of_environment(e)).await?;
+    migrate_and_seed_baseline(ctx, vol, owner_ref.clone(), &e.spec.owner, crd::SnapshotState::of_environment(e)).await?;
     // `apply_workspace`'s re-host arm, same rule: a node that has never run this worktree starts
     // from the newest sync point rather than the last commit, so a node death costs one
     // `WS_SYNC_SECS` of edits. Resolved before the guard below — a transient is a Snapshot CR, so
     // `has_commits` sees it too.
-    // `e.name_any()`, not `id`: `spec.worktree` on a Snapshot is what `sync.rs`'s
-    // `live_worktrees` wrote there, which is the Environment's own name. They are the same string
-    // for every environment today — the volume is named after the environment — and this arm is
-    // simply keyed on the field that actually names the worktree.
-    let synced = if ctx.engine.pool.worktree(&id, &id).exists() {
-        None
-    } else {
-        crate::snapshot::latest_transient(ctx, &id, &e.name_any()).await?
-    };
-    let effective_head = synced.or_else(|| prev.head.clone());
-    if effective_head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+    // The worktree is the environment's OWN name on whatever volume it resolved to — `id` for an
+    // environment that owns its volume (the same string), the SOURCE's volume for a restored one,
+    // which holds a SECOND worktree of it. Never `(id, id)`: that checked a restored environment
+    // out on top of the source's live worktree, two environments writing one subvolume. It is also
+    // the name `sync.rs`'s `live_worktrees` writes into `Snapshot.spec.worktree`, so every path
+    // below — checkout, mount, mkdir, stop cut, drop — uses this one string.
+    let wt = e.name_any();
+    let have_worktree = ctx.engine.pool.worktree(&id, &wt).exists();
+    let synced = if have_worktree { None } else { crate::snapshot::latest_transient(ctx, &id, &wt).await? };
+    // A restore/clone pinned to a commit already knows its head — grafted by `/v1` at restore
+    // time, not guessed here. Without this an environment restored onto a commit parked forever in
+    // `HeadUnknown` below: the volume HAS commits, and nothing else ever wrote this environment's
+    // head. `apply_workspace`'s twin arm, verbatim in shape.
+    let clone_commit = super::clone_commit(&e.spec.storage);
+    let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
+    // `!have_worktree`: `apply_workspace`'s twin — a migrated volume's baseline is a sync point,
+    // so it has records and no head, and its worktree is already on disk. See there.
+    if effective_head.is_none() && !have_worktree && crate::claim::has_commits(ctx, &id).await? {
         let st = crd::EnvironmentStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,
@@ -270,7 +280,51 @@ async fn run_environment(
         write_env_status(e, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), effective_head);
+    // Keyed on `effective_head`, not `prev.head`, for the same reason as the workspace arm: a
+    // volume that is going to check out a sync point instead was never going to touch the clone
+    // commit, so a swept one must not kill it.
+    if let Some(commit) = clone_commit {
+        let phase = if effective_head.as_deref() == Some(commit) {
+            crate::claim::commit_phase(ctx, &id, commit).await?
+        } else {
+            Some(crd::Phase::Ready)
+        };
+        // `/v1` creates the cut microseconds before the object, so the first reconcile almost
+        // always finds it still `Working` — one tick away, never Permanent.
+        if crate::claim::commit_pending(phase) {
+            let st = crd::EnvironmentStatus {
+                phase: crd::Phase::Creating,
+                observed_generation: None,
+                conditions: kept_conditions(
+                    &prev.conditions,
+                    crd::condition("Ready", false, "CommitPending", &format!("waiting for snapshot {commit} to be cut"), gen),
+                ),
+                ..prev.clone()
+            };
+            write_env_status(e, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
+        if phase != Some(crd::Phase::Ready) {
+            let prev = prev.clone();
+            return settle(
+                Outcome::Permanent(format!("clone commit {commit} is not a ready snapshot of volume {id}"), "NoSuchCommit"),
+                e,
+                "Environment",
+                gen,
+                move |cond| {
+                    serde_json::json!({
+                        "phase": crd::Phase::Error,
+                        "nodeName": prev.node_name,
+                        "volumeRef": prev.volume_ref,
+                        "conditions": kept_conditions(&prev.conditions, cond),
+                    })
+                },
+                ctx,
+            )
+            .await;
+        }
+    }
+    let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), wt.clone(), effective_head);
     let quota_gb = vol.spec.quota_gb;
     let result = tokio::task::spawn_blocking(move || {
         engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
@@ -283,6 +337,16 @@ async fn run_environment(
         Ok(()) => {}
         Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
         Err(e) => return Err(ReconcileErr(e.0)),
+    }
+    // First graft: nothing else will ever write this head — a restored environment gets
+    // `advance_head` only if it pushes itself. The preserve pattern, same as the workspace's.
+    let mut prev = prev;
+    if prev.head.is_none() {
+        if let Some(commit) = clone_commit {
+            let prev2 = prev.clone();
+            write_env_status(e, crd::EnvironmentStatus { head: Some(commit.to_string()), ..prev2 }, ctx).await?;
+            prev.head = Some(commit.to_string());
+        }
     }
 
     ensure(
@@ -324,7 +388,9 @@ async fn run_environment(
     // escape, mkdir -p'ing outside the subvolume before a pod ever starts.
     // On a blocking thread: `create_dir_all` is sync IO, and the pool can be a network-backed or
     // busy disk. Same rule the module doc states for the btrfs work.
-    let live = ctx.engine.pool.live(&id);
+    // The worktree, not `live/` itself: the pod mounts the worktree and binds `volumes/{folder}`
+    // as a subPath INSIDE it, so a folder made one level up is invisible to every service.
+    let live = ctx.engine.pool.worktree(&id, &wt);
     let services = e.spec.services.clone();
     tokio::task::spawn_blocking(move || mkdir_env_mounts(&live, &services))
         .await
@@ -333,9 +399,9 @@ async fn run_environment(
 
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {
-        let set = k8s::service_statefulset(svc, &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
+        let set = k8s::service_statefulset(svc, &e.name_any(), &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
         ensure(deployments, &set, ctx).await?;
-        ensure(&services, &k8s::service_clusterip(svc, &id, &e.spec.owner, owner_ref), ctx).await?;
+        ensure(&services, &k8s::service_clusterip(svc, &e.name_any(), &e.spec.owner, owner_ref), ctx).await?;
     }
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported

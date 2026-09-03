@@ -2,7 +2,7 @@
 //! beats they spawn, and the error policy. Nothing here decides anything about a workspace — this
 //! is the wiring the reconcilers hang off. Split out of `controller.rs` unchanged.
 
-use super::{apply_environment, reconcile_volume, reconcile_workspace, Ctx, Done, ReconcileErr, RETRY};
+use super::{reconcile_environment, reconcile_volume, reconcile_workspace, Ctx, Done, ReconcileErr, RETRY};
 use crate::{binding, claim, snapshot};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{Node, Pod};
@@ -192,7 +192,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let environments = environments
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only, move |_: Node| all_in_store(&env_store))
         .shutdown_on_signal()
-        .run(|e, c| timed("environment", async move { apply_environment(&e, &c).await }), error_policy, ctx.clone())
+        .run(|e, c| timed("environment", async move { reconcile_environment(e, c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "environment reconcile")

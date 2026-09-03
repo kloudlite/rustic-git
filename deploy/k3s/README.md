@@ -814,3 +814,46 @@ agent doesn't populate it yet, and rolling the agent first means it writes a fie
 schema doesn't know about (preserve-unknown-fields keeps it, not an error). Snapshots cut before
 this change simply have no `spec.state`, and a restore from one falls back to the live source (or
 the standard defaults, if that's gone too) exactly as it did before this release.
+
+## Release: durable snapshots
+
+The 2026-09-03 change makes a push outlive its workspace: a `Snapshot` a push writes is owned by
+the `Volume`, the working copy's own cuts (sync points, `spec.transient: true`) are owned by the
+workspace/environment, and every Workspace/Environment carries `WORKTREE_FINALIZER` so a delete
+drops the worktree and the sync points and DETACHES the Volume when a snapshot remains
+(`docs/superpowers/specs/2026-09-03-durable-snapshots-design.md` is the design).
+
+**Apply the manifests BEFORE rolling the agent and the api**, all four, in this order:
+
+```sh
+# The api SA gains `snapshots: delete` and `volumes: delete` (api-rbac.yaml) — `/v1`'s deletes are
+# CRD-backed now, so an api rolled ahead of its role 403s on every snapshot delete. The agent SA
+# gains `volumes: delete` (agent-rbac.yaml) for `collect_unreferenced_volumes` — an ownerless
+# volume with no worktree and no snapshot has no ownerReference left to garbage-collect it, and an
+# agent rolled ahead of its role 403s on every retire beat. The agent's
+# ownerReference patch needs no policy change (admission constrains spec only), and crds.yaml carries the reworded
+# descriptions and drops the dead `pinned` property.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml \
+  -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-admission.yaml -f deploy/k3s/api-rbac.yaml
+
+# Then the agent, then the api tier.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml
+KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/rustic-git-agent -n kube-system
+deploy/roll.sh
+kubectl rollout status deploy/rustic-git-api -n rustic-git
+```
+
+No migration script, and nothing to run afterwards:
+
+- **Every push already stored becomes a snapshot.** They are `spec.transient: false` already, which
+  is exactly what a snapshot is now — intended, not an accident of the rollout.
+- **Old migration baselines are recognised by SHAPE**, not by a flag: `transient: false`,
+  `parent: ""`, message `"migration baseline"` reads as a sync point everywhere
+  (`crd::Snapshot::is_snapshot`), so it stays out of history and never keeps a volume alive.
+- **One extra sync cut per worktree on the rollout.** The beat now cuts when the derived definition
+  differs from the newest sync point's as well as when the bytes moved, and the first pass of a new
+  agent has no definition on record for the cut it inherits — so each running worktree takes one
+  extra cut within a beat, then settles.
+- `spec.pinned` and `WS_SNAPSHOT_KEEP` are gone. Stored `pinned` values are ignored by serde and
+  pruned by the regenerated schema; retention now prunes sync points only, and a push is never
+  pruned by anything.

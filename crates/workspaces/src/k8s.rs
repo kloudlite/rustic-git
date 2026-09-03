@@ -1030,6 +1030,11 @@ pub fn env_unit_resources() -> PodResources {
 pub fn service_statefulset(
     svc: &model::Service,
     env_id: &str,
+    // The VOLUME the worktree lives under — the environment's own for one that owns its volume
+    // (the same string as `env_id`), the SOURCE's for a restored/cloned environment, which holds a
+    // second worktree of it. Separate parameters because a restored environment must not mount the
+    // source's worktree: that is two environments writing one live subvolume.
+    volume: &str,
     owner: &str,
     ctx: &PodContext,
 ) -> Result<StatefulSet, String> {
@@ -1082,10 +1087,8 @@ pub fn service_statefulset(
             security_context: Some(hardened()),
             ..Default::default()
         }],
-        // An environment's worktree is checked out under its OWN id (`run_environment` checks out
-        // `(volume=id, ws=id)` — an environment never shares its volume the way a workspace clone
-        // can), so volume and ws are the same id here.
-        volumes: Some(vec![live_worktree_volume(ctx.pool, env_id, env_id)]),
+        // Volume root, environment leaf — the same split a workspace clone's mount uses.
+        volumes: Some(vec![live_worktree_volume(ctx.pool, volume, env_id)]),
         // An environment's services are the likeliest place a private image appears — they are
         // whatever the user named, not our default.
         image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
@@ -1525,7 +1528,7 @@ mod tests {
     /// PV to carry `nodeAffinity` any more either.
     #[test]
     fn the_service_pod_selects_its_node_by_hostname() {
-        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
         let s = d.spec.unwrap().template.spec.unwrap();
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
@@ -1533,14 +1536,32 @@ mod tests {
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 
-    /// Task 7a: an environment's worktree is checked out under its OWN id (volume == ws, see
-    /// `run_environment`), so `env_id` alone determines the path.
+    /// An environment's worktree is its OWN id under whatever volume it resolved to — volume root,
+    /// environment leaf. For one that owns its volume the two are the same string, so the path is
+    /// unchanged from Task 7a.
     #[test]
     fn the_service_pods_live_mount_is_the_worktree_path() {
-        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
         let vols = d.spec.unwrap().template.spec.unwrap().volumes.unwrap();
         let live = vols.iter().find(|v| v.name == "live").unwrap();
         assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/env-1/live/env-1", ctx().pool));
+    }
+
+    /// A RESTORED environment holds a SECOND worktree of the SOURCE's volume: the root comes from
+    /// the source, the leaf from itself, and its objects live in its own namespace. Mounting
+    /// `(source, source)` — what this did before Task 2c — pointed two environments at one live
+    /// subvolume.
+    #[test]
+    fn a_restored_environments_live_mount_is_its_own_worktree_of_the_source_volume() {
+        let d = service_statefulset(&svc("data", "/data"), "env-restored", "env-src", "team", &ctx()).unwrap();
+        assert_eq!(
+            d.metadata.namespace.as_deref(),
+            Some(crate::crd::env_namespace("env-restored").as_str()),
+            "its own namespace, never the source's"
+        );
+        let vols = d.spec.unwrap().template.spec.unwrap().volumes.unwrap();
+        let live = vols.iter().find(|v| v.name == "live").unwrap();
+        assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/env-src/live/env-restored", ctx().pool));
     }
 
     fn ctx() -> PodContext<'static> {
@@ -1623,7 +1644,7 @@ mod tests {
     fn a_service_is_a_statefulset_with_a_stable_template() {
         let mut s = svc("data", "/data");
         s.env = [("Z", "1"), ("A", "2"), ("M", "3")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let d = service_statefulset(&s, "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&s, "env-1", "env-1", "team", &ctx()).unwrap();
         let spec = d.spec.unwrap();
         assert_eq!(spec.replicas, Some(1));
         assert_eq!(spec.service_name.as_deref(), Some("web"), "the ClusterIP Service of the same name");
@@ -1634,7 +1655,7 @@ mod tests {
     #[test]
     fn a_service_deployment_refuses_a_mount_that_escapes_the_subvolume() {
         let ctx = ctx();
-        let ok = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
+        let ok = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx).unwrap();
         let mounts = ok.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
             .volume_mounts
             .as_ref()
@@ -1646,12 +1667,12 @@ mod tests {
         // itself, but this must not lean on that — the segment is validated before it is formatted.
         for bad in ["/", "..", "a/b", "", "../../root/.ssh", "a:b"] {
             assert!(
-                service_statefulset(&svc(bad, "/host"), "env-1", "team", &ctx).is_err(),
+                service_statefulset(&svc(bad, "/host"), "env-1", "env-1", "team", &ctx).is_err(),
                 "folder {bad:?} must be refused"
             );
         }
-        assert!(service_statefulset(&svc("data", "/data:/etc"), "env-1", "team", &ctx).is_err());
-        assert!(service_statefulset(&svc("data", "relative"), "env-1", "team", &ctx).is_err());
+        assert!(service_statefulset(&svc("data", "/data:/etc"), "env-1", "env-1", "team", &ctx).is_err());
+        assert!(service_statefulset(&svc("data", "relative"), "env-1", "env-1", "team", &ctx).is_err());
     }
 
     /// Tenants share a node, so they share its kernel. A sandbox runtime puts a userspace kernel
@@ -1666,7 +1687,7 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx, None).unwrap();
         assert_eq!(p.spec.unwrap().runtime_class_name.as_deref(), Some("gvisor"));
 
-        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx).unwrap();
         assert_eq!(
             d.spec.unwrap().template.spec.unwrap().runtime_class_name.as_deref(),
             Some("gvisor"),
@@ -1689,7 +1710,7 @@ mod tests {
             // everything else is the workspace's data, which is a hostPath.
             assert!(v.host_path.is_some() || v.secret.is_some() || v.empty_dir.is_some());
         }
-        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
         for v in d.spec.unwrap().template.spec.unwrap().volumes.unwrap() {
             assert!(v.persistent_volume_claim.is_none(), "service pod must mount a hostPath, not a claim");
         }
@@ -1756,7 +1777,7 @@ mod tests {
         assert_eq!(r.cpu_limit, "4");
 
         // An environment service: 4 GB limit packed at 1.5x oversubscription.
-        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
         let res = d.spec.unwrap().template.spec.unwrap().containers[0].resources.clone().unwrap();
         let req = res.requests.unwrap();
         let lim = res.limits.unwrap();
@@ -1845,7 +1866,7 @@ mod tests {
         let refs = p.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(refs[0].name, PULL_SECRET);
 
-        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
         let refs = d.spec.unwrap().template.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(refs[0].name, PULL_SECRET, "an env's services are where private images show up");
     }

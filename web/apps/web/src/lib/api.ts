@@ -874,7 +874,7 @@ export function cloneEnvironment(token: string, id: string, name: string) {
   });
 }
 
-/** New workspace grafted onto an explicit past snapshot (a PUSHED commit), not the source's
+/** New workspace grafted onto an explicit past snapshot, not the source's
  *  current tip — see `crates/workspaces/src/api.rs::restore_ws`. */
 export function restoreWorkspace(
   token: string,
@@ -936,8 +936,14 @@ export type ApiVolumeSummary = {
   display_name: string;
   /** The workspace/environment is gone. The snapshots are not. */
   deleted: boolean;
-  /** Epoch millis of the volume's last write — approximate, see the server-tier handler. */
+  /** Epoch millis of the volume's last write — approximate, see the server-tier handler. It
+   *  counts sync points too, which are internal, so it is a liveness hint and never "last push". */
   latest_ms: number | null;
+  /** How many PUSHES are on this volume — the only thing keeping it once its workspace or
+   *  environment is gone. Sync points are not counted; they are never shown. */
+  snapshots: number;
+  /** RFC3339 of the newest push; `null` while the only push is still being taken. */
+  last_push_at: string | null;
 };
 
 /** `kind` narrows to `workspace` or `environment`. The Environments page asks for `environment`
@@ -953,7 +959,8 @@ export function listVolumes(token: string, kind?: "workspace" | "environment", o
   return call<ApiVolumeSummary[]>(`/v1/volumes${q ? `?${q}` : ""}`, { method: "GET", token });
 }
 
-/** `crates/workspaces/src/api.rs::commit_model_history_rows`, newest first. The row also carries
+/** `crates/workspaces/src/api.rs::snapshot_rows` — the volume's SNAPSHOTS, newest
+ *  first. Sync points are internal and never appear here. The row also carries
  *  `phase`, left undeclared here — no reader in this app looks at it yet; add it if one needs to. */
 export type ApiCommitRecord = {
   id: string;
@@ -962,7 +969,7 @@ export type ApiCommitRecord = {
   /** Always empty: the lineage lives with the bytes on the server tier, not in the CR the
    *  `/history` projection now reads. Kept on the wire so an older client still parses. */
   lineage: never[];
-  /** The record this one was pushed on top of — derived server-side from the blob chain. A push
+  /** The snapshot this one was pushed on top of — derived server-side from the blob chain. A push
    *  after an in-place restore grafts onto the restored record, which is what makes a branch. */
   parent?: string | null;
   region: string;
@@ -973,15 +980,15 @@ export type ApiCommitRecord = {
   createdAt: string | null;
 };
 
-/** Drops a volume's whole snapshot index — every commit record and the ref. What the environment
- *  Delete dialog calls when "Also delete its snapshots" is checked, and what an archived row's
- *  own "Delete snapshots" calls. The layer blobs are not reclaimed by it; see the server-tier
- *  handler's comment for why. */
+/** Deletes the volume and every `Snapshot` on it. A volume's snapshots are
+ *  the only thing keeping it once its workspace or environment is gone, so this is what finally
+ *  removes it: the Snapshots section's own "Delete volume". The bytes go with it — each node
+ *  holding the subvolume drops it on its next beat. 409 while a working copy still uses it. */
 export function deleteVolume(token: string, name: string) {
   return call<void>(`/v1/volumes/${encodeURIComponent(name)}`, { method: "DELETE", token });
 }
 
-/** Drops ONE commit record from a volume's lineage. The environment's disk is untouched — this
+/** Drops ONE snapshot from a volume's lineage. The environment's disk is untouched — this
  *  removes the record, not the data it points at. */
 export function deleteVolumeSnapshot(token: string, name: string, snapshot: string) {
   return call<void>(

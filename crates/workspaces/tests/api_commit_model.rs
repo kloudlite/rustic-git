@@ -61,7 +61,7 @@ fn snapshot_with_state(name: &str, volume: &str, owner: &str, worktree: &str, pa
     let mut v = json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name},
-        "spec": {"volume": volume, "owner": owner, "worktree": worktree, "parent": parent, "pinned": false},
+        "spec": {"volume": volume, "owner": owner, "worktree": worktree, "parent": parent},
         "status": {"phase": phase},
     });
     if let Some(state) = state {
@@ -131,8 +131,64 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     assert_eq!(req["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
     // Owned by the Volume: the record is garbage-collected with it instead of outliving a deleted workspace.
     assert_eq!(req["metadata"]["ownerReferences"][0]["kind"], "Volume");
+    assert_eq!(req["metadata"]["ownerReferences"][0]["name"], "ws-1");
     assert_eq!(req["metadata"]["ownerReferences"][0]["uid"], "vol-uid-1");
+    assert_eq!(req["metadata"]["ownerReferences"][0]["controller"], true);
     assert!(!s.rec.calls().iter().any(|c| c.contains("snapshotrequests")), "no SnapshotRequest under the flag");
+}
+
+/// Same push, phrased as the ownership contract itself: a commit record belongs to the Volume,
+/// not the Workspace that happened to cut it — a re-clone/re-attach onto the same volume must
+/// still see the history, and a deleted workspace must not orphan it.
+#[tokio::test]
+async fn a_push_commit_is_owned_by_the_volume_not_the_workspace() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"message": "m"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let body = s.rec.sent("POST", &format!("{API}/snapshots")).pop().unwrap();
+    let o = &body["metadata"]["ownerReferences"][0];
+    assert_eq!(o["kind"], "Volume");
+    assert_eq!(o["name"], "ws-1");
+    assert_eq!(o["uid"], "vol-uid-1");
+    assert_eq!(o["controller"], true);
+}
+
+/// The Volume named by `status.volumeRef` can be gone (deleted out from under a stale workspace
+/// object) — `create_snapshot` must not panic or 500 on a missing owner, it must say so plainly.
+#[tokio::test]
+async fn push_404s_with_a_sentence_when_the_volume_is_missing() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        not_found(format!("{API}/volumes/ws-1")),
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let text = resp.text().await.unwrap();
+    assert!(text.to_lowercase().contains("volume"), "{text}");
 }
 
 /// A workspace with no recorded head yet (its first push) writes an EMPTY parent — the root of a

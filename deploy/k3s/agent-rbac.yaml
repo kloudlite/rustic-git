@@ -15,18 +15,31 @@
 #                                                                       policy); workspaces only:
 #                                                                       reconcile_workspace's
 #                                                                       finalizer (metadata.
-#                                                                       finalizers) on a shared-
-#                                                                       volume clone (Task 7a's F5
-#                                                                       fix)
+#                                                                       finalizers) on EVERY
+#                                                                       workspace and environment
+#                                                                       (the delete path decides
+#                                                                       whether the Volume detaches
+#                                                                       or is collected)
 #   volumes (rustic-git.io)                get,list,watch               Controller + heartbeat list
 #                                          create                       ensure_child_volume (a
 #                                                                       parent's child)
 #                                          patch                        finalizer (metadata),
+#                                                                       detach_volume (metadata.
+#                                                                       ownerReferences: a deleted
+#                                                                       parent whose Volume still
+#                                                                       holds a Ready commit drops
+#                                                                       its own ownerReference so
+#                                                                       GC keeps the commits),
 #                                                                       restore_gate (spec.restoreTo),
 #                                                                       resolve_volume (spec.nodeName
 #                                                                       owned->'' or ''->node) — the
 #                                                                       two spec field exceptions, see
 #                                                                       the policy
+#                                          delete                       collect_unreferenced_volumes
+#                                                                       (peer.rs: an ownerless volume
+#                                                                       with no worktree and no
+#                                                                       snapshot has no
+#                                                                       ownerReference left to GC it)
 #   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
 #   snapshots (rustic-git.io)              get,list,watch               pull_beat (missing-commit
@@ -38,11 +51,16 @@
 #                                          patch                        record_post_cut_generation
 #                                                                       (the synced-generation
 #                                                                       annotation, metadata only)
-#                                          delete                       snapshot::retain (retention
-#                                                                       sweep past WS_SNAPSHOT_KEEP);
+#                                          delete                       snapshot::retain (one sync
+#                                                                       point per worktree; a push
+#                                                                       is never pruned);
 #                                                                       stop_push teardown cleanup;
 #                                                                       retire_pass's orphan sweep
-#                                                                       (spec.volume names no Volume)
+#                                                                       (spec.volume names no Volume);
+#                                                                       cleanup_parent (a deleted
+#                                                                       parent's own transients —
+#                                                                       worthless once the worktree
+#                                                                       they were cut from is gone)
 #   volumereplicas (rustic-git.io)         get,list,watch               pull_beat (source selection,
 #                                                                       reaper)
 #                                          create,patch                 write_replica_status (this
@@ -133,10 +151,12 @@ rules:
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch"]
   # `create` on the children: a controller that creates a child owns it, and the API lost the same
-  # verbs. No `delete` on volumes — a Volume goes by garbage collection through its ownerReference.
+  # verbs. `delete` is `collect_unreferenced_volumes` (peer.rs): an ownerless Volume with no
+  # worktree and no snapshot has no ownerReference left to garbage-collect it, so the sweep is the
+  # only thing that can reclaim it — without this verb the beat 403s every pass.
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
-    verbs: ["get", "list", "watch", "create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # `ownerbindings` are created by the agent that WINS a placement claim — `claim::ensure_binding`;
   # a losing claimant never creates one, and nothing ever edits or deletes one.
   - apiGroups: ["rustic-git.io"]
@@ -147,7 +167,8 @@ rules:
   # `local_commits` to decide what to fetch. `create` is also `home_commit_beat`'s own beat and
   # `stop_push`'s fixed-name `stop-{env}`/`stop-home-{ws}` CR (Task 8: the stop-before-teardown
   # push is a `Snapshot` now, not the deleted `SnapshotRequest`). `delete` is retention (the
-  # worktree's own node drops CRs beyond `WS_SNAPSHOT_KEEP`, converging the subvolume away too)
+  # worktree's own node keeps ONE sync point per worktree and drops the older ones, converging the
+  # subvolume away too — a push is never pruned, only deleted by hand through `/v1`)
   # and `stop_push`'s own teardown cleanup — left behind, the NEXT stop would find the same
   # fixed-name object already `Ready` and tear down without pushing again. `delete` is also
   # `retire_pass`'s orphan sweep, which clears the ownerless baselines minted before

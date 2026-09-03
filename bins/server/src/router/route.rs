@@ -178,18 +178,17 @@ pub(crate) const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-r
 /// before the router ever sees it — so adding a browse route means adding its
 /// tail here. `every_browse_route_is_routable` holds the two together.
 ///
-/// `imagetags`, `imagetagdelete`, `imagedelete`, `imagevisibility`, `volumehistory` and
-/// `volumedelete` are
+/// `imagetags`, `imagetagdelete`, `imagedelete`, `imagevisibility` and `volumehistory` are
 /// repo-scoped like the rest (though the first four route by the IMAGE key and the last by the
 /// VOLUME key — see `repo_of`). `images` and `volumes` are the two owner-scoped exceptions — see
 /// `api_route`.
-pub(crate) const BROWSE_TAILS: [&str; 26] = [
+pub(crate) const BROWSE_TAILS: [&str; 24] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
     "visibility", "create", "description", "delete", "protect", "merge", "patch", "images", "imagetags",
     "imagetagdelete", "imagedelete", "imagevisibility",
     // `volumes` is owner-scoped like `images` (two segments, no name); `volumehistory` names a
     // VOLUME and routes by the volume key, below.
-    "volumes", "volumehistory", "volumedelete", "snapshotdelete",
+    "volumes", "volumehistory",
     // Every pull-request route — list, get, comment, merge, close, check — has `pulls` as its
     // third segment, so this one entry covers all of them.
     "pulls",
@@ -286,7 +285,7 @@ pub(crate) fn repo_of(path: &str) -> Option<String> {
         // `volumehistory` names a VOLUME — `vol/{owner}/{name}`, the third keyspace — for the same
         // reason `imagetags` names an image: the records live in that database and only the node
         // holding it may open it.
-        if matches!(tail, "volumehistory" | "volumedelete" | "snapshotdelete") {
+        if tail == "volumehistory" {
             return Some(rustic_git_workspaces::registry::routing_key(owner, name));
         }
         let (owner, name) = crate::protocol::parse_repo_pair(owner, name)?;
@@ -755,15 +754,6 @@ mod tests {
             Some(rustic_git_workspaces::registry::routing_key("alice", "ws-1")),
         );
         assert_ne!(repo_of("/api/alice/ws-1/volumehistory"), repo_of("/api/alice/ws-1/refs"));
-        // The delete routes by the same volume key: it opens the same database the history does,
-        // so it has to reach the same node.
-        assert_eq!(repo_of("/api/alice/ws-1/volumedelete"), repo_of("/api/alice/ws-1/volumehistory"));
-        // `snapshotdelete` carries a fourth segment, the snapshot id — `api_route` reads only the
-        // third, so the id never changes which node the request reaches.
-        assert_eq!(
-            repo_of("/api/alice/ws-1/snapshotdelete/snap-9"),
-            repo_of("/api/alice/ws-1/volumehistory"),
-        );
         // An `/api/` path that is not a browse route is not routable at all. `repo_of` says None
         // and `route_inner` REFUSES it — it must never fall through to matchit, which would match
         // `/{owner}/{name}/git-upload-pack` with owner=`api`. See `api_prefixed`.

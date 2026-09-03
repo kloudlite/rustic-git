@@ -26,7 +26,7 @@ struct Server {
 fn vol_obj(name: &str, owner: &str) -> Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": "workspace"}},
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": "workspace"}},
         "spec": {"owner": owner, "nodeName": NODE, "region": "centralindia", "quotaGb": 20}
     })
 }
@@ -575,7 +575,7 @@ fn snap_obj() -> serde_json::Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": "ws-1-abcdef01"},
-        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": "", "pinned": false},
+        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
         "status": {"phase": "working"},
     })
 }
@@ -1477,7 +1477,7 @@ async fn detaching_a_stopped_workspace_still_collects_the_environment_side_polic
 /// A `Ready` `Snapshot` CR carrying an optional `spec.state` — what `find_commit_model_snapshot_for_restore`
 /// reads, and the only source of the restored spec once the source workspace is gone.
 fn ready_snap(name: &str, volume: &str, owner: &str, state: Option<Value>) -> Value {
-    let mut spec = json!({"volume": volume, "owner": owner, "worktree": volume, "parent": "", "pinned": false});
+    let mut spec = json!({"volume": volume, "owner": owner, "worktree": volume, "parent": ""});
     if let Some(st) = state {
         spec["state"] = st;
     }

@@ -67,7 +67,7 @@
                       },
                       "replicas": {
                         "default": 2,
-                        "description": "How many nodes should hold a synced copy of this volume's commit history — the commit\nmodel's replacement for \"one node has the only bytes\". Defaulted so every `Volume` written\nbefore this field existed keeps parsing; the reconciler that creates `VolumeReplica`\nchildren treats a missing field the same as an explicit 2.",
+                        "description": "How many nodes should hold a synced copy of this volume's snapshots — the replacement\nfor \"one node has the only bytes\". Defaulted so every `Volume` written\nbefore this field existed keeps parsing; the reconciler that creates `VolumeReplica`\nchildren treats a missing field the same as an explicit 2.",
                         "format": "uint32",
                         "minimum": 0.0,
                         "type": "integer"
@@ -130,7 +130,7 @@
                         ],
                         "properties": {
                           "cloneOf": {
-                            "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nUnder the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the head the API resolved\nONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before the commit model (and\nflag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
+                            "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nWith `commit: Some(_)`, `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the graft point the API\nresolved ONCE at clone time, so the clone stays on what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before shared-volume clones\nexisted, which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
                             "properties": {
                               "commit": {
                                 "nullable": true,
@@ -472,7 +472,7 @@
                             ],
                             "properties": {
                               "cloneOf": {
-                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nUnder the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the head the API resolved\nONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before the commit model (and\nflag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
+                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nWith `commit: Some(_)`, `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the graft point the API\nresolved ONCE at clone time, so the clone stays on what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before shared-volume clones\nexisted, which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
                                 "properties": {
                                   "commit": {
                                     "nullable": true,
@@ -614,7 +614,7 @@
                         "type": "array"
                       },
                       "head": {
-                        "description": "The commit id this worktree is checked out on right now. Written ONLY by the node actually\nrunning the pod — no other node can observe it, and a stale value here is exactly what\n\"the pod moved and hasn't reconciled yet\" looks like, never a fact anyone else may act on.",
+                        "description": "The snapshot id this worktree is checked out on right now. Written ONLY by the node actually\nrunning the pod — no other node can observe it, and a stale value here is exactly what\n\"the pod moved and hasn't reconciled yet\" looks like, never a fact anyone else may act on.",
                         "nullable": true,
                         "type": "string"
                       },
@@ -914,7 +914,7 @@
                             ],
                             "properties": {
                               "cloneOf": {
-                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nUnder the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the head the API resolved\nONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before the commit model (and\nflag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
+                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.\n\nWith `commit: Some(_)`, `volume` names the SOURCE'S OWN volume (not a\ndestination this object owns) and no child `Volume` is ever created for it: the clone is a\nsecond worktree of the same volume, checked out at `commit` — the graft point the API\nresolved ONCE at clone time, so the clone stays on what the caller saw rather than drifting\nwith the source's later pushes. `None` is every clone written before shared-volume clones\nexisted, which still copies bytes into a fresh child `Volume` via `clone_local_ids`.",
                                 "properties": {
                                   "commit": {
                                     "nullable": true,
@@ -1051,7 +1051,7 @@
                         "type": "array"
                       },
                       "head": {
-                        "description": "Same meaning and same one-writer rule as `WorkspaceStatus::head` — the commit id this\nenvironment's worktree is checked out on, written only by the node running it.",
+                        "description": "Same meaning and same one-writer rule as `WorkspaceStatus::head` — the snapshot id this\nenvironment's worktree is checked out on, written only by the node running it.",
                         "nullable": true,
                         "type": "string"
                       },
@@ -1085,7 +1085,7 @@
                         "type": "string"
                       },
                       "restoredTo": {
-                        "description": "The `spec.restore` wish this environment has already applied, recorded as the same PAIR the\n`Volume` records (`restoredTo` + `restoreRequestedAt`) and for the same reason: restoring\nthe same snapshot twice is a legitimate ask, so the id alone cannot tell a fresh wish from\na granted one.\n\nIt exists because a granted wish stays in the spec forever — a controller does not edit the\nuser's desired state. Without a record of having applied it, `restore_gate` re-derives\n`head` from the wish on EVERY pass, which silently undoes every push: the commit\nreconciler advances `head`, the next reconcile stamps it back to the restore point, and the\nenvironment's history can never move past the snapshot it was last restored to.",
+                        "description": "The `spec.restore` wish this environment has already applied, recorded as the same PAIR the\n`Volume` records (`restoredTo` + `restoreRequestedAt`) and for the same reason: restoring\nthe same snapshot twice is a legitimate ask, so the id alone cannot tell a fresh wish from\na granted one.\n\nIt exists because a granted wish stays in the spec forever — a controller does not edit the\nuser's desired state. Without a record of having applied it, `restore_gate` re-derives\n`head` from the wish on EVERY pass, which silently undoes every push: the snapshot\nreconciler advances `head`, the next reconcile stamps it back to the restore point, and the\nenvironment's history can never move past the snapshot it was last restored to.",
                         "nullable": true,
                         "type": "string"
                       },
@@ -1308,7 +1308,7 @@
                 "description": "Auto-generated derived type for SnapshotSpec via `CustomResource`",
                 "properties": {
                   "spec": {
-                    "description": "One immutable commit: a btrfs RO snapshot, recorded as a CR before the snapshot is cut so a\nretry finds the object and continues rather than orphaning a subvolume.\n\nNever patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the\nonly two things that ever remove one are an explicit delete and GC, same discipline as a\nregistry blob. Replaces the older `SnapshotRequest` push-as-annotation kind, which the cutover\ntask has since deleted — this is the only push record left.",
+                    "description": "One immutable cut — a snapshot or a sync point: a btrfs RO subvolume, recorded as a CR before the snapshot is cut so a\nretry finds the object and continues rather than orphaning a subvolume.\n\nNever patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the\nonly two things that ever remove one are an explicit delete and GC, same discipline as a\nregistry blob. Replaces the older `SnapshotRequest` push-as-annotation kind, which the cutover\ntask has since deleted — this is the only push record left.",
                     "properties": {
                       "message": {
                         "nullable": true,
@@ -1319,13 +1319,8 @@
                       },
                       "parent": {
                         "default": "",
-                        "description": "The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing\nreads creation timestamps to reconstruct history.",
+                        "description": "The parent cut's name, or empty for a root. Order comes ONLY from this chain — nothing\nreads creation timestamps to reconstruct history.",
                         "type": "string"
-                      },
-                      "pinned": {
-                        "default": false,
-                        "description": "Keeps this commit out of any future retention sweep. Never cleared by a controller.",
-                        "type": "boolean"
                       },
                       "state": {
                         "description": "Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.\n\nSchema is hand-written as free-form JSON (`preserve_unknown_state`), not `SnapshotState`'s\nown derived schema: kube-core's CRD generation flattens an internally-tagged enum's `oneOf`\nbranches into one object and panics when a shared property (`kind`) carries a different\n`const` per branch — which is the entire point of a tag. A hand-written *discriminated*\nschema would drift from the type the moment a variant changes, so this stays a plain\n`x-kubernetes-preserve-unknown-fields` object instead of trying to describe the union.\n`serde`'s view of the Rust type is untouched, so round-tripping is exact; only the\n*published* OpenAPI schema for this field is permissive. Because the schema can't validate\nit, a value that doesn't parse as `SnapshotState` must not fail the whole `Snapshot` read —\n`lenient_state` drops it to `None` (with a `tracing::warn!`) rather than taking the agent's\nlist/watch down with it.",
@@ -1334,14 +1329,14 @@
                       },
                       "transient": {
                         "default": false,
-                        "description": "A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a\nreplica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and\nretained ONE per worktree — see `snapshot::retain`. `push` never sets this.",
+                        "description": "A sync point, not a push: cut by the agent's sync beat (or a stop) from a live worktree so a\nreplica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and\nretained ONE per worktree — see `snapshot::retain`. `push` never sets this, which is the\nwhole distinction: `!transient` IS a snapshot (`Snapshot::is_snapshot`), and it is the only\none — an older build wrote a second flag alongside it, which serde ignores on the objects\nstored while it existed.",
                         "type": "boolean"
                       },
                       "volume": {
                         "type": "string"
                       },
                       "worktree": {
-                        "description": "The Workspace/Environment id whose worktree this commit is cut FROM — a volume can have\nmore than one worktree (a workspace plus a clone still attached, say), so `spec.volume`\nalone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The\ncommit reconciler only acts when THIS field's worktree is the one running on its node.\nRequired, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored\nobjects predating this field, so the usual back-compat exemption does not apply here.",
+                        "description": "The Workspace/Environment id whose worktree this cut is taken FROM — a volume can have\nmore than one worktree (a workspace plus a clone still attached, say), so `spec.volume`\nalone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The\nsnapshot reconciler only acts when THIS field's worktree is the one running on its node.\nRequired, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored\nobjects predating this field, so the usual back-compat exemption does not apply here.",
                         "type": "string"
                       }
                     },
@@ -1450,7 +1445,7 @@
                 "description": "Auto-generated derived type for VolumeReplicaSpec via `CustomResource`",
                 "properties": {
                   "spec": {
-                    "description": "One node's copy of a volume's commit history — the per-node replica state the commit model\ntracks in place of \"the object store has the only bytes\".\n\nWritten only by `spec.node`'s own controller, with two guarded exceptions: deleting a dead\nnode's replica row and clearing a dead node's claims, both gated on that node being NotReady\nfor longer than `WS_NODE_DEAD_SECS`.",
+                    "description": "One node's copy of a volume's snapshots — the per-node replica state kept in place of \"the object store has the only bytes\".\n\nWritten only by `spec.node`'s own controller, with two guarded exceptions: deleting a dead\nnode's replica row and clearing a dead node's claims, both gated on that node being NotReady\nfor longer than `WS_NODE_DEAD_SECS`.",
                     "properties": {
                       "node": {
                         "type": "string"
@@ -1472,7 +1467,7 @@
                         "additionalProperties": {
                           "type": "string"
                         },
-                        "description": "Branch name to commit id, this node's own view — what a reader checks before trusting a\n`head` claim against this replica.",
+                        "description": "Branch name to snapshot id, this node's own view — what a reader checks before trusting a\n`head` claim against this replica.",
                         "type": "object"
                       },
                       "phase": {

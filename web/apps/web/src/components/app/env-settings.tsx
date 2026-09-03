@@ -4,7 +4,7 @@ import { DeleteEnvDialog, DeleteSnapshotsDialog } from "@/components/app/env-act
 /** Everything about an environment that is a setting rather than a fact — which today is the way
  *  out, and the name it cannot change.
  *
- *  An ARCHIVED environment (`archived`) has no object left to configure or delete: the one thing
+ *  A DELETED environment (`archived`) has no object left to configure or delete: the one thing
  *  still deletable is its snapshots, so that is the only section it gets. The tab row stays the
  *  same either way — a row that loses a tab reads as a page that failed to load. */
 export function EnvSettings({
@@ -12,11 +12,15 @@ export function EnvSettings({
   id,
   name,
   archived,
+  snapshots,
 }: {
   owner: string;
   id: string;
   name: string;
   archived: boolean;
+  /** The volume's snapshot count, which both dialogs below name — one to promise they survive
+   *  the delete, the other to say how much the delete destroys. */
+  snapshots: number;
 }) {
   return (
     <div className="grid gap-8">
@@ -39,22 +43,22 @@ export function EnvSettings({
           <p className="text-sm2 leading-relaxed text-muted-foreground">
             {archived ? (
               <>
-                The environment is already gone. Its snapshots are the last copy of that data —
-                nothing else references them once they are deleted.
+                The environment is already gone. Its snapshots are the last copy of that data, and
+                the only thing keeping its volume.
               </>
             ) : (
               <>
                 Deleting stops its services, pushes one final snapshot, and removes it from the
-                node. Its snapshots survive as an archived row unless you say otherwise in the
-                dialog.
+                node. Its snapshots survive it — the environment appears under Snapshots on the
+                environments page, and deleting them for good lives there.
               </>
             )}
           </p>
           <div>
             {archived ? (
-              <DeleteSnapshotsDialog owner={owner} id={id} name={name} />
+              <DeleteSnapshotsDialog owner={owner} id={id} name={name} snapshots={snapshots} />
             ) : (
-              <DeleteEnvDialog owner={owner} id={id} name={name} />
+              <DeleteEnvDialog owner={owner} id={id} name={name} snapshots={snapshots} />
             )}
           </div>
         </div>

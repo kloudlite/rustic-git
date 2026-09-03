@@ -16,14 +16,14 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();
   const { env, services } = page;
-  // An archived environment runs nothing. Say so here rather than redirecting: a redirect is a
+  // A deleted environment runs nothing. Say so here rather than redirecting: a redirect is a
   // second navigation that the tab row has to catch up with, which is what made opening one
-  // archived environment look like a jump. The list already links archived rows to Snapshots.
+  // look like a jump. The list's Snapshots section already links these rows here.
   if (!env) {
     return (
       <div className="mt-5 border border-border bg-card px-5 py-14 text-center">
         <Boxes className="mx-auto size-6 text-muted-foreground" aria-hidden />
-        <p className="mt-3 text-sm2 font-medium">Archived — nothing is running</p>
+        <p className="mt-3 text-sm2 font-medium">Deleted — nothing is running</p>
         <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
           The environment was deleted and its snapshots kept. Restore one to run it again.
         </p>

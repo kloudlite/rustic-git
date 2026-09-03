@@ -22,14 +22,6 @@ use std::sync::Arc;
 // already exists for the pull side.
 // -------------------------------------------------------------------------------------------
 
-/// `WS_SNAPSHOT_KEEP`, default 10 — how many commits of the chain rooted at the just-cut head
-/// retention keeps before it starts deleting the tail.
-fn snapshot_keep() -> usize {
-    // `.max(1)`: `WS_SNAPSHOT_KEEP=0` from a config typo must never let `skip(0)` consider the
-    // commit just cut — the tip is always implicitly kept, same as `git gc` never expiring HEAD.
-    std::env::var("WS_SNAPSHOT_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(10).max(1)
-}
-
 /// Where `worktree` (a Workspace or Environment name) is running, if it names one that still
 /// exists and still points at `volume` — a stale or foreign `spec.worktree` cuts nothing rather
 /// than snapshotting the wrong disk.
@@ -225,53 +217,6 @@ async fn advance_head(ctx: &Arc<Ctx>, kind: &str, worktree: &str, name: &str) ->
     }
 }
 
-/// Every worktree head on `volume`, across both parent kinds — commits retention must never
-/// delete, no matter how far back in the keep-window they fall. List errors propagate: a
-/// half-seen head set is exactly the case that would let retention delete a commit someone is
-/// still standing on.
-async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
-    // F4: matched on the commit NAME's `{volume}-` prefix (`crd::snapshot_name`), not on
-    // `volume_ref` — a worktree whose status is mid-rebuild has `volumeRef` momentarily unset,
-    // and filtering on it there would make its head briefly invisible to retention. The prefix
-    // match is exact (commit names are volume-prefixed random hex) and cheap.
-    //
-    // ponytail: cluster-wide, not owner-scoped — a shared clone or a restore-to-new can put a
-    // worktree owned by a DIFFERENT owner on this volume (`CloneOf`), and an unpushed clone's head
-    // is its clone commit with no `Snapshot` under any owner to derive a selector from. Upgrade
-    // path: a volume-keyed label on parents, if this scan ever shows up in profiling.
-    let prefix = format!("{volume}-");
-    let mut heads = std::collections::HashSet::new();
-    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
-        if let Some(h) = w.status.as_ref().and_then(|s| s.head.clone()) {
-            if h.starts_with(&prefix) {
-                heads.insert(h);
-            }
-        }
-        // F4: a clone's grafted commit is unprotected until its FIRST checkout writes
-        // `status.head` — a busy source can sweep it out of the keep-window in that gap, and
-        // the clone lands `NoSuchCommit` forever. The spec already names it, so retention reads
-        // it from there too, same list this loop is already paying for.
-        if let Some(VolumeSource::CloneOf { commit: Some(c), .. }) = w.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
-            if c.starts_with(&prefix) {
-                heads.insert(c.clone());
-            }
-        }
-    }
-    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
-        if let Some(h) = e.status.as_ref().and_then(|s| s.head.clone()) {
-            if h.starts_with(&prefix) {
-                heads.insert(h);
-            }
-        }
-        if let Some(VolumeSource::CloneOf { commit: Some(c), .. }) = e.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
-            if c.starts_with(&prefix) {
-                heads.insert(c.clone());
-            }
-        }
-    }
-    Ok(heads)
-}
-
 /// Sync cuts that an interrupted clone still has to be seeded FROM, and which retention therefore
 /// may not delete — `VolumeSource::SeededFrom{volume, snapshot}` on a `Volume` of this pool.
 ///
@@ -299,15 +244,25 @@ async fn seeded_from_cuts(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collectio
     Ok(held)
 }
 
-/// Delete every `Ready` commit on `head`'s chain beyond `WS_SNAPSHOT_KEEP`, except pinned ones and
-/// any commit that is currently some worktree's head. v1 has no branches (`SnapshotSpec` carries
-/// none), so "per branch chain" collapses to the one chain reached by walking `spec.parent` from
-/// the commit just cut — the newest end of every chain this node could possibly be responsible
-/// for right now.
+/// Sync-point retention: exactly one `Ready` transient per worktree. A push is NEVER pruned —
+/// a snapshot lives until someone deletes it by hand (`DELETE /v1/volumes/{name}/snapshots/{id}`),
+/// which is why there is no keep window and no chain walk here any more.
+///
+/// A transient cut isn't a chain member at all (Task 3: it never carries `spec.parent` into a
+/// snapshot's ancestry and never advances a head). Order matters — the newer transient's
+/// `spec.parent` names the OLDER one as its btrfs send parent (Task 2), so deleting the older one
+/// before the newer reaches `Ready` would delete a still-needed send parent out from under a
+/// `Working` cut. Since this function only runs after `patch_status(Ready)` for `head` itself, any
+/// OTHER transient still seen here is either already `Ready` (safe to delete) or not yet `Ready`
+/// at all (filtered out below, so it is never considered) — never a `Working` cut caught mid-flight.
 ///
 /// Keep-biased throughout: any list error aborts the WHOLE pass with nothing deleted, same rule
 /// `pull_volume` and the GC sweep both follow — retention is a nice-to-have, a wrongly deleted
-/// commit is not recoverable.
+/// cut is not recoverable.
+///
+/// ponytail: this ignores worktree heads — a sync point is never a chain member and no HEAD can
+/// name one. It does consult `seeded_from_cuts`, because an interrupted clone DOES name a
+/// sync point by id (F6). Any further verb that names one belongs in that same set.
 async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let list = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
@@ -324,72 +279,26 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
         .map(|s| (s.name_any(), s))
         .collect();
 
-    // A transient cut isn't a chain member at all (Task 3: it never carries `spec.parent` into a
-    // commit's ancestry and never advances a head), so it gets its own pass: one sync point per
-    // worktree, full stop. Order matters — the newer transient's `spec.parent` names the OLDER
-    // one as its btrfs send parent (Task 2), so deleting the older one before the newer reaches
-    // `Ready` would delete a still-needed send parent out from under a `Working` cut. Since this
-    // function only runs after `patch_status(Ready)` for `head` itself, any OTHER transient still
-    // seen here is either already `Ready` (safe to delete) or not yet `Ready` at all (filtered out
-    // of `ready` above, so it is never considered) — never a `Working` cut caught mid-flight.
-    // ponytail: this arm still ignores `heads` and `spec.pinned` — a sync point is never a chain
-    // member and no HEAD can name one. It does consult `seeded_from_cuts`, because an interrupted
-    // clone DOES name a sync point by id (F6). Any further verb that names one belongs in that
-    // same set, or in `worktree_heads` the way the commit path below reads it.
-    if ready.get(head).is_some_and(|s| s.spec.transient) {
-        let worktree = ready[head].spec.worktree.clone();
-        // Keep-biased: a failed listing deletes nothing at all this pass.
-        let seeded = match seeded_from_cuts(ctx, volume).await {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(%volume, error = %e, "retention: listing seeded-from cuts; nothing deleted this pass");
-                return;
-            }
-        };
-        // A replica mid-receive of the older transient just deleted here fails that one pull and
-        // self-heals on its next: the beat re-lists and re-sends against whatever `Ready` transient
-        // is current then, so a delete racing an in-flight send is a retry, not data loss.
-        for (name, s) in &ready {
-            if name != head && s.spec.transient && s.spec.worktree == worktree && !seeded.contains(name) {
-                if let Err(e) = snap_api.delete(name, &Default::default()).await {
-                    tracing::warn!(%volume, snapshot = %name, error = %e, "retention: delete failed; left for the next pass");
-                }
-            }
-        }
+    if !ready.get(head).is_some_and(|s| s.spec.transient) {
         return;
     }
-
-    // Commit chain walk: transients are never chain members and must never be treated as one —
-    // filtered out here so a transient sharing a worktree can't be mistaken for this chain's
-    // parent, and is never a delete candidate on the commit path.
-    let by_name: std::collections::HashMap<String, crd::Snapshot> =
-        ready.into_iter().filter(|(_, s)| !s.spec.transient).collect();
-    let heads = match worktree_heads(ctx, volume).await {
+    let worktree = ready[head].spec.worktree.clone();
+    // Keep-biased: a failed listing deletes nothing at all this pass.
+    let seeded = match seeded_from_cuts(ctx, volume).await {
         Ok(h) => h,
         Err(e) => {
-            tracing::warn!(%volume, error = %e, "retention: listing worktree heads; nothing deleted this pass");
+            tracing::warn!(%volume, error = %e, "retention: listing seeded-from cuts; nothing deleted this pass");
             return;
         }
     };
-
-    // Walk the chain, newest (head) first — ORDER comes only from `spec.parent`, per the CRD's
-    // own doc comment, never from a listing or creation-time sort.
-    let mut chain = Vec::new();
-    let mut cur = Some(head.to_string());
-    while let Some(name) = cur {
-        let Some(s) = by_name.get(&name) else { break };
-        cur = (!s.spec.parent.is_empty()).then(|| s.spec.parent.clone());
-        chain.push(name);
-    }
-
-    let keep = snapshot_keep();
-    for name in chain.into_iter().skip(keep) {
-        let s = &by_name[&name];
-        if s.spec.pinned || heads.contains(&name) {
-            continue;
-        }
-        if let Err(e) = snap_api.delete(&name, &Default::default()).await {
-            tracing::warn!(%volume, snapshot = %name, error = %e, "retention: delete failed; left for the next pass");
+    // A replica mid-receive of the older transient just deleted here fails that one pull and
+    // self-heals on its next: the beat re-lists and re-sends against whatever `Ready` transient
+    // is current then, so a delete racing an in-flight send is a retry, not data loss.
+    for (name, s) in &ready {
+        if name != head && s.spec.transient && s.spec.worktree == worktree && !seeded.contains(name) {
+            if let Err(e) = snap_api.delete(name, &Default::default()).await {
+                tracing::warn!(%volume, snapshot = %name, error = %e, "retention: delete failed; left for the next pass");
+            }
         }
     }
 }
@@ -457,11 +366,11 @@ mod commit_tests {
         (Arc::new(ctx), rec)
     }
 
-    fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, pinned: bool, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
+    fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
         let v = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": name, "uid": format!("{name}-uid"), "generation": 1},
-            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "pinned": pinned, "transient": transient},
+            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "transient": transient},
             "status": {"phase": phase},
         });
         Arc::new(serde_json::from_value(v).unwrap())
@@ -509,7 +418,7 @@ mod commit_tests {
                 body: serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                     "status": {"phase": "ready"},
                 }),
             },
@@ -519,7 +428,7 @@ mod commit_tests {
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -542,7 +451,7 @@ mod commit_tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-b", "vol-1", None) }];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -558,7 +467,7 @@ mod commit_tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![not_found(WS_GET), not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1")];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK), "must requeue, not await a watch that never fires");
@@ -592,7 +501,7 @@ mod commit_tests {
                 body: serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                     "status": {"phase": "ready"},
                 }),
             },
@@ -602,7 +511,7 @@ mod commit_tests {
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -623,143 +532,37 @@ mod commit_tests {
             not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1"),
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, false, crd::Phase::Working);
+        let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK));
         assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "nothing written for an unknown volume");
     }
 
-    /// A chain of 13 commits, `WS_SNAPSHOT_KEEP=10`: the tail beyond the keep window is `c2, c1,
-    /// c0` (oldest three) — `c1` is pinned and `c0` is some worktree's current head, so only `c2`
-    /// is actually deleted. This is the durable-floor case the brief calls out: a head this far
-    /// back in the chain still survives the sweep.
+    /// Pushes are never pruned: a snapshot lives until someone deletes it by hand. A chain of 13
+    /// pushes with the newest just cut used to lose its tail to a keep window; now the whole chain
+    /// survives and retention returns without so much as a second listing.
     #[tokio::test]
-    async fn retention_deletes_beyond_keep_sparing_pinned_and_heads() {
-        std::env::set_var("WS_SNAPSHOT_KEEP", "10");
+    async fn retention_never_prunes_a_push() {
         let tmp = tempfile::tempdir().unwrap();
-        // vol-1-c12 -> vol-1-c11 -> ... -> vol-1-c0, oldest has no parent. Names carry the
-        // `vol-1-` prefix `worktree_heads`'s F4 match relies on — a real commit name always does
-        // (`crd::snapshot_name`).
         let name = |i: i32| format!("vol-1-c{i}");
         let mut items = Vec::new();
         for i in 0..13 {
             let parent = if i == 0 { String::new() } else { name(i - 1) };
-            let pinned = i == 1;
             items.push(serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": name(i), "uid": format!("{}-uid", name(i))},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": pinned},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": parent},
                 "status": {"phase": "ready"},
             }));
         }
-        let routes = vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) },
-            Route {
-                method: "GET",
-                path: WORKSPACES_LIST.into(),
-                status: 200,
-                body: list_of("Workspace", vec![ws_status_json("node-a", "vol-1", Some(&name(0)))]),
-            },
-            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route {
-                method: "DELETE",
-                path: format!("{SNAPSHOTS_LIST}/{}", name(2)),
-                status: 200,
-                body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}),
-            },
-        ];
+        let routes =
+            vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) }];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
         retain(&ctx, "vol-1", &name(12)).await;
 
-        let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/{}", name(2))], "only the unpinned, non-head tail entry is deleted: {deletes:?}");
-    }
-
-    /// F4: `worktree_heads` matches on the commit name's `{volume}-` prefix, not on
-    /// `status.volumeRef` — a worktree mid-rebuild has `volumeRef` momentarily unset, and this
-    /// proves its head still survives a sweep that would otherwise consider it fair game.
-    #[tokio::test]
-    async fn retention_spares_a_head_whose_worktree_status_has_no_volume_ref_yet() {
-        // No `WS_SNAPSHOT_KEEP` override: it is process-global and tests run in parallel in this
-        // binary (the file's own F3 note on `commit_model` living on `Ctx` rather than env is the
-        // same lesson) — two commits never reach even the smallest realistic keep window anyway,
-        // so the default proves the point without racing `retention_deletes_beyond_keep_...`'s own
-        // override.
-        let tmp = tempfile::tempdir().unwrap();
-        let older = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "vol-1-old", "uid": "old-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
-            "status": {"phase": "ready"},
-        });
-        let tip = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "vol-1-tip", "uid": "tip-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "vol-1-old", "pinned": false},
-            "status": {"phase": "ready"},
-        });
-        // `volumeRef` is absent — a status caught mid-rebuild — but `head` still names the
-        // volume's own oldest commit, and that must be enough to protect it.
-        let ws = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-            "metadata": {"name": "ws-1", "uid": "ws-uid"},
-            "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1", "image": "img", "desiredState": "running"},
-            "status": {"phase": "ready", "nodeName": "node-a", "head": "vol-1-old"},
-        });
-        let routes = vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![older, tip]) },
-            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![ws]) },
-            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-
-        retain(&ctx, "vol-1", "vol-1-tip").await;
-
-        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a volumeRef-less head must still be spared: {:?}", rec.calls());
-    }
-
-    /// F4: a clone's grafted commit (`cloneOf.commit` in the WORKSPACE SPEC) is unprotected
-    /// until its first checkout writes `status.head` — a busy source pushing past the keep window
-    /// in that gap would otherwise sweep the very commit the clone is pinned to, and the clone
-    /// lands `NoSuchCommit` forever. This clone has never had a `head` of its own (fresh, never
-    /// checked out), so only the SPEC names its commit — and that alone must be enough to spare
-    /// it.
-    #[tokio::test]
-    async fn retention_spares_a_spec_only_clone_commit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let older = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "vol-1-old", "uid": "old-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-src", "parent": "", "pinned": false},
-            "status": {"phase": "ready"},
-        });
-        let tip = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": "vol-1-tip", "uid": "tip-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-src", "parent": "vol-1-old", "pinned": false},
-            "status": {"phase": "ready"},
-        });
-        // No `status.head` at all — a fresh clone that has never checked out. Only the spec's
-        // `cloneOf.commit` names `vol-1-old`.
-        let clone = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-            "metadata": {"name": "ws-clone", "uid": "clone-uid"},
-            "spec": {"owner": "alice", "team": "", "name": "clone", "region": "r1", "image": "img", "desiredState": "running",
-                     "storage": {"quotaGb": 20, "source": {"cloneOf": {"volume": "vol-1", "commit": "vol-1-old"}}}},
-            "status": {"phase": "creating", "nodeName": "node-a"},
-        });
-        let routes = vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![older, tip]) },
-            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![clone]) },
-            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-
-        retain(&ctx, "vol-1", "vol-1-tip").await;
-
-        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a spec-only clone commit must survive: {:?}", rec.calls());
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a push is never pruned: {:?}", rec.calls());
     }
 
     /// Keep-biased: a `Snapshot`-list error must delete nothing at all, not even the obviously
@@ -793,7 +596,7 @@ mod commit_tests {
                 body: serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
                     "status": {"phase": "ready"},
                 }),
             },
@@ -804,13 +607,13 @@ mod commit_tests {
                 body: list_of("Snapshot", vec![serde_json::json!({
                     "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
                     "status": {"phase": "ready"},
                 })]),
             },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", true, crd::Phase::Working);
 
         let action = reconcile_commit(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -833,7 +636,7 @@ mod commit_tests {
         let ready = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
             "status": {"phase": "ready"},
         });
         let routes = vec![
@@ -842,7 +645,7 @@ mod commit_tests {
             Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![ready]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Working);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", true, crd::Phase::Working);
 
         reconcile_commit(s, ctx).await.unwrap();
 
@@ -859,11 +662,11 @@ mod commit_tests {
     #[tokio::test]
     async fn a_new_ready_transient_deletes_the_previous_one_for_its_worktree_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Ready);
-        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", false, true, crd::Phase::Ready);
-        let other = snapshot("sync-ws-2-c", "vol-1", "ws-2", "", false, true, crd::Phase::Ready);
+        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", true, crd::Phase::Ready);
+        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", true, crd::Phase::Ready);
+        let other = snapshot("sync-ws-2-c", "vol-1", "ws-2", "", true, crd::Phase::Ready);
         // A commit is not a sync point — the transient arm must spare it too.
-        let commit = snapshot("vol-1-commit", "vol-1", "ws-1", "", false, false, crd::Phase::Ready);
+        let commit = snapshot("vol-1-commit", "vol-1", "ws-1", "", false, crd::Phase::Ready);
         let items: Vec<serde_json::Value> = [&old, &new, &other, &commit]
             .into_iter()
             .map(|s| serde_json::to_value(s.as_ref()).unwrap())
@@ -891,8 +694,8 @@ mod commit_tests {
     #[tokio::test]
     async fn a_cut_a_seeded_clone_still_needs_survives_a_newer_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Ready);
-        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", false, true, crd::Phase::Ready);
+        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", true, crd::Phase::Ready);
+        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", true, crd::Phase::Ready);
         let items: Vec<serde_json::Value> =
             [&old, &new].into_iter().map(|s| serde_json::to_value(s.as_ref()).unwrap()).collect();
         let seeded_volume = |phase: &str, present: bool| {
@@ -943,13 +746,13 @@ mod commit_tests {
         let old = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "sync-ws-1-a", "uid": "a-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false, "transient": true},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
             "status": {"phase": "working"},
         });
         let new = serde_json::json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "sync-ws-1-b", "uid": "b-uid"},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "pinned": false, "transient": true},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "transient": true},
             "status": {"phase": "ready"},
         });
         let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![old, new]) }];
@@ -973,7 +776,7 @@ mod commit_tests {
             let mut v = serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": name, "uid": format!("{name}-uid")},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "pinned": false, "transient": transient},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "transient": transient},
                 "status": {"phase": phase},
             });
             if let Some(g) = gen {
@@ -1012,7 +815,7 @@ mod commit_tests {
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                 "status": {"phase": "ready"},
             })},
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_status_json("node-a", "vol-1", Some("vol-1-a")) },
@@ -1022,7 +825,7 @@ mod commit_tests {
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         // The shape the API server actually stores on create: no status at all.
-        let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, false, crd::Phase::Working)).clone();
+        let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working)).clone();
         s.status = None;
         let action = reconcile_commit(std::sync::Arc::new(s), ctx).await.unwrap();
         // The cut itself needs btrfs, which this box has not got — it fails and takes the
@@ -1035,64 +838,6 @@ mod commit_tests {
             "a status-less commit must not be ignored — it is a commit that has never been cut"
         );
         let _ = &rec;
-    }
-
-    /// A volume can carry commits and worktrees from more than one owner — a shared clone or a
-    /// restore-to-new lands a second owner's worktree on the SAME volume (CLAUDE.md's "Workspaces
-    /// and environments"). Retention must scan every owner's parents, not just the one whose
-    /// commit it just cut, or a foreign owner's head goes undetected and gets swept. Same 13-commit
-    /// chain and `WS_SNAPSHOT_KEEP=10` as `retention_deletes_beyond_keep_sparing_pinned_and_heads`
-    /// (both set it to the default value, so no race with tests that leave it unset) — but here
-    /// the tail entry that test deletes (`c2`) is instead a DIFFERENT owner's head.
-    #[tokio::test]
-    async fn retention_spares_another_owners_head_on_a_shared_volume() {
-        std::env::set_var("WS_SNAPSHOT_KEEP", "10");
-        let tmp = tempfile::tempdir().unwrap();
-        let name = |i: i32| format!("vol-1-c{i}");
-        let mut items = Vec::new();
-        for i in 0..13 {
-            let parent = if i == 0 { String::new() } else { name(i - 1) };
-            // c1 pinned, exactly as the sibling test — ownership of a COMMIT is not what protects
-            // it, only being pinned or being some worktree's head is, and this test isolates the
-            // "different owner's head" case from those two.
-            let pinned = i == 1;
-            let owner = if i == 2 { "bob" } else { "alice" };
-            items.push(serde_json::json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-                "metadata": {"name": name(i), "uid": format!("{}-uid", name(i))},
-                "spec": {"volume": "vol-1", "owner": owner, "worktree": "ws-1", "parent": parent, "pinned": pinned},
-                "status": {"phase": "ready"},
-            }));
-        }
-        // Bob's own worktree, on the SAME volume as alice's chain, owned by a different owner —
-        // its head is `c2`, the exact tail entry the sibling test deletes when nothing protects it.
-        let bob_ws = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-            "metadata": {"name": "ws-bob", "uid": "bob-uid"},
-            "spec": {"owner": "bob", "team": "", "name": "bob", "region": "r1", "image": "img", "desiredState": "running"},
-            "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1", "head": name(2)},
-        });
-        // c0, alice's own head, is protected the same way the sibling test protects it.
-        let alice_ws = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-            "metadata": {"name": "ws-1", "uid": "ws-1-uid"},
-            "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1", "image": "img", "desiredState": "running"},
-            "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1", "head": name(0)},
-        });
-        let routes = vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) },
-            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![alice_ws, bob_ws]) },
-            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
-        ];
-        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
-
-        retain(&ctx, "vol-1", &name(12)).await;
-
-        assert!(
-            rec.calls().iter().all(|c| !c.starts_with("DELETE")),
-            "a different owner's head on a shared volume must still be spared: {:?}",
-            rec.calls()
-        );
     }
 
     /// Keep-bias: a snapshot list this pass could not make deletes nothing at all.

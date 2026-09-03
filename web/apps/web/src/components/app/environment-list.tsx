@@ -9,23 +9,27 @@ import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import { when } from "@/lib/time";
 import type { ApiEnvironment } from "@/lib/api";
 import { Notices } from "@/components/app/workspace-list";
-
-/** An environment that no longer exists, but whose snapshots do — a volume on the server tier with
- *  history and no live `Environment`. Restoring one is the whole reason the row is here. */
-export type ArchivedEnv = {
-  id: string;
-  name: string;
-  latest_ms: number | null;
-  snapshots: number;
-  /** No push ever recorded what it was called; the row shows the id and says so. */
-  named: boolean;
-};
+import { ArchivedSnapshots } from "@/components/app/archived-snapshots";
+import type { ArchivedRow } from "@/lib/archived";
 
 /** A live row: the environment's own page is one click away, and every action lives THERE.
  *
  *  The row used to carry five buttons. A list is for finding the thing you meant; the actions
  *  belong where the thing is, which is also the only place that can show what they act on. */
-function LiveRow({ owner, e, latestMs }: { owner: string; e: ApiEnvironment; latestMs: number | null }) {
+function LiveRow({
+  owner,
+  e,
+  lastPushAt,
+  snapshots,
+}: {
+  owner: string;
+  e: ApiEnvironment;
+  lastPushAt: string | null;
+  /** How many snapshots the environment has. `undefined` means the volume listing had no row for
+   *  it — never pushed — and the row then says nothing rather than "0 snapshots", which reads as
+   *  a fact about a listing that failed just as much as about one that was empty. */
+  snapshots?: number;
+}) {
   return (
     <li>
       <Link
@@ -41,7 +45,8 @@ function LiveRow({ owner, e, latestMs }: { owner: string; e: ApiEnvironment; lat
             {/* Aggregate view mixes personal and team envs — name the owner when it isn't the page's. */}
             {e.owner !== owner ? `${e.owner} · ` : ""}
             {e.services.length} {e.services.length === 1 ? "service" : "services"} · {e.region}
-            {latestMs != null && ` · snapshot ${when(latestMs)}`}
+            {snapshots ? ` · ${snapshots} ${snapshots === 1 ? "snapshot" : "snapshots"}` : ""}
+            {lastPushAt && ` · last push ${when(Date.parse(lastPushAt))}`}
           </span>
           <Notices w={e} />
         </span>
@@ -56,12 +61,15 @@ export function EnvironmentList({
   environments,
   archived = [],
   latest = {},
+  snapshots = {},
 }: {
   owner: string;
   environments: ApiEnvironment[];
-  archived?: ArchivedEnv[];
-  /** Volume id → epoch millis of its newest snapshot, for the live rows' meta line. */
-  latest?: Record<string, number | null>;
+  archived?: ArchivedRow[];
+  /** Volume id → RFC3339 of its newest PUSH, for the live rows' meta line. */
+  latest?: Record<string, string | null>;
+  /** Volume id → its snapshot count, off the same listing as `latest`. */
+  snapshots?: Record<string, number>;
 }) {
   const [q, setQ] = useState("");
   // A row on its way up lands in one to three seconds; the shell's 10 s poll would show it late.
@@ -114,50 +122,18 @@ export function EnvironmentList({
           {shown.length > 0 && (
             <ul className="mt-5 divide-y divide-border border border-border bg-card">
               {shown.map((e) => (
-                <LiveRow key={e.id} owner={owner} e={e} latestMs={latest[e.id] ?? null} />
+                <LiveRow
+                  key={e.id}
+                  owner={owner}
+                  e={e}
+                  lastPushAt={latest[e.id] ?? null}
+                  snapshots={snapshots[e.id]}
+                />
               ))}
             </ul>
           )}
 
-          {/* Archived rows are environments that exist only as DATA. Collapsed, because they are
-              history rather than working set — and a native `<details>`, so the disclosure works
-              before hydration and needs no state of its own. */}
-          {shownArchived.length > 0 && (
-            <details className="mt-7 group">
-              <summary className="flex cursor-pointer list-none items-center gap-2 text-caption font-semibold tracking-wider text-muted-foreground uppercase">
-                <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" aria-hidden />
-                Archived ({shownArchived.length})
-                <span className="text-caption font-normal tracking-normal normal-case">
-                  — environments that are gone; their snapshots are not
-                </span>
-              </summary>
-              <ul className="mt-2.5 divide-y divide-border border border-border bg-card">
-                {shownArchived.map((a) => (
-                  <li key={a.id}>
-                    <Link
-                      href={`/${owner}/environments/${encodeURIComponent(a.id)}/snapshots`}
-                      className="flex items-center gap-3.5 px-5 py-3.5 transition-colors hover:bg-muted/40"
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2.5">
-                          <span className="truncate text-body font-medium">{a.name}</span>
-                          <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
-                            archived
-                          </span>
-                        </span>
-                        <span className="mt-1 block text-sm2 text-muted-foreground">
-                          {a.snapshots} {a.snapshots === 1 ? "snapshot" : "snapshots"}
-                          {a.latest_ms != null && ` · last ${when(a.latest_ms)}`}
-                          {!a.named && " · name not recorded"}
-                        </span>
-                      </span>
-                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
+          <ArchivedSnapshots owner={owner} kind="environment" rows={shownArchived} />
         </>
       )}
     </>

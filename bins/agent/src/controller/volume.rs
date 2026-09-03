@@ -451,6 +451,95 @@ pub(crate) async fn release_volume(ctx: &Arc<Ctx>, name: &str, owner: &str) -> R
     }
 }
 
+/// Remove `parent_uid`'s entry from the Volume's `ownerReferences` so Kubernetes GC stops seeing
+/// the Volume as that parent's child. Called only when the Volume still holds a Ready snapshot: a
+/// snapshot must outlive the workspace it was pushed from, and its bytes live on the Volume's
+/// subvolume — so the Volume has to survive its parent's delete, detached, rather than being
+/// collected with it. `ownerReferences` is METADATA, which is why the agent's admission policy
+/// (spec-only) needs nothing for this and its existing `patch` on volumes is enough.
+///
+/// Guarded like `take_volume`: `test` on the list we read, so a concurrent writer's change turns
+/// into `Ok(false)` — "lost, not broken" — and the finalizer simply requeues. An empty result is
+/// written as an empty list, which IS the detached state (no owners), not an error.
+pub(crate) async fn detach_volume(ctx: &Arc<Ctx>, name: &str, parent_uid: &str) -> Result<bool, kube::Error> {
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let current = api.get(name).await?.metadata.owner_references.unwrap_or_default();
+    if !current.iter().any(|o| o.uid == parent_uid) {
+        // Already detached (a requeue after a successful patch, or an object that never had us).
+        return Ok(true);
+    }
+    let kept: Vec<_> = current.iter().filter(|o| o.uid != parent_uid).cloned().collect();
+    let ops = json_patch::Patch(vec![
+        json_patch::PatchOperation::Test(json_patch::TestOperation {
+            path: "/metadata/ownerReferences".parse().expect("static pointer parses"),
+            value: serde_json::to_value(&current).expect("owner references serialize"),
+        }),
+        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
+            path: "/metadata/ownerReferences".parse().expect("static pointer parses"),
+            value: serde_json::to_value(&kept).expect("owner references serialize"),
+        }),
+    ]);
+    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// The mirror of `detach_volume`: add `parent`'s entry to a Volume it did NOT create, so a
+/// restored or cloned working copy is an owner of the volume it runs on (design rule 6). Without
+/// it the working copy is kept alive only by the snapshots on that volume — delete the last one
+/// and GC takes the subvolume its pod is running on.
+///
+/// Idempotent: an entry already present is `Ok(true)` on a bare GET. Guarded like `detach_volume`
+/// — `test` on the list we read, so a concurrent writer is "lost, not broken" and the caller
+/// requeues. `controller` is cleared because only ONE ownerReference may be the controller and
+/// that one belongs to the parent that created the Volume. `ownerReferences` is metadata, so the
+/// admission policy (spec-only) needs nothing and the existing `patch` on volumes is enough.
+pub(crate) async fn attach_volume<K>(ctx: &Arc<Ctx>, name: &str, parent: &K) -> Result<bool, ReconcileErr>
+where
+    K: Resource<DynamicType = ()>,
+{
+    let mut mine = owner_ref_of_kind(parent)?;
+    mine.controller = Some(false);
+    mine.block_owner_deletion = Some(false);
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let current = api.get(name).await?.metadata.owner_references.unwrap_or_default();
+    if current.iter().any(|o| o.uid == mine.uid) {
+        return Ok(true);
+    }
+    let mut next = current.clone();
+    next.push(mine);
+    let path = "/metadata/ownerReferences";
+    let value = serde_json::to_value(&next).expect("owner references serialize");
+    // A DETACHED volume — the ordinary restore target — has no `ownerReferences` key at all
+    // (the API server drops the empty list), and a `test` against `[]` would 422 forever on it.
+    // `add` creates the key and is the whole patch there; the guarded form is for the case where
+    // there is an existing list to lose.
+    let ops = json_patch::Patch(if current.is_empty() {
+        vec![json_patch::PatchOperation::Add(json_patch::AddOperation {
+            path: path.parse().expect("static pointer parses"),
+            value,
+        })]
+    } else {
+        vec![
+            json_patch::PatchOperation::Test(json_patch::TestOperation {
+                path: path.parse().expect("static pointer parses"),
+                value: serde_json::to_value(&current).expect("owner references serialize"),
+            }),
+            json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
+                path: path.parse().expect("static pointer parses"),
+                value,
+            }),
+        ]
+    });
+    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
 /// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
 /// this guards is a pod wedged forever on `path … does not exist`.
@@ -570,6 +659,7 @@ where
         }
         _ => None,
     };
+    let is_shared = shared.is_some();
     let vol = match shared {
         Some(Some(v)) => v,
         // The source volume vanished between claim and this pass — same shape as any other
@@ -603,6 +693,18 @@ where
             volume_ref: None,
             phase: crd::Phase::Creating,
             cond: crd::condition("Ready", false, "VolumeTakeover", "taking ownership of the released volume", gen),
+            action: Action::requeue(std::time::Duration::from_secs(5)),
+        });
+    }
+    // Design rule 6: a working copy grafted onto someone ELSE's volume becomes an owner of it,
+    // or only the snapshots keep it alive and deleting the last one collects the subvolume this
+    // pod runs on. After the placement guards, not before: a pass that turns out to be on the
+    // wrong node has no business rewriting the volume's owner list. A lost CAS just requeues.
+    if is_shared && vol.spec.node_name == node_name && !attach_volume(ctx, &id, parent).await? {
+        return Ok(Resolved::Wait {
+            volume_ref: None,
+            phase: crd::Phase::Creating,
+            cond: crd::condition("Ready", false, "VolumeAttach", "attaching to the shared volume", gen),
             action: Action::requeue(std::time::Duration::from_secs(5)),
         });
     }
@@ -787,11 +889,13 @@ mod tests {
         assert_ne!(sent["status"]["phase"], "error", "a live owner is not an error: {sent}");
     }
 
-    /// The migration baseline is the ONE Snapshot nothing owned, so 13 of them outlived their
-    /// volumes on the cluster. Cluster-scoped may own cluster-scoped: the Volume's own uid is the
-    /// whole fix, and Kubernetes GC does the rest.
+    /// The migration baseline is owned by its PARENT, not its Volume (the reverse of a real push
+    /// commit — see the WHY comment on `migrate_and_seed_baseline`): a Volume that only ever had
+    /// its baseline is not worth keeping once the workspace it was cut for is gone, so the
+    /// baseline must die with the parent rather than outlive it as an orphan CR. 13 were found
+    /// on the cluster that way before this had an owner at all.
     #[tokio::test]
-    async fn the_migration_baseline_is_owned_by_its_volume() {
+    async fn the_migration_baseline_is_owned_by_its_parent() {
         let tmp = tempfile::tempdir().unwrap();
         // The mid-migration staging dir: `migrate_volume`'s recovery arm reports a real migration
         // without needing btrfs, which is what mints the baseline CR.
@@ -803,12 +907,19 @@ mod tests {
             "status": {"phase": "ready"},
         }))
         .unwrap();
+        let parent: crd::Workspace = serde_json::from_value(serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "vol-1", "uid": "uid-ws-1", "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "name": "src", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
+            "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1"},
+        }))
+        .unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![post(
             "/apis/rustic-git.io/v1alpha1/snapshots",
             serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": "vol-1.aaaa"},
-                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "vol-1", "parent": "", "pinned": false, "transient": false},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "vol-1", "parent": "", "transient": false},
             }),
         )]);
 
@@ -819,16 +930,17 @@ mod tests {
             quota_gb: 5,
             attached_environment: None,
         };
+        let parent_ref = super::owner_ref_of_kind(&parent).unwrap();
         assert!(
-            super::super::migrate_and_seed_baseline(&ctx, &vol, "alice", state).await.unwrap(),
+            super::super::migrate_and_seed_baseline(&ctx, &vol, parent_ref, "alice", state).await.unwrap(),
             "the staging dir is a real migration"
         );
 
         let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots").remove(0);
         let owner = &sent["metadata"]["ownerReferences"][0];
-        assert_eq!(owner["kind"], "Volume");
+        assert_eq!(owner["kind"], "Workspace");
         assert_eq!(owner["name"], "vol-1");
-        assert_eq!(owner["uid"], "uid-vol-1");
+        assert_eq!(owner["uid"], "uid-ws-1");
         assert_eq!(owner["controller"], true);
         assert_eq!(sent["spec"]["state"]["kind"], "workspace");
     }

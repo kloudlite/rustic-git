@@ -65,12 +65,12 @@ pub enum DesiredState {
 pub enum VolumeSource {
     /// A local snapshot of a sibling on the same pool — no registry round trip.
     ///
-    /// Under the commit model (`commit: Some(_)`), `volume` names the SOURCE'S OWN volume (not a
+    /// With `commit: Some(_)`, `volume` names the SOURCE'S OWN volume (not a
     /// destination this object owns) and no child `Volume` is ever created for it: the clone is a
-    /// second worktree of the same volume, checked out at `commit` — the head the API resolved
-    /// ONCE at clone time, so the clone stays pinned to what the caller saw rather than drifting
-    /// with the source's later pushes. `None` is every clone written before the commit model (and
-    /// flag-off), which still copies bytes into a fresh child `Volume` via `clone_local_ids`.
+    /// second worktree of the same volume, checked out at `commit` — the graft point the API
+    /// resolved ONCE at clone time, so the clone stays on what the caller saw rather than drifting
+    /// with the source's later pushes. `None` is every clone written before shared-volume clones
+    /// existed, which still copies bytes into a fresh child `Volume` via `clone_local_ids`.
     CloneOf {
         volume: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,8 +168,8 @@ pub struct VolumeSpec {
     pub node_name: String,
     pub region: String,
     pub quota_gb: u64,
-    /// How many nodes should hold a synced copy of this volume's commit history — the commit
-    /// model's replacement for "one node has the only bytes". Defaulted so every `Volume` written
+    /// How many nodes should hold a synced copy of this volume's snapshots — the replacement
+    /// for "one node has the only bytes". Defaulted so every `Volume` written
     /// before this field existed keeps parsing; the reconciler that creates `VolumeReplica`
     /// children treats a missing field the same as an explicit 2.
     #[serde(default = "default_replicas")]
@@ -213,7 +213,7 @@ pub struct VolumeStatus {
     pub conditions: Vec<Condition>,
 }
 
-/// One immutable commit: a btrfs RO snapshot, recorded as a CR before the snapshot is cut so a
+/// One immutable cut — a snapshot or a sync point: a btrfs RO subvolume, recorded as a CR before the snapshot is cut so a
 /// retry finds the object and continues rather than orphaning a subvolume.
 ///
 /// Never patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the
@@ -238,25 +238,25 @@ pub struct VolumeStatus {
 pub struct SnapshotSpec {
     pub volume: String,
     pub owner: String,
-    /// The Workspace/Environment id whose worktree this commit is cut FROM — a volume can have
+    /// The Workspace/Environment id whose worktree this cut is taken FROM — a volume can have
     /// more than one worktree (a workspace plus a clone still attached, say), so `spec.volume`
     /// alone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The
-    /// commit reconciler only acts when THIS field's worktree is the one running on its node.
+    /// snapshot reconciler only acts when THIS field's worktree is the one running on its node.
     /// Required, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored
     /// objects predating this field, so the usual back-compat exemption does not apply here.
     pub worktree: String,
-    /// The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing
+    /// The parent cut's name, or empty for a root. Order comes ONLY from this chain — nothing
     /// reads creation timestamps to reconstruct history.
     #[serde(default)]
     pub parent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Keeps this commit out of any future retention sweep. Never cleared by a controller.
-    #[serde(default)]
-    pub pinned: bool,
-    /// A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a
+    /// A sync point, not a push: cut by the agent's sync beat (or a stop) from a live worktree so a
     /// replica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and
-    /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this.
+    /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this, which is the
+    /// whole distinction: `!transient` IS a snapshot (`Snapshot::is_snapshot`), and it is the only
+    /// one — an older build wrote a second flag alongside it, which serde ignores on the objects
+    /// stored while it existed.
     #[serde(default)]
     pub transient: bool,
     /// Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.
@@ -364,8 +364,7 @@ pub struct SnapshotStatus {
     pub ready_at: Option<String>,
 }
 
-/// One node's copy of a volume's commit history — the per-node replica state the commit model
-/// tracks in place of "the object store has the only bytes".
+/// One node's copy of a volume's snapshots — the per-node replica state kept in place of "the object store has the only bytes".
 ///
 /// Written only by `spec.node`'s own controller, with two guarded exceptions: deleting a dead
 /// node's replica row and clearing a dead node's claims, both gated on that node being NotReady
@@ -403,10 +402,40 @@ pub struct VolumeReplicaStatus {
     /// "Synced" | "Syncing" — a plain `String`, not `Phase`: this is a `selectableField` and the
     /// API server only accepts a string type there, never an enum's underlying representation.
     pub phase: String,
-    /// Branch name to commit id, this node's own view — what a reader checks before trusting a
+    /// Branch name to snapshot id, this node's own view — what a reader checks before trusting a
     /// `head` claim against this replica.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branches: BTreeMap<String, String>,
+}
+
+/// The message an older build stamped on a migration baseline, back when a baseline was written as
+/// an ordinary record. Matched by shape rather than migrated: the records are already on the
+/// cluster, and a migration job to rewrite them is more machinery than one predicate.
+const LEGACY_BASELINE_MESSAGE: &str = "migration baseline";
+
+impl Snapshot {
+    /// A push, as opposed to a sync point — the one distinction there is. Everything that keeps a
+    /// record (retention, `cleanup_parent`, the volume listing, `delete_snapshot`) asks this.
+    ///
+    /// A MIGRATION BASELINE is not a push either, whoever wrote it: nobody asked for it, it exists
+    /// only to seed replication of a pre-model volume, and treating one as a snapshot would keep
+    /// its Volume alive forever after the workspace was deleted. Baselines are written as sync
+    /// points now (`migrate_and_seed_baseline`); the shape match is for the ones already stored.
+    pub fn is_snapshot(&self) -> bool {
+        !self.spec.transient && !self.is_legacy_baseline()
+    }
+
+    // ponytail: a baseline is recognised by SHAPE — a root record of the volume's own worktree
+    // carrying exactly that message — because the records are already stored and a rewrite job is
+    // more machinery than a predicate. Ceiling: a person's very first push, on the volume's own
+    // worktree, whose message is exactly "migration baseline", reads as one and would be deleted
+    // with its parent. Upgrade path: a `baseline: true` field on new records, and this shape match
+    // kept only for the pre-field ones.
+    fn is_legacy_baseline(&self) -> bool {
+        self.spec.parent.is_empty()
+            && self.spec.worktree == self.spec.volume
+            && self.spec.message.as_deref() == Some(LEGACY_BASELINE_MESSAGE)
+    }
 }
 
 /// `{volume}-{8 hex}` — CR-first naming: minted before the btrfs snapshot is cut, so a retried
@@ -614,7 +643,7 @@ pub struct WorkspaceStatus {
     /// it in `known_hosts`, so an absent one means "no session yet", never "trust on first use".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host_key: Option<String>,
-    /// The commit id this worktree is checked out on right now. Written ONLY by the node actually
+    /// The snapshot id this worktree is checked out on right now. Written ONLY by the node actually
     /// running the pod — no other node can observe it, and a stale value here is exactly what
     /// "the pod moved and hasn't reconciled yet" looks like, never a fact anyone else may act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -713,7 +742,7 @@ pub struct EnvironmentStatus {
     pub service_status: Vec<ServiceStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
-    /// Same meaning and same one-writer rule as `WorkspaceStatus::head` — the commit id this
+    /// Same meaning and same one-writer rule as `WorkspaceStatus::head` — the snapshot id this
     /// environment's worktree is checked out on, written only by the node running it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
@@ -724,7 +753,7 @@ pub struct EnvironmentStatus {
     ///
     /// It exists because a granted wish stays in the spec forever — a controller does not edit the
     /// user's desired state. Without a record of having applied it, `restore_gate` re-derives
-    /// `head` from the wish on EVERY pass, which silently undoes every push: the commit
+    /// `head` from the wish on EVERY pass, which silently undoes every push: the snapshot
     /// reconciler advances `head`, the next reconcile stamps it back to the restore point, and the
     /// environment's history can never move past the snapshot it was last restored to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -769,7 +798,7 @@ pub struct OwnerBindingStatus {
     pub conditions: Vec<Condition>,
 }
 
-/// The label a commit-model `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
+/// The label a `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
 /// call rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
 /// authorization.
 pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
@@ -1072,6 +1101,41 @@ mod tests {
         assert_ne!(a, b, "two calls must not collide");
     }
 
+    /// The one distinction there is: a push is a snapshot, a sync point is not, and a MIGRATION
+    /// BASELINE is not — including the ones an older build wrote as ordinary records, which are
+    /// already on the cluster and would otherwise keep their Volume alive forever.
+    #[test]
+    fn a_push_is_a_snapshot_but_a_sync_point_or_a_baseline_is_not() {
+        let snap = |spec: serde_json::Value| -> Snapshot {
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": "v-aaaaaaaa"}, "spec": spec,
+            }))
+            .unwrap()
+        };
+        let base = serde_json::json!({"volume": "v", "owner": "o", "worktree": "v", "parent": ""});
+
+        assert!(snap(base.clone()).is_snapshot(), "a push");
+        let mut with_msg = base.clone();
+        with_msg["message"] = serde_json::json!("wip");
+        assert!(snap(with_msg).is_snapshot(), "a push with a message is still a push");
+
+        let mut transient = base.clone();
+        transient["transient"] = serde_json::json!(true);
+        assert!(!snap(transient).is_snapshot(), "a sync point");
+
+        let mut legacy = base.clone();
+        legacy["message"] = serde_json::json!("migration baseline");
+        assert!(!snap(legacy).is_snapshot(), "a baseline an older build wrote as an ordinary record");
+
+        // Shape, not text alone: a push that happens to carry that message but sits on a parent is
+        // somebody's snapshot, and a baseline is always a root.
+        let mut lookalike = base;
+        lookalike["message"] = serde_json::json!("migration baseline");
+        lookalike["parent"] = serde_json::json!("v-bbbbbbbb");
+        assert!(snap(lookalike).is_snapshot(), "a rooted record is never a baseline");
+    }
+
     #[test]
     fn replica_name_is_deterministic_per_volume_and_node() {
         assert_eq!(replica_name("myvol", "node-a"), "myvol.node-a");
@@ -1081,7 +1145,7 @@ mod tests {
     #[test]
     fn snapshot_spec_round_trips_with_empty_parent_and_no_message() {
         let spec = SnapshotSpec {
-            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false, transient: false, state: None,
+            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, transient: false, state: None,
         };
         let v = serde_json::to_value(&spec).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
@@ -1109,7 +1173,7 @@ mod tests {
     #[test]
     fn a_snapshot_spec_without_state_still_deserializes() {
         let s: SnapshotSpec = serde_json::from_value(serde_json::json!({
-            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "pinned": false, "transient": false
+            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "transient": false
         }))
         .unwrap();
         assert!(s.state.is_none());
@@ -1120,7 +1184,7 @@ mod tests {
     #[test]
     fn a_malformed_snapshot_state_is_dropped_not_a_deserialize_error() {
         let s: SnapshotSpec = serde_json::from_value(serde_json::json!({
-            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "pinned": false,
+            "volume": "v", "owner": "o", "worktree": "v", "parent": "",
             "transient": false, "state": {"kind": "bogus"}
         }))
         .unwrap();

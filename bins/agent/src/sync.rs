@@ -1,4 +1,5 @@
-//! The sync beat: one transient `Snapshot` per live worktree whose btrfs generation has moved.
+//! The sync beat: one transient `Snapshot` per live worktree whose btrfs generation has moved, or
+//! whose definition has changed.
 //!
 //! A push is the only thing that writes history; replication can only carry what has been cut, so
 //! between two pushes a replica holds nothing of the work in progress. This beat closes that gap
@@ -6,6 +7,12 @@
 //! worktree — so the puller has something recent to fetch. It is deliberately a beat and not a
 //! reconcile: the thing it reacts to (bytes changing under a running pod) produces no Kubernetes
 //! event at all.
+//!
+//! Bytes are not the whole record: every cut freezes the parent's definition (`spec.state`), and a
+//! package, image, resources, quota or services change moves no byte at all. A worktree whose
+//! newest sync point froze a definition that is no longer the parent's is therefore due as much as
+//! one whose generation moved — otherwise a re-host or an interrupted clone comes up with a stale
+//! definition it will never be told about.
 //!
 //! Keep-biased throughout: every per-object failure warns and moves on, and an unreadable
 //! generation cuts NOTHING rather than cutting a redundant snapshot on every pass.
@@ -38,6 +45,13 @@ pub fn due(current: u64, recorded: Option<u64>) -> bool {
     recorded.is_none_or(|g| current > g)
 }
 
+/// The other half of the decision: the newest sync point froze a definition, and the parent's is no
+/// longer it. No sync point at all (`None`) is "we have never recorded this definition", which is
+/// changed — the same rule `due` applies to a never-synced worktree.
+pub fn definition_changed(live: &crd::SnapshotState, recorded: Option<&crd::SnapshotState>) -> bool {
+    recorded != Some(live)
+}
+
 /// Sync points are not addressed by name by anything, so the name only has to be unique and
 /// recognisable — the random suffix is what lets a new one exist while the previous is still being
 /// retained away.
@@ -68,7 +82,6 @@ fn build_sync_spec(live: &crate::listing::Parent, parent: String) -> crd::Snapsh
         // already holds. Empty on the first one, exactly as a root commit is.
         parent,
         message: None,
-        pinned: false,
         transient: true,
         state: Some(live.state.clone()),
     }
@@ -85,13 +98,14 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     };
 
     let mut recorded: Option<u64> = None;
+    let mut recorded_state: Option<crd::SnapshotState> = None;
     let mut parent = String::new();
     for s in &list.items {
         if !s.spec.transient || s.spec.worktree != live.name {
             continue;
         }
         match s.status.as_ref().map(|st| st.phase) {
-            // One cut in flight at a time — the same rule `create_commit` applies, and the reason
+            // One cut in flight at a time — the same rule `create_snapshot` applies, and the reason
             // this beat can run on a tick without piling snapshots onto a slow btrfs.
             Some(crd::Phase::Working) => {
                 tracing::debug!(worktree = %live.name, snapshot = %s.name_any(), "sync: a transient is Working, skipping this pass");
@@ -101,6 +115,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
                 let gen = s.annotations().get(SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok());
                 if gen >= recorded {
                     recorded = gen;
+                    recorded_state = s.spec.state.clone();
                     parent = s.name_any();
                 }
             }
@@ -122,7 +137,9 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
             return;
         }
     };
-    if !due(gen, recorded) {
+    // The bytes may be identical and the cut still worth taking: it is the RECORD that differs,
+    // and a sync point is the only place the definition reaches another node.
+    if !due(gen, recorded) && !definition_changed(&live.state, recorded_state.as_ref()) {
         return;
     }
 
@@ -240,5 +257,71 @@ mod tests {
         assert_eq!(spec.parent, "sync-ws-1-prev");
         assert!(spec.transient);
         assert_eq!(spec.state, Some(live.state));
+    }
+
+    fn env_fixture(services: Vec<rustic_git_workspaces::model::Service>) -> crate::listing::Parent {
+        crate::listing::Parent {
+            kind: "Environment",
+            pod_ref: None,
+            state: crd::SnapshotState::Environment { services, quota_gb: 20 },
+            ..live_fixture()
+        }
+    }
+
+    fn service(name: &str) -> rustic_git_workspaces::model::Service {
+        rustic_git_workspaces::model::Service {
+            name: name.into(),
+            image: "mongo:7".into(),
+            command: vec![],
+            env: Default::default(),
+            mounts: vec![],
+            ports: vec![27017],
+        }
+    }
+
+    /// A package change moves no byte, so the generation says "nothing to do" — but the newest sync
+    /// point froze the OLD package list, and a re-host from it would come up with the old profile.
+    #[test]
+    fn a_definition_change_is_due_even_when_the_generation_stood_still() {
+        let mut live = live_fixture();
+        let recorded = live.state.clone();
+        assert!(!due(5, Some(5)), "the bytes did not move");
+        assert!(!definition_changed(&live.state, Some(&recorded)), "an idle worktree cuts nothing");
+
+        let crd::SnapshotState::Workspace { packages, .. } = &mut live.state else { unreachable!() };
+        *packages = vec!["ripgrep".into()];
+        assert!(definition_changed(&live.state, Some(&recorded)));
+        // And the cut that follows carries the NEW list, not the one the parent sync point froze.
+        let spec = build_sync_spec(&live, "sync-ws-1-prev".into());
+        let Some(crd::SnapshotState::Workspace { packages, .. }) = spec.state else { unreachable!() };
+        assert_eq!(packages, vec!["ripgrep".to_string()]);
+    }
+
+    /// Environments carry a definition too (services, quota) and go through the same beat — the one
+    /// asymmetry is that they have no `podRef` to be live by.
+    #[test]
+    fn an_environments_service_change_is_due_and_lands_in_the_cut() {
+        let recorded = env_fixture(vec![service("db")]);
+        let live = env_fixture(vec![service("db"), service("cache")]);
+        assert!(!definition_changed(&recorded.state, Some(&recorded.state)));
+        assert!(definition_changed(&live.state, Some(&recorded.state)));
+
+        let spec = build_sync_spec(&live, String::new());
+        let Some(crd::SnapshotState::Environment { services, .. }) = spec.state else { unreachable!() };
+        assert_eq!(services.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), ["db", "cache"]);
+    }
+
+    /// A worktree with no sync point at all has never recorded its definition anywhere.
+    #[test]
+    fn a_worktree_with_no_sync_point_has_a_changed_definition() {
+        assert!(definition_changed(&live_fixture().state, None));
+    }
+
+    /// The beat only ever sees what `listing::Parent::is_live_worktree` admits — asserted here
+    /// rather than assumed, because an environment reaching it depends on `pod_ref: None` being
+    /// tolerated for that kind alone.
+    #[test]
+    fn a_running_environment_is_a_live_worktree() {
+        assert!(env_fixture(vec![]).is_live_worktree());
     }
 }
