@@ -820,3 +820,101 @@ async fn cloning_an_interrupted_environment_is_a_409_that_names_the_wait() {
         s.rec.calls()
     );
 }
+
+/// A push freezes the workspace's own definition beside the cut, so a later restore knows what
+/// image/packages went with it rather than inheriting whatever the workspace has become.
+#[tokio::test]
+async fn a_push_records_the_workspace_definition_on_the_snapshot() {
+    let mut w = placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa");
+    w["spec"]["image"] = json!("alpine:3.20");
+    w["spec"]["packages"] = json!(["jq"]);
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), w),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"message": "m"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+
+    let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
+    assert_eq!(req["spec"]["state"]["kind"], "workspace");
+    assert_eq!(req["spec"]["state"]["image"], "alpine:3.20");
+    assert_eq!(req["spec"]["state"]["packages"], json!(["jq"]));
+}
+
+/// Same freeze on the environment side: the state names its services, not the workspace shape.
+#[tokio::test]
+async fn a_push_records_the_environment_services_on_the_snapshot() {
+    let mut e = placed_env("env-1", "karthik");
+    e["spec"]["services"] = json!([
+        {"name": "db", "image": "mongo:7", "command": [], "env": {}, "mounts": [], "ports": [27017]},
+        {"name": "cache", "image": "redis:7", "command": [], "env": {}, "mounts": [], "ports": [6379]},
+    ]);
+    let routes = vec![
+        get(format!("{API}/environments/env-1"), e),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/env-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "env-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("env-1-cccccccc", "env-1", "karthik", "env-1", "", "working") },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/env-1/push", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+
+    let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
+    assert_eq!(req["spec"]["state"]["kind"], "environment");
+    assert_eq!(req["spec"]["state"]["services"].as_array().unwrap().len(), 2);
+}
+
+/// The clone cut freezes the SOURCE's definition too — a restore from it should not depend on the
+/// source workspace still existing, let alone still looking the same.
+#[tokio::test]
+async fn a_clone_cut_records_the_source_definition() {
+    let mut w = placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa");
+    w["spec"]["image"] = json!("alpine:3.20");
+    w["spec"]["packages"] = json!(["jq"]);
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), w),
+        no_workspaces(),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
+        ]})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+            "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
+                body: snapshot("clone-ws-1-cafe", "ws-1", "karthik", "ws-1", "sync-ws-1-bbbb", "working") },
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let r = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "copy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+
+    let cut = s.rec.sent("POST", &format!("{API}/snapshots")).into_iter().find(|b| b["metadata"]["name"].as_str().unwrap().starts_with("clone-")).unwrap();
+    assert_eq!(cut["spec"]["state"]["kind"], "workspace");
+    assert_eq!(cut["spec"]["state"]["image"], "alpine:3.20");
+}

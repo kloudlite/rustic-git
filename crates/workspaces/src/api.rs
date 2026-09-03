@@ -1146,6 +1146,7 @@ async fn clone_base(
     worktree: &str,
     interrupted: bool,
     parent_ref: Option<OwnerReference>,
+    state: crd::SnapshotState,
 ) -> Result<(BasedOn, Option<crd::Snapshot>), Response> {
     let (newest, all) = newest_transient(c, volume, worktree).await?;
     if interrupted {
@@ -1180,7 +1181,7 @@ async fn clone_base(
             message: Some("cloning".to_string()),
             pinned: false,
             transient: true,
-            state: None,
+            state: Some(state),
         },
     );
     // `status` on CREATE is stored verbatim, which is how this is born `Working` and reaches the
@@ -1225,7 +1226,8 @@ async fn clone_ws(
     // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
     // the last sync beat happened to leave.
     let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
-    let (based_on, cut) = clone_base(c, &owner, &volume, &id, interrupted, src.controller_owner_ref(&())).await?;
+    let (based_on, cut) =
+        clone_base(c, &owner, &volume, &id, interrupted, src.controller_owner_ref(&()), crd::SnapshotState::of_workspace(&src)).await?;
     // An interrupted source is the ONE case that cannot be a second worktree of the source's own
     // volume: that volume is pinned to the node that is down, so the peer holding the cut would
     // settle `Degraded=NodeMismatch` instead of starting. It gets its own volume, seeded from the
@@ -1763,7 +1765,8 @@ async fn push_ws(
     let msg = optional_push_message(body).await?;
     let volume = ws_volume(&w).ok_or_else(not_ready)?;
     let head = w.status.as_ref().and_then(|st| st.head.clone());
-    create_commit(kube(&s)?, volume, &w.spec.owner, &id, head, msg).await
+    let state = crd::SnapshotState::of_workspace(&w);
+    create_commit(kube(&s)?, volume, &w.spec.owner, &id, head, msg, state).await
 }
 
 async fn push_env(
@@ -1777,7 +1780,8 @@ async fn push_env(
     let msg = optional_push_message(body).await?;
     let volume = env_volume(&e).ok_or_else(not_ready)?;
     let head = e.status.as_ref().and_then(|st| st.head.clone());
-    create_commit(kube(&s)?, volume, &e.spec.owner, &id, head, msg).await
+    let state = crd::SnapshotState::of_environment(&e);
+    create_commit(kube(&s)?, volume, &e.spec.owner, &id, head, msg, state).await
 }
 
 /// A `Snapshot` CR, created `Working` so the agent's `reconcile_commit` can act on the very first
@@ -1789,6 +1793,7 @@ async fn create_commit(
     worktree: &str,
     parent: Option<String>,
     message: Option<String>,
+    state: crd::SnapshotState,
 ) -> Result<Response, Response> {
     // F1: two pushes of the same worktree before the first is cut both read the same `head` and
     // both claim it as `parent` — the loser becomes a Ready commit no worktree's `head` ever
@@ -1823,7 +1828,7 @@ async fn create_commit(
             message,
             pinned: false,
             transient: false,
-            state: None,
+            state: Some(state),
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, volume));
