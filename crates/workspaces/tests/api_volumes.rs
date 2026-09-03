@@ -240,6 +240,29 @@ async fn deleting_a_snapshot_that_is_a_running_worktrees_head_is_a_409() {
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
+/// `status.head` is written only by the node running the pod, so a workspace created by a restore
+/// has `head == None` from the create until that node's first checkout — minutes on a cold node,
+/// indefinitely while it is down. Deleting its base in that window is permanent: `engine::checkout`
+/// answers NO_SUCH_RECORD and the volume controller classifies that as permanent, never retried.
+#[tokio::test]
+async fn a_restore_that_has_not_checked_out_yet_still_protects_its_base() {
+    let mut restored = ws_obj("ws-restored", "karthik", "recovered");
+    restored["spec"]["storage"]["source"] = json!({"cloneOf": {"volume": "ws-1", "commit": "ws-1-a"}});
+    // No status at all: no node has claimed it yet, so there is no head and no volumeRef.
+    restored["status"] = Value::Null;
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z")])),
+        kget(format!("{API}/workspaces"), ws_list(vec![restored])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409, "an unplaced restore's base");
+    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1").await, 409, "and the volume under it");
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
+}
+
 /// A sync point belongs to the agent's sync beat: deleting one by hand takes a replica's btrfs
 /// send parent away. 409 with its own message, so the person is told what it is.
 #[tokio::test]

@@ -2127,6 +2127,19 @@ struct Parent {
     display: String,
     /// `status.head` — the snapshot it is standing on, which `delete_snapshot` refuses to remove.
     head: Option<String>,
+    /// The snapshot its SPEC was grafted onto. `head` only exists once the owning node has checked
+    /// out; between the create and that first checkout the spec is the only record that this
+    /// snapshot is load-bearing, and deleting it there is unrecoverable.
+    base: Option<String>,
+}
+
+/// The snapshot a parent's volume source names, if any.
+fn source_snapshot(storage: &Option<crd::WorkspaceStorage>) -> Option<String> {
+    match storage.as_ref()?.source.as_ref()? {
+        VolumeSource::CloneOf { commit, .. } => commit.clone(),
+        VolumeSource::SeededFrom { snapshot, .. } => Some(snapshot.clone()),
+        _ => None,
+    }
 }
 
 /// The live parents, by the volume they are ON, with the kind they are. One list call per kind,
@@ -2153,13 +2166,29 @@ async fn live_parents(s: &ApiState, owners: &[String]) -> Option<BTreeMap<String
     for w in mine(ws.list(&lp).await.ok()?.items, owners) {
         let st = w.status.as_ref();
         let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| w.name_any());
-        live.insert(vol, Parent { kind: "workspace".into(), display: w.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
+        live.insert(
+            vol,
+            Parent {
+                kind: "workspace".into(),
+                display: w.spec.name.clone(),
+                head: st.and_then(|s| s.head.clone()),
+                base: source_snapshot(&w.spec.storage),
+            },
+        );
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
     for e in mine(envs.list(&lp).await.ok()?.items, owners) {
         let st = e.status.as_ref();
         let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| e.name_any());
-        live.insert(vol, Parent { kind: "environment".into(), display: e.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
+        live.insert(
+            vol,
+            Parent {
+                kind: "environment".into(),
+                display: e.spec.name.clone(),
+                head: st.and_then(|s| s.head.clone()),
+                base: source_snapshot(&e.spec.storage),
+            },
+        );
     }
     Some(live)
 }
@@ -2177,18 +2206,36 @@ async fn live_parents(s: &ApiState, owners: &[String]) -> Option<BTreeMap<String
 /// callers turn into a refusal rather than a delete.
 async fn parents_of_volume(s: &ApiState, volume: &str) -> Option<Vec<Parent>> {
     let c = s.kube.as_ref()?;
-    let on_volume = |vref: Option<String>, name: String| vref.unwrap_or(name) == volume;
+    let on_volume = |vref: Option<String>, name: String, storage: &Option<crd::WorkspaceStorage>| {
+        // Three ways to be on this volume: the node said so, the parent IS the volume (an owned
+        // one shares its id), or its spec grafts onto it and no node has answered yet.
+        vref.clone().unwrap_or(name) == volume
+            || matches!(
+                storage.as_ref().and_then(|s| s.source.as_ref()),
+                Some(VolumeSource::CloneOf { volume: v, .. } | VolumeSource::SeededFrom { volume: v, .. }) if v == volume
+            )
+    };
     let mut out = vec![];
     for w in Api::<crd::Workspace>::all(c.clone()).list(&ListParams::default()).await.ok()?.items {
         let st = w.status.as_ref();
-        if on_volume(st.and_then(|s| s.volume_ref.clone()), w.name_any()) {
-            out.push(Parent { kind: "workspace".into(), display: w.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
+        if on_volume(st.and_then(|s| s.volume_ref.clone()), w.name_any(), &w.spec.storage) {
+            out.push(Parent {
+                kind: "workspace".into(),
+                display: w.spec.name.clone(),
+                head: st.and_then(|s| s.head.clone()),
+                base: source_snapshot(&w.spec.storage),
+            });
         }
     }
     for e in Api::<crd::Environment>::all(c.clone()).list(&ListParams::default()).await.ok()?.items {
         let st = e.status.as_ref();
-        if on_volume(st.and_then(|s| s.volume_ref.clone()), e.name_any()) {
-            out.push(Parent { kind: "environment".into(), display: e.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
+        if on_volume(st.and_then(|s| s.volume_ref.clone()), e.name_any(), &e.spec.storage) {
+            out.push(Parent {
+                kind: "environment".into(),
+                display: e.spec.name.clone(),
+                head: st.and_then(|s| s.head.clone()),
+                base: source_snapshot(&e.spec.storage),
+            });
         }
     }
     Some(out)
@@ -2387,7 +2434,7 @@ async fn delete_snapshot(
     let live = parents_of_volume(&s, &name).await.ok_or_else(kube_unavailable)?;
     // EVERY parent on the volume, not just the caller's: a shared clone's worktree belongs to
     // another owner, and its head is just as much a running base as this owner's own.
-    if live.iter().any(|p| p.head.as_deref() == Some(snapshot.as_str())) {
+    if live.iter().any(|p| p.head.as_deref() == Some(snapshot.as_str()) || p.base.as_deref() == Some(snapshot.as_str())) {
         return Err((StatusCode::CONFLICT, "this snapshot is the base of a running worktree").into_response());
     }
     let api: Api<crd::Snapshot> = Api::all(kube(&s)?.clone());
