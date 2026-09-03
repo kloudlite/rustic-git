@@ -14,6 +14,7 @@ import { pendingPush } from "@/lib/pending-push";
 import { snapshotTime } from "@/lib/snapshot";
 import { stateSummary, type SnapshotState } from "@/lib/snapshot-state";
 import { deleteVolumeCopy } from "@/lib/archived";
+import { envCurrent } from "@/lib/env-current";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
@@ -329,30 +330,21 @@ export function EnvSnapshots({
   const pendingNode = pushing || (waiting && !stale);
 
   const byId = new Map(history.map((h) => [h.id, h]));
+  // Full ancestry, no restore cutoff — used below only to lay out the rail (which branch is
+  // "on the way to" current), not to decide what current IS (that's `envCurrent`).
   const descends = (n: SnapshotNode, anc: string): boolean => {
     for (let p: SnapshotNode | undefined = n; p; p = p.parent ? byId.get(p.parent) : undefined) {
       if (p.id === anc) return true;
     }
     return false;
   };
-  const restored = restoredTo ? (byId.get(restoredTo) ?? null) : null;
-  // Where the environment sits. Never restored: the newest record (one straight chain). Restored:
-  // the newest record pushed AFTER the restore that descends from the restored one — the
-  // environment moved on to it — else the restored record itself. Its older children are the
-  // branches the environment left behind.
-  const since = restoredAt ? Date.parse(restoredAt) : 0;
-  const current: SnapshotNode | null =
-    envName === null
-      ? null
-      : restoredTo === null
-        ? (history[0] ?? null)
-        : restored === null
-          ? null
-          : (history.find((h) => snapshotTime(h) > since && descends(h, restored.id)) ?? restored);
-  // A `restoredTo` that names no record here: a restore grafted ANOTHER volume's snapshot in
-  // place. Saying so is the honest answer — badging any record `current` would claim the
-  // environment is on a snapshot it is not.
-  const foreignCurrent = restoredTo !== null && restored === null ? restoredTo : null;
+
+  // One rule, shared with the environment header — see `lib/env-current.ts`.
+  const { current, foreign: foreignCurrent } = envCurrent(history, {
+    live: envName !== null,
+    restoredTo,
+    restoredAt,
+  });
 
   // Oldest first, and the branch the environment is on LAST among siblings, so the live node is
   // the bottom of the tree rather than buried between two branches.

@@ -8,6 +8,7 @@ import { apiToken } from "@/lib/api-token";
 import { when } from "@/lib/time";
 import { snapshotTime } from "@/lib/snapshot";
 import { requireToken } from "@/lib/session";
+import { envCurrent } from "@/lib/env-current";
 
 /** An environment is a SUBJECT, like a repo or an image: entering one swaps the chrome's tab row
  *  for its own (Services | Snapshots, with the arrow back to the list) and grows the breadcrumb a
@@ -39,7 +40,13 @@ export default async function Layout({
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();
   const { env, history } = page;
-  const at = env ? (history.find((c) => c.id === env.restored_to) ?? history[0] ?? null) : null;
+  // The same call the Snapshots tab makes, so the header and the tab cannot disagree about where
+  // the environment sits — they did, and the header was the wrong one.
+  const { current: at } = envCurrent(history, {
+    live: env !== null,
+    restoredTo: env?.restored_to ?? null,
+    restoredAt: env?.restore_requested_at ?? null,
+  });
 
   return (
     <section className="min-w-0">
@@ -73,8 +80,7 @@ export default async function Layout({
               {env.region}
               {env.placement ? ` · ${env.placement}` : " · not placed yet"} · {page.services.length}{" "}
               {page.services.length === 1 ? "service" : "services"}
-              {/* Where the lineage is, without opening the Snapshots tab. Same rule the tab uses:
-                  `restored_to` when set, else the newest record. */}
+              {/* Where the environment sits, from the one shared rule — see lib/env-current.ts. */}
               {at && (
                 <>
                   {" · at "}
