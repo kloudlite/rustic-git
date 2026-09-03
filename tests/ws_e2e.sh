@@ -115,6 +115,7 @@ CLONE_ID=""
 RESTORE_ID=""
 SEED_ID=""
 OTHER_NODE_WS_ID=""
+SNAP_STATE_RESTORE_ID=""
 
 cleanup() {
   set +e
@@ -122,7 +123,7 @@ cleanup() {
   # deployments, services, policies), so deleting the four objects is the whole teardown —
   # garbage collection does the rest. The probe namespace is ours, not the controller's.
   [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
-  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$OTHER_NODE_WS_ID"; do
+  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$OTHER_NODE_WS_ID" "$SNAP_STATE_RESTORE_ID"; do
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -1017,7 +1018,30 @@ else
   log "single-node cluster: skipping the second-node replica check"
 fi
 
+# ---------------------------------------------------------------------------
+# Restore (explicit snapshot), extended: the snapshot froze the source's definition at push time
+# (`spec.state`), so a restore must come back with THAT image even with the source gone — not the
+# default image a bare restore would otherwise fall back to. $WS_ID is not needed by anything
+# after this point, so it is safe to delete here.
+# ---------------------------------------------------------------------------
+log "restore (explicit snapshot): asserting the restored workspace keeps the source's frozen image after the source is deleted"
+SRC_IMAGE=$(kubectl get workspace "$WS_ID" -o jsonpath='{.spec.image}')
+curl -fsS -X DELETE "$BASE/v1/workspaces/$WS_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$WS_ID"
+SNAP_STATE_RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/restore" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-restore-state","snapshot_id":"'"$SNAP_NAME"'"}')
+SNAP_STATE_RESTORE_ID=$(echo "$SNAP_STATE_RESTORE_JSON" | field id)
+[ -n "$SNAP_STATE_RESTORE_ID" ] || fail "no id in state-restore response: $SNAP_STATE_RESTORE_JSON"
+WS_ID=""
+wait_ws_ready "$SNAP_STATE_RESTORE_ID"
+[ "$(kubectl get workspace "$SNAP_STATE_RESTORE_ID" -o jsonpath='{.spec.image}')" = "$SRC_IMAGE" ] \
+  || fail "restore did not take the snapshot's frozen image"
+[ "$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.kind}')" = workspace ] \
+  || fail "snapshot carries no state"
+
 echo "OK (commit model): push -> Ready Snapshot, clone from head, restore to a named commit, replica on a second node all passed"
+echo "OK (snapshot state): restore with the source deleted kept the frozen image, and the Snapshot CR carries spec.state"
 
 # ---------------------------------------------------------------------------
 # Volume takeover: node JOIN (spread + retire). Node DEATH is verified by hand on the cluster —

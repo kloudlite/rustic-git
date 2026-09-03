@@ -202,7 +202,12 @@ and it reaches other nodes as a `btrfs send` streamed over the peer listener bet
 Four verbs, no separate commit step: `push` is the single mutating verb — `/v1` writes a
 `Snapshot` CR naming the volume's current head as its parent and the owning node fulfils it:
 snapshot + upload + mark `Ready` + advance `status.head`, with an optional message
-(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads the chain of `Ready` `Snapshot`s back). A
+(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads the chain of `Ready` `Snapshot`s back).
+Every cut also records `spec.state` (`crd::SnapshotState`), the parent's own definition — image,
+packages, resources, quota, attached environment for a workspace; services and quota for an
+environment — frozen at that instant, and `restore` defaults to whatever it froze (the request
+body's fields override it; an environment restore with `services: []` explicit is data-only, not
+"take the frozen services too"). A
 workspace created with `repo`/`branch` is seeded by an init container that clones it over SSH with
 the owner's platform key, inside the workspace pod itself — no credential Secret is minted for it.
 There is no user-facing un-pushed state; internally

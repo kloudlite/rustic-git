@@ -804,3 +804,13 @@ agent never sets it, so an agent rolled ahead of the CRDs gets a 422 on every `e
 create and every workspace on that node parks in `NamespaceNotReady`. The other three
 (`compatibleNodes`, `durable`, `lastSyncAt`) are genuinely order-free: they were optional, an old
 agent that still writes one just has it pruned by the new schema, and nothing reads any of them.
+
+## Release: snapshot state
+
+The 2026-09-03 change adds `Snapshot.spec.state` (`crd::SnapshotState`), which every new cut
+records and `restore` reads back as its default. The field is optional and additive, so this one
+is order-free relative to the agent roll either way: applying the CRD first just means the running
+agent doesn't populate it yet, and rolling the agent first means it writes a field the old CRD
+schema doesn't know about (preserve-unknown-fields keeps it, not an error). Snapshots cut before
+this change simply have no `spec.state`, and a restore from one falls back to the live source (or
+the standard defaults, if that's gone too) exactly as it did before this release.
