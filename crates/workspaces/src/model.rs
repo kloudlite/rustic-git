@@ -34,6 +34,16 @@ pub fn default_ws_image() -> String {
     DEFAULT_WS_IMAGE.into()
 }
 
+/// How many workspaces plus environments one owner may have at once.
+///
+/// A runaway-loop stop, not a product limit: a workspace pod requests 4 GiB / 2 vCPU, so twenty is
+/// 80 GiB and 40 vCPU of requests per person — more than anyone here runs, and far under what a
+/// single `POST` loop reserved before this existed. Env-configurable because the number that is
+/// obviously safe today is a cluster-capacity question tomorrow.
+pub fn max_per_owner() -> usize {
+    std::env::var("WS_MAX_PER_OWNER").ok().and_then(|v| v.parse().ok()).unwrap_or(20)
+}
+
 /// The MARKER a spec carries for "the platform's image" — untagged on purpose. The tag is the
 /// agent's business (`WS_DEFAULT_IMAGE`, pinned with the agent by pin.sh): a spec that froze a
 /// tag would pin every workspace to whatever the image was the day it was created.

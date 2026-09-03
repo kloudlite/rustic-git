@@ -48,7 +48,11 @@ fn list_of(kind: &str, items: Vec<Value>) -> Value {
 }
 
 fn create_routes() -> Vec<Route> {
-    vec![post(format!("{API}/environments"), env_obj("env-new", "acme", NODE))]
+    vec![
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        post(format!("{API}/environments"), env_obj("env-new", "acme", NODE)),
+    ]
 }
 
 async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
@@ -211,7 +215,10 @@ async fn member_can_clone_a_team_environment() {
 #[tokio::test]
 async fn personal_workspace_unaffected_by_membership() {
     // A create lists the person's workspaces in the target team first, to refuse a taken name.
-    let routes = vec![get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})), post(
+    let routes = vec![
+        get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
+        get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
+        post(
         format!("{API}/workspaces"),
         json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",

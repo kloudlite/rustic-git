@@ -334,6 +334,30 @@ async fn refuse_taken_name(c: &kube::Client, owner: &str, team: &str, name: &str
     Ok(())
 }
 
+/// Refuse a create that would take this owner past their ceiling.
+///
+/// The two label-selected lists cost what `refuse_taken_name` already pays, and the DECISION reads
+/// `spec.owner` (labels are a view): an object mislabelled onto someone else must not spend their
+/// budget. Counted across both kinds — they share a node's memory and the pool.
+async fn refuse_over_cap(_s: &ApiState, c: &kube::Client, owner: &str) -> Result<(), Response> {
+    let max = crate::model::max_per_owner();
+    let lp = owned_by(owner);
+    let ws = Api::<crd::Workspace>::all(c.clone()).list(&lp).await.map_err(kube_err)?;
+    let envs = Api::<crd::Environment>::all(c.clone()).list(&lp).await.map_err(kube_err)?;
+    let mine = ws.items.iter().filter(|w| w.spec.owner == owner).count()
+        + envs.items.iter().filter(|e| e.spec.owner == owner).count();
+    if mine >= max {
+        // 429, not 409: nothing conflicts with a particular object — this account is asking for
+        // more than it may hold. The number is in the message so the person can ask for a raise.
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("you already have {mine} workspaces and environments; the limit is {max}"),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 /// `status.phase` is the state, and an object the controller has not seen yet has no status at
 /// all — `creating` rather than a `null` the web app's enum cannot parse.
 fn phase<T: serde::de::DeserializeOwned>(p: Option<&str>, default: T) -> T {
@@ -553,6 +577,7 @@ async fn create_ws(
     };
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
+    refuse_over_cap(&s, c, &owner).await?;
     let id = rid("ws");
     let source = match (&body.repo, &body.branch) {
         (None, _) => None,
@@ -1216,6 +1241,7 @@ async fn clone_ws(
     let src = my_ws(&s, &owner, &id).await?;
     refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
     let c = kube(&s)?;
+    refuse_over_cap(&s, c, &owner).await?;
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
@@ -1349,6 +1375,7 @@ async fn restore_ws(
     let src = my_ws(&s, &owner, &volume).await.ok();
     let team = src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default();
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
+    refuse_over_cap(&s, c, &owner).await?;
 
     // Precedence: the request, then what the snapshot froze, then the live source, then defaults.
     // A snapshot's `state` is DATA — written by an agent, hand-editable in the cluster — so every
@@ -1513,6 +1540,7 @@ async fn create_env(
     check_region(&s, &body.region).await?;
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let c = kube(&s)?;
+    refuse_over_cap(&s, c, &owner).await?;
     let id = rid("env");
     let e = create_environment(
         c,
@@ -1598,6 +1626,7 @@ async fn restore_env(
         return Err((StatusCode::FORBIDDEN, "a snapshot restores under its own owner, or under you").into_response());
     }
     let owner = resolve_new_owner(&s, &caller_id, body.owner.or(Some(src_owner.clone()))).await?;
+    refuse_over_cap(&s, kube(&s)?, &owner).await?;
     // The request, then what the snapshot froze, then nothing. A frozen list is DATA like any
     // other — `check_services` runs on whichever source won, because it is the trust boundary for
     // mounts and a hand-edited `state` is no more trusted than a request body.

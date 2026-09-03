@@ -75,10 +75,16 @@ fn no_workspaces() -> Route {
     get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
 }
 
+/// Same, for the environment half of the per-owner cap count (`refuse_over_cap` lists both kinds).
+fn no_environments() -> Route {
+    get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
+}
+
 /// The ONE write a create makes now.
 fn create_routes() -> Vec<Route> {
     vec![
         no_workspaces(),
+        no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
         post(format!("{API}/environments"), new_env("env-new", "karthik")),
     ]
@@ -234,7 +240,30 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
     assert_eq!(w["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
 }
 
-
+/// A `for` loop over POST /v1/workspaces used to reserve the cluster's whole schedulable memory
+/// and fill the btrfs pool from one ordinary account. The cap is counted over workspaces AND
+/// environments together — they cost the same node and the same pool.
+#[tokio::test]
+async fn creating_past_the_per_owner_cap_is_refused() {
+    let many: Vec<Value> = (0..20).map(|i| ws_obj(&format!("ws-{i}"), "karthik")).collect();
+    let s = server(vec![
+        get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": many})),
+        get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "twenty-one", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("20"), "the message states the limit: {body}");
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+}
 
 /// An unnamed restore is refused before anything is written, the same as a create.
 #[tokio::test]
@@ -1213,7 +1242,12 @@ async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [placed_ws("ws-old", "karthik")]
     });
-    let s = server(vec![get(format!("{API}/workspaces"), taken), post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik"))]).await;
+    let s = server(vec![
+        get(format!("{API}/workspaces"), taken),
+        no_environments(),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await;
     let tok = token(&s.jwt, "karthik");
     let name = placed_ws("ws-old", "karthik")["spec"]["name"].as_str().unwrap().to_string();
     let resp = reqwest::Client::new()
@@ -1504,6 +1538,7 @@ async fn server_with_snapshot_only(id: &str, state: Option<Value>) -> Server {
     server(vec![
         get(format!("{API}/snapshots/{id}"), ready_snap(id, "ws-src", "karthik", state)),
         no_workspaces(),
+        no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ])
     .await
@@ -1512,6 +1547,8 @@ async fn server_with_snapshot_only(id: &str, state: Option<Value>) -> Server {
 async fn server_with_env_snapshot_only(id: &str, state: Option<Value>) -> Server {
     server(vec![
         get(format!("{API}/snapshots/{id}"), ready_snap(id, "env-src", "karthik", state)),
+        no_workspaces(),
+        no_environments(),
         post(format!("{API}/environments"), new_env("env-new", "karthik")),
     ])
     .await
@@ -1593,6 +1630,7 @@ async fn a_restore_takes_its_region_from_the_volume_when_the_source_is_gone() {
     let s = server(vec![
         get(format!("{API}/snapshots/snap-ws"), ready_snap("snap-ws", "ws-src", "karthik", None)),
         no_workspaces(),
+        no_environments(),
         get(
             format!("{API}/volumes/ws-src"),
             json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-src"},

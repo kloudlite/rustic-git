@@ -39,6 +39,11 @@ fn no_workspaces() -> Route {
     get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
 }
 
+/// Same, for the environment half of the per-owner cap count (`refuse_over_cap` lists both kinds).
+fn no_environments() -> Route {
+    get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
+}
+
 fn placed_env(name: &str, owner: &str) -> Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
@@ -622,6 +627,7 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa")),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
@@ -670,6 +676,7 @@ async fn a_never_snapshotted_source_is_cloneable_and_the_cut_is_its_root() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
@@ -715,6 +722,7 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), src),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
@@ -760,6 +768,7 @@ async fn cloning_an_interrupted_source_with_no_sync_point_is_a_409() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         replicas(vec![]),
     ];
@@ -784,6 +793,7 @@ async fn an_interrupted_clone_skips_a_transient_no_live_node_holds() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-old", "ws-1", "karthik", "ws-1"),
             // Newest cluster-wide, and held by nobody but the corpse.
@@ -819,6 +829,7 @@ async fn an_interrupted_clone_ignores_a_working_cut_the_dead_node_left_behind() 
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1"),
             stuck
@@ -850,6 +861,7 @@ async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
@@ -996,6 +1008,7 @@ async fn a_clone_cut_records_the_source_definition() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), w),
         no_workspaces(),
+        no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
