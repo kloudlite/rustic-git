@@ -56,6 +56,25 @@ pub async fn sync_beat(ctx: &Arc<Ctx>) {
     }
 }
 
+/// The pure seam: everything about a sync cut's `SnapshotSpec` that does not need a live btrfs
+/// read, split out so the state-stamping logic has a test that runs without real btrfs (`generation`
+/// is threaded through only because a caller has it in hand and future fields may want it; the
+/// spec itself does not carry it — `sync_one` stamps it into the annotation instead).
+fn build_sync_spec(live: &crate::listing::Parent, parent: String, _generation: u64) -> crd::SnapshotSpec {
+    crd::SnapshotSpec {
+        volume: live.volume.clone(),
+        owner: live.owner.clone(),
+        worktree: live.name.clone(),
+        // The previous sync point, so the puller can send a delta against what a replica
+        // already holds. Empty on the first one, exactly as a root commit is.
+        parent,
+        message: None,
+        pinned: false,
+        transient: true,
+        state: Some(live.state.clone()),
+    }
+}
+
 async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let list = match api.list(&ListParams::default().fields(&format!("spec.volume={}", live.volume))).await {
@@ -109,21 +128,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     }
 
     let name = sync_name(&live.name);
-    let mut snap = crd::Snapshot::new(
-        &name,
-        crd::SnapshotSpec {
-            volume: live.volume.clone(),
-            owner: live.owner.clone(),
-            worktree: live.name.clone(),
-            // The previous sync point, so the puller can send a delta against what a replica
-            // already holds. Empty on the first one, exactly as a root commit is.
-            parent,
-            message: None,
-            pinned: false,
-            transient: true,
-            state: Some(live.state.clone()),
-        },
-    );
+    let mut snap = crd::Snapshot::new(&name, build_sync_spec(live, parent, gen));
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     // Owned by the worktree's object: deleting the workspace is the whole delete, and the sync
     // point has no meaning without it.
@@ -199,5 +204,42 @@ mod tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         sync_beat(&ctx).await;
         assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "{:?}", rec.calls());
+    }
+
+    fn live_fixture() -> crate::listing::Parent {
+        crate::listing::Parent {
+            kind: "Workspace",
+            name: "ws-1".into(),
+            volume: "vol-1".into(),
+            owner: "alice".into(),
+            node_name: "node-a".into(),
+            head: None,
+            phase: crd::Phase::Ready,
+            pod_ref: Some("ws-alice/ws-1".into()),
+            owner_ref: Default::default(),
+            replicated: false,
+            state: crd::SnapshotState::Workspace {
+                image: "alpine:3.20".into(),
+                packages: vec![],
+                resources: Default::default(),
+                quota_gb: 5,
+                attached_environment: None,
+            },
+        }
+    }
+
+    /// The pure seam `build_sync_spec` is what a real cut always goes through, but a real cut
+    /// itself needs `Engine::generation` — a live btrfs read, unavailable on this Mac. This is the
+    /// state-stamping assertion without one.
+    #[test]
+    fn the_sync_spec_carries_the_parents_fields_and_definition() {
+        let live = live_fixture();
+        let spec = build_sync_spec(&live, "sync-ws-1-prev".into(), 9);
+        assert_eq!(spec.volume, "vol-1");
+        assert_eq!(spec.owner, "alice");
+        assert_eq!(spec.worktree, "ws-1");
+        assert_eq!(spec.parent, "sync-ws-1-prev");
+        assert!(spec.transient);
+        assert_eq!(spec.state, Some(live.state));
     }
 }
