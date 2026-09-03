@@ -96,6 +96,36 @@ on `ClusterSettings`; the central binaries expose the loaded version on their `/
 The same area shows, read-only: image pins per tier (from the Deployments), replica counts,
 ingress hosts, each node's decommission status. No writes. A later spec may add them.
 
+### 7. Rolling the related workloads (owner, 2026-09-03)
+
+Changing a setting is not always enough: a bootstrap-only knob, a rotated secret, or a stuck
+process needs a restart. The admin area can roll workloads, with these limits:
+
+- **A fixed list, never a free name.** Central: `rustic-git-srv` (StatefulSet), `rustic-git-api`,
+  `rustic-git-worker`, `rustic-git-gateway`, `rustic-git-web`, `rustic-git-admin` (Deployments).
+  Per region: `rustic-git-agent` (DaemonSet, `kube-system`) and the region gateway. Any other name
+  is a 404. The list lives in code (`admin::workloads::KNOWN`), keyed by scope.
+- **Mechanism**: `POST /admin/workloads/{scope}/{name}/roll` with a required `reason` patches the
+  pod template annotation `rustic-git.io/restarted-at: <RFC 3339>` — exactly what
+  `kubectl rollout restart` does — so Kubernetes rolls with the workload's own strategy (the
+  StatefulSet one pod at a time, the DaemonSet node by node, the Deployments by surge). The admin
+  server never deletes a pod itself.
+- **Related**: every setting field declares its readers (`#[settings(readers = "server,worker")]`,
+  surfaced in the schema); after a save the UI offers "roll N workloads" for the readers of a
+  bootstrap-only field, and shows nothing for a live field (it needs no roll).
+- **One roll in flight per workload**: a second request while `status.observedGeneration` lags
+  is a 409 with the rollout's progress. `GET /admin/workloads` lists every known workload with
+  image, ready/desired, last roll (who, when, reason) and rollout state.
+- **The server StatefulSet is special**: its roll moves database ownership between nodes (see
+  "Deploying" in CLAUDE.md); the UI says so and requires a second confirmation.
+- **Audit**: who, when and reason are written to the workload's annotations
+  (`rustic-git.io/rolled-by`, `/rolled-at`, `/roll-reason`) and to the admin audit log.
+- **RBAC**: the admin ServiceAccount gains `get/list/patch` on exactly those Deployments and the
+  StatefulSet in the central namespace, and on the agent DaemonSet in each region. Nothing wider:
+  no pod delete, no manifest edits.
+
+Not doing here: editing images, env, replicas or ingress (option 2, still deferred).
+
 ## Rules
 
 - **Env is the bootstrap, the store is the truth, the built-in default is the floor.** A knob is
@@ -104,6 +134,7 @@ ingress hosts, each node's decommission status. No writes. A later spec may add 
 - **Last good wins.** An unparsable settings document changes nothing.
 - **A setting has a range or it is not a setting.** Unbounded knobs stay env-only.
 - **Secrets and addresses are never settings.**
+- **A roll is an annotation on a known workload, never a pod delete or a free name.**
 
 ## Cases
 
@@ -116,6 +147,9 @@ ingress hosts, each node's decommission status. No writes. A later spec may add 
 | admin server down | nothing changes; agents keep reading the CR |
 | `peerServeTimeoutSecs` lowered while a send is in flight | that send keeps its old deadline; the next one gets the new |
 | the web's clone host changed | clone menus show the new host on the next page load |
+| superadmin rolls `rustic-git-worker` with reason "rotate peer secret" | template annotation patched; Deployment surges; audit annotations written |
+| roll requested while the previous roll is still progressing | 409 with ready/desired |
+| roll of a name not in the list | 404 |
 
 ## Not doing
 
