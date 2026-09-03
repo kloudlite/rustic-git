@@ -378,9 +378,12 @@ fn spawn_pull(ctx: Arc<Ctx>) {
                 }
                 crate::peer::Next::RunAgain => {}
             }
+            let started = tokio::time::Instant::now();
             let missed = crate::peer::pull_beat(&ctx).await;
-            // Wakes that arrived DURING the pass decide whether to go straight round again.
-            next = crate::peer::after_pass(&wake, missed, &mut misses);
+            // Wakes that arrived DURING the pass decide whether to go straight round again — but
+            // never sooner than `MIN_WAKE_GAP` after this pass began, so a peer looping on
+            // `/peer/v1/wake` cannot drive this node's beat continuously.
+            next = crate::peer::after_pass(&wake, missed, &mut misses, started.elapsed());
         }
     });
 }

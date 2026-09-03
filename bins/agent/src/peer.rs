@@ -346,17 +346,33 @@ fn retry_delay(misses: u32) -> Duration {
     RETRY_SOON.saturating_mul(1u32 << misses.saturating_sub(1).min(16)).min(replica_interval())
 }
 
+/// The minimum gap between the STARTS of two wake-driven passes. `/peer/v1/wake` is
+/// unauthenticated beyond a fleet-wide symmetric secret, and a peer POSTing it in a loop otherwise
+/// pins this node in a back-to-back beat — six cluster-wide LISTs plus a Snapshot LIST and a
+/// directory walk per interesting volume, forever. Five seconds keeps a stop or a clone
+/// effectively immediate while capping one compromised or buggy agent's reach into the API server.
+pub(crate) const MIN_WAKE_GAP: Duration = Duration::from_secs(5);
+
 /// `misses` counts CONSECUTIVE passes that missed something, and is reset by any clean pass — a
 /// volume that starts fetching again returns the node to its ordinary beat immediately.
-pub(crate) fn after_pass(wake: &tokio::sync::Notify, missed: bool, misses: &mut u32) -> Next {
+///
+/// `since_last_start` is measured from when the pass that just ended BEGAN, not from when it
+/// ended: a slow pass has already paid the floor, and measuring from the end would let a long
+/// receive earn an extra idle 5 s it does not need.
+pub(crate) fn after_pass(wake: &tokio::sync::Notify, missed: bool, misses: &mut u32, since_last_start: Duration) -> Next {
     use futures::FutureExt;
     *misses = if missed { misses.saturating_add(1) } else { 0 };
-    if wake.notified().now_or_never().is_some() {
-        Next::RunAgain
-    } else if missed {
-        Next::RetrySoon(retry_delay(*misses))
-    } else {
-        Next::Wait
+    let woken = wake.notified().now_or_never().is_some();
+    let backoff = missed.then(|| retry_delay(*misses));
+    match (woken, backoff) {
+        // A wake inside the floor keeps its permit's effect — the pass still happens — but only
+        // after the remainder. `RetrySoon` is right and `Wait` is not: the wake must not be lost.
+        (true, None) if since_last_start < MIN_WAKE_GAP => Next::RetrySoon(MIN_WAKE_GAP - since_last_start),
+        (true, None) => Next::RunAgain,
+        // A missed pass's own backoff is always at least `RETRY_SOON` (30 s), which is longer than
+        // the floor: the floor can never shorten it, and a wake during it is taken by the select.
+        (_, Some(d)) => Next::RetrySoon(d),
+        (false, None) => Next::Wait,
     }
 }
 
@@ -3661,24 +3677,26 @@ fi
     fn a_burst_of_wakes_during_a_pass_buys_exactly_one_more_pass() {
         let wake = tokio::sync::Notify::new();
         let mut misses = 0;
-        assert_eq!(after_pass(&wake, false, &mut misses), Next::Wait, "no wake, no extra pass");
+        assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::Wait, "no wake, no extra pass");
         for _ in 0..5 {
             wake.notify_one();
         }
-        assert_eq!(after_pass(&wake, false, &mut misses), Next::RunAgain, "a wake during the pass runs it again");
-        assert_eq!(after_pass(&wake, false, &mut misses), Next::Wait, "five wakes are one permit, not five passes");
+        assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::RunAgain, "a wake during the pass runs it again");
+        assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::Wait, "five wakes are one permit, not five passes");
     }
 
     /// F4 (drill, 2026-09-03): a pass that could not fetch a snapshot waited out the full tick. It
-    /// now comes back in 30 s — but a pending wake still wins, because a stop waiting on a replica
-    /// must never be delayed by a retry.
+    /// now comes back in 30 s. A pending wake no longer shortens that (I2: a missed pass's own
+    /// backoff is always longer than `MIN_WAKE_GAP` and is never worth cutting short) — a stop
+    /// waiting on a replica still isn't delayed, because `spawn_pull` races the retry sleep against
+    /// the wake itself, outside `after_pass`.
     #[test]
-    fn a_pass_that_missed_a_snapshot_retries_soon_unless_a_wake_is_pending() {
+    fn a_pass_that_missed_a_snapshot_retries_soon_even_with_a_wake_pending() {
         let wake = tokio::sync::Notify::new();
         let mut misses = 0;
-        assert_eq!(after_pass(&wake, true, &mut misses), Next::RetrySoon(RETRY_SOON));
+        assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP), Next::RetrySoon(RETRY_SOON));
         wake.notify_one();
-        assert_eq!(after_pass(&wake, true, &mut misses), Next::RunAgain, "a pending wake beats the retry");
+        assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP), Next::RetrySoon(retry_delay(2)), "the backoff still governs");
     }
 
     /// Round 2: an unfetchable snapshot used to pin the whole node at a 30 s pass forever. The delay
@@ -3689,7 +3707,7 @@ fi
         let wake = tokio::sync::Notify::new();
         let mut misses = 0;
         let delays: Vec<Duration> = (0..6)
-            .map(|_| match after_pass(&wake, true, &mut misses) {
+            .map(|_| match after_pass(&wake, true, &mut misses, MIN_WAKE_GAP) {
                 Next::RetrySoon(d) => d,
                 other => panic!("expected a retry, got {other:?}"),
             })
@@ -3707,9 +3725,39 @@ fi
             ]
         );
 
-        assert_eq!(after_pass(&wake, false, &mut misses), Next::Wait, "a clean pass goes back to the tick");
+        assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::Wait, "a clean pass goes back to the tick");
         assert_eq!(misses, 0, "and forgets the streak");
-        assert_eq!(after_pass(&wake, true, &mut misses), Next::RetrySoon(RETRY_SOON), "so the next miss starts over at 30 s");
+        assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP), Next::RetrySoon(RETRY_SOON), "so the next miss starts over at 30 s");
+    }
+
+    /// I2: a wake still wins, but never sooner than `MIN_WAKE_GAP` after the last pass STARTED —
+    /// a peer looping POSTs on `/peer/v1/wake` must not pin this node in a back-to-back beat.
+    #[test]
+    fn a_wake_arriving_inside_the_floor_waits_out_the_remainder() {
+        let wake = tokio::sync::Notify::new();
+        wake.notify_one();
+        let mut misses = 0;
+        let next = after_pass(&wake, false, &mut misses, Duration::from_secs(1));
+        assert_eq!(next, Next::RetrySoon(MIN_WAKE_GAP - Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_wake_after_the_floor_runs_again_at_once() {
+        let wake = tokio::sync::Notify::new();
+        wake.notify_one();
+        let mut misses = 0;
+        assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::RunAgain);
+    }
+
+    /// The floor never delays a RETRY that is already longer than it: a missed pass's own backoff
+    /// still governs, and a wake inside the floor does not shorten it.
+    #[test]
+    fn the_floor_never_shortens_a_missed_passes_backoff() {
+        let wake = tokio::sync::Notify::new();
+        wake.notify_one();
+        let mut misses = 3;
+        let next = after_pass(&wake, true, &mut misses, Duration::from_secs(0));
+        assert_eq!(next, Next::RetrySoon(retry_delay(4)));
     }
 
     fn agent_pod(node: &str, ip: &str) -> serde_json::Value {
