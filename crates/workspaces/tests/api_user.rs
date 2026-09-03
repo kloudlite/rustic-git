@@ -1586,6 +1586,27 @@ async fn a_pre_change_snapshot_restores_as_before() {
     assert_eq!(w["spec"]["storage"]["quotaGb"], 20);
 }
 
+/// With the source gone, the region is not a guess: the detached `Volume` holding the bytes names
+/// it, and "default" would place the restored pod where no node holds this data.
+#[tokio::test]
+async fn a_restore_takes_its_region_from_the_volume_when_the_source_is_gone() {
+    let s = server(vec![
+        get(format!("{API}/snapshots/snap-ws"), ready_snap("snap-ws", "ws-src", "karthik", None)),
+        no_workspaces(),
+        get(
+            format!("{API}/volumes/ws-src"),
+            json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-src"},
+                   "spec": {"owner": "karthik", "nodeName": "node-a", "region": "centralindia", "quotaGb": 20}}),
+        ),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await;
+    let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["region"], "centralindia");
+}
+
 /// `spec.state` is data an agent wrote and a cluster admin can edit — it goes through
 /// `validate_list` exactly like a request body's package list does.
 #[tokio::test]

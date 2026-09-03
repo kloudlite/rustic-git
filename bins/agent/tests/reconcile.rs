@@ -4107,6 +4107,80 @@ async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
     assert_eq!(cond["reason"], "NoSuchCommit");
 }
 
+/// Restoring a snapshot of a DELETED workspace — the case durable snapshots exist for. No
+/// `Workspace` named by `cloneOf.volume` exists any more; the detached `Volume` does, and that is
+/// what `check_source` must look at. The live failure was a permanent `NoSuchSource` here.
+#[tokio::test]
+async fn a_restore_onto_a_detached_volume_is_not_no_such_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
+    let routes = vec![
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/workspaces/ws-src"),
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/environments/ws-src"),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        ready_binding(),
+        ready_namespace(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let w = cloned_workspace("ws-src-aaaaaaaa", None);
+
+    let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert!(
+        !sent.iter().any(|s| s["status"]["conditions"][0]["reason"] == "NoSuchSource"),
+        "a deleted source workspace must not settle a restore: {sent:?}"
+    );
+    // The shared-worktree arm ran: the graft commit became this clone's own head.
+    assert!(sent.iter().any(|s| s["status"]["head"] == "ws-src-aaaaaaaa"), "the shared-arm path must run: {sent:?}");
+}
+
+/// The other half: a restore naming a `Volume` that is really gone stays permanently wrong.
+#[tokio::test]
+async fn a_restore_whose_volume_is_gone_settles_as_no_such_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let routes = vec![
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/volumes/ws-src"),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let w = cloned_workspace("ws-src-aaaaaaaa", None);
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "settled permanently, not requeued");
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(sent.last().expect("a status write")["status"]["conditions"][0]["reason"], "NoSuchSource");
+}
+
+/// A LIVE clone (`cloneOf` with no commit) copies from the source's live worktree, so its source
+/// parent must still exist — unchanged by the restore carve-out above.
+#[tokio::test]
+async fn a_live_clone_of_a_deleted_workspace_still_settles_as_no_such_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let routes = vec![
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/workspaces/ws-src"),
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/environments/ws-src"),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: None }),
+    });
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "settled permanently, not requeued");
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(sent.last().expect("a status write")["status"]["conditions"][0]["reason"], "NoSuchSource");
+}
+
 /// F6: the interrupted clone. The source's Volume is pinned to the node that DIED, so the
 /// shared-worktree path settles `Degraded=NodeMismatch` on whichever peer holds the cut. A
 /// `seededFrom` parent instead authors its OWN child Volume on this node — pinned here, carrying

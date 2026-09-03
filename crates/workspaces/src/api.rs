@@ -1281,6 +1281,17 @@ async fn storage_quota(c: &kube::Client, storage: &Option<crd::WorkspaceStorage>
     }
 }
 
+/// The region the bytes actually live in, read off the detached `Volume` a restore grafts onto.
+///
+/// A restore's whole point is that the source workspace may be gone, and "default" is then a guess
+/// that lands the new pod in a region whose nodes hold none of these snapshots.
+async fn volume_region(c: &kube::Client, volume: &str) -> Option<String> {
+    let vols: Api<crd::Volume> = Api::all(c.clone());
+    // An unreadable Volume, or one written before regions existed (`region` is a plain String, so
+    // "no region" is the empty one), leaves the caller's own fallback in charge.
+    vols.get_opt(volume).await.ok().flatten().map(|v| v.spec.region).filter(|r| !r.is_empty())
+}
+
 /// A workspace whose `Volume` the controller has not reported yet: 409, not a 500 and not a
 /// silently dropped request. The caller can retry in a second.
 fn not_ready() -> Response {
@@ -1398,8 +1409,11 @@ async fn restore_ws(
             name: body.name,
             // No per-snapshot region under the commit model (single-pool, replica-based; cross-
             // region restore is out of scope — see the design doc). A live source still knows its
-            // own; a deleted one falls back to the engine's own default region.
-            region: src.as_ref().map(|w| w.spec.region.clone()).unwrap_or_else(|| "default".to_string()),
+            // own; for a deleted one the detached Volume holding the bytes does.
+            region: match src.as_ref() {
+                Some(w) => w.spec.region.clone(),
+                None => volume_region(c, &volume).await.unwrap_or_else(|| "default".to_string()),
+            },
             image,
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
@@ -1609,6 +1623,11 @@ async fn restore_env(
         (None, None) => default_env_quota(),
     };
     let c = kube(&s)?;
+    // The source environment may be long gone; the Volume holding the bytes still names its region.
+    let region = match body.region {
+        Some(r) => r,
+        None => volume_region(c, &volume).await.unwrap_or_else(|| "default".to_string()),
+    };
     let id = rid("env");
     let e = create_environment(
         c,
@@ -1617,7 +1636,7 @@ async fn restore_env(
             owner,
             name: body.name,
             // No per-snapshot region under the commit model (see `restore_ws`'s matching comment).
-            region: body.region.unwrap_or_else(|| "default".to_string()),
+            region,
             services,
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,

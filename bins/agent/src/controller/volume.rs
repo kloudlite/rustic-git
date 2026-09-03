@@ -549,7 +549,8 @@ pub(crate) fn volume_is_ready(v: &crd::Volume) -> bool {
 
 /// The source references that can be wrong forever, checked ONCE before a Volume is created.
 ///
-/// These never get better by being retried: a `cloneOf` naming a workspace that does not exist, a
+/// These never get better by being retried: a live `cloneOf` naming a workspace that does not
+/// exist, a restore naming a `Volume` that does not exist, a
 /// `restoreOf` whose snapshot id no `Ready` `Snapshot` carries. Without this branch each of
 /// them requeues at `RETRY` forever, and the log line is indistinguishable from a registry outage.
 async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(), Outcome> {
@@ -559,6 +560,18 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
         // the workspace kind settled every cloned environment as a permanent `NoSuchSource`.
         // `SeededFrom` alongside `CloneOf`: it names a source parent the same way, and a source
         // that does not exist is just as permanently wrong however the bytes would have been copied.
+        // A restore (`CloneOf{commit: Some(_)}`) is the one case where the source WORKING COPY is
+        // gone by design — restoring a snapshot of a deleted workspace is what durable snapshots
+        // exist for. What must still exist is the detached `Volume` CR holding the bytes; checking
+        // the parent kinds here parked every such restore on a permanent `NoSuchSource`.
+        Some(VolumeSource::CloneOf { volume, commit: Some(_) }) => {
+            let vols: Api<crd::Volume> = Api::all(ctx.client.clone());
+            match vols.get_opt(volume).await {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(Outcome::Permanent(format!("clone source {volume} does not exist"), "NoSuchSource")),
+                Err(e) => Err(e.into()),
+            }
+        }
         Some(VolumeSource::CloneOf { volume, .. }) | Some(VolumeSource::SeededFrom { volume, .. }) => {
             let ws: Api<crd::Workspace> = Api::all(ctx.client.clone());
             if ws.get_opt(volume).await.map_err(Outcome::from)?.is_some() {
