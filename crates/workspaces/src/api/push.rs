@@ -1,7 +1,7 @@
 //! `push` — the single mutating verb: a `Snapshot` CR, and the clone/restore machinery that grafts
 //! a new working copy onto one.
 
-use super::{caller, kube, kube_err, not_ready, ApiState};
+use super::{caller, guard_alloc, kube, kube_err, not_ready, ApiState};
 use super::scope::{find_env, my_ws};
 use super::workspaces::ws_volume;
 use super::environments::env_volume;
@@ -188,6 +188,8 @@ pub(crate) async fn push_ws(
     let w = my_ws(&s, &owner, &id).await?;
     let msg = optional_push_message(body)?;
     let volume = ws_volume(&w).ok_or_else(not_ready)?;
+    let owner_of = if w.spec.team.is_empty() { w.spec.owner.clone() } else { w.spec.team.clone() };
+    guard_alloc(&s, &owner_of, !w.spec.team.is_empty(), &[(crate::quota::Dim::Snapshots, 1)]).await?;
     let head = w.status.as_ref().and_then(|st| st.head.clone());
     let state = crd::SnapshotState::of_workspace(&w);
     create_snapshot(kube(&s)?, volume, &w.spec.owner, &id, head, msg, state).await
@@ -203,6 +205,7 @@ pub(crate) async fn push_env(
     let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body)?;
     let volume = env_volume(&e).ok_or_else(not_ready)?;
+    guard_alloc(&s, &e.spec.owner, e.spec.owner != caller_id, &[(crate::quota::Dim::Snapshots, 1)]).await?;
     let head = e.status.as_ref().and_then(|st| st.head.clone());
     let state = crd::SnapshotState::of_environment(&e);
     create_snapshot(kube(&s)?, volume, &e.spec.owner, &id, head, msg, state).await

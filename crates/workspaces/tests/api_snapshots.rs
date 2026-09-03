@@ -38,7 +38,8 @@ fn no_workspaces() -> Route {
     get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
 }
 
-/// Same, for the environment half of the per-owner cap count (`refuse_over_cap` lists both kinds).
+/// Same, so a workspace-only test's environment listing (`quota::usage` reads both kinds) doesn't
+/// 404.
 fn no_environments() -> Route {
     get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
 }
@@ -88,8 +89,24 @@ fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
+/// `push`, `clone` and `restore` all now go through `guard_alloc`, which reads the volume and
+/// snapshot listings and the two `Quota` objects on every call: appended once here rather than to
+/// every test's own route list, since none of this file is ABOUT quota — `api_quota.rs` covers
+/// the refusal shape and the dimensions.
+fn quota_gate_routes() -> Vec<Route> {
+    vec![
+        no_workspaces(),
+        no_environments(),
+        get(format!("{API}/volumes"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": []})),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+    ]
+}
+
 async fn server(routes: Vec<Route>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let mut routes = routes;
+    routes.extend(quota_gate_routes());
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(jwt.clone(), HashSet::new()).with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -887,6 +904,7 @@ async fn cloning_an_environment_cuts_nothing_and_reports_no_base() {
         get(format!("{API}/volumes/env-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "env-1", "uid": "vol-uid-2"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         Route { method: "POST", path: format!("{API}/environments"), status: 201, body: placed_env("env-2", "karthik") },
     ];
     let s = server(routes).await;

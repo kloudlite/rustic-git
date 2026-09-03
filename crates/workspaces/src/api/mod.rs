@@ -206,6 +206,61 @@ async fn get_quota(
     Ok(Json(serde_json::json!({"owner": owner, "limit": limit, "used": used})).into_response())
 }
 
+/// The ONE place `/v1` refuses an allocation.
+///
+/// Every route that brings a new working copy, a new disk or a new snapshot into existence goes
+/// through here, so the sentence, the status and the read-then-write window are decided once (see
+/// `quota::check`'s doc for why read-then-write is accepted rather than locked).
+///
+/// `owner` is the OBJECT's owner, never the caller: a team's working copies count against the
+/// team and nobody else. A superadmin gets no exemption — the claim says who may act, never how
+/// much may exist.
+pub(crate) async fn guard_alloc(
+    s: &ApiState,
+    owner: &str,
+    team: bool,
+    want: &[(crate::quota::Dim, u64)],
+) -> Result<(), Response> {
+    let c = kube(s)?;
+    let limit = crate::quota::effective(c, owner, team).await.map_err(kube_err)?;
+    let used = crate::quota::usage(c, owner).await.map_err(kube_err)?;
+    for (dim, adding) in want {
+        if let Err(msg) = crate::quota::check(*dim, &limit, &used, *adding) {
+            return Err((StatusCode::CONFLICT, msg).into_response());
+        }
+    }
+    Ok(())
+}
+
+// The design doc also lists "changing a volume's quota" and "changing resources". Neither has a
+// route today (`/v1` has no resize and no resources patch — `patch_ws_packages` is packages only),
+// so there is nothing to gate. A future resize route calls `guard_alloc` with the DELTA, never a
+// check of its own: the sentence and the read-then-write window are decided here.
+
+/// What a new workspace costs, from the values the handler has already resolved and clamped.
+pub(crate) fn workspace_cost(quota_gb: u64, res: &crd::PodResources) -> Vec<(crate::quota::Dim, u64)> {
+    use crate::quota::{mebibytes, millicores, Dim};
+    vec![
+        (Dim::Workspaces, 1),
+        (Dim::DiskGb, quota_gb),
+        (Dim::Cpu, millicores(&res.cpu_limit).div_ceil(1000)),
+        (Dim::MemoryGb, mebibytes(&res.memory_limit).div_ceil(1024)),
+    ]
+}
+
+/// The same for an environment: every service gets the env unit, one definition in `k8s`.
+pub(crate) fn environment_cost(quota_gb: u64, services: usize) -> Vec<(crate::quota::Dim, u64)> {
+    use crate::quota::{mebibytes, millicores, Dim};
+    let unit = crate::k8s::env_unit_resources();
+    let n = services as u64;
+    vec![
+        (Dim::Environments, 1),
+        (Dim::DiskGb, quota_gb),
+        (Dim::Cpu, (n * millicores(&unit.cpu_limit)).div_ceil(1000)),
+        (Dim::MemoryGb, (n * mebibytes(&unit.memory_limit)).div_ceil(1024)),
+    ]
+}
+
 pub(crate) fn rid(prefix: &str) -> String {
     use rand::RngCore;
     let mut b = [0u8; 8];

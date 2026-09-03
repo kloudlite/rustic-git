@@ -1,13 +1,13 @@
 //! `/v1/environments` — create, list, read, delete, start/stop, clone, restore-to-new and
 //! restore-in-place.
 
-use super::scope::{find_env, may_act_on, mine, owned_by, refuse_over_cap, resolve_new_owner, teams_for};
+use super::scope::{find_env, may_act_on, mine, owned_by, resolve_new_owner, teams_for};
 use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
     set_desired, storage_quota, CloneBody,
 };
-use super::{caller, check_region, kube, kube_err, not_found, not_ready, phase, rid, ApiState};
+use super::{caller, check_region, environment_cost, guard_alloc, kube, kube_err, not_found, not_ready, phase, rid, ApiState};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::{labels, ATTACHED_ENV_LABEL};
 use crate::model::*;
@@ -110,7 +110,8 @@ pub(crate) async fn create_env(
     check_region(&s, &body.region).await?;
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let c = kube(&s)?;
-    refuse_over_cap(&s, c, &owner).await?;
+    let quota_gb = clamp_quota(body.quota_gb);
+    guard_alloc(&s, &owner, owner != caller_id, &environment_cost(quota_gb, body.services.len())).await?;
     let id = rid("env");
     let e = create_environment(
         c,
@@ -120,7 +121,7 @@ pub(crate) async fn create_env(
             name: body.name,
             region: body.region,
             services: body.services,
-            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(body.quota_gb), source: None }),
+            storage: Some(crd::WorkspaceStorage { quota_gb, source: None }),
             desired_state: DesiredState::Running,
             restore: None,
         },
@@ -210,7 +211,6 @@ pub(crate) async fn restore_env(
         return Err((StatusCode::FORBIDDEN, "a snapshot restores under its own owner, or under you").into_response());
     }
     let owner = resolve_new_owner(&s, &caller_id, body.owner.or(Some(src_owner.clone()))).await?;
-    refuse_over_cap(&s, kube(&s)?, &owner).await?;
     // The request, then what the snapshot froze, then nothing. A frozen list is DATA like any
     // other — `check_services` runs on whichever source won, because it is the trust boundary for
     // mounts and a hand-edited `state` is no more trusted than a request body.
@@ -232,6 +232,7 @@ pub(crate) async fn restore_env(
         (None, None) => default_env_quota(),
     };
     let c = kube(&s)?;
+    guard_alloc(&s, &owner, owner != caller_id, &environment_cost(quota, services.len())).await?;
     // The source environment may be long gone; the Volume holding the bytes still names its region.
     let region = match body.region {
         Some(r) => r,
@@ -441,6 +442,7 @@ pub(crate) async fn clone_env(
     // ponytail: the ceiling is that an environment clone is LOCAL-ONLY. The upgrade is the
     // workspace's shared-worktree path (a `clone-{env}-{hex}` cut, `commit: Some(_)`, and the
     // `SnapshotPending` guard in this controller that `resolve_volume` would then need).
+    guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id, &environment_cost(quota, src.spec.services.len())).await?;
     let e = create_environment(
         c,
         &new_id,

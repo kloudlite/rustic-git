@@ -6,7 +6,7 @@
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory};
-use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
+use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -88,7 +88,8 @@ fn no_workspaces() -> Route {
     get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
 }
 
-/// Same, for the environment half of the per-owner cap count (`refuse_over_cap` lists both kinds).
+/// Same, so a workspace-only test's environment listing (`quota::usage` reads both kinds) doesn't
+/// 404.
 fn no_environments() -> Route {
     get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
 }
@@ -99,14 +100,41 @@ fn no_snapshots() -> Route {
     get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}))
 }
 
+fn no_volumes() -> Route {
+    get(format!("{API}/volumes"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": []}))
+}
+
+/// What `guard_alloc` reads beyond the create/clone/restore/push routes a test already mocks: the
+/// disk and snapshot listings, and no `Quota` object anywhere so the compiled-in default (5
+/// workspaces/2 environments/100 GB/20 snapshots) is what is being checked against.
+fn quota_gate_routes() -> Vec<Route> {
+    vec![no_volumes(), no_snapshots(), not_found(format!("{API}/quotas/karthik")), not_found(format!("{API}/quotas/default-user"))]
+}
+
+/// A `Quota` object big enough that nothing this test does can cross it — for fixtures ABOUT
+/// something other than quota enforcement (clamping, region checks, …) that would otherwise trip
+/// the compiled-in default while exercising extreme input values.
+fn huge_quota_routes(owner: &str) -> Vec<Route> {
+    vec![get(
+        format!("{API}/quotas/{owner}"),
+        json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": owner},
+            "spec": {"workspaces": 1000, "environments": 1000, "snapshots": 1000, "diskGb": 1_000_000, "cpu": 1000, "memoryGb": 1_000_000}
+        }),
+    )]
+}
+
 /// The ONE write a create makes now.
 fn create_routes() -> Vec<Route> {
-    vec![
+    let mut r = vec![
         no_workspaces(),
         no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
         post(format!("{API}/environments"), new_env("env-new", "karthik")),
-    ]
+    ];
+    r.extend(quota_gate_routes());
+    r
 }
 
 async fn server_with(admins: &[&str], routes: Option<Vec<Route>>) -> Server {
@@ -210,7 +238,7 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
     let calls = s.rec.calls();
-    assert!(!calls.iter().any(|c| c.contains("/volumes")), "the API never creates a Volume: {calls:?}");
+    assert!(s.rec.sent("POST", &format!("{API}/volumes")).is_empty(), "the API never creates a Volume: {calls:?}");
     assert!(!calls.iter().any(|c| c.contains("ownerbindings")), "the API never places: {calls:?}");
     assert!(!calls.iter().any(|c| c.contains("/nodes")), "and never reads node capacity: {calls:?}");
     let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
@@ -248,49 +276,67 @@ async fn a_workspace_doc_has_no_live_state_field() {
 }
 
 /// A `for` loop over POST /v1/workspaces used to reserve the cluster's whole schedulable memory
-/// and fill the btrfs pool from one ordinary account. The cap is counted over workspaces AND
-/// environments together — they cost the same node and the same pool.
+/// and fill the btrfs pool from one ordinary account. `guard_alloc`/`quota::check` replaced the
+/// fixed per-owner cap — this pins the workspace dimension at the compiled-in default (5).
 #[tokio::test]
-async fn creating_past_the_per_owner_cap_is_refused() {
-    let many: Vec<Value> = (0..20).map(|i| ws_obj(&format!("ws-{i}"), "karthik")).collect();
-    let s = server(vec![
+async fn creating_past_the_quota_limit_is_refused() {
+    let many: Vec<Value> = (0..5).map(|i| ws_obj(&format!("ws-{i}"), "karthik")).collect();
+    let mut routes = vec![
         get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": many})),
         get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
-        .json(&json!({"name": "twenty-one", "region": "centralindia", "quota_gb": 20}))
+        .json(&json!({"name": "sixth", "region": "centralindia", "quota_gb": 20}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 429);
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("20"), "the message states the limit: {body}");
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "workspaces: 5 of 5 in use; request more under Quota");
     assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
 }
 
-/// `n` workspaces owned by "karthik", for cap-counting fixtures.
+/// `n` workspaces owned by "karthik", for quota-counting fixtures. Stopped, not running: these
+/// tests pin the WORKSPACE dimension, and a running default-resourced fixture would trip the cpu
+/// ceiling (4 cores each) well before the workspace count does.
 fn many_ws(n: usize) -> Vec<Value> {
-    (0..n).map(|i| ws_obj(&format!("ws-{i}"), "karthik")).collect()
+    (0..n)
+        .map(|i| {
+            let mut w = ws_obj(&format!("ws-{i}"), "karthik");
+            w["spec"]["desiredState"] = json!("stopped");
+            w
+        })
+        .collect()
 }
 
 fn ws_list(items: Vec<Value>) -> Value {
     json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": items})
 }
 
-/// Same cap, reached through `clone_ws` — the second write path that creates a Workspace.
+/// `n` environments owned by "karthik", for quota-counting fixtures.
+fn many_envs(n: usize) -> Vec<Value> {
+    (0..n).map(|i| new_env(&format!("env-{i}"), "karthik")).collect()
+}
+
+fn list_of_envs(items: Vec<Value>) -> Value {
+    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": items})
+}
+
+/// Same limit, reached through `clone_ws` — the second write path that creates a Workspace.
 #[tokio::test]
-async fn cloning_past_the_per_owner_cap_is_refused() {
-    let s = server(vec![
+async fn cloning_past_the_quota_limit_is_refused() {
+    let mut routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
+        get(format!("{API}/workspaces"), ws_list(many_ws(5))),
         no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
@@ -298,36 +344,41 @@ async fn cloning_past_the_per_owner_cap_is_refused() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 429);
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "workspaces: 5 of 5 in use; request more under Quota");
     assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
     assert!(s.rec.sent("POST", &format!("{API}/snapshots")).is_empty(), "nothing written");
 }
 
-/// Same cap, reached through `restore_ws` — restore-to-new is a third write path that creates a
+/// Same limit, reached through `restore_ws` — restore-to-new is a third write path that creates a
 /// Workspace, so it needs its own refusal, not just the create's.
 #[tokio::test]
-async fn restoring_a_workspace_past_the_per_owner_cap_is_refused() {
-    let s = server(vec![
+async fn restoring_a_workspace_past_the_quota_limit_is_refused() {
+    let mut routes = vec![
         get(format!("{API}/snapshots/snap-ws"), ready_snap("snap-ws", "ws-src", "karthik", None)),
-        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
+        get(format!("{API}/workspaces"), ws_list(many_ws(5))),
         no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
     let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
-    assert_eq!(r.status(), 429);
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.text().await.unwrap(), "workspaces: 5 of 5 in use; request more under Quota");
     assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
 }
 
-/// The cap counts environments against the same ceiling, so `create_env` needs its own refusal.
+/// The environment dimension has its own default ceiling (2), so `create_env` needs its own
+/// refusal.
 #[tokio::test]
-async fn creating_an_environment_past_the_per_owner_cap_is_refused() {
-    let s = server(vec![
-        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
-        no_environments(),
+async fn creating_an_environment_past_the_quota_limit_is_refused() {
+    let mut routes = vec![
+        no_workspaces(),
+        get(format!("{API}/environments"), list_of_envs(many_envs(2))),
         post(format!("{API}/environments"), new_env("env-new", "karthik")),
-    ])
-    .await;
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/environments", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
@@ -335,38 +386,47 @@ async fn creating_an_environment_past_the_per_owner_cap_is_refused() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 429);
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "environments: 2 of 2 in use; request more under Quota");
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
 
-/// And `restore_env`, the fourth and last write path the cap has to cover.
+/// And `restore_env`, the fourth and last write path the limit has to cover.
 #[tokio::test]
-async fn restoring_an_environment_past_the_per_owner_cap_is_refused() {
-    let s = server(vec![
+async fn restoring_an_environment_past_the_quota_limit_is_refused() {
+    let mut routes = vec![
         get(format!("{API}/snapshots/snap-env"), ready_snap("snap-env", "env-src", "karthik", None)),
-        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
-        no_environments(),
+        no_workspaces(),
+        get(format!("{API}/environments"), list_of_envs(many_envs(2))),
         post(format!("{API}/environments"), new_env("env-new", "karthik")),
-    ])
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
+    let r = restore(
+        &s,
+        "/v1/environments/restore",
+        json!({"name": "back", "snapshot_id": "snap-env", "services": [{"name": "x", "image": "alpine", "command": [], "env": {}, "mounts": []}]}),
+    )
     .await;
-    let r = restore(&s, "/v1/environments/restore", json!({"name": "back", "snapshot_id": "snap-env"})).await;
-    assert_eq!(r.status(), 429);
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.text().await.unwrap(), "environments: 2 of 2 in use; request more under Quota");
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
 
-/// One under the cap still goes through — the check is `>=`, not `>`.
+/// One under the limit still goes through — the check is `>=`, not `>`.
 #[tokio::test]
-async fn creating_under_the_per_owner_cap_succeeds() {
-    let s = server(vec![
-        get(format!("{API}/workspaces"), ws_list(many_ws(19))),
+async fn creating_under_the_quota_limit_succeeds() {
+    let mut routes = vec![
+        get(format!("{API}/workspaces"), ws_list(many_ws(4))),
         no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
-        .json(&json!({"name": "nineteenth", "region": "centralindia", "quota_gb": 20}))
+        .json(&json!({"name": "fifth", "region": "centralindia", "quota_gb": 20}))
         .send()
         .await
         .unwrap();
@@ -731,7 +791,7 @@ async fn create_env_writes_exactly_one_unplaced_environment() {
     let doc: Value = resp.json().await.unwrap();
     assert_eq!(doc["state"], "creating", "an object the controller has not seen yet has no status");
 
-    assert!(!s.rec.calls().iter().any(|c| c.contains("/volumes")), "the API never creates a Volume");
+    assert!(s.rec.sent("POST", &format!("{API}/volumes")).is_empty(), "the API never creates a Volume");
     let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
     assert_eq!(e["spec"]["name"], "app-dev");
     assert_eq!(e["spec"]["desiredState"], "running");
@@ -787,13 +847,16 @@ fn snap_obj() -> serde_json::Value {
 /// subvolume that gets committed, and the owner is read off that volume, never off the caller.
 #[tokio::test]
 async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
-    let routes = vec![
+    let mut routes = vec![
         no_snapshots(),
+        no_workspaces(),
+        no_environments(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
+    routes.extend(quota_gate_routes());
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
@@ -817,13 +880,16 @@ async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
 
 #[tokio::test]
 async fn push_with_no_body_omits_the_message() {
-    let routes = vec![
+    let mut routes = vec![
         no_snapshots(),
+        no_workspaces(),
+        no_environments(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
+    routes.extend(quota_gate_routes());
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
@@ -840,13 +906,16 @@ async fn push_with_no_body_omits_the_message() {
 
 #[tokio::test]
 async fn env_push_targets_the_environments_own_volume() {
-    let routes = vec![
+    let mut routes = vec![
         no_snapshots(),
+        no_workspaces(),
+        no_environments(),
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
         get(format!("{API}/volumes/env-1"), vol_obj("env-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
+    routes.extend(quota_gate_routes());
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
@@ -1373,7 +1442,16 @@ async fn an_unknown_or_inactive_region_is_refused_on_create() {
 /// `0` was a `0Gi` claim nothing could start on, and there was no ceiling at all.
 #[tokio::test]
 async fn a_quota_is_clamped_to_the_range_a_node_can_back() {
-    let s = server(create_routes()).await;
+    let mut routes = vec![
+        no_workspaces(),
+        no_environments(),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+        post(format!("{API}/environments"), new_env("env-new", "karthik")),
+        no_volumes(),
+        no_snapshots(),
+    ];
+    routes.extend(huge_quota_routes("karthik"));
+    let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let client = reqwest::Client::new();
     for (asked, want) in [(0u64, 1u64), (1_000_000_000_000, 500), (20, 20)] {
@@ -1445,12 +1523,13 @@ async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [placed_ws("ws-old", "karthik")]
     });
-    let s = server(vec![
+    let mut routes = vec![
         get(format!("{API}/workspaces"), taken),
         no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let name = placed_ws("ws-old", "karthik")["spec"]["name"].as_str().unwrap().to_string();
     let resp = reqwest::Client::new()
@@ -1740,24 +1819,26 @@ fn environment_state(services: usize, quota_gb: u64) -> Value {
 
 /// The source workspace is gone (no route for it ⇒ 404), which is exactly when restoring matters.
 async fn server_with_snapshot_only(id: &str, state: Option<Value>) -> Server {
-    server(vec![
+    let mut routes = vec![
         no_snapshots(),
         get(format!("{API}/snapshots/{id}"), ready_snap(id, "ws-src", "karthik", state)),
         no_workspaces(),
         no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await
+    ];
+    routes.extend(quota_gate_routes());
+    server(routes).await
 }
 
 async fn server_with_env_snapshot_only(id: &str, state: Option<Value>) -> Server {
-    server(vec![
+    let mut routes = vec![
         get(format!("{API}/snapshots/{id}"), ready_snap(id, "env-src", "karthik", state)),
         no_workspaces(),
         no_environments(),
         post(format!("{API}/environments"), new_env("env-new", "karthik")),
-    ])
-    .await
+    ];
+    routes.extend(quota_gate_routes());
+    server(routes).await
 }
 
 async fn restore(s: &Server, path: &str, body: Value) -> reqwest::Response {
@@ -1833,7 +1914,7 @@ async fn a_pre_change_snapshot_restores_as_before() {
 /// it, and "default" would place the restored pod where no node holds this data.
 #[tokio::test]
 async fn a_restore_takes_its_region_from_the_volume_when_the_source_is_gone() {
-    let s = server(vec![
+    let mut routes = vec![
         no_snapshots(),
         get(format!("{API}/snapshots/snap-ws"), ready_snap("snap-ws", "ws-src", "karthik", None)),
         no_workspaces(),
@@ -1844,8 +1925,9 @@ async fn a_restore_takes_its_region_from_the_volume_when_the_source_is_gone() {
                    "spec": {"owner": "karthik", "nodeName": "node-a", "region": "centralindia", "quotaGb": 20}}),
         ),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
-    ])
-    .await;
+    ];
+    routes.extend(quota_gate_routes());
+    let s = server(routes).await;
     let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
     assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
     let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];

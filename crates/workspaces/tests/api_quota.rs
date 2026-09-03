@@ -46,6 +46,13 @@ fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
+fn region_route() -> Route {
+    get(
+        format!("{API}/regions/centralindia"),
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region", "metadata": {"name": "centralindia"}, "spec": {"name": "centralindia", "status": "active"}}),
+    )
+}
+
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
     json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
@@ -130,4 +137,91 @@ async fn another_owners_quota_is_not_readable() {
         .send().await.unwrap()
         .status();
     assert_eq!(code, 404);
+}
+
+/// The exact sentence from the design doc, on the exact status the web branches on. The routes
+/// below all share `guard_alloc`, so one shape check per KIND of allocation is enough; what each
+/// case pins is the DIMENSION the handler asks about.
+#[tokio::test]
+async fn a_create_at_the_workspace_limit_is_refused_with_the_specs_sentence() {
+    let mut items = vec![];
+    for i in 0..5 {
+        items.push(ws_obj(&format!("ws-{i}"), "karthik", "stopped"));
+    }
+    let routes = vec![
+        region_route(),
+        get(format!("{API}/workspaces"), list_of("Workspace", items)),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![])),
+        get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+    ];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "six", "region": "centralindia", "quota_gb": 5}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "workspaces: 5 of 5 in use; request more under Quota");
+    // Nothing was written: the refusal happens before the object, or an over-quota create leaves a
+    // workspace behind that the person was told they could not have.
+    assert!(!s.rec.calls().iter().any(|c| c == &format!("POST {API}/workspaces")), "{:?}", s.rec.calls());
+}
+
+/// Disk is its own dimension and it counts DETACHED volumes: 96 of 100 GB used leaves no room for
+/// a 5 GB workspace even though the workspace COUNT is fine.
+#[tokio::test]
+async fn a_create_that_would_cross_the_disk_limit_is_refused_on_disk() {
+    let routes = vec![
+        region_route(),
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![vol_obj("gone-1", "karthik", 96)])),
+        get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+    ];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "big", "region": "centralindia", "quota_gb": 5}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "diskGb: 96 of 100 in use; request more under Quota");
+}
+
+/// A push at the snapshot limit is refused, and the working copy keeps running — the refusal is
+/// before the `Snapshot` CR, so there is nothing half-cut to clean up.
+#[tokio::test]
+async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
+    let snaps: Vec<Value> = (0..20)
+        .map(|i| json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": format!("snap-{i}"), "labels": {"rustic-git.io/owner": "karthik"}},
+            "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "transient": false},
+            "status": {"phase": "ready"}
+        }))
+        .collect();
+    let mut ws = ws_obj("ws-1", "karthik", "running");
+    ws["status"] = json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"});
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), ws),
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![])),
+        get(format!("{API}/snapshots"), list_of("Snapshot", snaps)),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+    ];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "snapshots: 20 of 20 in use; request more under Quota");
+    assert!(!s.rec.calls().iter().any(|c| c == &format!("POST {API}/snapshots")), "{:?}", s.rec.calls());
 }

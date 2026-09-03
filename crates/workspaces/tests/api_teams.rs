@@ -4,7 +4,7 @@
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory};
-use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
+use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -67,13 +67,30 @@ fn region_obj(id: &str) -> Value {
     })
 }
 
-fn create_routes() -> Vec<Route> {
+/// What `guard_alloc` reads on every create/clone: the disk and snapshot listings, and no `Quota`
+/// object for the team or `default-team`, so the compiled-in default (20 workspaces, 8
+/// environments, 400 GB, 32 cpu, 128 GiB) is what is being checked against.
+fn quota_gate_routes(owner: &str) -> Vec<Route> {
     vec![
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![])),
+        get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
+        not_found(format!("{API}/quotas/{owner}")),
+        not_found(format!("{API}/quotas/default-team")),
+        not_found(format!("{API}/quotas/default-user")),
+    ]
+}
+
+fn create_routes() -> Vec<Route> {
+    let mut r = vec![
         get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
         post(format!("{API}/environments"), env_obj("env-new", "acme", NODE)),
         get(format!("{API}/regions/centralindia"), region_obj("centralindia")),
-    ]
+    ];
+    r.extend(quota_gate_routes("acme"));
+    r
 }
 
 async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
@@ -197,10 +214,12 @@ async fn team_owner_without_a_directory_configured_is_503() {
 /// team's ownership and asks for a clone of the source, naming no node.
 #[tokio::test]
 async fn member_can_clone_a_team_environment() {
-    let routes = vec![
+    let mut routes = vec![
         get(format!("{API}/environments/env-1"), env_obj("env-1", "acme", "node-z")),
+        not_found(format!("{API}/volumes/env-1")),
         post(format!("{API}/environments"), env_obj("env-new", "acme", "node-z")),
     ];
+    routes.extend(quota_gate_routes("acme"));
     let s = server(true, routes).await;
     let tok = token(&s.jwt, "karthik");
 
@@ -219,13 +238,15 @@ async fn member_can_clone_a_team_environment() {
     assert_eq!(e["spec"]["owner"], "acme");
     assert_eq!(e["spec"]["storage"]["source"]["cloneOf"]["volume"], "env-1");
     assert!(e["spec"].get("nodeName").is_none(), "locality is the claim's job now: {e}");
-    assert!(!s.rec.calls().iter().any(|c| c.contains("/volumes")), "a clone writes no Volume");
+    // `guard_alloc` READS the volume listing for the quota check; only a WRITE would mean the
+    // clone materialized its own Volume, which it must not — the child comes from the reconciler.
+    assert!(s.rec.sent("POST", &format!("{API}/volumes")).is_empty(), "a clone writes no Volume");
 }
 
 #[tokio::test]
 async fn personal_workspace_unaffected_by_membership() {
     // A create lists the person's workspaces in the target team first, to refuse a taken name.
-    let routes = vec![
+    let mut routes = vec![
         get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
         get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
         post(
@@ -241,6 +262,7 @@ async fn personal_workspace_unaffected_by_membership() {
     ),
         get(format!("{API}/regions/centralindia"), region_obj("centralindia")),
     ];
+    routes.extend(quota_gate_routes("karthik"));
     let s = server(true, routes).await;
     let tok = token(&s.jwt, "karthik");
 

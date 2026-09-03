@@ -1,8 +1,8 @@
 //! `/v1/workspaces` — create, list, read, delete, start/stop, attach/detach, package edits,
 //! clone and restore-to-new, plus the ssh connect ticket and the owner's platform key install.
 
-use super::scope::{find_env, may_act_on, mine, my_ws, owned_by, owned_in, owners_namespaces, refuse_over_cap, refuse_taken_name};
-use super::{caller, check_region, is_missing, kube, kube_err, not_found, not_ready, phase, rid, ApiState};
+use super::scope::{find_env, may_act_on, mine, my_ws, owned_by, owned_in, owners_namespaces, refuse_taken_name};
+use super::{caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
 use super::push::{clone_base, with_based_on};
 use super::volumes::{find_snapshot, volume_region};
 use crate::crd::{self, DesiredState, VolumeSource};
@@ -177,7 +177,11 @@ pub(crate) async fn create_ws(
     };
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
-    refuse_over_cap(&s, c, &owner).await?;
+    let quota_gb = clamp_quota(body.quota_gb);
+    // The object's owner is the team when one is given — a team's workspaces count against the
+    // team, never against whoever happened to click create.
+    let owner_of = if team.is_empty() { owner.clone() } else { team.clone() };
+    guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota_gb, &crd::PodResources::default())).await?;
     let id = rid("ws");
     let source = match (&body.repo, &body.branch) {
         (None, _) => None,
@@ -214,7 +218,7 @@ pub(crate) async fn create_ws(
             name: body.name,
             region: body.region,
             image: body.image,
-            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(body.quota_gb), source }),
+            storage: Some(crd::WorkspaceStorage { quota_gb, source }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: body.packages,
@@ -688,10 +692,11 @@ pub(crate) async fn clone_ws(
     let src = my_ws(&s, &owner, &id).await?;
     refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
     let c = kube(&s)?;
-    refuse_over_cap(&s, c, &owner).await?;
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
     let quota = storage_quota(c, &src.spec.storage, &volume).await;
+    let owner_of = if src.spec.team.is_empty() { owner.clone() } else { src.spec.team.clone() };
+    guard_alloc(&s, &owner_of, !src.spec.team.is_empty(), &workspace_cost(quota, &src.spec.resources)).await?;
     // A clone is a second worktree of the SOURCE's own volume, pinned to a cut taken NOW — resolved
     // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
     // the last sync beat happened to leave.
@@ -830,7 +835,6 @@ pub(crate) async fn restore_ws(
     let src = my_ws(&s, &owner, &volume).await.ok();
     let team = src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default();
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
-    refuse_over_cap(&s, c, &owner).await?;
 
     // Precedence: the request, then what the snapshot froze, then the live source, then defaults.
     // A snapshot's `state` is DATA — written by an agent, hand-editable in the cluster — so every
@@ -875,6 +879,10 @@ pub(crate) async fn restore_ws(
         },
         None => None,
     };
+    // A restore is an allocation like any other: the snapshot survives the refusal untouched, so
+    // the person can raise their quota and try the same id again.
+    let owner_of = if team.is_empty() { owner.clone() } else { team.clone() };
+    guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota, &resources)).await?;
     let new_id = rid("ws");
     let w = create_workspace(
         c,
