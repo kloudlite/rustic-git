@@ -26,7 +26,7 @@ use crate::crd;
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::ResourceExt;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -144,6 +144,7 @@ impl ApiState {
 
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
+        .route("/v1/quota", get(get_quota))
         .route("/v1/regions", post(create_region).get(list_regions))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
@@ -173,6 +174,36 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/v1/volumes/{name}/refs", get(volume_refs))
         .with_state(state)
+}
+
+// ── quota ───────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct QuotaQuery {
+    /// Absent means the caller's own. A team slug they belong to is allowed; anything else is a
+    /// 404, same as every other owner-scoped read.
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+/// `GET /v1/quota?owner=` — the ceiling and what is against it, both for one owner.
+///
+/// Usage is computed here and nowhere else, on every request (see `quota::usage`'s module doc).
+async fn get_quota(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<QuotaQuery>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let owner = q.owner.unwrap_or_else(|| c.clone());
+    if !scope::may_act_on(&s, &c, &owner).await {
+        return Err(not_found());
+    }
+    let client = kube(&s)?;
+    let team = owner != c;
+    let limit = crate::quota::effective(client, &owner, team).await.map_err(kube_err)?;
+    let used = crate::quota::usage(client, &owner).await.map_err(kube_err)?;
+    Ok(Json(serde_json::json!({"owner": owner, "limit": limit, "used": used})).into_response())
 }
 
 pub(crate) fn rid(prefix: &str) -> String {

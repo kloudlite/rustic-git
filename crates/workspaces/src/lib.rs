@@ -4,6 +4,7 @@ pub mod k8s;
 pub mod packages;
 pub mod crd;
 pub mod api;
+pub mod quota;
 pub mod engine;
 pub mod model;
 pub mod registry;
