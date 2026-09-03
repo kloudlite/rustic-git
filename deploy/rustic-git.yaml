@@ -434,6 +434,11 @@ spec:
             # Who may register regions (admin-gated route); everything else is owner-scoped.
             - name: RUSTIC_GIT_WORKSPACES_ADMINS
               value: karthik@kloudlite.io
+            # Runaway-loop stop on /v1 create/clone/restore: refused with 429 once one owner's
+            # live Workspaces plus Environments reaches this count. Default 20 (crates/workspaces/
+            # src/model.rs's max_per_owner) if unset — uncomment only to change it.
+            # - name: WS_MAX_PER_OWNER
+            #   value: "20"
             - name: RUSTIC_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
             # Optional: without it every request still answers, just always from a git node

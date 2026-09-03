@@ -265,6 +265,107 @@ async fn creating_past_the_per_owner_cap_is_refused() {
     assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
 }
 
+/// `n` workspaces owned by "karthik", for cap-counting fixtures.
+fn many_ws(n: usize) -> Vec<Value> {
+    (0..n).map(|i| ws_obj(&format!("ws-{i}"), "karthik")).collect()
+}
+
+fn ws_list(items: Vec<Value>) -> Value {
+    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": items})
+}
+
+/// Same cap, reached through `clone_ws` — the second write path that creates a Workspace.
+#[tokio::test]
+async fn cloning_past_the_per_owner_cap_is_refused() {
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
+        no_environments(),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "copy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+    assert!(s.rec.sent("POST", &format!("{API}/snapshots")).is_empty(), "nothing written");
+}
+
+/// Same cap, reached through `restore_ws` — restore-to-new is a third write path that creates a
+/// Workspace, so it needs its own refusal, not just the create's.
+#[tokio::test]
+async fn restoring_a_workspace_past_the_per_owner_cap_is_refused() {
+    let s = server(vec![
+        get(format!("{API}/snapshots/snap-ws"), ready_snap("snap-ws", "ws-src", "karthik", None)),
+        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
+        no_environments(),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await;
+    let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
+    assert_eq!(r.status(), 429);
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+}
+
+/// The cap counts environments against the same ceiling, so `create_env` needs its own refusal.
+#[tokio::test]
+async fn creating_an_environment_past_the_per_owner_cap_is_refused() {
+    let s = server(vec![
+        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
+        no_environments(),
+        post(format!("{API}/environments"), new_env("env-new", "karthik")),
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "app", "region": "centralindia"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+}
+
+/// And `restore_env`, the fourth and last write path the cap has to cover.
+#[tokio::test]
+async fn restoring_an_environment_past_the_per_owner_cap_is_refused() {
+    let s = server(vec![
+        get(format!("{API}/snapshots/snap-env"), ready_snap("snap-env", "env-src", "karthik", None)),
+        get(format!("{API}/workspaces"), ws_list(many_ws(20))),
+        no_environments(),
+        post(format!("{API}/environments"), new_env("env-new", "karthik")),
+    ])
+    .await;
+    let r = restore(&s, "/v1/environments/restore", json!({"name": "back", "snapshot_id": "snap-env"})).await;
+    assert_eq!(r.status(), 429);
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+}
+
+/// One under the cap still goes through — the check is `>=`, not `>`.
+#[tokio::test]
+async fn creating_under_the_per_owner_cap_succeeds() {
+    let s = server(vec![
+        get(format!("{API}/workspaces"), ws_list(many_ws(19))),
+        no_environments(),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "nineteenth", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+}
+
 /// An unnamed restore is refused before anything is written, the same as a create.
 #[tokio::test]
 async fn an_environment_restore_refuses_an_empty_name() {
