@@ -1146,21 +1146,13 @@ pub(crate) async fn sweep_volumes(
             // `test` proves the owner hadn't already moved (a survivor's takeover landing between
             // our list and this patch), THEN `replace` clears it; a failed test (409/422) means we
             // lost that race, so nothing at all is written this beat.
-            let ops = json_patch::Patch(vec![
-                json_patch::PatchOperation::Test(json_patch::TestOperation {
-                    path: "/spec/nodeName".parse().expect("static pointer parses"),
-                    value: serde_json::json!(owner),
-                }),
-                json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
-                    path: "/spec/nodeName".parse().expect("static pointer parses"),
-                    value: serde_json::json!(""),
-                }),
-            ]);
-            match api.patch(&name, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<crd::Volume>(ops)).await {
-                // The patched object, not our stale copy: the PUT below carries a
-                // `resourceVersion`, and the patch just bumped it.
-                Ok(v) => cur = v,
-                Err(kube::Error::Api(s)) if s.code == 409 || s.code == 422 => continue,
+            //
+            // `cur` stays the stale copy on purpose: the status PUT below carries a
+            // `resourceVersion` the patch just bumped, so its first attempt 409s and its
+            // existing re-read arm fetches the fresh object. One round trip, not two.
+            match crate::controller::volume::cas(&api, &name, "/spec/nodeName", serde_json::json!(owner), serde_json::json!("")).await {
+                Ok(true) => {}
+                Ok(false) => continue, // a survivor's takeover landed between our list and this patch
                 Err(e) => {
                     tracing::warn!(volume = %name, error = %e, "sweep: releasing an unavailable owner's volume");
                     continue;
@@ -2751,9 +2743,17 @@ fi
         let routes = vec![
             get("/apis/rustic-git.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
-            // The API server bumps resourceVersion on the patch; the status PUT must carry the
-            // NEW one or it 409s and the volume never gets marked.
+            // The API server bumps resourceVersion on the patch, but `cas` returns only whether it
+            // landed, not the patched object — so this beat's first status PUT still carries the
+            // stale one, 409s, and the existing re-read-on-409 loop fetches the fresh copy.
             Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop".into(), status: 200, body: vol_at_rv("vol-ws-stop", "", "10") },
+            Route {
+                method: "PUT",
+                path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop/status".into(),
+                status: 409,
+                body: serde_json::to_value(kube::core::Status::failure("conflict", "Conflict").with_code(409)).unwrap(),
+            },
+            get("/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop", vol_at_rv("vol-ws-stop", "", "10")),
             Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop/status".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
         ];
         let tmp = tempfile::tempdir().unwrap();
@@ -2780,11 +2780,15 @@ fi
         assert_eq!(ops[1]["path"], "/spec/nodeName");
         assert_eq!(ops[1]["value"], "");
         let vol_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-ws-stop/status");
-        assert_eq!(vol_sent.len(), 1);
-        assert_eq!(vol_sent[0]["metadata"]["resourceVersion"], "10", "the status PUT must carry the patch's resourceVersion, not the stale one");
-        assert_eq!(vol_sent[0]["spec"]["nodeName"], "", "and the patched spec it read back");
-        assert_eq!(vol_sent[0]["status"]["phase"], "unavailable");
-        assert_eq!(vol_sent[0]["status"]["conditions"][0]["reason"], "NodeDead");
+        // `cas` returns only success/failure, not the patched object, so this beat's first status
+        // PUT still carries the pre-patch resourceVersion, 409s, and the re-read-on-409 loop
+        // retries with the fresh one — one extra round trip versus adopting the patch response.
+        assert_eq!(vol_sent.len(), 2, "the stale-rv PUT that 409s, then the retry with the fresh one");
+        assert_eq!(vol_sent[0]["metadata"]["resourceVersion"], "9", "the first attempt still carries the stale rv");
+        assert_eq!(vol_sent[1]["metadata"]["resourceVersion"], "10", "the retry carries the rv the re-read fetched");
+        assert_eq!(vol_sent[1]["spec"]["nodeName"], "", "and the patched spec it read back");
+        assert_eq!(vol_sent[1]["status"]["phase"], "unavailable");
+        assert_eq!(vol_sent[1]["status"]["conditions"][0]["reason"], "NodeDead");
         assert!(!rec.calls().iter().any(|c| c.contains("/volumes/vol-live")), "{:?}", rec.calls());
     }
 

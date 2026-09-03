@@ -391,20 +391,26 @@ where
     }
 }
 
-/// Compare-and-set the owner pin from empty to `node`. The `test` op is what makes two claimants
-/// safe: the API server applies the patch atomically, so exactly one of them sees 200 and the
-/// other a 409/422 it treats as "lost, not broken" — same construction as `peer::release_dead_volumes`.
-pub(crate) async fn take_volume(ctx: &Arc<Ctx>, name: &str, node: &str) -> Result<bool, kube::Error> {
-    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+/// Compare-and-set one JSON pointer on a Volume, atomically. `test` proves the value we decided
+/// against is still there and `replace` writes the new one; the API server applies the pair as a
+/// unit, so of two claimants exactly one sees 200 and the other a 409/422 it reads as "lost, not
+/// broken" rather than as a failure. That reading is the safety property, which is why there is
+/// one of these and not five.
+///
+/// `Ok(false)` is a lost race and the caller re-decides on its next pass. An `Err` is an outage —
+/// never "lost": a caller that treated an unreachable API server as a lost race would silently
+/// skip work forever.
+pub(crate) async fn cas(
+    api: &Api<crd::Volume>,
+    name: &str,
+    path: &str,
+    from: serde_json::Value,
+    to: serde_json::Value,
+) -> Result<bool, kube::Error> {
+    let pointer = || path.parse().expect("callers pass static pointers");
     let ops = json_patch::Patch(vec![
-        json_patch::PatchOperation::Test(json_patch::TestOperation {
-            path: "/spec/nodeName".parse().expect("static pointer parses"),
-            value: serde_json::json!(""),
-        }),
-        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
-            path: "/spec/nodeName".parse().expect("static pointer parses"),
-            value: serde_json::json!(node),
-        }),
+        json_patch::PatchOperation::Test(json_patch::TestOperation { path: pointer(), value: from }),
+        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation { path: pointer(), value: to }),
     ]);
     match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
         Ok(_) => Ok(true),
@@ -413,26 +419,18 @@ pub(crate) async fn take_volume(ctx: &Arc<Ctx>, name: &str, node: &str) -> Resul
     }
 }
 
+/// Compare-and-set the owner pin from empty to `node`. The `test` op is what makes two claimants
+/// safe: the API server applies the patch atomically, so exactly one of them sees 200 and the
+/// other a 409/422 it treats as "lost, not broken" — same construction as `peer::release_dead_volumes`.
+pub(crate) async fn take_volume(ctx: &Arc<Ctx>, name: &str, node: &str) -> Result<bool, kube::Error> {
+    cas(&Api::all(ctx.client.clone()), name, "/spec/nodeName", serde_json::json!(""), serde_json::json!(node)).await
+}
+
 /// The mirror of `take_volume`: compare-and-set the owner pin from `owner` to empty. Same `test`
 /// construction and the same "lost, not broken" reading of a 409/422 — a start that raced the
 /// dead-node sweep just re-decides on its next pass.
 pub(crate) async fn release_volume(ctx: &Arc<Ctx>, name: &str, owner: &str) -> Result<bool, kube::Error> {
-    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    let ops = json_patch::Patch(vec![
-        json_patch::PatchOperation::Test(json_patch::TestOperation {
-            path: "/spec/nodeName".parse().expect("static pointer parses"),
-            value: serde_json::json!(owner),
-        }),
-        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
-            path: "/spec/nodeName".parse().expect("static pointer parses"),
-            value: serde_json::json!(""),
-        }),
-    ]);
-    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
-        Ok(_) => Ok(true),
-        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
-        Err(e) => Err(e),
-    }
+    cas(&Api::all(ctx.client.clone()), name, "/spec/nodeName", serde_json::json!(owner), serde_json::json!("")).await
 }
 
 /// Remove `parent_uid`'s entry from the Volume's `ownerReferences` so Kubernetes GC stops seeing
@@ -453,21 +451,14 @@ pub(crate) async fn detach_volume(ctx: &Arc<Ctx>, name: &str, parent_uid: &str) 
         return Ok(true);
     }
     let kept: Vec<_> = current.iter().filter(|o| o.uid != parent_uid).cloned().collect();
-    let ops = json_patch::Patch(vec![
-        json_patch::PatchOperation::Test(json_patch::TestOperation {
-            path: "/metadata/ownerReferences".parse().expect("static pointer parses"),
-            value: serde_json::to_value(&current).expect("owner references serialize"),
-        }),
-        json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
-            path: "/metadata/ownerReferences".parse().expect("static pointer parses"),
-            value: serde_json::to_value(&kept).expect("owner references serialize"),
-        }),
-    ]);
-    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
-        Ok(_) => Ok(true),
-        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
-        Err(e) => Err(e),
-    }
+    cas(
+        &api,
+        name,
+        "/metadata/ownerReferences",
+        serde_json::to_value(&current).expect("owner references serialize"),
+        serde_json::to_value(&kept).expect("owner references serialize"),
+    )
+    .await
 }
 
 /// The mirror of `detach_volume`: add `parent`'s entry to a Volume it did NOT create, so a
@@ -500,27 +491,20 @@ where
     // (the API server drops the empty list), and a `test` against `[]` would 422 forever on it.
     // `add` creates the key and is the whole patch there; the guarded form is for the case where
     // there is an existing list to lose.
-    let ops = json_patch::Patch(if current.is_empty() {
-        vec![json_patch::PatchOperation::Add(json_patch::AddOperation {
+    if current.is_empty() {
+        let ops = json_patch::Patch(vec![json_patch::PatchOperation::Add(json_patch::AddOperation {
             path: path.parse().expect("static pointer parses"),
             value,
-        })]
+        })]);
+        match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     } else {
-        vec![
-            json_patch::PatchOperation::Test(json_patch::TestOperation {
-                path: path.parse().expect("static pointer parses"),
-                value: serde_json::to_value(&current).expect("owner references serialize"),
-            }),
-            json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
-                path: path.parse().expect("static pointer parses"),
-                value,
-            }),
-        ]
-    });
-    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
-        Ok(_) => Ok(true),
-        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
-        Err(e) => Err(e.into()),
+        cas(&api, name, path, serde_json::to_value(&current).expect("owner references serialize"), value)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -817,6 +801,50 @@ mod tests {
             )),
             rec,
         )
+    }
+
+    const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
+
+    fn volume_json(name: &str, node: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        })
+    }
+
+    /// The whole point of the helper: a 409 or a 422 is "lost, not broken", and anything else is
+    /// an error the caller must see. Five copies of this rule is five places it can drift.
+    #[tokio::test]
+    async fn cas_reads_a_conflict_as_lost_and_anything_else_as_an_error() {
+        let ok = mock_client(vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 200, body: volume_json("v1", "node-a") }]);
+        let api: Api<crd::Volume> = Api::all(ok.0);
+        assert!(cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.unwrap());
+
+        let lost_body = serde_json::to_value(kube::core::Status::failure("test failed", "Invalid").with_code(422)).unwrap();
+        let lost = mock_client(vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 422, body: lost_body }]);
+        let api: Api<crd::Volume> = Api::all(lost.0);
+        assert!(!cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.unwrap());
+
+        let broken_body = serde_json::to_value(kube::core::Status::failure("etcd is down", "InternalError").with_code(500)).unwrap();
+        let broken = mock_client(vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 500, body: broken_body }]);
+        let api: Api<crd::Volume> = Api::all(broken.0);
+        assert!(cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.is_err(), "an outage is not a lost race");
+    }
+
+    /// The body must be exactly Test-then-Replace on the given pointer: it is the atomicity of
+    /// that pair that makes two claimants safe, and a Replace alone would let both win.
+    #[tokio::test]
+    async fn cas_sends_a_test_then_a_replace() {
+        let (client, rec) = mock_client(vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 200, body: volume_json("v1", "node-a") }]);
+        let api: Api<crd::Volume> = Api::all(client);
+        cas(&api, "v1", "/spec/nodeName", serde_json::json!(""), serde_json::json!("node-a")).await.unwrap();
+        let sent = rec.sent("PATCH", &format!("{VOLUMES}/v1"));
+        assert_eq!(sent[0], serde_json::json!([
+            {"op": "test", "path": "/spec/nodeName", "value": ""},
+            {"op": "replace", "path": "/spec/nodeName", "value": "node-a"},
+        ]));
     }
 
     /// A DECOMMISSIONING owner is ALIVE: it is draining at its people's pace and will reclaim this
