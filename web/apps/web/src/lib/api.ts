@@ -897,13 +897,14 @@ export function restoreWorkspace(
 }
 
 /** New environment grafted onto a past snapshot — `restore_env`'s twin of `restoreWorkspace`.
- *  A snapshot records the DATA, never a compose file, so the services are the caller's and an
- *  empty list is legal: it restores the volume. */
-export function restoreEnvironment(token: string, name: string, snapshotId: string, services: ApiService[] = []) {
+ *  A snapshot freezes the service list beside the data, so OMITTING `services` restores what was
+ *  pushed. An explicit `[]` is a different, legal choice — the data back with no services — so it
+ *  must reach the wire, and an absent list must stay off it entirely. */
+export function restoreEnvironment(token: string, name: string, snapshotId: string, services?: ApiService[]) {
   return call<ApiEnvironment>(`/v1/environments/restore`, {
     method: "POST",
     token,
-    body: JSON.stringify({ name, snapshot_id: snapshotId, services }),
+    body: JSON.stringify({ name, snapshot_id: snapshotId, ...(services ? { services } : {}) }),
   });
 }
 
