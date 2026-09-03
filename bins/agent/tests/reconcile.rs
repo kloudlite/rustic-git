@@ -2048,6 +2048,15 @@ fn env_flush_routes(stop: serde_json::Value, replicas: serde_json::Value) -> Vec
         rustic_git_workspaces::kube_test::get(REPLICAS, replicas),
         Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        // The children `run_environment` applies before it makes the mount folders. Named for the
+        // environment's OWN namespace: writing into `env-src`'s is the collision Task 2c removed.
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "Namespace"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/default-deny", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-dns", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-internet-egress", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{}/rolebindings/api-secrets", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/limitranges/slot", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
     ]
 }
 
@@ -3956,6 +3965,13 @@ async fn a_restored_environment_records_its_graft_commit_as_head() {
     // Task 2c: the restore holds its own worktree of the source's volume. Nothing it does may
     // reach the SOURCE's live subvolume — two environments writing one is the bug this proves gone.
     assert!(tmp.path().join("vol/env-src/live/env-src/marker").exists(), "the source's live worktree was touched");
+    // `mkdir_env_mounts`' root is the worktree the pod mounts, not `live/` one level above it — a
+    // folder made there is invisible to every service's subPath.
+    assert!(
+        tmp.path().join("vol/env-src/live/env-1/volumes/dbdata").is_dir(),
+        "the declared mount folder must be made inside this environment's own worktree: {:?}", rec.calls()
+    );
+    assert!(!tmp.path().join("vol/env-src/live/volumes").exists(), "nothing is made above the worktree");
     // Its StatefulSets and Services go in ITS namespace, not the source volume's.
     assert!(
         rec.calls().iter().all(|c| !c.contains(&format!("/namespaces/{}/", crd::env_namespace("env-src")))),
@@ -3993,7 +4009,9 @@ fn restored_env() -> crd::Environment {
         name: "db".into(),
         image: "mongo".into(),
         mounts: vec![rustic_git_workspaces::model::Mount { folder: "dbdata".into(), path: "/data/db".into() }],
-        ..Default::default()
+        command: vec![],
+        env: Default::default(),
+        ports: vec![],
     }];
     e.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
@@ -4018,6 +4036,15 @@ fn restored_env_routes(commit: serde_json::Value) -> Vec<Route> {
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-src", ready_source_volume("env-src")),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/env-src-aaaa", commit),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        // The children `run_environment` applies before it makes the mount folders. Named for the
+        // environment's OWN namespace: writing into `env-src`'s is the collision Task 2c removed.
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "Namespace"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/default-deny", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-dns", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-internet-egress", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{}/rolebindings/api-secrets", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/limitranges/slot", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
     ]
 }
 
