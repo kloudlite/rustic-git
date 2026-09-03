@@ -470,7 +470,10 @@ export function EnvSnapshots({
                     <div className="truncate text-sm2">Taking a snapshot</div>
                     <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
                   </div>
-                  <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
+                  <span
+                    role="status"
+                    className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground"
+                  >
                     uploading…
                   </span>
                 </div>
@@ -499,7 +502,10 @@ export function EnvSnapshots({
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   {isCurrent ? (
-                    <span className="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-caption font-medium text-primary">
+                    <span
+                      role="status"
+                      className="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-caption font-medium text-primary"
+                    >
                       current
                     </span>
                   ) : (
