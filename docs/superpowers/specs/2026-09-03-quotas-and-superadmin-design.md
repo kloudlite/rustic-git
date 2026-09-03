@@ -88,6 +88,38 @@ reason }`, `status { state: pending | approved | denied, decidedBy, decidedAt, n
 - A superadmin can act on any owner's objects through `/v1` (list, stop, delete) — `may_act_on`
   gains the claim as a third arm — so support can clean up without impersonation.
 
+### 5. Admin APIs live on their own server (owner, 2026-09-03)
+
+Everything that needs the superadmin claim is served by a SEPARATE api process, never by the
+`/v1` server:
+
+| admin server (`/admin/*`) | user server (`/v1/*`) |
+|---|---|
+| regions: create, list all | regions: list active (read) |
+| quota defaults: read, write | own quota: read (`GET /v1/quota`) |
+| quota requests: list all, approve, deny | own request: create, read own |
+| superadmin list: add, remove | — |
+| every owner's usage | — |
+| node decommission status | — |
+| cross-owner list / stop / delete | own objects only |
+
+- Same image, same `rustic-git-api` binary, one env `RUSTIC_GIT_API_ROLE=user|admin` (default
+  `user`). The admin role mounts ONLY `/admin/*` and answers 404 to `/v1`; the user role mounts
+  ONLY `/v1/*` and has no admin route compiled into its router — a `/v1` authorization bug cannot
+  reach an admin handler because the handler is not there.
+- The admin server refuses every request whose JWT lacks `superadmin: true`, before routing.
+- Separate Deployment (`rustic-git-admin`, 1 replica), separate Service, separate ingress host
+  (`admin.` subdomain) with an ingress-level source allowlist; separate ServiceAccount whose
+  ClusterRole is the ONLY one with `create/patch/delete` on `Quota`, `QuotaRequest`, `Region`.
+  The user server's role keeps `get/list` on those (it enforces limits and validates a region on
+  create) plus `create` on `QuotaRequest` (a person or team admin opens one).
+- The web's `/admin` area calls the admin host; `NEXT_PUBLIC_ADMIN_API_URL` (or the server-side
+  equivalent) names it. Everything else in the web keeps calling `/v1`.
+- `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap runs on the admin server only.
+
+Not doing: a separate crate or binary (same code, twice the build); a second JWT secret (the
+claim is the gate, and the admin server additionally refuses any token without it).
+
 ## Rules
 
 - **Quotas are data in the cluster, decisions are people.** No automatic approval, no automatic
@@ -97,6 +129,8 @@ reason }`, `status { state: pending | approved | denied, decidedBy, decidedAt, n
 - **A team's quota is the team's, a person's is the person's.** Working copies owned by the team
   slug count against the team only.
 - **Superadmin is a claim, not an owner.** It never changes who owns anything.
+- **Admin writes only happen on the admin server.** RBAC, not convention, is what stops the user
+  server writing a `Quota`.
 - **Detached volumes count.** Disk kept by snapshots after a working copy is deleted is still the
   owner's disk; deleting snapshots is how they get it back.
 
