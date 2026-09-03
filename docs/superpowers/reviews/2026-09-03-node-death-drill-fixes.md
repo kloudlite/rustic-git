@@ -157,3 +157,79 @@ writers, three is plenty. Said so where the loop is.
 cargo clippy --workspace -- -D warnings   → exit 0
 cargo test                                → exit 0 (71 result lines, all ok, 0 failed)
 ```
+
+# Round 3
+
+Two findings off a live drill of the stop/interrupt/decommission work.
+
+## F6 — a clone of an INTERRUPTED workspace could never start (`035bd9e5`)
+
+`/v1` wrote the clone as `VolumeSource::CloneOf { volume: <source>, commit: Some(<held cut>) }`,
+which is the SHARED-WORKTREE path: `resolve_volume` makes the clone a second worktree of the
+source's own `Volume`. That Volume is pinned to the node that died, so the peer that claims the
+clone — the one node holding the cut — settles `Error / Degraded=NodeMismatch`. Observed twice on
+the cluster. The spec's promise ("clone from the last synced point") needs the clone to have a
+volume of its OWN.
+
+`VolumeSource::SeededFrom { volume, snapshot }` is that volume: created by `ensure_child_volume`
+like any fresh workspace, pinned to the claiming node, and materialized by
+`Engine::seed_from_snapshot` — one `btrfs subvolume snapshot` of `pool.snap(volume, snapshot)` into
+`pool.live(new_id)`, erroring `NO_SUCH_RECORD` (permanent, via `permanent_reason`) when the cut is
+not held here. From there it is byte-for-byte the shipped `CloneOf{commit: None}` fresh-child path:
+`migrate_volume` renames `live` into `live/{id}` and mints the baseline `Snapshot`.
+
+`claim::decide` admits a node for such a parent only when its OWN `VolumeReplica` row for `volume`
+names that exact cut in `status.branches` — `clone_source` now returns the pinned cut and
+`placement` uses it as the bar instead of listing the newest transient cluster-wide. That matters:
+on a dead owner the newest cut cluster-wide may be one the dead node made and nobody holds, which
+is the same stranding in a different costume. The owner arm of `may_claim` is untouched and is
+asserted, but it is not the case that fires here — the source volume's owner is the DEAD node, and
+`decide` only gets past its owner guard because that owner is `unplaceable`.
+
+`/v1` writes `SeededFrom` for the interrupted branch of `clone_base` only; the non-interrupted
+clone and every other `CloneOf` are untouched. `clone_env` refuses an interrupted source outright
+and so needs nothing.
+
+Tests: `cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used` now asserts the POSTed
+body carries `seededFrom` and no `cloneOf`; `a_seeded_clone_places_over_the_one_cut_it_names`
+(holder admitted, holder-of-another-cut refused, no row refused);
+`seed_from_snapshot_refuses_a_commit_this_node_does_not_hold` (and creates nothing when it does);
+`a_seeded_clone_creates_its_own_volume_and_leaves_the_dead_owners_pin_alone`.
+
+No RBAC or admission change. `/v1` still writes spec, the agent still writes status and creates the
+child Volume as a parent's ownerReferenced child — which is exactly what the policy's create arm
+already allows, whatever the source variant says. `deploy/k3s/crds.yaml` IS regenerated
+(`CRD_REGEN=1`), because the variant is a new schema branch.
+
+## F7 — the decommission notice was erased every 15 s (`493af2c5`)
+
+The node annotation said `running=1` while the running workspace carried no `Decommissioning`
+condition at all: the beat wrote it with `mark_parent`, and the owner's running-arm reconcile
+rebuilds the condition list wholesale on every tick.
+
+Fixed at the root rather than by preserving the condition through the rebuild: the parent's OWN
+reconcile writes `Decommissioning=True/NodeLeaving` when its Node carries
+`rustic-git.io/decommission=true`. `controller::i_am_dead` becomes `my_node` and returns
+`{dead, decommissioning}` from the SAME single GET it already made, so the notice costs no extra
+API call; `with_drain_notice` appends it at the running arms of `apply_workspace` (the
+`PodNotReady` write and the converged write) and `apply_environment`. A stop arm never calls it, so
+a stopped parent never carries it. The beat's marking loop and its test are deleted; it still
+counts `running` for the drain status.
+
+Tests: `a_running_workspace_on_a_retiring_node_carries_the_drain_notice`,
+`a_running_workspace_on_an_ordinary_node_carries_no_drain_notice`,
+`a_stopped_workspace_never_carries_the_drain_notice`, and
+`a_drain_leaves_a_running_parent_completely_alone` (the beat writes nothing to the parent at all).
+
+One fixture change came with it: `ctx_full` no longer appends its default Ready `node-a` when the
+test supplied its own. The mock walks same-path routes in order and repeats the last, so the
+default was answering "Ready and unlabelled" from the second pass onward — silently un-draining the
+node midway through a multi-pass test.
+
+## Gates (round 3)
+
+```
+cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1  → exit 0
+cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
+CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml                  → exit 0
+```
