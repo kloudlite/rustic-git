@@ -452,8 +452,8 @@ pub(crate) async fn release_volume(ctx: &Arc<Ctx>, name: &str, owner: &str) -> R
 }
 
 /// Remove `parent_uid`'s entry from the Volume's `ownerReferences` so Kubernetes GC stops seeing
-/// the Volume as that parent's child. Called only when the Volume still holds a Ready commit: a
-/// pushed commit must outlive the workspace it was taken from, and a commit lives on the Volume's
+/// the Volume as that parent's child. Called only when the Volume still holds a Ready snapshot: a
+/// snapshot must outlive the workspace it was pushed from, and its bytes live on the Volume's
 /// subvolume — so the Volume has to survive its parent's delete, detached, rather than being
 /// collected with it. `ownerReferences` is METADATA, which is why the agent's admission policy
 /// (spec-only) needs nothing for this and its existing `patch` on volumes is enough.

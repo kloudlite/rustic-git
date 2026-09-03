@@ -980,10 +980,10 @@ export type ApiCommitRecord = {
   createdAt: string | null;
 };
 
-/** Drops a volume's whole snapshot index — every snapshot and the ref. A volume's snapshots are
+/** Deletes the volume and every `Snapshot` on it. A volume's snapshots are
  *  the only thing keeping it once its workspace or environment is gone, so this is what finally
- *  removes it: the Snapshots section's own "Delete volume". The layer blobs are not reclaimed by it; see the server-tier
- *  handler's comment for why. */
+ *  removes it: the Snapshots section's own "Delete volume". The bytes go with it — each node
+ *  holding the subvolume drops it on its next beat. 409 while a working copy still uses it. */
 export function deleteVolume(token: string, name: string) {
   return call<void>(`/v1/volumes/${encodeURIComponent(name)}`, { method: "DELETE", token });
 }

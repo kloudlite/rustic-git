@@ -10,8 +10,8 @@
 # change to it. CI does not pre-build anything for it — build the binaries on the VM itself
 # (`cargo build --bin rustic-git --bin rustic-git-api --bin rustic-git-agent`). A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
 #
-# Three binaries, and none of them talks to a volume registry: the commit history is the chain of
-# Ready `Snapshot` CRs, so GET /v1/volumes/* reads the CRDs (`Volume.status.head` names the tip)
+# Three binaries, and none of them talks to a volume registry: a volume's history is the chain of
+# Ready `Snapshot` CRs a push wrote, so GET /v1/volumes/* reads the CRDs (`Volume.status.head` names the tip)
 # and the agent reaches nothing over HTTP. /v1/workspaces|environments own the CRDs; only /v1/regions is
 # Cosmos-backed. The agent is a
 # CONTROLLER now, not a poller: it watches the CRDs, so this script waits on the conditions those
