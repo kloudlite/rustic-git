@@ -246,3 +246,16 @@ async fn the_byte_sweep_never_touches_a_working_or_pending_record() {
 - Spec coverage: rule 1 (Task 2), rule 2 (Task 1), rule 3 (no change; Task 5 test asserts a detached Volume is kept when it has a commit), rule 4 (existing restore path — Task 7 e2e asserts re-attach), rule 5 (Tasks 3 + 4), rule 6 (Task 4), listing (Tasks 4 + 6), delete-dialog copy (Task 6), docs/e2e (Task 7), janitor safety net (Task 5), admission/RBAC (Tasks 2 + 4).
 - Placeholders: test bodies in Tasks 2, 4 name the assertions and the recorded calls; fixture wiring is left to the file's existing helpers by design (the reviewer checks the assertions, not the fixture names).
 - Type consistency: `detach_volume` (Task 2) used only there; `VolumeSummary.commits/last_push_at` (Task 4) consumed by Task 6 as `commits`/`last_push_at`; `sweep_orphan_snap_bytes` (Task 3) standalone; `WORKTREE_FINALIZER` reused.
+
+## Revision 2026-09-03 (final vocabulary)
+
+Applies on top of the tasks above (see the spec's revision section):
+
+- **Task 1 (done):** stands — a push record is owned by the Volume.
+- **Task 2/2b/2c/2d (done):** `cleanup_parent` keeps records where `!spec.transient` (a snapshot) and deletes the rest; the "pinned" predicate is replaced by `crd::Snapshot::is_snapshot()` in Task 4.
+- **Task 4 (in flight):** push writes a snapshot (`transient: false`), `spec.pinned` is REMOVED from the CRD (regen), retention's push-pruning arm and `WS_SNAPSHOT_KEEP` are removed, the baseline becomes a sync point unless a head-bearing record is required (implementer explains), deletes/list per the brief's amendments, no pin/unpin routes.
+- **Task 5:** unchanged (safety sweep: a Volume with no parent and no snapshot, older than one beat, is deleted by its owner node).
+- **Task 6:** wording — "Snapshots" lists pushes; sync points never shown; delete-dialog copy: "Your N snapshots stay under Snapshots; unpushed changes are deleted."
+- **Task 7:** docs use only workspace / environment / push / snapshot / restore / clone / delete; "sync point" appears in CLAUDE.md as the internal name of transients.
+- **Task 8 (new): sync on definition change, both kinds.** `bins/agent/src/sync.rs`: `sync_one` cuts when the generation moved OR `live.state != newest_transient.spec.state` (the newest Ready transient of that worktree; absent ⇒ cut). Environments are already in `live_worktrees` — assert with a test. Tests: unchanged bytes + changed packages ⇒ a cut whose `state` carries the new packages; unchanged both ⇒ no cut; environment services change ⇒ cut. Update the sync.rs module doc and the CLAUDE.md sentence on when the sync beat cuts.
+- **Redundancy removed by this revision:** `spec.pinned`; `WS_SNAPSHOT_KEEP` and the push-pruning arm; the legacy registry `upstream.delete_volume/delete_snapshot` and their `registry` trait fns (Task 4); the word "commit" in user-facing docs and web copy (internal fn names such as `create_commit`, `clone_commit`, `commit_model_history_rows` may stay; the final review lists any that mislead).

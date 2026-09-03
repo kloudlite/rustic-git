@@ -140,3 +140,23 @@ deleted deletes itself.
 - Live: push twice, delete the workspace, list Snapshots, restore from the first commit, confirm
   bytes and frozen state, delete the restored workspace, delete one commit, delete the last commit
   and watch the Volume and its bytes disappear on every node. Same for an environment.
+
+## Revision 2026-09-03 (final vocabulary, owner)
+
+The owner collapsed the vocabulary to what a person sees: **workspace / environment** (a working
+copy), **push** takes a **snapshot**, kept until explicitly deleted. Everything else is unnamed
+machinery. This supersedes "commit" and "pinned" above:
+
+- A **snapshot** is any `Snapshot` record with `spec.transient == false` — exactly the pushes.
+  `spec.pinned` is dropped from the CRD: it was a second flag for the same distinction.
+- A **sync point** is any `spec.transient == true` record: the sync beat's, a stop's, a clone's,
+  and the migration baseline (which exists only to seed replication and is never history).
+- Retention prunes sync points only. `WS_SNAPSHOT_KEEP` is gone: a push is never pruned.
+- Rule 1 reads: deleting a working copy deletes its worktree and its sync points; the volume stays
+  iff a snapshot remains on it.
+- **Sync on definition change (both kinds).** A sync point carries the definition it was cut with.
+  The sync beat therefore cuts when EITHER the worktree's btrfs generation moved OR the parent's
+  derived definition (`SnapshotState::of_workspace` / `of_environment`) differs from the newest
+  sync point's `spec.state` — so a package or service change with no byte change still reaches
+  every replica within one beat, for workspaces and environments alike.
+- No pin/unpin routes. Delete is the only explicit verb on a snapshot.
