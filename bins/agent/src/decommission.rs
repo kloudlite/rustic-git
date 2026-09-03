@@ -131,41 +131,8 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use rustic_git_workspaces::kube_test::{get, mock_client, Recorder, Route};
-
-    struct NoopNix;
-    #[async_trait::async_trait]
-    impl crate::nix::Nix for NoopNix {
-        async fn build(&self, _e: &str, _t: std::time::Duration) -> Result<std::path::PathBuf, String> {
-            Ok(std::path::PathBuf::from("/tmp"))
-        }
-        async fn ping(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn collect_garbage(&self) -> Result<u64, String> {
-            Ok(0)
-        }
-    }
-
-    fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
-        let (client, rec) = mock_client(routes);
-        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
-        (
-            Arc::new(Ctx::new(
-                client,
-                Arc::new(Engine::new(EnginePool::new(pool))),
-                node.into(),
-                pool.to_string_lossy().into(),
-                "r1".into(),
-                vec![],
-                Some("test:/".into()),
-                Arc::new(NoopNix),
-                pool.join("profiles"),
-            )),
-            rec,
-        )
-    }
+    use crate::testsupport::test_ctx;
+    use rustic_git_workspaces::kube_test::{get, Route};
 
     const NODES: &str = "/api/v1/nodes";
     const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
@@ -279,6 +246,21 @@ mod tests {
 
         decommission_beat(&ctx).await;
 
+        // A negative alone passes for the wrong reason against a mock that 404s everything. Pin
+        // what the pass DID do, so a code change that calls something else fails here rather than
+        // silently satisfying the absence.
+        assert_eq!(
+            rec.calls(),
+            vec![
+                format!("GET {NODES}"),
+                format!("GET {VOLUMES}"),
+                format!("GET {VOLREPLICAS}"),
+                format!("GET {WORKSPACES}"),
+                format!("GET {ENVIRONMENTS}"),
+                "PATCH /api/v1/nodes/node-a".to_string(),
+            ],
+            "the beat lists, then stamps its own node's status — nothing else"
+        );
         assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "a drain stops nothing, ever: {:?}", rec.calls());
         // No parent write of ANY kind: the beat's mark was erased by the next running-arm
         // reconcile 15 s later, so writing it here was churn that fixed nothing. The route list

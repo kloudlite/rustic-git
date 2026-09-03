@@ -1,10 +1,15 @@
 //! The agent's peer listener (`peer::router`), driven directly with `tower::ServiceExt::oneshot`
 //! — no real socket, no real btrfs. The send command is a fake script so the router's logic
 //! (auth, path validation, streaming) is testable on this Mac.
+//!
+//! Drives the router with a fake `btrfs send` script — good coverage of auth, `valid_segment` and
+//! streaming; zero coverage of the receive half (`pull_one`) against a real `btrfs receive`. That
+//! half is only ever exercised by `tests/ws_e2e.sh`.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use rustic_git_agent::peer::{router, PeerState};
+use rustic_git_agent::peer::{peer_http_client, pull_one, receive_ceiling, router, PeerState};
+use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
 use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
 use std::os::unix::fs::PermissionsExt;
 use tower::util::ServiceExt;
@@ -244,4 +249,74 @@ async fn wake_requires_the_peer_secret_and_answers_204() {
         tokio::time::timeout(std::time::Duration::from_millis(500), notify.notified()).await.is_ok(),
         "an authenticated wake fires the pull notify"
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// The receive half — a fake `btrfs receive` this time, exercised directly through `pull_one`
+// rather than the router (the send side above never touches this code at all).
+// -------------------------------------------------------------------------------------------
+
+/// A fake `btrfs` whose `receive` arm creates the destination subvolume and then exits non-zero
+/// — exactly what a real `btrfs receive` does on a stream that dies mid-way — and whose
+/// `subvolume delete` arm actually removes what it created, so `pull_one`'s own cleanup has
+/// something real to act on.
+fn write_fake_btrfs_receive_fails_after_creating(dir: &std::path::Path) -> String {
+    let path = dir.join("btrfs-receive-fails");
+    let script = r#"#!/bin/sh
+if [ "$1" = "receive" ]; then
+    mkdir -p "$2/c1"
+    exit 1
+fi
+if [ "$1" = "subvolume" ] && [ "$2" = "delete" ]; then
+    rm -rf "$3"
+    exit 0
+fi
+"#;
+    std::fs::write(&path, script).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+struct OneShotServer {
+    addr: String,
+}
+
+/// The smallest HTTP/1.1 server that answers one GET with a fixed body — `pull_one` only needs a
+/// 200 and bytes, never a real peer, so hand-rolling this is less than a dependency.
+async fn serve_one_body(body: &'static [u8]) -> OneShotServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    OneShotServer { addr }
+}
+
+/// The receive half against a fake `btrfs receive`: a truncated body must delete the partial and
+/// return an error, so the puller tries the next source rather than keeping a half-received
+/// subvolume that `local_commits` would then advertise. The real `btrfs receive` is only ever
+/// exercised by `tests/ws_e2e.sh`; this covers the code AROUND it, which is where the bugs were.
+#[tokio::test]
+async fn a_truncated_receive_deletes_the_partial_and_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = write_fake_btrfs_receive_fails_after_creating(tmp.path());
+    let engine = Engine::new(EnginePool::new(tmp.path()));
+    let server = serve_one_body(b"partial stream").await;
+
+    let err = pull_one(&engine, &fake, &peer_http_client().unwrap(), &server.addr, "s3cret", "v1", "c1", None, receive_ceiling(0))
+        .await
+        .expect_err("a failed receive is an error");
+
+    assert!(err.contains("btrfs receive failed"), "{err}");
+    assert!(!engine.pool.snap("v1", "c1").exists(), "the partial must not survive a failed receive");
 }

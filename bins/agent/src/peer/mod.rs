@@ -20,7 +20,7 @@ mod wake;
 #[cfg(test)]
 mod tests;
 
-pub use pull::{pull_beat, replica_interval};
+pub use pull::{peer_http_client, pull_beat, pull_one, receive_ceiling, replica_interval};
 pub use wake::wake_peers;
 // Some of these are not dialled through `crate::peer::…` by any caller today (tests reach the
 // submodule directly, `use super::<mod>::*`), but the path is the contract this split promised to
@@ -44,7 +44,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use kube::api::Api;
-use pull::receive_ceiling;
 use rustic_git_storage::store::valid_segment;
 use rustic_git_workspaces::crd;
 use sha2::{Digest, Sha256};

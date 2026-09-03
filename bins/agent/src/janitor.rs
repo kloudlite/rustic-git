@@ -520,10 +520,15 @@ mod janitor_tests {
     /// `cleanup_local` must reach a nested worktree subvolume, not just the voldir's own top-level
     /// `live` — the snapshot model's `live/{ws}` layout, reproduced here without a full agent: two
     /// nested subvolumes (`snap/c1`, `live/ws1`) under one voldir, both gone afterward.
+    ///
+    /// GATED ON REAL BTRFS. Skipped in CI (no loopback btrfs, no root) — the only test of
+    /// `cleanup_local` against real subvolumes. Every other `cleanup_local` test exercises
+    /// `btrfs_delete`'s `#[cfg(test)]` `remove_dir_all` fallback, i.e. proves the fallback and not
+    /// the production path. Run it on the Linux VM, or through `tests/ws_e2e.sh`.
     #[test]
     fn cleanup_local_deletes_nested_worktree_subvolumes() {
         if !have_btrfs() {
-            eprintln!("skipping: btrfs unavailable or not root");
+            eprintln!("SKIPPED (needs loopback btrfs + root): cleanup_local_deletes_nested_commit_model_subvolumes");
             return;
         }
         let lp = LoopbackPool::new();

@@ -35,7 +35,7 @@ fn subvolume_names(dir: &std::path::Path) -> Vec<String> {
 /// ponytail: one ceiling per receive, not per volume total — N concurrent receives of one volume
 /// can still exceed it N times. The pool-level guard is the quota `volume_work` already sets;
 /// this is the bound on a single stream from a peer we do not otherwise trust to be finite.
-pub(crate) fn receive_ceiling(quota_gb: u64) -> u64 {
+pub fn receive_ceiling(quota_gb: u64) -> u64 {
     let slack: u64 = std::env::var("WS_PEER_RECEIVE_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     (quota_gb * slack * 1024 * 1024 * 1024).max(1024 * 1024 * 1024)
 }
@@ -81,7 +81,7 @@ fn send_timeout() -> Duration {
 /// `.timeout()`: the GET calls above set their own short bound per request, and the POST below
 /// sets its own generous one — a client-wide default would have to be the smaller of the two and
 /// wrongly cap the send.
-pub(crate) fn peer_http_client() -> Result<reqwest::Client, String> {
+pub fn peer_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())
 }
 
@@ -414,8 +414,11 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
 /// One `GET /peer/v1/snapshot/{volume}/{name}` streamed straight into `btrfs receive
 /// snap_dir/{volume}/`. A failed receive deletes the partial, same before/after diff the push
 /// side's `replicate` handler uses, mirrored here on the pulling node.
+// pub rather than private: bins/agent/tests/peer.rs is a separate integration-test crate and
+// needs to drive the receive half directly — the send half is already reachable there through the
+// router, but nothing else serves the other end of a `btrfs receive` to exercise from outside.
 #[allow(clippy::too_many_arguments)]
-async fn pull_one(
+pub async fn pull_one(
     engine: &Engine,
     btrfs_bin: &str,
     http: &reqwest::Client,

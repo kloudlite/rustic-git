@@ -2,6 +2,16 @@
 //! and the
 //! Kubernetes client the node controller (`controller/`) reconciles with. The work itself is
 //! there, not here — the CRD IS the work item, so there is no queue, no lease and no poll loop.
+//!
+//! # Tests that do not run in CI
+//!
+//! CI has no loopback btrfs and no root. `janitor::cleanup_local_deletes_nested_commit_model_subvolumes`
+//! is the only test gated explicitly on `have_btrfs()` and the only one exercising `cleanup_local`
+//! against real subvolumes; every other test of that path proves `btrfs_delete`'s test-only
+//! `remove_dir_all` fallback instead. Several more pass on a Mac only because the code
+//! short-circuits before touching btrfs (each carries an `IMPLICITLY GATED` doc line saying which
+//! short-circuit). If you change the engine so a path that used to return early now shells out,
+//! those tests keep passing here and fail on a node — run `tests/ws_e2e.sh` on the Linux VM.
 
 use rustic_git_workspaces::engine::{Engine, Pool};
 use std::sync::Arc;
@@ -17,6 +27,8 @@ pub mod peer;
 pub mod snapshot;
 pub mod sshkeys;
 pub mod sync;
+#[cfg(test)]
+mod testsupport;
 
 /// Env-derived config for `run`. `WS_REGISTRY_URL`/`WS_AGENT_TOKEN` are gone with the
 /// object-store registry surface they pointed at (Task 8).

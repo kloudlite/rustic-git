@@ -169,41 +169,8 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
-
-    struct NoopNix;
-    #[async_trait::async_trait]
-    impl crate::nix::Nix for NoopNix {
-        async fn build(&self, _e: &str, _t: std::time::Duration) -> Result<std::path::PathBuf, String> {
-            Ok(std::path::PathBuf::from("/tmp"))
-        }
-        async fn ping(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn collect_garbage(&self) -> Result<u64, String> {
-            Ok(0)
-        }
-    }
-
-    fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
-        let (client, rec) = mock_client(routes);
-        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
-        (
-            Arc::new(Ctx::new(
-                client,
-                Arc::new(Engine::new(EnginePool::new(pool))),
-                node.into(),
-                pool.to_string_lossy().into(),
-                "r1".into(),
-                vec![],
-                Some("test:/".into()),
-                Arc::new(NoopNix),
-                pool.join("profiles"),
-            )),
-            rec,
-        )
-    }
+    use crate::testsupport::test_ctx;
+    use rustic_git_workspaces::kube_test::Route;
 
     fn transient_with_generation(name: &str, volume: &str, worktree: &str, gen: Option<u64>) -> crd::Snapshot {
         let mut v = serde_json::json!({
@@ -266,6 +233,10 @@ mod tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         sync_beat(&ctx).await;
         assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "{:?}", rec.calls());
+        // A negative alone passes for the wrong reason against a mock that 404s everything. Pin
+        // what the pass DID do, so a code change that calls something else fails here rather than
+        // silently satisfying the absence.
+        assert_eq!(rec.calls(), vec!["GET /apis/rustic-git.io/v1alpha1/workspaces".to_string()], "the beat lists, and stops");
     }
 
     fn live_fixture() -> crate::listing::Parent {

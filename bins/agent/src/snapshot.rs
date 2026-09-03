@@ -341,48 +341,21 @@ mod snapshot_tests {
         assert!(wake_worthy("ws-1-aaaaaaaa", &last, 120_001, 60_000), "a push is person-initiated too");
         assert_eq!(last.load(std::sync::atomic::Ordering::Relaxed), claimed, "a person-initiated wake never moves the sync window");
     }
-    use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
+    use crate::testsupport::test_ctx as shared_test_ctx;
+    use rustic_git_workspaces::kube_test::{not_found, Recorder, Route};
 
-    struct NoopNix;
-    #[async_trait::async_trait]
-    impl crate::nix::Nix for NoopNix {
-        async fn build(&self, _expr: &str, _timeout: std::time::Duration) -> Result<std::path::PathBuf, String> {
-            Ok(std::path::PathBuf::from("/tmp"))
-        }
-        async fn ping(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn collect_garbage(&self) -> Result<u64, String> {
-            Ok(0)
-        }
-    }
-
+    // Wraps the shared fixture: `retain` consults `seeded_from_cuts` (a GET of every `Volume`)
+    // whenever the cut it is retiring is a transient, so every such test needs that route even
+    // when it has nothing to say about volumes — appended last, so a test with its own wins (the
+    // mock answers a repeated path by call order).
     fn test_ctx(pool: &std::path::Path, node: &str, mut routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
-        // Transient retention asks which cuts a seeded clone still needs (`seeded_from_cuts`), a
-        // list every retention test now pays for. Appended last, so a test with its own volumes
-        // wins; the default answer is "no seeded clones anywhere".
         routes.push(Route {
             method: "GET",
             path: "/apis/rustic-git.io/v1alpha1/volumes".into(),
             status: 200,
             body: list_of("Volume", vec![]),
         });
-        let (client, rec) = mock_client(routes);
-        let engine = Engine::new(EnginePool::new(pool));
-        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
-        let ctx = Ctx::new(
-            client,
-            Arc::new(engine),
-            node.into(),
-            pool.to_string_lossy().into(),
-            "r1".into(),
-            vec![],
-            Some("test:/".into()),
-            Arc::new(NoopNix),
-            pool.join("profiles"),
-        );
-        (Arc::new(ctx), rec)
+        shared_test_ctx(pool, node, routes)
     }
 
     fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
@@ -423,6 +396,9 @@ mod snapshot_tests {
     /// `snapshot_worktree` never shells to real `btrfs`: the destination `snap/{name}` dir already
     /// exists, so its own convergence check (`dst.exists()`) short-circuits before any command
     /// runs — the same trick `snapshot_model_checkout_converges_on_an_existing_worktree` uses.
+    ///
+    /// IMPLICITLY GATED: `snap/{name}` is pre-created, so `snapshot_worktree`'s `dst.exists()`
+    /// returns before any btrfs call.
     #[tokio::test]
     async fn cut_on_my_node_sets_ready_and_advances_head_preserving_other_status_fields() {
         let tmp = tempfile::tempdir().unwrap();

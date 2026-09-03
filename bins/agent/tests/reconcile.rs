@@ -3974,6 +3974,9 @@ async fn a_workspace_gets_its_pod_once_ready() {
 /// materialization never blocks a workspace whose worktree is already there. Real btrfs is not
 /// available in this test environment, so this is the one snapshot-model path exercisable here: the
 /// `Engine::checkout` call, without ever shelling out, because `dst.exists()` is checked first.
+///
+/// IMPLICITLY GATED: pre-created directories stand in for subvolumes, so no `btrfs` binary is
+/// invoked. A change that makes the engine actually shell out will pass here and fail on a node.
 #[tokio::test]
 async fn snapshot_model_checkout_converges_on_an_existing_worktree() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3997,6 +4000,9 @@ async fn snapshot_model_checkout_converges_on_an_existing_worktree() {
 /// `WORKTREE_EXISTS` without ever shelling to real btrfs — and the same zero-snapshot volume, so
 /// the `HeadUnknown` gate never engages. Reaching the Namespace `ensure` call (the very next thing
 /// `run_environment` does) is the proof the checkout arm did not block the pass.
+///
+/// IMPLICITLY GATED: pre-created directories stand in for subvolumes, so no `btrfs` binary is
+/// invoked. A change that makes the engine actually shell out will pass here and fail on a node.
 #[tokio::test]
 async fn snapshot_model_environment_bootstrap_materializes_its_worktree() {
     let tmp = tempfile::tempdir().unwrap();
@@ -4076,6 +4082,9 @@ fn cloned_workspace(snapshot: &str, head: Option<&str>) -> crd::Workspace {
 /// `worktree_heads` sees it from here on. `resolve_volume` also proves clone PLACEMENT here: the
 /// SOURCE's volume (`ws-src`), not a freshly created child, is what gets read — the route list has
 /// no `POST /volumes` at all, so `ensure_child_volume` was never called.
+///
+/// IMPLICITLY GATED: pre-created directories stand in for subvolumes, so no `btrfs` binary is
+/// invoked. A change that makes the engine actually shell out will pass here and fail on a node.
 #[tokio::test]
 async fn snapshot_model_clone_checks_out_its_graft_snapshot_and_records_it_as_head() {
     let tmp = tempfile::tempdir().unwrap();
@@ -4437,6 +4446,9 @@ async fn snapshot_model_restore_in_place_never_calls_the_registry() {
 /// a generation error — cutting on "we do not know" would cut a redundant sync point every single
 /// pass. The decision itself (has the generation moved?) is a pure function tested in `sync.rs`;
 /// no fake-`generation` seam is worth carrying for a second test of it.
+///
+/// IMPLICITLY GATED: pre-created directories stand in for subvolumes, so no `btrfs` binary is
+/// invoked. A change that makes the engine actually shell out will pass here and fail on a node.
 #[tokio::test]
 async fn the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved() {
     let tmp = tempfile::tempdir().unwrap();

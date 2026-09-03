@@ -340,42 +340,16 @@ pub async fn ensure_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustic_git_workspaces::kube_test::{get, mock_client, not_found};
+    use crate::testsupport::test_ctx as shared_test_ctx;
+    use rustic_git_workspaces::kube_test::{get, not_found};
 
     const SNAPS: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
 
-    struct NoopNix;
-    #[async_trait::async_trait]
-    impl crate::nix::Nix for NoopNix {
-        async fn build(&self, _e: &str, _t: std::time::Duration) -> Result<std::path::PathBuf, String> {
-            Ok(std::path::PathBuf::from("/tmp"))
-        }
-        async fn ping(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn collect_garbage(&self) -> Result<u64, String> {
-            Ok(0)
-        }
-    }
-
+    // This module never shells to btrfs or inspects the Recorder, so the shared fixture's pool
+    // path and second return value are irrelevant here — discarded rather than threaded through
+    // every call site.
     fn test_ctx(routes: Vec<rustic_git_workspaces::kube_test::Route>) -> Arc<Ctx> {
-        use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-        let (client, _) = mock_client(routes);
-        // `Ctx::new` PANICS without it, by design (an agent that defaulted to `:latest` would move
-        // every workspace on its next restart). Set here, as `sync.rs`'s own `test_ctx` does, so
-        // this test does not silently depend on another test having set it first.
-        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
-        Arc::new(Ctx::new(
-            client,
-            Arc::new(Engine::new(EnginePool::new(std::path::Path::new("/tmp/claim-test")))),
-            "node-a".into(),
-            "/tmp/claim-test".into(),
-            "r1".into(),
-            vec![],
-            Some("test:/".into()),
-            Arc::new(NoopNix),
-            std::path::PathBuf::from("/tmp/claim-test/profiles"),
-        ))
+        shared_test_ctx(std::path::Path::new("/tmp/claim-test"), "node-a", routes).0
     }
 
     fn snap_json(volume: &str, phase: Option<&str>) -> serde_json::Value {

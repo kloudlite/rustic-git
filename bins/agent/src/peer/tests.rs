@@ -9,9 +9,9 @@ use super::pull::*;
 use super::sweeps::*;
 use super::wake::*;
 use super::*;
+use crate::testsupport::test_ctx;
 use k8s_openapi::api::core::v1::Node;
 use rustic_git_workspaces::crd;
-use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
 use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
 use rustic_git_workspaces::replicate;
 use std::collections::HashSet;
@@ -25,40 +25,6 @@ use std::sync::Arc;
 fn the_dead_node_floor_defaults_to_the_number_the_cluster_runs() {
     std::env::remove_var("WS_NODE_DEAD_SECS");
     assert_eq!(node_dead_secs(), 180);
-}
-
-struct NoopNix;
-#[async_trait::async_trait]
-impl crate::nix::Nix for NoopNix {
-    async fn build(&self, _expr: &str, _timeout: std::time::Duration) -> Result<std::path::PathBuf, String> {
-        Ok(std::path::PathBuf::from("/tmp"))
-    }
-    async fn ping(&self) -> Result<(), String> {
-        Ok(())
-    }
-    async fn collect_garbage(&self) -> Result<u64, String> {
-        Ok(0)
-    }
-}
-
-fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
-    let (client, rec) = mock_client(routes);
-    let engine = Engine::new(EnginePool::new(pool));
-    std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
-    (
-        Arc::new(Ctx::new(
-            client,
-            Arc::new(engine),
-            node.into(),
-            pool.to_string_lossy().into(),
-            "r1".into(),
-            vec![],
-            Some("test:/".into()),
-            Arc::new(NoopNix),
-            pool.join("profiles"),
-        )),
-        rec,
-    )
 }
 
 /// M7: a pull target must be the agent's own ServiceAccount, not merely a pod wearing its
