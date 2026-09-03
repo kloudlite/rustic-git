@@ -38,22 +38,29 @@ function RestoreDialog({ owner, kind, row }: { owner: string; kind: ArchivedKind
   const act: DialogAction = kind === "workspace" ? restoreWorkspace : restoreEnvironmentFrom;
   const [state, action, pending] = useActionState<DialogState, FormData>(act, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
+  // Three states, not two: not read yet, failed, and genuinely empty. A failed read that renders
+  // as "no snapshots" is a false claim of data loss.
   const [snaps, setSnaps] = useState<ApiCommitRecord[] | null>(null);
+  const [snapsError, setSnapsError] = useState<string | null>(null);
   const [sel, setSel] = useState("");
 
   useEffect(() => {
-    if (!open || snaps !== null) return;
+    if (!open || snaps !== null || snapsError !== null) return;
     let live = true;
-    volumeSnapshots(row.id).then((s) => {
+    volumeSnapshots(row.id).then((r) => {
       if (!live) return;
-      setSnaps(s);
+      if (!r.ok) {
+        setSnapsError(r.error);
+        return;
+      }
+      setSnaps(r.rows);
       // Newest first from the api, and the newest is what a restore almost always means.
-      setSel(s[0]?.id ?? "");
+      setSel(r.rows[0]?.id ?? "");
     });
     return () => {
       live = false;
     };
-  }, [open, snaps, row.id]);
+  }, [open, snaps, snapsError, row.id]);
 
   const chosen = snaps?.find((s) => s.id === sel) ?? null;
   // Only a workspace definition pre-fills fields: an environment's is its service list, which
@@ -83,7 +90,11 @@ function RestoreDialog({ owner, kind, row }: { owner: string; kind: ArchivedKind
 
           <div className="grid gap-1.5">
             <label htmlFor={`snap-${row.id}`} className="text-sm2 font-medium">Snapshot</label>
-            {snaps === null ? (
+            {snapsError !== null ? (
+              <p role="alert" className="text-sm2 font-medium text-destructive">
+                Could not read the snapshots — try again. ({snapsError})
+              </p>
+            ) : snaps === null ? (
               <p className="text-sm2 text-muted-foreground">Reading the snapshots…</p>
             ) : snaps.length === 0 ? (
               <p role="alert" className="text-sm2 text-muted-foreground">

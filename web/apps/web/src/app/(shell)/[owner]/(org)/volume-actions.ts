@@ -11,9 +11,13 @@ import type { ApiCommitRecord } from "@/lib/api";
  *  history read per row is a request per deleted workspace on every page load. Only the row whose
  *  Restore dialog is opened pays for one. The api scopes the lookup to volumes the caller may
  *  read, so this shares its authorization rather than adding any. */
-export async function volumeSnapshots(name: string): Promise<ApiCommitRecord[]> {
+export async function volumeSnapshots(
+  name: string,
+): Promise<{ ok: true; rows: ApiCommitRecord[] } | { ok: false; error: string }> {
   const token = await tokenOr();
-  if (typeof token !== "string") return [];
+  // An expired session is NOT "no snapshots" — see `lib/require-api.ts`. Collapsing either
+  // failure into `[]` told someone their last copy was gone, silently.
+  if (typeof token !== "string") return { ok: false, error: token.error };
   const r = await api.volumeHistory(token, name);
-  return r.ok ? r.value : [];
+  return r.ok ? { ok: true, rows: r.value } : { ok: false, error: r.message || "Could not read the snapshots." };
 }
