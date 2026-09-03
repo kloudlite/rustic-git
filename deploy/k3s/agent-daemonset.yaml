@@ -205,10 +205,9 @@ spec:
             # listener only starts when WS_PEER_SECRET (below) is non-empty — see peer.rs.
             - name: WS_PEER_ADDR
               value: 0.0.0.0:8444
-            # How long another node must be observed NotReady before this one reaps its
-            # VolumeReplica rows and takes over — positive evidence only (peer.rs).
-            - name: WS_NODE_DEAD_SECS
-              value: "180"
+            # WS_NODE_DEAD_SECS (peer.rs) defaults to 180 s — how long another node must be
+            # observed NotReady before this one reaps its VolumeReplica rows and takes over.
+            # No override here: the code default is the value the cluster runs.
             # How often a node labelled `rustic-git.io/decommission=true` runs the drain beat
             # (decommission.rs): tell its running worktrees the next start lands elsewhere, release
             # each volume as it becomes stopped-and-replicated, and rewrite its own

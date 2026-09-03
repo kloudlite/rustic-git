@@ -453,11 +453,13 @@ fn spawn_send_tokio(btrfs_bin: &str, path: &FsPath, parent: Option<&FsPath>, clo
     cmd.spawn()
 }
 
-/// `WS_NODE_DEAD_SECS`, default 600 — how long a node must be observed NotReady before its
-/// `VolumeReplica` rows are reaped. Long enough that a rolling restart or a brief kubelet hiccup
-/// never costs a replica row; the row is cheap to recreate, a wrongly-reaped one is not.
+/// `WS_NODE_DEAD_SECS`, default 180 — how long a node must be observed NotReady before its
+/// `VolumeReplica` rows are reaped and its volumes swept. Long enough that a rolling restart or a
+/// brief kubelet hiccup never costs a replica row; the row is cheap to recreate, a wrongly-reaped
+/// one is not. It was 600 with a 180 deploy override, which meant the number every test and every
+/// other doc comment saw was not the one production ran.
 pub(crate) fn node_dead_secs() -> i64 {
-    std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
+    std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(180)
 }
 
 /// One pass of the puller — spawned beside `replicate_beat` in `controller/run.rs`. Inert without a
@@ -1004,11 +1006,12 @@ pub(crate) fn unplaceable(node: Option<&Node>, floor: i64, now: k8s_openapi::jif
     node_is_dead(node, floor, now) || decommissioning(node)
 }
 
-// ponytail: `now` is THIS node's own clock against another node's `lastTransitionTime`
-// (apiserver-stamped, but ultimately from whichever node reported the condition) — a fast
-// local clock reaps a row slightly early, a slow one slightly late. `WS_NODE_DEAD_SECS`'s
-// default (600s) swallows ordinary NTP drift; upgrade to an apiserver-relative delta (read the
-// list's own server timestamp instead of a local `now`) if skew ever gets close to the floor.
+// ponytail: `now` is THIS node's own clock against another node's `lastTransitionTime`, so
+// the 180 s floor absorbs NTP drift rather than measuring it. At 600 s that was ample slack;
+// at 180 it is three minutes of margin, which is still far more than a healthy fleet drifts.
+// The upgrade is an apiserver-relative delta (compare against the API server's own clock via
+// a `Lease` renewal, as the server tier's ownership lease already does) if drift ever shows up
+// as a spurious sweep.
 async fn reap_dead_replicas(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
     let replica_api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
     for r in &beat.replicas {
@@ -1606,6 +1609,15 @@ mod reconcile_tests {
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
     use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
     use std::os::unix::fs::PermissionsExt;
+
+    /// M2: the code default IS the cluster's floor. Two numbers — a 600 s default with a 180 s
+    /// deploy override — is a node declared dead at one interval in production and another in
+    /// every test, and the comments disagreed about which.
+    #[test]
+    fn the_dead_node_floor_defaults_to_the_number_the_cluster_runs() {
+        std::env::remove_var("WS_NODE_DEAD_SECS");
+        assert_eq!(node_dead_secs(), 180);
+    }
 
     struct NoopNix;
     #[async_trait::async_trait]
