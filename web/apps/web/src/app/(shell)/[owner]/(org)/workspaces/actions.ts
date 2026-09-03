@@ -63,7 +63,14 @@ export async function restoreWorkspace(_prev: WsActionState, formData: FormData)
   const token = await tokenOr();
   if (typeof token !== "string") return token;
 
-  const r = await api.restoreWorkspace(token, name, snapshotId);
+  // Present only when the snapshot carried a definition to pre-fill from; absent fields let the
+  // api use the snapshot's own, which is also what an untouched form sends back.
+  const image = String(formData.get("image") ?? "").trim();
+  const packages = formData.has("packages")
+    ? String(formData.get("packages")).split(",").map((p) => p.trim()).filter(Boolean)
+    : undefined;
+
+  const r = await api.restoreWorkspace(token, name, snapshotId, { image: image || undefined, packages });
   if (!r.ok) return { error: r.message || "Could not restore." };
   revalidatePath(`/${owner}/workspaces`);
   return { ok: true };

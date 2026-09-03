@@ -12,11 +12,12 @@ import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { stamp, when } from "@/lib/time";
 import { pendingPush } from "@/lib/pending-push";
 import { snapshotTime } from "@/lib/snapshot";
+import { stateSummary, type SnapshotState } from "@/lib/snapshot-state";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
 
-export type SnapshotNode = { id: string; message?: string; createdAt: string | null; parent: string | null };
+export type SnapshotNode = { id: string; message?: string; createdAt: string | null; parent: string | null; state?: SnapshotState | null };
 
 /** The rail's geometry, lifted from the landing page's environment panel so the two read as one
  *  drawing: the main lane 27px in, a branch lane every 18px further, a 12px ring on the lane. */
@@ -496,6 +497,9 @@ export function EnvSnapshots({
                   <div className={`truncate text-sm2 ${c.message ? "" : "text-muted-foreground"}`}>
                     {c.message || "snapshot"}
                   </div>
+                  {stateSummary(c.state) && (
+                    <div className="mt-0.5 text-sm2 text-muted-foreground">{stateSummary(c.state)}</div>
+                  )}
                   <div className="mt-0.5 text-caption text-muted-foreground">
                     <span title={stamp(ts.getTime())}>{when(ts.getTime())}</span> ·{" "}
                     <span className="font-mono">{c.id.slice(0, 8)}</span> · {pusher}

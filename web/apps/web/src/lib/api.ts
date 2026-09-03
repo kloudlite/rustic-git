@@ -1,6 +1,7 @@
 import "server-only";
 import { cache } from "react";
 import type { Commit } from "@/lib/browse";
+import type { SnapshotState } from "@/lib/snapshot-state";
 
 /**
  * The api server, from the web app's server side only.
@@ -873,13 +874,25 @@ export function cloneEnvironment(token: string, id: string, name: string) {
 
 /** New workspace grafted onto an explicit past snapshot (a PUSHED commit), not the source's
  *  current tip — see `crates/workspaces/src/api.rs::restore_ws`. */
-export function restoreWorkspace(token: string, name: string, snapshotId: string) {
+export function restoreWorkspace(
+  token: string,
+  name: string,
+  snapshotId: string,
+  // Each field OVERRIDES the snapshot's own frozen definition, so an omitted one must stay off
+  // the wire entirely — sending `image: undefined`'s JSON hole would read as "no image".
+  extra?: { image?: string; packages?: string[] },
+) {
   return call<ApiWorkspace>(`/v1/workspaces/restore`, {
     method: "POST",
     token,
     // The snapshot id is enough: the api tier finds the volume it belongs to. No source
     // workspace is named, because a restore is most wanted when there no longer is one.
-    body: JSON.stringify({ name, snapshot_id: snapshotId }),
+    body: JSON.stringify({
+      name,
+      snapshot_id: snapshotId,
+      ...(extra?.image ? { image: extra.image } : {}),
+      ...(extra?.packages ? { packages: extra.packages } : {}),
+    }),
   });
 }
 
@@ -942,7 +955,8 @@ export function listVolumes(token: string, kind?: "workspace" | "environment", o
  *  `phase`, left undeclared here — no reader in this app looks at it yet; add it if one needs to. */
 export type ApiCommitRecord = {
   id: string;
-  state: unknown;
+  /** The definition frozen at push time — `null` for snapshots taken before it was recorded. */
+  state: SnapshotState | null;
   /** Always empty: the lineage lives with the bytes on the server tier, not in the CR the
    *  `/history` projection now reads. Kept on the wire so an older client still parses. */
   lineage: never[];

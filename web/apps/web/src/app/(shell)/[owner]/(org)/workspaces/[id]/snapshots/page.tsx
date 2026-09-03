@@ -4,6 +4,7 @@ import { notFound, redirect } from "next/navigation";
 import { volumeHistory } from "@/lib/api";
 import { when } from "@/lib/time";
 import { snapshotTime } from "@/lib/snapshot";
+import { stateSummary } from "@/lib/snapshot-state";
 import { RestoreDialog } from "@/components/app/restore-dialog";
 import { requireToken } from "@/lib/session";
 
@@ -58,11 +59,14 @@ export default async function Page({
                     {c.message || "—"}
                   </span>
                 </div>
+                {stateSummary(c.state) && (
+                  <span className="mt-1 block text-sm2 text-muted-foreground">{stateSummary(c.state)}</span>
+                )}
                 <span className="mt-1 block text-caption text-muted-foreground">
                   {when(snapshotTime(c))}
                 </span>
               </div>
-              <RestoreDialog owner={owner} snapshotId={c.id} />
+              <RestoreDialog owner={owner} snapshotId={c.id} state={c.state} />
             </li>
           ))}
         </ul>

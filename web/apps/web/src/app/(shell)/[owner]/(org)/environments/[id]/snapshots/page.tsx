@@ -22,7 +22,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
       envName={env ? env.name : null}
       // A record carries no author, so the owner it belongs to is what the row can honestly say.
       pusher={env?.owner ?? owner}
-      history={history.map((c) => ({ id: c.id, message: c.message, createdAt: c.createdAt, parent: c.parent ?? null }))}
+      history={history.map((c) => ({ id: c.id, message: c.message, createdAt: c.createdAt, parent: c.parent ?? null, state: c.state }))}
       // The Volume's answer, not the history's: an in-place restore makes an OLDER record the
       // live one. Absent (never restored) means the newest record is current.
       restoredTo={env?.restored_to ?? null}
