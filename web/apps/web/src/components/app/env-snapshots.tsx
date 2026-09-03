@@ -253,7 +253,7 @@ function DeleteSnapshotDialog({
                 <>
                   {" "}
                   This is the snapshot the environment currently sits on; its disk does not change,
-                  but the lineage will no longer show where it is.
+                  but the snapshots will no longer show where it is.
                 </>
               )}
             </DialogDescription>
@@ -423,7 +423,7 @@ export function EnvSnapshots({
                 </div>
                 <div className="mt-0.5 text-caption text-muted-foreground">
                   {history.length === 0 ? (
-                    "No snapshots yet — take one to start the lineage"
+                    "No snapshots yet — take one to start"
                   ) : current ? (
                     <>
                       changes since <span>&ldquo;{current.message || "snapshot"}&rdquo;</span> (
@@ -439,7 +439,7 @@ export function EnvSnapshots({
                     <>
                       the snapshot the environment is on (
                       <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span>) is no longer in
-                      this lineage &mdash; changes since are not snapshotted
+                      this environment&rsquo;s snapshots &mdash; changes since are not snapshotted
                     </>
                   )}
                 </div>
