@@ -44,7 +44,7 @@ pub(crate) const TICK: Duration = Duration::from_secs(15);
 /// pass starts the work again — backoff, never give up.
 const RETRY: Duration = Duration::from_secs(60);
 
-/// True when the CLUSTER reads THIS node as dead — one GET on our own Node, per reconcile.
+/// What the CLUSTER says about THIS node — one GET on our own Node, per reconcile.
 ///
 /// The pull beat already refuses to sweep in that state; this is the other half. A partitioned
 /// agent (kubelet down, API server still reachable) goes on reconciling its own objects every
@@ -61,21 +61,48 @@ const RETRY: Duration = Duration::from_secs(60);
 /// The `WS_NODE_DEAD_SECS` floor (180 s) is the only guard here: a node wrongly NotReady past it
 /// stops reconciling until its Node object recovers. Deliberate — a wrong write corrupts placement,
 /// a paused reconcile only waits.
-pub(crate) async fn i_am_dead(ctx: &Ctx) -> bool {
+/// Both facts a reconcile needs about its own node, off the SAME single GET: `dead` gates every
+/// write below, `decommissioning` is the drain notice the running arms stamp (F7).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MyNode {
+    pub dead: bool,
+    pub decommissioning: bool,
+}
+
+pub(crate) async fn my_node(ctx: &Ctx) -> MyNode {
     match kube::Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&ctx.node).await {
         // Absent is not dead either: a wrong `$NODE_NAME` would otherwise freeze every reconcile
         // on a live node with nothing but a silent requeue. The sweep sees the whole listing and is
         // the authority on a node that is not there.
         Ok(None) => {
             tracing::warn!(node = %ctx.node, "reconcile: my own Node object is missing; assuming alive");
-            false
+            MyNode::default()
         }
-        Ok(Some(n)) => crate::peer::node_is_dead(Some(&n), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+        Ok(Some(n)) => MyNode {
+            dead: crate::peer::node_is_dead(Some(&n), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+            decommissioning: crate::peer::decommissioning(Some(&n)),
+        },
         Err(e) => {
             tracing::warn!(node = %ctx.node, error = %e, "reconcile: reading my own Node; assuming alive");
-            false
+            MyNode::default()
         }
     }
+}
+
+/// The drain notice a RUNNING parent carries while its node is being retired — the one place a
+/// person is told that stopping is theirs to time and that the next start lands elsewhere.
+///
+/// Written by the parent's OWN reconcile, not by the decommission beat: the running arms rewrite
+/// the condition list wholesale every `TICK`, so the beat's mark was erased seconds after it landed
+/// and the workspace never carried it at all. A reconcile cannot race itself.
+pub(crate) const DRAIN_MESSAGE: &str = "this node is being retired; stop when convenient and the next start lands elsewhere";
+
+pub(crate) fn with_drain_notice(prev: &[crd::Condition], mut conditions: Vec<crd::Condition>, decommissioning: bool, gen: i64) -> Vec<crd::Condition> {
+    if decommissioning {
+        let was = prev.iter().find(|c| c.type_ == "Decommissioning");
+        conditions.push(crd::condition_since(was, "Decommissioning", true, "NodeLeaving", DRAIN_MESSAGE, gen));
+    }
+    conditions
 }
 
 /// Keyed by uid, carrying the generation it was started for — see `Ctx::running`.

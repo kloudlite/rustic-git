@@ -1037,7 +1037,7 @@ pub(crate) async fn sweep_volumes(
             // happened to touch it.
             //
             // THREE attempts is enough only because the owner is no longer writing back: the
-            // parent and volume reconcilers bail on `i_am_dead` (see `controller::i_am_dead`), so a
+            // parent and volume reconcilers bail on `my_node` (see `controller::my_node`), so a
             // partitioned agent no longer rewrites this status every 15 s. Against that, no bound
             // would have been enough; against one-shot writers, three is plenty.
             for attempt in 0..3 {

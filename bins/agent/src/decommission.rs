@@ -82,19 +82,11 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
     // Keep-biased like every other beat: a half-listed cluster releases nothing.
     let Some(beat) = crate::listing::beat(ctx).await else { return };
 
-    // 1. Running parents keep running, and are told why the next start lands elsewhere. The person
-    //    decides when their edits are safe to leave this node; a drain never decides it for them.
-    for p in beat.parents.iter().filter(|p| p.is_live_worktree()) {
-        crate::peer::mark_parent(
-            ctx,
-            p,
-            ("Decommissioning", true),
-            "NodeLeaving",
-            "this node is being retired; stop when convenient and the next start lands elsewhere",
-            false,
-        )
-        .await;
-    }
+    // 1. Running parents keep running, and are told why the next start lands elsewhere — by their
+    //    OWN reconcile (`controller::with_drain_notice`), not from here. This beat wrote the
+    //    condition once and the parent's running arm, which rewrites conditions wholesale every
+    //    TICK, erased it seconds later: the annotation said `running=1` while the workspace it
+    //    named carried nothing. Counting them (step 4) is all this beat ever needed to do.
 
     // 2. Release owned volumes as they become releasable — the dead-node sweep's own three arms,
     //    the same function, called with this node as the "unavailable" owner and a different word.
@@ -269,10 +261,11 @@ mod tests {
         assert_eq!(drain_status(0, 0, 0, 0, "2026-09-03T10:00:00Z"), "drained 2026-09-03T10:00:00Z");
     }
 
-    /// A running parent is NEVER stopped: it is the person's, and the node waits. It is told, in
-    /// the one place a person looks, that the next start lands elsewhere.
+    /// A running parent is NEVER stopped, never un-pinned and never marked: it is the person's,
+    /// and the node waits. The drain notice they read is written by the parent's own reconcile
+    /// (`controller::with_drain_notice`) — this beat only counts what is left.
     #[tokio::test]
-    async fn running_parents_are_told_not_stopped() {
+    async fn a_drain_leaves_a_running_parent_completely_alone() {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![
             Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![node_decommissioning("node-a")]) },
@@ -280,40 +273,27 @@ mod tests {
             Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_running("ws-run", "node-a", "vol-1")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-run", ws_running("ws-run", "node-a", "vol-1")),
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_running("ws-run", "node-a", "vol-1") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "node-a") },
             Route { method: "PATCH", path: "/api/v1/nodes/node-a".into(), status: 200, body: node_decommissioning("node-a") },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
         decommission_beat(&ctx).await;
 
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "a drain stops nothing, ever: {:?}", rec.calls());
+        // No parent write of ANY kind: the beat's mark was erased by the next running-arm
+        // reconcile 15 s later, so writing it here was churn that fixed nothing. The route list
+        // carries no parent-status route at all — a write would 404 against the mock.
         assert!(
-            !rec.calls().iter().any(|c| c.starts_with("DELETE")),
-            "a drain stops nothing, ever: {:?}",
+            !rec.calls().iter().any(|c| c.contains("/workspaces/ws-run")),
+            "a running parent is not touched by the beat at all: {:?}",
             rec.calls()
         );
-        assert!(
-            !rec.calls().iter().any(|c| c == "PATCH /apis/rustic-git.io/v1alpha1/volumes/vol-1"),
-            "a running parent keeps the pin: {:?}",
-            rec.calls()
-        );
-        let sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status").remove(0);
-        let cond = sent["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "Decommissioning").expect("the condition");
-        assert_eq!(cond["reason"], "NodeLeaving");
-        assert_eq!(cond["message"], "this node is being retired; stop when convenient and the next start lands elsewhere");
-        assert_eq!(sent["status"]["nodeName"], "node-a", "a running worktree never moves");
         // The node is ALIVE and the workspace is happily running: nothing about it is degraded or
         // unavailable, and saying so would make `/v1`'s `interrupted()` 409 a clone of it.
         assert!(
-            !rec.calls().iter().any(|c| c == "PUT /apis/rustic-git.io/v1alpha1/volumes/vol-1/status"),
-            "a drain never marks a running volume Unavailable: {:?}",
+            !rec.calls().iter().any(|c| c.contains("/volumes/vol-1")),
+            "a drain never marks or releases a running volume: {:?}",
             rec.calls()
-        );
-        assert!(
-            !sent["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Degraded"),
-            "a running workspace is not Degraded by a drain: {sent}"
         );
         let ann = rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0);
         assert_eq!(ann["metadata"]["annotations"]["rustic-git.io/decommission-status"], "draining running=1 owned=1 copies=0 thin=1");

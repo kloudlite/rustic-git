@@ -127,14 +127,18 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
                                       "status": {"phase": "Synced", "branches": {}, "lastSyncAt": rfc3339_ago(1)}}]}),
     ));
     // The claim asks whether THIS node is placeable at all (dead or decommissioning takes no new
-    // work), so every fixture needs a Ready node-a. Appended last, so a decommission test's own
-    // route wins.
-    routes.push(rustic_git_workspaces::kube_test::get(
-        "/api/v1/nodes/node-a",
-        serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"},
-                           "status": {"conditions": [{"type": "Ready", "status": "True",
-                                                      "lastTransitionTime": rfc3339_ago(60)}]}}),
-    ));
+    // work), so every fixture needs a Ready node-a. SKIPPED when the test brought its own: the mock
+    // walks same-path routes in order and repeats the last, so merely appending this would answer
+    // "Ready and unlabelled" from the second pass onward — silently un-draining a node midway
+    // through a multi-pass test.
+    if !routes.iter().any(|r| r.method == "GET" && r.path == "/api/v1/nodes/node-a") {
+        routes.push(rustic_git_workspaces::kube_test::get(
+            "/api/v1/nodes/node-a",
+            serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"},
+                               "status": {"conditions": [{"type": "Ready", "status": "True",
+                                                          "lastTransitionTime": rfc3339_ago(60)}]}}),
+        ));
+    }
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
@@ -2635,6 +2639,70 @@ fn packages_condition(status: &serde_json::Value) -> serde_json::Value {
         .find(|c| c["type"] == "PackagesReady")
         .unwrap_or_else(|| panic!("no PackagesReady condition in {status}"))
         .clone()
+}
+
+/// F7: the drain notice a person actually reads. `node-a` carries the decommission label, so the
+/// RUNNING workspace's own reconcile stamps `Decommissioning=True/NodeLeaving` — the decommission
+/// beat used to write it and this very pass, which rewrites the condition list wholesale every
+/// TICK, erased it seconds later.
+fn decommissioning_node() -> Route {
+    rustic_git_workspaces::kube_test::get(
+        "/api/v1/nodes/node-a",
+        serde_json::json!({"apiVersion": "v1", "kind": "Node",
+                           "metadata": {"name": "node-a", "labels": {crd::DECOMMISSION_LABEL: "true"}},
+                           "status": {"conditions": [{"type": "Ready", "status": "True",
+                                                      "lastTransitionTime": rfc3339_ago(60)}]}}),
+    )
+}
+
+fn drain_notice(sent: &[serde_json::Value]) -> Option<serde_json::Value> {
+    sent.iter()
+        .flat_map(|s| s["status"]["conditions"].as_array().cloned().unwrap_or_default())
+        .find(|c| c["type"] == "Decommissioning")
+}
+
+#[tokio::test]
+async fn a_running_workspace_on_a_retiring_node_carries_the_drain_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ssh_routes();
+    routes.push(decommissioning_node());
+    let (ctx, rec, _) = ws_ctx_with_ssh(tmp.path(), routes);
+
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+
+    let cond = drain_notice(&rec.sent("PATCH", WS_STATUS)).expect("the drain notice");
+    assert_eq!(cond["status"], "True");
+    assert_eq!(cond["reason"], "NodeLeaving");
+    assert_eq!(cond["message"], "this node is being retired; stop when convenient and the next start lands elsewhere");
+}
+
+/// The same pass on a node nobody is retiring says nothing: the condition is a fact about the NODE,
+/// re-read every reconcile, so removing the label removes the notice on the very next tick.
+#[tokio::test]
+async fn a_running_workspace_on_an_ordinary_node_carries_no_drain_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _) = ws_ctx_with_nix(tmp.path());
+
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+
+    assert_eq!(drain_notice(&rec.sent("PATCH", WS_STATUS)), None);
+}
+
+/// A STOPPED workspace never carries it, on any node. The notice asks the person to stop when
+/// convenient; on one they have already stopped it is a message with nothing behind it.
+#[tokio::test]
+async fn a_stopped_workspace_never_carries_the_drain_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = vec![decommissioning_node()];
+    routes.extend(ws_stop_routes());
+    routes.push(rustic_git_workspaces::kube_test::not_found(WS_POD_DEL));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let _ = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await;
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert!(!sent.is_empty(), "the stop arm must have written a status");
+    assert_eq!(drain_notice(&sent), None, "{sent:?}");
 }
 
 /// The profile is built from the spec, and the pod only exists once it is — a container started on

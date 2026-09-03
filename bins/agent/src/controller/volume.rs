@@ -3,7 +3,7 @@
 //! — a workspace and an environment both own exactly one volume with identical semantics.
 //! Split out of `controller.rs` unchanged.
 
-use super::{i_am_dead, 
+use super::{my_node, 
     conditions_eq, kept_conditions, replace_status, running_contains, settle, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr,
     Work, RETRY, TICK,
 };
@@ -67,9 +67,9 @@ pub(crate) async fn reconcile_volume(v: Arc<crd::Volume>, ctx: Arc<Ctx>) -> Resu
 }
 
 pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    // Above every write — see `i_am_dead`. The `returned` re-run below is exactly the pass that
+    // Above every write — see `my_node`. The `returned` re-run below is exactly the pass that
     // rewrote the sweep's `Available=False/NodeDead` away on a node that had not actually come back.
-    if i_am_dead(ctx).await {
+    if my_node(ctx).await.dead {
         return Ok(Action::requeue(TICK));
     }
     let gen = v.meta().generation.unwrap_or(0);

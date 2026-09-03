@@ -2,7 +2,7 @@
 //! Split out of `controller.rs` unchanged.
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
-use super::{i_am_dead, conditions_eq, create_if_absent, delete_ignoring_404, ensure, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
+use super::{my_node, conditions_eq, create_if_absent, delete_ignoring_404, ensure, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
 use crate::binding;
 use std::time::Duration;
 use k8s_openapi::api::core::v1::Pod;
@@ -661,10 +661,11 @@ fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32) -> Result
 }
 
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    // FIRST, above every write: see `i_am_dead`. A partitioned agent that keeps reconciling erases
+    // FIRST, above every write: see `my_node`. A partitioned agent that keeps reconciling erases
     // the sweep's `NodeDead` on the very next tick, which is how `/v1` came to accept `start` on a
     // node the cluster reads as dead.
-    if i_am_dead(ctx).await {
+    let me = my_node(ctx).await;
+    if me.dead {
         return Ok(Action::requeue(TICK));
     }
     let gen = w.meta().generation.unwrap_or(0);
@@ -1132,12 +1133,17 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     // from the moment a pod exists here, no other node is an option whatever the
                     // copies hold, and a stale `True` left over from the last stop is exactly the
                     // answer placement must never read.
-                    conditions: replaced(
-                        &with_attached(
-                            ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
-                            attached.clone(),
+                    conditions: super::with_drain_notice(
+                        &prev.conditions,
+                        replaced(
+                            &with_attached(
+                                ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
+                                attached.clone(),
+                            ),
+                            running_condition(&prev.conditions, gen),
                         ),
-                        running_condition(&prev.conditions, gen),
+                        me.decommissioning,
+                        gen,
                     ),
                     ..prev
                 };
@@ -1164,6 +1170,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         Some(_) => replaced(&conditions, running_condition(&prev.conditions, gen)),
         None => conditions,
     };
+    // F7: the drain notice, on the running workspace's own status. The decommission beat used to
+    // write it and this very rewrite erased it 15 s later, so the node annotation said `running=1`
+    // while the workspace it was waiting on carried nothing at all.
+    let conditions = super::with_drain_notice(&prev.conditions, conditions, me.decommissioning, gen);
     let st = crd::WorkspaceStatus {
         phase,
         observed_generation: Some(gen),

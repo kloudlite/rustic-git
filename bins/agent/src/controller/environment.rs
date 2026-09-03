@@ -3,7 +3,7 @@
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
 use super::workspace::{cleared_node_dead, replaced};
-use super::{i_am_dead, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, migrate_and_seed_baseline, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
+use super::{my_node, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, migrate_and_seed_baseline, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -19,8 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    // Above every write, exactly as `apply_workspace` does — see `i_am_dead`.
-    if i_am_dead(ctx).await {
+    // Above every write, exactly as `apply_workspace` does — see `my_node`.
+    let me = my_node(ctx).await;
+    if me.dead {
         return Ok(Action::requeue(TICK));
     }
     let gen = e.meta().generation.unwrap_or(0);
@@ -111,7 +112,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             }
         }
     }
-    run_environment(e, &vol, &ns, &deployments, &owner_ref, prev, gen, ctx).await
+    run_environment(e, &vol, &ns, &deployments, &owner_ref, prev, gen, me.decommissioning, ctx).await
 }
 
 /// Tear the environment down, fail-closed: the services drain, the environment's own subvolume is
@@ -231,6 +232,9 @@ async fn run_environment(
     owner_ref: &OwnerReference,
     prev: crd::EnvironmentStatus,
     gen: i64,
+    // F7: whether THIS node carries the decommission label, read off `apply_environment`'s one
+    // Node GET. The running arm is where it has to be written — see `with_drain_notice`.
+    decommissioning: bool,
     ctx: &Arc<Ctx>,
 ) -> Result<Action, ReconcileErr> {
     let id = vol.name_any();
@@ -365,7 +369,10 @@ async fn run_environment(
             // other node is an option whatever the copies hold, and a stale `True` left over from
             // the last stop is exactly the answer placement must never read.
             c.push(running_condition(&prev.conditions, gen));
-            c
+            // A retirement in progress is told HERE, on the running environment, and nowhere else:
+            // this write is the wholesale rewrite that used to erase the decommission beat's mark
+            // every 15 s.
+            super::with_drain_notice(&prev.conditions, c, decommissioning, gen)
         },
         volume_ref: Some(id.clone()),
         ..prev
