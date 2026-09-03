@@ -67,6 +67,22 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
     }
 }
 
+/// `SnapshotSpec::state` can't be validated by the schema (kube-core cannot flatten an
+/// internally-tagged enum's `oneOf` into one object — see the comment on the field), so it must
+/// be published as `x-kubernetes-preserve-unknown-fields: true`, not left with no `type` at all:
+/// a structural-schema apply rejects a specified object property with no `type`, and if it were
+/// somehow accepted, pruning would strip every child and silently store `state: {}`.
+#[test]
+fn snapshot_state_preserves_unknown_fields() {
+    let crd = all_crds().into_iter().find(|c| c.spec.names.kind == "Snapshot").unwrap();
+    let schema = crd.spec.versions[0].schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
+    let props = schema.properties.as_ref().unwrap()["spec"].properties.as_ref().unwrap();
+    let state = &props["state"];
+    assert_eq!(state.type_.as_deref(), Some("object"), "state must have type: object");
+    let ext = &state.x_kubernetes_preserve_unknown_fields;
+    assert_eq!(*ext, Some(true), "state must set x-kubernetes-preserve-unknown-fields: true");
+}
+
 /// The six kinds, so a kind added to the group without a CRD entry cannot ship: `all_crds` is
 /// what generates the manifest AND what the agent's startup precondition check reads.
 /// `SnapshotRequest` — the object-store push request — is gone (Task 8).

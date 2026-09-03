@@ -261,20 +261,55 @@ pub struct SnapshotSpec {
     pub transient: bool,
     /// Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.
     ///
-    /// Schema is declared as free-form JSON, not `SnapshotState`'s own derived schema: kube-core's
-    /// CRD generation flattens an internally-tagged enum's `oneOf` branches into one object and
-    /// panics when a shared property (`kind`) carries a different `const` per branch — which is the
-    /// entire point of a tag. `serde`'s view of the type is untouched, so round-tripping is exact;
-    /// only the *published* OpenAPI schema for this field is permissive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<serde_json::Value>")]
+    /// Schema is hand-written as free-form JSON (`preserve_unknown_state`), not `SnapshotState`'s
+    /// own derived schema: kube-core's CRD generation flattens an internally-tagged enum's `oneOf`
+    /// branches into one object and panics when a shared property (`kind`) carries a different
+    /// `const` per branch — which is the entire point of a tag. A hand-written *discriminated*
+    /// schema would drift from the type the moment a variant changes, so this stays a plain
+    /// `x-kubernetes-preserve-unknown-fields` object instead of trying to describe the union.
+    /// `serde`'s view of the Rust type is untouched, so round-tripping is exact; only the
+    /// *published* OpenAPI schema for this field is permissive. Because the schema can't validate
+    /// it, a value that doesn't parse as `SnapshotState` must not fail the whole `Snapshot` read —
+    /// `lenient_state` drops it to `None` (with a `tracing::warn!`) rather than taking the agent's
+    /// list/watch down with it.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_state")]
+    #[schemars(schema_with = "preserve_unknown_state")]
     pub state: Option<SnapshotState>,
 }
 
-/// The parent's own quota fallback for a snapshot with no `spec.storage`, and its environment
-/// counterpart — both were `20` already (`FALLBACK_QUOTA_GB` in `api.rs`, `default_env_quota`);
-/// named here so `SnapshotState::of_workspace`/`of_environment` and `api.rs` share the one number.
+fn preserve_unknown_state(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true
+    }))
+    .expect("static schema literal")
+}
+
+/// `state` is unvalidatable by the published schema (see `preserve_unknown_state`), so a value
+/// that doesn't parse as `SnapshotState` — hand-edited, or written by some future variant this
+/// build doesn't know — must not fail the whole `Snapshot` read. Every reader already treats
+/// `None` as "no frozen state, fall back to defaults", which is exactly right for "couldn't read
+/// it" too.
+fn lenient_state<'de, D>(deserializer: D) -> Result<Option<SnapshotState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|v| match serde_json::from_value(v.clone()) {
+        Ok(state) => Some(state),
+        Err(e) => {
+            tracing::warn!(error = %e, value = %v, "snapshot state did not parse; treating as absent");
+            None
+        }
+    }))
+}
+
+/// The legacy-Volume quota fallback (`FALLBACK_QUOTA_GB` in `api.rs`) — was already `20`, named
+/// here so `SnapshotState::of_workspace` and `api.rs` share the one number.
 pub const DEFAULT_WS_QUOTA_GB: u64 = 20;
+/// `default_env_quota()`'s value in `api.rs` — both the `NewEnvironment.quota_gb` request-body
+/// default (an environment created without one gets this) and `SnapshotState::of_environment`'s
+/// fallback for a legacy `spec.storage`-less object; was already `20`, named here to share it.
 pub const DEFAULT_ENV_QUOTA_GB: u64 = 20;
 
 /// What the parent WAS when this cut was taken, frozen beside the bytes. A restore defaults to
@@ -1080,6 +1115,16 @@ mod tests {
         assert!(s.state.is_none());
         // and a None state is not written at all
         assert!(serde_json::to_value(&s).unwrap().get("state").is_none());
+    }
+
+    #[test]
+    fn a_malformed_snapshot_state_is_dropped_not_a_deserialize_error() {
+        let s: SnapshotSpec = serde_json::from_value(serde_json::json!({
+            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "pinned": false,
+            "transient": false, "state": {"kind": "bogus"}
+        }))
+        .unwrap();
+        assert!(s.state.is_none());
     }
 
     #[test]
