@@ -92,8 +92,6 @@ fn route_class(path: &str) -> &'static str {
         "v1"
     } else if path.starts_with("/own/") {
         "own"
-    } else if path.starts_with("/vol-agent/") {
-        "vol-agent"
     } else if path.starts_with("/tunnel/") {
         "tunnel"
     } else if path == "/healthz" || path == "/metrics" {
