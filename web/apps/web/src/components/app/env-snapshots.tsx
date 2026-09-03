@@ -170,12 +170,12 @@ function RestoreDialog({
                 {keep ? (
                   <div className="grid gap-1.5">
                     <input type="hidden" name="snapshotFirst" value="1" />
-                    <label htmlFor="restore-keep-message" className="text-muted-foreground">
+                    <label htmlFor={`restore-keep-${snapshot.id}`} className="text-muted-foreground">
                       The current state is snapshotted first, so you can come back to it. The restore
                       waits for that snapshot to land.
                     </label>
                     <Input
-                      id="restore-keep-message"
+                      id={`restore-keep-${snapshot.id}`}
                       name="snapshotMessage"
                       defaultValue={`before restore to ${label}`}
                       placeholder="Message for the snapshot"
