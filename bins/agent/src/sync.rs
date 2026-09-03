@@ -87,6 +87,24 @@ fn build_sync_spec(live: &crate::listing::Parent, parent: String) -> crd::Snapsh
     }
 }
 
+/// The newest recorded sync point of `worktree`: its name, its recorded generation, and the state
+/// it froze. Pure, and keyed by `crd::transient_generation_of` — the SAME ordering key
+/// `newest_transient_of` and the pull beat's replica branches use. Three call sites computing
+/// "which cut is newest" three ways is three answers that can disagree about a send parent.
+///
+/// A record with no generation annotation is generation 0, never a winner: the annotation write
+/// is a documented keep-biased path that can fail, and a failed write must not promote its record.
+pub(crate) fn newest_recorded(snapshots: &[crd::Snapshot], worktree: &str) -> Option<(String, u64, Option<crd::SnapshotState>)> {
+    snapshots
+        .iter()
+        .filter(|s| s.spec.transient && s.spec.worktree == worktree)
+        .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
+        .max_by(|a, b| {
+            (crd::transient_generation_of(a), a.name_any()).cmp(&(crd::transient_generation_of(b), b.name_any()))
+        })
+        .map(|s| (s.name_any(), crd::transient_generation_of(s), s.spec.state.clone()))
+}
+
 async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let list = match api.list(&ListParams::default().fields(&format!("spec.volume={}", live.volume))).await {
@@ -97,31 +115,20 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
         }
     };
 
-    let mut recorded: Option<u64> = None;
-    let mut recorded_state: Option<crd::SnapshotState> = None;
-    let mut parent = String::new();
-    for s in &list.items {
-        if !s.spec.transient || s.spec.worktree != live.name {
-            continue;
-        }
-        match s.status.as_ref().map(|st| st.phase) {
-            // One cut in flight at a time — the same rule `create_snapshot` applies, and the reason
-            // this beat can run on a tick without piling snapshots onto a slow btrfs.
-            Some(crd::Phase::Working) => {
-                tracing::debug!(worktree = %live.name, snapshot = %s.name_any(), "sync: a transient is Working, skipping this pass");
-                return;
-            }
-            Some(crd::Phase::Ready) => {
-                let gen = s.annotations().get(SYNCED_GENERATION).and_then(|g| g.parse::<u64>().ok());
-                if gen >= recorded {
-                    recorded = gen;
-                    recorded_state = s.spec.state.clone();
-                    parent = s.name_any();
-                }
-            }
-            _ => {}
-        }
+    // One cut in flight at a time — the same rule `create_snapshot` applies, and the reason this
+    // beat can run on a tick without piling snapshots onto a slow btrfs.
+    if list.items.iter().any(|s| {
+        s.spec.transient
+            && s.spec.worktree == live.name
+            && s.status.as_ref().map(|st| st.phase) == Some(crd::Phase::Working)
+    }) {
+        tracing::debug!(worktree = %live.name, "sync: a transient is Working, skipping this pass");
+        return;
     }
+    let (parent, recorded, recorded_state) = match newest_recorded(&list.items, &live.name) {
+        Some((name, gen, state)) => (name, Some(gen), state),
+        None => (String::new(), None, None),
+    };
 
     let (engine, volume, worktree) = (ctx.engine.clone(), live.volume.clone(), live.name.clone());
     let gen = match tokio::task::spawn_blocking(move || engine.generation(&volume, &worktree)).await {
@@ -196,6 +203,45 @@ mod tests {
             )),
             rec,
         )
+    }
+
+    fn transient_with_generation(name: &str, volume: &str, worktree: &str, gen: Option<u64>) -> crd::Snapshot {
+        let mut v = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1",
+            "kind": "Snapshot",
+            "metadata": {"name": name, "uid": "snap-uid"},
+            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "", "transient": true},
+            "status": {"phase": "ready"},
+        });
+        if let Some(g) = gen {
+            v["metadata"]["annotations"] = serde_json::json!({SYNCED_GENERATION: g.to_string()});
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// I5: the newest recorded sync point is the one with the highest generation, whatever order
+    /// the list came back in — a missing annotation is generation 0, never a winner. Before this,
+    /// `Some(_) >= None` made the first Ready transient win and the send parent a coin flip.
+    #[test]
+    fn the_newest_sync_point_wins_regardless_of_list_order() {
+        // Deliberately newest-first: the buggy comparison keeps whichever came first.
+        let snaps = vec![
+            transient_with_generation("sync-new", "vol-1", "ws-1", Some(7)),
+            transient_with_generation("sync-none", "vol-1", "ws-1", None),
+        ];
+        let (name, gen, _) = newest_recorded(&snaps, "ws-1").expect("a Ready transient exists");
+        assert_eq!((name.as_str(), gen), ("sync-new", 7));
+    }
+
+    /// The reverse order must give the same answer.
+    #[test]
+    fn the_newest_sync_point_wins_when_it_is_listed_last() {
+        let snaps = vec![
+            transient_with_generation("sync-none", "vol-1", "ws-1", None),
+            transient_with_generation("sync-new", "vol-1", "ws-1", Some(7)),
+        ];
+        let (name, gen, _) = newest_recorded(&snaps, "ws-1").expect("a Ready transient exists");
+        assert_eq!((name.as_str(), gen), ("sync-new", 7));
     }
 
     #[test]
