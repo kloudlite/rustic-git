@@ -19,6 +19,15 @@ pub(crate) async fn teams_for(s: &ApiState, caller: &str) -> Vec<String> {
     }
 }
 
+/// Whether `slug` is a team, straight from the directory — no directory means no teams exist to
+/// this node, so `false` matches every other unwired-directory answer here.
+pub(crate) async fn is_team(s: &ApiState, slug: &str) -> bool {
+    match &s.directory {
+        Some(m) => m.is_team(slug).await,
+        None => false,
+    }
+}
+
 /// `owner` is the object's actual owner field (a username or a team slug). Their own always
 /// passes; a team's passes for a member; and a platform administrator passes for anyone — so
 /// support can clean up without impersonating the person.
@@ -210,6 +219,11 @@ mod tests {
             // Not exercised here — this test is about namespace hashing, not rank.
             async fn team_role(&self, _user: &str, _team: &str) -> Option<crate::api::TeamRole> {
                 None
+            }
+
+            // Not exercised here either.
+            async fn is_team(&self, _slug: &str) -> bool {
+                false
             }
         }
         let state = ApiState::new(

@@ -140,6 +140,13 @@ pub trait Directory: Send + Sync {
     /// is in the team. Required (no default): unlike the other lookups, a stub that silently
     /// answered "not a member" would make the admin-only request check a no-op nobody tests.
     async fn team_role(&self, user: &str, team: &str) -> Option<TeamRole>;
+
+    /// Does a team named `slug` exist? The one thing a slug's spelling cannot say by itself, and
+    /// the quota routes need it to pick `default_quota(team)`'s right side rather than guess from
+    /// who happens to be asking. Required (no default): a stub answering `false` here would make
+    /// every team-owned quota request silently seed from the person defaults, and nothing would
+    /// fail loudly enough to notice.
+    async fn is_team(&self, slug: &str) -> bool;
 }
 
 pub struct ApiState {
@@ -246,7 +253,7 @@ async fn get_quota(
         return Err(not_found());
     }
     let client = kube(&s)?;
-    let team = owner != c.name;
+    let team = scope::is_team(&s, &owner).await;
     let limit = crate::quota::effective(client, &owner, team).await.map_err(kube_err)?;
     let used = crate::quota::usage(client, &owner).await.map_err(kube_err)?;
     Ok(Json(serde_json::json!({"owner": owner, "limit": limit, "used": used})).into_response())
@@ -458,14 +465,7 @@ async fn approve_quota_request(
     let owner = r.spec.owner.clone();
     let client = kube(&s)?;
     let api: Api<crd::Quota> = Api::all(client.clone());
-    // A slug does not say which it is, and the admin deciding is never the requester, so comparing
-    // against the CALLER (as the personal-quota routes do) tells us nothing here. The `Directory`
-    // trait has no "is this a team" lookup to ask instead. Only used to pick which `default-*`
-    // object an owner with no `Quota` of their own starts from, so a wrong guess costs a fallback
-    // number, never an authorization.
-    // ponytail: always guesses "person"; add a real team lookup if a team's approval is ever seen
-    // starting from the wrong bootstrap default.
-    let team = false;
+    let team = scope::is_team(&s, &owner).await;
     let existing = api.get_opt(&owner).await.map_err(kube_err)?;
     let base = match &existing {
         Some(q) => q.spec.clone(),

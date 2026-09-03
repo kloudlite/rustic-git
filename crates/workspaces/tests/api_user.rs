@@ -183,6 +183,10 @@ impl Directory for StubMembership {
     async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
         None
     }
+
+    async fn is_team(&self, slug: &str) -> bool {
+        slug == "acme"
+    }
 }
 
 async fn server_with_teams(routes: Vec<Route>) -> Server {
@@ -1131,6 +1135,11 @@ impl Directory for StubCliTokens {
     async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
         None
     }
+
+    // Not exercised here either.
+    async fn is_team(&self, _slug: &str) -> bool {
+        false
+    }
 }
 
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
@@ -1306,6 +1315,11 @@ impl Directory for StubKeys {
     async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
         None
     }
+
+    // Not exercised here either.
+    async fn is_team(&self, _slug: &str) -> bool {
+        false
+    }
 }
 
 fn ns_obj(name: &str, owner: &str) -> Value {
@@ -1338,6 +1352,11 @@ impl Directory for KeyTeams {
     // Not exercised here — this stub is about namespace/keys fan-out, not rank.
     async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
         None
+    }
+
+    // Every slug `teams_for` above returns is by definition a team.
+    async fn is_team(&self, slug: &str) -> bool {
+        slug == "team1" || slug == self.0
     }
 }
 

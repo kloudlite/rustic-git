@@ -59,6 +59,10 @@ impl rustic_git_workspaces::api::Directory for Dir {
             Role::Member => Some(TeamRole::Member),
         }
     }
+
+    async fn is_team(&self, slug: &str) -> bool {
+        self.0.get(slug).await.ok().flatten().is_some()
+    }
 }
 
 #[tokio::main]

@@ -36,6 +36,10 @@ impl Directory for StubMembership {
     async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         None
     }
+
+    async fn is_team(&self, slug: &str) -> bool {
+        slug == "acme"
+    }
 }
 
 struct Server {
@@ -391,6 +395,36 @@ async fn approving_writes_the_quota_then_marks_the_request() {
     let quota_at = calls.iter().position(|c| c == &format!("POST {API}/quotas")).expect("quota written");
     let mark_at = calls.iter().position(|c| c.contains("quotarequests/qr-1/status")).expect("request marked");
     assert!(quota_at < mark_at, "the quota must land before the request is marked: {calls:?}");
+}
+
+/// The other side of the same seed: a request whose owner IS a team (`is_team`, not a guess from
+/// who is approving — the admin is never the requester) starts from the team defaults.
+#[tokio::test]
+async fn approving_a_team_request_seeds_the_team_defaults() {
+    let routes = vec![
+        get(format!("{API}/quotarequests/qr-2"), req_obj("qr-2", "acme", Some("pending"))),
+        not_found(format!("{API}/quotas/acme")),
+        not_found(format!("{API}/quotas/default-team")),
+        post(format!("{API}/quotas"), json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": "acme"},
+            "spec": {"workspaces": 10, "environments": 8, "snapshots": 80, "diskGb": 400, "cpu": 32, "memoryGb": 128}
+        })),
+        Route { method: "PATCH", path: format!("{API}/quotarequests/qr-2/status"), status: 200, body: req_obj("qr-2", "acme", Some("approved")) },
+    ];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests/qr-2/approve", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "ok"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let written = s.rec.sent("POST", &format!("{API}/quotas")).remove(0);
+    // Only the dimension the request named moved; the rest stay at the TEAM default, not the
+    // person one — the bug this test guards against is seeding a team's ceiling too low.
+    assert_eq!(written["spec"]["workspaces"], 10);
+    assert_eq!(written["spec"]["environments"], 8);
 }
 
 /// Deciding is the claim's, not the owner's: the person who asked cannot approve their own.

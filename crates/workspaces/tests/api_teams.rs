@@ -35,6 +35,10 @@ impl Directory for StubMembership {
     async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
         None
     }
+
+    async fn is_team(&self, slug: &str) -> bool {
+        slug == "acme"
+    }
 }
 
 struct Server {
