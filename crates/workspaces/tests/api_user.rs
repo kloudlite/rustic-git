@@ -1878,3 +1878,54 @@ async fn list_ws_drops_a_mislabelled_workspace() {
     let ids: Vec<&str> = body.as_array().unwrap().iter().map(|w| w["id"].as_str().unwrap()).collect();
     assert_eq!(ids, vec!["ws-mine"], "bob's workspace is not karthik's: {body}");
 }
+
+/// Restoring an environment snapshot into a workspace used to fall through `_ => None` and produce
+/// a workspace with the DEFAULT image, default quota and no packages, mounting a database's data
+/// directory. Not an escalation — `caller_owners` gates readability either way — but a request the
+/// API should refuse rather than half-honour.
+#[tokio::test]
+async fn a_workspace_restore_refuses_an_environment_snapshot() {
+    let snap = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "env-1-a", "labels": {"rustic-git.io/owner": "karthik"}},
+        "spec": {"volume": "env-1", "owner": "karthik", "worktree": "env-1", "parent": "",
+                 "state": {"kind": "environment", "services": [], "quotaGb": 20}},
+        "status": {"phase": "ready", "readyAt": "2026-08-27T09:00:00Z"}
+    });
+    let s = server(vec![get(format!("{API}/snapshots/env-1-a"), snap)]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "wrong-kind", "snapshot_id": "env-1-a"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("/v1/environments/restore"), "the answer names the right route: {body}");
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+}
+
+/// The twin. A `state: None` legacy snapshot keeps today's behaviour in both — "absent means old".
+#[tokio::test]
+async fn an_environment_restore_refuses_a_workspace_snapshot() {
+    let snap = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "ws-1-a", "labels": {"rustic-git.io/owner": "karthik"}},
+        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": "",
+                 "state": {"kind": "workspace", "image": "alpine:3.20", "packages": [],
+                           "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
+                           "quotaGb": 20}},
+        "status": {"phase": "ready", "readyAt": "2026-08-27T09:00:00Z"}
+    });
+    let s = server(vec![get(format!("{API}/snapshots/ws-1-a"), snap)]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "wrong-kind", "snapshot_id": "ws-1-a"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+}

@@ -1394,6 +1394,25 @@ async fn restore_ws(
     let snap = find_commit_model_snapshot_for_restore(&s, &owner, &body.snapshot_id).await?;
     let volume = snap.spec.volume.clone();
 
+    // A `state` from the other kind is a request to refuse, not to half-honour: restoring an
+    // environment snapshot as a workspace mounts a database's data directory under the default
+    // image with no packages. `None` is a snapshot cut before states existed — "absent means old",
+    // and every reader keeps its fallback for it. Checked before any other lookup so the refusal
+    // costs nothing beyond the snapshot fetch already made.
+    let frozen = match &snap.spec.state {
+        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment }) => {
+            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone()))
+        }
+        Some(crd::SnapshotState::Environment { .. }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "this snapshot was cut from an environment; use POST /v1/environments/restore",
+            )
+                .into_response())
+        }
+        None => None,
+    };
+
     // A live source still knows its own size and settings; a deleted one gets the standard quota.
     let src = my_ws(&s, &owner, &volume).await.ok();
     let team = src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default();
@@ -1403,12 +1422,6 @@ async fn restore_ws(
     // Precedence: the request, then what the snapshot froze, then the live source, then defaults.
     // A snapshot's `state` is DATA — written by an agent, hand-editable in the cluster — so every
     // value it contributes goes through the same checks a request body's does, below.
-    let frozen = match &snap.spec.state {
-        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment }) => {
-            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone()))
-        }
-        _ => None,
-    };
     let image = body
         .image
         .clone()
@@ -1640,6 +1653,20 @@ async fn restore_env(
     // check: CR exists, Ready, and the caller may read `spec.owner`.
     let snap = find_commit_model_snapshot_for_restore(&s, &caller_id, &body.snapshot_id).await?;
     let (volume, src_owner) = (snap.spec.volume.clone(), snap.spec.owner.clone());
+    // Twin of restore_ws's guard: a workspace's frozen state under an environment restore would
+    // mount nothing and silently ignore the image/packages it froze. `None` stays "absent means
+    // old". Checked before any other lookup, right after the fetch, same reasoning as restore_ws.
+    let frozen = match &snap.spec.state {
+        Some(crd::SnapshotState::Environment { services, quota_gb }) => Some((services.clone(), *quota_gb)),
+        Some(crd::SnapshotState::Workspace { .. }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "this snapshot was cut from a workspace; use POST /v1/workspaces/restore",
+            )
+                .into_response())
+        }
+        None => None,
+    };
     // Defaults to the label the snapshot was FOUND under, not the caller: restoring a team's
     // environment produces a team environment without the client having to say so. Any OTHER
     // owner is refused even when the caller is a member of it: a snapshot found under team A is
@@ -1653,10 +1680,6 @@ async fn restore_env(
     // The request, then what the snapshot froze, then nothing. A frozen list is DATA like any
     // other — `check_services` runs on whichever source won, because it is the trust boundary for
     // mounts and a hand-edited `state` is no more trusted than a request body.
-    let frozen = match &snap.spec.state {
-        Some(crd::SnapshotState::Environment { services, quota_gb }) => Some((services.clone(), *quota_gb)),
-        _ => None,
-    };
     // An environment always has services: an empty body list is "use the snapshot's", never
     // "restore the data with nothing running" — the owner ruled the latter out on 2026-09-03.
     let services = body
