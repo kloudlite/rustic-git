@@ -409,11 +409,25 @@ pub struct VolumeReplicaStatus {
     pub branches: BTreeMap<String, String>,
 }
 
+/// The message an older build stamped on a migration baseline, back when a baseline was written as
+/// an ordinary record. Matched by shape rather than migrated: the records are already on the
+/// cluster, and a migration job to rewrite them is more machinery than one predicate.
+const LEGACY_BASELINE_MESSAGE: &str = "migration baseline";
+
 impl Snapshot {
     /// A push, as opposed to a sync point — the one distinction there is. Everything that keeps a
     /// record (retention, `cleanup_parent`, the volume listing, `delete_snapshot`) asks this.
+    ///
+    /// A MIGRATION BASELINE is not a push either, whoever wrote it: nobody asked for it, it exists
+    /// only to seed replication of a pre-model volume, and treating one as a snapshot would keep
+    /// its Volume alive forever after the workspace was deleted. Baselines are written as sync
+    /// points now (`migrate_and_seed_baseline`); the shape match is for the ones already stored.
     pub fn is_snapshot(&self) -> bool {
-        !self.spec.transient
+        !self.spec.transient && !self.is_legacy_baseline()
+    }
+
+    fn is_legacy_baseline(&self) -> bool {
+        self.spec.parent.is_empty() && self.spec.message.as_deref() == Some(LEGACY_BASELINE_MESSAGE)
     }
 }
 
@@ -1078,6 +1092,41 @@ mod tests {
         assert_eq!(hex.len(), 8);
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "two calls must not collide");
+    }
+
+    /// The one distinction there is: a push is a snapshot, a sync point is not, and a MIGRATION
+    /// BASELINE is not — including the ones an older build wrote as ordinary records, which are
+    /// already on the cluster and would otherwise keep their Volume alive forever.
+    #[test]
+    fn a_push_is_a_snapshot_but_a_sync_point_or_a_baseline_is_not() {
+        let snap = |spec: serde_json::Value| -> Snapshot {
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": "v-aaaaaaaa"}, "spec": spec,
+            }))
+            .unwrap()
+        };
+        let base = serde_json::json!({"volume": "v", "owner": "o", "worktree": "v", "parent": ""});
+
+        assert!(snap(base.clone()).is_snapshot(), "a push");
+        let mut with_msg = base.clone();
+        with_msg["message"] = serde_json::json!("wip");
+        assert!(snap(with_msg).is_snapshot(), "a push with a message is still a push");
+
+        let mut transient = base.clone();
+        transient["transient"] = serde_json::json!(true);
+        assert!(!snap(transient).is_snapshot(), "a sync point");
+
+        let mut legacy = base.clone();
+        legacy["message"] = serde_json::json!("migration baseline");
+        assert!(!snap(legacy).is_snapshot(), "a baseline an older build wrote as an ordinary record");
+
+        // Shape, not text alone: a push that happens to carry that message but sits on a parent is
+        // somebody's snapshot, and a baseline is always a root.
+        let mut lookalike = base;
+        lookalike["message"] = serde_json::json!("migration baseline");
+        lookalike["parent"] = serde_json::json!("v-bbbbbbbb");
+        assert!(snap(lookalike).is_snapshot(), "a rooted record is never a baseline");
     }
 
     #[test]

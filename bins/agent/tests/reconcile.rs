@@ -1090,13 +1090,13 @@ fn owned_volume(name: &str, uid: &str) -> serde_json::Value {
     })
 }
 
-/// A PINNED Ready commit — a "snapshot" in the owner's sense, the only kind that is never deleted
-/// and the only kind that keeps a Volume alive past its parent.
-fn pinned_commit(name: &str, volume: &str, worktree: &str) -> serde_json::Value {
+/// A Ready push — a snapshot, the only kind that is never deleted with its parent and the only
+/// kind that keeps a Volume alive past it.
+fn snapshot_record(name: &str, volume: &str, worktree: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name, "uid": "p-uid"},
-        "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "", "pinned": true},
+        "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": ""},
         "status": {"phase": "ready"},
     })
 }
@@ -1122,17 +1122,17 @@ fn deleting_ws(mut w: crd::Workspace) -> crd::Workspace {
     w
 }
 
-/// Deleting a workspace that holds a PINNED snapshot keeps it: the worktree goes, every unpinned
-/// record of it goes, and the Volume is DETACHED (this parent's ownerReference removed) rather than
+/// Deleting a workspace that holds a snapshot keeps it: the worktree goes, every sync point of it
+/// goes, and the Volume is DETACHED (this parent's ownerReference removed) rather than
 /// left for GC to take the snapshot with it.
 #[tokio::test]
-async fn deleting_a_workspace_with_a_pinned_snapshot_detaches_its_volume() {
+async fn deleting_a_workspace_with_a_snapshot_detaches_its_volume() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
     let routes = vec![
         rustic_git_workspaces::kube_test::get(
             SNAPS,
-            snap_list(vec![pinned_commit("ws-1-aaaaaaaa", "ws-1", "ws-1"), ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")]),
+            snap_list(vec![snapshot_record("ws-1-aaaaaaaa", "ws-1", "ws-1"), ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")]),
         ),
         Route { method: "DELETE", path: format!("{SNAPS}/sync-ws-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
         rustic_git_workspaces::kube_test::get(VOL_WS1, owned_volume("ws-1", "ws-uid-1")),
@@ -1155,28 +1155,26 @@ async fn deleting_a_workspace_with_a_pinned_snapshot_detaches_its_volume() {
     assert_eq!(patches[0][1]["value"], serde_json::json!([]));
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-ws-1-aaaa")), "the transient goes: {:?}", rec.calls());
     assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE /apis/rustic-git.io/v1alpha1/volumes/")), "the Volume itself is never deleted");
-    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/ws-1-aaaaaaaa")), "a pinned snapshot is never deleted");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/ws-1-aaaaaaaa")), "a snapshot is never deleted");
 }
 
-/// The owner's rule, the other half: an ordinary UNPINNED commit is history of a worktree that no
-/// longer exists, not a snapshot. Every unpinned record of this parent goes — commits as well as
-/// transients, whatever their phase — and with nothing pinned left the Volume keeps its
-/// ownerReference and GC takes it.
+/// The owner's rule, the other half: a SYNC POINT is replication state for a worktree that no
+/// longer exists, not a snapshot. Every sync point of this parent goes, whatever its phase, and
+/// with no snapshot left the Volume keeps its ownerReference and GC takes it.
 #[tokio::test]
-async fn deleting_a_workspace_with_only_unpinned_commits_deletes_them_and_leaves_the_volume_to_gc() {
+async fn deleting_a_workspace_with_only_sync_points_deletes_them_and_leaves_the_volume_to_gc() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
-    // `ready_commit` is unpinned; `working` proves phase does not gate the deletion.
-    let mut working = ready_commit("ws-1-bbbbbbbb", "ws-1");
+    // `working` proves phase does not gate the deletion.
+    let mut working = ready_transient("sync-ws-1-bbbb", "ws-1", "ws-1");
     working["status"]["phase"] = serde_json::json!("working");
     let routes = vec![
         rustic_git_workspaces::kube_test::get(
             SNAPS,
-            snap_list(vec![ready_commit("ws-1-aaaaaaaa", "ws-1"), working, ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")]),
+            snap_list(vec![ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1"), working]),
         ),
-        Route { method: "DELETE", path: format!("{SNAPS}/ws-1-aaaaaaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
-        Route { method: "DELETE", path: format!("{SNAPS}/ws-1-bbbbbbbb"), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: format!("{SNAPS}/sync-ws-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: format!("{SNAPS}/sync-ws-1-bbbb"), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
@@ -1184,20 +1182,20 @@ async fn deleting_a_workspace_with_only_unpinned_commits_deletes_them_and_leaves
 
     rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
 
-    for name in ["ws-1-aaaaaaaa", "ws-1-bbbbbbbb", "sync-ws-1-aaaa"] {
+    for name in ["sync-ws-1-aaaa", "sync-ws-1-bbbb"] {
         assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/{name}")), "{name} was kept: {:?}", rec.calls());
     }
-    assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "nothing pinned: the Volume goes with its parent: {:?}", rec.calls());
+    assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "no snapshot: the Volume goes with its parent: {:?}", rec.calls());
 }
 
-/// A pinned push still being CUT when its parent was deleted keeps the Volume too: waiting for
-/// `Ready` here let GC delete the subvolume out from under the cut and leave an orphan pinned
-/// record naming a Volume that is gone.
+/// A push still being CUT when its parent was deleted keeps the Volume too: waiting for `Ready`
+/// here let GC delete the subvolume out from under the cut and leave an orphan record naming a
+/// Volume that is gone.
 #[tokio::test]
-async fn a_pinned_commit_that_is_still_working_detaches_the_volume() {
+async fn a_push_that_is_still_working_detaches_the_volume() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
-    let mut working = pinned_commit("ws-1-dddddddd", "ws-1", "ws-1");
+    let mut working = snapshot_record("ws-1-dddddddd", "ws-1", "ws-1");
     working["status"]["phase"] = serde_json::json!("working");
     let routes = vec![
         rustic_git_workspaces::kube_test::get(SNAPS, snap_list(vec![working])),
@@ -1210,20 +1208,20 @@ async fn a_pinned_commit_that_is_still_working_detaches_the_volume() {
 
     rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
 
-    assert_eq!(rec.sent("PATCH", VOL_WS1).len(), 1, "an uncut pinned snapshot still keeps the Volume: {:?}", rec.calls());
-    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/ws-1-dddddddd")), "a pinned record is never deleted");
+    assert_eq!(rec.sent("PATCH", VOL_WS1).len(), 1, "an uncut snapshot still keeps the Volume: {:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/ws-1-dddddddd")), "a snapshot record is never deleted");
 }
 
-/// A pinned snapshot of a SIBLING worktree on the same volume keeps it alive too: the bytes live on
-/// the same subvolume tree, and this parent's own records are unpinned so they all go.
+/// A snapshot of a SIBLING worktree on the same volume keeps it alive too: the bytes live on the
+/// same subvolume tree, and this parent's own records are all sync points so they all go.
 #[tokio::test]
-async fn a_pinned_snapshot_of_another_worktree_still_detaches_the_volume() {
+async fn a_snapshot_of_another_worktree_still_detaches_the_volume() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
     let routes = vec![
         rustic_git_workspaces::kube_test::get(
             SNAPS,
-            snap_list(vec![pinned_commit("ws-1-cccccccc", "ws-1", "ws-other"), ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")]),
+            snap_list(vec![snapshot_record("ws-1-cccccccc", "ws-1", "ws-other"), ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")]),
         ),
         Route { method: "DELETE", path: format!("{SNAPS}/sync-ws-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
         rustic_git_workspaces::kube_test::get(VOL_WS1, owned_volume("ws-1", "ws-uid-1")),
@@ -1241,6 +1239,29 @@ async fn a_pinned_snapshot_of_another_worktree_still_detaches_the_volume() {
         "another worktree's records are not this parent's to delete: {:?}",
         rec.calls()
     );
+}
+
+/// A migration baseline an OLDER build wrote as an ordinary record is not a snapshot: nobody asked
+/// for it, and treating it as one would keep its Volume — and the pre-model volume's whole
+/// subvolume tree — alive forever after the workspace was deleted. It goes with the working copy.
+#[tokio::test]
+async fn deleting_a_workspace_with_only_a_legacy_baseline_deletes_it_and_leaves_the_volume_to_gc() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let mut baseline = snapshot_record("ws-1-aaaaaaaa", "ws-1", "ws-1");
+    baseline["spec"]["message"] = serde_json::json!("migration baseline");
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(SNAPS, snap_list(vec![baseline])),
+        Route { method: "DELETE", path: format!("{SNAPS}/ws-1-aaaaaaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/ws-1-aaaaaaaa")), "the baseline goes: {:?}", rec.calls());
+    assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "a baseline never detaches the Volume: {:?}", rec.calls());
 }
 
 /// No commit on the Volume: the ownerReference stays and ownerReference GC deletes the Volume with
@@ -1281,10 +1302,10 @@ fn environment(status: serde_json::Value) -> crd::Environment {
     serde_json::from_value(env_json(status)).unwrap()
 }
 
-/// The environment twin of `deleting_a_workspace_with_a_pinned_snapshot_detaches_its_volume`: same
+/// The environment twin of `deleting_a_workspace_with_a_snapshot_detaches_its_volume`: same
 /// rule, same cleanup, and the worktree is the environment's own id.
 #[tokio::test]
-async fn deleting_an_environment_with_a_pinned_snapshot_detaches_its_volume() {
+async fn deleting_an_environment_with_a_snapshot_detaches_its_volume() {
     const ENV_OBJ: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
     const VOL_ENV1: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
     let tmp = tempfile::tempdir().unwrap();
@@ -1298,7 +1319,7 @@ async fn deleting_an_environment_with_a_pinned_snapshot_detaches_its_volume() {
     let routes = vec![
         rustic_git_workspaces::kube_test::get(
             SNAPS,
-            snap_list(vec![pinned_commit("env-1-aaaaaaaa", "env-1", "env-1"), ready_transient("sync-env-1-aaaa", "env-1", "env-1")]),
+            snap_list(vec![snapshot_record("env-1-aaaaaaaa", "env-1", "env-1"), ready_transient("sync-env-1-aaaa", "env-1", "env-1")]),
         ),
         Route { method: "DELETE", path: format!("{SNAPS}/sync-env-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
         rustic_git_workspaces::kube_test::get(VOL_ENV1, vol.clone()),
