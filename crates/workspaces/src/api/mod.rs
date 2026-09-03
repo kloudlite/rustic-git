@@ -7,10 +7,12 @@
 //! nature, but registered rarely enough that the cluster this tier already talks to is the
 //! cheapest correct home for it.
 //!
-//! Auth mirrors `crates/api`'s `caller()`: a Bearer JWT identifies the owner. Admin-gated routes
-//! (`/v1/regions` and the quota decisions) read the `superadmin` claim on the session token,
-//! minted at sign-in from the directory's own list. The static email allowlist this used to carry
-//! is gone; `RUSTIC_GIT_WORKSPACES_ADMINS` is a bootstrap for that list and nothing reads it here.
+//! Auth mirrors `crates/api`'s `caller()`: a Bearer JWT identifies the owner. Nothing superadmin-
+//! only lives on this router: region creation, quota decisions and every cross-owner surface are
+//! in `admin` (`/admin/*`, its own process under `RUSTIC_GIT_API_ROLE=admin`), which refuses a
+//! token without the `superadmin` claim before routing. Here the claim is read only by
+//! `may_act_on`'s third arm. The static email allowlist this used to carry is gone;
+//! `RUSTIC_GIT_WORKSPACES_ADMINS` is a bootstrap for the directory's list and nothing reads it here.
 //!
 //! Split across `scope` (who the caller is, what they may act on), `workspaces`, `environments`,
 //! `volumes` and `push` (I7) — one module per resource, this file keeps only what is shared by

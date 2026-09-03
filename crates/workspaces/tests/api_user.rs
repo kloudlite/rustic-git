@@ -2086,6 +2086,22 @@ async fn an_environment_restore_refuses_a_workspace_snapshot() {
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
 
+/// The other half of the two-router rule (spec §5): the USER router has no admin handler compiled
+/// into it, so every `/admin` path is a 404 here even for a superadmin token — a `/v1` auth bug
+/// cannot reach a handler that is not there.
+#[tokio::test]
+async fn the_user_router_has_never_heard_of_admin() {
+    let s = server(vec![]).await;
+    let c = reqwest::Client::new();
+    for path in [
+        "/admin/workspaces", "/admin/environments", "/admin/nodes", "/admin/quota-requests",
+        "/admin/quota/karthik", "/admin/regions", "/admin/usage",
+    ] {
+        let code = c.get(format!("{}{path}", s.base)).bearer_auth(token(&s.jwt, "karthik")).send().await.unwrap().status();
+        assert_eq!(code, 404, "{path}");
+    }
+}
+
 /// A split that drops a route is invisible until someone clicks. An unmounted path answers 404;
 /// a mounted one answers something else — 401 once auth runs, or 415 when a `Json<T>` extractor
 /// on the handler's signature rejects the bodyless request before auth gets a turn. Either is
