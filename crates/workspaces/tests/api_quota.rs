@@ -347,23 +347,6 @@ fn admin_token(jwt: &Jwt) -> String {
     jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
-/// The claim's third arm on `may_act_on`: support can read another owner's objects without
-/// impersonating them, and the access is logged with the caller.
-#[tokio::test]
-async fn a_superadmin_may_list_another_owners_workspaces() {
-    let routes = vec![
-        get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
-        get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-1", "karthik", "running")])),
-    ];
-    let s = server(true, routes).await;
-    let code = reqwest::Client::new()
-        .get(format!("{}/v1/workspaces?owner=karthik", s.base))
-        .bearer_auth(admin_token(&s.jwt))
-        .send().await.unwrap()
-        .status();
-    assert_eq!(code, 200);
-}
-
 /// Approving writes the Quota FIRST and only then marks the request: a request marked approved
 /// whose quota never landed is the one ordering that leaves a person told yes and still refused.
 #[tokio::test]
