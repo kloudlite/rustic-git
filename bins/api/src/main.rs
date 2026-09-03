@@ -122,14 +122,6 @@ async fn run() -> Result<()> {
             if let Some(dir) = directory.clone() {
                 state = state.with_directory(Arc::new(Dir(dir)));
             }
-            // Snapshots live on the server tier, not in the cluster: a snapshot outlives the
-            // workspace it was taken of, so the volume routes read the browse tier's
-            // `/api/{owner}/volumes|volumehistory` over the same peer credentials this process
-            // already proxies browse reads with.
-            state = state.with_upstream(Arc::new(rustic_git_workspaces::upstream::Upstream::new(
-                &upstream,
-                &secret,
-            )));
             // In-cluster config when the pod has a ServiceAccount, else the operator's kubeconfig.
             // `None` is a legitimate dev configuration (no cluster) — workspace and environment
             // routes answer 503 rather than not existing. The volume routes keep working without

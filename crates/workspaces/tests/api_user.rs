@@ -6,8 +6,7 @@
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory};
-use rustic_git_workspaces::kube_test::{get, mock_client, post, stub_registry, Recorder, Route};
-use rustic_git_workspaces::upstream::Upstream;
+use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -133,21 +132,6 @@ async fn server(routes: Vec<Route>) -> Server {
     server_with(&[], Some(routes)).await
 }
 
-/// The same, plus a stand-in server tier — needed by every route that reads snapshots, since those
-/// records do not live in the cluster.
-async fn server_with_registry(routes: Vec<Route>, registry_base: String) -> Server {
-    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let (client, rec) = mock_client(with_region(routes));
-    let state = ApiState::new(jwt.clone(), HashSet::new())
-        .with_kube(client)
-        .with_upstream(Arc::new(Upstream::new(registry_base, "peer-secret")));
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    let app = router(Arc::new(state));
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), jwt, rec }
-}
-
 /// `karthik` is the only member of team `acme` — enough to prove that team membership does not
 /// reach another member's WORKSPACE snapshots.
 struct StubMembership;
@@ -159,13 +143,12 @@ impl Directory for StubMembership {
     }
 }
 
-async fn server_with_teams(routes: Vec<Route>, registry_base: String) -> Server {
+async fn server_with_teams(routes: Vec<Route>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(with_region(routes));
     let state = ApiState::new(jwt.clone(), HashSet::new())
         .with_kube(client)
-        .with_directory(Arc::new(StubMembership))
-        .with_upstream(Arc::new(Upstream::new(registry_base, "peer-secret")));
+        .with_directory(Arc::new(StubMembership));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
@@ -179,17 +162,11 @@ async fn server_with_teams(routes: Vec<Route>, registry_base: String) -> Server 
 /// that asymmetry is the product rule, and this is the test that keeps it true.)
 #[tokio::test]
 async fn a_teammate_cannot_restore_another_members_workspace_snapshot() {
-    let up = stub_registry(
-        // Neither the caller's own label nor their team's holds bob's volume.
-        vec![("karthik", json!([])), ("acme", json!([]))],
-        vec![(
-            "bob/ws-bob",
-            json!([{"id": "snap-bob", "state": null, "lineage": [],
-                    "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}]),
-        )],
-    )
+    let s = server_with_teams(vec![get(
+        format!("{API}/snapshots/snap-bob"),
+        ready_snap("snap-bob", "ws-bob", "bob", None),
+    )])
     .await;
-    let s = server_with_teams(vec![], up).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/restore", s.base))
@@ -367,7 +344,7 @@ async fn creating_under_the_per_owner_cap_succeeds() {
 /// An unnamed restore is refused before anything is written, the same as a create.
 #[tokio::test]
 async fn an_environment_restore_refuses_an_empty_name() {
-    let s = server_with_registry(vec![], stub_registry(vec![], vec![]).await).await;
+    let s = server(vec![]).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/environments/restore", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
@@ -383,7 +360,7 @@ async fn an_environment_restore_refuses_an_empty_name() {
 /// service list as a create is — an escaping mount must not get in through the new door.
 #[tokio::test]
 async fn an_environment_restore_refuses_an_escaping_mount() {
-    let s = server_with_registry(vec![], stub_registry(vec![], vec![]).await).await;
+    let s = server(vec![]).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/environments/restore", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
@@ -404,18 +381,11 @@ async fn an_environment_restore_refuses_an_escaping_mount() {
 /// same answer another owner's snapshot id gets, deliberately indistinguishable.
 #[tokio::test]
 async fn restore_of_an_unknown_or_foreign_snapshot_is_not_found() {
-    let up = stub_registry(
-        vec![("karthik", json!([{"name": "ws-mine", "latest_ms": 1i64}])),
-             ("alice", json!([{"name": "ws-hers", "latest_ms": 1i64}]))],
-        vec![
-            ("karthik/ws-mine", json!([{"id": "snap-mine", "state": null, "lineage": [],
-                                        "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}])),
-            ("alice/ws-hers", json!([{"id": "snap-hers", "state": null, "lineage": [],
-                                      "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}])),
-        ],
-    )
+    let s = server(vec![get(
+        format!("{API}/snapshots/snap-hers"),
+        ready_snap("snap-hers", "ws-hers", "alice", None),
+    )])
     .await;
-    let s = server_with_registry(vec![], up).await;
     let tok = token(&s.jwt, "karthik");
 
     for id in ["nope", "snap-hers"] {
@@ -2050,7 +2020,7 @@ async fn attaching_refuses_an_id_that_is_not_a_label_value() {
 /// against directory slug `acme` was a 404 "no such team".
 #[tokio::test]
 async fn a_team_name_is_matched_case_insensitively() {
-    let s = server_with_teams(create_routes(), stub_registry(vec![], vec![]).await).await;
+    let s = server_with_teams(create_routes()).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
@@ -2084,4 +2054,26 @@ async fn a_stop_response_reports_the_volume_it_has() {
         .unwrap();
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["volume"], "vol/karthik/ws-1", "a pushed volume is not null: {body}");
+}
+
+/// The volume pointer on a workspace doc is answered by the snapshots in the cluster, not by a
+/// round trip to the git tier's peer listener: a push writes a Snapshot CR and nothing else.
+#[tokio::test]
+async fn a_workspace_doc_reports_its_volume_without_an_upstream() {
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
+            "items": [{"metadata": {"name": "ws-1-a", "labels": {"rustic-git.io/owner": "karthik"}},
+                       "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
+                       "status": {"phase": "ready"}}]})),
+    ])
+    .await; // no `with_upstream` at all
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["volume"], "vol/karthik/ws-1", "{body}");
 }

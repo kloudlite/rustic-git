@@ -3,12 +3,14 @@
 //! One keyspace over from `rustic_git_registry::store`'s image pattern, and deliberately the same
 //! shape: a volume gets its own SlateDB, opened through the same storage pool as repos and images
 //! (`vol` joins `RESERVED_OWNERS` so no repo or image can collide with it), routed by the same
-//! ownership middleware. Single-writer-per-database is what gives `move_ref` its CAS for free —
-//! two concurrent pushes racing to move `main` still order against each other because only one
-//! node ever holds the database open.
+//! ownership middleware. Read-only in PRODUCTION — nothing writes a `CommitRecord` any more, the
+//! write side (`vol_agent.rs`) went with Task 8 — but `append_commits` stays because
+//! `tests/browse_http.rs` (root `rustic-git-tests`, exercising `browse_api::volumes` — FROZEN,
+//! keep-until-drained) has no other way to seed a pre-cutover row for the frozen read side to
+//! serve.
 //!
-//! Keyspaces: `commit/{id}` -> a `CommitRecord` (immutable once written — a commit is content-
-//! addressed by its own id, never mutated), `ref/{name}` -> the commit id it currently names.
+//! Keyspace: `commit/{id}` -> a `CommitRecord` (immutable once written — a commit is content-
+//! addressed by its own id, never mutated).
 
 use rustic_git_core::Result;
 use rustic_git_storage::store::Store;
@@ -50,36 +52,31 @@ pub fn pool_coords(owner: &str, name: &str) -> (&'static str, String) {
     ("vol", format!("{owner}/{name}"))
 }
 
-/// The per-volume listing marker, `index/vol/{owner}/{name}`, touched on every push. Its mtime is
-/// what `GET /api/{owner}/volumes` reports as `latest_ms` — one LIST of `index/vol/{owner}/` in
-/// place of every SST and WAL object of every volume's database under the owner.
+/// The per-volume listing marker, `index/vol/{owner}/{name}`, touched by `append_commits`. Its
+/// mtime is what `GET /api/{owner}/volumes` reports as `latest_ms`.
 pub fn volume_marker(owner: &str, name: &str) -> slatedb::object_store::path::Path {
     slatedb::object_store::path::Path::from(format!("{}{name}", volume_marker_prefix(owner)))
 }
 
+/// The per-volume listing marker prefix, `index/vol/{owner}/`: one LIST in place of every SST and
+/// WAL object of every volume's database under the owner.
 pub fn volume_marker_prefix(owner: &str) -> String {
     format!("index/vol/{owner}/")
 }
 
 const COMMIT_PREFIX: &str = "commit/";
-/// The region that owns this volume, stamped by its first append and never rewritten.
-///
-/// It exists so the record routes can scope an agent token to the volume it is writing. Every
-/// `CommitRecord` already carries a region, but answering "whose volume is this?" from the records
-/// would mean reading history on every request; this is one point read.
-const REGION_KEY: &str = "meta/region";
-const REF_PREFIX: &str = "ref/";
 fn commit_key(id: &str) -> String {
     format!("{COMMIT_PREFIX}{id}")
-}
-fn ref_key(name: &str) -> String {
-    format!("{REF_PREFIX}{name}")
 }
 
 #[allow(async_fn_in_trait)]
 /// `Store`'s volume-registry methods, as an extension trait for the same reason
 /// `registry::store::ImageExt` is one: `Store` lives in the `storage` crate, and the orphan rule
 /// forbids an inherent impl on a foreign type from here.
+///
+/// Read-only in production: nothing writes a `CommitRecord` any more (the write side,
+/// `vol_agent.rs`, was deleted with Task 8) — `append_commits` only still exists to seed the
+/// frozen `browse_api::volumes` read side in tests, see the module doc.
 pub trait VolExt {
     async fn vol_db(&self, owner: &str, name: &str) -> Result<Arc<Db>>;
     /// Whether this volume's database exists, WITHOUT opening it.
@@ -93,15 +90,8 @@ pub trait VolExt {
     /// append leaves every already-written record valid on its own — commits never reference each
     /// other, only their own lineage — so there is nothing for a batch to buy here.
     async fn append_commits(&self, owner: &str, name: &str, records: &[CommitRecord]) -> Result<()>;
-    /// Moves `ref_name` to `commit`, refusing an unknown commit id (the caller answers 404/409;
-    /// this just reports `false`).
-    async fn move_ref(&self, owner: &str, name: &str, ref_name: &str, commit: &str) -> Result<bool>;
-    async fn ref_commit(&self, owner: &str, name: &str, ref_name: &str) -> Result<Option<String>>;
-    async fn commit(&self, owner: &str, name: &str, id: &str) -> Result<Option<CommitRecord>>;
     /// Every commit record, newest first.
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>>;
-    /// The region that owns this volume, or `None` if nothing has been written to it yet.
-    async fn region(&self, owner: &str, name: &str) -> Result<Option<String>>;
 }
 
 impl VolExt for Store {
@@ -117,53 +107,15 @@ impl VolExt for Store {
 
     async fn append_commits(&self, owner: &str, name: &str, records: &[CommitRecord]) -> Result<()> {
         let db = self.vol_db(owner, name).await?;
-        // Claim the volume for its region on the first record ever written, and never rewrite it:
-        // the stamp is what later requests are checked against, so a writer that could overwrite it
-        // could also hand the volume to itself.
-        if let Some(first) = records.first() {
-            if !first.region.is_empty() && db.get(REGION_KEY).await?.is_none() {
-                db.put(REGION_KEY, first.region.as_bytes().to_vec()).await?;
-            }
-        }
         for r in records {
             let bytes = serde_json::to_vec(r).map_err(|e| rustic_git_core::err(e.to_string()))?;
             db.put(commit_key(&r.id), bytes).await?;
         }
         // The listing marker, AFTER the records: `browse_api::volumes` reads its mtime as "last
         // pushed" without opening the database, which it may not do. A view for a listing, never
-        // authorization — the same rule as every other `index/` key. Written on every push so the
-        // mtime moves; a volume from before the marker existed simply lists undated.
+        // authorization — the same rule as every other `index/` key.
         self.os.put(&volume_marker(owner, name), slatedb::object_store::PutPayload::from_static(b"")).await?;
         Ok(())
-    }
-
-    async fn region(&self, owner: &str, name: &str) -> Result<Option<String>> {
-        let db = self.vol_db(owner, name).await?;
-        Ok(db
-            .get(REGION_KEY)
-            .await?
-            .map(|b| String::from_utf8_lossy(&b).to_string())
-            .filter(|s| !s.is_empty()))
-    }
-
-    async fn move_ref(&self, owner: &str, name: &str, ref_name: &str, commit: &str) -> Result<bool> {
-        let db = self.vol_db(owner, name).await?;
-        if db.get(commit_key(commit)).await?.is_none() {
-            return Ok(false);
-        }
-        db.put(ref_key(ref_name), commit.as_bytes().to_vec()).await?;
-        Ok(true)
-    }
-
-    async fn ref_commit(&self, owner: &str, name: &str, ref_name: &str) -> Result<Option<String>> {
-        let db = self.vol_db(owner, name).await?;
-        Ok(db.get(ref_key(ref_name)).await?.map(|v| String::from_utf8_lossy(&v).into_owned()))
-    }
-
-    async fn commit(&self, owner: &str, name: &str, id: &str) -> Result<Option<CommitRecord>> {
-        let db = self.vol_db(owner, name).await?;
-        let Some(v) = db.get(commit_key(id)).await? else { return Ok(None) };
-        Ok(Some(serde_json::from_slice(&v).map_err(|e| rustic_git_core::err(e.to_string()))?))
     }
 
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>> {

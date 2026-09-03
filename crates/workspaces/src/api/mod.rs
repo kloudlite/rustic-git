@@ -119,10 +119,6 @@ pub struct ApiState {
     /// into their namespace. `None` in dev and in tests: workspaces still create, they just come
     /// up without a key.
     pub keys: Option<Arc<rustic_git_storage::store::Store>>,
-    /// The server tier's browse routes, where a volume's snapshots actually live. `None` in dev
-    /// and in tests that do not exercise them: the volume routes answer 503, the same way every
-    /// other route here reports a missing dependency rather than pretending it does not exist.
-    pub upstream: Option<Arc<crate::upstream::Upstream>>,
 }
 
 impl ApiState {
@@ -133,7 +129,6 @@ impl ApiState {
             directory: None,
             kube: None,
             keys: None,
-            upstream: None,
         }
     }
 
@@ -152,10 +147,6 @@ impl ApiState {
         self
     }
 
-    pub fn with_upstream(mut self, upstream: Arc<crate::upstream::Upstream>) -> Self {
-        self.upstream = Some(upstream);
-        self
-    }
 }
 
 pub fn router(state: Arc<ApiState>) -> Router {

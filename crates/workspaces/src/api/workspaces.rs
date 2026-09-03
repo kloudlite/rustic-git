@@ -25,36 +25,21 @@ pub(crate) fn ws_volume(w: &crd::Workspace) -> Option<&str> {
     w.status.as_ref().and_then(|st| st.volume_ref.as_deref()).filter(|v| !v.is_empty())
 }
 
-/// Every volume of `owner` that has ever landed a snapshot.
+/// Every volume of `owner` that has ever landed a snapshot (`spec.transient: false` — a sync
+/// point never makes a workspace/environment doc's `volume` field non-null).
 ///
-/// From the SERVER tier's volume index — the same listing the Snapshots page reads — because that
-/// is the record: a push receipt is reclaimed by the owning node in time, and a listing that read
-/// the receipts went blind on a volume a week after its last push. It is a QUERY rather than a Volume status field because a field would need a
-/// second controller writing the Volume's status — `patch_status` force-applies under one field
-/// manager, so the Volume reconciler's next pass would prune it.
+/// Answered from the `Snapshot` CRs themselves, label-selected then re-checked against
+/// `spec.owner` (`mine`, never the label). It is a QUERY rather than a Volume status field
+/// because a field would need a second controller writing the Volume's status — `patch_status`
+/// force-applies under one field manager, so the Volume reconciler's next pass would prune it.
 ///
 /// ONE call per REQUEST, passed down to every row: one lookup per row turns a listing into an N+1.
-/// With no server tier configured (a dev API with no git node) the label-selected receipts are
-/// the fallback, for as long as they last.
-pub(crate) async fn pushed_volumes(s: &ApiState, c: &kube::Client, owner: &str) -> Result<HashSet<String>, Response> {
-    if let Some(up) = s.upstream.as_ref() {
-        return Ok(up
-            .volumes(owner, owner)
-            .await
-            .map_err(upstream_err)?
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| row.name)
-            .collect());
-    }
-    // No server tier configured (a dev API with no git node): fall back to `Snapshot` CRs owned
-    // by this label, deduplicated to their volume — the commit-model equivalent of the browse
-    // tier's per-owner volume list.
+pub(crate) async fn pushed_volumes(_s: &ApiState, c: &kube::Client, owner: &str) -> Result<HashSet<String>, Response> {
     let api: Api<crd::Snapshot> = Api::all(c.clone());
     let items = mine(api.list(&owned_by(owner)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
     Ok(items
         .into_iter()
-        .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
+        .filter(|s| s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error))
         .map(|s| s.spec.volume)
         .collect())
 }
@@ -922,11 +907,6 @@ pub(crate) async fn restore_ws(
 }
 
 // ── environments ─────────────────────────────────────────────────────────
-
-fn upstream_err(e: String) -> Response {
-    tracing::error!(error = %e, "volume upstream");
-    (StatusCode::BAD_GATEWAY, "registry unavailable").into_response()
-}
 
 #[cfg(test)]
 mod tests {
