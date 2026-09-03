@@ -52,11 +52,31 @@ fn placed_env(name: &str, owner: &str) -> Value {
 }
 
 fn snapshot(name: &str, volume: &str, owner: &str, worktree: &str, parent: &str, phase: &str) -> Value {
-    json!({
+    snapshot_with_state(name, volume, owner, worktree, parent, phase, None)
+}
+
+/// `snapshot`, plus the frozen `spec.state` a workspace/environment cut carries — `None` matches
+/// a legacy row with no state recorded, which the history rows must still show as `null`.
+fn snapshot_with_state(name: &str, volume: &str, owner: &str, worktree: &str, parent: &str, phase: &str, state: Option<Value>) -> Value {
+    let mut v = json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name},
         "spec": {"volume": volume, "owner": owner, "worktree": worktree, "parent": parent, "pinned": false},
         "status": {"phase": phase},
+    });
+    if let Some(state) = state {
+        v["spec"]["state"] = state;
+    }
+    v
+}
+
+fn workspace_state(image: &str, packages: &[&str], quota_gb: u64) -> Value {
+    json!({
+        "kind": "workspace",
+        "image": image,
+        "packages": packages,
+        "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
+        "quotaGb": quota_gb,
     })
 }
 
@@ -165,6 +185,34 @@ async fn history_lists_snapshot_crs_in_parent_order() {
     assert_eq!(rows[0]["parent"], "ws-1-aaaaaaaa");
     assert_eq!(rows[1]["id"], "ws-1-aaaaaaaa");
     assert_eq!(rows[1]["parent"], Value::Null);
+}
+
+/// History rows carry each snapshot's own frozen `spec.state` — a legacy row with none recorded
+/// stays `null` rather than inheriting a sibling's.
+#[tokio::test]
+async fn history_rows_carry_the_frozen_state_or_null() {
+    let mut with_state = snapshot_with_state("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready", Some(workspace_state("alpine:3.19", &["jq"], 5)));
+    with_state["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
+    let mut without_state = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "ready");
+    without_state["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
+    let routes = vec![get(
+        format!("{API}/snapshots"),
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [with_state, without_state]}),
+    )];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let rows: Vec<Value> = resp.json().await.unwrap();
+    let by_id = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+    assert_eq!(by_id("ws-1-aaaaaaaa")["state"]["kind"], "workspace");
+    assert_eq!(by_id("ws-1-aaaaaaaa")["state"]["image"], "alpine:3.19");
+    assert!(by_id("ws-1-bbbbbbbb")["state"].is_null());
 }
 
 /// `/refs` names the newest commit as `main` — same "first = tip" convention the registry path

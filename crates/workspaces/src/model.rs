@@ -76,10 +76,10 @@ pub struct Workspace {
     /// `None` until the workspace's pod has reported a host key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshDoc>,
-    /// Current live state: exposed ports, installed packages, free-form. Snapshotted into the
-    /// `Snapshot` record's `state` at push time. Named `live_state` (not `state`, despite the
-    /// design doc's JSON sketch reusing that key) because the field above already owns `state`
-    /// for the lifecycle enum.
+    /// Unused: the per-snapshot definition now lives on the history rows' `state`
+    /// (`commit_model_history_rows`, from `crd::SnapshotSpec.state`), frozen at push time by the
+    /// owning node rather than read back here. This field stays `null` and is kept only because
+    /// the web types still name it.
     #[serde(default)]
     pub live_state: serde_json::Value,
     /// The list the caller asked for (`spec.packages`), not what is installed — see

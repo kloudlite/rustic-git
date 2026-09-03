@@ -2324,7 +2324,7 @@ fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> 
             let phase = sn.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending);
             serde_json::json!({
                 "id": sn.name_any(),
-                "state": serde_json::Value::Null,
+                "state": serde_json::to_value(&sn.spec.state).unwrap_or(serde_json::Value::Null),
                 "lineage": [],
                 "region": "",
                 "message": sn.spec.message,
