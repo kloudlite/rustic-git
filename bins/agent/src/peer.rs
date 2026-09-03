@@ -100,6 +100,11 @@ pub async fn serve(ctx: &Ctx, secret: String) -> Result<(), String> {
 /// Equal in time proportional to the digest length, not to where the strings first differ — a
 /// timing side-channel on a bearer secret is a real attack, and this compares SHA-256 digests of
 /// both sides rather than pulling in a dedicated constant-time-compare crate for one call site.
+///
+/// `==` on the digests, deliberately, and NOT a constant-time-compare crate: the values compared
+/// are SHA-256 digests of both sides, so an early-exit `memcmp` over them leaks where two DIGESTS
+/// differ, which says nothing about the secret. The length-independence above is the property that
+/// matters and it is already held. Changing this buys nothing.
 fn secret_ok(headers: &HeaderMap, want: &str) -> bool {
     // An empty `want` must never authenticate: `unwrap_or("")` below means a request with no
     // header at all would otherwise compare equal to a misconfigured empty secret. Unreachable in
@@ -296,6 +301,10 @@ async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<String, Str
     let ip = pods
         .items
         .into_iter()
+        // The label and the node are a selector, not an identity: a pod created in `kube-system`
+        // by anyone can wear both. The ServiceAccount is the thing only our DaemonSet has, and a
+        // pull redirected to an impostor is a root `btrfs receive` of whatever it answers with.
+        .filter(|p| p.spec.as_ref().and_then(|s| s.service_account_name.as_deref()) == Some("rustic-git-agent"))
         .find_map(|p| p.status.and_then(|s| s.pod_ip))
         .ok_or_else(|| format!("no ready rustic-git-agent pod on {node}"))?;
     Ok(format!("{ip}:8444"))
@@ -1295,6 +1304,12 @@ where
 ///
 /// `node_is_dead`, deliberately NOT `unplaceable`: a decommissioning node is alive and its running
 /// work keeps running. Task 11's decommission beat calls `sweep_volumes` itself, with its own set.
+///
+/// ponytail: every live node computes the same dead set and runs this same sweep. Only one wins
+/// the release CAS and `mark_parent_of`'s idle check absorbs the duplicate marks, so it is
+/// correct — it just pays `N ×` the parent GETs and status writes. The upgrade is a rendezvous
+/// over `live` keyed by volume id (`preferred_node`, already in this file), not a lease; take it
+/// if the dead-node write volume ever shows up in an API server's audit log.
 async fn sweep_dead_nodes(
     ctx: &Arc<Ctx>,
     beat: &crate::listing::Beat,
@@ -1651,6 +1666,27 @@ mod reconcile_tests {
             )),
             rec,
         )
+    }
+
+    /// M7: a pull target must be the agent's own ServiceAccount, not merely a pod wearing its
+    /// label in `kube-system`. Creating a pod there is cluster-admin-adjacent already, so this is
+    /// depth, not a hole — but the check is one line and the alternative is a redirected pull.
+    #[tokio::test]
+    async fn a_pod_wearing_the_label_but_not_the_service_account_is_not_a_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let impostor = serde_json::json!({
+            "apiVersion": "v1", "kind": "PodList",
+            "items": [{
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "not-us", "namespace": "kube-system", "labels": {"app": "rustic-git-agent"}},
+                "spec": {"nodeName": "node-b", "serviceAccountName": "default"},
+                "status": {"podIp": "10.0.0.9"},
+            }],
+        });
+        let routes = vec![get("/api/v1/namespaces/kube-system/pods", impostor)];
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        assert!(agent_pod_addr(&ctx.client, "node-b").await.is_err(), "an impostor pod is not a peer address");
     }
 
     /// I4: the ceiling is the volume's own quota times slack, never unbounded, and never below a
@@ -2112,6 +2148,7 @@ fi
         let pod = serde_json::json!({
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": "agent-a"},
+            "spec": {"serviceAccountName": "rustic-git-agent"},
             "status": {"podIP": "127.0.0.1"},
         });
         let routes = vec![
@@ -2925,6 +2962,7 @@ fi
         let pod = serde_json::json!({
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": "agent-a"},
+            "spec": {"serviceAccountName": "rustic-git-agent"},
             "status": {"podIP": "127.0.0.1"},
         });
         let routes = vec![
@@ -3852,7 +3890,7 @@ fi
         serde_json::json!({
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": format!("agent-{node}"), "namespace": "kube-system"},
-            "spec": {"nodeName": node},
+            "spec": {"nodeName": node, "serviceAccountName": "rustic-git-agent"},
             "status": {"podIP": ip},
         })
     }
