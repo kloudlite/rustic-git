@@ -672,6 +672,155 @@ spec:
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
+# The superadmin-only surface. Same image and binary as rustic-git-api, one env apart
+# (RUSTIC_GIT_API_ROLE=admin) — see CLAUDE.md "Admin APIs live on their own server". One replica:
+# losing this pod for a few minutes during a roll is acceptable (nothing here is on any ordinary
+# request's path), and two would mean two places RUSTIC_GIT_WORKSPACES_ADMINS seeds from, which
+# is harmless but pointless. No podAntiAffinity: with exactly one pod a spread rule can never fire.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-admin
+  namespace: rustic-git
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: rustic-git-admin }
+  template:
+    metadata:
+      labels: { app: rustic-git-admin }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
+    spec:
+      # Same reasoning as rustic-git-api: this process reaches the k3s cluster with its own
+      # mounted kubeconfig Secret, not a projected ServiceAccount token.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: admin
+          image: ghcr.io/kloudlite/rustic-git:ca4dfefeb59c4de5ee39d3261cdd0f6ea0b42d57
+          command: ["rustic-git-api"]
+          ports:
+            - { name: http, containerPort: 8090 }
+          env:
+            - name: TOKIO_WORKER_THREADS
+              value: "2"
+            # The only line that turns this binary into the admin process: mounts
+            # api::admin::router() instead of api::router() and runs the superadmin bootstrap.
+            - name: RUSTIC_GIT_API_ROLE
+              value: admin
+            - name: RUSTIC_GIT_S3_URL
+              value: az://rustic-git
+            - name: AZURE_STORAGE_ACCOUNT_NAME
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+            - name: AZURE_STORAGE_ACCOUNT_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+            - name: RUSTIC_GIT_UPSTREAM
+              value: http://rustic-git:8081
+            - name: RUSTIC_GIT_API_ADDR
+              value: 0.0.0.0:8090
+            - name: RUSTIC_GIT_METRICS_ADDR
+              value: 0.0.0.0:9464
+            # The bootstrap: seeds these addresses into the directory's superadmins collection at
+            # boot (Task 10). Unset here and the admin process starts with no administrator except
+            # whoever the directory already lists — fine after the first boot, fatal on a fresh
+            # cluster, so this must be set on THIS Deployment's first rollout.
+            - name: RUSTIC_GIT_WORKSPACES_ADMINS
+              value: karthik@kloudlite.io
+            - name: RUSTIC_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            - name: RUSTIC_GIT_REDIS_URL
+              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
+            - name: RUSTIC_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri, optional: true } }
+            - name: RUSTIC_GIT_MONGO_DB
+              value: kloudlite
+            - name: RUSTIC_GIT_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
+            # Its own kubeconfig, bound to the rustic-git-admin ServiceAccount (Task 10) rather
+            # than rustic-git-api's — the split RBAC only means something if the admin process
+            # authenticates as the admin SA. Secret not created by this task; see
+            # deploy/k3s/README.md for the rotation recipe rustic-git-k3s-kubeconfig already
+            # documents, repeated for this name.
+            - name: KUBECONFIG
+              value: /etc/rustic-git/k3s/config
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: cache, mountPath: /var/cache/rustic-git }
+            - { name: k3s-kubeconfig, mountPath: /etc/rustic-git/k3s, readOnly: true }
+      volumes:
+        - name: cache
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: k3s-kubeconfig
+          secret:
+            secretName: rustic-git-admin-k3s-kubeconfig
+            defaultMode: 0400
+---
+# rustic-git-admin has no repo-request path, so no PodDisruptionBudget: an eviction during a
+# drain is exactly the "a few minutes' outage is fine" tradeoff replicas:1 above already made.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustic-git-admin
+  namespace: rustic-git
+spec:
+  type: ClusterIP
+  selector: { app: rustic-git-admin }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# The admin host. No IP allowlist (owner, 2026-09-04): the admin server refuses every request
+# whose session JWT lacks `superadmin: true` before routing, and the superadmin list — seeded
+# with the owner's email via RUSTIC_GIT_WORKSPACES_ADMINS above — is the only way onto it. The
+# web's /admin pages call it from the server side (Task 12), never from the client.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rustic-git-admin
+  namespace: rustic-git
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    # Same reasoning as the app ingress: verify with `dig admin.khost.dev` before assuming this
+    # host is Cloudflare-proxied. If it is not, this stays "false" for the same loop reason the
+    # registry's does.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [admin.khost.dev]
+      secretName: rustic-git-admin-tls
+  rules:
+    - host: admin.khost.dev
+      http:
+        paths:
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: rustic-git-admin
+                port:
+                  number: 80
+---
 # The registry gets a hostname of its own rather than a path on the app's.
 #
 # A registry client asks for `/v2/` and follows `Location` headers the server writes
