@@ -369,7 +369,10 @@ export function WorkspaceList({
                 <Notices w={w} />
               </span>
               <div className="flex shrink-0 items-center gap-2">
-                <ToggleForm owner={owner} id={w.id} running={w.state !== "stopped"} />
+                {/* Positive test, as the environment's ToggleForm uses: `creating`, `error` and
+                    `deleted` have nothing to stop, and a button that only ever errors is worse
+                    than no button. */}
+                <ToggleForm owner={owner} id={w.id} running={w.state === "ready"} />
                 {/* A workspace's snapshots are ITS OWNER'S undo history, so this row is the only
                     way to them — they are deliberately absent from the Snapshots tab, which lists
                     the shared artifact (environments). */}
