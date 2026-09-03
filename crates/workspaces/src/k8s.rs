@@ -1536,14 +1536,32 @@ mod tests {
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 
-    /// Task 7a: an environment's worktree is checked out under its OWN id (volume == ws, see
-    /// `run_environment`), so `env_id` alone determines the path.
+    /// An environment's worktree is its OWN id under whatever volume it resolved to — volume root,
+    /// environment leaf. For one that owns its volume the two are the same string, so the path is
+    /// unchanged from Task 7a.
     #[test]
     fn the_service_pods_live_mount_is_the_worktree_path() {
         let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
         let vols = d.spec.unwrap().template.spec.unwrap().volumes.unwrap();
         let live = vols.iter().find(|v| v.name == "live").unwrap();
         assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/env-1/live/env-1", ctx().pool));
+    }
+
+    /// A RESTORED environment holds a SECOND worktree of the SOURCE's volume: the root comes from
+    /// the source, the leaf from itself, and its objects live in its own namespace. Mounting
+    /// `(source, source)` — what this did before Task 2c — pointed two environments at one live
+    /// subvolume.
+    #[test]
+    fn a_restored_environments_live_mount_is_its_own_worktree_of_the_source_volume() {
+        let d = service_statefulset(&svc("data", "/data"), "env-restored", "env-src", "team", &ctx()).unwrap();
+        assert_eq!(
+            d.metadata.namespace.as_deref(),
+            Some(crate::crd::env_namespace("env-restored").as_str()),
+            "its own namespace, never the source's"
+        );
+        let vols = d.spec.unwrap().template.spec.unwrap().volumes.unwrap();
+        let live = vols.iter().find(|v| v.name == "live").unwrap();
+        assert_eq!(live.host_path.as_ref().unwrap().path, format!("{}/vol/env-src/live/env-restored", ctx().pool));
     }
 
     fn ctx() -> PodContext<'static> {

@@ -591,9 +591,9 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 ///      commits alike, whatever their phase. "Snapshot" in the owner's sense means a PINNED
 ///      commit; the rest is history of a worktree that no longer exists, and nothing else ever
 ///      reclaims it. A pinned record is never touched here, by any parent, for any reason.
-///   3. if a PINNED Ready commit remains on the Volume — this worktree's or another's — detach it
-///      so that snapshot outlives its parent; otherwise leave the ownerReference and let GC delete
-///      the Volume as it always did.
+///   3. if a PINNED commit remains on the Volume — this worktree's or another's — detach it so that
+///      snapshot outlives its parent; otherwise leave the ownerReference and let GC delete the
+///      Volume as it always did.
 async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let Some(volume) = volume else { return Ok(Action::await_change()) };
     let id = id.to_string();
@@ -618,8 +618,14 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
     }
     // Not scoped to this worktree: a pinned snapshot of a SIBLING worktree is just as good a reason
     // to keep the Volume alive — the bytes it names live on the same subvolume tree.
+    //
+    // Any phase but `Error`, NOT just `Ready`: a pinned push still being cut when its parent was
+    // deleted is exactly the case that must not lose the Volume — GC would take the subvolume out
+    // from under the cut and leave an orphan pinned record naming a Volume that is gone. A
+    // status-less record has never been cut at all and counts the same way; only `Error` is a
+    // record that will never name bytes.
     let has_snapshot = items.iter().any(|s| {
-        s.spec.pinned && !s.spec.transient && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)
+        s.spec.pinned && !s.spec.transient && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
     });
     if has_snapshot
         && !super::volume::detach_volume(ctx, &volume, uid).await.map_err(|e| ReconcileErr(e.to_string()))?

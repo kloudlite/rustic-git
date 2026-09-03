@@ -1190,6 +1190,30 @@ async fn deleting_a_workspace_with_only_unpinned_commits_deletes_them_and_leaves
     assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "nothing pinned: the Volume goes with its parent: {:?}", rec.calls());
 }
 
+/// A pinned push still being CUT when its parent was deleted keeps the Volume too: waiting for
+/// `Ready` here let GC delete the subvolume out from under the cut and leave an orphan pinned
+/// record naming a Volume that is gone.
+#[tokio::test]
+async fn a_pinned_commit_that_is_still_working_detaches_the_volume() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let mut working = pinned_commit("ws-1-dddddddd", "ws-1", "ws-1");
+    working["status"]["phase"] = serde_json::json!("working");
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(SNAPS, snap_list(vec![working])),
+        rustic_git_workspaces::kube_test::get(VOL_WS1, owned_volume("ws-1", "ws-uid-1")),
+        Route { method: "PATCH", path: VOL_WS1.into(), status: 200, body: owned_volume("ws-1", "ws-uid-1") },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", VOL_WS1).len(), 1, "an uncut pinned snapshot still keeps the Volume: {:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/ws-1-dddddddd")), "a pinned record is never deleted");
+}
+
 /// A pinned snapshot of a SIBLING worktree on the same volume keeps it alive too: the bytes live on
 /// the same subvolume tree, and this parent's own records are unpinned so they all go.
 #[tokio::test]
@@ -3963,6 +3987,14 @@ async fn a_restored_environment_waits_while_its_commit_is_still_working() {
 /// writes — claimed on this node, with no head of its own yet.
 fn restored_env() -> crd::Environment {
     let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    // One declared mount, so the pass exercises `mkdir_env_mounts` — whose root must be the
+    // worktree the pod mounts, not `live/` one level above it.
+    e.spec.services = vec![rustic_git_workspaces::model::Service {
+        name: "db".into(),
+        image: "mongo".into(),
+        mounts: vec![rustic_git_workspaces::model::Mount { folder: "dbdata".into(), path: "/data/db".into() }],
+        ..Default::default()
+    }];
     e.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
         source: Some(crd::VolumeSource::CloneOf { volume: "env-src".into(), commit: Some("env-src-aaaa".into()) }),
