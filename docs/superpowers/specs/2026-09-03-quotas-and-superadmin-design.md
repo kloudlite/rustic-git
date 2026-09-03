@@ -109,13 +109,17 @@ Everything that needs the superadmin claim is served by a SEPARATE api process, 
   reach an admin handler because the handler is not there.
 - The admin server refuses every request whose JWT lacks `superadmin: true`, before routing.
 - Separate Deployment (`rustic-git-admin`, 1 replica), separate Service, separate ingress host
-  (`admin.` subdomain) with an ingress-level source allowlist; separate ServiceAccount whose
+  (`admin.` subdomain). No IP allowlist (owner, 2026-09-04): the gate is identity — the admin
+  server refuses every request whose JWT lacks `superadmin: true`, and the superadmin list is the
+  only way in. Separate ServiceAccount whose
   ClusterRole is the ONLY one with `create/patch/delete` on `Quota`, `QuotaRequest`, `Region`.
   The user server's role keeps `get/list` on those (it enforces limits and validates a region on
   create) plus `create` on `QuotaRequest` (a person or team admin opens one).
 - The web's `/admin` area calls the admin host; `NEXT_PUBLIC_ADMIN_API_URL` (or the server-side
   equivalent) names it. Everything else in the web keeps calling `/v1`.
-- `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap runs on the admin server only.
+- `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap runs on the admin server only, and DEFAULTS to
+  `karthik@kloudlite.io` when unset (owner, 2026-09-04), so a fresh deployment always has one
+  superadmin who can add the rest from the admin area.
 
 Not doing: a separate crate or binary (same code, twice the build); a second JWT secret (the
 claim is the gate, and the admin server additionally refuses any token without it).

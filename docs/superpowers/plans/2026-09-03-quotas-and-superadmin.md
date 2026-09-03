@@ -3384,7 +3384,11 @@ git commit -m "Serve the superadmin-only routes from their own router"
 **Files:**
 - Modify: `deploy/k3s/api-rbac.yaml` — split `rustic-git-api`'s ClusterRole in two
 - Modify: `bins/api/src/main.rs` — the `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap runs only under
-  `RUSTIC_GIT_API_ROLE=admin`
+  `RUSTIC_GIT_API_ROLE=admin`, and DEFAULTS to `karthik@kloudlite.io` when the env is unset or
+  empty (owner, 2026-09-04): a fresh deployment always has one superadmin, who adds the rest
+  from the admin area. `ensure_superadmins` stays add-only, so the default never removes anyone.
+  Test: with the env unset the seed is exactly `["karthik@kloudlite.io"]`; with it set the env
+  wins.
 
 **Interfaces:**
 - Consumes: `role` (Task 9).
@@ -3614,14 +3618,13 @@ spec:
     - { name: http, port: 80, targetPort: http }
 ```
 
-- [ ] **Step 3: The Ingress, with a source allowlist**
+- [ ] **Step 3: The Ingress — identity is the gate, not the source**
 
 ```yaml
-# The admin host. Nothing on it is reachable by an ordinary user's browser session — the web's
-# /admin pages call it from the server side (Task 12), never from the client — so this Ingress
-# additionally restricts the SOURCE, the same pattern `rustic-git-registry`'s peer allowlist uses,
-# rather than relying on the superadmin claim alone to be the only thing standing between the
-# public internet and these routes.
+# The admin host. No IP allowlist (owner, 2026-09-04): the admin server refuses every request
+# whose session JWT lacks `superadmin: true` before routing, and the superadmin list — seeded
+# with the owner's email — is the only way onto it. The web's /admin pages call it from the
+# server side (Task 12), never from the client.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -3633,10 +3636,6 @@ metadata:
     # host is Cloudflare-proxied. If it is not, this stays "false" for the same loop reason the
     # registry's does.
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    # Source allowlist: only the office/VPN range and the web app's own egress may reach this
-    # host at all, ahead of and independent of the superadmin claim. Replace with the real ranges
-    # before applying — a placeholder here must fail closed, not open.
-    nginx.ingress.kubernetes.io/whitelist-source-range: "<admin-source-cidrs>"
 spec:
   ingressClassName: nginx
   tls:
@@ -3870,7 +3869,7 @@ git commit -m "Prove the user and admin routers cannot answer each other's paths
 
 ## Self-Review
 
-**Spec coverage.** §1 One quota per owner → Tasks 1 (CRD, defaults table), 2 (usage, `GET /v1/quota`). §2 Enforcement → Task 3 (`/v1`, all six live routes plus the note on the two that have no route), Task 6 (`ResourceQuota`). §3 Quota requests → Tasks 1 (CRD), 4 (create/list, the role rule, the one-pending rule), 5b/9 (approve/deny, the decided-once rule — written in 5b, relocated to the admin router in 9 with the note in 5b marking exactly what moves). §4 Superadmin → Task 5a (directory list, bootstrap, JWT claim), 5b (`Caller`, `require_admin`, `may_act_on`'s third arm with the audit line), 7b (`/admin`: queue, usage, defaults, regions, node decommission status). §5 Admin APIs live on their own server → Task 9 (`api::admin` router, the pre-routing claim refusal, every handler the spec's table lists moved out of `/v1`), Task 10 (the RBAC split — only the admin ClusterRole may write `Quota`/`QuotaRequest`/`Region` — and the bootstrap gated to the admin role), Task 11 (separate Deployment/Service/Ingress/ServiceAccount, the source allowlist, one shared image pin), Task 12 (the web's `NEXT_PUBLIC`-free `RUSTIC_GIT_ADMIN_API_URL` and `adminCall`), Task 13 (the two-router 404 tests and the e2e's `$ADMIN_BASE` proof). Rules → the Global Constraints block, plus "Admin writes only happen on the admin server" → Task 10's RBAC split is what makes that literally true rather than a convention. Cases table → the recorder tests in Tasks 3, 4, 5b/9 and 13, plus the e2e in Tasks 8 and 13. Testing → Tasks 2/3/4/5b (`/v1` recorder), 6 (agent recorder), 7a (`bun:test`), 9/13 (admin recorder, the cross-router 404s), 8/13 (live).
+**Spec coverage.** §1 One quota per owner → Tasks 1 (CRD, defaults table), 2 (usage, `GET /v1/quota`). §2 Enforcement → Task 3 (`/v1`, all six live routes plus the note on the two that have no route), Task 6 (`ResourceQuota`). §3 Quota requests → Tasks 1 (CRD), 4 (create/list, the role rule, the one-pending rule), 5b/9 (approve/deny, the decided-once rule — written in 5b, relocated to the admin router in 9 with the note in 5b marking exactly what moves). §4 Superadmin → Task 5a (directory list, bootstrap, JWT claim), 5b (`Caller`, `require_admin`, `may_act_on`'s third arm with the audit line), 7b (`/admin`: queue, usage, defaults, regions, node decommission status). §5 Admin APIs live on their own server → Task 9 (`api::admin` router, the pre-routing claim refusal, every handler the spec's table lists moved out of `/v1`), Task 10 (the RBAC split — only the admin ClusterRole may write `Quota`/`QuotaRequest`/`Region` — and the bootstrap gated to the admin role), Task 11 (separate Deployment/Service/Ingress/ServiceAccount, identity as the only gate, one shared image pin), Task 12 (the web's `NEXT_PUBLIC`-free `RUSTIC_GIT_ADMIN_API_URL` and `adminCall`), Task 13 (the two-router 404 tests and the e2e's `$ADMIN_BASE` proof). Rules → the Global Constraints block, plus "Admin writes only happen on the admin server" → Task 10's RBAC split is what makes that literally true rather than a convention. Cases table → the recorder tests in Tasks 3, 4, 5b/9 and 13, plus the e2e in Tasks 8 and 13. Testing → Tasks 2/3/4/5b (`/v1` recorder), 6 (agent recorder), 7a (`bun:test`), 9/13 (admin recorder, the cross-router 404s), 8/13 (live).
 
 **Placeholders.** None: every code step carries the code, every test step the assertions. The three places that say "copy the sibling" name the exact sibling file and line range (`api_teams.rs:26-83`, `reconcile.rs:386-500`, `new-token-dialog.tsx`), because the harnesses are long and duplicating them here would be the drift. Task 9's `list_for_owner`/`stop_as`/`delete_as` split is named as a refactor with the exact shape to copy (`guard_alloc`'s owner-as-parameter pattern), not a placeholder — the existing `list_ws`/`stop_ws`/`delete_ws` bodies are what move, unchanged in logic.
 
