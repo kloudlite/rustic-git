@@ -79,6 +79,7 @@
 #                                                                       none — see its module doc)
 #   namespaces                             get,create,patch             ensure (server-side apply); get for the per-node gate
 #   limitranges                            create,patch                 ensure (server-side apply)
+#   resourcequotas                          create,patch                 ensure (server-side apply)
 #   services                               create,patch,delete          ensure; delete removes the ClusterIP of a service whose definition lost its ports
 #   networkpolicies                        create,patch                 ensure (incl. both halves of
 #                                                                       an attachment grant)
@@ -212,7 +213,7 @@ rules:
   # in THIS rule is ever deleted by the agent — an ownerReference does that — so no `delete`, and
   # nothing is read back, so no `get`.
   - apiGroups: [""]
-    resources: ["limitranges"]
+    resources: ["limitranges", "resourcequotas"]
     verbs: ["create", "patch"]
   # `delete` on services only: a service whose definition dropped its ports gets no ClusterIP any
   # more, and the stale one from the earlier definition has to go — nothing else the agent writes

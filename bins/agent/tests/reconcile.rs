@@ -1419,6 +1419,7 @@ fn ns_routes(ns: &str) -> Vec<Route> {
     let mut r = vec![
         ok(format!("/api/v1/namespaces/{ns}"), "v1", "Namespace"),
         ok(format!("/api/v1/namespaces/{ns}/limitranges/slot"), "v1", "LimitRange"),
+        ok(format!("/api/v1/namespaces/{ns}/resourcequotas/owner"), "v1", "ResourceQuota"),
         ok(
             format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings/api-secrets"),
             "rbac.authorization.k8s.io/v1",

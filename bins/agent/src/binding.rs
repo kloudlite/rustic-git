@@ -15,7 +15,7 @@
 //! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
 
 use crate::controller::{conditions_eq, ensure, patch_status, settle, Ctx, Outcome, ReconcileErr};
-use k8s_openapi::api::core::v1::{LimitRange, Namespace};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace, ResourceQuota};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 use kube::api::{Api, ListParams};
@@ -105,6 +105,14 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         ensure(
             &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
             &k8s::limit_range(&ns, owner, "workspace", &crd::PodResources::default(), None),
+            ctx,
+        )
+        .await?;
+        // Aggregate ceiling beside the per-container one: see `k8s::resource_quota`'s doc comment
+        // for why it's sized from the same numbers `/v1`'s per-owner count is.
+        ensure(
+            &Api::<ResourceQuota>::namespaced(ctx.client.clone(), &ns),
+            &k8s::resource_quota(&ns, owner, "workspace", &crd::PodResources::default(), rustic_git_workspaces::model::max_per_owner()),
             ctx,
         )
         .await?;
