@@ -343,3 +343,11 @@ fn every_namespace_the_code_makes_is_admitted() {
         assert!(secret_arm.contains(&format!("startsWith('{p}')")), "Secret branch must admit {p} namespaces");
     }
 }
+
+/// The tolerance for a pre-cutover restore source protected objects that no longer exist. A schema
+/// that still advertises the variant invites the next reader to write one.
+#[test]
+fn restore_of_is_gone_from_the_published_schema() {
+    let yaml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/crds.yaml")).unwrap();
+    assert!(!yaml.contains("restoreOf"), "regenerate deploy/k3s/crds.yaml");
+}

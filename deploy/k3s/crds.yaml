@@ -77,7 +77,7 @@
                         "nullable": true,
                         "properties": {
                           "owner": {
-                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner — same rule as `VolumeSource::RestoreOf`.",
+                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner, which is every personal restore.",
                             "nullable": true,
                             "type": "string"
                           },
@@ -119,11 +119,6 @@
                           },
                           {
                             "required": [
-                              "restoreOf"
-                            ]
-                          },
-                          {
-                            "required": [
                               "gitRepo"
                             ]
                           }
@@ -158,31 +153,6 @@
                             "required": [
                               "branch",
                               "repo"
-                            ],
-                            "type": "object"
-                          },
-                          "restoreOf": {
-                            "description": "DEAD as of Task 8: restore-to-new is `CloneOf{commit: Some(id)}` now — `/v1` never writes\nthis variant any more. Kept ONLY so a pre-cutover stored spec still deserializes; a\nreconcile that finds one converges to a fixed Permanent condition\n(`engine::ops::RESTORE_OF_GONE`) rather than attempting a fetch that has nowhere left to\nfetch from.",
-                            "properties": {
-                              "owner": {
-                                "description": "The registry owner LABEL the source volume lives under — a team slug for a team's\nenvironment, which is not the owner of the object being restored INTO. Absent means\n\"the same owner\", which is every record written before this and every personal restore.",
-                                "nullable": true,
-                                "type": "string"
-                              },
-                              "region": {
-                                "nullable": true,
-                                "type": "string"
-                              },
-                              "snapshot_id": {
-                                "type": "string"
-                              },
-                              "volume": {
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "snapshot_id",
-                              "volume"
                             ],
                             "type": "object"
                           },
@@ -461,11 +431,6 @@
                               },
                               {
                                 "required": [
-                                  "restoreOf"
-                                ]
-                              },
-                              {
-                                "required": [
                                   "gitRepo"
                                 ]
                               }
@@ -500,31 +465,6 @@
                                 "required": [
                                   "branch",
                                   "repo"
-                                ],
-                                "type": "object"
-                              },
-                              "restoreOf": {
-                                "description": "DEAD as of Task 8: restore-to-new is `CloneOf{commit: Some(id)}` now — `/v1` never writes\nthis variant any more. Kept ONLY so a pre-cutover stored spec still deserializes; a\nreconcile that finds one converges to a fixed Permanent condition\n(`engine::ops::RESTORE_OF_GONE`) rather than attempting a fetch that has nowhere left to\nfetch from.",
-                                "properties": {
-                                  "owner": {
-                                    "description": "The registry owner LABEL the source volume lives under — a team slug for a team's\nenvironment, which is not the owner of the object being restored INTO. Absent means\n\"the same owner\", which is every record written before this and every personal restore.",
-                                    "nullable": true,
-                                    "type": "string"
-                                  },
-                                  "region": {
-                                    "nullable": true,
-                                    "type": "string"
-                                  },
-                                  "snapshot_id": {
-                                    "type": "string"
-                                  },
-                                  "volume": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "snapshot_id",
-                                  "volume"
                                 ],
                                 "type": "object"
                               },
@@ -791,7 +731,7 @@
                         "nullable": true,
                         "properties": {
                           "owner": {
-                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner — same rule as `VolumeSource::RestoreOf`.",
+                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner, which is every personal restore.",
                             "nullable": true,
                             "type": "string"
                           },
@@ -906,11 +846,6 @@
                               },
                               {
                                 "required": [
-                                  "restoreOf"
-                                ]
-                              },
-                              {
-                                "required": [
                                   "gitRepo"
                                 ]
                               }
@@ -945,31 +880,6 @@
                                 "required": [
                                   "branch",
                                   "repo"
-                                ],
-                                "type": "object"
-                              },
-                              "restoreOf": {
-                                "description": "DEAD as of Task 8: restore-to-new is `CloneOf{commit: Some(id)}` now — `/v1` never writes\nthis variant any more. Kept ONLY so a pre-cutover stored spec still deserializes; a\nreconcile that finds one converges to a fixed Permanent condition\n(`engine::ops::RESTORE_OF_GONE`) rather than attempting a fetch that has nowhere left to\nfetch from.",
-                                "properties": {
-                                  "owner": {
-                                    "description": "The registry owner LABEL the source volume lives under — a team slug for a team's\nenvironment, which is not the owner of the object being restored INTO. Absent means\n\"the same owner\", which is every record written before this and every personal restore.",
-                                    "nullable": true,
-                                    "type": "string"
-                                  },
-                                  "region": {
-                                    "nullable": true,
-                                    "type": "string"
-                                  },
-                                  "snapshot_id": {
-                                    "type": "string"
-                                  },
-                                  "volume": {
-                                    "type": "string"
-                                  }
-                                },
-                                "required": [
-                                  "snapshot_id",
-                                  "volume"
                                 ],
                                 "type": "object"
                               },

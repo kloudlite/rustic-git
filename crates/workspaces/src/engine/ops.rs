@@ -15,13 +15,6 @@ pub struct EngErr(pub String);
 /// doesn't exist locally.
 pub const NO_SUCH_RECORD: &str = "commit record not found";
 
-/// A reconcile that finds a pre-cutover `VolumeSource::RestoreOf` on a stored spec: the mechanism
-/// it named (a registry fetch into a fresh volume) is gone as of Task 8 — restore-to-new is now
-/// `CloneOf{volume, commit: Some(id)}`, written only by `/v1` from here on. PERMANENT, not
-/// retried: no amount of waiting fetches from a registry that no longer exists. The fix is to
-/// re-issue the restore from the API, which writes the new shape.
-pub const RESTORE_OF_GONE: &str = "restore-to-new via the object-store registry is gone; re-issue the restore";
-
 impl std::fmt::Display for EngErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)

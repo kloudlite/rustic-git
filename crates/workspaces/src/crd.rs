@@ -86,22 +86,6 @@ pub enum VolumeSource {
     /// pin on the source's — which is why the interrupted branch of `/v1`'s clone writes this and
     /// nothing else does.
     SeededFrom { volume: String, snapshot: String },
-    /// DEAD as of Task 8: restore-to-new is `CloneOf{commit: Some(id)}` now — `/v1` never writes
-    /// this variant any more. Kept ONLY so a pre-cutover stored spec still deserializes; a
-    /// reconcile that finds one converges to a fixed Permanent condition
-    /// (`engine::ops::RESTORE_OF_GONE`) rather than attempting a fetch that has nowhere left to
-    /// fetch from.
-    RestoreOf {
-        volume: String,
-        snapshot_id: String,
-        /// The registry owner LABEL the source volume lives under — a team slug for a team's
-        /// environment, which is not the owner of the object being restored INTO. Absent means
-        /// "the same owner", which is every record written before this and every personal restore.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        owner: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        region: Option<String>,
-    },
     /// A git repository on this platform, cloned at `branch` into the fresh subvolume by the
     /// workspace pod's INIT CONTAINER, not by the agent.
     ///
@@ -127,7 +111,7 @@ pub struct RestoreWish {
     /// restore can graft another volume's snapshot in place.
     pub volume: String,
     /// The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means
-    /// the destination's own owner — same rule as `VolumeSource::RestoreOf`.
+    /// the destination's own owner, which is every personal restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

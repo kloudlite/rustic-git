@@ -220,8 +220,8 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
 /// The engine's named permanent failures, mapped to the condition `reason` a person reads in
 /// `kubectl describe`. Anything else is transient and retried.
 fn permanent_reason(e: &str) -> Option<&'static str> {
-    use rustic_git_workspaces::engine::ops::{NO_SUCH_RECORD, RESTORE_OF_GONE};
-    [(RESTORE_OF_GONE, "RestoreMechanismGone"), (NO_SUCH_RECORD, "NoSuchSnapshot")]
+    use rustic_git_workspaces::engine::ops::NO_SUCH_RECORD;
+    [(NO_SUCH_RECORD, "NoSuchSnapshot")]
         .into_iter()
         .find(|(marker, _)| e.contains(marker))
         .map(|(_, reason)| reason)
@@ -252,22 +252,6 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                     // whole reason this variant exists.
                     Some(VolumeSource::SeededFrom { volume, snapshot }) => {
                         engine.seed_from_snapshot(volume, snapshot, id).await.map_err(|e| e.to_string())?
-                    }
-                    // `VolumeSource::RestoreOf` is DEAD: "restore into a new workspace/environment"
-                    // is now `CloneOf{volume, commit: Some(id)}` (Task 8, ratified) — `/v1`
-                    // translates a restore request to that at write time and never writes this
-                    // variant any more. The variant itself stays in the enum only so an object
-                    // stored before the cutover still deserializes; any reconcile that finds one
-                    // converges to a fixed, PERMANENT condition rather than attempting a fetch
-                    // that has nowhere to fetch from.
-                    // Already on disk means there is nothing to restore: this volume was
-                    // materialized before the cutover and its data is right there. Only a
-                    // never-materialized one has to fail, and permanently. Without this, any
-                    // re-run of the materialize pass (a status reset, a rebuilt node) turns a
-                    // healthy legacy volume into a permanent error while its pod keeps serving.
-                    Some(VolumeSource::RestoreOf { .. }) if engine.pool.voldir(id).exists() => {}
-                    Some(VolumeSource::RestoreOf { .. }) => {
-                        return Err(rustic_git_workspaces::engine::ops::RESTORE_OF_GONE.into());
                     }
                     // Empty, deliberately: a `GitRepo` volume is seeded by the workspace pod's
                     // INIT CONTAINER, inside the workspace, over SSH, as the owner. The agent no
@@ -584,13 +568,6 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
                 Err(e) => Err(e.into()),
             }
         }
-        // Deliberately unchecked here. A snapshot outlives its stop commit -- the env-stop
-        // request is deleted after teardown, and nothing keeps a push request forever -- so
-        // validating against a `done` CR made a deleted environment's snapshots unrestorable while
-        // their records sat in the registry untouched. The registry is the source of truth, and
-        // the restore work reads it anyway; a missing record comes back as `NO_SUCH_RECORD` and is
-        // settled permanently on the work path.
-        Some(VolumeSource::RestoreOf { .. }) => Ok(()),
     }
 }
 
