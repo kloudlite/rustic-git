@@ -1028,17 +1028,3 @@ export function listQuotaRequests(owner: string | undefined, token: string) {
   return call<QuotaRequestDoc[]>(`/v1/quota-requests${q}`, { method: "GET", token });
 }
 
-export function decideQuotaRequest(id: string, decision: "approve" | "deny", note: string, token: string) {
-  return call<QuotaRequestDoc>(`/v1/quota-requests/${encodeURIComponent(id)}/${decision}`, {
-    method: "POST",
-    token,
-    body: JSON.stringify({ note }),
-  });
-}
-
-// ponytail: the admin area (Task 9) is what actually calls this; declared here now so Task 7a's
-// api surface matches the brief. Shape is a guess at the superadmin row — narrow it when the
-// admin page reads a field this doesn't have.
-export function listSuperadmins(token: string) {
-  return call<{ user: string }[]>("/admin/superadmins", { method: "GET", token });
-}
