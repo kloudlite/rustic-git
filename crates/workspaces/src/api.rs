@@ -1528,8 +1528,9 @@ struct RestoreEnvBody {
     owner: Option<String>,
     /// Validated exactly as `create_env`'s are — `check_services` is the trust boundary for mounts
     /// and a restore is just as much a caller-authored service list as a create is. Absent means
-    /// "the services the snapshot froze"; an explicit `[]` means none, which is how you ask for
-    /// the data back without the compose file.
+    /// "the services the snapshot froze", and so does an explicit `[]`: an environment always has
+    /// services, so an empty list is not a way to ask for the data with nothing running (a
+    /// snapshot that froze none is a 400).
     #[serde(default)]
     services: Option<Vec<Service>>,
     /// The region to RUN in. Where the snapshot's bytes live is the record's business, not this

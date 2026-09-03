@@ -174,7 +174,8 @@ and is collected when neither does. Deleting a workspace or an environment there
 `WORKTREE_FINALIZER` (`cleanup_parent`): drop the worktree, delete that working copy's sync
 points, and detach the Volume — remove the parent's owner entry — only if a snapshot remains, so
 the volume survives detached with its snapshots; with none left the entry stays and Kubernetes GC
-takes the Volume, its records and its bytes. A lost detach is an error, never a completed
+takes the Volume and its records — the bytes go on the agent's next beat, when the orphan-voldir
+sweep finds a tree with no Volume behind it. A lost detach is an error, never a completed
 finalizer. `retire_pass` in `bins/agent/src/peer.rs` is the safety net at both ends: it deletes
 `snap/` subvolumes whose record is gone (re-read before every delete, keep on any error) and
 deletes a Volume that has no owner entry and no snapshot. Containers live in

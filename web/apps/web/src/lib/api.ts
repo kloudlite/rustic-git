@@ -959,7 +959,7 @@ export function listVolumes(token: string, kind?: "workspace" | "environment", o
   return call<ApiVolumeSummary[]>(`/v1/volumes${q ? `?${q}` : ""}`, { method: "GET", token });
 }
 
-/** `crates/workspaces/src/api.rs::commit_model_history_rows` — the volume's SNAPSHOTS, newest
+/** `crates/workspaces/src/api.rs::snapshot_rows` — the volume's SNAPSHOTS, newest
  *  first. Sync points are internal and never appear here. The row also carries
  *  `phase`, left undeclared here — no reader in this app looks at it yet; add it if one needs to. */
 export type ApiCommitRecord = {

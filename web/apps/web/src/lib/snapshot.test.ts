@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { snapshotTime } from "./snapshot";
 
-// One row exactly as `commit_model_history_rows` builds it
+// One row exactly as `snapshot_rows` builds it
 // (`crates/workspaces/src/api.rs:2012-2033`): camelCase `createdAt`, an RFC3339 string from
 // `jiff::Timestamp`'s Display, plus the `phase` the TS type does not declare and the hardcoded
 // `region: ""` / `state: null`. Recorded here so a rename on either side fails loudly.

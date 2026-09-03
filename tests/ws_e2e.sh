@@ -113,6 +113,8 @@ WS_NS=""
 PROBE_NS=""
 CLONE1_ID=""
 CLONE_ID=""
+CM_CLONE_ID=""
+CM_RESTORE_ID=""
 RESTORE_ID=""
 SEED_ID=""
 OTHER_NODE_WS_ID=""
@@ -126,7 +128,7 @@ cleanup() {
   for eid in "$ENV_ID" "$DELETED_ENV_ID"; do
     [ -n "$eid" ] && kubectl delete environment "$eid" --ignore-not-found --wait=false >/dev/null 2>&1
   done
-  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$OTHER_NODE_WS_ID" "$SNAP_STATE_RESTORE_ID"; do
+  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$OTHER_NODE_WS_ID" "$SNAP_STATE_RESTORE_ID" "$CM_CLONE_ID" "$CM_RESTORE_ID"; do
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -323,6 +325,10 @@ NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=
 # (lib.rs's run: unset means "no shared home on this node", fail closed) — the real Service the
 # cluster's own agents point at (deploy/k3s/agent-daemonset.yaml), reachable here because this
 # runs against the real k3s cluster, just with a loopback pool standing in for the node's btrfs.
+# WS_REPLICA_SECS: the pull/retire beat, 300 s by default. The orphan-byte sweep and the
+# unreferenced-volume collection (and its age floor) both ride it, so every reclaim assertion in
+# this script would time out at the default; 20 s here, and every such wait below is at least
+# three beats.
 log "starting rustic-git-agent against pool $MOUNT as node $E2E_NODE"
 NODE_NAME="$E2E_NODE" \
 WS_GIT_SSH_HOST="$NODE_IP" \
@@ -331,6 +337,7 @@ WS_REGION="$REGION_ID" \
 WS_POOL="$MOUNT" \
 WS_HOMES_EXPORT="zerofs.rustic-git-system.svc:/" \
 WS_SYNC_SECS="5" \
+WS_REPLICA_SECS="20" \
 HOSTNAME="ws-e2e-agent" \
 COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
 COSMOS_KEY="$COSMOS_KEY" \
@@ -453,7 +460,9 @@ kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/worksp
 ready_transients() {
   # jsonpath filters on phase=="Ready" only (no && support); the name prefix and spec.transient
   # check are done in awk against the paired field this prints alongside each name.
-  kubectl get snapshots -l "rustic-git.io/volume=$WS_ID" \
+  # Sorted by creationTimestamp, so a caller taking `head -1`/`tail -1` gets the oldest/newest
+  # cut rather than whatever order the API server listed the names in.
+  kubectl get snapshots -l "rustic-git.io/volume=$WS_ID" --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{range .items[?(@.status.phase=="Ready")]}{.metadata.name}{" "}{.spec.transient}{"\n"}{end}' \
     2>/dev/null | awk -v p="^sync-$WS_ID-" '$1 ~ p && $2 == "true" {print $1}'
 }
@@ -485,22 +494,23 @@ done
 # A definition change with NO byte change must cut too (`sync_one` compares the derived
 # `spec.state` against the newest sync point's, not just the btrfs generation). Only a real
 # generation read can tell the two triggers apart, so this cannot be asserted off-cluster: PATCH
-# the packages, touch NOTHING on disk, and require a new sync point carrying the new list within
-# two beats (WS_SYNC_SECS is 5 for this run).
+# the packages, touch NOTHING on disk, and require a new sync point carrying the new list. The
+# bound is ~50 s, not two 5 s beats: the PATCH triggers a nix build (~28 s cold) that clears
+# `pod_ref` while it runs, so the first cut after it can be several beats out.
 log "sync points: a packages change with no write must cut a new sync point carrying it"
 curl -fsS -X PATCH "$BASE/v1/workspaces/$WS_ID" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{"packages":["hello"]}' >/dev/null || fail "PATCH packages"
 SYNC3=""
-for i in $(seq 1 10); do
-  SYNC3=$(ready_transients | head -1)
+for i in $(seq 1 24); do
+  SYNC3=$(ready_transients | tail -1)
   if [ -n "$SYNC3" ] && [ "$SYNC3" != "$SYNC2" ] \
     && [ "$(kubectl get snapshot "$SYNC3" -o jsonpath='{.spec.state.packages[0]}' 2>/dev/null)" = "hello" ]; then
     break
   fi
   SYNC3=""
-  sleep 1
+  sleep 2
 done
-[ -n "$SYNC3" ] || fail "no new sync point carrying packages=[hello] within two sync beats of the PATCH; the definition-change trigger is not firing"
+[ -n "$SYNC3" ] || fail "no new sync point carrying packages=[hello] within ~50 s of the PATCH; the definition-change trigger is not firing"
 
 # ---------------------------------------------------------------------------
 # Push: the one mutating verb — `/v1` writes a `Snapshot` CR and the owning node cuts it (btrfs
@@ -1158,6 +1168,17 @@ fi
 # default image a bare restore would otherwise fall back to. $WS_ID is not needed by anything
 # after this point, so it is safe to delete here.
 # ---------------------------------------------------------------------------
+# Both of those are worktrees of $WS_ID's OWN volume (a clone and a restore share it), so the
+# volume stays attached — and its bytes stay on the node — until they are gone too. The durable
+# block below asserts a DETACHED volume and then its collection, so they go first.
+log "deleting the clone and the restore that share the source's volume"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$CM_CLONE_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$CM_CLONE_ID"
+CM_CLONE_ID=""
+curl -fsS -X DELETE "$BASE/v1/workspaces/$CM_RESTORE_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$CM_RESTORE_ID"
+CM_RESTORE_ID=""
+
 log "restore (explicit snapshot): asserting the restored workspace keeps the source's frozen image after the source is deleted"
 SRC_IMAGE=$(kubectl get workspace "$WS_ID" -o jsonpath='{.spec.image}')
 SRC_PACKAGES=$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.packages}')

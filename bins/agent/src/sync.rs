@@ -105,7 +105,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
             continue;
         }
         match s.status.as_ref().map(|st| st.phase) {
-            // One cut in flight at a time — the same rule `create_commit` applies, and the reason
+            // One cut in flight at a time — the same rule `create_snapshot` applies, and the reason
             // this beat can run on a tick without piling snapshots onto a slow btrfs.
             Some(crd::Phase::Working) => {
                 tracing::debug!(worktree = %live.name, snapshot = %s.name_any(), "sync: a transient is Working, skipping this pass");

@@ -142,43 +142,7 @@ pub async fn stub_registry(
         Arc::new(volumes.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
     let hist: Arc<HashMap<String, serde_json::Value>> =
         Arc::new(histories.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
-    let hist_del = hist.clone();
-    let snap_del = hist.clone();
     let app = Router::new()
-        // One snapshot: 404 for an unknown volume AND for an id that is not in its history, which
-        // is the pair the api tier collapses into a single 404 of its own.
-        .route(
-            "/api/{owner}/{name}/snapshotdelete/{snapshot}",
-            axum::routing::delete(
-                move |Path((owner, name, snapshot)): Path<(String, String, String)>| {
-                    let h = snap_del.clone();
-                    async move {
-                        let found = h
-                            .get(&format!("{owner}/{name}"))
-                            .and_then(|v| v.as_array())
-                            .is_some_and(|recs| recs.iter().any(|r| r["id"] == snapshot));
-                        match found {
-                            true => axum::http::StatusCode::NO_CONTENT,
-                            false => axum::http::StatusCode::NOT_FOUND,
-                        }
-                    }
-                },
-            ),
-        )
-        // The delete side of the same map: 404 when nothing was pushed under that name, so the
-        // api tier's own scoping (which owner label it may ask as) is what the test exercises.
-        .route(
-            "/api/{owner}/{name}/volumedelete",
-            axum::routing::delete(move |Path((owner, name)): Path<(String, String)>| {
-                let h = hist_del.clone();
-                async move {
-                    match h.contains_key(&format!("{owner}/{name}")) {
-                        true => axum::http::StatusCode::NO_CONTENT,
-                        false => axum::http::StatusCode::NOT_FOUND,
-                    }
-                }
-            }),
-        )
         .route(
             "/api/{owner}/volumes",
             get(move |Path(owner): Path<String>| {
