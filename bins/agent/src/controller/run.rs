@@ -189,8 +189,16 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             |r| owned_by::<crd::Environment, _>(&r),
         );
     let env_store = environments.store();
+    let env_store_for_quota = env_store.clone();
     let environments = environments
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only, move |_: Node| all_in_store(&env_store))
+        // Same reasoning as the `bindings` controller's Quota watch just above: an Environment's
+        // `spec.owner` is a plain field so filtering by it is easy, but there are few Environments
+        // per cluster and this is the same "cluster-wide fact changed" shape the Node watch above
+        // already uses `all_in_store` for — so it does too, rather than adding a second pattern.
+        .watches(Api::<crd::Quota>::all(ctx.client.clone()), watcher::Config::default(), move |_: crd::Quota| {
+            all_in_store(&env_store_for_quota)
+        })
         .shutdown_on_signal()
         .run(|e, c| timed("environment", async move { reconcile_environment(e, c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -235,6 +243,19 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                     &w.spec.owner,
                 )))
             }
+        });
+    // A raised or lowered `Quota` must re-stamp the `ResourceQuota` promptly, not wait out the
+    // next unrelated event. `Quota.metadata.name` is the owner slug but `OwnerBinding.metadata.name`
+    // is `binding_name(region, owner)` — a hash of the pair — so there is no cheap ObjectRef to
+    // derive without a region, and a binding can exist in more than one region for the same owner.
+    // Filtering the local store by `spec.owner` would be a few more lines; `all_in_store` is the
+    // pattern this file already uses for exactly this shape of "something cluster-wide changed"
+    // wake (the Node watch below), and there are at most a few dozen OwnerBindings in any real
+    // cluster — cheap enough that the precision is not worth the extra code.
+    let bindings_store = bindings.store();
+    let bindings = bindings
+        .watches(Api::<crd::Quota>::all(ctx.client.clone()), watcher::Config::default(), move |_: crd::Quota| {
+            all_in_store(&bindings_store)
         })
         .shutdown_on_signal()
         .run(|b, c| timed("binding", async move { binding::apply_binding(&b, &c).await }), error_policy, ctx.clone())

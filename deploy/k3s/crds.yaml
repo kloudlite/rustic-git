@@ -1161,6 +1161,11 @@
                         "format": "int64",
                         "nullable": true,
                         "type": "integer"
+                      },
+                      "team": {
+                        "default": false,
+                        "description": "Whether `spec.owner` names a team rather than a person — a FACT the binding reconciler\nderives (no personal Workspace anywhere carries this owner's handle, see\n`binding::is_team_owner`), not a directory lookup the agent cannot make. Readers with no\ndirectory of their own (`controller/environment.rs`'s quota sizing) read this instead of\nguessing; defaults false because a binding not yet reconciled is more often a person's\nfirst workspace than a team's first environment.",
+                        "type": "boolean"
                       }
                     },
                     "type": "object"

@@ -1674,6 +1674,49 @@ async fn a_binding_pass_writes_the_owners_resource_quota() {
     assert_eq!(sent[0]["spec"]["hard"]["limits.memory"], "48Gi");
 }
 
+/// `run.rs` wakes every `OwnerBinding` on any `Quota` write (`all_in_store`, same pattern as the
+/// Node watch) rather than trying to map a `Quota`'s name back to the hashed binding name it does
+/// not appear in — this is the reconcile that wake reaches: a raised `Quota` re-read on the very
+/// next binding pass, with no roll and no wait for an unrelated event to happen to touch it.
+#[tokio::test]
+async fn a_quota_change_re_stamps_the_resource_quota_on_the_next_binding_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+    });
+    let raised_quota = rustic_git_workspaces::kube_test::get(
+        "/apis/rustic-git.io/v1alpha1/quotas/alice",
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": "alice"},
+            "spec": {"workspaces": 5, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 16, "memoryGb": 64}
+        }),
+    );
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            raised_quota,
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
+        ]
+        .into_iter()
+        .chain(ns_routes("ws-alice"))
+        .collect(),
+    );
+    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
+
+    // The event this test proves the reconcile side of: `run.rs`'s Quota watch requeues this same
+    // binding, and the requeued pass is exactly another `apply_binding` call — nothing about the
+    // binding itself changed, only the `Quota` object the mock now answers with the raised numbers.
+    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/resourcequotas/owner-quota");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["spec"]["hard"]["limits.cpu"], "16", "the raised number, not the old one: {sent:?}");
+    assert_eq!(sent[0]["spec"]["hard"]["limits.memory"], "64Gi");
+}
+
 fn home_vol_json(quota: u64) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
@@ -2552,6 +2595,74 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
 
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert_eq!(st.last().unwrap()["status"]["phase"], "running", "both services converge: {:?}", st.last());
+}
+
+/// `EnvironmentSpec` carries one owner string, no separate "is this a team" bit — the agent has no
+/// directory to ask either. The binding reconciler already worked this out for every owner it has
+/// ever seen (`binding::is_team_owner`, stamped as `OwnerBinding.status.team`), so a team-owned
+/// environment must read THAT rather than being sized off the smaller, person-shaped default.
+#[tokio::test]
+async fn a_team_owned_environments_quota_reads_the_bindings_team_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/env-1/live/env-1")).unwrap();
+    let ready_sts = |name: &str| {
+        serde_json::json!({
+            "apiVersion": "apps/v1", "kind": "StatefulSet",
+            "metadata": {"name": name, "namespace": "env-1"},
+            "status": {"readyReplicas": 1},
+        })
+    };
+    let binding = rustic_git_workspaces::kube_test::get(
+        format!("/apis/rustic-git.io/v1alpha1/ownerbindings/{}", crd::binding_name("r1", "acme")),
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                           "metadata": {"name": "r1-acme"},
+                           "spec": {"owner": "acme", "region": "r1"},
+                           "status": {"team": true, "conditions": []}}),
+    );
+    let quota = rustic_git_workspaces::kube_test::get(
+        "/apis/rustic-git.io/v1alpha1/quotas/acme",
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": "acme"},
+            "spec": {"workspaces": 5, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 12, "memoryGb": 48}
+        }),
+    );
+    let routes = vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) },
+        binding,
+        quota,
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "Namespace"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/default-deny", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-dns", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-internet-egress", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{}/rolebindings/api-secrets", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/limitranges/slot", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/resourcequotas/owner-quota", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "ResourceQuota"}) },
+        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/web".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/web".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
+        rustic_git_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets/web", ready_sts("web")),
+        Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
+    e.spec.services = vec![rustic_git_workspaces::model::Service {
+        name: "web".into(),
+        image: "nginx".into(),
+        command: vec![],
+        env: Default::default(),
+        mounts: vec![],
+        ports: vec![80],
+    }];
+
+    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", &format!("/api/v1/namespaces/{}/resourcequotas/owner-quota", crd::env_namespace("env-1")));
+    assert!(!sent.is_empty(), "{:?}", rec.calls());
+    assert_eq!(sent[0]["spec"]["hard"]["limits.cpu"], "12", "the TEAM's quota, not the person default of 8");
+    assert_eq!(sent[0]["spec"]["hard"]["limits.memory"], "48Gi");
 }
 
 /// A NEW environment with no `storage` can never build a disk, and no retry adds a field.

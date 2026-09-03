@@ -348,11 +348,20 @@ async fn run_environment(
     // The same ceiling, in the environment's own namespace: an environment's services are its
     // owner's capacity too, and the namespace is where Kubernetes can enforce it.
     //
-    // `false`: the agent has no directory to ask whether this slug is a team, so an owner with no
-    // `Quota` object of their own falls back to the SMALLER table. A team whose quota has ever
-    // been set has an object, and that object is what is read — the fallback is the only case that
-    // guesses, and it guesses conservatively.
-    let q = rustic_git_workspaces::quota::effective(&ctx.client, &e.spec.owner, false).await?;
+    // `EnvironmentSpec` alone cannot say whether `owner` is a team or a person — it is one string,
+    // "usually" a team slug but not always, and the agent has no directory to ask either way. The
+    // binding reconciler already answers this for every owner it has ever seen (`is_team_owner`,
+    // stamped onto `OwnerBinding.status.team`), so read THAT instead of guessing here. A binding
+    // not yet reconciled (this owner's very first object) falls back to `false`: the smaller,
+    // conservative table, logged once so a quietly-wrong ceiling is at least visible.
+    let team = match crate::binding::get_binding(ctx, &e.spec.region, &e.spec.owner).await? {
+        Some(b) => b.status.map(|s| s.team).unwrap_or(false),
+        None => {
+            tracing::info!(owner = %e.spec.owner, "no OwnerBinding yet; sizing this environment's quota as a person's");
+            false
+        }
+    };
+    let q = rustic_git_workspaces::quota::effective(&ctx.client, &e.spec.owner, team).await?;
     ensure(
         &Api::<ResourceQuota>::namespaced(ctx.client.clone(), ns),
         &k8s::resource_quota(ns, &e.spec.owner, "environment", &q),

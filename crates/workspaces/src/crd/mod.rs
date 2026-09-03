@@ -810,6 +810,14 @@ pub struct OwnerBindingStatus {
     pub observed_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+    /// Whether `spec.owner` names a team rather than a person — a FACT the binding reconciler
+    /// derives (no personal Workspace anywhere carries this owner's handle, see
+    /// `binding::is_team_owner`), not a directory lookup the agent cannot make. Readers with no
+    /// directory of their own (`controller/environment.rs`'s quota sizing) read this instead of
+    /// guessing; defaults false because a binding not yet reconciled is more often a person's
+    /// first workspace than a team's first environment.
+    #[serde(default)]
+    pub team: bool,
 }
 
 /// What ONE owner — a person or a team slug — may allocate. Cluster-scoped, named by the owner

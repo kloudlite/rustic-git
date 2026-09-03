@@ -61,15 +61,28 @@ async fn teams_in_use(ctx: &Arc<Ctx>, owner: &str) -> Result<BTreeSet<String>, R
     Ok(teams)
 }
 
+/// Whether `owner` names a team rather than a person. The agent has no directory to ask, but a
+/// person's own Workspace always carries their handle as `OWNER_LABEL` (`spec.team` is the
+/// separate field for the team they made it in — never the owner label itself), so a Workspace
+/// with `owner` as its OWNER_LABEL, ANYWHERE in the cluster, is proof `owner` names a person; none
+/// at all is the only signal left, and it reads as a team. Unscoped by node on purpose — a
+/// node-scoped read (like `teams_in_use`'s) would call someone a team just for having their one
+/// workspace claimed elsewhere.
+pub async fn is_team_owner(ctx: &Arc<Ctx>, owner: &str) -> Result<bool, ReconcileErr> {
+    let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
+    let lp = ListParams::default().labels(&format!("{}={owner}", k8s::OWNER_LABEL)).limit(1);
+    Ok(api.list(&lp).await?.items.is_empty())
+}
+
 /// Write the status only when it actually says something new.
 ///
 /// `crd::condition` stamps `lastTransitionTime` with `now`, so an unconditional write produces new
 /// bytes on every pass, which fires this controller's own watch, which writes again: a hot loop
 /// that never idles. `conditions_eq` ignores that timestamp for exactly this reason.
-async fn write_binding_status(b: &crd::OwnerBinding, ctx: &Arc<Ctx>, gen: i64) -> Result<(), ReconcileErr> {
+async fn write_binding_status(b: &crd::OwnerBinding, ctx: &Arc<Ctx>, gen: i64, team: bool) -> Result<(), ReconcileErr> {
     let conds = vec![crd::condition(NAMESPACE_READY, true, "Converged", "namespaces exist on this node", gen)];
     if let Some(cur) = &b.status {
-        if cur.observed_generation == Some(gen) && conditions_eq(&cur.conditions, &conds) {
+        if cur.observed_generation == Some(gen) && conditions_eq(&cur.conditions, &conds) && cur.team == team {
             return Ok(());
         }
     }
@@ -78,7 +91,7 @@ async fn write_binding_status(b: &crd::OwnerBinding, ctx: &Arc<Ctx>, gen: i64) -
         &api,
         &b.name_any(),
         "OwnerBinding",
-        serde_json::json!({"observedGeneration": gen, "conditions": conds}),
+        serde_json::json!({"observedGeneration": gen, "conditions": conds, "team": team}),
     )
     .await
 }
@@ -146,7 +159,7 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         // granted here, per namespace, instead of `secrets` cluster-wide.
         ensure(&bindings, &k8s::agent_secret_binding(&ns, owner, &owner_ref), ctx).await?;
     }
-    write_binding_status(b, ctx, gen).await?;
+    write_binding_status(b, ctx, gen, is_team_owner(ctx, owner).await?).await?;
     Ok(Action::await_change())
 }
 
