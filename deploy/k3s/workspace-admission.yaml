@@ -67,6 +67,12 @@ spec:
                   || ((!has(c.securityContext.privileged) || c.securityContext.privileged == false)
                       && (!has(c.securityContext.allowPrivilegeEscalation) || c.securityContext.allowPrivilegeEscalation == false)))
       message: "workspace/environment containers may not run privileged or with allowPrivilegeEscalation"
+    # `vol/` is deliberately NOT owner-scoped, unlike `homes`/`homecache` below: the volume pool
+    # is laid out `{pool}/vol/{id}` with no owner segment, so there is nothing for the CEL to
+    # compare against. The residual is a pod-builder bug mounting another tenant's subvolume —
+    # not reachable from outside, because the path comes from the agent and volume ids are
+    # opaque. ponytail: the fix is `{pool}/vol/{owner}/{id}`, at which point this line becomes
+    # the same comparison the two below already make.
     - expression: >-
         has(object.metadata.labels) && 'rustic-git.io/owner' in object.metadata.labels
           && (has(object.spec.volumes) ? object.spec.volumes : [])

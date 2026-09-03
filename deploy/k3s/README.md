@@ -99,14 +99,16 @@ kubectl label node <node> rustic-git.io/env=true           # may host environmen
 One key per role, not `role=session`, because a label key holds one value and a small cluster needs
 one node to be both.
 
-A new node ALSO needs its `flannel.1` address added to `system-netpol.yaml` before its agent first
-mounts the shared home — that policy's `from` list is hand-maintained, and an agent whose mount is
-denied wedges on a `hard` mount rather than failing:
-
 ```sh
+# N. The new node's flannel /32, BEFORE its agent first mounts. `system-netpol.yaml` allow-lists
+#    NFS (2049) by node and flannel address; a missing entry is not an error anyone sees — the
+#    mount times out and every workspace on that node parks in `HomeNotReady`.
 ssh <node> ip -4 -o addr show flannel.1     # e.g. 10.42.6.0 — add `- ipBlock: {cidr: 10.42.6.0/32}`
+# Add that /32 to the `zerofs-nfs-from-agents` ingress in system-netpol.yaml, commit, then:
 kubectl apply -f system-netpol.yaml
 ```
+
+Then start the agent on the new node (the DaemonSet schedules it once the labels above are set).
 
 ## Control-plane backup
 
