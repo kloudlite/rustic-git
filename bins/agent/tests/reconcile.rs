@@ -3934,6 +3934,7 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
     let routes = vec![
         source_workspace_exists("ws-src"),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
         ready_binding(),
         ready_namespace(),
@@ -3983,6 +3984,11 @@ async fn a_restored_environment_records_its_graft_commit_as_head() {
         !sent.iter().any(|s| s["status"]["conditions"][0]["reason"] == "HeadUnknown"),
         "never HeadUnknown: the head is known from the spec: {sent:?}"
     );
+    // Design rule 6, the environment twin: the restore becomes an owner of the source's Volume.
+    let attach = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/env-src");
+    assert_eq!(attach.len(), 1, "one attach patch: {:?}", rec.calls());
+    assert_eq!(attach[0][0]["value"][0]["uid"], "env-uid-1");
+    assert_eq!(attach[0][0]["value"][0]["kind"], "Environment");
     // Task 2c: the restore holds its own worktree of the source's volume. Nothing it does may
     // reach the SOURCE's live subvolume — two environments writing one is the bug this proves gone.
     assert!(tmp.path().join("vol/env-src/live/env-src/marker").exists(), "the source's live worktree was touched");
@@ -4055,6 +4061,8 @@ fn restored_env_routes(commit: serde_json::Value) -> Vec<Route> {
                                         "storage": {"quotaGb": 20}, "desiredState": "running"}}),
         ),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-src", ready_source_volume("env-src")),
+        // The restore's own attach: it becomes an OWNER of the source's Volume (design rule 6).
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/env-src".into(), status: 200, body: ready_source_volume("env-src") },
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/env-src-aaaa", commit),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         // The children `run_environment` applies before it makes the mount folders. Named for the
@@ -4079,6 +4087,7 @@ async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
     let routes = vec![
         source_workspace_exists("ws-src"),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-gone"),
         ready_binding(),
         ready_namespace(),
@@ -4155,6 +4164,7 @@ async fn commit_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
     let routes = vec![
         source_workspace_exists("ws-src"),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
@@ -4697,4 +4707,96 @@ async fn a_parent_whose_own_node_is_dead_is_not_reconciled_at_all() {
     rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     assert_eq!(rec.calls(), vec!["GET /api/v1/nodes/node-a".to_string()], "one read, no writes: {:?}", rec.calls());
+}
+
+const VOL_WS_SRC: &str = "/apis/rustic-git.io/v1alpha1/volumes/ws-src";
+
+/// Design rule 6: a restored (or cloned) working copy is grafted onto the SOURCE's volume, and it
+/// must become an owner of that Volume — otherwise only the snapshots keep it alive and deleting
+/// the last one collects the subvolume its pod runs on. The patch is `add`, because a detached
+/// volume — the ordinary restore target — has no `ownerReferences` key at all.
+#[tokio::test]
+async fn a_restored_workspace_attaches_itself_to_the_source_volume() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
+    let routes = vec![
+        source_workspace_exists("ws-src"),
+        rustic_git_workspaces::kube_test::get(VOL_WS_SRC, ready_source_volume("ws-src")),
+        Route { method: "PATCH", path: VOL_WS_SRC.into(), status: 200, body: ready_source_volume("ws-src") },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        ready_binding(),
+        ready_namespace(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+
+    let _ = rustic_git_agent::controller::apply_workspace(&cloned_workspace("ws-src-aaaaaaaa", None), &ctx).await;
+
+    let patches = rec.sent("PATCH", VOL_WS_SRC);
+    assert_eq!(patches.len(), 1, "one attach patch: {:?}", rec.calls());
+    assert_eq!(patches[0][0]["op"], "add");
+    assert_eq!(patches[0][0]["path"], "/metadata/ownerReferences");
+    assert_eq!(patches[0][0]["value"][0]["uid"], "ws-uid-1");
+    assert_eq!(patches[0][0]["value"][0]["kind"], "Workspace");
+    // Only ONE ownerReference may be the controller, and that is the volume's creator's.
+    assert_eq!(patches[0][0]["value"][0]["controller"], false);
+}
+
+/// The attach is idempotent: the entry it wrote is read back on the next pass and nothing is
+/// patched again. A controller that re-patched every reconcile would rewrite the list forever.
+#[tokio::test]
+async fn a_second_reconcile_does_not_re_attach() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
+    let mut attached = ready_source_volume("ws-src");
+    attached["metadata"]["ownerReferences"] = serde_json::json!([
+        {"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace", "name": "ws-1",
+         "uid": "ws-uid-1", "controller": false, "blockOwnerDeletion": false}
+    ]);
+    let routes = vec![
+        source_workspace_exists("ws-src"),
+        rustic_git_workspaces::kube_test::get(VOL_WS_SRC, attached),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        ready_binding(),
+        ready_namespace(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+
+    let _ = rustic_git_agent::controller::apply_workspace(&cloned_workspace("ws-src-aaaaaaaa", None), &ctx).await;
+
+    assert!(rec.sent("PATCH", VOL_WS_SRC).is_empty(), "already an owner: {:?}", rec.calls());
+}
+
+/// The other end of the same rule: deleting the restored workspace removes EXACTLY its own entry
+/// from the source volume's owner list — the source's own controller reference stays, so the
+/// volume is still its child.
+#[tokio::test]
+async fn deleting_a_restored_workspace_removes_only_its_own_owner_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let source_ref = serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+                                        "name": "ws-src", "uid": "src-uid", "controller": true});
+    let mine = serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+                                  "name": "ws-1", "uid": "ws-uid-1", "controller": false});
+    let mut vol = ready_source_volume("ws-src");
+    vol["metadata"]["ownerReferences"] = serde_json::json!([source_ref, mine]);
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(SNAPS, snap_list(vec![snapshot_record("ws-src-aaaaaaaa", "ws-src", "ws-src")])),
+        rustic_git_workspaces::kube_test::get(VOL_WS_SRC, vol.clone()),
+        Route { method: "PATCH", path: VOL_WS_SRC.into(), status: 200, body: vol },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-src"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-src"})));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    let patches = rec.sent("PATCH", VOL_WS_SRC);
+    assert_eq!(patches.len(), 1, "one detach patch: {:?}", rec.calls());
+    assert_eq!(patches[0][1]["op"], "replace");
+    assert_eq!(patches[0][1]["value"].as_array().unwrap().len(), 1, "only mine goes: {:?}", patches[0]);
+    assert_eq!(patches[0][1]["value"][0]["uid"], "src-uid");
 }

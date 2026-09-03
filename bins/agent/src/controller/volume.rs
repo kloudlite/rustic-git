@@ -486,6 +486,60 @@ pub(crate) async fn detach_volume(ctx: &Arc<Ctx>, name: &str, parent_uid: &str) 
     }
 }
 
+/// The mirror of `detach_volume`: add `parent`'s entry to a Volume it did NOT create, so a
+/// restored or cloned working copy is an owner of the volume it runs on (design rule 6). Without
+/// it the working copy is kept alive only by the snapshots on that volume — delete the last one
+/// and GC takes the subvolume its pod is running on.
+///
+/// Idempotent: an entry already present is `Ok(true)` on a bare GET. Guarded like `detach_volume`
+/// — `test` on the list we read, so a concurrent writer is "lost, not broken" and the caller
+/// requeues. `controller` is cleared because only ONE ownerReference may be the controller and
+/// that one belongs to the parent that created the Volume. `ownerReferences` is metadata, so the
+/// admission policy (spec-only) needs nothing and the existing `patch` on volumes is enough.
+pub(crate) async fn attach_volume<K>(ctx: &Arc<Ctx>, name: &str, parent: &K) -> Result<bool, ReconcileErr>
+where
+    K: Resource<DynamicType = ()>,
+{
+    let mut mine = owner_ref_of_kind(parent)?;
+    mine.controller = Some(false);
+    mine.block_owner_deletion = Some(false);
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let current = api.get(name).await?.metadata.owner_references.unwrap_or_default();
+    if current.iter().any(|o| o.uid == mine.uid) {
+        return Ok(true);
+    }
+    let mut next = current.clone();
+    next.push(mine);
+    let path = "/metadata/ownerReferences";
+    let value = serde_json::to_value(&next).expect("owner references serialize");
+    // A DETACHED volume — the ordinary restore target — has no `ownerReferences` key at all
+    // (the API server drops the empty list), and a `test` against `[]` would 422 forever on it.
+    // `add` creates the key and is the whole patch there; the guarded form is for the case where
+    // there is an existing list to lose.
+    let ops = json_patch::Patch(if current.is_empty() {
+        vec![json_patch::PatchOperation::Add(json_patch::AddOperation {
+            path: path.parse().expect("static pointer parses"),
+            value,
+        })]
+    } else {
+        vec![
+            json_patch::PatchOperation::Test(json_patch::TestOperation {
+                path: path.parse().expect("static pointer parses"),
+                value: serde_json::to_value(&current).expect("owner references serialize"),
+            }),
+            json_patch::PatchOperation::Replace(json_patch::ReplaceOperation {
+                path: path.parse().expect("static pointer parses"),
+                value,
+            }),
+        ]
+    });
+    match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
+        Ok(_) => Ok(true),
+        Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
 /// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
 /// this guards is a pod wedged forever on `path … does not exist`.
@@ -605,6 +659,7 @@ where
         }
         _ => None,
     };
+    let is_shared = shared.is_some();
     let vol = match shared {
         Some(Some(v)) => v,
         // The source volume vanished between claim and this pass — same shape as any other
@@ -638,6 +693,18 @@ where
             volume_ref: None,
             phase: crd::Phase::Creating,
             cond: crd::condition("Ready", false, "VolumeTakeover", "taking ownership of the released volume", gen),
+            action: Action::requeue(std::time::Duration::from_secs(5)),
+        });
+    }
+    // Design rule 6: a working copy grafted onto someone ELSE's volume becomes an owner of it,
+    // or only the snapshots keep it alive and deleting the last one collects the subvolume this
+    // pod runs on. After the placement guards, not before: a pass that turns out to be on the
+    // wrong node has no business rewriting the volume's owner list. A lost CAS just requeues.
+    if is_shared && vol.spec.node_name == node_name && !attach_volume(ctx, &id, parent).await? {
+        return Ok(Resolved::Wait {
+            volume_ref: None,
+            phase: crd::Phase::Creating,
+            cond: crd::condition("Ready", false, "VolumeAttach", "attaching to the shared volume", gen),
             action: Action::requeue(std::time::Duration::from_secs(5)),
         });
     }
