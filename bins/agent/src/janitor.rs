@@ -310,7 +310,9 @@ pub(crate) fn drop_stale_worktrees(engine: &Engine, volume: &str, owner: &str, m
 }
 
 fn btrfs_delete(path: &std::path::Path, id: &str) {
-    match std::process::Command::new("btrfs").args(["subvolume", "delete", path.to_str().unwrap()]).output() {
+    // `arg`, not `args([… path.to_str().unwrap()])`: `Command::arg` takes `AsRef<OsStr>`, so the
+    // UTF-8 conversion — and its panic, inside the path a finalizer depends on — was never needed.
+    match std::process::Command::new("btrfs").arg("subvolume").arg("delete").arg(path).output() {
         Ok(out) if out.status.success() => {}
         Ok(out) => tracing::warn!(
             %id,
