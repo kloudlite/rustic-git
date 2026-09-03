@@ -800,17 +800,17 @@ metadata:
   namespace: rustic-git
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-    # Same reasoning as the app ingress: verify with `dig admin.khost.dev` before assuming this
+    # Same reasoning as the app ingress: verify with `dig admin.dev.kloudlite.io` before assuming this
     # host is Cloudflare-proxied. If it is not, this stays "false" for the same loop reason the
     # registry's does.
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   tls:
-    - hosts: [admin.khost.dev]
+    - hosts: [admin.dev.kloudlite.io]
       secretName: rustic-git-admin-tls
   rules:
-    - host: admin.khost.dev
+    - host: admin.dev.kloudlite.io
       http:
         paths:
           - path: /admin

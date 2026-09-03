@@ -898,7 +898,7 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml
 ```
 
 Then the AKS roll: `deploy/rustic-git.yaml` adds the `rustic-git-admin` Deployment, Service and
-Ingress — **the `admin.khost.dev` DNS record must exist first**, or the Ingress's certificate
+Ingress — **the `admin.dev.kloudlite.io` DNS record must exist first**, or the Ingress's certificate
 request stalls the same way the app ingress's would. Repin and roll it with the rest of the tier
 (`deploy/pin.sh`, `deploy/roll.sh`), then `deploy/rustic-git-web.yaml` for the web app's
 `RUSTIC_GIT_ADMIN_API_URL` wiring to the new host.
