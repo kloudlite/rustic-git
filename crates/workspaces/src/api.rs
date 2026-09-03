@@ -1922,14 +1922,15 @@ async fn create_commit(
     // Owned by the Volume so the commit record goes with it: a commit CR with no owner outlived
     // its deleted workspace once, and its snapshot subvolume sat on a node with nothing left to
     // reap it. The agent's own cuts (sync points, stops) are owned the same way, via the parent.
-    let vol = Api::<crd::Volume>::all(c.clone()).get(volume).await.map_err(kube_err)?;
-    snap.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-        api_version: format!("{}/{}", crd::GROUP, crd::VERSION),
-        kind: "Volume".to_string(),
-        name: volume.to_string(),
-        uid: vol.metadata.uid.unwrap_or_default(),
-        ..Default::default()
-    }]);
+    let vol = match Api::<crd::Volume>::all(c.clone()).get(volume).await {
+        Ok(v) => v,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            return Err((StatusCode::NOT_FOUND, "the volume this worktree is on no longer exists").into_response())
+        }
+        Err(e) => return Err(kube_err(e)),
+    };
+    snap.metadata.owner_references =
+        Some(vec![vol.controller_owner_ref(&()).expect("a live Volume has a uid")]);
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())

@@ -26,7 +26,7 @@ struct Server {
 fn vol_obj(name: &str, owner: &str) -> Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": "workspace"}},
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": "workspace"}},
         "spec": {"owner": owner, "nodeName": NODE, "region": "centralindia", "quotaGb": 20}
     })
 }

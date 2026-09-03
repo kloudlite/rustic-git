@@ -601,13 +601,17 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 /// `WORKTREE_EXISTS` guard converges on right below this call — so the caller needs no branch for
 /// "just migrated" vs. "always was commit-model-native".
 ///
-/// Takes the `Volume` and not its id because the baseline needs an ownerReference to it: a
-/// cluster-scoped object may own another cluster-scoped one, so Kubernetes GC reclaims the record
-/// with the volume. Without it the baseline outlived every workspace it was cut for — 13 were on
-/// the cluster for volumes that no longer exist. Push commits have carried one all along (`api.rs`).
+/// Owned by the PARENT (Workspace/Environment), not the Volume, unlike a push commit (`api.rs`):
+/// a baseline only ever exists because a pre-model volume was migrated under one specific parent,
+/// and a Volume that only ever had its baseline is not worth keeping once that parent is gone — so
+/// the baseline dies with the parent rather than outliving it as an orphan CR for a workspace that
+/// no longer exists (13 were found on the cluster that way before this had an owner at all). A
+/// real push commit is different: it is worth keeping across a re-clone/re-attach of the same
+/// volume, so it stays owned by the Volume.
 pub(crate) async fn migrate_and_seed_baseline(
     ctx: &Arc<Ctx>,
     vol: &crd::Volume,
+    parent_ref: OwnerReference,
     owner: &str,
     state: crd::SnapshotState,
 ) -> Result<bool, ReconcileErr> {
@@ -636,7 +640,7 @@ pub(crate) async fn migrate_and_seed_baseline(
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, id));
-    snap.metadata.owner_references = Some(vec![owner_ref_of_kind(vol)?]);
+    snap.metadata.owner_references = Some(vec![parent_ref]);
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     // Same convergence rule as everything else in this cutover: a retry that finds the CR already
     // there (crash between the rename above landing and this create) is not an error.
@@ -826,7 +830,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // the claim itself does, by asking whether the VOLUME has any commits at all.
     // Lazy per-volume migration, before anything mounts (the pod must be recreated to pick up
     // the new path, same as the hostpath cutover) — a no-op every pass after the first.
-    migrate_and_seed_baseline(ctx, &vol, &w.spec.owner, crd::SnapshotState::of_workspace(w)).await?;
+    migrate_and_seed_baseline(ctx, &vol, owner_ref_of_kind(w)?, &w.spec.owner, crd::SnapshotState::of_workspace(w)).await?;
     // A clone pinned to a commit already knows its head — grafted by the API at clone time,
     // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
     // the source's real history, even on the very first pass.

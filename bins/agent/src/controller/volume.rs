@@ -787,11 +787,13 @@ mod tests {
         assert_ne!(sent["status"]["phase"], "error", "a live owner is not an error: {sent}");
     }
 
-    /// The migration baseline is the ONE Snapshot nothing owned, so 13 of them outlived their
-    /// volumes on the cluster. Cluster-scoped may own cluster-scoped: the Volume's own uid is the
-    /// whole fix, and Kubernetes GC does the rest.
+    /// The migration baseline is owned by its PARENT, not its Volume (the reverse of a real push
+    /// commit — see the WHY comment on `migrate_and_seed_baseline`): a Volume that only ever had
+    /// its baseline is not worth keeping once the workspace it was cut for is gone, so the
+    /// baseline must die with the parent rather than outlive it as an orphan CR. 13 were found
+    /// on the cluster that way before this had an owner at all.
     #[tokio::test]
-    async fn the_migration_baseline_is_owned_by_its_volume() {
+    async fn the_migration_baseline_is_owned_by_its_parent() {
         let tmp = tempfile::tempdir().unwrap();
         // The mid-migration staging dir: `migrate_volume`'s recovery arm reports a real migration
         // without needing btrfs, which is what mints the baseline CR.
@@ -801,6 +803,13 @@ mod tests {
             "metadata": {"name": "vol-1", "uid": "uid-vol-1", "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
+        }))
+        .unwrap();
+        let parent: crd::Workspace = serde_json::from_value(serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "vol-1", "uid": "uid-ws-1", "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "name": "src", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
+            "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1"},
         }))
         .unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![post(
@@ -819,16 +828,17 @@ mod tests {
             quota_gb: 5,
             attached_environment: None,
         };
+        let parent_ref = super::owner_ref_of_kind(&parent).unwrap();
         assert!(
-            super::super::migrate_and_seed_baseline(&ctx, &vol, "alice", state).await.unwrap(),
+            super::super::migrate_and_seed_baseline(&ctx, &vol, parent_ref, "alice", state).await.unwrap(),
             "the staging dir is a real migration"
         );
 
         let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots").remove(0);
         let owner = &sent["metadata"]["ownerReferences"][0];
-        assert_eq!(owner["kind"], "Volume");
+        assert_eq!(owner["kind"], "Workspace");
         assert_eq!(owner["name"], "vol-1");
-        assert_eq!(owner["uid"], "uid-vol-1");
+        assert_eq!(owner["uid"], "uid-ws-1");
         assert_eq!(owner["controller"], true);
         assert_eq!(sent["spec"]["state"]["kind"], "workspace");
     }
