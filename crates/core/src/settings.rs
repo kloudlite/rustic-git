@@ -61,10 +61,13 @@ pub struct CentralSettings {
     /// How long an unfinished upload session is kept before GC reclaims it. 3600..=604800 seconds.
     pub upload_grace_secs: u64,
     /// Registry GC sweep interval. 300..=86400 seconds.
-    // ponytail: unread until a caller needs it — see Task 4 Step 4's grep.
+    // ponytail: default mirrors `bins/worker/src/main.rs`'s `GC_PASS_GAP` (60s) — below this
+    // field's own stated range floor of 300, a pre-existing mismatch between the spec's table
+    // and the real constant, not something this task invents. Unread by any beat until Task 4.
     pub gc_interval_secs: u64,
     /// Merge-worker lease TTL. 30..=3600 seconds.
-    // ponytail: unread until a caller needs it — see Task 4 Step 4's grep.
+    // ponytail: default mirrors `App::MERGE_LEASE` (`crates/app/src/lib.rs`). Unread by any beat
+    // until Task 4 wires it.
     pub merge_lease_secs: u64,
     /// `announce_stranded_merges`'s beat interval. 5..=300 seconds.
     // ponytail: unread until a caller needs it — see Task 4 Step 4's grep.
@@ -110,8 +113,8 @@ impl CentralSettings {
             max_layer: env_u64("RUSTIC_GIT_MAX_LAYER", 5_368_709_120),
             max_manifest: 4_194_304,
             upload_grace_secs: env_u64("RUSTIC_GIT_UPLOAD_GRACE_SECS", 86_400),
-            gc_interval_secs: 3_600,
-            merge_lease_secs: 300,
+            gc_interval_secs: 60,
+            merge_lease_secs: 600,
             announce_stranded_secs: 15,
             feed_retention_secs: 604_800,
             clone_host: env_string("RUSTIC_GIT_CLONE_HOST"),

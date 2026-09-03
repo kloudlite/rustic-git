@@ -1529,8 +1529,7 @@ async fn a_quota_is_clamped_to_the_range_a_node_can_back() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let client = reqwest::Client::new();
-    let ceiling = rustic_git_workspaces::crd::defaults::quota_gb_ceiling() as u64;
-    for (asked, want) in [(0u64, 1u64), (1_000_000_000_000, ceiling), (20, 20)] {
+    for (asked, want) in [(0u64, 1u64), (1_000_000_000_000, 500), (20, 20)] {
         let resp = client
             .post(format!("{}/v1/workspaces", s.base))
             .bearer_auth(&tok)

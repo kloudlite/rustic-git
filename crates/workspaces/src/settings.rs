@@ -72,35 +72,36 @@ impl AgentSettings {
         }
     }
 
-    /// `stored ?? env ?? default`: `self` (already env ?? default from `from_env`) is the floor,
-    /// `spec`'s fields override it unconditionally — `ClusterSettingsSpec` has no `Option<_>`
-    /// twin because its own `serde(default = ..)` already fills every field on deserialize, so
-    /// there is nothing to distinguish "admin set this" from "admin never touched this" beyond
-    /// what the CRD's default already picked; that is an accepted gap (the CRD, not this merge,
-    /// is where a partial write would need `Option<_>` fields to preserve "untouched").
+    /// `stored ?? env ?? default`: `self` (already env ?? default from `from_env`) is the floor;
+    /// `spec`'s fields are `Option<_>`, so only what an admin actually set overrides it — a
+    /// field the admin never touched stays at its env/default value instead of being silently
+    /// overwritten by the CRD's own `serde` default.
     pub fn merged_with(mut self, spec: &ClusterSettingsSpec) -> Self {
-        self.sync_secs = spec.sync_secs;
-        self.replica_secs = spec.replica_secs;
-        self.decommission_secs = spec.decommission_secs;
-        self.node_dead_secs = spec.node_dead_secs;
-        self.peer_send_timeout_secs = spec.peer_send_timeout_secs;
-        self.peer_serve_timeout_secs = spec.peer_serve_timeout_secs;
-        self.peer_receive_slack = spec.peer_receive_slack;
-        self.stop_flush_timeout_secs = spec.stop_flush_timeout_secs;
-        self.nix_timeout_secs = spec.nix_timeout_secs;
-        if !spec.nixpkgs.is_empty() {
-            self.nixpkgs = spec.nixpkgs.clone();
+        macro_rules! over {
+            ($f:ident) => {
+                if let Some(v) = spec.$f.clone() {
+                    self.$f = v;
+                }
+            };
         }
-        self.base_packages = spec.base_packages.clone();
-        self.default_replicas = spec.default_replicas;
-        self.max_per_owner = spec.max_per_owner;
-        self.home_cache_gb = spec.home_cache_gb;
-        self.quota_gb_ceiling = spec.quota_gb_ceiling;
-        if !spec.default_image.is_empty() {
-            self.default_image = spec.default_image.clone();
-        }
-        self.git_init_image = spec.git_init_image.clone();
-        self.runtime_class = spec.runtime_class.clone();
+        over!(sync_secs);
+        over!(replica_secs);
+        over!(decommission_secs);
+        over!(node_dead_secs);
+        over!(peer_send_timeout_secs);
+        over!(peer_serve_timeout_secs);
+        over!(peer_receive_slack);
+        over!(stop_flush_timeout_secs);
+        over!(nix_timeout_secs);
+        over!(nixpkgs);
+        over!(base_packages);
+        over!(default_replicas);
+        over!(max_per_owner);
+        over!(home_cache_gb);
+        over!(quota_gb_ceiling);
+        over!(default_image);
+        over!(git_init_image);
+        over!(runtime_class);
         self
     }
 }
@@ -121,15 +122,15 @@ mod tests {
         assert_eq!(base.sync_secs, 45, "env must override the built-in default");
 
         let mut spec: ClusterSettingsSpec =
-            serde_json::from_value(serde_json::json!({})).expect("every field has a serde default");
-        spec.replica_secs = 900;
+            serde_json::from_value(serde_json::json!({})).expect("every field is Option, so an empty object parses");
+        spec.replica_secs = Some(900);
         let merged = base.clone().merged_with(&spec);
-        assert_eq!(merged.replica_secs, 900, "stored spec must override env/default");
-        assert_eq!(merged.sync_secs, spec.sync_secs, "the merge always takes the stored spec's value");
+        assert_eq!(merged.replica_secs, 900, "an admin-set field in the stored spec must override env/default");
+        assert_eq!(merged.sync_secs, 45, "a field the stored spec never touched (None) keeps env's value, not the CRD's own default");
         assert_eq!(
             merged.decommission_secs,
             crd::defaults::decommission_secs(),
-            "a field neither env nor the stored spec meaningfully changed keeps the CRD's own default"
+            "a field neither env nor the stored spec touched keeps the built-in default"
         );
 
         unsafe {
