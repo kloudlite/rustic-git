@@ -1339,6 +1339,7 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
         Ok(l) => {
             sweep_orphan_snapshots(ctx, &known, &l.items).await;
             sweep_orphan_snap_bytes(ctx, beat, &l.items).await;
+            collect_unreferenced_volumes(ctx, beat, &l.items, live).await;
         }
         Err(e) => tracing::warn!(error = %e, "pull: retire: listing snapshots; sweeping none"),
     }
@@ -1387,6 +1388,62 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
         }
         janitor::cleanup_local(&ctx.engine, &id);
         tracing::info!(volume = %id, "pull: retire: slot moved elsewhere, copy dropped");
+    }
+}
+
+/// Design rule 1/5's crash-between-steps safety net: `/v1` deletes a Snapshot then the Volume it
+/// leaves reference-less, and a crash between those two steps strands the Volume with no snapshot
+/// and no owner entry to ever collect it (Kubernetes GC only fires from an ownerReference, and the
+/// finalizer already removed the last one on detach). This is the only other path that deletes a
+/// Volume, and it is keep-biased like every sweep beside it: no owner entry, no `beat.parents` entry
+/// (even an unfinalized one — the finalizer racing this pass is not evidence of anything, only a
+/// gone one is), and no live snapshot (`is_snapshot()`, any phase but `Error` — the same predicate
+/// `cleanup_parent`'s detach uses, so the two paths never disagree about "does a snapshot remain").
+/// `WS_REPLICA_SECS` as the age floor keeps a Volume just created (its owner entry not yet visible
+/// in this beat's stale listing) from being collected out from under its own creator.
+///
+/// Runs on the SAME Snapshot listing `sweep_orphan_snapshots`/`sweep_orphan_snap_bytes` already
+/// made — a failed list skips this too, never "there are no snapshots".
+///
+/// One deleter: the Volume's pinned node (`spec.node_name`), same as every other per-volume
+/// decision here. A released pin (`node_name` empty — `Volume.spec.node_name` is cleared, never
+/// absent) has no owner left to be it, so the rendezvous top candidate over `live` stands in, the
+/// same substitute `preferred_node` already is for "who takes this volume next".
+async fn collect_unreferenced_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshots: &[crd::Snapshot], live: &[String]) {
+    let floor = replica_interval().as_secs() as i64;
+    let now = k8s_openapi::jiff::Timestamp::now();
+    let hosted = beat.hosted_volumes();
+    let snapshotted: HashSet<&str> = snapshots
+        .iter()
+        .filter(|s| s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error))
+        .map(|s| s.spec.volume.as_str())
+        .collect();
+    for v in &beat.volumes {
+        let id = v.name_any();
+        if v.metadata.deletion_timestamp.is_some() {
+            continue; // already going; the delete below would only race its own finalizer
+        }
+        let has_owner = v.metadata.owner_references.as_ref().is_some_and(|refs| !refs.is_empty());
+        if has_owner || hosted.contains(&id) || snapshotted.contains(id.as_str()) {
+            continue;
+        }
+        let old_enough = v
+            .metadata
+            .creation_timestamp
+            .as_ref()
+            .is_some_and(|t| now.as_second() - t.0.as_second() > floor);
+        if !old_enough {
+            continue;
+        }
+        let deleter = if v.spec.node_name.is_empty() { preferred_node(&id, live) } else { Some(v.spec.node_name.clone()) };
+        if deleter.as_deref() != Some(ctx.node.as_str()) {
+            continue;
+        }
+        match Api::<crd::Volume>::all(ctx.client.clone()).delete(&id, &Default::default()).await {
+            Ok(_) => tracing::info!(volume = %id, "pull: retire: no working copy and no snapshot; collecting the volume"),
+            Err(e) if matches!(&e, kube::Error::Api(s) if s.code == 404) => {}
+            Err(e) => tracing::warn!(volume = %id, error = %e, "pull: retire: collecting an unreferenced volume"),
+        }
     }
 }
 
@@ -2804,6 +2861,110 @@ fi
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", Vec::new());
 
         retire_pass(&ctx, &beat_of(vec![], vec![], vec![]), &["node-a".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Task 5: `collect_unreferenced_volumes`, the crash-between-steps safety net for design rule
+    // 5 — a Volume with no owner entry, no `beat.parents`, and no snapshot older than one beat.
+    // -----------------------------------------------------------------------------------------
+
+    /// Old enough to collect: `WS_REPLICA_SECS` defaults to 300 and nothing here sets it.
+    const LONG_AGO: &str = "2000-01-01T00:00:00Z";
+
+    fn vol_unowned(name: &str, node: &str, created_at: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9", "creationTimestamp": created_at},
+            "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        })
+    }
+
+    fn vol_still_owned(name: &str, node: &str, created_at: &str) -> serde_json::Value {
+        let mut v = vol_unowned(name, node, created_at);
+        v["metadata"]["ownerReferences"] = serde_json::json!([
+            {"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace", "name": "ws-1", "uid": "ws-uid", "controller": true}
+        ]);
+        v
+    }
+
+    #[tokio::test]
+    async fn retire_pass_collects_a_volume_no_working_copy_and_no_snapshot_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, snap_list(vec![]))]);
+        std::fs::create_dir_all(tmp.path().join("vol/v1")).unwrap();
+
+        retire_pass(&ctx, &beat_of(vec![vol_unowned("v1", "node-a", LONG_AGO)], vec![], vec![]), &["node-a".to_string()]).await;
+
+        assert_eq!(rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect::<Vec<_>>(), vec![format!("DELETE {VOLUMES}/v1")]);
+    }
+
+    #[tokio::test]
+    async fn retire_pass_keeps_an_unreferenced_volume_that_has_a_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, snap_list(vec![snap_of("v1.aaaa", "v1")]))]);
+
+        retire_pass(&ctx, &beat_of(vec![vol_unowned("v1", "node-a", LONG_AGO)], vec![], vec![]), &["node-a".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    /// Even with no ownerReference yet — the finalizer that would have removed it may simply not
+    /// have run this beat — a live parent still using the volume must never be collected under it.
+    #[tokio::test]
+    async fn retire_pass_keeps_an_unowned_volume_a_parent_still_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, snap_list(vec![]))]);
+
+        retire_pass(&ctx, &beat_of(vec![vol_unowned("v1", "node-a", LONG_AGO)], vec![], vec![("Workspace", "ws-1", "v1")]), &["node-a".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    #[tokio::test]
+    async fn retire_pass_keeps_an_unreferenced_volume_younger_than_a_beat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, snap_list(vec![]))]);
+        let just_now = k8s_openapi::jiff::Timestamp::now().to_string();
+
+        retire_pass(&ctx, &beat_of(vec![vol_unowned("v1", "node-a", &just_now)], vec![], vec![]), &["node-a".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    #[tokio::test]
+    async fn retire_pass_keeps_a_still_owned_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, snap_list(vec![]))]);
+
+        retire_pass(&ctx, &beat_of(vec![vol_still_owned("v1", "node-a", LONG_AGO)], vec![], vec![]), &["node-a".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    /// Only the pinned node collects — a non-owner never races the one deleter the doc string
+    /// promises.
+    #[tokio::test]
+    async fn retire_pass_never_collects_a_volume_pinned_to_another_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, snap_list(vec![]))]);
+
+        retire_pass(&ctx, &beat_of(vec![vol_unowned("v1", "node-b", LONG_AGO)], vec![], vec![]), &["node-a".to_string(), "node-b".to_string()]).await;
+
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    /// The Snapshot listing is the one shared by every sweep on this pass: a failed list must
+    /// starve this one too, not just the record- and byte-side sweeps beside it.
+    #[tokio::test]
+    async fn retire_pass_collects_no_volume_when_the_snapshot_list_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No `SNAPSHOTS` route at all: the mock answers 404, which is a list failure.
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", Vec::new());
+
+        retire_pass(&ctx, &beat_of(vec![vol_unowned("v1", "node-a", LONG_AGO)], vec![], vec![]), &["node-a".to_string()]).await;
 
         assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     }
