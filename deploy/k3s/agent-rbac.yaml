@@ -35,6 +35,11 @@
 #                                                                       owned->'' or ''->node) — the
 #                                                                       two spec field exceptions, see
 #                                                                       the policy
+#                                          delete                       collect_unreferenced_volumes
+#                                                                       (peer.rs: an ownerless volume
+#                                                                       with no worktree and no
+#                                                                       snapshot has no
+#                                                                       ownerReference left to GC it)
 #   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
 #   snapshots (rustic-git.io)              get,list,watch               pull_beat (missing-commit
@@ -146,10 +151,12 @@ rules:
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch"]
   # `create` on the children: a controller that creates a child owns it, and the API lost the same
-  # verbs. No `delete` on volumes — a Volume goes by garbage collection through its ownerReference.
+  # verbs. `delete` is `collect_unreferenced_volumes` (peer.rs): an ownerless Volume with no
+  # worktree and no snapshot has no ownerReference left to garbage-collect it, so the sweep is the
+  # only thing that can reclaim it — without this verb the beat 403s every pass.
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
-    verbs: ["get", "list", "watch", "create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # `ownerbindings` are created by the agent that WINS a placement claim — `claim::ensure_binding`;
   # a losing claimant never creates one, and nothing ever edits or deletes one.
   - apiGroups: ["rustic-git.io"]

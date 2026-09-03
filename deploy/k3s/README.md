@@ -827,9 +827,11 @@ drops the worktree and the sync points and DETACHES the Volume when a snapshot r
 
 ```sh
 # The api SA gains `snapshots: delete` and `volumes: delete` (api-rbac.yaml) — `/v1`'s deletes are
-# CRD-backed now, so an api rolled ahead of its role 403s on every snapshot delete. The agent's
-# ownerReference patch needs no policy change (admission constrains spec only), but agent-rbac and
-# agent-admission are re-applied together as always, and crds.yaml carries the reworded
+# CRD-backed now, so an api rolled ahead of its role 403s on every snapshot delete. The agent SA
+# gains `volumes: delete` (agent-rbac.yaml) for `collect_unreferenced_volumes` — an ownerless
+# volume with no worktree and no snapshot has no ownerReference left to garbage-collect it, and an
+# agent rolled ahead of its role 403s on every retire beat. The agent's
+# ownerReference patch needs no policy change (admission constrains spec only), and crds.yaml carries the reworded
 # descriptions and drops the dead `pinned` property.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml \
   -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-admission.yaml -f deploy/k3s/api-rbac.yaml
