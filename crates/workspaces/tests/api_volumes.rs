@@ -634,3 +634,20 @@ async fn the_delete_paths_select_on_the_volume_ref() {
         "every parent read is indexed: {listed:?}"
     );
 }
+
+/// M4: `live_parents` keys a BTreeMap by volume, so a volume carrying two worktrees showed only the
+/// last one's name and kind — and an environment inserted after a workspace overwrote it.
+#[tokio::test]
+async fn a_volume_with_two_worktrees_names_the_one_that_owns_it() {
+    // in api_volumes.rs: a shared clone plus the source, both on ws-1.
+    let mut clone = ws_obj("ws-clone", "karthik", "copy");
+    clone["status"]["volumeRef"] = json!("ws-1");
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z")])),
+        kget(format!("{API}/workspaces"), ws_list(vec![ws_obj("ws-1", "karthik", "source"), clone])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+    let (_, body) = get_json(&s, &token(&s.jwt, "karthik"), "/v1/volumes").await;
+    assert_eq!(body[0]["display_name"], "source", "the volume's own parent names it: {body}");
+}

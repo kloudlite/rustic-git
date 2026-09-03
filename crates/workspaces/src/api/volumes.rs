@@ -2,9 +2,10 @@
 //! refs, and the two deletes (one snapshot, or a whole detached volume with everything on it).
 //!
 //! A snapshot is a point in time and outlives the workspace it was taken of, so none of these reads
-//! may hang off a live Workspace/Environment. The index and the records both live on the SERVER
-//! tier (`vol/{owner}/{name}`); the cluster is consulted only to answer "is the parent still
-//! around?", which is a display detail, never an authorization one.
+//! may hang off a live Workspace/Environment. The records are `Snapshot` CRs in the CLUSTER, not on
+//! the server tier — there is no registry any more under the commit model; the cluster is consulted
+//! a second time only to answer "is the parent still around?", which is a display detail, never an
+//! authorization one.
 
 use super::scope::{caller_owners, may_act_on, mine, owner_set_selector};
 use super::{caller, check_path_segment, kube, kube_err, kube_unavailable, not_found, ApiState};
@@ -99,31 +100,40 @@ async fn live_parents(s: &ApiState, owners: &[String]) -> Option<BTreeMap<String
     let mut live = BTreeMap::new();
     let ws: Api<crd::Workspace> = Api::all(c.clone());
     for w in mine(ws.list(&lp).await.ok()?.items, owners) {
+        let name = w.name_any();
         let st = w.status.as_ref();
-        let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| w.name_any());
-        live.insert(
-            vol,
-            Parent {
-                kind: "workspace".into(),
-                display: w.spec.name.clone(),
-                head: st.and_then(|s| s.head.clone()),
-                base: source_snapshot(&w.spec.storage),
-            },
-        );
+        let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| name.clone());
+        let parent = Parent {
+            kind: "workspace".into(),
+            display: w.spec.name.clone(),
+            head: st.and_then(|s| s.head.clone()),
+            base: source_snapshot(&w.spec.storage),
+        };
+        // A volume can carry several worktrees (a shared clone, a restore). The parent that OWNS
+        // the volume — the one whose id is the volume's — is what names the row; anything else
+        // would let a clone rename its source's listing.
+        if name == vol {
+            live.insert(vol, parent);
+        } else {
+            live.entry(vol).or_insert(parent);
+        }
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
     for e in mine(envs.list(&lp).await.ok()?.items, owners) {
+        let name = e.name_any();
         let st = e.status.as_ref();
-        let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| e.name_any());
-        live.insert(
-            vol,
-            Parent {
-                kind: "environment".into(),
-                display: e.spec.name.clone(),
-                head: st.and_then(|s| s.head.clone()),
-                base: source_snapshot(&e.spec.storage),
-            },
-        );
+        let vol = st.and_then(|s| s.volume_ref.clone()).unwrap_or_else(|| name.clone());
+        let parent = Parent {
+            kind: "environment".into(),
+            display: e.spec.name.clone(),
+            head: st.and_then(|s| s.head.clone()),
+            base: source_snapshot(&e.spec.storage),
+        };
+        if name == vol {
+            live.insert(vol, parent);
+        } else {
+            live.entry(vol).or_insert(parent);
+        }
     }
     Some(live)
 }
@@ -485,6 +495,9 @@ fn snapshot_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "id": sn.name_any(),
                 "state": serde_json::to_value(&sn.spec.state).unwrap_or(serde_json::Value::Null),
+                // Both dead weight now — a `Snapshot` CR carries neither — but `ApiCommitRecord` in
+                // web/apps/web/src/lib/api.ts still declares them, so they stay on the wire until a
+                // web change drops the fields.
                 "lineage": [],
                 "region": "",
                 "message": sn.spec.message,

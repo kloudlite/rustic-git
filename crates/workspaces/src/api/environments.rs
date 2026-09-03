@@ -330,7 +330,8 @@ pub(crate) async fn start_env(
         return Err(interrupted_409("environment"));
     }
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Running).await?;
-    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
+    let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &pushed))).into_response())
 }
 
 pub(crate) async fn stop_env(
@@ -341,7 +342,8 @@ pub(crate) async fn stop_env(
     let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Stopped).await?;
-    let mut doc = env_doc(&e, &HashSet::new());
+    let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
+    let mut doc = env_doc(&e, &pushed);
     doc.state = EnvState::Stopped;
     let warning = e.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
     let mut body = serde_json::to_value(&doc).expect("Environment doc always serializes");
@@ -374,20 +376,36 @@ pub(crate) async fn delete_env(
     // environment, and the reconciler treating that as unattached is a degradation somebody has
     // to be able to find in the logs.
     let attached_to = ListParams::default().labels(&format!("{ATTACHED_ENV_LABEL}={id}"));
+    // Same warning shape `stop_ws` uses: a body the caller can act on, not just a log line only an
+    // operator sees.
+    let mut warning = None;
     match wss.list(&attached_to).await {
         Ok(list) => {
+            let mut failed = 0;
             for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
                 let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
                 if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
                     tracing::warn!(workspace = %w.name_any(), error = %e, "clearing an attachment");
+                    failed += 1;
                 }
             }
+            if failed > 0 {
+                warning = Some(format!("{failed} workspace(s) may still name this deleted environment"));
+            }
         }
-        Err(err) => tracing::warn!(environment = %id, error = %err, "listing workspaces to clear attachments; some may still name this environment"),
+        Err(err) => {
+            tracing::warn!(environment = %id, error = %err, "listing workspaces to clear attachments; some may still name this environment");
+            warning = Some("could not list workspaces to clear; some may still name this deleted environment".to_string());
+        }
     }
-    let mut doc = env_doc(&e, &HashSet::new());
+    let pushed = pushed_volumes(&s, c, &e.spec.owner).await?;
+    let mut doc = env_doc(&e, &pushed);
     doc.state = EnvState::Deleted;
-    Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
+    let mut body = serde_json::to_value(&doc).expect("Environment doc always serializes");
+    if let Some(w) = warning {
+        body["warning"] = serde_json::Value::String(w);
+    }
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
 /// Env's local-copy route. Names no node, for the same reason `clone_ws` does not, and the

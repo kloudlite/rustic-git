@@ -94,6 +94,12 @@ fn no_environments() -> Route {
     get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
 }
 
+/// `pushed_volumes` lists `Snapshot` CRs on every mutation response now (M3), so any test whose
+/// mock has no snapshots at all needs this route or the list 404s.
+fn no_snapshots() -> Route {
+    get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}))
+}
+
 /// The ONE write a create makes now.
 fn create_routes() -> Vec<Route> {
     vec![
@@ -428,6 +434,7 @@ async fn restore_of_an_unknown_or_foreign_snapshot_is_not_found() {
 #[tokio::test]
 async fn start_and_stop_patch_the_desired_state() {
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
     ];
@@ -463,6 +470,7 @@ fn with_node_dead(mut w: Value) -> Value {
 async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
     let dead = with_node_dead(placed_ws("ws-1", "karthik"));
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces/ws-1"), dead),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
     ];
@@ -482,6 +490,7 @@ async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
     // A healthy workspace: same route, no `NodeDead` condition — no warning key at all, but the
     // body still parses as JSON (a body-less 202 throws in the web client's `res.json()`).
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
     ];
@@ -501,6 +510,7 @@ async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
 async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
     let dead = with_node_dead(env_obj("env-1", "karthik"));
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/environments/env-1"), dead),
         Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
     ];
@@ -520,6 +530,7 @@ async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
     assert_eq!(body["state"], "stopped");
 
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
         Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
     ];
@@ -541,6 +552,7 @@ async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
 #[tokio::test]
 async fn delete_is_one_call() {
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         Route { method: "DELETE", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
     ];
@@ -774,6 +786,7 @@ fn snap_obj() -> serde_json::Value {
 #[tokio::test]
 async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
@@ -803,6 +816,7 @@ async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
 #[tokio::test]
 async fn push_with_no_body_omits_the_message() {
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
@@ -825,6 +839,7 @@ async fn push_with_no_body_omits_the_message() {
 #[tokio::test]
 async fn env_push_targets_the_environments_own_volume() {
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
         get(format!("{API}/volumes/env-1"), vol_obj("env-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
@@ -902,6 +917,7 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
     });
     // No route for the Secret GET: the mock 404s it, which is exactly "the namespace has no key".
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces"), list),
         get(format!("{API}/snapshots"), json!({
             "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []
@@ -998,6 +1014,7 @@ async fn patch_merges_the_package_list_and_echoes_the_doc() {
     let mut patched = placed_ws("ws-1", "karthik");
     patched["spec"]["packages"] = json!(["hello", "jq"]);
     let routes = vec![
+        no_snapshots(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: patched },
     ];
@@ -1538,6 +1555,7 @@ async fn deleting_an_environment_clears_the_attachments_to_it() {
         "items": [attached, placed_ws("ws-2", "karthik")]
     });
     let s = server(vec![
+        no_snapshots(),
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
         Route { method: "DELETE", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
         get(format!("{API}/workspaces"), list),
@@ -1565,6 +1583,7 @@ async fn deleting_an_environment_clears_the_attachments_to_it() {
 #[tokio::test]
 async fn delete_env_lists_only_workspaces_attached_to_it() {
     let s = server(vec![
+        no_snapshots(),
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
         Route { method: "DELETE", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
         get(format!("{API}/workspaces"), json!({"apiVersion": "v1", "kind": "WorkspaceList", "items": []})),
@@ -1693,6 +1712,7 @@ fn environment_state(services: usize, quota_gb: u64) -> Value {
 /// The source workspace is gone (no route for it ⇒ 404), which is exactly when restoring matters.
 async fn server_with_snapshot_only(id: &str, state: Option<Value>) -> Server {
     server(vec![
+        no_snapshots(),
         get(format!("{API}/snapshots/{id}"), ready_snap(id, "ws-src", "karthik", state)),
         no_workspaces(),
         no_environments(),
@@ -1785,6 +1805,7 @@ async fn a_pre_change_snapshot_restores_as_before() {
 #[tokio::test]
 async fn a_restore_takes_its_region_from_the_volume_when_the_source_is_gone() {
     let s = server(vec![
+        no_snapshots(),
         get(format!("{API}/snapshots/snap-ws"), ready_snap("snap-ws", "ws-src", "karthik", None)),
         no_workspaces(),
         no_environments(),
@@ -2006,4 +2027,61 @@ async fn every_v1_route_is_still_mounted() {
             .unwrap();
         assert_ne!(resp.status(), 404, "{m} {p} is not mounted");
     }
+}
+
+/// M1: the environment id is patched verbatim into a label VALUE. `find_env` succeeding means it is
+/// a legal object name today, but that is incidental — the same check `validate_ws_spec` applies at
+/// the agent belongs here, so a bad value is a 422 rather than a kube 422 laundered into a 500.
+#[tokio::test]
+async fn attaching_refuses_an_id_that_is_not_a_label_value() {
+    let s = server(vec![get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik"))]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/attach", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"environment": "env-1/../../etc"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422, "{}", resp.text().await.unwrap());
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with("PATCH")), "nothing patched");
+}
+
+/// M2: `may_act_on` runs on the raw string and only the ACCEPTED value is lowercased, so `Acme`
+/// against directory slug `acme` was a 404 "no such team".
+#[tokio::test]
+async fn a_team_name_is_matched_case_insensitively() {
+    let s = server_with_teams(create_routes(), stub_registry(vec![], vec![]).await).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "web", "team": "Acme", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    assert_eq!(s.rec.sent("POST", &format!("{API}/workspaces"))[0]["spec"]["team"], "acme");
+}
+
+/// M3: every mutation response built its doc with an empty pushed set, so `volume` was null even
+/// for a volume with fifty pushes — and a client reading that as "never pushed" gets a wrong answer
+/// from all seven of them.
+#[tokio::test]
+async fn a_stop_response_reports_the_volume_it_has() {
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
+            "items": [{"metadata": {"name": "ws-1-a", "labels": {"rustic-git.io/owner": "karthik"}},
+                       "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
+                       "status": {"phase": "ready"}}]})),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["volume"], "vol/karthik/ws-1", "a pushed volume is not null: {body}");
 }

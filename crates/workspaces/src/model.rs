@@ -212,6 +212,13 @@ pub fn valid_ws_name(name: &str) -> bool {
         && name.bytes().any(|b| b != b'.')
 }
 
+/// A segment that also has to survive being patched verbatim into a label VALUE (63 chars, the
+/// k8s label-value ceiling). Shared by `validate_ws_spec`'s `attachedEnvironment` check and
+/// `attach_ws`'s request-body check, so the two can never drift into checking different things.
+pub fn valid_segment_label(s: &str) -> bool {
+    rustic_git_storage::store::valid_segment(s) && s.len() <= 63
+}
+
 /// Every untrusted string on a `WorkspaceSpec` that becomes a path, an argv word or an object
 /// name, checked in ONE place at the agent.
 ///
@@ -230,7 +237,7 @@ pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> 
     // `write_attach_label` (controller/workspace.rs) patches this verbatim into a label value —
     // unchecked, a hostile or over-long value 422s that patch and wedges the reconcile forever.
     if let Some(env) = &spec.attached_environment {
-        if !rustic_git_storage::store::valid_segment(env) || env.len() > 63 {
+        if !valid_segment_label(env) {
             return Err(format!("attachedEnvironment {env:?} is not a segment"));
         }
     }

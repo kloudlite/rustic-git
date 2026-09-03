@@ -13,6 +13,18 @@ use crate::engine::{Engine, ws_lock};
 /// marker rather than a generic IO error.
 pub const WORKTREE_EXISTS: &str = "worktree already exists";
 
+/// `swap_worktree`'s two intermediate names — dot-prefixed so a worktree scanner (`set_quota_worktrees`,
+/// any `read_dir` of `live/`) skips them: they are worktree-SHAPED subvolumes but not a worktree, and
+/// a crash between the two renames used to leave one behind indefinitely, counted and quota-limited
+/// as if it were live.
+pub fn restoring_name(ws: &str) -> String {
+    format!(".restoring-{ws}")
+}
+
+pub fn before_restore_name(ws: &str) -> String {
+    format!(".before-restore-{ws}")
+}
+
 impl Engine {
     /// Cut commit `name` from worktree `ws` of `volume`: sync the pool first (btrfs only commits
     /// its transaction periodically, so an unsynced snapshot can miss writes made moments
@@ -75,7 +87,7 @@ impl Engine {
     /// Any leftover staging subvolume from an earlier, crashed attempt is discarded first, same
     /// as `checkout`'s own idempotent-retry rule.
     pub fn swap_worktree(&self, volume: &str, ws: &str, commit: &str) -> Result<(), EngErr> {
-        let staging = format!("{ws}-restoring");
+        let staging = restoring_name(ws);
         let staging_path = self.pool.worktree(volume, &staging);
         if staging_path.exists() {
             run(&["btrfs", "subvolume", "delete", staging_path.to_str().unwrap()])?;
@@ -84,7 +96,7 @@ impl Engine {
 
         let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
         let live = self.pool.worktree(volume, ws);
-        let backup = self.pool.worktree(volume, &format!("{ws}-before-restore"));
+        let backup = self.pool.worktree(volume, &before_restore_name(ws));
         if backup.exists() {
             run(&["btrfs", "subvolume", "delete", backup.to_str().unwrap()])?;
         }
@@ -99,8 +111,8 @@ impl Engine {
     }
 
     /// Commits present on this pool for `volume`: a plain dir listing of `snap_dir`, not a
-    /// registry read — this answers "what can this node check out locally right now", which the
-    /// registry (durable, shared, but not necessarily pulled here yet) can't.
+    /// `Snapshot` CR list — this answers "what can this node check out locally right now", which
+    /// the CRs (durable, cluster-wide, but not necessarily pulled to this node yet) can't.
     pub fn local_commits(&self, volume: &str) -> Result<Vec<String>, EngErr> {
         let dir = self.pool.snap_dir(volume);
         let entries = match std::fs::read_dir(&dir) {

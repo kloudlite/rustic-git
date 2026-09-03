@@ -196,6 +196,12 @@ impl Engine {
         let mut first_failure = None;
         for entry in entries {
             let entry = entry.map_err(EngErr::io)?;
+            // `swap_worktree`'s dot-prefixed staging/backup subvolumes are worktree-SHAPED but not
+            // worktrees — quota-limiting them is harmless but pointless, and counting them here is
+            // how a crash-recovery leftover would otherwise get treated as a real worktree.
+            if entry.file_name().to_str().is_some_and(|n| n.starts_with('.')) {
+                continue;
+            }
             if let Err(e) = run(&["btrfs", "qgroup", "limit", &limit, entry.path().to_str().unwrap()]) {
                 first_failure.get_or_insert(e.0);
             }

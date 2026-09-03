@@ -178,10 +178,17 @@ pub(crate) async fn create_ws(
     check_region(&s, &body.region).await?;
     let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner) {
         None => String::new(),
-        // 404, not 403: whether a team exists is not a non-member's to learn, same as every
-        // other owner-scoped route.
-        Some(t) if may_act_on(&s, &owner, t).await => t.to_lowercase(),
-        Some(_) => return Err((StatusCode::NOT_FOUND, "no such team").into_response()),
+        // Lowercased BEFORE `may_act_on`: the directory's team slugs are lowercase, so a `may_act_on`
+        // on the raw casing 404'd a real member of `acme` who typed `Acme`. 404, not 403, on a miss:
+        // whether a team exists is not a non-member's to learn, same as every other owner-scoped route.
+        Some(t) => {
+            let t = t.to_lowercase();
+            if may_act_on(&s, &owner, &t).await {
+                t
+            } else {
+                return Err((StatusCode::NOT_FOUND, "no such team").into_response());
+            }
+        }
     };
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
@@ -352,8 +359,15 @@ pub(crate) async fn list_ws(
     // list that says the team exists.
     let team = match q.get("team").map(|t| t.trim()).filter(|t| !t.is_empty() && *t != owner) {
         None => String::new(),
-        Some(t) if may_act_on(&s, &owner, t).await => t.to_lowercase(),
-        Some(_) => return Err((StatusCode::NOT_FOUND, "no such team").into_response()),
+        // Same casing fix as `create_ws`: lowercase before the membership check, not after.
+        Some(t) => {
+            let t = t.to_lowercase();
+            if may_act_on(&s, &owner, &t).await {
+                t
+            } else {
+                return Err((StatusCode::NOT_FOUND, "no such team").into_response());
+            }
+        }
     };
     // No "filter out the deleted ones": a deleted object is gone from the API server.
     let api: Api<crd::Workspace> = Api::all(c.clone());
@@ -542,7 +556,11 @@ pub(crate) async fn stop_ws(
     // The whole doc, not a bare `{}`: the caller needs `replicated` to know whether this may be
     // started elsewhere, and a second round trip for it would race the stop it just asked for.
     let warning = w.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
-    let mut doc = ws_doc(&w, &HashSet::new());
+    // The real pushed set, not `HashSet::new()`: an empty one made `volume` null on every mutation
+    // response even for a volume with fifty pushes, and a client reading that as "never pushed" got
+    // a wrong answer from all seven of these handlers.
+    let pushed = pushed_volumes(&s, kube(&s)?, &owner).await?;
+    let mut doc = ws_doc(&w, &pushed);
     doc.state = WsState::Stopped;
     let mut body = serde_json::to_value(&doc).expect("Workspace doc always serializes");
     if let Some(w) = warning {
@@ -569,6 +587,12 @@ pub(crate) async fn attach_ws(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
+    // Same predicate `validate_ws_spec` applies to this field at the agent — checked here too so a
+    // bad id is a 422 at the door rather than a kube 422 (a patch on an illegal label value)
+    // laundered into a 500 further down.
+    if !valid_segment_label(&body.environment) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "invalid environment id").into_response());
+    }
     // `find_env` answers 404 for an environment the caller has no part in, which is what keeps this
     // route from being a way to enumerate other people's environments.
     let e = find_env(&s, &owner, &body.environment).await?;
@@ -653,7 +677,8 @@ pub(crate) async fn patch_ws_packages(
         .patch(&id, &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .map_err(kube_err)?;
-    Ok(Json(ws_doc(&w, &HashSet::new())).into_response())
+    let pushed = pushed_volumes(&s, kube(&s)?, &owner).await?;
+    Ok(Json(ws_doc(&w, &pushed)).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -701,7 +726,7 @@ pub(crate) async fn clone_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
-            owner,
+            owner: owner.clone(),
             // A clone lives where its source lives: same team, same namespace.
             team: src.spec.team.clone(),
             name: body.name,
@@ -721,7 +746,8 @@ pub(crate) async fn clone_ws(
         let api: Api<crd::Snapshot> = Api::all(c.clone());
         api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     }
-    Ok(with_based_on(&ws_doc(&w, &HashSet::new()), &based_on))
+    let pushed = pushed_volumes(&s, c, &owner).await?;
+    Ok(with_based_on(&ws_doc(&w, &pushed), &based_on))
 }
 
 /// What a copy of `volume` should be sized at.
@@ -812,6 +838,10 @@ pub(crate) async fn restore_ws(
     };
 
     // A live source still knows its own size and settings; a deleted one gets the standard quota.
+    // `my_ws(volume)` resolves only because an OWNED volume shares its parent workspace's id — the
+    // one case this can look up. A shared-clone volume's id is the SOURCE workspace's, so this
+    // resolves the source, and the team/region a clone contributes below are the source's on
+    // purpose: a snapshot taken on a shared worktree has no other owner to ask.
     let src = my_ws(&s, &owner, &volume).await.ok();
     let team = src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default();
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
@@ -865,7 +895,7 @@ pub(crate) async fn restore_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
-            owner,
+            owner: owner.clone(),
             team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,
             // No per-snapshot region under the commit model (single-pool, replica-based; cross-
@@ -887,7 +917,8 @@ pub(crate) async fn restore_ws(
         },
     )
     .await?;
-    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &HashSet::new()))).into_response())
+    let pushed = pushed_volumes(&s, c, &owner).await?;
+    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &pushed))).into_response())
 }
 
 // ── environments ─────────────────────────────────────────────────────────

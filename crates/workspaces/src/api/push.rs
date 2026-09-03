@@ -169,7 +169,7 @@ struct PushBody {
 /// The push body is optional (`{message?}`), and axum's `Json<T>` extractor 415s a request
 /// with no body/content-type at all rather than treating it as absent — so the message is read
 /// as raw bytes and parsed only when present, same forgiving shape a curl with no `-d` expects.
-async fn optional_push_message(body: axum::body::Bytes) -> Result<Option<String>, Response> {
+fn optional_push_message(body: axum::body::Bytes) -> Result<Option<String>, Response> {
     if body.is_empty() {
         return Ok(None);
     }
@@ -186,7 +186,7 @@ pub(crate) async fn push_ws(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
-    let msg = optional_push_message(body).await?;
+    let msg = optional_push_message(body)?;
     let volume = ws_volume(&w).ok_or_else(not_ready)?;
     let head = w.status.as_ref().and_then(|st| st.head.clone());
     let state = crd::SnapshotState::of_workspace(&w);
@@ -201,7 +201,7 @@ pub(crate) async fn push_env(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
-    let msg = optional_push_message(body).await?;
+    let msg = optional_push_message(body)?;
     let volume = env_volume(&e).ok_or_else(not_ready)?;
     let head = e.status.as_ref().and_then(|st| st.head.clone());
     let state = crd::SnapshotState::of_environment(&e);

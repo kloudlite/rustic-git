@@ -1067,7 +1067,7 @@ pub fn env_unit_resources() -> PodResources {
     }
 }
 
-/// One Deployment per service in an environment.
+/// One StatefulSet per service in an environment.
 ///
 /// **Every mount goes through `validate_mount` here.** An environment has ONE volume, and each
 /// declared mount is a folder inside it, expressed as a `subPath` on the shared hostPath. Kubernetes
