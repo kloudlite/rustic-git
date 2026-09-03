@@ -2223,7 +2223,7 @@ async fn delete_volume(
     let owners = caller_owners(&s, &caller_id).await;
     // A cluster that could not be listed is "cannot prove nothing is running" — the opposite bias
     // to the listing's, and the right one for a delete.
-    let live = live_parents(&s, &owners).await.ok_or_else(|| kube_unavailable())?;
+    let live = live_parents(&s, &owners).await.ok_or_else(kube_unavailable)?;
     if live.contains_key(&name) {
         return Err((StatusCode::CONFLICT, "this volume still belongs to a workspace or environment").into_response());
     }
@@ -2268,7 +2268,7 @@ async fn delete_snapshot(
         return Err((StatusCode::CONFLICT, "a sync point cannot be deleted by hand").into_response());
     }
     let owners = caller_owners(&s, &caller_id).await;
-    let live = live_parents(&s, &owners).await.ok_or_else(|| kube_unavailable())?;
+    let live = live_parents(&s, &owners).await.ok_or_else(kube_unavailable)?;
     // Any live parent's head, not just this volume's: a restored parent holds a second worktree on
     // the SAME volume, and its head is just as much a base as the volume's own parent's.
     if live.values().any(|p| p.head.as_deref() == Some(snapshot.as_str())) {

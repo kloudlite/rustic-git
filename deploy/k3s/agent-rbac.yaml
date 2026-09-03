@@ -160,7 +160,8 @@ rules:
   # `local_commits` to decide what to fetch. `create` is also `home_commit_beat`'s own beat and
   # `stop_push`'s fixed-name `stop-{env}`/`stop-home-{ws}` CR (Task 8: the stop-before-teardown
   # push is a `Snapshot` now, not the deleted `SnapshotRequest`). `delete` is retention (the
-  # worktree's own node drops CRs beyond `WS_SNAPSHOT_KEEP`, converging the subvolume away too)
+  # worktree's own node keeps ONE sync point per worktree and drops the older ones, converging the
+  # subvolume away too — a push is never pruned, only deleted by hand through `/v1`)
   # and `stop_push`'s own teardown cleanup — left behind, the NEXT stop would find the same
   # fixed-name object already `Ready` and tear down without pushing again. `delete` is also
   # `retire_pass`'s orphan sweep, which clears the ownerless baselines minted before

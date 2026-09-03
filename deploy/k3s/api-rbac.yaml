@@ -18,20 +18,24 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # A push, and the history/refs listings behind it. No `watch`: nothing in the API watches —
-  # every read is a one-shot list on a request. `create` and `delete` but deliberately NO
-  # `/status`: the outcome of a push is the agent's to write, and an API that could write it
-  # could report a commit that never happened.
+  # A push, the history/refs listings behind it, and `DELETE /v1/volumes/{name}/snapshots/{id}` —
+  # the one explicit way a snapshot ever goes away, now that retention never prunes one. No
+  # `watch`: nothing in the API watches — every read is a one-shot list on a request. `create` and
+  # `delete` but deliberately NO `/status`: the outcome of a push is the agent's to write, and an
+  # API that could write it could report a push that never happened.
   - apiGroups: ["rustic-git.io"]
     resources: ["snapshots"]
     verbs: ["get", "list", "create", "delete"]
-  # Read-only, for projections. `create` went to the agent (a controller owns the children it
-  # authors) and `delete` went with it — the API's delete handler is now one call to the Workspace,
-  # and garbage collection follows the ownerReference to the Volume. `ownerbindings` are gone from
-  # this file entirely: the claiming agent creates them now.
+  # Reads for projections, plus `delete` — and `delete` ONLY because a volume can now outlive
+  # every parent: `cleanup_parent` detaches one that still holds a snapshot, so nothing's
+  # ownerReference points at it any more and GC will never take it. `DELETE /v1/volumes/{name}`
+  # and the last-snapshot arm of `DELETE .../snapshots/{id}` are the two callers, both refusing
+  # while a live parent names it. `create` stays with the agent (a controller owns the children it
+  # authors); the API's parent delete is still one call to the Workspace. `ownerbindings` are gone
+  # from this file entirely: the claiming agent creates them now.
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "delete"]
   # Read-only, for ONE question: cloning an INTERRUPTED workspace. Its node is down, so nothing can
   # be cut there and the clone has to graft onto a sync point some OTHER node already holds — and
   # `status.branches` is the only record of who holds what. `get`/`list` and nothing else: the
