@@ -36,6 +36,8 @@ pub mod run;
 pub use run::{run, running_contains, wake_on_finish};
 pub(crate) mod stop;
 pub use stop::{replicated_condition, start_placement};
+pub(crate) mod worktree;
+pub(crate) use worktree::{start_spread, worktree_gate, WorktreeGate};
 pub(crate) mod status;
 pub(crate) use status::{conditions_eq, create_if_absent, delete_ignoring_404, ensure, forget_applied, patch_status, replace_status, settle, write_status, Outcome};
 

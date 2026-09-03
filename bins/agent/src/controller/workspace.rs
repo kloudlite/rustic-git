@@ -826,16 +826,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // nothing else, matching the environment's: a workspace parked in `Creating` has no bytes
     // anywhere to spread toward. A listing that could not be completed moves nothing — an unseen
     // sibling may be a running pod.
-    if prev.phase == crd::Phase::Stopped {
-        if let Some(siblings) = crate::listing::parents_on_volume(ctx, &id).await {
-            if let Some(node) = super::stop::start_placement(ctx, &vol, &siblings).await? {
-                // Nothing left to do here: this object is unplaced now and `node`'s claim watch
-                // picks it up. Await the change rather than requeueing at an object that is no
-                // longer ours.
-                tracing::info!(workspace = %w.name_any(), %node, "handed over on start");
-                return Ok(Action::await_change());
-            }
-        }
+    if super::start_spread("Workspace", &w.name_any(), &id, &vol, prev.phase, ctx).await?.is_some() {
+        // Nothing left to do here: this object is unplaced now and the new node's claim watch
+        // picks it up. Await the change rather than requeueing at an object that is no longer ours.
+        return Ok(Action::await_change());
     }
     // The namespace is the OwnerBinding reconciler's to make; this one only waits for it. Creating
     // it here as well is how it ended up with two writers.
@@ -896,87 +890,27 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // those lands, `head == None` is ambiguous between "genuinely bootstrap" and "this workspace's
     // own head just has not been recorded yet" — the guard below tells the two apart the same way
     // the claim itself does, by asking whether the VOLUME has any snapshots at all.
-    // Lazy per-volume migration, before anything mounts (the pod must be recreated to pick up
-    // the new path, same as the hostpath cutover) — a no-op every pass after the first.
-    migrate_and_seed_baseline(ctx, &vol, owner_ref_of_kind(w)?, &w.spec.owner, crd::SnapshotState::of_workspace(w)).await?;
-    // A clone pinned to a snapshot already knows its head — grafted by the API at clone time,
-    // not guessed here — so it never sees `HeadUnknown` and never bootstraps empty next to
-    // the source's real history, even on the very first pass.
-    let clone_commit = super::clone_commit(&w.spec.storage);
-    // Re-host: a node that has never run this worktree checks out its LATEST SYNC POINT in
-    // preference to `head`, because the sync beat replicated it after the last snapshot — the
-    // data-loss window on a node death is one `WS_SYNC_SECS`, not everything since the last push.
-    // Only when there is no worktree here yet: a live worktree is never swapped under a running
-    // pod, whatever the sync points say.
-    //
-    // Resolved BEFORE the `HeadUnknown` guard below: a transient IS a Snapshot CR, so `has_snapshots`
-    // is true when a sync point is all this volume has, and parking there would strand a workspace
-    // that has perfectly good state to start from.
-    let have_worktree = ctx.engine.pool.worktree(&id, &w.name_any()).exists();
-    let synced = if have_worktree { None } else { crate::snapshot::latest_transient(ctx, &id, &w.name_any()).await? };
-    let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
-    // `!have_worktree` is part of the guard, not an optimization: a MIGRATED volume has its
-    // worktree on disk already and its baseline is a sync point, so it has records and no head
-    // forever. Parking it would be permanent. The guard is about never checking out an EMPTY
-    // worktree next to real history, and a worktree that is already here is not empty.
-    if effective_head.is_none() && !have_worktree && crate::claim::has_snapshots(ctx, &id).await? {
-        // F2 guard: the volume has snapshots but this workspace's own `head` is still `None` —
-        // checking out `None` here would hand it an EMPTY worktree next to real history,
-        // which is the never-started-dataless bug in worktree form. Wait for Task 5/6 to
-        // write a real head instead of guessing one; zero-snapshot volumes never reach this arm
-        // (`has_snapshots` is false), so bootstrap is untouched.
-        let st = crd::WorkspaceStatus {
-            phase: crd::Phase::Creating,
-            observed_generation: None,
-            volume_ref: Some(id.clone()),
-            conditions: ws_conditions(
-                &prev,
-                crd::condition("Ready", false, "HeadUnknown", "volume has snapshots but this workspace has no recorded head yet", gen),
-            ),
-            ..prev
-        };
-        write_ws_status(w, st, ctx).await?;
-        return Ok(Action::requeue(TICK));
-    }
-    // A clone naming a snapshot that retention has since swept is wrong forever, not
-    // transient: retrying at TICK would spin on the same missing snapshot until someone
-    // notices, so this settles Permanent with its own reason distinct from a bad clone
-    // SOURCE (`NoSuchSource`, settled earlier in `resolve_volume`/`check_source`).
-    // Keyed on `effective_head`, not on `prev.head`: a volume whose only state is a sync point has
-    // `prev.head == None` but is going to check that sync point out, never the clone snapshot — so
-    // settling `Permanent/NoSuchSnapshot` on a swept snapshot it was never going to use would kill a
-    // workspace that has perfectly good state. Only a volume that would ACTUALLY resolve to the
-    // clone snapshot can be permanently broken by that snapshot being gone.
-    if let Some(commit) = clone_commit {
-        let phase = if effective_head.as_deref() == Some(commit) {
-            crate::claim::snapshot_phase(ctx, &id, commit).await?
-        } else {
-            Some(crd::Phase::Ready)
-        };
-        // The clone's own cut is created by `/v1` microseconds before the clone object itself, so
-        // this reconcile almost always arrives while it is still `Working` — the owner has not
-        // taken the btrfs snapshot yet. That is one tick away, not wrong forever: settling
-        // Permanent here killed every clone at birth. Only an ABSENT (retention-swept, or of
-        // another volume) or `Error` snapshot is permanent.
-        if crate::claim::snapshot_pending(phase) {
-            let st = crd::WorkspaceStatus {
-                phase: crd::Phase::Creating,
-                observed_generation: None,
-                volume_ref: Some(id.clone()),
-                conditions: ws_conditions(
-                    &prev,
-                    crd::condition("Ready", false, "SnapshotPending", &format!("waiting for snapshot {commit} to be cut"), gen),
-                ),
-                ..prev
-            };
-            write_ws_status(w, st, ctx).await?;
-            return Ok(Action::requeue(TICK));
-        }
-        if phase != Some(crd::Phase::Ready) {
+    // Lazy per-volume migration, resolve the effective head, checkout and quota — identical for a
+    // Workspace and an Environment down to the guard conditions; see `worktree_gate`.
+    let gate = super::worktree_gate(
+        &w.name_any(),
+        "Workspace",
+        &vol,
+        &w.spec.storage,
+        prev.head.as_deref(),
+        &w.spec.owner,
+        owner_ref_of_kind(w)?,
+        crd::SnapshotState::of_workspace(w),
+        ctx,
+    )
+    .await?;
+    match gate {
+        super::WorktreeGate::Wait { reason: "NoSuchSnapshot", message, .. } => {
+            // Permanent: only the caller can settle it, since `settle` needs the object itself.
             let prev = prev.clone();
             let vref = id.clone();
             return settle(
-                Outcome::Permanent(format!("clone snapshot {commit} is not a ready snapshot of volume {id}"), "NoSuchSnapshot"),
+                Outcome::Permanent(message, "NoSuchSnapshot"),
                 w,
                 "Workspace",
                 gen,
@@ -991,32 +925,24 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             )
             .await;
         }
-    }
-    // `WORKTREE_EXISTS` converges a race (this pass and an earlier one both reaching here, or
-    // a pod restart finding its own worktree already there) into a no-op rather than an error.
-    // The worktree name is the WORKSPACE's own id, never the volume's — the two differ for a
-    // shared-volume clone, whose `id` (`volumeRef`) names the SOURCE's volume.
-    let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), w.name_any(), effective_head.clone());
-    let quota_gb = vol.spec.quota_gb;
-    let result = tokio::task::spawn_blocking(move || {
-        engine.checkout(&vol_id, head.as_deref(), &ws_id)?;
-        // Quota the worktree the instant it exists — waiting for the volume's next reconcile
-        // pass would leave a freshly checked-out worktree briefly unquota'd.
-        engine.set_quota_worktree(&vol_id, &ws_id, quota_gb)?;
-        Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
-    })
-    .await
-    .map_err(|e| ReconcileErr(e.to_string()))?;
-    match result {
-        Ok(()) => {}
-        Err(e) if e.0 == rustic_git_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
-        Err(e) => return Err(ReconcileErr(e.0)),
+        super::WorktreeGate::Wait { reason, message, action } => {
+            let st = crd::WorkspaceStatus {
+                phase: crd::Phase::Creating,
+                observed_generation: None,
+                volume_ref: Some(id.clone()),
+                conditions: ws_conditions(&prev, crd::condition("Ready", false, reason, &message, gen)),
+                ..prev
+            };
+            write_ws_status(w, st, ctx).await?;
+            return Ok(action);
+        }
+        super::WorktreeGate::Ready => {}
     }
     // First graft: this pass checked out the clone's snapshot, and nothing else will ever write
     // it as `head` (a clone never gets Task 5's push-time `advance_head` unless it pushes
     // itself) — the preserve pattern, same as `snapshot::advance_head`.
     if prev.head.is_none() {
-        if let Some(commit) = clone_commit {
+        if let Some(commit) = super::clone_commit(&w.spec.storage) {
             let prev2 = prev.clone();
             write_ws_status(w, crd::WorkspaceStatus { head: Some(commit.to_string()), ..prev2 }, ctx).await?;
             prev.head = Some(commit.to_string());
