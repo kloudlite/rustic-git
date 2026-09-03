@@ -76,6 +76,16 @@ pub enum VolumeSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commit: Option<String>,
     },
+    /// A clone of a source whose node is DOWN: its OWN volume, seeded from a read-only copy of
+    /// `snapshot` that the claiming node already holds locally (`{pool}/vol/{volume}/snap/{id}`).
+    ///
+    /// `CloneOf{commit: Some(_)}` cannot serve this case: it makes the clone a second worktree of
+    /// the SOURCE'S volume, which is pinned to the dead node, so the peer holding the cut settles
+    /// `Degraded=NodeMismatch` and the clone never starts. Here `volume` is read ONLY as the place
+    /// to copy bytes from — the clone owns a fresh child `Volume` on the claiming node and takes no
+    /// pin on the source's — which is why the interrupted branch of `/v1`'s clone writes this and
+    /// nothing else does.
+    SeededFrom { volume: String, snapshot: String },
     /// DEAD as of Task 8: restore-to-new is `CloneOf{commit: Some(id)}` now — `/v1` never writes
     /// this variant any more. Kept ONLY so a pre-cutover stored spec still deserializes; a
     /// reconcile that finds one converges to a fixed Permanent condition

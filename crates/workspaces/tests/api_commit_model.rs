@@ -638,6 +638,15 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
     assert_eq!(body["based_on"]["interrupted"], true);
     assert_eq!(body["based_on"]["at"], "2026-09-01T14:32:07Z", "the age the person weighs is the cut's own readyAt");
     assert!(body["based_on"]["age_seconds"].as_i64().unwrap() > 0);
+
+    // F6: `seededFrom`, never `cloneOf`. A shared worktree of the source's volume would pin this
+    // clone to the DEAD node, and the peer that holds the cut settles `Degraded=NodeMismatch`
+    // instead of starting it. Its own volume, seeded from the held cut, is the whole fix.
+    let made = s.rec.sent("POST", &format!("{API}/workspaces")).remove(0);
+    let source = &made["spec"]["storage"]["source"];
+    assert!(source["cloneOf"].is_null(), "an interrupted clone is never a shared worktree: {source}");
+    assert_eq!(source["seededFrom"]["volume"], "ws-1");
+    assert_eq!(source["seededFrom"]["snapshot"], "sync-ws-1-bbbb", "the held cut, which is what a holder node can seed from");
 }
 
 /// An interrupted source with nothing synced anywhere has no way forward at all — a 409 that says

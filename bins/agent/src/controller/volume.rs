@@ -247,6 +247,12 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                     Some(VolumeSource::CloneOf { volume, .. }) => {
                         engine.clone_local_ids(volume, id).await.map_err(|e| e.to_string())?
                     }
+                    // The interrupted clone: bytes from a LOCAL read-only copy of the named cut,
+                    // never from the source's `live` — the source's node is down, which is the
+                    // whole reason this variant exists.
+                    Some(VolumeSource::SeededFrom { volume, snapshot }) => {
+                        engine.seed_from_snapshot(volume, snapshot, id).await.map_err(|e| e.to_string())?
+                    }
                     // `VolumeSource::RestoreOf` is DEAD: "restore into a new workspace/environment"
                     // is now `CloneOf{volume, commit: Some(id)}` (Task 8, ratified) — `/v1`
                     // translates a restore request to that at write time and never writes this
@@ -462,7 +468,9 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
         None | Some(VolumeSource::GitRepo { .. }) => Ok(()),
         // Workspace THEN Environment: `clone_env` names an environment's id here, and checking only
         // the workspace kind settled every cloned environment as a permanent `NoSuchSource`.
-        Some(VolumeSource::CloneOf { volume, .. }) => {
+        // `SeededFrom` alongside `CloneOf`: it names a source parent the same way, and a source
+        // that does not exist is just as permanently wrong however the bytes would have been copied.
+        Some(VolumeSource::CloneOf { volume, .. }) | Some(VolumeSource::SeededFrom { volume, .. }) => {
             let ws: Api<crd::Workspace> = Api::all(ctx.client.clone());
             if ws.get_opt(volume).await.map_err(Outcome::from)?.is_some() {
                 return Ok(());

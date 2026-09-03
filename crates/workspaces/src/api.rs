@@ -1225,7 +1225,15 @@ async fn clone_ws(
     // the last sync beat happened to leave.
     let interrupted = src.status.as_ref().is_some_and(|st| interrupted(&st.conditions));
     let (based_on, cut) = clone_base(c, &owner, &volume, &id, interrupted, src.controller_owner_ref(&())).await?;
-    let source = VolumeSource::CloneOf { volume, commit: Some(based_on.snapshot.clone()) };
+    // An interrupted source is the ONE case that cannot be a second worktree of the source's own
+    // volume: that volume is pinned to the node that is down, so the peer holding the cut would
+    // settle `Degraded=NodeMismatch` instead of starting. It gets its own volume, seeded from the
+    // held cut — see `VolumeSource::SeededFrom`. Every other clone is unchanged.
+    let source = if based_on.interrupted {
+        VolumeSource::SeededFrom { volume, snapshot: based_on.snapshot.clone() }
+    } else {
+        VolumeSource::CloneOf { volume, commit: Some(based_on.snapshot.clone()) }
+    };
     let w = create_workspace(
         c,
         &new_id,

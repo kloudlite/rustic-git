@@ -271,6 +271,28 @@ impl Engine {
         }
         Ok(())
     }
+
+    /// Seed a fresh volume from a LOCAL read-only commit of another one: the materialize step of
+    /// `VolumeSource::SeededFrom`. Same btrfs snapshot `clone_local_ids` takes, from `snap/{name}`
+    /// instead of `live` — the source's node is down, so its `live` is somewhere else entirely and
+    /// the only bytes here are the copy this node pulled.
+    ///
+    /// `NO_SUCH_RECORD` when the commit is not held here: the claim admits only a node whose
+    /// replica names it, so a missing one means the claim and the disk disagree — permanent (see
+    /// `permanent_reason`), never a retry against a path that will not appear.
+    pub async fn seed_from_snapshot(&self, src_volume: &str, snapshot: &str, dst_id: &str) -> Result<(), EngErr> {
+        let src = self.pool.snap(src_volume, snapshot);
+        if !src.exists() {
+            return Err(EngErr::other(NO_SUCH_RECORD));
+        }
+        let _lock = ws_lock(&self.pool, src_volume).map_err(EngErr::other)?;
+        std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
+        // Converge on a replayed reconcile, exactly as `clone_local_ids` does.
+        if !self.pool.live(dst_id).exists() {
+            run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), self.pool.live(dst_id).to_str().unwrap()])?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -323,5 +345,17 @@ mod tests {
         let e = engine(tmp.path());
         let err = futures::executor::block_on(e.clone_local_ids("nope", "dst")).unwrap_err();
         assert!(err.to_string().contains("not materialized"));
+    }
+
+    /// The claim only admits a node whose replica names the cut, so "not held here" means the
+    /// claim and the disk disagree — permanent, not a retry. Checked BEFORE any btrfs call, which
+    /// is what lets this run off a btrfs box.
+    #[test]
+    fn seed_from_snapshot_refuses_a_commit_this_node_does_not_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let err = futures::executor::block_on(e.seed_from_snapshot("vol-src", "sync-ws-1-aaaa", "ws-new")).unwrap_err();
+        assert!(err.to_string().contains(NO_SUCH_RECORD), "{err}");
+        assert!(!e.pool.voldir("ws-new").exists(), "a refused seed creates nothing");
     }
 }

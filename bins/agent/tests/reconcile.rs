@@ -3603,6 +3603,54 @@ async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
     assert_eq!(cond["reason"], "NoSuchCommit");
 }
 
+/// F6: the interrupted clone. The source's Volume is pinned to the node that DIED, so the
+/// shared-worktree path settles `Degraded=NodeMismatch` on whichever peer holds the cut. A
+/// `seededFrom` parent instead authors its OWN child Volume on this node — pinned here, carrying
+/// the source reference for the materialize step — and never touches the source Volume at all.
+#[tokio::test]
+async fn a_seeded_clone_creates_its_own_volume_and_leaves_the_dead_owners_pin_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut dead_owner = ready_source_volume("ws-src");
+    dead_owner["spec"]["nodeName"] = serde_json::json!("node-b");
+    let routes = vec![
+        source_workspace_exists("ws-src"),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", dead_owner),
+        rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/volumes/ws-1"),
+        Route {
+            method: "POST",
+            path: "/apis/rustic-git.io/v1alpha1/volumes".into(),
+            status: 201,
+            body: serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                                     "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+                                     "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20}}),
+        },
+        ready_binding(),
+        ready_namespace(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::SeededFrom { volume: "ws-src".into(), snapshot: "sync-ws-src-bbbb".into() }),
+    });
+
+    let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
+
+    let made = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes").remove(0);
+    assert_eq!(made["metadata"]["name"], "ws-1", "its own volume, named after itself — not a worktree of ws-src");
+    assert_eq!(made["spec"]["nodeName"], "node-a", "pinned HERE: the node that holds the cut, not the dead one");
+    assert_eq!(made["spec"]["source"]["seededFrom"]["snapshot"], "sync-ws-src-bbbb");
+    // The whole point: the dead node's pin is untouched, so nothing settles NodeMismatch and the
+    // source volume is still the unclaim sweep's to release on its own terms.
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/volumes/ws-src") && !c.starts_with("GET")),
+        "a seeded clone only READS the source volume: {:?}",
+        rec.calls()
+    );
+}
+
 /// A clone that already has its own `head` (it pushed since being grafted) never re-derives it
 /// from `cloneOf` — the graft is a ONE-TIME starting point, not a value this pass keeps re-reading.
 #[tokio::test]

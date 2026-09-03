@@ -54,13 +54,22 @@ fn may_claim(me: &str, owner: &str, p: &Placement) -> bool {
 /// every workspace/environment starts that way, and that IS the bootstrap case). Errors propagate
 /// rather than being swallowed: a claim decided on a partial read of "does anyone have this" is
 /// exactly the never-started-dataless bug the guard exists to prevent.
-async fn placement(ctx: &Arc<Ctx>, volume: Option<&str>, worktree: &str) -> Result<Placement, ReconcileErr> {
+async fn placement(
+    ctx: &Arc<Ctx>,
+    volume: Option<&str>,
+    worktree: &str,
+    // `Some` only for a `SeededFrom`: the bar is that exact cut, so there is nothing to list.
+    pinned_cut: Option<&str>,
+) -> Result<Placement, ReconcileErr> {
     let Some(volume) = volume else {
         return Ok(Placement { has_commits: false, my_replica: None, newest_transient: None, worktree: worktree.into() });
     };
     let has_commits = has_commits(ctx, volume).await?;
     let my_replica = Api::<crd::VolumeReplica>::all(ctx.client.clone()).get_opt(&crd::replica_name(volume, &ctx.node)).await?;
-    let newest_transient = crate::peer::newest_transient(ctx, volume, worktree).await?;
+    let newest_transient = match pinned_cut {
+        Some(cut) => Some(cut.to_string()),
+        None => crate::peer::newest_transient(ctx, volume, worktree).await?,
+    };
     Ok(Placement { has_commits, my_replica, newest_transient, worktree: worktree.into() })
 }
 
@@ -105,9 +114,14 @@ pub(crate) fn commit_pending(phase: Option<crd::Phase>) -> bool {
 /// OF. This replaces `source_nodes`, which pinned a clone to the source volume's `nodeName`
 /// unconditionally — which is why a clone of a released or dead-node source could never start
 /// anywhere at all.
-fn clone_source(storage: Option<&crd::WorkspaceStorage>) -> Option<&str> {
+/// The second element is the ONE cut this clone may be seeded from, and only a `SeededFrom` has
+/// one: its bytes come from a specific local read-only copy, so "up to date" for it means holding
+/// exactly THAT cut, not merely the newest one the cluster knows about. A `CloneOf` keeps reading
+/// the newest transient, as before.
+fn clone_source(storage: Option<&crd::WorkspaceStorage>) -> Option<(&str, Option<&str>)> {
     match storage.and_then(|s| s.source.as_ref()) {
-        Some(crd::VolumeSource::CloneOf { volume, .. }) => Some(volume),
+        Some(crd::VolumeSource::CloneOf { volume, .. }) => Some((volume, None)),
+        Some(crd::VolumeSource::SeededFrom { volume, snapshot }) => Some((volume, Some(snapshot))),
         _ => None,
     }
 }
@@ -152,9 +166,9 @@ async fn decide(
     }
     // A clone is decided over its SOURCE's volume and worktree; everything else over its own. Both
     // go through the same rule — there is no "same node as the source" policy any more.
-    let (volume, worktree) = match clone_source(storage) {
-        Some(v) => (Some(v), v),
-        None => (volume, name),
+    let (volume, worktree, pinned_cut) = match clone_source(storage) {
+        Some((v, cut)) => (Some(v), v, cut),
+        None => (volume, name, None),
     };
     // The volume's CURRENT owner, not a remembered one.
     let owner = match volume {
@@ -172,7 +186,7 @@ async fn decide(
             return Ok(None);
         }
     }
-    let p = placement(ctx, volume, worktree).await?;
+    let p = placement(ctx, volume, worktree, pinned_cut).await?;
     if !may_claim(&ctx.node, &owner, &p) {
         return Ok(None);
     }
@@ -509,8 +523,36 @@ mod tests {
             quota_gb: 20,
             source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: None }),
         };
-        assert_eq!(clone_source(Some(&storage)), Some("ws-src"));
+        assert_eq!(clone_source(Some(&storage)), Some(("ws-src", None)));
         assert_eq!(clone_source(Some(&crd::WorkspaceStorage { quota_gb: 20, source: None })), None);
         assert_eq!(clone_source(None), None);
+    }
+
+    /// F6: a `SeededFrom` clone places over ONE named cut, not over "whatever is newest". The
+    /// source's node is down, so the newest cut cluster-wide may be one the dead node made and
+    /// nobody holds — placing on it would strand the clone exactly the way the shared-worktree
+    /// path did.
+    #[test]
+    fn a_seeded_clone_places_over_the_one_cut_it_names() {
+        let storage = crd::WorkspaceStorage {
+            quota_gb: 20,
+            source: Some(crd::VolumeSource::SeededFrom { volume: "ws-src".into(), snapshot: "sync-ws-src-bbbb".into() }),
+        };
+        assert_eq!(clone_source(Some(&storage)), Some(("ws-src", Some("sync-ws-src-bbbb"))));
+
+        // The bar `placement` then hands `may_claim` is that exact cut.
+        let cut = Some("sync-ws-src-bbbb");
+        let holder = Some(replica("node-b", "Synced", &[("ws-1", "sync-ws-src-bbbb")]));
+        assert!(may_claim("node-b", "node-a", &p(true, holder, cut)), "the node that holds the cut may seed from it");
+        assert!(
+            !may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Synced", &[("ws-1", "sync-ws-src-old")])), cut)),
+            "a node holding some OTHER cut cannot seed this one: the bytes are not on its disk"
+        );
+        assert!(!may_claim("node-b", "node-a", &p(true, None, cut)), "and no replica row at all is never up to date");
+        // The owner arm is reachable but not the case that matters here: an interrupted clone's
+        // source volume is pinned to the DEAD node, so `decide` only gets past its owner guard
+        // because that owner is unplaceable — and then this node is never the owner. Asserted so
+        // the arm is not mistaken for the seeding rule.
+        assert!(may_claim("node-a", "node-a", &p(true, None, cut)), "an owner holds its own volume's cuts");
     }
 }
