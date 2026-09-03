@@ -706,7 +706,6 @@ export type ApiWorkspace = {
   placement: string | null;
   volume: string | null;
   quota_gb: number;
-  live_state: unknown;
   /** nixpkgs attribute names the workspace declares — what was ASKED for, not what is installed. */
   packages: string[];
   /** The platform's base set every workspace gets on top of its own list; shown, not edited. */
@@ -936,9 +935,6 @@ export type ApiVolumeSummary = {
   display_name: string;
   /** The workspace/environment is gone. The snapshots are not. */
   deleted: boolean;
-  /** Epoch millis of the volume's last write — approximate, see the server-tier handler. It
-   *  counts sync points too, which are internal, so it is a liveness hint and never "last push". */
-  latest_ms: number | null;
   /** How many PUSHES are on this volume — the only thing keeping it once its workspace or
    *  environment is gone. Sync points are not counted; they are never shown. */
   snapshots: number;
@@ -961,18 +957,16 @@ export function listVolumes(token: string, kind?: "workspace" | "environment", o
 
 /** `crates/workspaces/src/api.rs::snapshot_rows` — the volume's SNAPSHOTS, newest
  *  first. Sync points are internal and never appear here. The row also carries
- *  `phase`, left undeclared here — no reader in this app looks at it yet; add it if one needs to. */
+ *  `phase`, left undeclared here — no reader in this app looks at it yet; add it if one needs to.
+ *  The wire also carries `lineage` (always `[]`) and `region` (always `""`), left undeclared for
+ *  the same reason: nothing reads them, and a type that names a field invites one to. */
 export type ApiCommitRecord = {
   id: string;
   /** The definition frozen at push time — `null` for snapshots taken before it was recorded. */
   state: SnapshotState | null;
-  /** Always empty: the lineage lives with the bytes on the server tier, not in the CR the
-   *  `/history` projection now reads. Kept on the wire so an older client still parses. */
-  lineage: never[];
   /** The snapshot this one was pushed on top of — derived server-side from the blob chain. A push
    *  after an in-place restore grafts onto the restored record, which is what makes a branch. */
   parent?: string | null;
-  region: string;
   message?: string;
   /** RFC3339. camelCase because `/history` builds its rows by hand rather than serializing
    *  `CommitRecord` (`crates/workspaces/src/api.rs:2027`); `null` when the object carries no

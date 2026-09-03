@@ -3,12 +3,10 @@ import { snapshotTime } from "./snapshot";
 
 // One row exactly as `snapshot_rows` builds it
 // (`crates/workspaces/src/api.rs:2012-2033`): camelCase `createdAt`, an RFC3339 string from
-// `jiff::Timestamp`'s Display, plus the `phase` the TS type does not declare and the hardcoded
-// `region: ""` / `state: null`. Recorded here so a rename on either side fails loudly.
+// `jiff::Timestamp`'s Display, plus the `phase`, `region` and `lineage` the TS type does not declare.
 const ROW = {
   id: "snap-4f2c",
   state: null,
-  lineage: [],
   region: "",
   message: "before the migration",
   createdAt: "2026-09-02T11:04:07Z",

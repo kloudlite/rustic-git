@@ -8,7 +8,6 @@ const vol = (v: Partial<ApiVolumeSummary>): ApiVolumeSummary => ({
   volume: "v1",
   display_name: "v1",
   deleted: true,
-  latest_ms: null,
   snapshots: 1,
   last_push_at: null,
   ...v,
