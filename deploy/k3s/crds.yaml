@@ -1800,6 +1800,178 @@
           }
         ]
       }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "clustersettings.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "ClusterSettings",
+          "plural": "clustersettings",
+          "singular": "clustersettings"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for ClusterSettingsSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "One per region, named `default` — the cluster-scoped tunables every agent in that cluster\nreads on its refresh beat. `spec` is desired (admin-written); `status.observedGeneration`\nis the last generation an agent actually applied, so the UI's \"pending\" marker has\nsomething to compare against. Cluster-scoped like every other kind here: there is one\nobject per region's k3s, not per namespace.",
+                    "properties": {
+                      "basePackages": {
+                        "default": "",
+                        "description": "Packages prepended to every workspace's profile, space-separated.",
+                        "type": "string"
+                      },
+                      "decommissionSecs": {
+                        "default": 30,
+                        "description": "Decommission-beat interval. 5..=600 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "defaultImage": {
+                        "default": "",
+                        "description": "Tenant workspace pod image. **Boot** — the agent reads this at pod-template render\ntime, not per reconcile; a change rolls `rustic-git-agent` (Task 5). Empty means \"keep\ntoday's env value\" so an admin who never opens this row cannot blank a required image.",
+                        "type": "string"
+                      },
+                      "defaultReplicas": {
+                        "default": 2,
+                        "description": "Default `Volume.spec.replicas` for a newly created volume. 1..=5.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "gitInitImage": {
+                        "default": "",
+                        "description": "The init container that clones a workspace's seed repo over SSH. **Boot**, same reason.",
+                        "type": "string"
+                      },
+                      "homeCacheGb": {
+                        "default": 20,
+                        "description": "Home-cache local subvolume quota per (owner, node). 1..=500 GiB.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "maxPerOwner": {
+                        "default": 50,
+                        "description": "Max workspaces+environments per owner in this region, until `Quota` fully replaces it.\n1..=1000.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "nixTimeoutSecs": {
+                        "default": 600,
+                        "description": "Nix build timeout. 60..=7200 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "nixpkgs": {
+                        "default": "",
+                        "description": "Nixpkgs revision pin (`github:NixOS/nixpkgs/<rev>`). Empty means \"whatever the agent's\nown env default is\" — this field does not carry a built-in default of its own.",
+                        "type": "string"
+                      },
+                      "nodeDeadSecs": {
+                        "default": 180,
+                        "description": "How long a node must be observed NotReady before it is declared dead for placement.\n60..=3600 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "peerReceiveSlack": {
+                        "default": 30,
+                        "description": "Slack added to the receive-side timeout over the serve-side one. 0..=60 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "peerSendTimeoutSecs": {
+                        "default": 3600,
+                        "description": "`btrfs send`-over-HTTP client timeout. 60..=21600 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "peerServeTimeoutSecs": {
+                        "default": 3300,
+                        "description": "The send side's own deadline, deliberately shorter than the client's. 60..=21600 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "quotaGbCeiling": {
+                        "default": 1000,
+                        "description": "Ceiling `clamp_quota` enforces on a requested quota. 10..=5000 GiB.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "replicaSecs": {
+                        "default": 300,
+                        "description": "Replication pull beat interval. 30..=3600 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "runtimeClass": {
+                        "default": "",
+                        "description": "k8s `runtimeClassName` for tenant pods (e.g. `gvisor`); empty = host kernel. **Boot**.",
+                        "type": "string"
+                      },
+                      "stopFlushTimeoutSecs": {
+                        "default": 30,
+                        "description": "Deadline for a stop's flush before the pod is torn down anyway. 5..=300 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "syncSecs": {
+                        "default": 60,
+                        "description": "Sync-point cut beat interval. 10..=3600 seconds.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "status": {
+                    "nullable": true,
+                    "properties": {
+                      "observedGeneration": {
+                        "description": "The generation an agent last successfully applied. Compared against\n`metadata.generation` by the admin UI's pending marker.",
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "ClusterSettings",
+                "type": "object"
+              }
+            },
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
     }
   ]
 }

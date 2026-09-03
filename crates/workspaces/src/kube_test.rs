@@ -26,6 +26,12 @@ pub fn post(path: impl Into<String>, body: serde_json::Value) -> Route {
     Route { method: "POST", path: path.into(), status: 201, body }
 }
 
+/// A merge/JSON-patch call — same shape as `post`, for the PATCH-based recorder tests later
+/// settings tasks add (server-side apply and status writes are both PATCH on the wire).
+pub fn patch(path: impl Into<String>, body: serde_json::Value) -> Route {
+    Route { method: "PATCH", path: path.into(), status: 200, body }
+}
+
 pub fn not_found(path: impl Into<String>) -> Route {
     Route {
         method: "GET",

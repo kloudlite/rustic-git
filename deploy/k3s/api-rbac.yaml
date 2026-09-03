@@ -99,6 +99,11 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["regions"]
     verbs: ["get", "list", "create", "patch", "delete"]
+  # No `delete`: `ClusterSettings` is never removed, only its fields reset to defaults by
+  # omission — the object itself (named `default`) is expected to always exist once created.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["clustersettings"]
+    verbs: ["get", "create", "patch"]
   # The decommission view and the cross-owner list/stop/delete surfaces both need the full object,
   # not the read the user role keeps for its own owner-scoped routes.
   - apiGroups: ["rustic-git.io"]

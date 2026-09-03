@@ -988,6 +988,173 @@ pub fn wish_granted(wish: &RestoreWish, restored_to: Option<&str>, restored_at: 
     restored_to == Some(wish.snapshot_id.as_str()) && restored_at == Some(wish.requested_at.as_str())
 }
 
+/// Built-in defaults for `ClusterSettingsSpec` fields, one `fn` per field so `#[serde(default =
+/// "...")]` has a path to name — kept separate from the values themselves so
+/// `Settings::from_env` (Task 2) can call the same functions as the env-var fallback, and the CRD
+/// default and the env default can never drift apart.
+pub mod defaults {
+    pub fn sync_secs() -> u64 {
+        60
+    }
+    pub fn replica_secs() -> u64 {
+        300
+    }
+    pub fn decommission_secs() -> u64 {
+        30
+    }
+    pub fn node_dead_secs() -> u64 {
+        180
+    }
+    pub fn peer_send_timeout_secs() -> u64 {
+        3600
+    }
+    pub fn peer_serve_timeout_secs() -> u64 {
+        3300
+    }
+    pub fn peer_receive_slack() -> u64 {
+        30
+    }
+    pub fn stop_flush_timeout_secs() -> u64 {
+        30
+    }
+    pub fn nix_timeout_secs() -> u64 {
+        600
+    }
+    pub fn base_packages() -> String {
+        String::new()
+    }
+    pub fn default_replicas() -> u32 {
+        crate::crd::DEFAULT_REPLICAS
+    }
+    pub fn max_per_owner() -> u32 {
+        50
+    }
+    pub fn home_cache_gb() -> u32 {
+        20
+    }
+    pub fn quota_gb_ceiling() -> u32 {
+        1000
+    }
+    pub fn git_init_image() -> String {
+        String::new()
+    }
+}
+
+/// One per region, named `default` — the cluster-scoped tunables every agent in that cluster
+/// reads on its refresh beat. `spec` is desired (admin-written); `status.observedGeneration`
+/// is the last generation an agent actually applied, so the UI's "pending" marker has
+/// something to compare against. Cluster-scoped like every other kind here: there is one
+/// object per region's k3s, not per namespace.
+#[derive(CustomResource, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "rustic-git.io",
+    version = "v1alpha1",
+    kind = "ClusterSettings",
+    plural = "clustersettings",
+    status = "ClusterSettingsStatus"
+    // selectable = "": deliberately no selectableFields — agents watch the single `default`
+    // object by name, not by node, so there is no per-node axis to select on.
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterSettingsSpec {
+    /// Sync-point cut beat interval. 10..=3600 seconds.
+    #[serde(default = "defaults::sync_secs")]
+    pub sync_secs: u64,
+    /// Replication pull beat interval. 30..=3600 seconds.
+    #[serde(default = "defaults::replica_secs")]
+    pub replica_secs: u64,
+    /// Decommission-beat interval. 5..=600 seconds.
+    #[serde(default = "defaults::decommission_secs")]
+    pub decommission_secs: u64,
+    /// How long a node must be observed NotReady before it is declared dead for placement.
+    /// 60..=3600 seconds.
+    #[serde(default = "defaults::node_dead_secs")]
+    pub node_dead_secs: u64,
+    /// `btrfs send`-over-HTTP client timeout. 60..=21600 seconds.
+    #[serde(default = "defaults::peer_send_timeout_secs")]
+    pub peer_send_timeout_secs: u64,
+    /// The send side's own deadline, deliberately shorter than the client's. 60..=21600 seconds.
+    #[serde(default = "defaults::peer_serve_timeout_secs")]
+    pub peer_serve_timeout_secs: u64,
+    /// Slack added to the receive-side timeout over the serve-side one. 0..=60 seconds.
+    #[serde(default = "defaults::peer_receive_slack")]
+    pub peer_receive_slack: u64,
+    /// Deadline for a stop's flush before the pod is torn down anyway. 5..=300 seconds.
+    // ponytail: no caller reads this yet; ships for the admin UI ahead of the enforcement it
+    // is meant for. Add the read when a stop-flush deadline is actually implemented.
+    #[serde(default = "defaults::stop_flush_timeout_secs")]
+    pub stop_flush_timeout_secs: u64,
+    /// Nix build timeout. 60..=7200 seconds.
+    #[serde(default = "defaults::nix_timeout_secs")]
+    pub nix_timeout_secs: u64,
+    /// Nixpkgs revision pin (`github:NixOS/nixpkgs/<rev>`). Empty means "whatever the agent's
+    /// own env default is" — this field does not carry a built-in default of its own.
+    #[serde(default)]
+    pub nixpkgs: String,
+    /// Packages prepended to every workspace's profile, space-separated.
+    #[serde(default = "defaults::base_packages")]
+    pub base_packages: String,
+    /// Default `Volume.spec.replicas` for a newly created volume. 1..=5.
+    #[serde(default = "defaults::default_replicas")]
+    pub default_replicas: u32,
+    /// Max workspaces+environments per owner in this region, until `Quota` fully replaces it.
+    /// 1..=1000.
+    #[serde(default = "defaults::max_per_owner")]
+    pub max_per_owner: u32,
+    /// Home-cache local subvolume quota per (owner, node). 1..=500 GiB.
+    #[serde(default = "defaults::home_cache_gb")]
+    pub home_cache_gb: u32,
+    /// Ceiling `clamp_quota` enforces on a requested quota. 10..=5000 GiB.
+    #[serde(default = "defaults::quota_gb_ceiling")]
+    pub quota_gb_ceiling: u32,
+    /// Tenant workspace pod image. **Boot** — the agent reads this at pod-template render
+    /// time, not per reconcile; a change rolls `rustic-git-agent` (Task 5). Empty means "keep
+    /// today's env value" so an admin who never opens this row cannot blank a required image.
+    #[serde(default)]
+    pub default_image: String,
+    /// The init container that clones a workspace's seed repo over SSH. **Boot**, same reason.
+    #[serde(default = "defaults::git_init_image")]
+    pub git_init_image: String,
+    /// k8s `runtimeClassName` for tenant pods (e.g. `gvisor`); empty = host kernel. **Boot**.
+    #[serde(default)]
+    pub runtime_class: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterSettingsStatus {
+    /// The generation an agent last successfully applied. Compared against
+    /// `metadata.generation` by the admin UI's pending marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+}
+
+/// Which mechanism carries each `ClusterSettingsSpec` field: `Live` (next refresh beat picks it
+/// up) or `Boot` (only a pod-template rebuild reads it, so it needs a roll of the readers named
+/// here). A test (`cluster_setting_meta_is_exhaustive`) asserts this table's field names equal
+/// `ClusterSettingsSpec`'s schemars property names, so a field added to the struct without an
+/// entry here fails loudly instead of shipping unreadable.
+pub const CLUSTER_SETTING_META: &[(&str, rustic_git_core::settings::Mark, &[&str])] = &[
+    ("syncSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("replicaSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("decommissionSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("nodeDeadSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("peerSendTimeoutSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("peerServeTimeoutSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("peerReceiveSlack", rustic_git_core::settings::Mark::Live, &[]),
+    ("stopFlushTimeoutSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("nixTimeoutSecs", rustic_git_core::settings::Mark::Live, &[]),
+    ("nixpkgs", rustic_git_core::settings::Mark::Live, &[]),
+    ("basePackages", rustic_git_core::settings::Mark::Live, &[]),
+    ("defaultReplicas", rustic_git_core::settings::Mark::Live, &[]),
+    ("maxPerOwner", rustic_git_core::settings::Mark::Live, &[]),
+    ("homeCacheGb", rustic_git_core::settings::Mark::Live, &[]),
+    ("quotaGbCeiling", rustic_git_core::settings::Mark::Live, &[]),
+    ("defaultImage", rustic_git_core::settings::Mark::Boot, &["rustic-git-agent"]),
+    ("gitInitImage", rustic_git_core::settings::Mark::Boot, &["rustic-git-agent"]),
+    ("runtimeClass", rustic_git_core::settings::Mark::Boot, &["rustic-git-agent"]),
+];
+
 /// Every CRD this repo owns, for YAML generation and for a startup precondition check.
 pub fn all_crds() -> Vec<CustomResourceDefinition> {
     vec![
@@ -1000,6 +1167,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Region::crd(),
         Quota::crd(),
         QuotaRequest::crd(),
+        ClusterSettings::crd(),
     ]
 }
 
@@ -1345,5 +1513,21 @@ mod tests {
             "lastSyncAt": "2026-09-01T00:00:00Z",
         });
         serde_json::from_value::<VolumeReplicaStatus>(replica_status).expect("lastSyncAt must still parse");
+    }
+
+    /// `CLUSTER_SETTING_META` names every field the admin write path/UI must know about a
+    /// `Live`/`Boot` split for. A field added to the struct without a matching entry here would
+    /// silently ship with no mark — meaning no reader ever gets told to roll.
+    #[test]
+    fn cluster_setting_meta_is_exhaustive() {
+        use kube::CustomResourceExt;
+        let crd = ClusterSettings::crd();
+        let schema = crd.spec.versions[0].schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
+        let mut props: Vec<&str> =
+            schema.properties.as_ref().unwrap()["spec"].properties.as_ref().unwrap().keys().map(|k| k.as_str()).collect();
+        props.sort_unstable();
+        let mut meta: Vec<&str> = CLUSTER_SETTING_META.iter().map(|(name, _, _)| *name).collect();
+        meta.sort_unstable();
+        assert_eq!(props, meta, "CLUSTER_SETTING_META must name exactly ClusterSettingsSpec's fields");
     }
 }

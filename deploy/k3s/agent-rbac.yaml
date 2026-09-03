@@ -48,6 +48,12 @@
 #                                                                       a ResourceQuota. READ ONLY —
 #                                                                       a quota is desired state and
 #                                                                       the agent never writes one
+#   clustersettings (rustic-git.io)        get,list,watch               refresh beat reads the single
+#                                                                       `default` object every tunable
+#                                                                       (sync/replica/decommission
+#                                                                       intervals, timeouts, images)
+#                                                                       comes from. READ ONLY — an
+#                                                                       admin writes it through /v1
 #   snapshots (rustic-git.io)              get,list,watch               pull_beat (missing-commit
 #                                                                       diff against local_commits);
 #                                                                       Controller (cut, retention,
@@ -173,6 +179,11 @@ rules:
   # agent-admission.yaml gains nothing for this feature — there is no agent spec write to refuse.
   - apiGroups: ["rustic-git.io"]
     resources: ["quotas"]
+    verbs: ["get", "list", "watch"]
+  # Same read-only reasoning as `quotas`: `ClusterSettings` is admin-written desired state, and
+  # the agent's refresh beat only ever reads the single `default` object.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["clustersettings"]
     verbs: ["get", "list", "watch"]
   # `snapshots`: mostly created by `/v1` (Task 6's `/push`), CR-first per the brief — the agent
   # only cuts the btrfs snapshot and reports status, and `pull_beat` diffs the Ready set against
