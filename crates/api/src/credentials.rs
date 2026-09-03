@@ -679,7 +679,7 @@ pub(crate) async fn cli_token(
 /// out-of-range instant answers empty here exactly as bson's fallible conversion did.
 fn rfc3339(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
-        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
         .unwrap_or_default()
 }
 
@@ -917,6 +917,10 @@ mod tests {
         // The four call sites feed it `timestamp_millis()` and `exp * 1000`; a bad value must not
         // panic a route, it must answer the empty string the old bson path answered.
         assert_eq!(super::rfc3339(0), "1970-01-01T00:00:00Z");
+        // `AutoSi`, not `Secs`: bson printed the millis when they were non-zero, and `created_at`
+        // is wall-clock, so every token row carried them. The web parses either, but a silent
+        // precision drop is still a change.
+        assert_eq!(super::rfc3339(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
         assert_eq!(super::rfc3339(i64::MAX), "");
     }
 
