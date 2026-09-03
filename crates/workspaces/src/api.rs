@@ -1180,6 +1180,7 @@ async fn clone_base(
             message: Some("cloning".to_string()),
             pinned: false,
             transient: true,
+            state: None,
         },
     );
     // `status` on CREATE is stored verbatim, which is how this is born `Working` and reaches the
@@ -1267,7 +1268,7 @@ async fn clone_ws(
 /// "controller default" — it would size the btrfs qgroup straight to zero. The quota of a legacy
 /// source lives on its Volume, which is the object the controller sizes the disk from, so read it
 /// there rather than inventing a number.
-const FALLBACK_QUOTA_GB: u64 = 20;
+const FALLBACK_QUOTA_GB: u64 = crd::DEFAULT_WS_QUOTA_GB;
 async fn storage_quota(c: &kube::Client, storage: &Option<crd::WorkspaceStorage>, volume: &str) -> u64 {
     if let Some(st) = storage {
         return st.quota_gb;
@@ -1377,7 +1378,7 @@ struct NewEnvironment {
 }
 
 fn default_env_quota() -> u64 {
-    20
+    crd::DEFAULT_ENV_QUOTA_GB
 }
 
 /// Resolve `NewEnvironment.owner` against the caller: personal (`None` or `caller`) always
@@ -1822,6 +1823,7 @@ async fn create_commit(
             message,
             pinned: false,
             transient: false,
+            state: None,
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, volume));

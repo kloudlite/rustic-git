@@ -259,6 +259,62 @@ pub struct SnapshotSpec {
     /// retained ONE per worktree — see `snapshot::retain`. `push` never sets this.
     #[serde(default)]
     pub transient: bool,
+    /// Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.
+    ///
+    /// Schema is declared as free-form JSON, not `SnapshotState`'s own derived schema: kube-core's
+    /// CRD generation flattens an internally-tagged enum's `oneOf` branches into one object and
+    /// panics when a shared property (`kind`) carries a different `const` per branch — which is the
+    /// entire point of a tag. `serde`'s view of the type is untouched, so round-tripping is exact;
+    /// only the *published* OpenAPI schema for this field is permissive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub state: Option<SnapshotState>,
+}
+
+/// The parent's own quota fallback for a snapshot with no `spec.storage`, and its environment
+/// counterpart — both were `20` already (`FALLBACK_QUOTA_GB` in `api.rs`, `default_env_quota`);
+/// named here so `SnapshotState::of_workspace`/`of_environment` and `api.rs` share the one number.
+pub const DEFAULT_WS_QUOTA_GB: u64 = 20;
+pub const DEFAULT_ENV_QUOTA_GB: u64 = 20;
+
+/// What the parent WAS when this cut was taken, frozen beside the bytes. A restore defaults to
+/// it, which is the whole reason it exists: last month's files with today's image is not last
+/// month's workspace. A copy, never a reference — later edits to the parent leave it alone.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SnapshotState {
+    #[serde(rename_all = "camelCase")]
+    Workspace {
+        image: String,
+        packages: Vec<String>,
+        resources: PodResources,
+        quota_gb: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attached_environment: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Environment {
+        services: Vec<crate::model::Service>,
+        quota_gb: u64,
+    },
+}
+
+impl SnapshotState {
+    pub fn of_workspace(w: &Workspace) -> Self {
+        SnapshotState::Workspace {
+            image: w.spec.image.clone(),
+            packages: w.spec.packages.clone(),
+            resources: w.spec.resources.clone(),
+            quota_gb: w.spec.storage.as_ref().map(|s| s.quota_gb).unwrap_or(DEFAULT_WS_QUOTA_GB),
+            attached_environment: w.spec.attached_environment.clone(),
+        }
+    }
+    pub fn of_environment(e: &Environment) -> Self {
+        SnapshotState::Environment {
+            services: e.spec.services.clone(),
+            quota_gb: e.spec.storage.as_ref().map(|s| s.quota_gb).unwrap_or(DEFAULT_ENV_QUOTA_GB),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -990,12 +1046,58 @@ mod tests {
     #[test]
     fn snapshot_spec_round_trips_with_empty_parent_and_no_message() {
         let spec = SnapshotSpec {
-            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false, transient: false,
+            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false, transient: false, state: None,
         };
         let v = serde_json::to_value(&spec).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
         let back: SnapshotSpec = serde_json::from_value(v).unwrap();
         assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn snapshot_state_serializes_with_the_kind_tag_and_camel_case() {
+        let st = SnapshotState::Workspace {
+            image: "alpine:3.20".into(),
+            packages: vec!["ripgrep".into()],
+            resources: PodResources::default(),
+            quota_gb: 5,
+            attached_environment: Some("env-1".into()),
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["kind"], "workspace");
+        assert_eq!(v["quotaGb"], 5);
+        assert_eq!(v["attachedEnvironment"], "env-1");
+        let back: SnapshotState = serde_json::from_value(v).unwrap();
+        assert_eq!(back, st);
+    }
+
+    #[test]
+    fn a_snapshot_spec_without_state_still_deserializes() {
+        let s: SnapshotSpec = serde_json::from_value(serde_json::json!({
+            "volume": "v", "owner": "o", "worktree": "v", "parent": "", "pinned": false, "transient": false
+        }))
+        .unwrap();
+        assert!(s.state.is_none());
+        // and a None state is not written at all
+        assert!(serde_json::to_value(&s).unwrap().get("state").is_none());
+    }
+
+    #[test]
+    fn of_workspace_copies_the_spec_and_falls_back_to_the_default_quota() {
+        let mut w = Workspace::new("ws-1", WorkspaceSpec {
+            owner: "o".into(), team: String::new(), name: "n".into(), region: "r".into(),
+            image: "alpine:3.20".into(), storage: None, desired_state: DesiredState::Running,
+            resources: PodResources::default(), packages: vec!["jq".into()], attached_environment: None,
+        });
+        match SnapshotState::of_workspace(&w) {
+            SnapshotState::Workspace { image, packages, quota_gb, attached_environment, .. } => {
+                assert_eq!(image, "alpine:3.20"); assert_eq!(packages, vec!["jq"]);
+                assert_eq!(quota_gb, DEFAULT_WS_QUOTA_GB); assert_eq!(attached_environment, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        w.spec.storage = Some(WorkspaceStorage { quota_gb: 42, source: None });
+        assert!(matches!(SnapshotState::of_workspace(&w), SnapshotState::Workspace { quota_gb: 42, .. }));
     }
 
     #[test]

@@ -88,6 +88,7 @@ where
                     message: Some("stopping".to_string()),
                     pinned: false,
                     transient: true,
+                    state: None,
                 },
             );
             snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });

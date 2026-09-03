@@ -627,6 +627,7 @@ pub(crate) async fn migrate_and_seed_baseline(ctx: &Arc<Ctx>, vol: &crd::Volume,
             message: Some("migration baseline".to_string()),
             pinned: false,
             transient: false,
+            state: None,
         },
     );
     snap.metadata.labels = Some(crd::commit_labels(owner, id));

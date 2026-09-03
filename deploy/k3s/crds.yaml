@@ -1327,6 +1327,9 @@
                         "description": "Keeps this commit out of any future retention sweep. Never cleared by a controller.",
                         "type": "boolean"
                       },
+                      "state": {
+                        "description": "Absent only on a snapshot cut before 2026-09-03; every reader falls back for `None`.\n\nSchema is declared as free-form JSON, not `SnapshotState`'s own derived schema: kube-core's\nCRD generation flattens an internally-tagged enum's `oneOf` branches into one object and\npanics when a shared property (`kind`) carries a different `const` per branch — which is the\nentire point of a tag. `serde`'s view of the type is untouched, so round-tripping is exact;\nonly the *published* OpenAPI schema for this field is permissive."
+                      },
                       "transient": {
                         "default": false,
                         "description": "A sync point, not a commit: cut by the agent's sync beat (or a stop) from a live worktree so a\nreplica holds its latest state. Never a `parent` of anything, never a worktree's `head`, and\nretained ONE per worktree — see `snapshot::retain`. `push` never sets this.",
