@@ -124,6 +124,21 @@ fn subvolume_names(dir: &std::path::Path) -> Vec<String> {
 #[derive(serde::Deserialize)]
 struct SnapshotQuery {
     parent: Option<String>,
+    max: Option<u64>,
+}
+
+/// The most bytes a single receive of a volume's snapshot may write. Derived from the volume's own
+/// `spec.quotaGb`, because that IS the answer to "how big can this volume's data be" — a separate
+/// env would be a second, drifting copy of it. Times a slack factor for btrfs metadata,
+/// reflink-broken copies and a snapshot cut just before a large delete; floored at 1 GiB so a
+/// quota-less volume (`quotaGb: 0`) still receives rather than failing at zero.
+///
+/// ponytail: one ceiling per receive, not per volume total — N concurrent receives of one volume
+/// can still exceed it N times. The pool-level guard is the quota `volume_work` already sets;
+/// this is the bound on a single stream from a peer we do not otherwise trust to be finite.
+fn receive_ceiling(quota_gb: u64) -> u64 {
+    let slack: u64 = std::env::var("WS_PEER_RECEIVE_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    (quota_gb * slack * 1024 * 1024 * 1024).max(1024 * 1024 * 1024)
 }
 
 /// The pull side's send: streams `btrfs send [-p parent] snap_dir/{name}`'s stdout as the response
@@ -148,6 +163,18 @@ async fn snapshot(
         return (StatusCode::NOT_FOUND, Body::empty()).into_response();
     }
     let parent_path = q.parent.as_ref().map(|p| dir.join(p));
+
+    // The puller declares what it will accept; a source that cannot fit a full send under it says
+    // so BEFORE streaming. A truncated body after a 200 costs both sides the whole transfer, and
+    // the puller cannot tell it from a crashed `btrfs send`. One Volume GET, on a path that is
+    // about to spawn a root `btrfs send` and stream tens of GiB — not a cost worth avoiding.
+    if let Some(max) = q.max {
+        let quota =
+            Api::<crd::Volume>::all(state.client.clone()).get_opt(&volume).await.ok().flatten().map(|v| v.spec.quota_gb).unwrap_or(0);
+        if max < receive_ceiling(quota) {
+            return (StatusCode::PAYLOAD_TOO_LARGE, Body::empty()).into_response();
+        }
+    }
 
     // Held for the life of the stream (moved into `KillOnDrop` below): a retried pull for the
     // same volume must not race a send still in flight for it.
@@ -692,6 +719,11 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
         }
     }
 
+    // The volume's own quota is the ceiling's source. A volume missing from the beat's listing is
+    // one this node holds a copy of without a CR; the floor applies.
+    let quota_gb = beat.volumes.iter().find(|v| v.name_any() == volume).map(|v| v.spec.quota_gb).unwrap_or(0);
+    let max_bytes = receive_ceiling(quota_gb);
+
     // Any pull that could not be satisfied this pass. It gates the retire pass below, because
     // the two together would otherwise LOSE a sync point: the owner deletes `sync-A`'s CR the
     // instant `sync-B` is Ready, so a replica that cannot reach the owner right now would drop
@@ -715,10 +747,10 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
             // `send_to_target` already handles on the push side. One retry against the SAME
             // source with no parent at all before moving on, so a single bad guess costs one
             // extra full pull instead of losing this snapshot (and every descendant) forever.
-            let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref()).await;
+            let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref(), max_bytes).await;
             if result.is_err() && my_parent.is_some() {
                 tracing::warn!(%volume, %name, source, "pull: incremental receive failed, falling back to a full pull from the same source");
-                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None).await;
+                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None, max_bytes).await;
             }
             match result {
                 Ok(()) => {
@@ -794,10 +826,11 @@ async fn pull_one(
     volume: &str,
     name: &str,
     parent: Option<&str>,
+    max_bytes: u64,
 ) -> Result<(), String> {
-    let mut url = format!("http://{addr}/peer/v1/snapshot/{volume}/{name}");
+    let mut url = format!("http://{addr}/peer/v1/snapshot/{volume}/{name}?max={max_bytes}");
     if let Some(p) = parent {
-        url = format!("{url}?parent={p}");
+        url = format!("{url}&parent={p}");
     }
     // ponytail: `send_timeout()` bounds the WHOLE streamed pull, not just the connect — a first
     // replica larger than ~1h of transfer at whatever the link does is timed out and retried from
@@ -819,11 +852,20 @@ async fn pull_one(
     cmd.args(prefix).arg("receive").arg(&dir).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null());
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let mut stdin = child.stdin.take().expect("stdin was piped");
-    let mut reader = StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other));
+    // `take(max_bytes + 1)`: the extra byte is how a stream that WOULD exceed the ceiling is told
+    // apart from one that exactly fills it. A peer answering with an unbounded body otherwise
+    // fills the pool, and a full pool takes down every workspace on this node, not one volume.
+    let mut reader =
+        tokio::io::AsyncReadExt::take(StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other)), max_bytes + 1);
     let copy_result = tokio::io::copy(&mut reader, &mut stdin).await;
     let _ = stdin.shutdown().await;
     drop(stdin);
     let ok = match copy_result {
+        Ok(n) if n > max_bytes => {
+            tracing::warn!(%volume, %name, max_bytes, "pull: the source exceeded this volume's receive ceiling");
+            let _ = child.wait().await;
+            false
+        }
         Ok(_) => matches!(child.wait().await, Ok(s) if s.success()),
         Err(_) => {
             let _ = child.wait().await;
@@ -1597,6 +1639,14 @@ mod reconcile_tests {
             )),
             rec,
         )
+    }
+
+    /// I4: the ceiling is the volume's own quota times slack, never unbounded, and never below a
+    /// floor a snapshot's metadata needs even on a tiny or quota-less volume.
+    #[test]
+    fn the_receive_ceiling_follows_the_volumes_quota() {
+        assert_eq!(receive_ceiling(10), 10 * 3 * 1024 * 1024 * 1024);
+        assert_eq!(receive_ceiling(0), 1024 * 1024 * 1024, "a quota-less volume still gets the floor");
     }
 
     // -----------------------------------------------------------------------------------------

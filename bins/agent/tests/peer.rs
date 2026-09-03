@@ -158,7 +158,7 @@ async fn a_stalled_puller_does_not_hold_the_volume_send_lock() {
     let first = tokio::spawn({
         let app = app.clone();
         async move {
-            let resp = app.oneshot(commit_req("/peer/v1/commit/v1/c1", Some("s3cret"))).await.unwrap();
+            let resp = app.oneshot(snapshot_req("/peer/v1/snapshot/v1/c1", Some("s3cret"))).await.unwrap();
             axum::body::to_bytes(resp.into_body(), usize::MAX).await
         }
     });
@@ -168,13 +168,50 @@ async fn a_stalled_puller_does_not_hold_the_volume_send_lock() {
 
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        app.oneshot(commit_req("/peer/v1/commit/v1/c1", Some("s3cret"))),
+        app.oneshot(snapshot_req("/peer/v1/snapshot/v1/c1", Some("s3cret"))),
     )
     .await;
 
     assert!(second.is_ok(), "the second pull must not wait out the first puller's stall");
     let _ = first.await;
     std::env::remove_var("WS_PEER_SERVE_TIMEOUT_SECS");
+}
+
+/// Builds a router over a fake `btrfs send` (named by the caller's `label`, so two calls in the
+/// same test don't collide on the script's filename) and returns the tempdir so the caller can
+/// create snapshot subvolumes under it.
+fn router_with_fake_btrfs(label: &str) -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join(format!("btrfs-send-{label}"));
+    let script = r#"#!/bin/sh
+if [ "$1" = "send" ]; then
+    printf 'snapshot-bytes'
+    exit 0
+fi
+"#;
+    std::fs::write(&path, script).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    let (state, _rec) = state(tmp.path(), path.to_string_lossy().into_owned(), vec![]);
+    (router(state), tmp)
+}
+
+async fn send_request(app: &axum::Router, path: &str) -> axum::http::Response<Body> {
+    app.clone().oneshot(snapshot_req(path, Some("s3cret"))).await.unwrap()
+}
+
+/// I4: a puller declares the ceiling it will accept, and a source that cannot fit a full send
+/// under it says so BEFORE streaming — a 413 is a fetchable answer, a truncated body after a 200
+/// is a wasted transfer.
+#[tokio::test]
+async fn a_ceiling_below_the_volumes_quota_is_refused_with_413() {
+    let (app, tmp) = router_with_fake_btrfs("ok");
+    std::fs::create_dir_all(tmp.path().join("vol").join("v1").join("snap").join("c1")).unwrap();
+
+    let resp = send_request(&app, "/peer/v1/snapshot/v1/c1?max=1").await;
+
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "a ceiling that cannot fit the volume is refused up front");
 }
 
 // -------------------------------------------------------------------------------------------
