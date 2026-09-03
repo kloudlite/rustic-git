@@ -260,6 +260,33 @@ async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections
     Ok(heads)
 }
 
+/// Sync cuts that an interrupted clone still has to be seeded FROM, and which retention therefore
+/// may not delete — `VolumeSource::SeededFrom{volume, snapshot}` on a `Volume` of this pool.
+///
+/// Protected only until that Volume is MATERIALIZED, not for its whole life: once the bytes are
+/// copied the clone never reads the cut again, and holding it forever would pin one extra
+/// read-only subvolume per seeded clone on the source volume with nothing to ever release it.
+/// Between `/v1`'s write and `seed_from_snapshot`, though, the source node returning and cutting a
+/// fresh sync point would sweep the pinned one out from under the clone — `NO_SUCH_RECORD`, and
+/// `permanent_reason` makes that terminal.
+///
+/// List errors propagate for the same reason `worktree_heads`' do: a half-seen set is exactly the
+/// case that deletes a cut somebody is still waiting on.
+async fn seeded_from_cuts(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
+    let mut held = std::collections::HashSet::new();
+    for v in Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
+        if crate::controller::volume::volume_is_ready(&v) {
+            continue;
+        }
+        if let Some(VolumeSource::SeededFrom { volume: src, snapshot }) = v.spec.source.as_ref() {
+            if src == volume {
+                held.insert(snapshot.clone());
+            }
+        }
+    }
+    Ok(held)
+}
+
 /// Delete every `Ready` commit on `head`'s chain beyond `WS_SNAPSHOT_KEEP`, except pinned ones and
 /// any commit that is currently some worktree's head. v1 has no branches (`SnapshotSpec` carries
 /// none), so "per branch chain" collapses to the one chain reached by walking `spec.parent` from
@@ -293,17 +320,25 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     // function only runs after `patch_status(Ready)` for `head` itself, any OTHER transient still
     // seen here is either already `Ready` (safe to delete) or not yet `Ready` at all (filtered out
     // of `ready` above, so it is never considered) — never a `Working` cut caught mid-flight.
-    // ponytail: this arm deliberately ignores `heads` (and `spec.pinned`) — a sync point is never
-    // a chain member and nothing user-facing names one, so nothing can hold a reference to it.
-    // If `clone`, `restore` or any other verb ever names a sync point by id, this arm is wrong and
-    // must consult `worktree_heads` the way the commit path below does.
+    // ponytail: this arm still ignores `heads` and `spec.pinned` — a sync point is never a chain
+    // member and no HEAD can name one. It does consult `seeded_from_cuts`, because an interrupted
+    // clone DOES name a sync point by id (F6). Any further verb that names one belongs in that
+    // same set, or in `worktree_heads` the way the commit path below reads it.
     if ready.get(head).is_some_and(|s| s.spec.transient) {
         let worktree = ready[head].spec.worktree.clone();
+        // Keep-biased: a failed listing deletes nothing at all this pass.
+        let seeded = match seeded_from_cuts(ctx, volume).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(%volume, error = %e, "retention: listing seeded-from cuts; nothing deleted this pass");
+                return;
+            }
+        };
         // A replica mid-receive of the older transient just deleted here fails that one pull and
         // self-heals on its next: the beat re-lists and re-sends against whatever `Ready` transient
         // is current then, so a delete racing an in-flight send is a retry, not data loss.
         for (name, s) in &ready {
-            if name != head && s.spec.transient && s.spec.worktree == worktree {
+            if name != head && s.spec.transient && s.spec.worktree == worktree && !seeded.contains(name) {
                 if let Err(e) = snap_api.delete(name, &Default::default()).await {
                     tracing::warn!(%volume, snapshot = %name, error = %e, "retention: delete failed; left for the next pass");
                 }
@@ -377,7 +412,16 @@ mod commit_tests {
         }
     }
 
-    fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    fn test_ctx(pool: &std::path::Path, node: &str, mut routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+        // Transient retention asks which cuts a seeded clone still needs (`seeded_from_cuts`), a
+        // list every retention test now pays for. Appended last, so a test with its own volumes
+        // wins; the default answer is "no seeded clones anywhere".
+        routes.push(Route {
+            method: "GET",
+            path: "/apis/rustic-git.io/v1alpha1/volumes".into(),
+            status: 200,
+            body: list_of("Volume", vec![]),
+        });
         let (client, rec) = mock_client(routes);
         let engine = Engine::new(EnginePool::new(pool));
         std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
@@ -821,6 +865,54 @@ mod commit_tests {
 
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
         assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "only the same worktree's older transient is deleted, sparing the commit and the other worktree: {deletes:?}");
+    }
+
+    /// F6/round 3: an interrupted clone names a sync cut by id and is seeded from it later, so
+    /// retention must not sweep that cut when the source node returns and takes a fresh one. The
+    /// protection lifts once the clone's Volume is materialized — it never reads the cut again.
+    #[tokio::test]
+    async fn a_cut_a_seeded_clone_still_needs_survives_a_newer_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", false, true, crd::Phase::Ready);
+        let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", false, true, crd::Phase::Ready);
+        let items: Vec<serde_json::Value> =
+            [&old, &new].into_iter().map(|s| serde_json::to_value(s.as_ref()).unwrap()).collect();
+        let seeded_volume = |phase: &str, present: bool| {
+            serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                               "metadata": {"name": "ws-2", "uid": "ws-2-uid"},
+                               "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20,
+                                        "source": {"seededFrom": {"volume": "vol-1", "snapshot": "sync-ws-1-a"}}},
+                               "status": {"phase": phase, "subvolumePresent": present}})
+        };
+        let routes = |vol: serde_json::Value| {
+            vec![
+                Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items.clone()) },
+                Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumes".into(), status: 200, body: list_of("Volume", vec![vol]) },
+                Route {
+                    method: "DELETE",
+                    path: format!("{SNAPSHOTS_LIST}/sync-ws-1-a"),
+                    status: 200,
+                    body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}),
+                },
+            ]
+        };
+
+        // Not materialized yet: the cut is the only copy of the bytes this clone will be built
+        // from, and deleting it settles the clone Permanent/NoSuchSnapshot.
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes(seeded_volume("creating", false)));
+        retain(&ctx, "vol-1", "sync-ws-1-b").await;
+        assert!(
+            !rec.calls().iter().any(|c| c.starts_with("DELETE")),
+            "a cut an unmaterialized seeded clone names must survive: {:?}",
+            rec.calls()
+        );
+
+        // Materialized: the bytes are copied, nothing reads the cut again, and holding it forever
+        // would pin one extra read-only subvolume per seeded clone with nothing to release it.
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes(seeded_volume("ready", true)));
+        retain(&ctx, "vol-1", "sync-ws-1-b").await;
+        let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "{deletes:?}");
     }
 
     /// The previous transient is the btrfs send parent of a still-`Working` new one — deleting it
