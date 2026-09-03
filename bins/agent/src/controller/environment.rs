@@ -610,7 +610,6 @@ pub(crate) async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentS
         a.phase == b.phase
             && a.observed_generation == b.observed_generation
             && a.node_name == b.node_name
-            && a.compatible_nodes == b.compatible_nodes
             && a.volume_ref == b.volume_ref
             && a.service_status == b.service_status
             // See `write_ws_status`'s twin comment: without this, a head-only advance is a no-op.

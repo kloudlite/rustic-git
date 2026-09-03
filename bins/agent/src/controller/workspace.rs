@@ -1220,7 +1220,6 @@ pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus
             && a.observed_generation == b.observed_generation
             && a.pod_ref == b.pod_ref
             && a.node_name == b.node_name
-            && a.compatible_nodes == b.compatible_nodes
             && a.volume_ref == b.volume_ref
             // `head` in the comparison: without it, a snapshot's advance of `head` with every other
             // field unchanged reads as a no-op and the write silently never happens — exactly the

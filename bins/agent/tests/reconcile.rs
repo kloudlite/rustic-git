@@ -535,7 +535,7 @@ async fn a_node_without_a_homes_export_does_not_claim() {
 async fn an_already_placed_workspace_is_left_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(tmp.path(), vec![]);
-    let w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a"}));
 
     rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
     assert!(rec.calls().is_empty(), "{:?}", rec.calls());
@@ -564,7 +564,7 @@ async fn a_claim_that_loses_the_race_re_reads_and_binds_nothing() {
             "message": "the object has been modified; please apply your changes to the latest version"
         }),
     };
-    let won_by_peer = ws_json(serde_json::json!({"phase": "pending", "nodeName": "node-b", "compatibleNodes": ["node-b"]}));
+    let won_by_peer = ws_json(serde_json::json!({"phase": "pending", "nodeName": "node-b"}));
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![conflict, rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces/ws-1", won_by_peer)],
@@ -833,7 +833,7 @@ async fn f1_reclaiming_an_unclaimed_workspace_preserves_head_and_volume_ref() {
         ],
     );
     let w = workspace(serde_json::json!({
-        "phase": "ready", "nodeName": "", "compatibleNodes": [],
+        "phase": "ready", "nodeName": "",
         "volumeRef": "vol-1", "head": "vol-1-snapshot-a",
         "packages": {"base": [], "observed": [], "observedHash": "h1", "profile": "/nix/store/x"},
     }));
@@ -1654,7 +1654,7 @@ async fn a_workspace_with_an_unready_volume_creates_no_pod() {
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
-    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
 
     let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
@@ -1694,7 +1694,7 @@ async fn a_placed_workspace_creates_its_volume_child_on_its_own_node() {
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
-    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
 
     rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
@@ -1736,7 +1736,7 @@ async fn a_mismatch_against_a_live_owner_un_places_me() {
         ],
     );
     let w = workspace(serde_json::json!({
-        "phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-1",
+        "phase": "creating", "nodeName": "node-a", "volumeRef": "ws-1",
         "head": "ws-1-aaaaaaaa", "conditions": [{"type": "PackagesReady", "status": "True", "reason": "Built",
                                                   "message": "ok", "lastTransitionTime": "2026-08-27T00:00:00Z"}],
     }));
@@ -1779,7 +1779,7 @@ async fn a_mismatch_against_a_dead_owner_still_refuses_and_waits() {
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
-    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-1"}));
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "volumeRef": "ws-1"}));
 
     rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
@@ -1802,7 +1802,7 @@ async fn a_wrong_owner_label_is_re_stamped_from_spec() {
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
-    let mut j = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut j = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a"}));
     j["metadata"]["labels"]["rustic-git.io/owner"] = serde_json::json!("mallory");
     j["spec"]["desiredState"] = serde_json::json!("stopped");
     let w: crd::Workspace = serde_json::from_value(j).unwrap();
@@ -1834,7 +1834,7 @@ async fn a_stale_attached_env_label_is_re_stamped_from_spec() {
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
-    let mut j = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut j = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a"}));
     j["spec"]["desiredState"] = serde_json::json!("stopped");
     j["spec"]["attachedEnvironment"] = serde_json::json!("env-1");
     j["metadata"]["labels"]["rustic-git.io/attached-environment"] = serde_json::json!("env-stale");
@@ -2052,7 +2052,7 @@ async fn a_volume_with_a_push_annotation_starts_no_push() {
 
 /// A stopping environment with one service and its own volume, on this node.
 fn stopping_env() -> crd::Environment {
-    let mut o = env_json(serde_json::json!({"phase": "running", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut o = env_json(serde_json::json!({"phase": "running", "nodeName": "node-a"}));
     o["spec"]["desiredState"] = serde_json::json!("stopped");
     o["spec"]["services"] =
         serde_json::json!([{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": []}]);
@@ -2081,7 +2081,7 @@ fn stop_snapshot(status: serde_json::Value) -> serde_json::Value {
 }
 
 fn stopping_ws() -> crd::Workspace {
-    let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+    let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a",
                                             "volumeRef": "ws-1", "podRef": "ws-alice/ws-1"}));
     o["spec"]["desiredState"] = serde_json::json!("stopped");
     serde_json::from_value(o).unwrap()
@@ -2380,7 +2380,7 @@ async fn a_placed_environment_creates_its_volume_child_on_its_own_node() {
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         ],
     );
-    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
 
     rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
 
@@ -2408,7 +2408,7 @@ async fn an_environment_with_an_unready_volume_creates_no_deployment() {
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         ],
     );
-    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
 
     let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
@@ -2456,7 +2456,7 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
     e.spec.services = vec![
         rustic_git_workspaces::model::Service {
             name: "web".into(),
@@ -2541,7 +2541,6 @@ async fn an_environment_whose_only_delta_is_its_volume_ref_still_writes_status()
         phase: crd::Phase::Stopped,
         observed_generation: Some(1),
         node_name: "node-a".into(),
-        compatible_nodes: vec!["node-a".into()],
         conditions: vec![rustic_git_workspaces::crd::condition("Ready", true, "Stopped", "pushed and stopped", 1)],
         ..Default::default()
     });
@@ -2564,7 +2563,7 @@ const VOL_PATCH: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
 const WISH_AT: &str = "2026-08-27T00:00:00Z";
 
 fn restoring_env(restored_to: Option<&str>) -> (crd::Environment, serde_json::Value) {
-    let mut o = env_json(serde_json::json!({"phase": "running", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut o = env_json(serde_json::json!({"phase": "running", "nodeName": "node-a"}));
     o["spec"]["services"] =
         serde_json::json!([{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": []}]);
     o["spec"]["restore"] = serde_json::json!({"snapshotId": "snap-7", "volume": "env-1",
@@ -2865,7 +2864,6 @@ async fn a_second_reconcile_of_a_settled_workspace_writes_nothing() {
     let mut w = workspace(serde_json::json!({
         "phase": "error",
         "nodeName": "node-a",
-        "compatibleNodes": ["node-a"],
         "conditions": [{"type": "Ready", "status": "False", "reason": "NoStorage",
                         "message": "spec.storage is required", "observedGeneration": 1,
                         "lastTransitionTime": "2026-08-27T00:00:00Z"}]
@@ -3054,7 +3052,7 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
 }
 
 fn ready_workspace(id: &str, packages: Vec<String>) -> crd::Workspace {
-    let mut o = ws_json(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut o = ws_json(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
     o["metadata"]["name"] = id.into();
     o["spec"]["packages"] = serde_json::json!(packages);
     serde_json::from_value(o).unwrap()
@@ -4009,7 +4007,7 @@ async fn snapshot_model_environment_bootstrap_materializes_its_worktree() {
         Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
 
     // The pass runs past the Namespace `ensure` call and then fails on the next unmocked route
     // (NetworkPolicy, RoleBinding, ...) — that error is not the point; the point is that the
@@ -4045,7 +4043,7 @@ fn source_workspace_exists(id: &str) -> Route {
                            "metadata": {"name": id},
                            "spec": {"owner": "alice", "team": "", "name": id, "region": "r1",
                                     "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
-                           "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"]}}),
+                           "status": {"phase": "ready", "nodeName": "node-a"}}),
     )
 }
 
@@ -4060,7 +4058,7 @@ fn ready_source_volume(id: &str) -> serde_json::Value {
 
 /// A workspace whose `cloneOf` carries a graft snapshot and no worktree yet — a fresh clone.
 fn cloned_workspace(snapshot: &str, head: Option<&str>) -> crd::Workspace {
-    let mut status = serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]});
+    let mut status = serde_json::json!({"phase": "creating", "nodeName": "node-a"});
     if let Some(h) = head {
         status["head"] = serde_json::json!(h);
     }
@@ -4182,7 +4180,7 @@ async fn a_restored_environment_waits_while_its_snapshot_is_still_working() {
 /// An environment whose `cloneOf` carries a graft snapshot — what `POST /v1/environments/restore`
 /// writes — claimed on this node, with no head of its own yet.
 fn restored_env() -> crd::Environment {
-    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
     // One declared mount, so the pass exercises `mkdir_env_mounts` — whose root must be the
     // worktree the pod mounts, not `live/` one level above it.
     e.spec.services = vec![rustic_git_workspaces::model::Service {
@@ -4322,7 +4320,7 @@ async fn a_live_clone_of_a_deleted_workspace_still_settles_as_no_such_source() {
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
-    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
     w.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
         source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: None }),
@@ -4361,7 +4359,7 @@ async fn a_seeded_clone_creates_its_own_volume_and_leaves_the_dead_owners_pin_al
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
-    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
     w.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
         source: Some(crd::VolumeSource::SeededFrom { volume: "ws-src".into(), snapshot: "sync-ws-src-bbbb".into() }),
@@ -4487,7 +4485,7 @@ async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_dire
         "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
         "spec": {"owner": "../../etc", "team": "", "name": "ws", "region": "r1",
                  "image": "", "packages": [], "desiredState": "running"},
-        "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+        "status": {"phase": "ready", "nodeName": "node-a",
                    "volumeRef": "vol-1", "conditions": []},
     }))
     .unwrap();
@@ -4519,7 +4517,7 @@ async fn a_workspace_with_a_traversing_attached_environment_settles_permanent() 
         "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
         "spec": {"owner": "alice", "team": "", "name": "ws", "region": "r1",
                  "image": "", "packages": [], "desiredState": "running", "attachedEnvironment": "../evil"},
-        "status": {"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+        "status": {"phase": "ready", "nodeName": "node-a",
                    "volumeRef": "vol-1", "conditions": []},
     }))
     .unwrap();
@@ -4545,7 +4543,7 @@ async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_
         vec![Route { method: "PATCH", path: ENV_STATUS.into(), status: 200, body: env_json(serde_json::json!({})) }],
     );
     let mut json = env_json(serde_json::json!({
-        "phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "vol-1",
+        "phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1",
         "serviceStatus": [], "conditions": []
     }));
     json["spec"]["owner"] = serde_json::json!("../../etc");

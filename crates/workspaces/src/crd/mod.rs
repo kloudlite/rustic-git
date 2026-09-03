@@ -644,13 +644,6 @@ pub struct WorkspaceStatus {
     /// watch's `status.nodeName=` field selector matches.
     #[serde(default)]
     pub node_name: String,
-    /// DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'
-    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field (not
-    /// declared in the schema) so a stored object written before the cutover still parses;
-    /// nothing writes it and nothing reads it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(skip)]
-    pub compatible_nodes: Vec<String>,
     /// The child `Volume`, reported rather than wished for: the reconciler creates it and then
     /// says so here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -755,13 +748,6 @@ pub struct EnvironmentStatus {
     /// watch's `status.nodeName=` field selector matches.
     #[serde(default)]
     pub node_name: String,
-    /// DEAD as of the 2026-09-03 stop/decommission design: placement reads the replica rows'
-    /// `branches` now, so "who held this once" is never consulted. Kept as a tolerated field (not
-    /// declared in the schema) so a stored object written before the cutover still parses;
-    /// nothing writes it and nothing reads it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(skip)]
-    pub compatible_nodes: Vec<String>,
     /// The child `Volume`, reported rather than wished for: the reconciler creates it and then
     /// says so here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1199,8 +1185,10 @@ mod tests {
 
     /// Nothing sets `deny_unknown_fields`, so an object stored before this task's cutover — still
     /// carrying `durable`, `compatibleNodes`, or `lastSyncAt` — keeps parsing after those fields
-    /// are dropped from the schema and the struct. The value just goes nowhere: it disappears on
-    /// the object's next write and nothing ever reads it again.
+    /// are dropped from the schema and the struct entirely (`compatible_nodes` is no longer a
+    /// tolerated field either — it is gone from `WorkspaceStatus`/`EnvironmentStatus`, same as
+    /// `durable`). The value just goes nowhere: it disappears on the object's next write and
+    /// nothing ever reads it again.
     #[test]
     fn dropped_fields_are_tolerated_on_deserialize() {
         let ws_status = serde_json::json!({

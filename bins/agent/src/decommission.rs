@@ -231,7 +231,7 @@ mod tests {
             "spec": {"owner": "alice", "name": name, "region": "r1", "image": "img", "desiredState": desired, "packages": []},
             "status": {
                 "phase": if pod { "ready" } else { "stopped" },
-                "nodeName": node, "compatibleNodes": [node], "volumeRef": volume,
+                "nodeName": node, "volumeRef": volume,
                 "podRef": pod.then(|| format!("ws-alice/{name}")),
                 "conditions": if replicated {
                     serde_json::json!([{"type": "Replicated", "status": "True", "reason": "Replicated", "message": "", "observedGeneration": 1, "lastTransitionTime": "2000-01-01T00:00:00Z"}])

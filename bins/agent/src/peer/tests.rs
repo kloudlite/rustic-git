@@ -855,7 +855,7 @@ fn ws_placed(name: &str, node: &str) -> serde_json::Value {
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "name": name, "region": "r1", "image": "img", "desiredState": "running", "packages": []},
-        "status": {"phase": "ready", "nodeName": node, "compatibleNodes": [node], "volumeRef": format!("vol-{name}")},
+        "status": {"phase": "ready", "nodeName": node, "volumeRef": format!("vol-{name}")},
     })
 }
 
@@ -864,7 +864,7 @@ fn ws_placed_stopped(name: &str, node: &str) -> serde_json::Value {
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "name": name, "region": "r1", "image": "img", "desiredState": "stopped", "packages": []},
-        "status": {"phase": "ready", "nodeName": node, "compatibleNodes": [node], "volumeRef": format!("vol-{name}")},
+        "status": {"phase": "ready", "nodeName": node, "volumeRef": format!("vol-{name}")},
     })
 }
 
@@ -888,7 +888,7 @@ fn env_placed_stopped(name: &str, node: &str) -> serde_json::Value {
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "acme", "name": name, "region": "r1", "services": [], "desiredState": "stopped"},
-        "status": {"phase": "creating", "nodeName": node, "compatibleNodes": [node], "volumeRef": format!("vol-{name}")},
+        "status": {"phase": "creating", "nodeName": node, "volumeRef": format!("vol-{name}")},
     })
 }
 
