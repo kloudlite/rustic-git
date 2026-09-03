@@ -23,25 +23,42 @@ cd "$(dirname "$0")"
 SHA=${1:?commit sha image.yml built, 40 hex}
 WEB=${2:-}
 
-tag_exists() {
+# digest_of also proves the tag exists (curl -f fails the manifest fetch on a 404), so it
+# replaces tag_exists rather than running a second round-trip: same token, same request, the
+# digest is just a response header we weren't reading before. A GHCR tag is mutable — a
+# re-pushed :<sha> would change what an IfNotPresent node pulls next — so the digest, not the
+# tag, is what actually pins the image; the tag stays in the reference for legibility.
+digest_of() {
   # Anonymous pull token: the packages are public. The Accept list covers an index or a single
   # manifest, whichever buildx wrote — without it ghcr answers 404 for a perfectly good tag.
-  local tok
+  local tok digest
   tok=$(curl -sS "https://ghcr.io/token?scope=repository:kloudlite/$1:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-  curl -sfI -o /dev/null -H "Authorization: Bearer $tok" \
+  digest=$(curl -sfI -H "Authorization: Bearer $tok" \
     -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
-    "https://ghcr.io/v2/kloudlite/$1/manifests/$2"
+    "https://ghcr.io/v2/kloudlite/$1/manifests/$2" | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: *//p') || return 1
+  [ -n "$digest" ] || return 1
+  echo "$digest"
 }
 
+declare -A DIGEST
 for img in rustic-git rustic-git-agent rustic-git-gateway rustic-git-workspace; do
-  tag_exists "$img" "$SHA" || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
+  DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
-[ -z "$WEB" ] || tag_exists rustic-git-web "$WEB" || { echo "ghcr.io/kloudlite/rustic-git-web:$WEB does not exist" >&2; exit 1; }
+if [ -n "$WEB" ]; then
+  DIGEST[rustic-git-web]=$(digest_of rustic-git-web "$WEB") || { echo "ghcr.io/kloudlite/rustic-git-web:$WEB does not exist" >&2; exit 1; }
+fi
 
-# The tag character class also swallows a `dev-<sha>[-dirty]` tag dev-push.sh left behind.
-perl -pi -e "s#(ghcr\.io/kloudlite/rustic-git(-agent|-gateway|-workspace)?:)[A-Za-z0-9_.-]+#\${1}$SHA#" \
-  rustic-git.yaml k3s/agent-daemonset.yaml k3s/gateway.yaml
-[ -z "$WEB" ] || perl -pi -e "s#(ghcr\.io/kloudlite/rustic-git-web:)[A-Za-z0-9_.-]+#\${1}$WEB#" rustic-git-web.yaml
+# Match a bare :<sha> or an already digest-pinned :<sha>@sha256:<old-digest> and replace the
+# whole tail — otherwise a second run leaves :<sha>@sha256:<old>@sha256:<new>. The tag character
+# class also swallows a `dev-<sha>[-dirty]` tag dev-push.sh left behind, but only on the first
+# (bare-tag) alternative — a dev tag is never digest-pinned by this script.
+pin() {
+  perl -pi -e "s#(ghcr\.io/kloudlite/$1:)(?:[A-Za-z0-9_.-]+|[0-9a-f]{40}(?:\@sha256:[0-9a-f]{64})?)#\${1}$2\@$3#" "${@:4}"
+}
+pin 'rustic-git(?!-)' "$SHA" "${DIGEST[rustic-git]}" rustic-git.yaml
+pin 'rustic-git-agent' "$SHA" "${DIGEST[rustic-git-agent]}" k3s/agent-daemonset.yaml
+pin 'rustic-git-gateway' "$SHA" "${DIGEST[rustic-git-gateway]}" k3s/gateway.yaml
+[ -z "$WEB" ] || pin 'rustic-git-web' "$WEB" "${DIGEST[rustic-git-web]}" rustic-git-web.yaml
 
 grep -rn --include='*.yaml' -E 'image: ghcr\.io/kloudlite/' . | sed 's/^\.\///'
 cat <<EOF
