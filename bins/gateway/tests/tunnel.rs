@@ -6,7 +6,7 @@
 //! cross, which is the only thing the pump can get wrong that a type does not catch.
 
 use rustic_git_core::jwt::{Jwt, SshSessionClaims};
-use rustic_git_gateway::Gateway;
+use rustic_git_gateway::tunnel::Gateway;
 use rustic_git_workspaces::kube_test::{get, mock_client, Route};
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite;
@@ -70,7 +70,7 @@ async fn serve(routes: Vec<Route>, ssh_port: u16) -> String {
     let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(l, rustic_git_gateway::app(gw)).await.unwrap() });
+    tokio::spawn(async move { axum::serve(l, rustic_git_gateway::tunnel::app(gw)).await.unwrap() });
     format!("ws://{addr}")
 }
 

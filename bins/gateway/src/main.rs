@@ -8,7 +8,7 @@
 //! passes its probe and is unreachable from the edge. Unset is the laptop shape: HTTP only.
 
 use rustic_git_core::jwt::Jwt;
-use rustic_git_gateway::{app, Gateway};
+use rustic_git_gateway::tunnel::{app, Gateway};
 use std::sync::Arc;
 
 #[tokio::main]
