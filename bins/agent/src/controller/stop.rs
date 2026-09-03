@@ -190,9 +190,10 @@ pub async fn start_placement(
     // would need the admission policy to allow ANY `nodeName` change, and this reuses the CAS the
     // takeover path already proved. Pin first, parents second — the reverse leaves parents
     // claimable on a node that does not own the volume. A crash BETWEEN them leaves a cleared pin
-    // with placed parents: here that self-heals through `resolve_volume`'s mismatch branch,
-    // because the node named is this live owner. It does not when a DEAD node's sweep crashes
-    // there, which is why `sweep_volumes` treats an empty pin with placed parents as its own case.
+    // with placed parents: here the node the parents still name is this live owner, whose own
+    // `resolve_volume` takes the empty pin back (`spec.node_name.is_empty()` → `take_volume`). That
+    // heal never runs when a DEAD node's sweep crashes there — the node it needs is the gone one —
+    // which is why `sweep_volumes` treats an empty pin with placed parents as its own case.
     if !crate::controller::volume::release_volume(ctx, &id, &ctx.node).await? {
         return Ok(None); // someone else moved it first; next pass re-decides against the new owner
     }

@@ -1004,13 +1004,16 @@ pub(crate) async fn sweep_volumes(
         let parents: Vec<&crate::listing::Parent> = beat.all_parents.iter().filter(|p| p.volume == name).collect();
         // An EMPTY pin with parents still placed ON AN UNPLACEABLE NODE is the crash window between
         // the release CAS and the un-place: no watch matches such a parent (`status.nodeName` is
-        // neither this node nor empty) and `resolve_volume`'s self-heal only runs on the node it
-        // names — the one that is gone. The sweep is the only thing that can see it, so it finishes
+        // neither this node nor empty), and the heal for an unowned volume — `resolve_volume`'s
+        // `spec.node_name.is_empty()` → `take_volume` branch — runs only on the node the parent
+        // names, the one that is gone. The sweep is the only thing that can see it, so it finishes
         // the release rather than skipping the volume for having no owner. Nothing is re-patched:
         // the pin is already clear. A parent on a LIVE node is deliberately not this case — that is
-        // the spread's crash window, which self-heals on the owner it names — and a parent here
-        // cannot be running: the CAS that cleared the pin only ever ran on a volume with nothing
-        // running on it.
+        // the spread's crash window, and its own node's `take_volume` picks the pin back up — and a
+        // parent here cannot be running: the CAS that cleared the pin only ever ran on a volume
+        // with nothing running on it. That is also why `stranded` bypasses `volume_decision`
+        // entirely, so a drain (`mark_running: false`) finishes an interrupted release too: the
+        // only thing it un-places is a stopped parent on a node nothing can start on.
         let stranded = owner.is_empty() && parents.iter().any(|p| owners.contains(&p.node_name));
         if !stranded && (owner.is_empty() || !owners.contains(&owner)) {
             continue;
