@@ -229,7 +229,10 @@ async fn advance_head(ctx: &Arc<Ctx>, kind: &str, worktree: &str, name: &str) ->
 ///
 /// List errors propagate for the same reason `worktree_heads`' do: a half-seen set is exactly the
 /// case that deletes a cut somebody is still waiting on.
-async fn seeded_from_cuts(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
+///
+/// Read by BOTH reclaimers of a sync point — `retain` and the delete path's `cleanup_parent`.
+/// Two copies of this predicate is how one of them deletes what the other is protecting.
+pub(crate) async fn seeded_from_cuts(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
     let mut held = std::collections::HashSet::new();
     for v in Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
         if crate::controller::volume::volume_is_ready(&v) {

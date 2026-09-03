@@ -588,8 +588,9 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 ///   1. drop the parent's worktree — `{pool}/vol/{volume}/live/{id}`, the LIVE subvolume only;
 ///      `snap/` (the snapshots) is never touched, which is the whole point of the exercise.
 ///   2. delete every SYNC POINT of that worktree, whatever its phase — replication state for a
-///      worktree that no longer exists, which nothing else ever reclaims. A snapshot (a push) is
-///      never touched here, by any parent, for any reason.
+///      worktree that no longer exists, which nothing else ever reclaims — except one an
+///      unmaterialized `SeededFrom` Volume still names, which is a rescue clone's only source. A
+///      snapshot (a push) is never touched here, by any parent, for any reason.
 ///   3. if a snapshot remains on the Volume — this worktree's or another's — detach it so that
 ///      snapshot outlives its parent; otherwise leave the ownerReference and let GC delete the
 ///      Volume as it always did.
@@ -612,7 +613,13 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
         .await
         .map_err(|e| ReconcileErr(e.to_string()))?
         .items;
-    for s in items.iter().filter(|s| !s.is_snapshot() && s.spec.worktree == id) {
+    // The same predicate `retain` applies, for the same reason: an interrupted parent's rescue
+    // clone (`VolumeSource::SeededFrom`) names one of these cuts by id and has not copied the bytes
+    // yet, so deleting it settles that clone `Permanent/NoSuchSnapshot` — the documented recovery
+    // path destroyed by an ordinary delete. An Err, never an empty set: a half-seen listing is
+    // exactly the case that deletes what is still needed, and the finalizer retries the whole pass.
+    let seeded = crate::snapshot::seeded_from_cuts(ctx, &volume).await?;
+    for s in items.iter().filter(|s| !s.is_snapshot() && s.spec.worktree == id && !seeded.contains(&s.name_any())) {
         delete_ignoring_404(&snaps, &s.name_any()).await?;
     }
     // Not scoped to this worktree: a snapshot of a SIBLING worktree is just as good a reason

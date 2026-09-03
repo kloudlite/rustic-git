@@ -107,6 +107,15 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
         "/apis/rustic-git.io/v1alpha1/snapshots",
         serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": []}),
     ));
+    // The delete path now asks "does an unmaterialized rescue clone name one of these cuts"
+    // (`snapshot::seeded_from_cuts`) before it deletes any of them, so every finalizer fixture
+    // needs an answer. Appended after the caller's own routes: "no clone is seeding from anything"
+    // is only the default for the tests that are not about that rule.
+    routes.push(rustic_git_workspaces::kube_test::get(
+        "/apis/rustic-git.io/v1alpha1/volumes",
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList",
+                           "metadata": {"resourceVersion": "1"}, "items": []}),
+    ));
     // Likewise the stop's flush gate: a workspace stop now waits until another node holds its
     // final sync point, so the default answer for every test that is not ABOUT the flush is
     // "already cut, already replicated". Appended last, so a flush test's own routes win.
@@ -1186,6 +1195,73 @@ async fn deleting_a_workspace_with_only_sync_points_deletes_them_and_leaves_the_
         assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/{name}")), "{name} was kept: {:?}", rec.calls());
     }
     assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "no snapshot: the Volume goes with its parent: {:?}", rec.calls());
+}
+
+const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
+
+/// C3: deleting an interrupted workspace must not delete the sync point a rescue clone is seeding
+/// from. `retain` has this rule; the delete path did not, so an ordinary delete destroyed the
+/// documented recovery for an interrupted parent and settled the clone `Permanent/NoSuchSnapshot`.
+#[tokio::test]
+async fn deleting_a_parent_keeps_a_sync_point_a_seeded_clone_still_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    // Not Ready: a materialized clone has copied the bytes and released the pin.
+    let seeded_vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-rescue", "uid": "v-rescue"},
+        "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 5,
+                 "source": {"seededFrom": {"volume": "ws-1", "snapshot": "sync-ws-1-aaaa"}}},
+        "status": {"phase": "creating", "subvolumePresent": false}
+    });
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(
+            SNAPS,
+            snap_list(vec![ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1"), ready_transient("sync-ws-1-bbbb", "ws-1", "ws-1")]),
+        ),
+        rustic_git_workspaces::kube_test::get(VOLUMES, serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList",
+            "metadata": {"resourceVersion": "1"}, "items": [seeded_vol]})),
+        Route { method: "DELETE", path: format!("{SNAPS}/sync-ws-1-bbbb"), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})));
+
+    rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    assert!(
+        !rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-ws-1-aaaa")),
+        "a cut a SeededFrom volume names must survive its parent's delete: {:?}", rec.calls()
+    );
+    assert!(
+        rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-ws-1-bbbb")),
+        "every other sync point of the worktree still goes: {:?}", rec.calls()
+    );
+    assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "no snapshot: the Volume still goes with its parent: {:?}", rec.calls());
+}
+
+/// A failed Volume listing must delete NOTHING: a half-seen set is exactly the case that drops the
+/// cut somebody is waiting on, and the finalizer retries the whole cleanup on an Err.
+#[tokio::test]
+async fn a_failed_seeded_listing_deletes_no_sync_points() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(SNAPS, snap_list(vec![ready_transient("sync-ws-1-aaaa", "ws-1", "ws-1")])),
+        Route { method: "GET", path: VOLUMES.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})));
+
+    let out = rustic_git_agent::controller::reconcile_workspace(Arc::new(w), ctx).await;
+
+    assert!(out.is_err(), "a partial view must requeue the finalizer, not proceed");
+    assert!(
+        rec.calls().iter().all(|c| !c.starts_with("DELETE ")),
+        "nothing is deleted on a partial view: {:?}", rec.calls()
+    );
 }
 
 /// A push still being CUT when its parent was deleted keeps the Volume too: waiting for `Ready`
