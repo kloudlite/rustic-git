@@ -383,9 +383,22 @@ live_dir() { echo "$MOUNT/vol/$1/live"; }
 # ---------------------------------------------------------------------------
 # Create workspace, wait ready, write into live
 # ---------------------------------------------------------------------------
-log "creating workspace"
+# An EXPLICIT, non-default image, so the frozen-state restore assertion at the end of this script
+# is not vacuous: with the default, a restore that ignored `spec.state` entirely would still land on
+# the same image and pass. The agent's own pinned tag is the one to use — a TAGGED platform image is
+# still `model::is_default_image`, so sshd, the nix profile and zsh all keep working below, while
+# `spec.image` differs from the untagged marker a bare restore falls back to.
+WS_IMAGE=$(kubectl -n kube-system get daemonset rustic-git-agent \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="WS_DEFAULT_IMAGE")].value}')
+[ -n "$WS_IMAGE" ] || fail "the agent DaemonSet has no WS_DEFAULT_IMAGE to pin e2e-ws to"
+case "$WS_IMAGE" in
+  *:*) ;;
+  *) fail "WS_DEFAULT_IMAGE ($WS_IMAGE) carries no tag, so it equals the restore fallback and proves nothing" ;;
+esac
+
+log "creating workspace on the explicit image $WS_IMAGE"
 WS_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
-  -H 'Content-Type: application/json' -d '{"name":"e2e-ws","region":"'"$REGION_ID"'","quota_gb":5}')
+  -H 'Content-Type: application/json' -d '{"name":"e2e-ws","region":"'"$REGION_ID"'","quota_gb":5,"image":"'"$WS_IMAGE"'"}')
 WS_ID=$(echo "$WS_JSON" | field id)
 [ -n "$WS_ID" ] || fail "no id in workspace create response: $WS_JSON"
 wait_ws_ready "$WS_ID"
@@ -1035,8 +1048,15 @@ SNAP_STATE_RESTORE_ID=$(echo "$SNAP_STATE_RESTORE_JSON" | field id)
 [ -n "$SNAP_STATE_RESTORE_ID" ] || fail "no id in state-restore response: $SNAP_STATE_RESTORE_JSON"
 WS_ID=""
 wait_ws_ready "$SNAP_STATE_RESTORE_ID"
-[ "$(kubectl get workspace "$SNAP_STATE_RESTORE_ID" -o jsonpath='{.spec.image}')" = "$SRC_IMAGE" ] \
-  || fail "restore did not take the snapshot's frozen image"
+RESTORED_IMAGE=$(kubectl get workspace "$SNAP_STATE_RESTORE_ID" -o jsonpath='{.spec.image}')
+FROZEN_IMAGE=$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.image}')
+[ "$RESTORED_IMAGE" = "$SRC_IMAGE" ] || fail "restore did not take the snapshot's frozen image: $RESTORED_IMAGE != $SRC_IMAGE"
+[ "$RESTORED_IMAGE" = "$FROZEN_IMAGE" ] \
+  || fail "the restored image is not the one the Snapshot froze: $RESTORED_IMAGE != $FROZEN_IMAGE"
+# The whole point of creating e2e-ws with an explicit image: without this the assertion above would
+# pass just as well on a restore that ignored `spec.state` and fell back to the default.
+[ "$RESTORED_IMAGE" != "ghcr.io/kloudlite/rustic-git-workspace" ] \
+  || fail "the restored image is the default fallback, so the frozen state proved nothing"
 [ "$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.kind}')" = workspace ] \
   || fail "snapshot carries no state"
 
