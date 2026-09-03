@@ -555,6 +555,10 @@ fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (Str
 /// Ready, so a replica that could not reach the owner this pass would drop its local `sync-A` and
 /// gain nothing — going from one sync point to none, in exactly the partition-then-owner-death
 /// case sync points exist for. Deferring the reclaim costs a subvolume until the next clean pass.
+/// The names this returns are CANDIDATES, not verdicts: the caller re-GETs each one before
+/// deleting anything, because this list is computed from a Snapshot listing taken before
+/// `local_snapshots` and a push cut in that window is on disk and absent from it.
+///
 /// ponytail: all-or-nothing rather than transients-only, because a retired name has no CR left to
 /// read `spec.transient` off — telling a swept snapshot from a swept sync point here would mean
 /// trusting the name prefix. Split it if held-back snapshots ever cost real space.
@@ -684,10 +688,22 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     // on the same disk state without a second round trip to confirm it.
     // Gated on `any_pull_failed` — see `retired`.
     for name in retired(&have, &existing, any_pull_failed) {
-        if let Err(e) = ctx.engine.drop_snapshot(volume, &name) {
-            tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired snapshot failed; left for the next pass");
-        } else {
-            have.remove(&name);
+        // `existing` was listed before `local_snapshots`, and the Snapshot reconciler cuts in this
+        // same process: a push whose CR was created inside that window is on disk and absent from
+        // the listing, and deleting it loses a Ready push nothing can recover. One fresh GET per
+        // candidate, exactly as `sweep_orphan_snap_bytes` does; a present record OR a failed GET
+        // keeps the bytes. Candidates are rare, so this is a GET per reclaim, not per pass.
+        if !matches!(snap_api.get_opt(&name).await, Ok(None)) {
+            continue;
+        }
+        // btrfs delete takes a blocking flock and shells out — never on the reactor thread.
+        let (engine, vol, cname) = (ctx.engine.clone(), volume.to_string(), name.clone());
+        match tokio::task::spawn_blocking(move || engine.drop_snapshot(&vol, &cname)).await {
+            Ok(Ok(())) => {
+                have.remove(&name);
+            }
+            Ok(Err(e)) => tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired snapshot failed; left for the next pass"),
+            Err(e) => tracing::warn!(%volume, snapshot = %name, error = %e, "pull: the retire drop task panicked"),
         }
     }
 
@@ -1593,6 +1609,56 @@ mod reconcile_tests {
         pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
 
         assert!(rec.calls().iter().all(|c| !c.contains("volumereplicas")), "a snapshot-list error must never reach the replica write");
+    }
+
+    /// C1: a snapshot whose CR appeared AFTER this pass's listing (a push racing the pull) is on
+    /// disk and absent from `existing` — the fresh GET is what stops the pull beat deleting a
+    /// Ready push's bytes.
+    #[tokio::test]
+    async fn a_push_that_landed_during_the_pass_is_never_retired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_dir = tmp.path().join("vol").join("vol-1").join("snap");
+        std::fs::create_dir_all(snap_dir.join("push-late")).unwrap();
+        let routes = vec![
+            // The pass's own listing: empty, taken before the push's CR existed.
+            get(SNAPSHOTS, list_of("Snapshot", vec![])),
+            // The fresh per-candidate GET: the CR is there now.
+            get(format!("{SNAPSHOTS}/push-late"), ready_snapshot("push-late", "vol-1", "")),
+            not_found(format!("{VOLREPLICAS}/{}", crd::replica_name("vol-1", "node-b"))),
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
+
+        assert!(
+            rec.calls().contains(&format!("GET {SNAPSHOTS}/push-late")),
+            "the retire loop must GET each candidate fresh before deleting it: {:?}",
+            rec.calls()
+        );
+        assert!(snap_dir.join("push-late").exists(), "a snapshot whose CR exists must keep its bytes");
+    }
+
+    /// The other half: a name whose CR really is gone is still visited and handed to
+    /// `drop_commit`, so the guard did not turn the retire into a no-op. The bytes themselves are
+    /// btrfs's business — `drop_commit` is deliberately Ok-on-a-plain-directory, so off a real
+    /// filesystem the reachable assertion is the fresh GET, and `engine_commit.rs`'s loopback
+    /// tests cover the delete.
+    #[tokio::test]
+    async fn a_snapshot_with_no_cr_at_all_is_still_retired() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol").join("vol-1").join("snap").join("gone")).unwrap();
+        let routes = vec![
+            get(SNAPSHOTS, list_of("Snapshot", vec![])),
+            not_found(format!("{SNAPSHOTS}/gone")),
+            not_found(format!("{VOLREPLICAS}/{}", crd::replica_name("vol-1", "node-b"))),
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
+
+        assert!(rec.calls().contains(&format!("GET {SNAPSHOTS}/gone")), "{:?}", rec.calls());
     }
 
     /// H2: creating this node's `VolumeReplica` for the first time stamps `rustic-git.io/volume`
