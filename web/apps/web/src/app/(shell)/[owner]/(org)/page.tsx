@@ -3,6 +3,7 @@ import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import {
   activity,
+  getQuota,
   getTeam,
   getTeamProfile,
   listEnvironments,
@@ -154,13 +155,14 @@ async function memberView(
   self: string,
   team: { name: string; members: unknown[] } | null,
 ) {
-  const [repos, events, workspaces, environments] = await Promise.all([
+  const [repos, events, workspaces, environments, quota] = await Promise.all([
     listRepos(token, owner),
     activity(token, owner, 30),
     // No owner filter on the caller's own page — the api then aggregates personal work
     // plus every team they belong to, the same as the list pages do.
     listWorkspaces(token, ownHandle ? undefined : owner),
     listEnvironments(token, ownHandle ? undefined : owner),
+    getQuota(owner, token),
   ]);
   if (!repos.ok) {
     // An expired token is a session problem, not a missing namespace.
@@ -188,6 +190,9 @@ async function memberView(
         workspaces={workspaces.ok ? workspaces.value : []}
         environments={environments.ok ? environments.value : []}
         events={events.ok ? events.value : []}
+        // A read failure here is one lost section, not a broken page — see the "renders the
+        // section absent" note on `<QuotaBar>`'s call site.
+        quota={quota.ok ? quota.value : null}
       />
     </>
   );

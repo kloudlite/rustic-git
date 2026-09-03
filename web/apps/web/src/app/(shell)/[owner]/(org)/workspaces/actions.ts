@@ -12,13 +12,16 @@ import { safeSegment } from "@/lib/slug";
 import { cloneResult } from "@/lib/ws-status";
 import { getSession } from "@/lib/session";
 import { packagesField } from "@/lib/packages-field";
+import { dimFromRefusal, type QuotaDim } from "@/lib/quota";
 
 /** `ok` is what lets a dialog close on success — see `useDialogUntilSuccess`. */
 /** `warning`: the api's sentence when a stop moves a workspace off a dead node — edits since the
  *  last sync point stay on that node. Not an error: the stop happened, the person should know. */
 /** `basedOn`: the sentence naming the cut a clone was grafted onto. A success the dialog must
  *  SHOW rather than close on — it is the only place that cut is ever named. */
-export type WsActionState = { ok?: true; error?: string; warning?: string; basedOn?: string } | null;
+/** `quotaDim`: set only when `error` is the quota 409 — the dimension it named, so the form can
+ *  offer the request dialog pre-filled rather than just showing the api's sentence. */
+export type WsActionState = { ok?: true; error?: string; warning?: string; basedOn?: string; quotaDim?: QuotaDim } | null;
 
 /** Mutations are async jobs (202 + a doc whose `state` is still `creating`), so
  *  there is nothing to poll here: revalidating just re-renders the list with
@@ -201,7 +204,10 @@ export async function openInWorkspace(_prev: WsActionState, formData: FormData):
       repo: `${owner}/${repo}`,
       branch,
     });
-    if (!r.ok) return { error: r.message || "Could not open a workspace." };
+    if (!r.ok) {
+      const dim = r.kind === "conflict" ? dimFromRefusal(r.message) : null;
+      return { error: r.message || "Could not open a workspace.", quotaDim: dim ?? undefined };
+    }
   }
 
   revalidatePath(`/${owner}/workspaces`);

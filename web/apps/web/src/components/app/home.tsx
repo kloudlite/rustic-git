@@ -3,7 +3,10 @@ import { ArrowRight, SquareCode, Users } from "lucide-react";
 import { RecentActivity } from "@/components/app/recent-activity";
 import { ViewAs } from "@/components/app/view-as";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
+import { QuotaBar } from "@/components/app/quota-bar";
+import { QuotaRequestDialog } from "@/components/app/quota-request-dialog";
 import { when } from "@/lib/time";
+import type { QuotaReport } from "@/lib/quota";
 import type { ApiEnvironment, ApiEvent, ApiRepo, ApiWorkspace } from "@/lib/api";
 
 /** What to pick up first: the things that are up, then alphabetical. Without an
@@ -88,6 +91,7 @@ export function Home({
   workspaces,
   environments,
   events,
+  quota,
 }: {
   owner: string;
   title: string;
@@ -100,6 +104,8 @@ export function Home({
   workspaces: ApiWorkspace[];
   environments: ApiEnvironment[];
   events: ApiEvent[];
+  /** `null` when the read failed — the section is then absent rather than a broken page. */
+  quota: QuotaReport | null;
 }) {
   return (
     <>
@@ -163,6 +169,17 @@ export function Home({
               </ul>
             )}
           </section>
+          {quota && (
+            <section>
+              <div className="flex items-baseline justify-between">
+                <Caption>Quota</Caption>
+                <QuotaRequestDialog owner={owner} />
+              </div>
+              <div className="mt-3 border border-border bg-card px-4 py-3">
+                <QuotaBar report={quota} />
+              </div>
+            </section>
+          )}
           <section>
             <div className="flex items-baseline justify-between">
               <Caption>Repos</Caption>

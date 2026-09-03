@@ -2,6 +2,7 @@ import "server-only";
 import { cache } from "react";
 import type { Commit } from "@/lib/browse";
 import type { SnapshotState } from "@/lib/snapshot-state";
+import type { QuotaDim, QuotaReport } from "@/lib/quota";
 
 /**
  * The api server, from the web app's server side only.
@@ -993,4 +994,51 @@ export function deleteVolumeSnapshot(token: string, name: string, snapshot: stri
 
 export function volumeHistory(token: string, name: string) {
   return call<ApiCommitRecord[]>(`/v1/volumes/${encodeURIComponent(name)}/history`, { method: "GET", token });
+}
+
+/** An owner's ceiling and what is against it. Computed by the api on every request — there is no
+ *  cached number to be stale. */
+export function getQuota(owner: string, token: string) {
+  return call<QuotaReport>(`/v1/quota?owner=${encodeURIComponent(owner)}`, { method: "GET", token });
+}
+
+export type QuotaRequestDoc = {
+  id: string;
+  owner: string;
+  requested: Partial<Record<QuotaDim, number>>;
+  reason: string;
+  state: "pending" | "approved" | "denied";
+  decidedBy?: string | null;
+  decidedAt?: string | null;
+  note?: string | null;
+  createdAt?: string | null;
+};
+
+export function createQuotaRequest(
+  body: { owner?: string; requested: Partial<Record<QuotaDim, number>>; reason: string },
+  token: string,
+) {
+  return call<QuotaRequestDoc>("/v1/quota-requests", { method: "POST", token, body: JSON.stringify(body) });
+}
+
+/** No `owner` and the superadmin claim is the whole queue; otherwise the caller's own and their
+ *  teams'. */
+export function listQuotaRequests(owner: string | undefined, token: string) {
+  const q = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+  return call<QuotaRequestDoc[]>(`/v1/quota-requests${q}`, { method: "GET", token });
+}
+
+export function decideQuotaRequest(id: string, decision: "approve" | "deny", note: string, token: string) {
+  return call<QuotaRequestDoc>(`/v1/quota-requests/${encodeURIComponent(id)}/${decision}`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ note }),
+  });
+}
+
+// ponytail: the admin area (Task 9) is what actually calls this; declared here now so Task 7a's
+// api surface matches the brief. Shape is a guess at the superadmin row — narrow it when the
+// admin page reads a field this doesn't have.
+export function listSuperadmins(token: string) {
+  return call<{ user: string }[]>("/admin/superadmins", { method: "GET", token });
 }

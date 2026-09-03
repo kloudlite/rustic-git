@@ -15,6 +15,7 @@ import { snapshotTime } from "@/lib/snapshot";
 import { stateSummary, type SnapshotState } from "@/lib/snapshot-state";
 import { envCurrent } from "@/lib/env-current";
 import { DeleteSnapshotDialog } from "@/components/app/restore-dialog";
+import { QuotaRequestDialog } from "@/components/app/quota-request-dialog";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
@@ -204,7 +205,14 @@ function RestoreDialog({
               aria-label="Restored environment name"
             />
           )}
-          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          {state?.error && (
+            <div className="flex flex-wrap items-center gap-2">
+              <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>
+              {/* Only the `new` branch can hit this — restoring in place reuses the volume that
+                  already exists, so quota never blocks it. */}
+              {state.quotaDim && <QuotaRequestDialog owner={owner} dim={state.quotaDim} />}
+            </div>
+          )}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
             <Button type="submit" disabled={pending}>

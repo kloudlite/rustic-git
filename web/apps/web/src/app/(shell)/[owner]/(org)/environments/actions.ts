@@ -8,6 +8,7 @@ import * as api from "@/lib/api";
 // action refuses it — a bad one is never a real submission, since the pages that render these
 // forms fill the field from the route params.
 import { safeSegment } from "@/lib/slug";
+import { dimFromRefusal, type QuotaDim } from "@/lib/quota";
 
 /** `ok` is what lets a dialog close on success — see `useDialogUntilSuccess`. */
 export type EnvActionState = {
@@ -17,6 +18,9 @@ export type EnvActionState = {
   warning?: string;
   /** A push's request id — the only thing `push` answers with. See `pushEnvironment`. */
   requestId?: string;
+  /** Set only when `error` is the quota 409 — see `restoreEnvironmentFrom`'s `new` branch, the
+   *  one place this app creates an environment (there is no separate `createEnvironment` action). */
+  quotaDim?: QuotaDim;
 } | null;
 
 export async function startEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
@@ -115,7 +119,12 @@ export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: Fo
     mode === "inplace"
       ? await api.restoreEnvironmentInPlace(token, id, snapshotId)
       : await api.restoreEnvironment(token, name, snapshotId);
-  if (!r.ok) return { error: r.message || "Could not restore." };
+  if (!r.ok) {
+    // `new` is the only path here that allocates a new environment, so it is the only branch a
+    // quota 409 can come from — restoring in place reuses the volume that already exists.
+    const dim = mode === "new" && r.kind === "conflict" ? dimFromRefusal(r.message) : null;
+    return { error: r.message || "Could not restore.", quotaDim: dim ?? undefined };
+  }
   revalidatePath(`/${owner}/environments`);
   revalidatePath(`/${owner}/environments/${id}`);
   revalidatePath(`/${owner}/environments/${id}/snapshots`);
