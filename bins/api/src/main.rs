@@ -3,8 +3,8 @@
 //! Separate because the two have nothing in common at runtime. The git server owns
 //! repositories: it holds SlateDB writer leases, answers SSH, and a restart moves
 //! ownership around the fleet. This one owns no repository state at all — it reads
-//! through a cache and talks to Cosmos — so it scales on request volume, restarts
-//! freely, and must never be the reason a git node bounces.
+//! through a cache and the cluster (Kubernetes CRDs, for workspaces/environments/regions) — so
+//! it scales on request volume, restarts freely, and must never be the reason a git node bounces.
 //!
 //! One binary with a subcommand made that distinction a convention. Two binaries
 //! make it a fact: this process cannot open a repository for writing, because none
@@ -61,7 +61,7 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    // Explicit here as well as inside open_store: this process opens TLS to Cosmos
+    // Explicit here as well as inside open_store: this process opens TLS to the k3s API
     // too, and a future reordering must not depend on which call happens first.
     install_crypto_provider();
 
@@ -103,19 +103,11 @@ async fn run() -> Result<()> {
         }
     };
 
-    // Workspaces/environments/regions routes need both a MetaStore and a signer, so they can
-    // only be mounted once `jwt` above is Some. `COSMOS_ENDPOINT` unset means dev: an in-memory
-    // store, lost on restart, same spirit as `RUSTIC_GIT_S3_URL=mem://` for the git store.
+    // Workspaces/environments/regions routes need a signer, so they can only be mounted once
+    // `jwt` above is Some. Regions themselves are a CRD (`crd::Region`), read through the same
+    // kube client every other route here uses — no separate store to wire up.
     let workspaces = match jwt.clone() {
         Some(jwt) => {
-            let meta_store: Arc<dyn rustic_git_workspaces::store::MetaStore> =
-                match rustic_git_workspaces::store::from_env().await.map_err(err)? {
-                    Some(s) => s,
-                    None => {
-                        tracing::warn!("COSMOS_ENDPOINT unset: workspaces metadata is in-memory (dev only)");
-                        Arc::new(rustic_git_workspaces::store::MemStore::new())
-                    }
-                };
             // No admin-role system exists yet anywhere in this codebase (checked); a static
             // allowlist of emails is the whole mechanism for the region routes until one does.
             let admins = std::env::var("RUSTIC_GIT_WORKSPACES_ADMINS")
@@ -124,7 +116,7 @@ async fn run() -> Result<()> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let mut state = rustic_git_workspaces::api::ApiState::new(meta_store, jwt, admins);
+            let mut state = rustic_git_workspaces::api::ApiState::new(jwt, admins);
             // So a new workspace comes up with the owner's platform-issued git key already mounted.
             state = state.with_keys(store.clone());
             if let Some(dir) = directory.clone() {

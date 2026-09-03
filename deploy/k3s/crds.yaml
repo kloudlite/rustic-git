@@ -1513,6 +1513,74 @@
           }
         ]
       }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "regions.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "Region",
+          "plural": "regions",
+          "singular": "region"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.status",
+                "name": "Status",
+                "type": "string"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for RegionSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "A region a workspace may run in — cluster-scoped, like every other kind here.\n\nCross-cluster metadata by nature, and it used to live in Cosmos for exactly that reason. It does\nnot need to: a region is registered by an admin, read on every create, and changed almost never,\nso the cheapest correct home is the API server this tier already talks to. `spec.status` is\nDESIRED state (`active`/`inactive`) — re-registering is the only way to retire one, and a\nretired region stops being offered while its existing workspaces keep running.",
+                    "properties": {
+                      "name": {
+                        "description": "What a person sees in the region picker. The object's NAME is the id.",
+                        "type": "string"
+                      },
+                      "status": {
+                        "description": "`active` or `inactive`.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "status"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "description": "Empty on purpose: no controller observes a region. It exists so the kind has the same\n`/status` subresource split every sibling has, rather than being the one kind where a status\nwrite would fold into spec.",
+                    "nullable": true,
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "Region",
+                "type": "object"
+              }
+            },
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
     }
   ]
 }

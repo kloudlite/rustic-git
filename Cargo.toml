@@ -111,12 +111,6 @@ slatedb-common = { version = "0.15", features = ["test-util"] }
 async-trait = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
-# Cosmos DB SQL API client for the workspaces/environments metastore (Task 2). Its HTTP client
-# is azure_core's reqwest 0.12 — the second reqwest major in the lock, and the one that carried
-# native-tls/openssl-sys until crates/workspaces turned azure_core's defaults off and switched
-# that copy to rustls. `cargo tree -i openssl-sys --target x86_64-unknown-linux-gnu` must stay
-# empty (on macOS the check is vacuous: native-tls there is Security.framework).
-azure_data_cosmos = "0.30"
 # Already in the lock via slatedb (its aws/azure features); declared directly for the
 # workspaces snapshot engine's layer store (Task 3), pinned to slatedb's version.
 #

@@ -16,13 +16,13 @@ cargo clippy --workspace -- -D warnings      # CI gates on this (image.yml test 
                                              # no NEW warnings in files you touch.
 ./tests/registry_e2e.sh                      # real docker push/pull round trip; exit 77 = the
                                              # docker half was skipped (no daemon) — not a pass
-./tests/ws_e2e.sh                            # real server+api+agent+Cosmos+Azure+btrfs workspaces
+./tests/ws_e2e.sh                            # real server+api+agent+Azure+btrfs workspaces
                                              # round trip against a k3s cluster (still three
                                              # binaries — the agent is a controller now, not a
                                              # poller — and rustic-git-api serves /v1/*);
                                              # exit 77 = a prerequisite (root-capable btrfs, a
                                              # reachable cluster with the CRDs installed,
-                                             # COSMOS_*/AZURE_* env) was missing — needs a Linux VM
+                                             # AZURE_* env) was missing — needs a Linux VM
                                              # with btrfs and k3s, not this Mac
 
 cd web && bun install
@@ -201,9 +201,9 @@ There is no Workspace finalizer for this: `/v1`'s `delete_ws` removes the enviro
 itself while the spec is still readable, and the agent's janitor sweeps orphaned `{pool}/attach/{id}`
 directories left behind by a workspace that is simply gone.
 
-Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests) now
-holds ONLY cross-cluster `Region` metadata — `bins/api` is its only writer, via `/v1/regions`.
-Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. Snapshot BYTES have
+`Region` is a cluster-scoped CRD (`crd::Region`) like everything else here — `bins/api` is its only
+writer, via `/v1/regions` (server-side apply, so a second POST of the same id retires or renames it
+rather than 409ing). Snapshot BYTES have
 no object store at all: a snapshot is a read-only btrfs subvolume under `{pool}/vol/{volume}/snap/`,
 and it reaches other nodes as a `btrfs send` streamed over the peer listener between agents
 (`bins/agent/src/peer.rs`) — never uploaded anywhere. Durability is therefore replica count

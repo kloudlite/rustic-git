@@ -283,17 +283,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-lock"
-version = "3.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
-dependencies = [
- "event-listener",
- "event-listener-strategy",
- "pin-project-lite",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -446,56 +435,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
-]
-
-[[package]]
-name = "azure_core"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfe45c6bd7ce3a592327ee4e35b5bd16681714c4443c8a9884abb5731cc4d833"
-dependencies = [
- "async-lock",
- "async-trait",
- "azure_core_macros",
- "bytes",
- "futures",
- "hmac 0.12.1",
- "pin-project",
- "rustc_version",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
- "typespec",
- "typespec_client_core",
-]
-
-[[package]]
-name = "azure_core_macros"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "190d6e0622d17e2a28239b55d2829d98b348269adcd4ab86a21d3304aa3500cb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "tracing",
-]
-
-[[package]]
-name = "azure_data_cosmos"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "196ab882f9a566826713e52ab6bd3a744c4942699f20970565194a81a268ce93"
-dependencies = [
- "async-lock",
- "async-trait",
- "azure_core",
- "futures",
- "serde",
- "serde_json",
- "tracing",
- "url",
 ]
 
 [[package]]
@@ -1441,9 +1380,6 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "derive-syn-parse"
@@ -2953,7 +2889,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -3512,7 +3447,7 @@ dependencies = [
  "dirs",
  "futures",
  "open",
- "reqwest 0.13.4",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",
@@ -4236,7 +4171,7 @@ dependencies = [
  "percent-encoding",
  "quick-xml",
  "rand 0.10.2",
- "reqwest 0.13.4",
+ "reqwest",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -5246,46 +5181,6 @@ checksum = "51743d3e274e2b18df81c4dc6caf8a5b8e15dbe799e0dca05c7617380094e884"
 
 [[package]]
 name = "reqwest"
-version = "0.12.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
-dependencies = [
- "base64",
- "bytes",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams 0.4.2",
- "web-sys",
- "webpki-roots 1.0.9",
-]
-
-[[package]]
-name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
@@ -5322,7 +5217,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams 0.5.0",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -5554,7 +5449,7 @@ dependencies = [
  "kube-runtime",
  "libc",
  "metrics",
- "reqwest 0.13.4",
+ "reqwest",
  "rustic-git-core",
  "rustic-git-storage",
  "rustic-git-workspaces",
@@ -5581,7 +5476,7 @@ dependencies = [
  "pgp",
  "rand 0.8.7",
  "rand_core 0.10.1",
- "reqwest 0.13.4",
+ "reqwest",
  "russh",
  "rustic-git-core",
  "rustic-git-pulls",
@@ -5618,7 +5513,7 @@ dependencies = [
  "futures",
  "metrics",
  "rand 0.8.7",
- "reqwest 0.13.4",
+ "reqwest",
  "rustic-git-core",
  "rustic-git-pulls",
  "rustic-git-storage",
@@ -5639,7 +5534,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "rand 0.8.7",
- "reqwest 0.13.4",
+ "reqwest",
  "russh",
  "rustls",
  "serde",
@@ -5764,7 +5659,7 @@ dependencies = [
  "gix-odb",
  "metrics",
  "rand 0.8.7",
- "reqwest 0.13.4",
+ "reqwest",
  "russh",
  "rustic-git-app",
  "rustic-git-core",
@@ -5824,7 +5719,7 @@ dependencies = [
  "gix-odb",
  "gix-traverse",
  "mongodb",
- "reqwest 0.13.4",
+ "reqwest",
  "russh",
  "rustic-git-api",
  "rustic-git-app",
@@ -5850,7 +5745,7 @@ dependencies = [
  "futures",
  "metrics",
  "rand 0.8.7",
- "reqwest 0.13.4",
+ "reqwest",
  "rustic-git-core",
  "rustic-git-pulls",
  "rustic-git-registry",
@@ -5869,8 +5764,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "azure_core",
- "azure_data_cosmos",
  "bytes",
  "chrono",
  "futures",
@@ -5881,8 +5774,7 @@ dependencies = [
  "libc",
  "object_store",
  "rand 0.8.7",
- "reqwest 0.12.28",
- "reqwest 0.13.4",
+ "reqwest",
  "rustic-git-core",
  "rustic-git-server",
  "rustic-git-storage",
@@ -6947,7 +6839,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
- "js-sys",
  "num-conv",
  "powerfmt",
  "serde_core",
@@ -7317,57 +7208,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
-name = "typespec"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dd1eb4a538c1ab3d5c05437129bc16891296146b23c9b0bb3f5df99f5b3a18d"
-dependencies = [
- "base64",
- "bytes",
- "futures",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "typespec_client_core"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e632235c99ae896a3c451d1ead00cea11a2219aeda1b35a74027fe99ea3f3b72"
-dependencies = [
- "async-trait",
- "base64",
- "dyn-clone",
- "futures",
- "getrandom 0.3.4",
- "pin-project",
- "rand 0.9.5",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "time",
- "tokio",
- "tracing",
- "typespec",
- "typespec_macros",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "typespec_macros"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7048df3b053daa72e8ea91894ebcb2f0511ba52737379834524d82074a94a458"
-dependencies = [
- "proc-macro2",
- "quote",
- "rustc_version",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "ucd-trie"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7611,19 +7451,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

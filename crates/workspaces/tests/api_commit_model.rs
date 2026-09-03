@@ -3,7 +3,6 @@
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
 use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
-use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -90,10 +89,9 @@ fn token(jwt: &Jwt, username: &str) -> String {
 }
 
 async fn server(routes: Vec<Route>) -> Server {
-    let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
-    let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new()).with_kube(client);
+    let state = ApiState::new(jwt.clone(), HashSet::new()).with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));

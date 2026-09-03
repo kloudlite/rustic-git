@@ -5,7 +5,6 @@
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory};
 use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
-use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -47,28 +46,28 @@ fn list_of(kind: &str, items: Vec<Value>) -> Value {
     json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
+/// Creates check the region against the registered ones, so every fixture that creates gets
+/// this route folded into it below rather than repeating it per test.
+fn region_obj(id: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+        "metadata": {"name": id},
+        "spec": {"name": id, "status": "active"}
+    })
+}
+
 fn create_routes() -> Vec<Route> {
     vec![
         get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
         post(format!("{API}/environments"), env_obj("env-new", "acme", NODE)),
+        get(format!("{API}/regions/centralindia"), region_obj("centralindia")),
     ]
 }
 
 async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
-    let store = Arc::new(MemStore::new());
-    // Creates check the region against the registered ones, so the harness registers the one
-    // every fixture names.
-    store
-        .put_region(&rustic_git_workspaces::model::Region {
-            id: "centralindia".into(),
-            name: "centralindia".into(),
-            status: "active".into(),
-        })
-        .await
-        .unwrap();
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new());
+    let mut state = ApiState::new(jwt.clone(), HashSet::new());
     if with_membership {
         state = state.with_directory(Arc::new(StubMembership));
     }
@@ -151,7 +150,9 @@ async fn non_member_cannot_create_or_see_a_team_environment() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
-    assert!(s.rec.calls().is_empty(), "a refused create writes nothing");
+    // `check_region` reads the cluster before membership is checked, so a call landed — but
+    // nothing was WRITTEN, which is the actual guarantee this test is after.
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "a refused create writes nothing");
 
     // And an existing team environment is a 404 to them, never a 403 — they learn nothing.
     let resp = client.get(format!("{}/v1/environments/env-1", s.base)).bearer_auth(&stranger).send().await.unwrap();
@@ -226,7 +227,9 @@ async fn personal_workspace_unaffected_by_membership() {
                 "storage": {"quotaGb": 20}, "desiredState": "running"
             }
         }),
-    )];
+    ),
+        get(format!("{API}/regions/centralindia"), region_obj("centralindia")),
+    ];
     let s = server(true, routes).await;
     let tok = token(&s.jwt, "karthik");
 

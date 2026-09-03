@@ -3,8 +3,9 @@
 //!
 //! Every mutation writes a CUSTOM RESOURCE and answers 202 with a projection of it. The object is
 //! the work item: there is no queue, no lease and no dispatch — the node named by `spec.nodeName`
-//! reconciles what it owns. `Region` alone still lives in Cosmos (`store`), because it is
-//! cross-cluster metadata no single API server can hold.
+//! reconciles what it owns. `Region` is a CRD too (`crd::Region`) — cross-cluster metadata by
+//! nature, but registered rarely enough that the cluster this tier already talks to is the
+//! cheapest correct home for it.
 //!
 //! Auth mirrors `crates/api`'s `caller()`: a Bearer JWT identifies the owner. There is no
 //! existing "is this caller an admin" check anywhere in the codebase to reuse (grepped for one —
@@ -19,7 +20,6 @@
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::labels;
 use crate::model::*;
-use crate::store::MetaStore;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{Resource, ResourceExt};
@@ -81,7 +81,6 @@ pub trait Directory: Send + Sync {
 }
 
 pub struct ApiState {
-    pub store: Arc<dyn MetaStore>,
     pub jwt: Arc<Jwt>,
     /// Emails allowed to hit the admin-gated region routes. See module docs.
     pub admins: HashSet<String>,
@@ -104,9 +103,8 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
+    pub fn new(jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
         ApiState {
-            store,
             jwt,
             admins,
             directory: None,
@@ -224,13 +222,6 @@ fn require_admin(state: &ApiState, email: &str) -> Result<(), Response> {
     }
 }
 
-fn store_err(e: crate::store::StoreErr) -> Response {
-    // The text names Cosmos endpoints and query shapes; it is ours to read, not the caller's.
-    let crate::store::StoreErr::Other(msg) = e;
-    tracing::error!(error = %msg, "directory store");
-    (StatusCode::INTERNAL_SERVER_ERROR, "directory error").into_response()
-}
-
 // ── regions ──────────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -248,6 +239,19 @@ fn active_status() -> String {
     "active".into()
 }
 
+/// What a caller sees: the three fields `check_region` and the web consume, and nothing about
+/// where the region's infrastructure lives.
+#[derive(serde::Serialize)]
+struct RegionDoc {
+    id: String,
+    name: String,
+    status: String,
+}
+
+fn region_doc(r: &crd::Region) -> RegionDoc {
+    RegionDoc { id: r.name_any(), name: r.spec.name.clone(), status: r.spec.status.clone() }
+}
+
 async fn create_region(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -258,13 +262,19 @@ async fn create_region(
     let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
     let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
     require_admin(&s, &email)?;
-    let r = Region {
-        id: body.id,
-        name: body.name,
-        status: if body.status == "inactive" { "inactive".into() } else { "active".into() },
-    };
-    s.store.put_region(&r).await.map_err(store_err)?;
-    Ok((StatusCode::CREATED, Json(r)).into_response())
+    // The id becomes an object name and a gateway hostname label, so it goes through the same
+    // segment check every other path segment here does.
+    check_path_segment(&body.id)?;
+    let status = if body.status == "inactive" { "inactive" } else { "active" };
+    let r = crd::Region::new(&body.id, crd::RegionSpec { name: body.name, status: status.into() });
+    // Apply, not create: re-registering IS how a region is retired or renamed, so a second POST of
+    // the same id must not be a 409.
+    let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
+    let saved = api
+        .patch(&body.id, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&r))
+        .await
+        .map_err(kube_err)?;
+    Ok((StatusCode::CREATED, Json(region_doc(&saved))).into_response())
 }
 
 async fn list_regions(
@@ -272,8 +282,10 @@ async fn list_regions(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     caller(&s, &headers).await?;
-    let regions = s.store.regions().await.map_err(store_err)?;
-    Ok(Json(regions).into_response())
+    let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
+    let rows: Vec<RegionDoc> =
+        api.list(&ListParams::default()).await.map_err(kube_err)?.items.iter().map(region_doc).collect();
+    Ok(Json(rows).into_response())
 }
 
 // ── the cluster ──────────────────────────────────────────────────────────
@@ -566,8 +578,14 @@ fn check_ws_name(name: &str) -> Result<(), Response> {
 /// hostname. Unknown: a workspace no controller ever claims. Chosen: a binding name squatted in
 /// someone else's region. Only what an admin registered and left active gets through.
 async fn check_region(s: &ApiState, region: &str) -> Result<(), Response> {
-    let known = s.store.regions().await.map_err(store_err)?;
-    if known.iter().any(|r| r.id == region && r.status == "active") {
+    check_path_segment(region)?;
+    let api: Api<crd::Region> = Api::all(kube(s)?.clone());
+    let active = api
+        .get_opt(region)
+        .await
+        .map_err(kube_err)?
+        .is_some_and(|r| r.spec.status == "active");
+    if active {
         return Ok(());
     }
     Err((StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": "unknown region"}))).into_response())
@@ -2626,8 +2644,8 @@ async fn volume_refs(
 
 #[cfg(test)]
 mod tests {
-    /// Cosmos and kube error text names endpoints, keys and query shapes; the caller gets a fixed
-    /// body and the log gets the detail.
+    /// Kube error text names endpoints, keys and query shapes; the caller gets a fixed body and
+    /// the log gets the detail.
     #[tokio::test]
     async fn backend_error_text_never_reaches_the_caller() {
         let body = |r: axum::response::Response| async move {
@@ -2636,8 +2654,6 @@ mod tests {
         let e = kube::Error::Api(Box::new(kube::core::Status::failure("AccountEndpoint=https://secret", "InternalError").with_code(500)));
         let r = super::kube_err(e);
         assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(!body(r).await.contains("secret"));
-        let r = super::store_err(crate::store::StoreErr::Other("AccountEndpoint=https://secret".into()));
         assert!(!body(r).await.contains("secret"));
     }
 
@@ -2691,7 +2707,6 @@ mod tests {
             }
         }
         let state = ApiState::new(
-            Arc::new(crate::store::MemStore::new()),
             Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
             Default::default(),
         )

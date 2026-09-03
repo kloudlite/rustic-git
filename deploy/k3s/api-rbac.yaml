@@ -43,6 +43,11 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumereplicas"]
     verbs: ["get", "list"]
+  # `/v1/regions` is the only writer. `patch` because re-registering a region IS how one is
+  # retired — there is no delete — and a create would 409 on the second POST of the same id.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["regions"]
+    verbs: ["get", "list", "create", "patch"]
   # One policy, one moment: deleting an ATTACHED workspace. Nothing stamps a finalizer on a
   # Workspace, so its deletion is garbage collection the agent never observes, and the
   # environment-side half of the attach grant lives in the environment's namespace where the

@@ -45,7 +45,7 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
         let v = &crd.spec.versions[0];
         assert!(v.subresources.as_ref().is_some_and(|s| s.status.is_some()), "{}", crd.spec.names.kind);
         let want: &[&str] = match crd.spec.names.kind.as_str() {
-            "OwnerBinding" => &[],
+            "OwnerBinding" | "Region" => &[],
             "Volume" => &[".spec.nodeName"],
             "Workspace" | "Environment" => &[".status.nodeName", ".status.volumeRef"],
             "Snapshot" => &[".spec.volume"],
@@ -83,13 +83,14 @@ fn snapshot_state_preserves_unknown_fields() {
     assert_eq!(*ext, Some(true), "state must set x-kubernetes-preserve-unknown-fields: true");
 }
 
-/// The six kinds, so a kind added to the group without a CRD entry cannot ship: `all_crds` is
+/// The seven kinds, so a kind added to the group without a CRD entry cannot ship: `all_crds` is
 /// what generates the manifest AND what the agent's startup precondition check reads.
-/// `SnapshotRequest` — the object-store push request — is gone (Task 8).
+/// `SnapshotRequest` — the object-store push request — is gone (Task 8). `Region` replaced the
+/// Cosmos-backed metastore (Task 9).
 #[test]
-fn all_six_kinds_are_generated() {
+fn all_seven_kinds_are_generated() {
     let kinds: Vec<String> = all_crds().into_iter().map(|c| c.spec.names.kind).collect();
-    for k in ["Volume", "Workspace", "Environment", "OwnerBinding", "Snapshot", "VolumeReplica"] {
+    for k in ["Volume", "Workspace", "Environment", "OwnerBinding", "Snapshot", "VolumeReplica", "Region"] {
         assert!(kinds.iter().any(|g| g == k), "{k} missing from all_crds(): {kinds:?}");
     }
 }
@@ -106,7 +107,8 @@ fn every_phase_is_a_schema_enum() {
         // OwnerBinding has no phase and needs none: `NamespaceReady` is its whole state.
         // VolumeReplica's phase is deliberately a plain string, not `Phase` — it must be a
         // `selectableField`, and the API server only accepts a string type there.
-        if crd.spec.names.kind == "OwnerBinding" || crd.spec.names.kind == "VolumeReplica" {
+        // Region's status is empty on purpose (no controller observes it) and has no phase at all.
+        if matches!(crd.spec.names.kind.as_str(), "OwnerBinding" | "VolumeReplica" | "Region") {
             continue;
         }
         let status = crd.spec.versions[0]

@@ -1,23 +1,10 @@
 //! Domain models, mirrored 1:1 against the Cosmos JSON in
 //! docs/superpowers/specs/2026-08-24-workspaces-environments-design.md §Domain model.
+//!
+//! `Region` moved out of here — it is `crd::Region` now, a CRD like everything else.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-
-/// A region a workspace may run in. `status` is `active` or `inactive`: re-registering is the only
-/// way to retire one, and a retired region must stop being offered while its records stay readable.
-///
-/// No storage account and no blob container: snapshot bytes are btrfs subvolumes replicated
-/// between agents and have never touched an object store since the durable-snapshots cutover.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Region {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-}
-
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

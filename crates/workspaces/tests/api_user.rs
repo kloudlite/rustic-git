@@ -8,7 +8,6 @@ use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState, Directory};
 use rustic_git_workspaces::kube_test::{get, mock_client, post, stub_registry, Recorder, Route};
 use rustic_git_workspaces::upstream::Upstream;
-use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,9 +17,24 @@ const NODE: &str = "node-a";
 
 struct Server {
     base: String,
-    store: Arc<MemStore>,
     jwt: Arc<Jwt>,
     rec: Recorder,
+}
+
+/// Regions are a CRD like everything else in this control plane: a GET by name is what
+/// `check_region` does on every create and restore. Folded into every helper below rather than
+/// into each test's route list — an unmatched route in the mock is simply never hit.
+fn region_obj(id: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+        "metadata": {"name": id},
+        "spec": {"name": id, "status": "active"}
+    })
+}
+
+fn with_region(mut routes: Vec<Route>) -> Vec<Route> {
+    routes.push(get(format!("{API}/regions/centralindia"), region_obj("centralindia")));
+    routes
 }
 
 fn vol_obj(name: &str, owner: &str) -> Value {
@@ -91,17 +105,12 @@ fn create_routes() -> Vec<Route> {
 }
 
 async fn server_with(admins: &[&str], routes: Option<Vec<Route>>) -> Server {
-    let store = Arc::new(MemStore::new());
-    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(
-        store.clone() as Arc<dyn MetaStore>,
-        jwt.clone(),
-        admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
-    );
+    let mut state =
+        ApiState::new(jwt.clone(), admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>());
     let rec = match routes {
         Some(routes) => {
-            let (client, rec) = mock_client(routes);
+            let (client, rec) = mock_client(with_region(routes));
             state = state.with_kube(client);
             rec
         }
@@ -111,7 +120,7 @@ async fn server_with(admins: &[&str], routes: Option<Vec<Route>>) -> Server {
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), store, jwt, rec }
+    Server { base: format!("http://{addr}"), jwt, rec }
 }
 
 async fn server(routes: Vec<Route>) -> Server {
@@ -121,18 +130,16 @@ async fn server(routes: Vec<Route>) -> Server {
 /// The same, plus a stand-in server tier — needed by every route that reads snapshots, since those
 /// records do not live in the cluster.
 async fn server_with_registry(routes: Vec<Route>, registry_base: String) -> Server {
-    let store = Arc::new(MemStore::new());
-    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let (client, rec) = mock_client(routes);
-    let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+    let (client, rec) = mock_client(with_region(routes));
+    let state = ApiState::new(jwt.clone(), HashSet::new())
         .with_kube(client)
         .with_upstream(Arc::new(Upstream::new(registry_base, "peer-secret")));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), store, jwt, rec }
+    Server { base: format!("http://{addr}"), jwt, rec }
 }
 
 /// `karthik` is the only member of team `acme` — enough to prove that team membership does not
@@ -147,11 +154,9 @@ impl Directory for StubMembership {
 }
 
 async fn server_with_teams(routes: Vec<Route>, registry_base: String) -> Server {
-    let store = Arc::new(MemStore::new());
-    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let (client, rec) = mock_client(routes);
-    let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+    let (client, rec) = mock_client(with_region(routes));
+    let state = ApiState::new(jwt.clone(), HashSet::new())
         .with_kube(client)
         .with_directory(Arc::new(StubMembership))
         .with_upstream(Arc::new(Upstream::new(registry_base, "peer-secret")));
@@ -159,7 +164,7 @@ async fn server_with_teams(routes: Vec<Route>, registry_base: String) -> Server 
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), store, jwt, rec }
+    Server { base: format!("http://{addr}"), jwt, rec }
 }
 
 /// A workspace's snapshots are its OWNER's undo history, not a team artifact: workspace volumes
@@ -193,17 +198,6 @@ async fn a_teammate_cannot_restore_another_members_workspace_snapshot() {
 
 fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
-}
-
-async fn region(store: &MemStore, id: &str) {
-    store
-        .put_region(&rustic_git_workspaces::model::Region {
-            id: id.into(),
-            name: id.into(),
-            status: "active".into(),
-        })
-        .await
-        .unwrap();
 }
 
 /// One object per user action. The API used to write two and pick a node; both are the
@@ -613,9 +607,53 @@ async fn workspace_routes_without_a_cluster_are_503() {
     assert_eq!(resp.status(), 503);
 }
 
+/// Regions are a CRD like everything else in this control plane: an admin POST writes one object,
+/// and a create reads it back by name. No Cosmos, and no in-memory fallback that a restart forgets.
+#[tokio::test]
+async fn registering_a_region_writes_one_custom_resource() {
+    let s = server_with(
+        &["admin@example.com"],
+        Some(vec![Route { method: "PATCH", path: format!("{API}/regions/centralindia"), status: 201, body: region_obj("centralindia") }]),
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/regions", s.base))
+        .bearer_auth(s.jwt.mint("admin@example.com", "Admin", Some("admin")).unwrap())
+        .json(&json!({"id": "centralindia", "name": "Central India"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let r = &s.rec.sent("PATCH", &format!("{API}/regions/centralindia"))[0];
+    assert_eq!(r["metadata"]["name"], "centralindia");
+    assert_eq!(r["spec"]["name"], "Central India");
+    assert_eq!(r["spec"]["status"], "active", "a new region is active unless it says otherwise");
+}
+
+/// An inactive region must stop being offered to new workspaces while its existing records stay
+/// readable — the one rule the region routes have ever had.
+#[tokio::test]
+async fn creating_in_an_inactive_region_is_refused() {
+    let mut inactive = region_obj("centralindia");
+    inactive["spec"]["status"] = json!("inactive");
+    let s = server(vec![get(format!("{API}/regions/centralindia"), inactive)]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422, "{}", resp.text().await.unwrap());
+}
+
 #[tokio::test]
 async fn region_create_requires_admin() {
-    let s = server_with(&["admin@example.com"], None).await;
+    let s = server_with(
+        &["admin@example.com"],
+        Some(vec![Route { method: "PATCH", path: format!("{API}/regions/centralindia"), status: 201, body: region_obj("centralindia") }]),
+    )
+    .await;
     let client = reqwest::Client::new();
 
     let non_admin = token(&s.jwt, "karthik");
@@ -644,7 +682,11 @@ async fn region_create_requires_admin() {
 /// map of our infrastructure.
 #[tokio::test]
 async fn listing_regions_never_names_a_storage_account() {
-    let s = server(vec![]).await;
+    let s = server(vec![get(
+        format!("{API}/regions"),
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": [region_obj("centralindia")]}),
+    )])
+    .await;
     let resp = reqwest::Client::new()
         .get(format!("{}/v1/regions", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
@@ -662,7 +704,6 @@ async fn listing_regions_never_names_a_storage_account() {
 #[tokio::test]
 async fn create_env_writes_exactly_one_unplaced_environment() {
     let s = server(create_routes()).await;
-    region(&s.store, "centralindia").await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
@@ -872,11 +913,9 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
             body: json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "user-key"}}),
         },
     ];
-    let store = Arc::new(MemStore::new());
-    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
-    let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+    let state = ApiState::new(jwt.clone(), HashSet::new())
         .with_kube(client)
         .with_keys(keys)
         .with_directory(Arc::new(StubKeys));
@@ -913,7 +952,9 @@ async fn create_refuses_a_package_that_is_not_an_attribute_name() {
     assert_eq!(resp.status(), 422);
     let body: Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("$(id)"), "{body}");
-    assert!(s.rec.calls().is_empty(), "a refused create writes nothing");
+    // `check_region` reads the cluster before packages are validated, so a call landed — but
+    // nothing was WRITTEN, which is the actual guarantee this test is after.
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "a refused create writes nothing");
 }
 
 /// The name lands verbatim in generated ssh config on every TEAMMATE's machine, so a newline in
@@ -989,18 +1030,16 @@ impl Directory for StubCliTokens {
 }
 
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
-    let store = Arc::new(MemStore::new());
-    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let (client, rec) = mock_client(routes);
-    let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+    let (client, rec) = mock_client(with_region(routes));
+    let state = ApiState::new(jwt.clone(), HashSet::new())
         .with_kube(client)
         .with_directory(Arc::new(StubCliTokens(live)));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), store, jwt, rec }
+    Server { base: format!("http://{addr}"), jwt, rec }
 }
 
 #[tokio::test]
@@ -1211,7 +1250,6 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
         ok(&long_ns),
     ]);
     let state = ApiState::new(
-        Arc::new(MemStore::new()) as Arc<dyn MetaStore>,
         Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
         HashSet::new(),
     )
@@ -1241,13 +1279,18 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
 /// an admin registered and left active gets past the create.
 #[tokio::test]
 async fn an_unknown_or_inactive_region_is_refused_on_create() {
-    let s = server(create_routes()).await;
-    let mut inactive = rustic_git_workspaces::model::Region {
-        id: "westeurope".into(),
-        name: "westeurope".into(),
-        status: "inactive".into(),
-    };
-    s.store.put_region(&inactive).await.unwrap();
+    let mut inactive = region_obj("westeurope");
+    inactive["spec"]["status"] = json!("inactive");
+    let mut active = inactive.clone();
+    active["spec"]["status"] = json!("active");
+    // The loop below hits `regions/westeurope` twice while inactive (workspace, then
+    // environment); the mock repeats the last route once its list is exhausted, so the final
+    // create after "activating" it lands on `active` too.
+    let mut routes = create_routes();
+    routes.push(get(format!("{API}/regions/westeurope"), inactive.clone()));
+    routes.push(get(format!("{API}/regions/westeurope"), inactive));
+    routes.push(get(format!("{API}/regions/westeurope"), active));
+    let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let client = reqwest::Client::new();
     for region in ["nosuch", "centralindia-x", "westeurope"] {
@@ -1270,9 +1313,7 @@ async fn an_unknown_or_inactive_region_is_refused_on_create() {
     }
     assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
-    // Activated, the same id is accepted.
-    inactive.status = "active".into();
-    s.store.put_region(&inactive).await.unwrap();
+    // Activated (the mock's 3rd route for this path), the same id is accepted.
     let resp = client
         .post(format!("{}/v1/workspaces", s.base))
         .bearer_auth(&tok)

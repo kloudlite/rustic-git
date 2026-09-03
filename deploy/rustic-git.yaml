@@ -127,14 +127,6 @@ spec:
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
             - name: RUSTIC_GIT_MONGO_URI
               valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
-            # Workspaces control plane: cross-cluster Region metadata only (Cosmos-backed); absent
-            # secret leaves the region routes answering 503 and the feature dark — pods still boot.
-            - name: COSMOS_ENDPOINT
-              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: endpoint, optional: true } }
-            - name: COSMOS_KEY
-              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: key, optional: true } }
-            - name: COSMOS_DB
-              value: workspaces
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
@@ -421,16 +413,6 @@ spec:
             # A separate listener: 8090 is what the ingress forwards /v1 to.
             - name: RUSTIC_GIT_METRICS_ADDR
               value: 0.0.0.0:9464
-            # Workspaces frontend surface: cross-cluster Region metadata in Cosmos, everything
-            # else in the CRDs. /v1/volumes/* reads the cluster now (a label list of `done`
-            # SnapshotRequests), so there is no registry client here. Absent secret = region
-            # routes 503, feature dark.
-            - name: COSMOS_ENDPOINT
-              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: endpoint, optional: true } }
-            - name: COSMOS_KEY
-              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: key, optional: true } }
-            - name: COSMOS_DB
-              value: workspaces
             # Who may register regions (admin-gated route); everything else is owner-scoped.
             - name: RUSTIC_GIT_WORKSPACES_ADMINS
               value: karthik@kloudlite.io

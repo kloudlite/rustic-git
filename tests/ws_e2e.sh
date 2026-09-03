@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end workspaces/environments test: a real btrfs pool, a real rustic-git (server tier),
-# rustic-git-api, rustic-git-agent, a real Cosmos DB, real Azure blob storage, a real k3s cluster.
+# rustic-git-api, rustic-git-agent, real Azure blob storage, a real k3s cluster.
 #
 # Mirrors tests/registry_e2e.sh's conventions: exit 77 when a prerequisite is absent (root-capable
-# btrfs, a reachable cluster with the CRDs installed, Cosmos/Azure credentials) rather than failing
+# btrfs, a reachable cluster with the CRDs installed, Azure credentials) rather than failing
 # mid-script; one trap tears everything down. This needs a Linux box with btrfs + root AND a k3s
 # node (the CLAUDE.md-documented `wssnap-bench` VM) — it cannot run on a Mac laptop, which is why
 # this script was authored without ever being run locally: read it carefully before trusting a
@@ -12,8 +12,8 @@
 #
 # Three binaries, and none of them talks to a volume registry: a volume's history is the chain of
 # Ready `Snapshot` CRs a push wrote, so GET /v1/volumes/* reads the CRDs (`Volume.status.head` names the tip)
-# and the agent reaches nothing over HTTP. /v1/workspaces|environments own the CRDs; only /v1/regions is
-# Cosmos-backed. The agent is a
+# and the agent reaches nothing over HTTP. /v1/workspaces|environments|regions all own CRDs now —
+# no Cosmos anywhere in this stack. The agent is a
 # CONTROLLER now, not a poller: it watches the CRDs, so this script waits on the conditions those
 # controllers write (`kubectl wait --for=condition=Ready`) rather than polling document state.
 #
@@ -66,7 +66,6 @@ kubectl -n rustic-git-system rollout status deployment/rustic-git-gateway --time
   echo "SKIP: rustic-git-gateway deployment not Ready in rustic-git-system (not applied, or still in kube-system — see deploy/k3s/gateway.yaml)" >&2
   exit 77
 }
-[ -n "${COSMOS_ENDPOINT:-}" ] && [ -n "${COSMOS_KEY:-}" ] || { echo "SKIP: COSMOS_ENDPOINT/COSMOS_KEY not set" >&2; exit 77; }
 [ -n "${AZURE_ACCOUNT:-}" ] && [ -n "${AZURE_KEY:-}" ] && [ -n "${AZURE_CONTAINER:-}" ] || {
   echo "SKIP: AZURE_ACCOUNT/AZURE_KEY/AZURE_CONTAINER not set" >&2
   exit 77
@@ -94,18 +93,6 @@ AGENT_PID=""
 MOUNT=""
 IMG=""
 TMPD=""
-# ONE database, reused, not a fresh `wse2e-$RANDOM` per run.
-#
-# The per-run name was only deletable by the `az` branch in `cleanup`, which needs the Azure CLI on
-# the runner — and the runner is a cluster node, where installing it is not worth it. So every run
-# leaked a database: 34 of them had accumulated before anyone looked. A single reused name cannot
-# accumulate, and stale rows inside it are harmless because everything this script creates is
-# already namespaced by a random id (region, workspace, environment), so no run can see another's.
-#
-# Override with WS_E2E_COSMOS_DB when two runs must genuinely not share — but note the script
-# already requires exclusive use of the node's pool and its agent, so concurrent runs are not a
-# supported shape anyway.
-COSMOS_DB="${WS_E2E_COSMOS_DB:-wse2e}"
 ENV_ID=""
 DELETED_ENV_ID=""
 WS_ID=""
@@ -139,17 +126,9 @@ cleanup() {
   [ -n "$API_PID" ] && wait "$API_PID" 2>/dev/null
   [ -n "$SERVER_PID" ] && wait "$SERVER_PID" 2>/dev/null
   [ -n "$MOUNT" ] && sudo umount "$MOUNT" >/dev/null 2>&1
-  # Cosmos has no admin-delete route in this API (see api.rs — only create/list regions exist),
-  # so cleanup of the throwaway per-run database needs the az CLI; best-effort, and not assumed
-  # to be installed on every runner.
-  if command -v az >/dev/null 2>&1; then
-    az cosmosdb sql database delete --account-name "${COSMOS_ACCOUNT:-}" --resource-group "${COSMOS_RESOURCE_GROUP:-}" \
-      --name "$COSMOS_DB" --yes >/dev/null 2>&1
-  else
-    # Not a leak any more: the name is fixed, so the next run reuses this database rather than
-    # adding one. Deleting it is a convenience when `az` happens to be present, not a requirement.
-    echo "NOTE: az CLI not found — Cosmos test db '$COSMOS_DB' left in place for the next run" >&2
-  fi
+  # Regions are a CRD now, not a Cosmos database: no admin-delete route exists (see api.rs — only
+  # create/list), and there is nothing to clean up here — a handful of test-region objects left in
+  # the cluster is harmless and the next run's `POST /v1/regions` just re-registers over them.
   # Azure blobs live under layers/{uuid}.zst with no per-run prefix (the
   # engine keys them by digest, not by run), so a run's blobs cannot be scoped and deleted here —
   # they are left behind as orphans. That is acceptable: they are immutable by design (the whole
@@ -219,7 +198,7 @@ wait_for_listener() {
 # ---------------------------------------------------------------------------
 STORE_URL="file://$TMPD/store"
 mkdir -p "$TMPD/store"
-log "starting rustic-git serve on $SERVER_HTTP_ADDR (Cosmos db $COSMOS_DB)"
+log "starting rustic-git serve on $SERVER_HTTP_ADDR"
 # Its own cache dir, like every other process here: the default is `./.local/cache` in the repo,
 # which would make one run's leftovers an input to the next.
 RUSTIC_GIT_CACHE_DIR="$TMPD/cache-server" \
@@ -229,9 +208,6 @@ RUSTIC_GIT_HTTP_ADDR="$SERVER_HTTP_ADDR" \
 RUSTIC_GIT_PEER_ADDR="$SERVER_PEER_ADDR" \
 RUSTIC_GIT_SSH_ADDR="$SERVER_SSH_ADDR" \
 RUSTIC_GIT_HOST_KEY="$TMPD/host_key" \
-COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
-COSMOS_KEY="$COSMOS_KEY" \
-COSMOS_DB="$COSMOS_DB" \
 "$SERVER_BIN" serve &
 SERVER_PID=$!
 
@@ -241,19 +217,15 @@ wait_for_listener "$SERVER_BASE/healthz" "rustic-git serve"
 # ---------------------------------------------------------------------------
 # Start the api: the user-facing /v1/workspaces|environments|regions|volumes surface — the one
 # writer of the CRDs the controllers reconcile. It talks to no other tier: /v1/volumes/* reads
-# SnapshotRequests out of the cluster, and only /v1/regions is Cosmos-backed (same db as the
-# server above).
+# SnapshotRequests out of the cluster, and /v1/regions is a CRD like everything else here.
 # ---------------------------------------------------------------------------
-log "starting rustic-git-api on $API_ADDR (Cosmos db $COSMOS_DB)"
+log "starting rustic-git-api on $API_ADDR"
 RUSTIC_GIT_CACHE_DIR="$TMPD/cache-api" \
 RUSTIC_GIT_S3_URL="$STORE_URL" \
 RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
 RUSTIC_GIT_PEER_SECRET="$PEER_SECRET" \
 RUSTIC_GIT_API_ADDR="$API_ADDR" \
 RUSTIC_GIT_WORKSPACES_ADMINS="$ADMIN_EMAIL" \
-COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
-COSMOS_KEY="$COSMOS_KEY" \
-COSMOS_DB="$COSMOS_DB" \
 "$API_BIN" &
 API_PID=$!
 
@@ -339,9 +311,6 @@ WS_HOMES_EXPORT="zerofs.rustic-git-system.svc:/" \
 WS_SYNC_SECS="5" \
 WS_REPLICA_SECS="20" \
 HOSTNAME="ws-e2e-agent" \
-COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
-COSMOS_KEY="$COSMOS_KEY" \
-COSMOS_DB="$COSMOS_DB" \
 AZURE_ACCOUNT="$AZURE_ACCOUNT" \
 AZURE_KEY="$AZURE_KEY" \
 AZURE_CONTAINER="$AZURE_CONTAINER" \
