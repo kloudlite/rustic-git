@@ -14,10 +14,12 @@ metadata:
   name: rustic-git-api
 rules:
   # Spec is the API's to write. It never writes status — that is the controller's, and the split is
-  # what stops the two overwriting each other's view of the same object.
+  # what stops the two overwriting each other's view of the same object. No `watch`: nothing in the
+  # API watches — every read is a one-shot list on a request. No `update`: every write is a
+  # server-side `patch`, never a whole-object replace.
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+    verbs: ["get", "list", "create", "patch", "delete"]
   # A push, the history/refs listings behind it, and `DELETE /v1/volumes/{name}/snapshots/{id}` —
   # the one explicit way a snapshot ever goes away, now that retention never prunes one. No
   # `watch`: nothing in the API watches — every read is a one-shot list on a request. `create` and
