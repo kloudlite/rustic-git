@@ -893,7 +893,7 @@ export function restoreWorkspace(
       name,
       snapshot_id: snapshotId,
       ...(extra?.image ? { image: extra.image } : {}),
-      ...(extra?.packages ? { packages: extra.packages } : {}),
+      ...(extra?.packages !== undefined ? { packages: extra.packages } : {}),
     }),
   });
 }

@@ -11,6 +11,7 @@ import * as api from "@/lib/api";
 import { safeSegment } from "@/lib/slug";
 import { cloneResult } from "@/lib/ws-status";
 import { getSession } from "@/lib/session";
+import { packagesField } from "@/lib/packages-field";
 
 /** `ok` is what lets a dialog close on success — see `useDialogUntilSuccess`. */
 /** `warning`: the api's sentence when a stop moves a workspace off a dead node — edits since the
@@ -69,9 +70,7 @@ export async function restoreWorkspace(_prev: WsActionState, formData: FormData)
   // Present only when the snapshot carried a definition to pre-fill from; absent fields let the
   // api use the snapshot's own, which is also what an untouched form sends back.
   const image = String(formData.get("image") ?? "").trim();
-  const packages = formData.has("packages")
-    ? String(formData.get("packages")).split(",").map((p) => p.trim()).filter(Boolean)
-    : undefined;
+  const packages = packagesField(formData);
 
   const r = await api.restoreWorkspace(token, name, snapshotId, { image: image || undefined, packages });
   if (!r.ok) return { error: r.message || "Could not restore." };
