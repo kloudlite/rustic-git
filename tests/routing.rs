@@ -62,10 +62,24 @@ async fn node(
         SECRET.into(),
         rustic_git_pulls::pulls::Source::Absent,
     ));
-    // One election beat before serving, and no loop: renewal cadence is lanes.rs's, not what these
-    // tests prove. A test that needs a failover advances a follower's clock past LEADER_TTL and
-    // ticks it by hand — deterministic, and ten seconds faster than waiting.
+    // One election beat before serving, and then a renewal beat, because a lease that lapses
+    // mid-test changes what the test measures. A test that needs a failover still advances a
+    // follower's clock past LEADER_TTL and ticks it by hand — deterministic, and ten seconds
+    // faster than waiting.
     app.election_tick().await.unwrap();
+    // Production renews every held lease on a beat (`bins/server/src/lanes.rs`). Without it a
+    // claim taken here is dead in LEASE_TTL (10 s) and any test whose middle runs longer — a
+    // real git push, an ssh clone — silently stops testing forwarding and starts testing
+    // claiming, which is the "only under load" flake. The 3 s cadence is LEASE_TTL/3, the same
+    // ratio lanes.rs uses, so a single missed beat is survivable.
+    let a5 = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let _ = a5.election_tick().await;
+            let _ = a5.renew_once().await;
+        }
+    });
     // Eviction gives the lease back before it closes the database, exactly as `serve()` wires it.
     store.pool.set_release_hook(
         Arc::downgrade(&app) as std::sync::Weak<dyn rustic_git_storage::pool::ReleaseHook>
@@ -390,7 +404,9 @@ async fn a_real_git_push_and_clone_work_through_a_forwarding_node() {
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
-    a.app.claim(&repo).await.unwrap(); // A holds it; every request to B is forwarded
+    // The fixture FIRST: `renew_once` only renews repos this node has OPEN, so the window
+    // between the claim and A's first forwarded request is not covered by the beat. Doing the
+    // slow local work before the claim keeps that window at roughly one HTTP round trip.
     let tmp = tempfile::tempdir().unwrap();
     let work = tmp.path().join("work");
     let url = format!("http://x:{token}@{}/{repo}.git", b.public);
@@ -418,6 +434,7 @@ async fn a_real_git_push_and_clone_work_through_a_forwarding_node() {
     std::fs::write(work.join("big"), vec![b'z'; 3 * 1024 * 1024]).unwrap();
     git(&work, &["add", "big"]);
     git(&work, &["commit", "-qm", "big"]);
+    a.app.claim(&repo).await.unwrap(); // A holds it; every request to B is forwarded
     git(&work, &["push", "-q", &url, "main"]);
     let clone = tmp.path().join("clone");
     git(tmp.path(), &["clone", "-q", &url, clone.to_str().unwrap()]);
@@ -540,6 +557,36 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
     assert_eq!(res.status(), 200);
     assert_eq!(b.store.pool.warm_count(), 0, "still cold: b forwarded");
     let _ = token;
+}
+
+/// The harness must renew what it holds, or any test whose middle takes longer than
+/// `LEASE_TTL` silently stops testing forwarding and starts testing claiming — the failure
+/// mode that made the real git/ssh tests flake only under load.
+#[tokio::test]
+async fn a_claim_outlives_an_operation_longer_than_the_lease() {
+    let e = common::env().await;
+    let f = fleet(3);
+    let repo = "alice/web".to_string();
+    let (o, n) = repo.split_once('/').unwrap();
+    e.store.create_repo(o, n).await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    a.app.claim(&repo).await.unwrap();
+    // Open it on A immediately, as a real request would in the same handler: `renew_once` only
+    // renews repos this node has OPEN (`Pool::warm_repos`), so a claim with nothing behind it
+    // yet is not the beat's job to save — it is a request never having arrived.
+    let seed_url = format!("http://{}/{repo}.git/info/refs?service=git-upload-pack", a.public);
+    let _ = reqwest::get(&seed_url).await.unwrap();
+
+    // Longer than LEASE_TTL (10 s), which is what a loaded box's git fixture work costs.
+    tokio::time::sleep(std::time::Duration::from_secs(13)).await;
+
+    // B must still forward, not claim: it opens nothing.
+    let url = format!("http://{}/{repo}.git/info/refs?service=git-upload-pack", b.public);
+    let _ = reqwest::get(&url).await.unwrap();
+    assert_eq!(b.store.pool.warm_count(), 0, "B claimed the repo — A's lease lapsed");
+    assert_eq!(a.store.pool.warm_count(), 1, "A no longer holds the repo it claimed");
 }
 
 /// A push that hits an already-observed fence on a node that is STILL the owner: the fence
@@ -1077,8 +1124,11 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
-    a.app.claim(&repo).await.unwrap(); // A holds it; b forwards every session
 
+    // The fixture FIRST: `renew_once` only renews repos this node has OPEN, so the window
+    // between the claim and A's first forwarded request is not covered by the beat. Doing the
+    // slow local work before the claim keeps that window at roughly one HTTP round trip.
+    //
     // b also speaks SSH; b does not own the repo, so every session it accepts is forwarded to a.
     let host_key = gen_host_key(kd.path());
     let ssh_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1086,7 +1136,9 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     let b_app = b.app.clone();
     tokio::spawn(async move { rustic_git_git::ssh::serve(b_app, ssh_l, host_key).await.unwrap() });
 
-    // One commit, pushed over a's public HTTP port, so the repo has content.
+    // One commit, pushed over a's public HTTP port, so the repo has content. This also opens a's
+    // copy before the claim below — fine: `claim` on a repo this node already has open is a no-op
+    // re-assert, and the beat covers it from then on.
     let w = tempfile::tempdir().unwrap();
     let http_url = format!("http://x:{token}@{}/{repo}.git", a.public);
     common::git(w.path(), &["clone", "-q", &http_url, "seed"]);
@@ -1095,6 +1147,7 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     common::git(&seed, &["add", "."]);
     common::git(&seed, &["commit", "-qm", "one"]);
     common::git(&seed, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    a.app.claim(&repo).await.unwrap(); // A holds it; b forwards every session
 
     let ssh_cmd = format!(
         "ssh -i {} -p {ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes",
