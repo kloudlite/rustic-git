@@ -998,22 +998,38 @@ pub(crate) async fn sweep_volumes(
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     for vol in beat.volumes.iter().cloned() {
         let owner = vol.spec.node_name.clone();
-        if owner.is_empty() || !owners.contains(&owner) {
-            continue;
-        }
         let name = vol.name_any();
         // `all_parents`, not `parents`: this volume is owned by another node, so this node's own
         // scoped list would show none of its parents and every arm would read as "nothing on it".
         let parents: Vec<&crate::listing::Parent> = beat.all_parents.iter().filter(|p| p.volume == name).collect();
+        // An EMPTY pin with parents still placed ON AN UNPLACEABLE NODE is the crash window between
+        // the release CAS and the un-place: no watch matches such a parent (`status.nodeName` is
+        // neither this node nor empty) and `resolve_volume`'s self-heal only runs on the node it
+        // names — the one that is gone. The sweep is the only thing that can see it, so it finishes
+        // the release rather than skipping the volume for having no owner. Nothing is re-patched:
+        // the pin is already clear. A parent on a LIVE node is deliberately not this case — that is
+        // the spread's crash window, which self-heals on the owner it names — and a parent here
+        // cannot be running: the CAS that cleared the pin only ever ran on a volume with nothing
+        // running on it.
+        let stranded = owner.is_empty() && parents.iter().any(|p| owners.contains(&p.node_name));
+        if !stranded && (owner.is_empty() || !owners.contains(&owner)) {
+            continue;
+        }
         // The reason comes back OUT of the verdict, so the word written is the one the decision
         // made rather than a second copy of the caller's argument.
-        let (why, reason, release) = match volume_decision(&name, &owner, &parents, reason) {
-            VolumeVerdict::Mark { .. } if !mark_running => continue,
-            VolumeVerdict::Mark { why } => (why, reason, false),
-            VolumeVerdict::Release { why, reason } => (why, reason, true),
+        let (why, reason, release) = if stranded {
+            (format!("volume {name} has no owner; finishing an interrupted release"), reason, true)
+        } else {
+            match volume_decision(&name, &owner, &parents, reason) {
+                VolumeVerdict::Mark { .. } if !mark_running => continue,
+                VolumeVerdict::Mark { why } => (why, reason, false),
+                VolumeVerdict::Release { why, reason } => (why, reason, true),
+            }
         };
         let mut cur = vol;
-        if release {
+        // A stranded volume is already released — its verdict is the un-place below, and there is
+        // no pin left to compare-and-set.
+        if release && !stranded {
             // The pin FIRST, before anything is un-placed: a failed CAS with parents already
             // cleared would leave them claimable on a node that does not own the volume — the
             // exact bug this whole function exists to make impossible.
@@ -1586,6 +1602,108 @@ mod reconcile_tests {
                 attached_environment: None,
             },
         }
+    }
+
+    /// C2: the crash window. The volume's pin is already empty (the release CAS landed) and its
+    /// parents still name the dead node (the un-place did not). No watch anywhere matches that
+    /// state, so the sweep is the only thing that can free it — it must not skip the volume for
+    /// having no owner.
+    #[tokio::test]
+    async fn an_empty_pinned_volume_with_placed_parents_is_still_unplaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "name": "ws-1", "region": "r1", "image": "img", "desiredState": "stopped", "packages": []},
+            "status": {"phase": "ready", "nodeName": "node-dead", "volumeRef": "vol-1"},
+        });
+        let routes = vec![
+            get(format!("{WORKSPACES}/ws-1"), ws.clone()),
+            Route { method: "PUT", path: format!("{WORKSPACES}/ws-1/status"), status: 200, body: ws },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        // The volume as the crash left it: empty pin, and a parent still placed on the dead node.
+        let vol = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "vol-1", "uid": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1",
+                     "quotaGb": 5, "replicas": 2},
+        });
+        let mut parent = parent_at("Workspace", "ws-1", "vol-1", crd::Phase::Stopped, true);
+        parent.node_name = "node-dead".into();
+        parent.pod_ref = None;
+        let beat = crate::listing::Beat {
+            volumes: vec![serde_json::from_value(vol).unwrap()],
+            replicas: vec![],
+            parents: vec![parent.clone()],
+            all_parents: vec![parent],
+        };
+        let dead: HashSet<String> = ["node-dead".to_string()].into_iter().collect();
+
+        sweep_volumes(&ctx, &beat, &dead, "NodeDead", true).await;
+
+        let sent = rec.sent("PUT", &format!("{WORKSPACES}/ws-1/status"));
+        assert_eq!(sent.len(), 1, "the stranded parent must be un-placed exactly once: {:?}", rec.calls());
+        assert_eq!(sent[0]["status"]["nodeName"], "", "un-place clears the parent's pin: {}", sent[0]);
+        assert!(
+            rec.calls().iter().all(|c| !c.starts_with("PATCH ")),
+            "the pin is already clear; nothing re-patches the volume spec: {:?}",
+            rec.calls()
+        );
+    }
+
+    /// The guard's other side: an empty-pinned volume whose parents are ALSO unplaced is nobody's
+    /// business, and the sweep must not walk it every beat forever.
+    #[tokio::test]
+    async fn an_empty_pinned_volume_with_no_placed_parents_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![]);
+        let vol = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "vol-1", "uid": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 2},
+        });
+        let mut parent = parent_at("Workspace", "ws-1", "vol-1", crd::Phase::Stopped, true);
+        parent.node_name = String::new();
+        parent.pod_ref = None;
+        let beat = crate::listing::Beat {
+            volumes: vec![serde_json::from_value(vol).unwrap()],
+            replicas: vec![],
+            parents: vec![parent.clone()],
+            all_parents: vec![parent],
+        };
+        let dead: HashSet<String> = ["node-dead".to_string()].into_iter().collect();
+
+        sweep_volumes(&ctx, &beat, &dead, "NodeDead", true).await;
+
+        assert!(rec.calls().is_empty(), "an already-converged volume costs no writes: {:?}", rec.calls());
+    }
+
+    /// The same empty pin with a parent RUNNING on a LIVE node is the spread path's crash window,
+    /// not this one: `resolve_volume`'s mismatch branch heals it on the node it names, and a
+    /// running working copy never moves. The sweep must keep its hands off it.
+    #[tokio::test]
+    async fn an_empty_pinned_volume_with_a_running_parent_on_a_live_node_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![]);
+        let vol = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "vol-1", "uid": "v1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 2},
+        });
+        let parent = parent_at("Workspace", "ws-1", "vol-1", crd::Phase::Running, false);
+        let beat = crate::listing::Beat {
+            volumes: vec![serde_json::from_value(vol).unwrap()],
+            replicas: vec![],
+            parents: vec![parent.clone()],
+            all_parents: vec![parent],
+        };
+        let dead: HashSet<String> = ["node-dead".to_string()].into_iter().collect();
+
+        sweep_volumes(&ctx, &beat, &dead, "NodeDead", true).await;
+
+        assert!(rec.calls().is_empty(), "a live node's running parent is untouched: {:?}", rec.calls());
     }
 
     fn replica_of(volume: &str, node: &str, phase: &str) -> serde_json::Value {
