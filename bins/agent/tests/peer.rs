@@ -122,6 +122,61 @@ async fn snapshot_get_streams_the_send_output() {
     assert_eq!(&body[..], b"snapshot-bytes");
 }
 
+/// A fake `btrfs send` that stalls after its first byte, to model a puller that opens the
+/// connection and stops reading.
+fn fake_btrfs_send_slow(dir: &std::path::Path) -> String {
+    let path = dir.join("btrfs-send-slow");
+    let script = r#"#!/bin/sh
+if [ "$1" = "send" ]; then
+    printf x
+    sleep 60
+    exit 0
+fi
+"#;
+    std::fs::write(&path, script).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// I3: the server bounds its own send. A puller that stops reading must not hold the volume's
+/// send lock until its own hour-long client timeout — the next puller of the same volume waits
+/// behind it, fleet-wide. With a one-second serve timeout, the second request must be served.
+#[tokio::test]
+async fn a_stalled_puller_does_not_hold_the_volume_send_lock() {
+    std::env::set_var("WS_PEER_SERVE_TIMEOUT_SECS", "1");
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fake_btrfs_send_slow(tmp.path());
+    std::fs::create_dir_all(tmp.path().join("vol/v1/snap/c1")).unwrap();
+    let (state, _rec) = state(tmp.path(), bin, vec![]);
+    let app = router(state);
+
+    // Drives the body to completion (a stalled real puller keeps the connection's write side
+    // polled the same way): `oneshot` alone only returns the response headers and drops the body
+    // unread, which would free the lock immediately and prove nothing.
+    let first = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let resp = app.oneshot(commit_req("/peer/v1/commit/v1/c1", Some("s3cret"))).await.unwrap();
+            axum::body::to_bytes(resp.into_body(), usize::MAX).await
+        }
+    });
+    // Long enough for the first request to have taken the lock, short enough to be inside the
+    // fake script's 60 s sleep: the point is that the SECOND request is not blocked behind it.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(commit_req("/peer/v1/commit/v1/c1", Some("s3cret"))),
+    )
+    .await;
+
+    assert!(second.is_ok(), "the second pull must not wait out the first puller's stall");
+    let _ = first.await;
+    std::env::remove_var("WS_PEER_SERVE_TIMEOUT_SECS");
+}
+
 // -------------------------------------------------------------------------------------------
 // POST /peer/v1/wake — the poke that makes a peer pull now.
 // -------------------------------------------------------------------------------------------

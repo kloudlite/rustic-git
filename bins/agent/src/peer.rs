@@ -172,7 +172,22 @@ async fn snapshot(
         })
     });
     let killer = KillOnDrop { stdout, child: Some(child), stderr_task, volume: volume_id, name: snapshot_name, _guard: guard };
-    (StatusCode::OK, Body::from_stream(tokio_util::io::ReaderStream::new(killer))).into_response()
+    // Dropping the stream on timeout drops `KillOnDrop`, which kills and reaps the child AND
+    // releases the send lock — the whole point. The puller sees a truncated body after its 200,
+    // which is the case it already handles (`pull_one`'s failed-receive path deletes the partial
+    // and tries the next source).
+    let stream = tokio_util::io::ReaderStream::new(killer);
+    let deadline = tokio::time::Instant::now() + serve_timeout();
+    let body = Body::from_stream(futures::stream::unfold(Box::pin(stream), move |mut s| async move {
+        match tokio::time::timeout_at(deadline, futures::StreamExt::next(&mut s)).await {
+            Ok(Some(chunk)) => Some((chunk, s)),
+            Ok(None) => None,
+            // The deadline is on the WHOLE body, not per chunk: a puller trickling one byte a
+            // minute is the same wedge as one reading nothing.
+            Err(_) => Some((Err(std::io::Error::other("peer: serve timeout")), s)),
+        }
+    }));
+    (StatusCode::OK, body).into_response()
 }
 
 /// Wraps a streamed `btrfs send`'s stdout so a response body dropped mid-stream (a disconnected
@@ -264,6 +279,17 @@ async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<String, Str
 /// no timeout knob of its own — the sender's is the only bound on a transfer.
 fn send_timeout() -> Duration {
     Duration::from_secs(std::env::var("WS_PEER_SEND_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600))
+}
+
+/// `WS_PEER_SERVE_TIMEOUT_SECS`, default 900. Deliberately SHORTER than the client's
+/// `send_timeout` (3600) and a separate knob: the client's bound protects the puller, this one
+/// protects the SOURCE. The per-volume send lock is held for the life of this body, so a puller
+/// that opens the connection and stops reading otherwise blocks every other node's pull of that
+/// volume for the client's full hour — one wedged connection stopping a volume's replication
+/// fleet-wide. A legitimate send that needs longer than 15 minutes of TOTAL wall clock raises
+/// this; the puller retries from the next source either way.
+fn serve_timeout() -> Duration {
+    Duration::from_secs(std::env::var("WS_PEER_SERVE_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(900))
 }
 
 /// The client every peer dial in this file shares. `connect_timeout` alone, not a blanket
@@ -1811,9 +1837,9 @@ mod reconcile_tests {
     }
 
     /// The other half: a name whose CR really is gone is still visited and handed to
-    /// `drop_commit`, so the guard did not turn the retire into a no-op. The bytes themselves are
-    /// btrfs's business — `drop_commit` is deliberately Ok-on-a-plain-directory, so off a real
-    /// filesystem the reachable assertion is the fresh GET, and `engine_commit.rs`'s loopback
+    /// `drop_snapshot`, so the guard did not turn the retire into a no-op. The bytes themselves are
+    /// btrfs's business — `drop_snapshot` is deliberately Ok-on-a-plain-directory, so off a real
+    /// filesystem the reachable assertion is the fresh GET, and `engine_snapshot.rs`'s loopback
     /// tests cover the delete.
     #[tokio::test]
     async fn a_snapshot_with_no_cr_at_all_is_still_retired() {

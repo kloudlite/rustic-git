@@ -220,6 +220,11 @@ spec:
             # than fails, so the beat moves on to the next source (peer.rs).
             - name: WS_PEER_SEND_TIMEOUT_SECS
               value: "3600"
+            # The SOURCE-side bound on one streamed `btrfs send`. Shorter than the puller's
+            # WS_PEER_SEND_TIMEOUT_SECS on purpose: the send lock is per volume, so a stalled
+            # puller otherwise blocks that volume's replication fleet-wide for the client's hour.
+            - name: WS_PEER_SERVE_TIMEOUT_SECS
+              value: "900"
           envFrom:
             # `WS_REGION` (which region this node belongs to, matched against the `Region` CRD)
             # and WS_PEER_SECRET below. Absent keys leave the engine in its dev fallbacks, which is
