@@ -1471,3 +1471,161 @@ async fn detaching_a_stopped_workspace_still_collects_the_environment_side_polic
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     assert!(s.rec.calls().contains(&format!("DELETE {policy}")), "{:?}", s.rec.calls());
 }
+
+// ── restoring takes the snapshot's frozen definition ──────────────────────
+
+/// A `Ready` `Snapshot` CR carrying an optional `spec.state` — what `find_commit_model_snapshot_for_restore`
+/// reads, and the only source of the restored spec once the source workspace is gone.
+fn ready_snap(name: &str, volume: &str, owner: &str, state: Option<Value>) -> Value {
+    let mut spec = json!({"volume": volume, "owner": owner, "worktree": volume, "parent": "", "pinned": false});
+    if let Some(st) = state {
+        spec["state"] = st;
+    }
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": name}, "spec": spec, "status": {"phase": "ready"},
+    })
+}
+
+fn workspace_state(image: &str, packages: &[&str], quota_gb: u64) -> Value {
+    json!({"kind": "workspace", "image": image, "packages": packages, "quotaGb": quota_gb,
+           "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"}})
+}
+
+fn environment_state(services: usize, quota_gb: u64) -> Value {
+    let svcs: Vec<Value> = (0..services)
+        .map(|i| json!({"name": format!("svc{i}"), "image": "alpine", "command": [], "env": {}, "mounts": []}))
+        .collect();
+    json!({"kind": "environment", "services": svcs, "quotaGb": quota_gb})
+}
+
+/// The source workspace is gone (no route for it ⇒ 404), which is exactly when restoring matters.
+async fn server_with_snapshot_only(id: &str, state: Option<Value>) -> Server {
+    server(vec![
+        get(format!("{API}/snapshots/{id}"), ready_snap(id, "ws-src", "karthik", state)),
+        no_workspaces(),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await
+}
+
+async fn server_with_env_snapshot_only(id: &str, state: Option<Value>) -> Server {
+    server(vec![
+        get(format!("{API}/snapshots/{id}"), ready_snap(id, "env-src", "karthik", state)),
+        post(format!("{API}/environments"), new_env("env-new", "karthik")),
+    ])
+    .await
+}
+
+async fn restore(s: &Server, path: &str, body: Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{}{path}", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn restoring_a_workspace_whose_source_is_gone_takes_the_snapshot_state() {
+    let s = server_with_snapshot_only("snap-ws", Some(workspace_state("alpine:3.19", &["ripgrep"], 7))).await;
+    let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["image"], "alpine:3.19");
+    assert_eq!(w["spec"]["packages"], json!(["ripgrep"]));
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 7);
+    assert_eq!(w["spec"]["resources"]["memoryLimit"], "8Gi");
+}
+
+#[tokio::test]
+async fn a_restore_body_field_overrides_the_snapshot_state() {
+    let s = server_with_snapshot_only("snap-ws", Some(workspace_state("alpine:3.19", &["ripgrep"], 7))).await;
+    let r = restore(
+        &s,
+        "/v1/workspaces/restore",
+        json!({"name": "back", "snapshot_id": "snap-ws", "image": "alpine:3.20", "quota_gb": 11}),
+    )
+    .await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["image"], "alpine:3.20");
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 11);
+    // untouched fields still come from the snapshot
+    assert_eq!(w["spec"]["packages"], json!(["ripgrep"]));
+}
+
+/// A snapshot cut before this existed carries no `state`, and must restore exactly as it used to.
+#[tokio::test]
+async fn a_pre_change_snapshot_restores_as_before() {
+    let s = server_with_snapshot_only("snap-ws", None).await;
+    let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["image"], rustic_git_workspaces::model::default_ws_image());
+    assert!(w["spec"]["packages"].as_array().is_none_or(|p| p.is_empty()), "{w}");
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 20);
+}
+
+/// `spec.state` is data an agent wrote and a cluster admin can edit — it goes through
+/// `validate_list` exactly like a request body's package list does.
+#[tokio::test]
+async fn a_snapshot_with_a_bad_package_name_is_refused_like_a_bad_body() {
+    let s = server_with_snapshot_only("snap-ws", Some(workspace_state("alpine:3.19", &["../evil"], 7))).await;
+    let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
+    assert_eq!(r.status(), 422, "{}", r.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+}
+
+/// An attachment to an environment the caller cannot see is dropped, not refused: the environment
+/// may be gone or someone else's, and neither makes the snapshot unrestorable.
+#[tokio::test]
+async fn a_frozen_attachment_the_caller_cannot_see_is_dropped() {
+    let mut state = workspace_state("alpine:3.19", &[], 7);
+    state["attachedEnvironment"] = json!("env-theirs");
+    let s = server_with_snapshot_only("snap-ws", Some(state)).await;
+    let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert!(w["spec"]["attachedEnvironment"].is_null(), "{w}");
+}
+
+#[tokio::test]
+async fn restoring_an_environment_without_services_takes_the_snapshots() {
+    let s = server_with_env_snapshot_only("snap-env", Some(environment_state(2, 9))).await;
+    let r = restore(&s, "/v1/environments/restore", json!({"name": "back", "snapshot_id": "snap-env"})).await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let e = &s.rec.sent("POST", &format!("{API}/environments"))[0];
+    assert_eq!(e["spec"]["services"].as_array().unwrap().len(), 2);
+    assert_eq!(e["spec"]["storage"]["quotaGb"], 9);
+}
+
+/// An explicit empty list is a choice — the data back, no services — and must not be read as
+/// "absent, so take the snapshot's".
+#[tokio::test]
+async fn restoring_an_environment_with_empty_services_restores_data_only() {
+    let s = server_with_env_snapshot_only("snap-env", Some(environment_state(2, 9))).await;
+    let r = restore(
+        &s,
+        "/v1/environments/restore",
+        json!({"name": "back", "snapshot_id": "snap-env", "services": []}),
+    )
+    .await;
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let e = &s.rec.sent("POST", &format!("{API}/environments"))[0];
+    assert_eq!(e["spec"]["services"].as_array().unwrap().len(), 0);
+    assert_eq!(e["spec"]["storage"]["quotaGb"], 9, "quota still comes from the snapshot");
+}
+
+/// A frozen service list is no more trusted than a body one — `check_services` is the trust
+/// boundary for mounts whichever source the list came from.
+#[tokio::test]
+async fn a_frozen_service_with_an_escaping_mount_is_refused() {
+    let mut state = environment_state(1, 9);
+    state["services"][0]["mounts"] = json!([{"folder": "../../etc", "path": "/etc"}]);
+    let s = server_with_env_snapshot_only("snap-env", Some(state)).await;
+    let r = restore(&s, "/v1/environments/restore", json!({"name": "back", "snapshot_id": "snap-env"})).await;
+    assert_eq!(r.status(), 400, "{}", r.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+}

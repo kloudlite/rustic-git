@@ -1297,6 +1297,18 @@ struct RestoreBody {
     // hint that used to turn a multi-volume scan into one read no longer means anything, since
     // `find_commit_model_snapshot_for_restore` looks the CR up by name directly.
     snapshot_id: String,
+    // All optional and all overrides: absent means "whatever the snapshot froze", not "the
+    // default" — restoring last month's files with today's image is not last month's workspace.
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    packages: Option<Vec<String>>,
+    #[serde(default)]
+    resources: Option<crd::PodResources>,
+    #[serde(default)]
+    quota_gb: Option<u64>,
+    #[serde(default)]
+    attached_environment: Option<String>,
 }
 
 /// New workspace grafted onto an explicit, possibly-older snapshot — a PUSHED commit, which is
@@ -1327,12 +1339,50 @@ async fn restore_ws(
     let src = my_ws(&s, &owner, &volume).await.ok();
     let team = src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default();
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
-    let quota = match &src {
-        Some(w) => storage_quota(c, &w.spec.storage, &volume).await,
+
+    // Precedence: the request, then what the snapshot froze, then the live source, then defaults.
+    // A snapshot's `state` is DATA — written by an agent, hand-editable in the cluster — so every
+    // value it contributes goes through the same checks a request body's does, below.
+    let frozen = match &snap.spec.state {
+        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment }) => {
+            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone()))
+        }
+        _ => None,
+    };
+    let image = body
+        .image
+        .clone()
+        .or_else(|| frozen.as_ref().map(|f| f.0.clone()))
+        .or_else(|| src.as_ref().map(|w| w.spec.image.clone()))
+        .unwrap_or_else(default_ws_image);
+    let packages = body
+        .packages
+        .clone()
+        .or_else(|| frozen.as_ref().map(|f| f.1.clone()))
+        .or_else(|| src.as_ref().map(|w| w.spec.packages.clone()))
+        .unwrap_or_default();
+    crate::packages::validate_list(&packages).map_err(bad_packages)?;
+    let resources = body
+        .resources
+        .clone()
+        .or_else(|| frozen.as_ref().map(|f| f.2.clone()))
+        .or_else(|| src.as_ref().map(|w| w.spec.resources.clone()))
+        .unwrap_or_default();
+    let quota = match (body.quota_gb, &frozen, &src) {
+        (Some(q), _, _) => clamp_quota(q),
+        (None, Some(f), _) => clamp_quota(f.3),
+        (None, None, Some(w)) => storage_quota(c, &w.spec.storage, &volume).await,
         // A deleted source cannot be asked its size, and nothing user-facing offers to name one:
         // someone recovering a lost workspace is not sizing a disk. The standard quota, which is
         // also what `create` sends by default.
-        None => FALLBACK_QUOTA_GB,
+        (None, None, None) => FALLBACK_QUOTA_GB,
+    };
+    // An attachment the caller cannot see is dropped rather than refused: the environment may
+    // simply be gone or someone else's now, and that must not make the snapshot unrestorable.
+    // `find_env` is the same visibility check `attach_ws` applies.
+    let attached_environment = match body.attached_environment.clone().or_else(|| frozen.as_ref().and_then(|f| f.4.clone())) {
+        Some(e) if find_env(&s, &owner, &e).await.is_ok() => Some(e),
+        _ => None,
     };
     let new_id = rid("ws");
     let w = create_workspace(
@@ -1346,15 +1396,15 @@ async fn restore_ws(
             // region restore is out of scope — see the design doc). A live source still knows its
             // own; a deleted one falls back to the engine's own default region.
             region: src.as_ref().map(|w| w.spec.region.clone()).unwrap_or_else(|| "default".to_string()),
-            image: src.as_ref().map(|w| w.spec.image.clone()).unwrap_or_else(default_ws_image),
+            image,
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
                 source: Some(VolumeSource::CloneOf { volume, commit: Some(body.snapshot_id) }),
             }),
             desired_state: DesiredState::Running,
-            resources: Default::default(),
-            packages: vec![],
-            attached_environment: None,
+            resources,
+            packages,
+            attached_environment,
         },
     )
     .await?;
@@ -1473,15 +1523,18 @@ struct RestoreEnvBody {
     #[serde(default)]
     owner: Option<String>,
     /// Validated exactly as `create_env`'s are — `check_services` is the trust boundary for mounts
-    /// and a restore is just as much a caller-authored service list as a create is.
+    /// and a restore is just as much a caller-authored service list as a create is. Absent means
+    /// "the services the snapshot froze"; an explicit `[]` means none, which is how you ask for
+    /// the data back without the compose file.
     #[serde(default)]
-    services: Vec<Service>,
+    services: Option<Vec<Service>>,
     /// The region to RUN in. Where the snapshot's bytes live is the record's business, not this
     /// field's — that goes on the volume source.
     #[serde(default)]
     region: Option<String>,
-    #[serde(default = "default_env_quota")]
-    quota_gb: u64,
+    /// Absent means the snapshot's frozen quota, then the standard default.
+    #[serde(default)]
+    quota_gb: Option<u64>,
 }
 
 /// New environment grafted onto an explicit past snapshot — `restore_ws`'s twin, resolving the
@@ -1489,16 +1542,20 @@ struct RestoreEnvBody {
 /// kind of object it writes. The agent needs no new path: `resolve_volume` already materializes a
 /// `restoreOf` source for an Environment.
 ///
-/// The services are the caller's, because a snapshot does not record them: the commit record
-/// carries provenance (what the volume was OF), not a compose file. Restoring with none is legal
-/// and gives back the DATA — which is the thing that could not be reconstructed.
+/// The services default to what the snapshot froze beside the bytes (`SnapshotState`), because an
+/// environment's data without its services is not the environment. A body list overrides it, and
+/// an explicit `[]` restores the DATA alone — still legal, now a choice rather than the only door.
 async fn restore_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<RestoreEnvBody>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    check_services(&body.services)?;
+    // A caller-authored list is refused before anything is read or written, as it always was; the
+    // resolved list is checked again below, because it may instead come from the snapshot.
+    if let Some(svcs) = &body.services {
+        check_services(svcs)?;
+    }
     // Named before anything is written, like `create_env`'s: an environment with no name is a row
     // nobody can tell apart from another.
     check_ws_name(&body.name)?;
@@ -1522,10 +1579,20 @@ async fn restore_env(
         return Err((StatusCode::FORBIDDEN, "a snapshot restores under its own owner, or under you").into_response());
     }
     let owner = resolve_new_owner(&s, &caller_id, body.owner.or(Some(src_owner.clone()))).await?;
-    // No per-commit service provenance under the commit model (the object-store `CommitRecord`
-    // that used to carry it is gone) — a caller-supplied list wins; naming none restores the data
-    // and no services, which the UI says out loud.
-    let services = body.services;
+    // The request, then what the snapshot froze, then nothing. A frozen list is DATA like any
+    // other — `check_services` runs on whichever source won, because it is the trust boundary for
+    // mounts and a hand-edited `state` is no more trusted than a request body.
+    let frozen = match &snap.spec.state {
+        Some(crd::SnapshotState::Environment { services, quota_gb }) => Some((services.clone(), *quota_gb)),
+        _ => None,
+    };
+    let services = body.services.clone().or_else(|| frozen.as_ref().map(|f| f.0.clone())).unwrap_or_default();
+    check_services(&services)?;
+    let quota = match (body.quota_gb, &frozen) {
+        (Some(q), _) => clamp_quota(q),
+        (None, Some(f)) => clamp_quota(f.1),
+        (None, None) => default_env_quota(),
+    };
     let c = kube(&s)?;
     let id = rid("env");
     let e = create_environment(
@@ -1538,7 +1605,7 @@ async fn restore_env(
             region: body.region.unwrap_or_else(|| "default".to_string()),
             services,
             storage: Some(crd::WorkspaceStorage {
-                quota_gb: clamp_quota(body.quota_gb),
+                quota_gb: quota,
                 source: Some(VolumeSource::CloneOf { volume, commit: Some(body.snapshot_id) }),
             }),
             desired_state: DesiredState::Running,
