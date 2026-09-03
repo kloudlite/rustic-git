@@ -69,7 +69,20 @@ pub struct OwnerMaterial {
     pub git_email: String,
 }
 
-/// The three lookups this api makes against the platform directory, kept behind a trait rather
+/// A person's standing in a team, as the platform directory records it.
+///
+/// A local enum rather than `rustic_git_pulls::directory::Role` for the same reason the whole
+/// `Directory` trait is local: this crate must not depend on the mongo-backed one just for a
+/// lookup. `Ord` is declared by the variant ORDER — `Member < Admin < Owner` — so `>= Admin` is
+/// the rank rule, and there is no second rank table to fall out of step with the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TeamRole {
+    Member,
+    Admin,
+    Owner,
+}
+
+/// The four lookups this api makes against the platform directory, kept behind a trait rather
 /// than a direct dependency on `rustic_git_pulls::directory::Directory` (mongo-backed, heavy to
 /// construct) so unit tests can supply a stub instead. Production wires `Directory` in via an
 /// adapter in `bins/api`.
@@ -94,6 +107,15 @@ pub trait Directory: Send + Sync {
     /// with an empty `authorized_keys`, which is a user with no keys and is written as an empty
     /// file.
     async fn for_owner(&self, owner: &str) -> Option<OwnerMaterial>;
+
+    /// The caller's role in `team`, or `None` when they are not a member — or when the lookup
+    /// could not be made. Both answer "no" here, which is the safe direction for the one decision
+    /// it feeds: who may raise a team's ceiling.
+    ///
+    /// `user` is whatever identity `teams_for` matches on, so the two can never disagree about who
+    /// is in the team. Required (no default): unlike the other lookups, a stub that silently
+    /// answered "not a member" would make the admin-only request check a no-op nobody tests.
+    async fn team_role(&self, user: &str, team: &str) -> Option<TeamRole>;
 }
 
 pub struct ApiState {
@@ -145,6 +167,7 @@ impl ApiState {
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/quota", get(get_quota))
+        .route("/v1/quota-requests", post(create_quota_request).get(list_quota_requests))
         .route("/v1/regions", post(create_region).get(list_regions))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
@@ -204,6 +227,144 @@ async fn get_quota(
     let limit = crate::quota::effective(client, &owner, team).await.map_err(kube_err)?;
     let used = crate::quota::usage(client, &owner).await.map_err(kube_err)?;
     Ok(Json(serde_json::json!({"owner": owner, "limit": limit, "used": used})).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct NewQuotaRequest {
+    /// Absent means the caller's own quota.
+    #[serde(default)]
+    owner: Option<String>,
+    requested: crd::RequestedQuota,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Who may ask, and for whom.
+///
+/// A person may always ask for their own. A team's ceiling is a team decision, so only a member
+/// whose directory role is at least admin may ask on its behalf — checked against the DIRECTORY,
+/// never against a label and never against who happens to have created something.
+async fn may_request_for(s: &ApiState, caller: &str, owner: &str) -> Result<(), Response> {
+    if owner == caller {
+        return Ok(());
+    }
+    let Some(dir) = &s.directory else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response());
+    };
+    match dir.team_role(caller, owner).await {
+        Some(r) if r >= TeamRole::Admin => Ok(()),
+        // A member gets the reason; a non-member learns nothing about the team at all.
+        Some(_) => Err((StatusCode::FORBIDDEN, "only a team admin can request a team quota").into_response()),
+        None => Err(not_found()),
+    }
+}
+
+/// Every request of `owner`, label-selected — and re-checked against `spec.owner`, because the
+/// label is a view.
+async fn requests_of(c: &kube::Client, owner: &str) -> Result<Vec<crd::QuotaRequest>, Response> {
+    let api: Api<crd::QuotaRequest> = Api::all(c.clone());
+    Ok(api
+        .list(&scope::owned_by(owner))
+        .await
+        .map_err(kube_err)?
+        .items
+        .into_iter()
+        .filter(|r| r.spec.owner == owner)
+        .collect())
+}
+
+/// A request with no status yet is PENDING: `/v1` writes the object and stamps status in a second
+/// call, and reading that window as "decided" would let two requests stand at once.
+fn is_pending(r: &crd::QuotaRequest) -> bool {
+    r.status.as_ref().map(|s| s.state).unwrap_or_default() == crd::RequestState::Pending
+}
+
+async fn create_quota_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<NewQuotaRequest>,
+) -> Result<Response, Response> {
+    let caller = caller(&s, &headers).await?;
+    let owner = body.owner.unwrap_or_else(|| caller.clone());
+    may_request_for(&s, &caller, &owner).await?;
+    let client = kube(&s)?;
+    // One at a time, so the queue is a list of decisions rather than a list of the same ask.
+    if requests_of(client, &owner).await?.iter().any(is_pending) {
+        return Err((StatusCode::CONFLICT, "a request is already pending").into_response());
+    }
+    let id = rid("qr");
+    let mut r = crd::QuotaRequest::new(
+        &id,
+        crd::QuotaRequestSpec { owner: owner.clone(), requested: body.requested, reason: body.reason },
+    );
+    // A view of `spec.owner`, so the queue and the owner's own list are indexed selectors — same
+    // rule as every other label in this codebase.
+    r.metadata.labels = Some(std::collections::BTreeMap::from([(OWNER_LABEL.to_string(), owner)]));
+    let api: Api<crd::QuotaRequest> = Api::all(client.clone());
+    let made = api.create(&kube::api::PostParams::default(), &r).await.map_err(kube_err)?;
+    Ok((StatusCode::CREATED, Json(request_doc(&made))).into_response())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuotaRequestDoc {
+    id: String,
+    owner: String,
+    requested: crd::RequestedQuota,
+    reason: String,
+    state: crd::RequestState,
+    decided_by: Option<String>,
+    decided_at: Option<String>,
+    note: Option<String>,
+    created_at: Option<String>,
+}
+
+fn request_doc(r: &crd::QuotaRequest) -> QuotaRequestDoc {
+    let st = r.status.clone().unwrap_or_default();
+    QuotaRequestDoc {
+        id: r.name_any(),
+        owner: r.spec.owner.clone(),
+        requested: r.spec.requested.clone(),
+        reason: r.spec.reason.clone(),
+        state: st.state,
+        decided_by: st.decided_by,
+        decided_at: st.decided_at,
+        note: st.note,
+        created_at: r.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RequestQuery {
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+/// The caller's own requests and their teams'. `owner` narrows to one, and must be something the
+/// caller may act on — same rule as every other owner-scoped read.
+async fn list_quota_requests(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<RequestQuery>,
+) -> Result<Response, Response> {
+    let caller = caller(&s, &headers).await?;
+    let client = kube(&s)?;
+    let mut rows = Vec::new();
+    match q.owner {
+        Some(owner) => {
+            if !scope::may_act_on(&s, &caller, &owner).await {
+                return Err(not_found());
+            }
+            rows.extend(requests_of(client, &owner).await?);
+        }
+        None => {
+            for owner in scope::caller_owners(&s, &caller).await {
+                rows.extend(requests_of(client, &owner).await?);
+            }
+        }
+    }
+    rows.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
+    Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
 }
 
 /// The ONE place `/v1` refuses an allocation.

@@ -31,6 +31,11 @@ impl Directory for StubMembership {
     async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         None
     }
+
+    // Not exercised here — this file's cases are about membership, not rank.
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
+        None
+    }
 }
 
 struct Server {

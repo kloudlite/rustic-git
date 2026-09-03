@@ -189,6 +189,11 @@ mod tests {
             async fn for_owner(&self, _owner: &str) -> Option<crate::api::OwnerMaterial> {
                 None
             }
+
+            // Not exercised here — this test is about namespace hashing, not rank.
+            async fn team_role(&self, _user: &str, _team: &str) -> Option<crate::api::TeamRole> {
+                None
+            }
         }
         let state = ApiState::new(
             Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),

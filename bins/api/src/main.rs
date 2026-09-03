@@ -46,6 +46,19 @@ impl rustic_git_workspaces::api::Directory for Dir {
             .ok()?;
         Some(rustic_git_workspaces::api::OwnerMaterial { authorized_keys, git_name, git_email })
     }
+
+    async fn team_role(&self, user: &str, team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
+        use rustic_git_pulls::directory::Role;
+        use rustic_git_workspaces::api::TeamRole;
+        let t = self.0.get(team).await.ok().flatten()?;
+        // The same `user` value `slugs_for` matches on, through the same members array — one
+        // identity, so membership and role can never disagree.
+        match rustic_git_pulls::directory::Directory::role_of(&t, user)? {
+            Role::Owner => Some(TeamRole::Owner),
+            Role::Admin => Some(TeamRole::Admin),
+            Role::Member => Some(TeamRole::Member),
+        }
+    }
 }
 
 #[tokio::main]

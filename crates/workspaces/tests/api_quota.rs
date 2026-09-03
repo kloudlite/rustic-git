@@ -2,21 +2,40 @@
 //! `Directory` for team membership.
 
 use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState, Directory};
-use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
+use rustic_git_workspaces::api::{router, ApiState, Directory, TeamRole};
+use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
 const API: &str = "/apis/rustic-git.io/v1alpha1";
 
-/// `karthik` is the only member of team `acme`.
+/// `karthik` (admin) and `bob` (plain member) both belong to team `acme`.
 struct StubMembership;
 
 #[async_trait::async_trait]
 impl Directory for StubMembership {
     async fn teams_for(&self, user: &str) -> Vec<String> {
-        if user == "karthik" { vec!["acme".into()] } else { vec![] }
+        if user == "karthik" || user == "bob" { vec!["acme".into()] } else { vec![] }
+    }
+
+    async fn team_role(&self, user: &str, team: &str) -> Option<TeamRole> {
+        match (user, team) {
+            ("karthik", "acme") => Some(TeamRole::Admin),
+            ("bob", "acme") => Some(TeamRole::Member),
+            _ => None,
+        }
+    }
+
+    // This stub exercises team membership and role only; CLI tokens and ssh keys are not part
+    // of its case, and an unwired revocation list must refuse rather than admit.
+    async fn is_live(&self, _jti: &str) -> bool {
+        false
+    }
+
+    // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
+    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+        None
     }
 }
 
@@ -224,4 +243,85 @@ async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
     assert_eq!(resp.status(), 409);
     assert_eq!(resp.text().await.unwrap(), "snapshots: 20 of 20 in use; request more under Quota");
     assert!(!s.rec.calls().iter().any(|c| c == &format!("POST {API}/snapshots")), "{:?}", s.rec.calls());
+}
+
+fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
+    let mut o = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "QuotaRequest",
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}
+    });
+    if let Some(st) = state {
+        o["status"] = json!({"state": st});
+    }
+    o
+}
+
+/// A team admin may ask on the team's behalf; the object's owner is the TEAM, and the label is a
+/// view of it.
+#[tokio::test]
+async fn a_team_admin_may_open_a_request_for_the_team() {
+    let routes = vec![
+        get(format!("{API}/quotarequests"), list_of("QuotaRequest", vec![])),
+        post(format!("{API}/quotarequests"), req_obj("qr-1", "acme", None)),
+    ];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"owner": "acme", "requested": {"workspaces": 40}, "reason": "onboarding"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let sent = s.rec.sent("POST", &format!("{API}/quotarequests")).remove(0);
+    assert_eq!(sent["spec"]["owner"], "acme");
+    assert_eq!(sent["spec"]["requested"]["workspaces"], 40);
+    assert_eq!(sent["metadata"]["labels"]["rustic-git.io/owner"], "acme");
+}
+
+/// A plain member may not: raising a team's ceiling is a team decision, and the message says so.
+#[tokio::test]
+async fn a_plain_member_may_not_open_a_team_request() {
+    let s = server(true, vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests", s.base))
+        .bearer_auth(token(&s.jwt, "bob"))
+        .json(&json!({"owner": "acme", "requested": {"workspaces": 40}, "reason": "please"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.text().await.unwrap(), "only a team admin can request a team quota");
+}
+
+/// One pending request per owner. A request with no status yet counts as pending — /v1 creates the
+/// object and stamps status separately, and that window must not read as "decided".
+#[tokio::test]
+async fn a_second_pending_request_is_refused() {
+    let routes = vec![get(
+        format!("{API}/quotarequests"),
+        list_of("QuotaRequest", vec![req_obj("qr-1", "karthik", Some("pending"))]),
+    )];
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"requested": {"workspaces": 10}, "reason": "again"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), "a request is already pending");
+}
+
+/// A decided one is not in the way: the same owner may ask again after a denial.
+#[tokio::test]
+async fn a_denied_request_does_not_block_the_next_one() {
+    let routes = vec![
+        get(format!("{API}/quotarequests"), list_of("QuotaRequest", vec![req_obj("qr-1", "karthik", Some("denied"))])),
+        post(format!("{API}/quotarequests"), req_obj("qr-2", "karthik", None)),
+    ];
+    let s = server(true, routes).await;
+    let code = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"requested": {"workspaces": 10}, "reason": "again"}))
+        .send().await.unwrap()
+        .status();
+    assert_eq!(code, 201);
 }

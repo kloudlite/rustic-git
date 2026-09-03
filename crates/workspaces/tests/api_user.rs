@@ -180,6 +180,11 @@ impl Directory for StubMembership {
     async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         None
     }
+
+    // Not exercised here — this file's snapshot case is about membership, not rank.
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
+        None
+    }
 }
 
 async fn server_with_teams(routes: Vec<Route>) -> Server {
@@ -1125,6 +1130,11 @@ impl Directory for StubCliTokens {
     async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         None
     }
+
+    // Not exercised here — this stub is about CLI-token liveness only.
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
+        None
+    }
 }
 
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
@@ -1295,6 +1305,11 @@ impl Directory for StubKeys {
     async fn is_live(&self, _jti: &str) -> bool {
         false
     }
+
+    // Not exercised here — this stub is about ssh/git material only.
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
+        None
+    }
 }
 
 fn ns_obj(name: &str, owner: &str) -> Value {
@@ -1322,6 +1337,11 @@ impl Directory for KeyTeams {
     // an unwired revocation list must refuse rather than admit.
     async fn is_live(&self, _jti: &str) -> bool {
         false
+    }
+
+    // Not exercised here — this stub is about namespace/keys fan-out, not rank.
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<rustic_git_workspaces::api::TeamRole> {
+        None
     }
 }
 
