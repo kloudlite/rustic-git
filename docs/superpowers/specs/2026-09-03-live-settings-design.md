@@ -89,7 +89,7 @@ keeps the old value until it finishes. Nothing is interrupted by a settings chan
 a row: name, description, unit, current value (editable), env bootstrap value, built-in default,
 range, last change (who, when). Save writes only the changed fields. A "pending" marker shows
 until the next refresh reports the value applied (the agent writes `status.observedGeneration`
-on `ClusterSettings`; the central binaries expose the loaded version on their `/api/health`).
+on `ClusterSettings`; the central binaries expose the loaded version on their `/healthz`).
 
 ### 6. Read-only infrastructure view (option 2 deferred)
 
