@@ -38,15 +38,12 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
     verbs: ["get", "list", "delete"]
-  # Quotas: read on every path (usage answers and enforcement both need the owner's effective
-  # limit). No write here yet — approving a request is a superadmin act that lands with the admin
-  # server (Task 10); granting `create`/`patch` now would let this tier widen an owner's ceiling.
+  # Read for enforcement (`guard_alloc` needs the owner's effective limit) and for `GET /v1/quota`;
+  # no create, patch or delete — writing a Quota is the admin role's alone.
   - apiGroups: ["rustic-git.io"]
     resources: ["quotas"]
     verbs: ["get", "list"]
-  # QuotaRequests: a person files one through this tier. Deciding it (writing `/status`) is the
-  # same admin-only act as above and is not granted here; requests are never deleted, so no
-  # `delete` either — the record of who asked is the point.
+  # A person or a team admin may open a request for themselves; deciding it is not a /v1 verb.
   - apiGroups: ["rustic-git.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "create"]
@@ -57,11 +54,11 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumereplicas"]
     verbs: ["get", "list"]
-  # `/v1/regions` is the only writer. `patch` because re-registering a region IS how one is
-  # retired — there is no delete — and a create would 409 on the second POST of the same id.
+  # Read-only: registering a region is `POST /admin/regions` now, and `/v1/regions` keeps only the
+  # active-region GET every workspace/environment create already calls to validate `region`.
   - apiGroups: ["rustic-git.io"]
     resources: ["regions"]
-    verbs: ["get", "list", "create", "patch"]
+    verbs: ["get", "list"]
   # One policy, one moment: deleting an ATTACHED workspace. Nothing stamps a finalizer on a
   # Workspace, so its deletion is garbage collection the agent never observes, and the
   # environment-side half of the attach grant lives in the environment's namespace where the
@@ -75,6 +72,54 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["list"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustic-git-admin
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-admin
+rules:
+  # The only role that may create, patch or delete a Quota, a QuotaRequest or a Region — the
+  # design doc's whole point: RBAC, not a claim check inside a shared process, is what stops the
+  # user-role process writing one of these, because that process's ServiceAccount cannot.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotas"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotarequests"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotarequests/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["regions"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # The decommission view and the cross-owner list/stop/delete surfaces both need the full object,
+  # not the read the user role keeps for its own owner-scoped routes.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["workspaces", "environments"]
+    verbs: ["get", "list", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rustic-git-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rustic-git-admin
+subjects:
+  - kind: ServiceAccount
+    name: rustic-git-admin
+    namespace: kube-system
 ---
 # Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
 #

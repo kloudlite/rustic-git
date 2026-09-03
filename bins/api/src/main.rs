@@ -96,25 +96,40 @@ async fn run() -> Result<()> {
     // Optional on purpose: without it the browse routes still answer and only the
     // team routes report unavailable. A database outage must not stop reads that
     // never touched it.
+    // Same binary, same image, one env choosing which surface it exposes. Read once, up here,
+    // both because the bootstrap below needs it and so the router-selection match downstream
+    // reuses this binding rather than reading the env var a second time.
+    let role = std::env::var("RUSTIC_GIT_API_ROLE").unwrap_or_else(|_| "user".into());
     let directory = match std::env::var("RUSTIC_GIT_MONGO_URI") {
         Ok(uri) if !uri.is_empty() => {
             let db = env("RUSTIC_GIT_MONGO_DB", "kloudlite");
             let d = rustic_git_pulls::directory::Directory::connect(&uri, &db).await?;
             tracing::info!(db = %db, "directory in mongo db");
+            // Only the admin process seeds the directory: the bootstrap is additive and harmless
+            // to run twice, but running it from the user role too would mean an operator who
+            // scales the user Deployment to zero and only runs `admin` still gets it seeded —
+            // reversed, running it here only, a fleet with no admin replica up yet simply has no
+            // bootstrap run until one is, which is the safe direction to be wrong in.
+            //
             // `RUSTIC_GIT_WORKSPACES_ADMINS` is a BOOTSTRAP now, not the list: it seeds the
             // directory once so an empty cluster has a first administrator, and after that the
             // list is managed through /api/admin/superadmins. Additive only — dropping an address
-            // from the env must not silently revoke someone.
-            let seed: Vec<String> = std::env::var("RUSTIC_GIT_WORKSPACES_ADMINS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect();
-            match d.ensure_superadmins(&seed).await {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(added = n, "superadmins seeded from RUSTIC_GIT_WORKSPACES_ADMINS"),
-                Err(e) => tracing::warn!(error = %e, "superadmin bootstrap skipped"),
+            // from the env must not silently revoke someone. Unset or empty defaults to the
+            // owner's own address (2026-09-04) so a fresh deployment always has one superadmin to
+            // add the rest from the admin area.
+            if role == "admin" {
+                let seed: Vec<String> = std::env::var("RUSTIC_GIT_WORKSPACES_ADMINS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let seed = if seed.is_empty() { vec!["karthik@kloudlite.io".to_string()] } else { seed };
+                match d.ensure_superadmins(&seed).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(added = n, "superadmins seeded from RUSTIC_GIT_WORKSPACES_ADMINS"),
+                    Err(e) => tracing::warn!(error = %e, "superadmin bootstrap skipped"),
+                }
             }
             Some(Arc::new(d))
         }
@@ -173,11 +188,10 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as rustic_git_api::KeysChanged
     });
-    // Same binary, same image, one env choosing which surface it exposes. The admin role mounts
-    // ONLY `/admin` — no `/v1` route is compiled into that router at all, so a `/v1` authorization
-    // bug literally cannot reach an admin handler on that process; the user role mounts ONLY
-    // `/v1` and never sees an admin route (design doc §5).
-    let role = std::env::var("RUSTIC_GIT_API_ROLE").unwrap_or_else(|_| "user".into());
+    // The admin role mounts ONLY `/admin` — no `/v1` route is compiled into that router at all, so
+    // a `/v1` authorization bug literally cannot reach an admin handler on that process; the user
+    // role mounts ONLY `/v1` and never sees an admin route (design doc §5). `role` was read once,
+    // above, before the bootstrap decided whether to run.
     let workspaces_router = workspaces.map(|ws| match role.as_str() {
         "admin" => rustic_git_workspaces::api::admin::router(ws),
         _ => rustic_git_workspaces::api::router(ws),
