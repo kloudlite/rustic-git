@@ -90,9 +90,16 @@ spec:
 #    Any other kind reaching this policy is denied outright: a new write in the code needs a row
 #    in agent-rbac.yaml AND a branch here.
 #
-#    Not covered, deliberately: DELETE. `object` is null on a delete, which needs a second
-#    expression shape, and the residual is denial of service on a kube-system pod the kubelet
-#    recreates — not a privilege gain like CREATE is.
+#    DELETE is covered too, by a SECOND validation entry keyed on `request.operation`: `object` is
+#    null on a delete and `oldObject` holds the doomed object, so the two operations cannot share
+#    an expression. The fence is the same one CREATE gets — the namespace must be `ws-`/`wt-`/
+#    `env-`. It is not cosmetic: a Service is not recreated by any kubelet, so deleting `kube-dns`
+#    in kube-system or `kubernetes` in default is a durable cluster-wide outage, and deleting the
+#    tenant egress NetworkPolicies would take the isolation model with them.
+#
+#    Still not covered: cluster-scoped kinds the agent writes — `nodes: patch`, and its own
+#    `namespaces: get,create,patch`. `nodes` is the broad grant already marked `ponytail:` in
+#    agent-rbac.yaml, and namespace CREATE/UPDATE is fenced by the expression below.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -117,11 +124,40 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["rolebindings"]
+      # DELETE is matched separately from CREATE/UPDATE: `object` is null on a delete and
+      # `oldObject` carries the doomed object, so the two need different expression shapes and
+      # must not share a rule. `namespaces` is absent on purpose — the agent holds no
+      # `namespaces: delete`, so there is nothing to fence.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["services", "pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["statefulsets"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["networkpolicies"]
   matchConditions:
     - name: from-the-agent
       expression: "request.userInfo.username == 'system:serviceaccount:kube-system:rustic-git-agent'"
   validations:
+    # A delete the agent legitimately makes is always inside a namespace it reconciles: a
+    # workspace pod, an environment's StatefulSets and Services, an attachment NetworkPolicy.
+    # Deleting `kube-dns` or the `kubernetes` Service is a durable cluster-wide outage that no
+    # kubelet repairs, which is why DELETE is fenced here and not left as an accepted residual.
+    # `oldObject` IS populated on a delete (`object` is null), so this must be its own entry —
+    # folding it into the expression below would dereference a null `object.kind`.
     - expression: >-
+        request.operation != 'DELETE'
+          || oldObject.metadata.namespace.startsWith('ws-')
+          || oldObject.metadata.namespace.startsWith('wt-')
+          || oldObject.metadata.namespace.startsWith('env-')
+      message: "rustic-git-agent may only delete namespaced objects in ws-/wt-/env- namespaces"
+    - expression: >-
+        request.operation == 'DELETE' ? true :
         object.kind == 'Namespace'
           ? (object.metadata.name.startsWith('ws-')
              || object.metadata.name.startsWith('wt-')
