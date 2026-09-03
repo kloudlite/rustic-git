@@ -3001,31 +3001,60 @@ fi
         assert!(ctx.engine.pool.voldir("v-live").exists(), "listed: untouched");
     }
 
-    /// I1: the retire's btrfs work must not run on the reactor. Driven on a single-threaded
-    /// runtime with a concurrent task that must make progress WHILE the retire runs: with
-    /// `cleanup_local` called inline the sleeper cannot be polled until the walk finishes, and
-    /// with it on `spawn_blocking` it can. The orphan voldir is a real directory tree, so the
-    /// walk is real work either way.
+    /// I1: the retire's btrfs work must not run on the reactor. On a single-threaded runtime a
+    /// `spawn_blocking`'d walk lets a concurrent `yield_now` ticker rack up many ticks while the
+    /// blocking pool thread does the real work; an inline walk starves the ticker completely,
+    /// because nothing yields until the walk (and the `remove_dir_all` after it) is done. A
+    /// watcher records the ticker's count at the instant the directory is observed gone, which
+    /// stays in the single digits for the inline form (measured by temporarily reverting the
+    /// orphan call site to a direct `janitor::cleanup_local` call: 1 tick — the ticker and the
+    /// watcher each get exactly one poll once the already-finished walk finally lets the task
+    /// yield) and reaches the thousands for the `spawn_blocking` form (8000 plain directories
+    /// measured ~140ms to walk plus ~400ms to `remove_dir_all` on this machine — real wall-clock
+    /// work, not a sleep).
     #[test]
     fn the_retire_pass_does_not_walk_the_pool_on_the_reactor() {
         let tmp = tempfile::tempdir().unwrap();
-        // 200 nested directories: enough walking that an inline call is unambiguously ordered
-        // before the sleeper, without making the test slow.
-        for i in 0..200 {
+        for i in 0..8000 {
             std::fs::create_dir_all(tmp.path().join("vol").join("orphan").join("snap").join(format!("c{i}"))).unwrap();
         }
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let (ctx, _rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, list_of("Snapshot", vec![]))]);
-            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let f = flag.clone();
+
+            let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let t = ticks.clone();
             let ticker = tokio::spawn(async move {
-                tokio::task::yield_now().await;
-                f.store(true, std::sync::atomic::Ordering::SeqCst);
+                loop {
+                    t.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                }
             });
+
+            let orphan = tmp.path().join("vol").join("orphan");
+            let ticks_at_gone = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let recorded = ticks_at_gone.clone();
+            let watched = ticks.clone();
+            let watcher = tokio::spawn(async move {
+                loop {
+                    if !orphan.exists() {
+                        recorded.store(watched.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            });
+
             retire_pass(&ctx, &beat_of(vec![], vec![], vec![]), &[]).await;
-            ticker.await.unwrap();
-            assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+            watcher.await.unwrap();
+            ticker.abort();
+
+            let ticks_before_gone = ticks_at_gone.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                ticks_before_gone >= 50,
+                "the orphan walk must run off the reactor: only {ticks_before_gone} ticker ticks happened \
+                 before the directory was reclaimed (inline blocking gives 0)"
+            );
             assert!(!tmp.path().join("vol").join("orphan").exists(), "the orphan voldir is still reclaimed");
         });
     }
