@@ -161,7 +161,7 @@ async fn decide(
     // A node being retired takes no new work: the label is the operator's decision and the claim
     // is where it has to bite, or a drain never finishes because new workspaces keep landing.
     let me = Api::<Node>::all(ctx.client.clone()).get_opt(&ctx.node).await?;
-    if crate::peer::unplaceable(me.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()) {
+    if crate::peer::unplaceable(me.as_ref(), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()) {
         return Ok(None);
     }
     // A clone is decided over its SOURCE's volume and worktree; everything else over its own. Both
@@ -182,7 +182,7 @@ async fn decide(
     // guard's business — `may_claim`'s up-to-date rule is what lets a replacement take over.
     if !owner.is_empty() && owner != ctx.node {
         let owner_node = Api::<Node>::all(ctx.client.clone()).get_opt(&owner).await?;
-        if !crate::peer::unplaceable(owner_node.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()) {
+        if !crate::peer::unplaceable(owner_node.as_ref(), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()) {
             return Ok(None);
         }
     }

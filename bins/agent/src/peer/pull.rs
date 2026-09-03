@@ -35,8 +35,8 @@ fn subvolume_names(dir: &std::path::Path) -> Vec<String> {
 /// ponytail: one ceiling per receive, not per volume total — N concurrent receives of one volume
 /// can still exceed it N times. The pool-level guard is the quota `volume_work` already sets;
 /// this is the bound on a single stream from a peer we do not otherwise trust to be finite.
-pub fn receive_ceiling(quota_gb: u64) -> u64 {
-    let slack: u64 = std::env::var("WS_PEER_RECEIVE_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+pub fn receive_ceiling(quota_gb: u64, settings: &crate::controller::Settings) -> u64 {
+    let slack = settings.load().peer_receive_slack;
     (quota_gb * slack * 1024 * 1024 * 1024).max(1024 * 1024 * 1024)
 }
 
@@ -46,9 +46,9 @@ async fn delete_subvolume(btrfs_bin: &str, path: &std::path::Path) {
     let _ = tokio::process::Command::new(prog).args(prefix).arg("subvolume").arg("delete").arg(path).status().await;
 }
 
-/// `WS_REPLICA_SECS`, default 300.
-pub fn replica_interval() -> std::time::Duration {
-    std::time::Duration::from_secs(std::env::var("WS_REPLICA_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300))
+/// `replica_secs`, `stored ?? env ?? default`.
+pub fn replica_interval(settings: &crate::controller::Settings) -> std::time::Duration {
+    std::time::Duration::from_secs(settings.load().replica_secs)
 }
 
 /// `{pod ip}:8444` for the `rustic-git-agent` pod on `node` — the peer listener's own address,
@@ -73,8 +73,8 @@ pub(crate) async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<
 /// `WS_PEER_SEND_TIMEOUT_SECS`, default 3600. A send is legitimately tens of GiB; this exists to
 /// unwedge a connection that has actually stalled, not to police link speed. The receive side has
 /// no timeout knob of its own — the sender's is the only bound on a transfer.
-fn send_timeout() -> Duration {
-    Duration::from_secs(std::env::var("WS_PEER_SEND_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600))
+fn send_timeout(settings: &crate::controller::Settings) -> Duration {
+    Duration::from_secs(settings.load().peer_send_timeout_secs)
 }
 
 /// The client every peer dial in this file shares. `connect_timeout` alone, not a blanket
@@ -114,7 +114,7 @@ pub(crate) async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str
     // One clock and one floor for the whole pass: reap, unclaim and live_nodes must agree on
     // exactly the same "dead" answer, not three readings a few nanoseconds apart.
     let now = k8s_openapi::jiff::Timestamp::now();
-    let floor = node_dead_secs();
+    let floor = node_dead_secs(&ctx.settings);
 
     // A node the cluster reads as dead must not sweep: its agent kept running through a kubelet
     // outage, so it went on reaping replicas, unclaiming volumes and retiring copies on a view of
@@ -320,7 +320,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
     // The volume's own quota is the ceiling's source. A volume missing from the beat's listing is
     // one this node holds a copy of without a CR; the floor applies.
     let quota_gb = beat.volumes.iter().find(|v| v.name_any() == volume).map(|v| v.spec.quota_gb).unwrap_or(0);
-    let max_bytes = receive_ceiling(quota_gb);
+    let max_bytes = receive_ceiling(quota_gb, &ctx.settings);
 
     // Any pull that could not be satisfied this pass. It gates the retire pass below, because
     // the two together would otherwise LOSE a sync point: the owner deletes `sync-A`'s CR the
@@ -345,10 +345,13 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             // `send_to_target` already handles on the push side. One retry against the SAME
             // source with no parent at all before moving on, so a single bad guess costs one
             // extra full pull instead of losing this snapshot (and every descendant) forever.
-            let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref(), max_bytes).await;
+            // Read fresh for each new send this pass starts — an in-flight one keeps the
+            // deadline it started with, nothing here cancels or extends one already streaming.
+            let timeout = send_timeout(&ctx.settings);
+            let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref(), max_bytes, timeout).await;
             if result.is_err() && my_parent.is_some() {
                 tracing::warn!(%volume, %name, source, "pull: incremental receive failed, falling back to a full pull from the same source");
-                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None, max_bytes).await;
+                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None, max_bytes, timeout).await;
             }
             match result {
                 Ok(()) => {
@@ -428,17 +431,18 @@ pub async fn pull_one(
     name: &str,
     parent: Option<&str>,
     max_bytes: u64,
+    timeout: Duration,
 ) -> Result<(), String> {
     let mut url = format!("http://{addr}/peer/v1/snapshot/{volume}/{name}?max={max_bytes}");
     if let Some(p) = parent {
         url = format!("{url}&parent={p}");
     }
-    // ponytail: `send_timeout()` bounds the WHOLE streamed pull, not just the connect — a first
+    // ponytail: `timeout` bounds the WHOLE streamed pull, not just the connect — a first
     // replica larger than ~1h of transfer at whatever the link does is timed out and retried from
-    // the next source rather than finishing. `WS_PEER_SEND_TIMEOUT_SECS` is the escape hatch;
+    // the next source rather than finishing. `peer_send_timeout_secs` is the escape hatch;
     // splitting "connect" from "whole body" is the upgrade if a legitimately huge first pull ever
-    // needs longer than an operator wants to raise the env for everyone.
-    let resp = http.get(&url).header("x-peer-secret", secret).timeout(send_timeout()).send().await.map_err(|e| e.to_string())?;
+    // needs longer than an operator wants to raise it for everyone.
+    let resp = http.get(&url).header("x-peer-secret", secret).timeout(timeout).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("GET {url}: status {}", resp.status()));
     }

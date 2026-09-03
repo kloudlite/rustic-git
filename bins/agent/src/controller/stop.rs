@@ -158,7 +158,7 @@ pub async fn start_placement(
     let lp = ListParams::default().fields(&format!("spec.volume={id}"));
     let rows = Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&lp).await?.items;
     let nodes = Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
-    let (floor, now) = (crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now());
+    let (floor, now) = (crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now());
     // A dead or draining node is no candidate: handing it the volume would strand every parent
     // until the sweep took it back.
     let live: Vec<crd::VolumeReplica> = rows

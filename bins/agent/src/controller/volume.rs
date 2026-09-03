@@ -709,7 +709,7 @@ where
         // else ever touches that claim. `claim.rs` keeps `unplaceable`: nothing NEW may land here.
         let owner_node = Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&vol.spec.node_name).await;
         let alive = match &owner_node {
-            Ok(n) => !crate::peer::node_is_dead(n.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+            Ok(n) => !crate::peer::node_is_dead(n.as_ref(), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()),
             Err(_) => false,
         };
         if alive {

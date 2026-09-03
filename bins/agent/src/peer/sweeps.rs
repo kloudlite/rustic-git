@@ -571,7 +571,7 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
 /// absent) has no owner left to be it, so the rendezvous top candidate over `live` stands in, the
 /// same substitute `preferred_node` already is for "who takes this volume next".
 async fn collect_unreferenced_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshots: &[crd::Snapshot], live: &[String]) {
-    let floor = replica_interval().as_secs() as i64;
+    let floor = replica_interval(&ctx.settings).as_secs() as i64;
     let now = k8s_openapi::jiff::Timestamp::now();
     let hosted = beat.hosted_volumes();
     let snapshotted: HashSet<&str> = snapshots

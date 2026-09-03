@@ -378,8 +378,6 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
 /// the same volume buy nothing but disk contention.
 fn spawn_pull(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(crate::peer::replica_interval());
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let wake = ctx.pull_wake.clone();
         let mut next = crate::peer::Next::Wait;
         let mut misses = 0;
@@ -394,9 +392,11 @@ fn spawn_pull(ctx: Arc<Ctx>) {
                         _ = wake.notified() => {}
                     }
                 }
+                // Read fresh, not from a `tokio::time::interval` fixed at spawn time — a changed
+                // `replica_secs` must land on the NEXT wait, never require a restart to notice.
                 crate::peer::Next::Wait => {
                     tokio::select! {
-                        _ = tick.tick() => {}
+                        _ = tokio::time::sleep(crate::peer::replica_interval(&ctx.settings)) => {}
                         _ = wake.notified() => {}
                     }
                 }
@@ -407,7 +407,7 @@ fn spawn_pull(ctx: Arc<Ctx>) {
             // Wakes that arrived DURING the pass decide whether to go straight round again — but
             // never sooner than `MIN_WAKE_GAP` after this pass began, so a peer looping on
             // `/peer/v1/wake` cannot drive this node's beat continuously.
-            next = crate::peer::after_pass(&wake, missed, &mut misses, started.elapsed());
+            next = crate::peer::after_pass(&wake, missed, &mut misses, started.elapsed(), &ctx.settings);
         }
     });
 }
@@ -418,10 +418,10 @@ fn spawn_pull(ctx: Arc<Ctx>) {
 /// workspace) is observed through the same listing everything else already reads.
 fn spawn_decommission(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(crate::decommission::beat_interval());
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tick.tick().await;
+            // Read fresh each turn, same reason as `spawn_pull`: a changed `decommission_secs`
+            // takes effect on the NEXT sleep, never mid-sleep.
+            tokio::time::sleep(crate::decommission::beat_interval(&ctx.settings)).await;
             crate::decommission::decommission_beat(&ctx).await;
         }
     });
@@ -431,10 +431,10 @@ fn spawn_decommission(ctx: Arc<Ctx>) {
 /// watches change under a running pod without producing any Kubernetes event to reconcile on.
 fn spawn_sync(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(crate::sync::sync_interval());
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tick.tick().await;
+            // Read fresh each turn: a changed `sync_secs` takes effect on the NEXT sleep, never
+            // mid-sleep — the one property `tests::spawn_sync_picks_up_a_changed_interval` pins.
+            tokio::time::sleep(crate::sync::sync_interval(&ctx.settings)).await;
             crate::sync::sync_beat(&ctx).await;
         }
     });
@@ -466,7 +466,51 @@ pub fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testsupport::test_ctx;
     use kube::runtime::reflector::{store, ObjectRef};
+    use rustic_git_workspaces::kube_test::Route;
+    use rustic_git_workspaces::settings::AgentSettings;
+
+    /// I3/Task 3 Step 6: an interval read fresh each loop turn — never a `tokio::time::interval`
+    /// captured at spawn — takes effect on the NEXT sleep, and never cuts a sleep already in
+    /// progress short. `spawn_sync` is exactly that shape; this pins it with a fake clock instead
+    /// of asserting the *reader* (`sync_interval`, already covered by `sync.rs`'s own tests).
+    #[tokio::test(start_paused = true)]
+    async fn spawn_sync_picks_up_a_changed_interval_on_the_next_tick_not_mid_sleep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty_workspaces = serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "items": []});
+        let routes = vec![Route {
+            method: "GET",
+            path: "/apis/rustic-git.io/v1alpha1/workspaces".into(),
+            status: 200,
+            body: empty_workspaces,
+        }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        ctx.settings.store(AgentSettings { sync_secs: 60, ..AgentSettings::from_env() });
+        spawn_sync(ctx.clone());
+        // Let the spawned task run to its first `sleep(..)` — reading the 60s interval — before
+        // any clock advance, or the timer it registers races the advance below.
+        tokio::task::yield_now().await;
+
+        // Changed mid-sleep: the beat must NOT wake early on it.
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        ctx.settings.store(AgentSettings { sync_secs: 10, ..AgentSettings::from_env() });
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rec.calls().len(), 0, "the in-flight 60s sleep must keep the value it started with");
+
+        // The rest of the original 60s: the first tick fires on the OLD interval.
+        tokio::time::advance(std::time::Duration::from_secs(25)).await;
+        tokio::task::yield_now().await;
+        // One pass lists both kinds (workspaces, environments) — two calls.
+        assert_eq!(rec.calls().len(), 2, "the first tick still fires at the interval read when the sleep began");
+
+        // The next sleep reads the NEW value (10s), not another 60s.
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rec.calls().len(), 4, "the second tick used the changed interval, not the original one");
+    }
 
     fn ws(name: &str) -> crd::Workspace {
         serde_json::from_value(serde_json::json!({

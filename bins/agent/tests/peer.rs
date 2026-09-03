@@ -9,14 +9,21 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use rustic_git_agent::peer::{peer_http_client, pull_one, receive_ceiling, router, PeerState};
+use rustic_git_core::settings::LiveSettings;
 use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
 use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
+use rustic_git_workspaces::settings::AgentSettings;
+use std::time::Duration;
+
+fn test_settings() -> LiveSettings<AgentSettings> {
+    LiveSettings::new(AgentSettings::from_env())
+}
 use std::os::unix::fs::PermissionsExt;
 use tower::util::ServiceExt;
 
 fn state(pool: &std::path::Path, btrfs_bin: String, routes: Vec<Route>) -> (PeerState, Recorder) {
     let (client, rec) = mock_client(routes);
-    (PeerState::new(client, pool.to_string_lossy().into(), "node-b".into(), "s3cret".into(), btrfs_bin), rec)
+    (PeerState::new(client, pool.to_string_lossy().into(), "node-b".into(), "s3cret".into(), btrfs_bin, test_settings()), rec)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -31,7 +38,7 @@ fn state(pool: &std::path::Path, btrfs_bin: String, routes: Vec<Route>) -> (Peer
 async fn an_empty_configured_secret_authenticates_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let (client, _rec) = mock_client(vec![]);
-    let state = PeerState::new(client, tmp.path().to_string_lossy().into(), "node-b".into(), String::new(), "btrfs".into());
+    let state = PeerState::new(client, tmp.path().to_string_lossy().into(), "node-b".into(), String::new(), "btrfs".into(), test_settings());
     let app = router(state);
 
     for header in [None, Some(""), Some("anything")] {
@@ -313,9 +320,21 @@ async fn a_truncated_receive_deletes_the_partial_and_fails() {
     let engine = Engine::new(EnginePool::new(tmp.path()));
     let server = serve_one_body(b"partial stream").await;
 
-    let err = pull_one(&engine, &fake, &peer_http_client().unwrap(), &server.addr, "s3cret", "v1", "c1", None, receive_ceiling(0))
-        .await
-        .expect_err("a failed receive is an error");
+    let settings = test_settings();
+    let err = pull_one(
+        &engine,
+        &fake,
+        &peer_http_client().unwrap(),
+        &server.addr,
+        "s3cret",
+        "v1",
+        "c1",
+        None,
+        receive_ceiling(0, &settings),
+        Duration::from_secs(60),
+    )
+    .await
+    .expect_err("a failed receive is an error");
 
     assert!(err.contains("btrfs receive failed"), "{err}");
     assert!(!engine.pool.snap("v1", "c1").exists(), "the partial must not survive a failed receive");

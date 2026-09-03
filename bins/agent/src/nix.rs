@@ -13,7 +13,6 @@ use std::time::Duration;
 use tokio::process::Command;
 
 pub const PROFILES_DIR: &str = "/nix/var/rustic/profiles";
-const DEFAULT_TIMEOUT_SECS: u64 = 1200;
 
 // The root is always passed in (`Ctx::profiles_dir`) rather than read from a global: a process-wide
 // override is a test that can reach the node's real /nix, and one that races every other test.
@@ -60,17 +59,24 @@ pub fn valid_pin(pin: &str) -> bool {
 pub const DEFAULT_BASE_PACKAGES: &str =
     "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils";
 
-pub fn base_packages() -> Vec<String> {
-    let raw = std::env::var("WS_BASE_PACKAGES").unwrap_or_else(|_| DEFAULT_BASE_PACKAGES.to_string());
-    raw.split_whitespace().map(str::to_string).collect()
+pub fn base_packages(settings: &crate::controller::Settings) -> Vec<String> {
+    settings.load().base_packages.split_whitespace().map(str::to_string).collect()
 }
 
-pub fn nixpkgs_pin() -> String {
+pub fn nixpkgs_pin(settings: &crate::controller::Settings) -> String {
+    settings.load().nixpkgs.clone()
+}
+
+/// Env-only: read at boot, before `Ctx` (and so before `LiveSettings`) exists, to validate
+/// `WS_NIXPKGS` ahead of anything that would build with it. The live handle's own value comes
+/// from `AgentSettings::from_env()` seeded with the same read, so this and `nixpkgs_pin` never
+/// disagree at the moment the process starts.
+pub fn nixpkgs_pin_env() -> String {
     std::env::var("WS_NIXPKGS").unwrap_or_default()
 }
 
-pub fn build_timeout() -> Duration {
-    Duration::from_secs(std::env::var("WS_NIX_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_TIMEOUT_SECS))
+pub fn build_timeout(settings: &crate::controller::Settings) -> Duration {
+    Duration::from_secs(settings.load().nix_timeout_secs)
 }
 
 #[async_trait::async_trait]

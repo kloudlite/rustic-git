@@ -104,10 +104,10 @@ async fn ensure_profile(
         // Only a spec edit fixes this, and that is an event.
         return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &e.to_string()), Action::await_change()).await;
     }
-    let pin = crate::nix::nixpkgs_pin();
+    let pin = crate::nix::nixpkgs_pin(&ctx.settings);
     // The platform's base set first, then the workspace's own, deduplicated: the hash covers
     // both, so rolling the base rebuilds every profile, and a name in both lists is one package.
-    let base = crate::nix::base_packages();
+    let base = crate::nix::base_packages(&ctx.settings);
     let mut all: Vec<String> = base.clone();
     all.extend(w.spec.packages.iter().filter(|p| !base.contains(p)).cloned());
     if let Err(e) = packages::validate_list(&all) {
@@ -221,7 +221,7 @@ async fn ensure_profile(
     let dir = crate::nix::profile_dir(&ctx.profiles_dir, id);
     let building = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();
-    let timeout = crate::nix::build_timeout();
+    let timeout = crate::nix::build_timeout(&ctx.settings);
     // `nix.build` is async (it drives the child through tokio), so this is a plain task; the fs
     // calls after it are a symlink and a mkdir, not the substituter's minutes.
     let handle = tokio::spawn(async move {

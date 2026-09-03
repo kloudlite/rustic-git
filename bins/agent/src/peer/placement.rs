@@ -31,8 +31,8 @@ pub(crate) async fn pool_nodes(client: &kube::Client) -> Result<Vec<String>, Str
 /// brief kubelet hiccup never costs a replica row; the row is cheap to recreate, a wrongly-reaped
 /// one is not. It was 600 with a 180 deploy override, which meant the number every test and every
 /// other doc comment saw was not the one production ran.
-pub(crate) fn node_dead_secs() -> i64 {
-    std::env::var("WS_NODE_DEAD_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(180)
+pub(crate) fn node_dead_secs(settings: &crate::controller::Settings) -> i64 {
+    settings.load().node_dead_secs as i64
 }
 
 /// The nodes a stopped parent could start on, from this node's own view — the pool minus the
@@ -45,7 +45,7 @@ pub(crate) async fn placeable_nodes(ctx: &Arc<Ctx>) -> Vec<String> {
     ) else {
         return Vec::new();
     };
-    live_nodes(&pool, &nodes.items, node_dead_secs(), k8s_openapi::jiff::Timestamp::now())
+    live_nodes(&pool, &nodes.items, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now())
 }
 
 /// Rendezvous over the FULL pool keeps electing a corpse: the reaper deletes its row every beat

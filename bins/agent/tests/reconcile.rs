@@ -6,10 +6,16 @@
 //! loopback tests and by `tests/ws_e2e.sh` against real k3s.
 
 use rustic_git_agent::controller::{Ctx, Done};
+use rustic_git_core::settings::LiveSettings;
 use rustic_git_workspaces::crd;
 use rustic_git_workspaces::engine::{Engine, Pool};
 use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
+use rustic_git_workspaces::settings::AgentSettings;
 use std::sync::Arc;
+
+fn test_settings() -> LiveSettings<AgentSettings> {
+    LiveSettings::new(AgentSettings::from_env())
+}
 
 const VOL_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status";
 
@@ -50,7 +56,7 @@ impl rustic_git_agent::nix::Nix for FakeNix {
 /// A profile as a finished build leaves it: the directory the pod mounts, with `current` inside.
 /// The list the node actually hashes: the platform base set first, then the workspace's own.
 fn with_base(own: &[String]) -> Vec<String> {
-    let base = rustic_git_agent::nix::base_packages();
+    let base = rustic_git_agent::nix::base_packages(&test_settings());
     let mut all = base.clone();
     all.extend(own.iter().filter(|p| !base.contains(p)).cloned());
     all
@@ -166,6 +172,7 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
             homes_export,
             nix,
             profiles,
+            test_settings(),
         )),
         rec,
     )
@@ -3441,7 +3448,7 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
     let mut ws = ready_workspace("ws-1", vec!["hello".into()]);
-    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let pin = rustic_git_agent::nix::nixpkgs_pin(&test_settings());
     ws.status.as_mut().unwrap().packages = Some(rustic_git_workspaces::crd::PackagesStatus {
         base: vec![],
         observed: vec!["hello".into()],
@@ -3520,7 +3527,7 @@ async fn a_spec_change_during_a_build_is_rebuilt_not_published_under_the_new_has
     assert_eq!(builds.len(), 2, "the superseded build is discarded and the new spec built: {builds:?}");
     assert!(builds[1].contains("pkgs.jq"), "the second build is the edited list: {}", builds[1]);
     let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
-    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let pin = rustic_git_agent::nix::nixpkgs_pin(&test_settings());
     assert_eq!(
         st["status"]["packages"]["observedHash"],
         rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into(), "jq".into()])),
@@ -3577,7 +3584,7 @@ async fn stopping_a_workspace_keeps_its_packages_condition() {
 async fn a_build_interrupted_by_a_restart_is_started_again() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
-    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let pin = rustic_git_agent::nix::nixpkgs_pin(&test_settings());
     // The disk has [hello]; the spec asks for [hello, jq]; status says Building and — correctly —
     // still names the OLD list. The Ctx is fresh: no handle, no remembered hash, as after a crash.
     plant_profile(&ctx, "ws-1");
@@ -4069,7 +4076,7 @@ async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
     // Seed the index as a previous build would have.
     let store = ctx.profiles_dir.join("seeded-store-path");
     std::fs::create_dir_all(&store).unwrap();
-    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let pin = rustic_git_agent::nix::nixpkgs_pin(&test_settings());
     let hash = rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
     rustic_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &store).unwrap();
 
@@ -4092,7 +4099,7 @@ async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
 async fn an_index_entry_pointing_at_nothing_still_builds() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
-    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let pin = rustic_git_agent::nix::nixpkgs_pin(&test_settings());
     let hash = rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
     rustic_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &ctx.profiles_dir.join("gone")).unwrap();
 
@@ -4110,7 +4117,7 @@ async fn a_finished_build_is_recorded_under_its_inputs() {
     let ws = ready_workspace("ws-1", vec!["hello".into()]);
     apply_until_settled(&ws, &ctx).await;
 
-    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let pin = rustic_git_agent::nix::nixpkgs_pin(&test_settings());
     let hash = rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
     assert_eq!(
         rustic_git_agent::nix::indexed(&ctx.profiles_dir, &hash),
@@ -4830,6 +4837,7 @@ fn ctx_with_node(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc
             Some("test:/".into()),
             Arc::new(FakeNix::default()),
             profiles,
+            test_settings(),
         )),
         rec,
     )

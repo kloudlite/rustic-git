@@ -45,6 +45,9 @@ reqwest = { workspace = true }
 ssh-key = { workspace = true }
 
 [dev-dependencies]
+# `tokio::time::pause`/`advance`, for the fake-clock beat-interval tests — production never
+# builds with this, so a beat can never accidentally rely on virtual time.
+tokio = { workspace = true, features = ["test-util"] }
 # Tests only: every fs test gets its own pool/profiles root.
 tempfile = { workspace = true }
 async-trait = { workspace = true }

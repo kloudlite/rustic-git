@@ -3,8 +3,10 @@
 //! two different worlds.
 
 use crate::controller::Ctx;
+use rustic_git_core::settings::LiveSettings;
 use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
 use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
+use rustic_git_workspaces::settings::AgentSettings;
 use std::sync::Arc;
 
 pub(crate) struct NoopNix;
@@ -28,6 +30,10 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
     // Set, not read from the environment: a pod spec built without an image is a reconcile error,
     // and every test in this binary shares one process env — hence `--test-threads=1`.
     std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
+    // `LiveSettings::new` directly, not a fake reflector — a beat's test never has to touch
+    // `std::env` for a field it wants to override, only for `WS_DEFAULT_IMAGE` above (a `Ctx::new`
+    // boot-time read, unrelated to the beats this fixture serves).
+    let settings = LiveSettings::new(AgentSettings::from_env());
     (
         Arc::new(Ctx::new(
             client,
@@ -39,6 +45,7 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
             Some("test:/".into()),
             Arc::new(NoopNix),
             pool.join("profiles"),
+            settings,
         )),
         rec,
     )

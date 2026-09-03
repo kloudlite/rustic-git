@@ -71,13 +71,17 @@ pub struct PeerState {
     sends: StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     /// Shared with `Ctx::pull_wake`, so `/peer/v1/wake` reaches the puller's own beat.
     pub pull_wake: Arc<tokio::sync::Notify>,
+    /// The same live handle as `Ctx::settings` — the serve deadline and the receive ceiling are
+    /// read off it per request, never cached at listener-bind time.
+    pub settings: crate::controller::Settings,
 }
 
 impl PeerState {
     /// The one constructor — `sends` starts empty and is never meaningfully set any other
     /// way, so nothing outside this module (tests included) builds a `PeerState` by struct
     /// literal.
-    pub fn new(client: kube::Client, pool: String, node: String, secret: String, btrfs_bin: String) -> PeerState {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(client: kube::Client, pool: String, node: String, secret: String, btrfs_bin: String, settings: crate::controller::Settings) -> PeerState {
         PeerState {
             client,
             pool,
@@ -86,13 +90,17 @@ impl PeerState {
             btrfs_bin,
             sends: StdMutex::new(HashMap::new()),
             pull_wake: Arc::new(tokio::sync::Notify::new()),
+            settings,
         }
     }
 
     pub fn from_ctx(ctx: &Ctx, secret: String) -> PeerState {
         // The listener's notify must be the PULLER's, not a fresh one: a wake that fired a
         // private `Notify` would be a 204 nobody is waiting on.
-        PeerState { pull_wake: ctx.pull_wake.clone(), ..PeerState::new(ctx.client.clone(), ctx.pool.clone(), ctx.node.clone(), secret, "btrfs".into()) }
+        PeerState {
+            pull_wake: ctx.pull_wake.clone(),
+            ..PeerState::new(ctx.client.clone(), ctx.pool.clone(), ctx.node.clone(), secret, "btrfs".into(), ctx.settings.clone())
+        }
     }
 
     fn send_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
@@ -176,7 +184,7 @@ async fn snapshot(
     if let Some(max) = q.max {
         let quota =
             Api::<crd::Volume>::all(state.client.clone()).get_opt(&volume).await.ok().flatten().map(|v| v.spec.quota_gb).unwrap_or(0);
-        if max < receive_ceiling(quota) {
+        if max < receive_ceiling(quota, &state.settings) {
             return (StatusCode::PAYLOAD_TOO_LARGE, Body::empty()).into_response();
         }
     }
@@ -209,7 +217,7 @@ async fn snapshot(
     // which is the case it already handles (`pull_one`'s failed-receive path deletes the partial
     // and tries the next source).
     let stream = tokio_util::io::ReaderStream::new(killer);
-    let deadline = tokio::time::Instant::now() + serve_timeout();
+    let deadline = tokio::time::Instant::now() + serve_timeout(&state.settings);
     let body = Body::from_stream(futures::stream::unfold(Box::pin(stream), move |mut s| async move {
         match tokio::time::timeout_at(deadline, futures::StreamExt::next(&mut s)).await {
             Ok(Some(chunk)) => Some((chunk, s)),
@@ -276,8 +284,8 @@ impl Drop for KillOnDrop {
 /// volume for the client's full hour — one wedged connection stopping a volume's replication
 /// fleet-wide. A legitimate send that needs longer than 15 minutes of TOTAL wall clock raises
 /// this; the puller retries from the next source either way.
-fn serve_timeout() -> Duration {
-    Duration::from_secs(std::env::var("WS_PEER_SERVE_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(900))
+fn serve_timeout(settings: &crate::controller::Settings) -> Duration {
+    Duration::from_secs(settings.load().peer_serve_timeout_secs)
 }
 
 /// "Something you replicate just changed; pull now." The whole handler is one `notify_one`: the

@@ -9,14 +9,22 @@ use super::pull::*;
 use super::sweeps::*;
 use super::wake::*;
 use super::*;
+use crate::controller::Settings;
 use crate::testsupport::test_ctx;
 use k8s_openapi::api::core::v1::Node;
+use rustic_git_core::settings::LiveSettings;
 use rustic_git_workspaces::crd;
 use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
 use rustic_git_workspaces::replicate;
+use rustic_git_workspaces::settings::AgentSettings;
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
+
+/// Env-then-default `AgentSettings`, for a test that wants the handle but not a live reflector.
+fn test_settings() -> Settings {
+    LiveSettings::new(AgentSettings::from_env())
+}
 
 /// M2: the code default IS the cluster's floor. Two numbers — a 600 s default with a 180 s
 /// deploy override — is a node declared dead at one interval in production and another in
@@ -24,7 +32,7 @@ use std::sync::Arc;
 #[test]
 fn the_dead_node_floor_defaults_to_the_number_the_cluster_runs() {
     std::env::remove_var("WS_NODE_DEAD_SECS");
-    assert_eq!(node_dead_secs(), 180);
+    assert_eq!(node_dead_secs(&test_settings()), 180);
 }
 
 /// M7: a pull target must be the agent's own ServiceAccount, not merely a pod wearing its
@@ -52,8 +60,9 @@ async fn a_pod_wearing_the_label_but_not_the_service_account_is_not_a_peer() {
 /// floor a snapshot's metadata needs even on a tiny or quota-less volume.
 #[test]
 fn the_receive_ceiling_follows_the_volumes_quota() {
-    assert_eq!(receive_ceiling(10), 10 * 3 * 1024 * 1024 * 1024);
-    assert_eq!(receive_ceiling(0), 1024 * 1024 * 1024, "a quota-less volume still gets the floor");
+    let settings = test_settings();
+    assert_eq!(receive_ceiling(10, &settings), 10 * 3 * 1024 * 1024 * 1024);
+    assert_eq!(receive_ceiling(0, &settings), 1024 * 1024 * 1024, "a quota-less volume still gets the floor");
 }
 
 // -----------------------------------------------------------------------------------------
@@ -499,7 +508,7 @@ fi
     let source_pool = tmp.path().join("source-pool");
     std::fs::create_dir_all(source_pool.join("vol/vol-1/snap/vol-1-child")).unwrap();
     let (client, _rec) = mock_client(vec![]);
-    let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin);
+    let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin, test_settings());
     // `agent_pod_addr` hard-codes `:8444` (the peer listener's fixed port in production), so
     // the fake source server must actually listen there for this end-to-end test to reach it.
     let peer_server = serve_on_the_peer_port(router(peer_state)).await;
@@ -786,7 +795,7 @@ async fn reaper_deletes_dead_keeps_young_keeps_absent_condition() {
     ];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
-    reap_dead_replicas(&ctx, &beat_of(vec![], replica_rows, vec![]), &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    reap_dead_replicas(&ctx, &beat_of(vec![], replica_rows, vec![]), &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes.len(), 2, "{deletes:?}");
@@ -921,7 +930,7 @@ async fn a_stopped_parent_beside_a_running_clone_on_one_volume_never_moves() {
         parent_at("Workspace", "ws-clone", "vol-1", crd::Phase::Ready, true),
     ];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     assert!(
         !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/rustic-git.io/v1alpha1/volumes/vol-1")),
@@ -961,7 +970,7 @@ async fn the_sweep_retries_a_conflicted_volume_status_write() {
     let mut beat = beat_of(vec![vol_owned("vol-1", "node-b")], vec![], vec![]);
     beat.all_parents = vec![parent_at("Workspace", "ws-1", "vol-1", crd::Phase::Ready, false)];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     let writes = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status");
     assert_eq!(writes.len(), 2, "the conflicted write is retried once: {:?}", rec.calls());
@@ -1013,7 +1022,7 @@ async fn the_sweep_unplaces_a_dead_owners_parents_and_never_touches_a_live_one()
         parent_at("Environment", "env-dead", "vol-env-dead", crd::Phase::Stopped, true),
     ];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-dead/status");
     assert_eq!(ws_sent.len(), 1, "{:?}", rec.calls());
@@ -1041,7 +1050,7 @@ async fn a_running_worktree_on_a_dead_node_is_marked_not_moved() {
     let mut beat = beat_of(vec![vol_owned("vol-ws-run", "node-b")], vec![], vec![]);
     beat.all_parents = vec![parent_at("Workspace", "ws-run", "vol-ws-run", crd::Phase::Ready, false)];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status");
     assert_eq!(ws_sent.len(), 1, "{:?}", rec.calls());
@@ -1092,7 +1101,7 @@ async fn a_second_pass_over_the_same_running_dead_state_writes_nothing() {
     let mut beat = beat_of(vec![already_unavailable], vec![], vec![]);
     beat.all_parents = vec![parent_at("Workspace", "ws-run", "vol-ws-run", crd::Phase::Ready, false)];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     assert!(
         !rec.calls().iter().any(|c| c.starts_with("PUT") || c.starts_with("PATCH")),
@@ -1120,7 +1129,7 @@ async fn a_stopped_worktree_on_a_dead_node_is_released_with_its_volume() {
     let mut beat = beat_of(vec![vol_owned("vol-ws-stop", "node-b"), vol_owned("vol-live", "node-a")], vec![], vec![]);
     beat.all_parents = vec![parent_at("Workspace", "ws-stop", "vol-ws-stop", crd::Phase::Stopped, true)];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     let ws_sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status");
     assert_eq!(ws_sent.len(), 1);
@@ -1169,7 +1178,7 @@ async fn a_lost_pin_cas_leaves_the_volume_and_its_parents_untouched() {
     let mut beat = beat_of(vec![vol_owned("vol-ws-stop", "node-b")], vec![], vec![]);
     beat.all_parents = vec![parent_at("Workspace", "ws-stop", "vol-ws-stop", crd::Phase::Stopped, true)];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     assert!(
         !rec.calls().iter().any(|c| c.starts_with("PUT")),
@@ -1200,7 +1209,7 @@ async fn a_shared_volume_releases_every_parent_on_it_at_once() {
         parent_at("Environment", "env-b", "vol-1", crd::Phase::Stopped, true),
     ];
 
-    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
+    sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     assert_eq!(rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/vol-1").len(), 1, "one pin patch for the volume, not one per parent");
     assert_eq!(rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status").len(), 1);
@@ -1303,7 +1312,7 @@ fi
     let source_pool = tmp.path().join("source-pool");
     std::fs::create_dir_all(source_pool.join("vol/vol-1/snap/sync-ws-1-x")).unwrap();
     let (client, _rec) = mock_client(vec![]);
-    let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin);
+    let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin, test_settings());
     // Captures every request path the real peer server sees, so we can prove the transient is
     // fetched over `/peer/v1/snapshot/{volume}/{name}` — the exact same endpoint a real snapshot
     // uses — rather than trusting the on-disk result alone.
@@ -2134,7 +2143,7 @@ async fn wake_peers_posts_once_per_live_peer_and_skips_me() {
 async fn a_wake_reaches_a_live_peers_notify() {
     let tmp = tempfile::tempdir().unwrap();
     let (client, _rec) = mock_client(vec![]);
-    let peer_state = PeerState::new(client, tmp.path().to_string_lossy().into(), "node-b".into(), "s3cret".into(), "btrfs".into());
+    let peer_state = PeerState::new(client, tmp.path().to_string_lossy().into(), "node-b".into(), "s3cret".into(), "btrfs".into(), test_settings());
     let peer_notify = peer_state.pull_wake.clone();
     let peer_server = serve_on_the_peer_port(router(peer_state)).await;
 
@@ -2160,14 +2169,15 @@ async fn a_wake_reaches_a_live_peers_notify() {
 /// after that waits. Driven through `after_pass`, so the count is asserted rather than timed.
 #[test]
 fn a_burst_of_wakes_during_a_pass_buys_exactly_one_more_pass() {
+    let settings = test_settings();
     let wake = tokio::sync::Notify::new();
     let mut misses = 0;
-    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::Wait, "no wake, no extra pass");
+    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP, &settings), Next::Wait, "no wake, no extra pass");
     for _ in 0..5 {
         wake.notify_one();
     }
-    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::RunAgain, "a wake during the pass runs it again");
-    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::Wait, "five wakes are one permit, not five passes");
+    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP, &settings), Next::RunAgain, "a wake during the pass runs it again");
+    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP, &settings), Next::Wait, "five wakes are one permit, not five passes");
 }
 
 /// F4 (drill, 2026-09-03): a pass that could not fetch a snapshot waited out the full tick. It
@@ -2177,22 +2187,24 @@ fn a_burst_of_wakes_during_a_pass_buys_exactly_one_more_pass() {
 /// the wake itself, outside `after_pass`.
 #[test]
 fn a_pass_that_missed_a_snapshot_retries_soon_even_with_a_wake_pending() {
+    let settings = test_settings();
     let wake = tokio::sync::Notify::new();
     let mut misses = 0;
-    assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP), Next::RetrySoon(RETRY_SOON));
+    assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP, &settings), Next::RetrySoon(RETRY_SOON));
     wake.notify_one();
-    assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP), Next::RetrySoon(retry_delay(2)), "the backoff still governs");
+    assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP, &settings), Next::RetrySoon(retry_delay(2, &settings)), "the backoff still governs");
 }
 
 /// Round 2: an unfetchable snapshot used to pin the whole node at a 30 s pass forever. The delay
 /// doubles per consecutive miss, caps at the ordinary tick, and a single clean pass resets it.
 #[test]
 fn consecutive_misses_back_off_to_the_ordinary_tick_and_one_clean_pass_resets() {
-    let cap = replica_interval();
+    let settings = test_settings();
+    let cap = replica_interval(&settings);
     let wake = tokio::sync::Notify::new();
     let mut misses = 0;
     let delays: Vec<Duration> = (0..6)
-        .map(|_| match after_pass(&wake, true, &mut misses, MIN_WAKE_GAP) {
+        .map(|_| match after_pass(&wake, true, &mut misses, MIN_WAKE_GAP, &settings) {
             Next::RetrySoon(d) => d,
             other => panic!("expected a retry, got {other:?}"),
         })
@@ -2210,39 +2222,42 @@ fn consecutive_misses_back_off_to_the_ordinary_tick_and_one_clean_pass_resets() 
         ]
     );
 
-    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::Wait, "a clean pass goes back to the tick");
+    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP, &settings), Next::Wait, "a clean pass goes back to the tick");
     assert_eq!(misses, 0, "and forgets the streak");
-    assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP), Next::RetrySoon(RETRY_SOON), "so the next miss starts over at 30 s");
+    assert_eq!(after_pass(&wake, true, &mut misses, MIN_WAKE_GAP, &settings), Next::RetrySoon(RETRY_SOON), "so the next miss starts over at 30 s");
 }
 
 /// I2: a wake still wins, but never sooner than `MIN_WAKE_GAP` after the last pass STARTED —
 /// a peer looping POSTs on `/peer/v1/wake` must not pin this node in a back-to-back beat.
 #[test]
 fn a_wake_arriving_inside_the_floor_waits_out_the_remainder() {
+    let settings = test_settings();
     let wake = tokio::sync::Notify::new();
     wake.notify_one();
     let mut misses = 0;
-    let next = after_pass(&wake, false, &mut misses, Duration::from_secs(1));
+    let next = after_pass(&wake, false, &mut misses, Duration::from_secs(1), &settings);
     assert_eq!(next, Next::RetrySoon(MIN_WAKE_GAP - Duration::from_secs(1)));
 }
 
 #[test]
 fn a_wake_after_the_floor_runs_again_at_once() {
+    let settings = test_settings();
     let wake = tokio::sync::Notify::new();
     wake.notify_one();
     let mut misses = 0;
-    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP), Next::RunAgain);
+    assert_eq!(after_pass(&wake, false, &mut misses, MIN_WAKE_GAP, &settings), Next::RunAgain);
 }
 
 /// The floor never delays a RETRY that is already longer than it: a missed pass's own backoff
 /// still governs, and a wake inside the floor does not shorten it.
 #[test]
 fn the_floor_never_shortens_a_missed_passes_backoff() {
+    let settings = test_settings();
     let wake = tokio::sync::Notify::new();
     wake.notify_one();
     let mut misses = 3;
-    let next = after_pass(&wake, true, &mut misses, Duration::from_secs(0));
-    assert_eq!(next, Next::RetrySoon(retry_delay(4)));
+    let next = after_pass(&wake, true, &mut misses, Duration::from_secs(0), &settings);
+    assert_eq!(next, Next::RetrySoon(retry_delay(4, &settings)));
 }
 
 fn agent_pod(node: &str, ip: &str) -> serde_json::Value {

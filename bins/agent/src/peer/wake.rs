@@ -65,8 +65,8 @@ pub(crate) const RETRY_SOON: Duration = Duration::from_secs(30);
 /// node placed on that volume at a 30 s beat forever, node-wide: the flag is per-PASS, so one
 /// stuck volume paid the whole node's listing cost every 30 s until someone deleted the CR.
 /// Capping at `replica_interval` makes the worst case exactly today's steady state.
-pub(crate) fn retry_delay(misses: u32) -> Duration {
-    RETRY_SOON.saturating_mul(1u32 << misses.saturating_sub(1).min(16)).min(replica_interval())
+pub(crate) fn retry_delay(misses: u32, settings: &crate::controller::Settings) -> Duration {
+    RETRY_SOON.saturating_mul(1u32 << misses.saturating_sub(1).min(16)).min(replica_interval(settings))
 }
 
 /// The minimum gap between the STARTS of two wake-driven passes. `/peer/v1/wake` is
@@ -82,11 +82,17 @@ pub(crate) const MIN_WAKE_GAP: Duration = Duration::from_secs(5);
 /// `since_last_start` is measured from when the pass that just ended BEGAN, not from when it
 /// ended: a slow pass has already paid the floor, and measuring from the end would let a long
 /// receive earn an extra idle 5 s it does not need.
-pub(crate) fn after_pass(wake: &tokio::sync::Notify, missed: bool, misses: &mut u32, since_last_start: Duration) -> Next {
+pub(crate) fn after_pass(
+    wake: &tokio::sync::Notify,
+    missed: bool,
+    misses: &mut u32,
+    since_last_start: Duration,
+    settings: &crate::controller::Settings,
+) -> Next {
     use futures::FutureExt;
     *misses = if missed { misses.saturating_add(1) } else { 0 };
     let woken = wake.notified().now_or_never().is_some();
-    let backoff = missed.then(|| retry_delay(*misses));
+    let backoff = missed.then(|| retry_delay(*misses, settings));
     match (woken, backoff) {
         // A wake inside the floor keeps its permit's effect — the pass still happens — but only
         // after the remainder. `RetrySoon` is right and `Wait` is not: the wake must not be lost.

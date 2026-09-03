@@ -13,7 +13,10 @@
 //! short-circuit). If you change the engine so a path that used to return early now shells out,
 //! those tests keep passing here and fail on a node — run `tests/ws_e2e.sh` on the Linux VM.
 
+use rustic_git_core::settings::LiveSettings;
+use rustic_git_workspaces::crd;
 use rustic_git_workspaces::engine::{Engine, Pool};
+use rustic_git_workspaces::settings::AgentSettings;
 use std::sync::Arc;
 
 pub mod binding;
@@ -212,7 +215,9 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     if cfg.node.is_empty() {
         return Err("NODE_NAME is unset: the controller would watch every node's objects".into());
     }
-    let pin = nix::nixpkgs_pin();
+    // Env-only, ahead of `LiveSettings` — this validates the pin the process is ABOUT to build
+    // with, before anything (including the settings merge below) can build with it.
+    let pin = nix::nixpkgs_pin_env();
     if pin.is_empty() {
         return Err("WS_NIXPKGS is required: the nixpkgs pin every profile on this node is built against".into());
     }
@@ -232,7 +237,13 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
     let roles = node_roles(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, ?roles, "node roles");
-    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, cfg.homes_export, nix_client, nix::PROFILES_DIR.into()));
+    // Resolved BEFORE `Ctx`: `Ctx::new` reads the boot-marked fields (`default_image`,
+    // `git_init_image`, `runtime_class`) straight off this handle instead of `std::env` itself,
+    // so the CRD's admin-written value is what a fresh pod boots with, not just what a running
+    // one picks up later.
+    let settings = LiveSettings::new(initial_settings(&client).await);
+    let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, roles, cfg.homes_export, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
+    spawn_settings_reflector(client, settings);
     // Fail closed: no `WS_PEER_SECRET` means no listener at all, never one guarded by an empty
     // secret that would compare-equal to a missing header.
     if let Ok(secret) = std::env::var("WS_PEER_SECRET") {
@@ -248,6 +259,81 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     controller::run(ctx).await
 }
 
+/// `SETTINGS_REFRESH_SECS`, default 30 — bootstrap-only, so this one stays a plain env read even
+/// though everything it governs is now live: there is no live source to refresh THIS with.
+fn settings_refresh_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(std::env::var("SETTINGS_REFRESH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30))
+}
+
+/// The one-shot GET `Ctx::new` needs before it can build a pod template. Missing object or a
+/// failed GET falls back to `AgentSettings::from_env()` alone — first boot, or a region that has
+/// never had a `ClusterSettings/default` written; the reflector spawned right after this will
+/// pick up the real one the moment it exists.
+async fn initial_settings(client: &kube::Client) -> AgentSettings {
+    let base = AgentSettings::from_env();
+    let api: kube::Api<crd::ClusterSettings> = kube::Api::all(client.clone());
+    match api.get_opt("default").await {
+        Ok(Some(obj)) => base.merged_with(&obj.spec),
+        Ok(None) => base,
+        Err(e) => {
+            tracing::warn!(error = %e, "boot: could not read ClusterSettings/default; starting from env/default alone");
+            base
+        }
+    }
+}
+
+/// Keeps `settings` live for the rest of the process: a watch on the single `default` object —
+/// the first CLUSTER-WIDE singleton watch this agent does, everything else shards by node — plus
+/// a periodic re-GET (`settings_refresh_interval`) as the backstop for a watch event this node
+/// missed (a reconnect gap, an apiserver restart). "Last good wins": a spec that fails to
+/// deserialize (a future field, a hand-edit with the wrong type) surfaces as a stream error, is
+/// logged once, and changes nothing — the process keeps whatever it last applied.
+fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSettings>) {
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        use kube::runtime::{watcher, WatchStreamExt};
+        let api: kube::Api<crd::ClusterSettings> = kube::Api::all(client.clone());
+        let cfg = watcher::Config::default().fields("metadata.name=default");
+        let mut events = std::pin::pin!(watcher(api.clone(), cfg).default_backoff().applied_objects());
+        let mut tick = tokio::time::interval(settings_refresh_interval());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                event = events.next() => {
+                    match event {
+                        Some(Ok(obj)) => apply_settings(&api, &settings, obj).await,
+                        // A malformed spec never reaches here as `Ok` — kube-runtime's own
+                        // decode failed first, which IS the "logged once, changes nothing" case.
+                        Some(Err(e)) => tracing::warn!(error = %e, "settings watch: last good wins"),
+                        None => return,
+                    }
+                }
+                _ = tick.tick() => {
+                    if let Ok(Some(obj)) = api.get_opt("default").await {
+                        apply_settings(&api, &settings, obj).await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The store, plus the one write-back the spec asks for: `status.observedGeneration`, so the
+/// admin UI's pending marker has something to compare `metadata.generation` against. Never called
+/// from the boot-time `initial_settings` load — only a watch/refresh event that actually reached
+/// this node earns the write.
+async fn apply_settings(api: &kube::Api<crd::ClusterSettings>, settings: &LiveSettings<AgentSettings>, obj: crd::ClusterSettings) {
+    settings.store(AgentSettings::from_env().merged_with(&obj.spec));
+    let body = serde_json::json!({
+        "apiVersion": format!("{}/{}", crd::GROUP, crd::VERSION),
+        "kind": "ClusterSettings",
+        "status": {"observedGeneration": obj.metadata.generation},
+    });
+    let params = kube::api::PatchParams::apply(crd::AGENT_FIELD_MANAGER).force();
+    if let Err(e) = api.patch_status("default", &params, &kube::api::Patch::Apply(&body)).await {
+        tracing::warn!(error = %e, "settings: writing status.observedGeneration");
+    }
+}
 
 /// The roles this node advertises. An unreadable Node object yields no roles, so the agent
 /// converges what it already owns and claims nothing new — the safe direction, since the

@@ -127,7 +127,7 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
     // only on the 300 s pull beat (71–270 s measured). One wake per node per `WS_SYNC_SECS`, no
     // matter how many worktrees cut in that window, buys edit → replica ≈ one sync beat at the cost
     // of at most one node list a minute. Best-effort by construction; the ticker still collects the rest.
-    if wake_worthy(&name, &ctx.last_sync_wake, chrono::Utc::now().timestamp_millis(), crate::sync::sync_interval().as_millis() as i64) {
+    if wake_worthy(&name, &ctx.last_sync_wake, chrono::Utc::now().timestamp_millis(), crate::sync::sync_interval(&ctx.settings).as_millis() as i64) {
         let live = crate::peer::placeable_nodes(&ctx).await;
         crate::peer::wake_peers(&ctx, &live, &ctx.peer_secret).await;
     }

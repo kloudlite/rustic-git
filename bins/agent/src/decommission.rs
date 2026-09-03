@@ -23,8 +23,8 @@ pub const DECOMMISSION_STATUS: &str = "rustic-git.io/decommission-status";
 /// `WS_DECOMMISSION_SECS`, default 30 — fast, because everything it does is idempotent and cheap,
 /// and because the thing it is waiting for (a person stopping their workspace) deserves a prompt
 /// answer when it happens.
-pub(crate) fn beat_interval() -> std::time::Duration {
-    std::time::Duration::from_secs(std::env::var("WS_DECOMMISSION_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30))
+pub(crate) fn beat_interval(settings: &crate::controller::Settings) -> std::time::Duration {
+    std::time::Duration::from_secs(settings.load().decommission_secs)
 }
 
 /// Drained is a conjunction: nothing running here, no volume owned here, no replica row here, and

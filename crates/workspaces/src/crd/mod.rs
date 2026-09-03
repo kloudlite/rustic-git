@@ -1039,7 +1039,10 @@ pub mod defaults {
         500
     }
     pub fn git_init_image() -> String {
-        String::new()
+        // Matches the agent's own pre-settings fallback (`bins/agent/src/controller/mod.rs`) —
+        // this is a required init container image, not an optional one, so the built-in default
+        // cannot be empty the way an unset `runtime_class` legitimately is.
+        "alpine/git:2.45.2".to_string()
     }
 }
 

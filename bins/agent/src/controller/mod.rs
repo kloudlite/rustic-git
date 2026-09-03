@@ -13,11 +13,17 @@
 //! change here) — they never have to cross an actual cross-thread `.await` boundary.
 
 use kube::runtime::watcher;
+use rustic_git_core::settings::LiveSettings;
 use rustic_git_workspaces::crd::{self, Phase, VolumeSource};
 use rustic_git_workspaces::engine::Engine;
+use rustic_git_workspaces::settings::AgentSettings;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// One name for the handle every beat's interval/timeout function takes, so a signature reads
+/// `settings: &Settings` instead of the full generic spelled out at every call site.
+pub type Settings = LiveSettings<AgentSettings>;
 
 pub(crate) mod environment;
 pub use environment::apply_environment;
@@ -94,7 +100,7 @@ pub(crate) async fn my_node(ctx: &Ctx) -> MyNode {
             MyNode::default()
         }
         Ok(Some(n)) => MyNode {
-            dead: crate::peer::node_is_dead(Some(&n), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+            dead: crate::peer::node_is_dead(Some(&n), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()),
             decommissioning: crate::peer::decommissioning(Some(&n)),
         },
         Err(e) => {
@@ -222,19 +228,32 @@ pub struct Ctx {
     /// node: `wake_peers` tells every peer "pull now", so a second one inside the same window
     /// carries no information the first did not, and would cost another Node list.
     pub last_sync_wake: std::sync::atomic::AtomicI64,
+    /// The merged `stored ?? env ?? default` view of `ClusterSettings/default`, kept live by
+    /// `lib.rs`'s reflector. Every beat reads `.load()` at the top of its own iteration rather
+    /// than caching a value here — see each beat's own interval function.
+    pub settings: LiveSettings<AgentSettings>,
 }
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, homes_export: Option<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, homes_export: Option<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, settings: LiveSettings<AgentSettings>) -> Ctx {
+        // Boot-marked fields (`CLUSTER_SETTING_META`): read ONCE here from the settings already
+        // merged at process start, not per reconcile — a change to one takes effect on this
+        // agent's next restart, not its next tick (pod templates and runtimeClassName are
+        // rendered from these, and there is no way to migrate a running pod's runtimeClassName).
+        let merged = settings.load();
         // Required, not defaulted: a workspace that names no image runs THIS, and an agent that
         // silently fell back to `:latest` would move every workspace on its next restart.
-        let default_image = std::env::var("WS_DEFAULT_IMAGE").ok().filter(|v| !v.is_empty())
-            .unwrap_or_else(|| panic!("WS_DEFAULT_IMAGE is required: the pinned image a workspace without one runs"));
-        let runtime_class = std::env::var("WS_RUNTIME_CLASS").ok().filter(|v| !v.is_empty());
+        let default_image = if merged.default_image.is_empty() {
+            panic!("WS_DEFAULT_IMAGE (or ClusterSettings.defaultImage) is required: the pinned image a workspace without one runs")
+        } else {
+            merged.default_image.clone()
+        };
+        let runtime_class = (!merged.runtime_class.is_empty()).then(|| merged.runtime_class.clone());
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
         }
+        let git_init_image = merged.git_init_image.clone();
         // Unbounded on purpose: the only senders are this agent's own finished operations, one
         // wake each, so the queue can never hold more than the operations in flight.
         let (wake_volume, vol_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -260,7 +279,7 @@ impl Ctx {
             pool,
             git_ssh_host: std::env::var("WS_GIT_SSH_HOST").unwrap_or_else(|_| "git.khost.dev".into()),
             git_ssh_port: std::env::var("WS_GIT_SSH_PORT").unwrap_or_else(|_| "22".into()),
-            git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| "alpine/git:2.45.2".into()),
+            git_init_image,
             runtime_class,
             default_image,
             running: Mutex::new(HashMap::new()),
@@ -270,6 +289,7 @@ impl Ctx {
             nix,
             profiles_dir,
             profile_builds: Mutex::new(HashMap::new()),
+            settings,
         }
     }
 }

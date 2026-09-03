@@ -33,9 +33,10 @@ use std::sync::Arc;
 /// permanently "due" and cutting once per interval forever.
 pub use crd::SYNCED_GENERATION;
 
-/// `WS_SYNC_SECS`, default 60. Lives beside the beat, as `peer::replica_interval` does.
-pub fn sync_interval() -> std::time::Duration {
-    std::time::Duration::from_secs(std::env::var("WS_SYNC_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60))
+/// `sync_secs`, `stored ?? env ?? default`. Read fresh by the caller on every loop turn — see
+/// `controller::run::spawn_sync` — so a changed value lands on the NEXT tick, never mid-sleep.
+pub fn sync_interval(settings: &crate::controller::Settings) -> std::time::Duration {
+    std::time::Duration::from_secs(settings.load().sync_secs)
 }
 
 /// The whole decision: cut only when the worktree's generation is past the last one we cut from.
