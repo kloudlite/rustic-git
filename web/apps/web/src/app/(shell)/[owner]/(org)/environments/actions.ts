@@ -85,6 +85,9 @@ export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: Fo
   const id = safeSegment(String(formData.get("id") ?? ""));
   if (!id) return { error: "That environment is not valid." };
   const snapshotId = String(formData.get("snapshotId") ?? "");
+  // Empty when the dialog's snapshot list has not landed, or landed empty. The disabled submit
+  // button is a convenience; this is the check.
+  if (!snapshotId) return { error: "Choose a snapshot to restore." };
   const mode = formData.get("mode");
   if (mode !== "inplace" && mode !== "new") return { error: "Could not tell where to restore to." };
   const name = String(formData.get("name") ?? "").trim();

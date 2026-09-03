@@ -12,6 +12,7 @@ import {
   deleteWorkspaceSnapshot, restoreWorkspace, type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 import type { SnapshotState } from "@/lib/snapshot-state";
+import { deleteVolumeCopy } from "@/lib/archived";
 
 /** A row on a workspace's own snapshots page (`workspaces/[id]/snapshots`). Builds a NEW
  *  workspace grafted onto this exact snapshot, not the source's current tip — see
@@ -112,7 +113,7 @@ export function DeleteSnapshotDialog({
           <DialogHeader>
             <DialogTitle>Delete snapshot &ldquo;{label}&rdquo;?</DialogTitle>
             <DialogDescription>
-              Deletes 1 snapshot. This cannot be undone. The workspace itself is not affected.
+              {deleteVolumeCopy(1)} The workspace itself is not affected.
             </DialogDescription>
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />

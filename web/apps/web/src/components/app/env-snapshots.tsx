@@ -13,6 +13,7 @@ import { stamp, when } from "@/lib/time";
 import { pendingPush } from "@/lib/pending-push";
 import { snapshotTime } from "@/lib/snapshot";
 import { stateSummary, type SnapshotState } from "@/lib/snapshot-state";
+import { deleteVolumeCopy } from "@/lib/archived";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
@@ -215,9 +216,9 @@ function RestoreDialog({
   );
 }
 
-/** Delete ONE record. Deliberately worded as removing a RECORD: nothing about the environment's
- *  disk changes, and the current node says so a second time — the lineage stops showing where the
- *  environment sits, which is the only thing that actually goes. */
+/** Delete ONE snapshot — the explicit delete a snapshot is kept until, bytes included. The live
+ *  environment is not affected; the current node says the one extra thing that IS lost, which is
+ *  the lineage still showing where the environment sits. */
 function DeleteSnapshotDialog({
   owner,
   id,
@@ -246,13 +247,12 @@ function DeleteSnapshotDialog({
           <DialogHeader>
             <DialogTitle>Delete snapshot &ldquo;{label}&rdquo;</DialogTitle>
             <DialogDescription>
-              Delete snapshot &ldquo;{label}&rdquo; ({when(snapshotTime(snapshot))})? The
-              record is removed from the lineage; the environment&rsquo;s disk is not affected.
+              {deleteVolumeCopy(1)} The environment itself is not affected.
               {isCurrent && (
                 <>
                   {" "}
-                  This is the snapshot the environment currently sits on; deleting the record does not
-                  change the disk, but the lineage will no longer show where it is.
+                  This is the snapshot the environment currently sits on; its disk does not change,
+                  but the lineage will no longer show where it is.
                 </>
               )}
             </DialogDescription>

@@ -26,14 +26,14 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   // Same `mine` rule as the environment list above: aggregate on the caller's own page, one
   // label on a team's.
   const volumes = await listVolumes(token, "environment", mine ? undefined : owner);
-  const archived = archivedRows(volumes.ok ? volumes.value : []);
+  const rows = volumes.ok ? volumes.value : [];
 
-  // The live rows' "last push 2 h ago". Same listing already read above, so this costs nothing:
-  // a volume with no row has never been pushed and shows no time at all. `last_push_at`, never
-  // `latest_ms` — that one counts sync points, which are internal and never shown.
-  const latest = Object.fromEntries(
-    (volumes.ok ? volumes.value : []).map((v) => [v.name, v.last_push_at] as const),
-  );
+  // Two maps off the ONE listing, both keyed by volume id, exactly as the workspaces page does
+  // it: the live rows' "last push 2 h ago", and the count each live row's Delete dialog names.
+  // `last_push_at`, never `latest_ms` — that one counts sync points, which are internal and
+  // never shown. A volume with no row here has never been pushed and shows no time at all.
+  const latest = Object.fromEntries(rows.map((v) => [v.name, v.last_push_at] as const));
+  const snapshots = Object.fromEntries(rows.map((v) => [v.name, v.snapshots] as const));
 
   return (
     <section>
@@ -41,8 +41,9 @@ export default async function Page({ params }: { params: Promise<{ owner: string
       <EnvironmentList
         owner={owner}
         environments={list.value}
-        archived={archived}
+        archived={archivedRows(rows)}
         latest={latest}
+        snapshots={snapshots}
       />
     </section>
   );

@@ -16,7 +16,20 @@ import type { ArchivedRow } from "@/lib/archived";
  *
  *  The row used to carry five buttons. A list is for finding the thing you meant; the actions
  *  belong where the thing is, which is also the only place that can show what they act on. */
-function LiveRow({ owner, e, lastPushAt }: { owner: string; e: ApiEnvironment; lastPushAt: string | null }) {
+function LiveRow({
+  owner,
+  e,
+  lastPushAt,
+  snapshots,
+}: {
+  owner: string;
+  e: ApiEnvironment;
+  lastPushAt: string | null;
+  /** How many snapshots the environment has. `undefined` means the volume listing had no row for
+   *  it — never pushed — and the row then says nothing rather than "0 snapshots", which reads as
+   *  a fact about a listing that failed just as much as about one that was empty. */
+  snapshots?: number;
+}) {
   return (
     <li>
       <Link
@@ -32,6 +45,7 @@ function LiveRow({ owner, e, lastPushAt }: { owner: string; e: ApiEnvironment; l
             {/* Aggregate view mixes personal and team envs — name the owner when it isn't the page's. */}
             {e.owner !== owner ? `${e.owner} · ` : ""}
             {e.services.length} {e.services.length === 1 ? "service" : "services"} · {e.region}
+            {snapshots ? ` · ${snapshots} ${snapshots === 1 ? "snapshot" : "snapshots"}` : ""}
             {lastPushAt && ` · last push ${when(Date.parse(lastPushAt))}`}
           </span>
           <Notices w={e} />
@@ -47,12 +61,15 @@ export function EnvironmentList({
   environments,
   archived = [],
   latest = {},
+  snapshots = {},
 }: {
   owner: string;
   environments: ApiEnvironment[];
   archived?: ArchivedRow[];
-  /** Volume id → epoch millis of its newest snapshot, for the live rows' meta line. */
+  /** Volume id → RFC3339 of its newest PUSH, for the live rows' meta line. */
   latest?: Record<string, string | null>;
+  /** Volume id → its snapshot count, off the same listing as `latest`. */
+  snapshots?: Record<string, number>;
 }) {
   const [q, setQ] = useState("");
   // A row on its way up lands in one to three seconds; the shell's 10 s poll would show it late.
@@ -105,7 +122,13 @@ export function EnvironmentList({
           {shown.length > 0 && (
             <ul className="mt-5 divide-y divide-border border border-border bg-card">
               {shown.map((e) => (
-                <LiveRow key={e.id} owner={owner} e={e} lastPushAt={latest[e.id] ?? null} />
+                <LiveRow
+                  key={e.id}
+                  owner={owner}
+                  e={e}
+                  lastPushAt={latest[e.id] ?? null}
+                  snapshots={snapshots[e.id]}
+                />
               ))}
             </ul>
           )}

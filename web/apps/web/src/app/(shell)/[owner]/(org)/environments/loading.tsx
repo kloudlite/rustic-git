@@ -1,6 +1,6 @@
 import { Bone, Skeleton } from "@/components/app/skeleton";
 
-/** Filter box, the live list, then the collapsed Archived heading — the two groups the page
+/** Filter box, the live list, then the collapsed Snapshots heading — the two groups the page
  *  lands as. `py-3.5` rows, not `ListBones`'s `py-4`: these rows are 75px, and a skeleton that
  *  draws a different height is worse than none, because the page then jumps twice.
  *

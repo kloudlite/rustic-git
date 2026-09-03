@@ -57,6 +57,9 @@ export async function restoreWorkspace(_prev: WsActionState, formData: FormData)
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
   const snapshotId = String(formData.get("snapshotId") ?? "");
+  // Empty when the dialog's snapshot list has not landed, or landed empty. The disabled submit
+  // button is a convenience; this is the check.
+  if (!snapshotId) return { error: "Choose a snapshot to restore." };
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { error: "Name the new workspace." };
 
