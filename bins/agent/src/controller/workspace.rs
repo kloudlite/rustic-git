@@ -538,6 +538,15 @@ fn replicas_of(ctx: &Arc<Ctx>, id: &str) -> u32 {
 /// to decide whether the Volume goes with the parent (no commits — ownerReference GC as before) or
 /// survives it detached (a pushed commit outlives the workspace it came from), and that decision
 /// can only be made while the parent's own spec and status are still readable.
+///
+/// Two windows this deliberately does not close. (1) The rollout: a parent deleted between the
+/// upgrade landing and its first post-upgrade reconcile carries no finalizer yet, so GC takes its
+/// Volume the old way, commits included — one pass per object closes it, and there is no way to
+/// stamp a finalizer on an object that is already gone. (2) An unclaimed Terminating parent:
+/// a node-death sweep that cleared `status.nodeName` leaves nothing watching it (every parent
+/// watch is `status.nodeName`-selected), so it waits in Terminating until a node re-claims it —
+/// which converges, because the claim path ignores `deletionTimestamp` and places a deleting
+/// object like any other.
 pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
     finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {

@@ -1217,9 +1217,39 @@ async fn deleting_an_environment_with_a_commit_detaches_its_volume() {
 
     rustic_git_agent::controller::reconcile_environment(Arc::new(e), ctx).await.unwrap();
 
-    assert_eq!(rec.sent("PATCH", VOL_ENV1).len(), 1, "the detach patch: {:?}", rec.calls());
+    let patches = rec.sent("PATCH", VOL_ENV1);
+    assert_eq!(patches.len(), 1, "the detach patch: {:?}", rec.calls());
+    assert_eq!(patches[0][0]["op"], "test");
+    assert_eq!(patches[0][0]["path"], "/metadata/ownerReferences");
+    assert_eq!(patches[0][0]["value"][0]["uid"], "env-uid-1");
+    assert_eq!(patches[0][1]["op"], "replace");
+    assert_eq!(patches[0][1]["value"], serde_json::json!([]));
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-env-1-aaaa")), "the transient goes");
     assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE /apis/rustic-git.io/v1alpha1/volumes/")), "the Volume itself is never deleted");
+}
+
+/// The environment twin of `deleting_a_workspace_without_a_commit_leaves_the_volume_to_gc`.
+#[tokio::test]
+async fn deleting_an_environment_without_a_commit_leaves_the_volume_to_gc() {
+    const ENV_OBJ: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
+    const VOL_ENV1: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let routes = vec![
+        rustic_git_workspaces::kube_test::get(SNAPS, snap_list(vec![ready_transient("sync-env-1-aaaa", "env-1", "env-1")])),
+        Route { method: "DELETE", path: format!("{SNAPS}/sync-env-1-aaaa"), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "PATCH", path: ENV_OBJ.into(), status: 200, body: env_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "env-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let mut e = environment(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "env-1"}));
+    e.metadata.finalizers = Some(vec![crd::WORKTREE_FINALIZER.to_string()]);
+    e.metadata.deletion_timestamp =
+        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
+
+    rustic_git_agent::controller::reconcile_environment(Arc::new(e), ctx).await.unwrap();
+
+    assert!(rec.sent("PATCH", VOL_ENV1).is_empty(), "ownerReference kept so GC deletes the Volume: {:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPS}/sync-env-1-aaaa")), "the transient still goes");
 }
 
 /// The environment claim is the workspace claim with a different opening phase — an environment has

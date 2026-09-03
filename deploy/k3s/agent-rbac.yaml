@@ -50,7 +50,11 @@
 #                                                                       sweep past WS_SNAPSHOT_KEEP);
 #                                                                       stop_push teardown cleanup;
 #                                                                       retire_pass's orphan sweep
-#                                                                       (spec.volume names no Volume)
+#                                                                       (spec.volume names no Volume);
+#                                                                       cleanup_parent (a deleted
+#                                                                       parent's own transients —
+#                                                                       worthless once the worktree
+#                                                                       they were cut from is gone)
 #   volumereplicas (rustic-git.io)         get,list,watch               pull_beat (source selection,
 #                                                                       reaper)
 #                                          create,patch                 write_replica_status (this
