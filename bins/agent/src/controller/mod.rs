@@ -198,6 +198,11 @@ pub struct Ctx {
     /// rather than reading process env itself: a function that reads env is a function whose
     /// tests must write env, and this binary's tests all share one process.
     pub peer_secret: String,
+    /// When this node last woke its peers for a SYNC point, in unix millis — the coalescing window
+    /// behind `snapshot::wake_worthy`. Per node and not per worktree because the wake itself is per
+    /// node: `wake_peers` tells every peer "pull now", so a second one inside the same window
+    /// carries no information the first did not, and would cost another Node list.
+    pub last_sync_wake: std::sync::atomic::AtomicI64,
 }
 
 impl Ctx {
@@ -224,6 +229,8 @@ impl Ctx {
             volume_writer: Mutex::new(Some(volume_writer)),
             applied: Mutex::new(HashMap::new()),
             pull_wake: Arc::new(tokio::sync::Notify::new()),
+            // 0, not "now": a restarted agent's first sync cut should wake immediately.
+            last_sync_wake: std::sync::atomic::AtomicI64::new(0),
             peer_secret: std::env::var("WS_PEER_SECRET").unwrap_or_default(),
             wake_volume,
             wake_workspace,

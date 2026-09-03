@@ -235,8 +235,10 @@ Stopping a workspace or environment cuts a `stop-{ws}-{gen}`/`stop-{env}-{gen}` 
 the parent's generation so every stop is a fresh snapshot (skipped if the pod never ran), and tears
 the pod (or the StatefulSets) down as soon as that cut is Ready — a stop is seconds, and it never
 waits for a replica. Right after the cut the owner POSTs `/peer/v1/wake` to every placeable node
-(`peer::wake_peers`) so the peers pull within seconds instead of at the next replication beat; sync
-cuts do not wake anyone, only stop, clone and push cuts do. Whether the bytes have landed elsewhere
+(`peer::wake_peers`) so the peers pull within seconds instead of at the next replication beat. Stop,
+clone and push cuts wake unconditionally; a sync cut wakes too but COALESCED to at most one wake per
+node per `WS_SYNC_SECS` (`snapshot::wake_worthy`, the timestamp on `Ctx::last_sync_wake`), so an edit
+reaches a replica in about one sync beat rather than waiting out the five-minute pull. Whether the bytes have landed elsewhere
 is the `Replicated` condition on the parent (`controller/stop.rs`), computed only by the owner:
 `False/Running` in the same status write that records a running pod, and while stopped
 `False/AwaitingReplica` ("no other node holds the final sync point yet", or "no replica is

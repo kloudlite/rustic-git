@@ -112,12 +112,14 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     // Poke every placeable peer: fresh bytes exist NOW, and waiting out the pull beat is what made
     // a clone or a cross-node start take minutes.
     //
-    // Every cut EXCEPT the sync beat's. A `sync-` cut IS the background beat — it already runs on a
-    // timer, nobody is waiting on it, and waking on it costs a Node list plus a pod list per
-    // worktree per `WS_SYNC_SECS` forever. A push, a stop cut and a clone cut are all
-    // person-initiated: someone is waiting, and the wake is the difference between seconds and a
-    // whole pull cycle. Best-effort by construction; the ticker still collects the rest.
-    if wake_worthy(&name) {
+    // A push, a stop cut and a clone cut are person-initiated — someone is waiting, so every one of
+    // them wakes. A `sync-` cut is the background beat's, and it wakes too, but COALESCED: the
+    // whole reason it used to wake nobody was the cost of a Node list plus a pod list per worktree
+    // per `WS_SYNC_SECS` forever, and without a wake a replica picked up a running worktree's edits
+    // only on the 300 s pull beat (71–270 s measured). One wake per node per `WS_SYNC_SECS`, no
+    // matter how many worktrees cut in that window, buys edit → replica ≈ one sync beat at the cost
+    // of at most one node list a minute. Best-effort by construction; the ticker still collects the rest.
+    if wake_worthy(&name, &ctx.last_sync_wake, chrono::Utc::now().timestamp_millis(), crate::sync::sync_interval().as_millis() as i64) {
         let live = crate::peer::placeable_nodes(&ctx).await;
         crate::peer::wake_peers(&ctx, &live, &ctx.peer_secret).await;
     }
@@ -135,8 +137,18 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
 /// Whether a freshly Ready cut is worth an immediate peer wake. By NAME because the name is the
 /// only thing that says who asked for the cut: `sync_name` is the beat's and nothing else uses
 /// that prefix, while a push, `stop-{ws}-{gen}` and `clone-{ws}-{hex}` all have someone waiting.
-fn wake_worthy(name: &str) -> bool {
-    !name.starts_with("sync-")
+///
+/// A person-initiated cut always wakes and never touches the window — a stop must not be swallowed
+/// because a sync point happened to land a second earlier. A `sync-` cut wakes at most once per
+/// `window_ms` per node: the timestamp is claimed with a compare-exchange, so N worktrees finishing
+/// their cuts concurrently produce exactly one wake between them.
+fn wake_worthy(name: &str, last: &std::sync::atomic::AtomicI64, now_ms: i64, window_ms: i64) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !name.starts_with("sync-") {
+        return true;
+    }
+    let prev = last.load(Relaxed);
+    now_ms.saturating_sub(prev) >= window_ms && last.compare_exchange(prev, now_ms, Relaxed, Relaxed).is_ok()
 }
 
 /// Re-stamp a sync point's `SYNCED_GENERATION` with the generation the worktree has AFTER the cut.
@@ -386,14 +398,20 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
 mod commit_tests {
     use super::*;
 
-    /// The sync beat runs on a timer and nobody waits on it; waking on its cuts costs a Node list
-    /// plus a pod list per worktree per interval, forever. Every other cut has a person behind it.
+    /// A person-initiated cut always wakes; a sync cut wakes at most once per window.
     #[test]
-    fn only_person_initiated_cuts_are_worth_a_wake() {
-        assert!(!wake_worthy("sync-ws-1-abcd"), "the background beat wakes nobody");
-        assert!(wake_worthy("stop-ws-1-7"));
-        assert!(wake_worthy("clone-ws-1-cafe"));
-        assert!(wake_worthy("ws-1-aaaaaaaa"), "a push is person-initiated too");
+    fn person_initiated_cuts_always_wake_and_sync_cuts_coalesce() {
+        let last = std::sync::atomic::AtomicI64::new(0);
+        assert!(wake_worthy("sync-ws-1-abcd", &last, 60_000, 60_000), "the first sync cut wakes");
+        assert!(!wake_worthy("sync-ws-2-beef", &last, 61_000, 60_000), "a second sync cut inside the window does not");
+        assert!(wake_worthy("sync-ws-2-beef", &last, 120_000, 60_000), "once the window is past, it does again");
+
+        // Regardless of the window, and without consuming it: someone is waiting on each of these.
+        let claimed = last.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(wake_worthy("stop-ws-1-7", &last, 120_001, 60_000), "a stop cut wakes inside the window");
+        assert!(wake_worthy("clone-ws-1-cafe", &last, 120_001, 60_000));
+        assert!(wake_worthy("ws-1-aaaaaaaa", &last, 120_001, 60_000), "a push is person-initiated too");
+        assert_eq!(last.load(std::sync::atomic::Ordering::Relaxed), claimed, "a person-initiated wake never moves the sync window");
     }
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
     use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
