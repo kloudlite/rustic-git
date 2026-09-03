@@ -758,7 +758,7 @@ fn workspaces_volume() -> Volume {
     Volume { name: "workspaces".to_string(), empty_dir: Some(Default::default()), ..Default::default() }
 }
 
-/// `{pool}/vol/{volume}/live/{ws}` — commit model's per-worktree layout (mirrors
+/// `{pool}/vol/{volume}/live/{ws}` — the per-worktree layout (mirrors
 /// `engine::pool::Pool::worktree`, which this crate cannot depend on directly: `engine` is
 /// gated behind btrfs tooling this crate's tests don't need).
 fn worktree_path(pool: &str, volume: &str, ws: &str) -> String {
@@ -1554,7 +1554,7 @@ mod tests {
         assert_eq!(path("attach"), attach_file(ctx().pool, "ws-1"));
     }
 
-    /// Task 7a: the `live` mount is the WORKTREE path, not the old single-subvolume one — and
+    /// The `live` mount is the WORKTREE path, not the old single-subvolume one — and
     /// `id` (volumeRef) vs `ws_id` (this workspace's own id) matter: a shared-volume clone's
     /// worktree lives under the SOURCE volume's `live/`, named by the clone's own id.
     #[test]
@@ -1592,7 +1592,7 @@ mod tests {
 
     /// An environment's worktree is its OWN id under whatever volume it resolved to — volume root,
     /// environment leaf. For one that owns its volume the two are the same string, so the path is
-    /// unchanged from Task 7a.
+    /// unchanged from the workspace pod's worktree-path mount.
     #[test]
     fn the_service_pods_live_mount_is_the_worktree_path() {
         let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
@@ -1603,7 +1603,7 @@ mod tests {
 
     /// A RESTORED environment holds a SECOND worktree of the SOURCE's volume: the root comes from
     /// the source, the leaf from itself, and its objects live in its own namespace. Mounting
-    /// `(source, source)` — what this did before Task 2c — pointed two environments at one live
+    /// `(source, source)` — what this did before the restored-environment fix — pointed two environments at one live
     /// subvolume.
     #[test]
     fn a_restored_environments_live_mount_is_its_own_worktree_of_the_source_volume() {

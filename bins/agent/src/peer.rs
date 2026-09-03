@@ -1,4 +1,4 @@
-//! Replication's transport, both halves. It is PULL-based: `pull_beat` decides which commits this
+//! Replication's transport, both halves. It is PULL-based: `pull_beat` decides which snapshots this
 //! node is missing and GETs them from a peer that has them, and the listener serves the other
 //! side of that — `btrfs send`'s stdout streamed as the response body. A node therefore only ever
 //! receives what it asked for, and no peer can push bytes at it.
@@ -81,9 +81,9 @@ impl PeerState {
 
 pub fn router(state: PeerState) -> Router {
     Router::new()
-        .route("/peer/v1/commit/{volume}/{name}", get(commit))
+        .route("/peer/v1/snapshot/{volume}/{name}", get(snapshot))
         // A poke, not a transfer: the body is empty and the answer is 204. Same secret as the
-        // commit route and the same NetworkPolicy, because it drives the same root-run machinery.
+        // snapshot route and the same NetworkPolicy, because it drives the same root-run machinery.
         .route("/peer/v1/wake", axum::routing::post(wake))
         .with_state(Arc::new(state))
 }
@@ -122,18 +122,18 @@ fn subvolume_names(dir: &std::path::Path) -> Vec<String> {
 }
 
 #[derive(serde::Deserialize)]
-struct CommitQuery {
+struct SnapshotQuery {
     parent: Option<String>,
 }
 
 /// The pull side's send: streams `btrfs send [-p parent] snap_dir/{name}`'s stdout as the response
 /// body. Auth and `valid_segment` before anything the
 /// path could steer — the body here is a root-run `btrfs send`.
-async fn commit(
+async fn snapshot(
     State(state): State<Arc<PeerState>>,
     headers: HeaderMap,
     Path((volume, name)): Path<(String, String)>,
-    Query(q): Query<CommitQuery>,
+    Query(q): Query<SnapshotQuery>,
 ) -> impl IntoResponse {
     if !secret_ok(&headers, &state.secret) {
         return (StatusCode::UNAUTHORIZED, Body::empty()).into_response();
@@ -163,7 +163,7 @@ async fn commit(
     // Drained concurrently, same reason `post_send` drains the sender's stderr while the POST is
     // in flight: nothing else empties this pipe, and an unread 64K of stderr would otherwise
     // block a chatty `btrfs send` forever, invisibly, on both ends of this stream.
-    let (volume_id, commit_name) = (volume.clone(), name.clone());
+    let (volume_id, snapshot_name) = (volume.clone(), name.clone());
     let stderr_task = child.stderr.take().map(|mut se| {
         tokio::spawn(async move {
             let mut buf = Vec::new();
@@ -171,7 +171,7 @@ async fn commit(
             buf
         })
     });
-    let killer = KillOnDrop { stdout, child: Some(child), stderr_task, volume: volume_id, name: commit_name, _guard: guard };
+    let killer = KillOnDrop { stdout, child: Some(child), stderr_task, volume: volume_id, name: snapshot_name, _guard: guard };
     (StatusCode::OK, Body::from_stream(tokio_util::io::ReaderStream::new(killer))).into_response()
 }
 
@@ -182,7 +182,7 @@ async fn commit(
 struct KillOnDrop {
     stdout: tokio::process::ChildStdout,
     child: Option<tokio::process::Child>,
-    /// Drains stderr concurrently with the streamed body — see the comment at the `commit`
+    /// Drains stderr concurrently with the streamed body — see the comment at the `snapshot`
     /// handler's spawn site.
     stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
     volume: String,
@@ -216,7 +216,7 @@ impl Drop for KillOnDrop {
                     Some(t) => t.await.unwrap_or_default(),
                     None => Vec::new(),
                 };
-                tracing::warn!(%volume, %name, status = ?exit, stderr = %tail_str(&stderr, 300), "commit: btrfs send exited non-zero");
+                tracing::warn!(%volume, %name, status = ?exit, stderr = %tail_str(&stderr, 300), "snapshot: btrfs send exited non-zero");
             }
         });
     }
@@ -338,7 +338,7 @@ pub(crate) enum Next {
 pub(crate) const RETRY_SOON: Duration = Duration::from_secs(30);
 
 /// `RETRY_SOON` doubled per CONSECUTIVE missed pass, capped at the ordinary tick. Without the cap
-/// a permanently unfetchable commit — a Snapshot whose only source is gone for good — pinned every
+/// a permanently unfetchable snapshot — a Snapshot whose only source is gone for good — pinned every
 /// node placed on that volume at a 30 s beat forever, node-wide: the flag is per-PASS, so one
 /// stuck volume paid the whole node's listing cost every 30 s until someone deleted the CR.
 /// Capping at `replica_interval` makes the worst case exactly today's steady state.
@@ -394,7 +394,7 @@ pub(crate) fn node_dead_secs() -> i64 {
 /// One pass of the puller — spawned beside `replicate_beat` in `controller/run.rs`. Inert without a
 /// peer secret, same fail-closed rule every dial in this file follows: no secret, no
 /// authenticated GET to another node's root-run `btrfs send`.
-/// Returns true when some commit could not be fetched this pass, so the caller retries soon
+/// Returns true when some snapshot could not be fetched this pass, so the caller retries soon
 /// instead of waiting out the full tick.
 pub async fn pull_beat(ctx: &Arc<Ctx>) -> bool {
     if ctx.peer_secret.is_empty() {
@@ -498,7 +498,7 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str) -> bool {
     missed
 }
 
-/// Every volume this node must hold a commit-model replica of: named by replication's rendezvous
+/// Every volume this node must hold a snapshot-model replica of: named by replication's rendezvous
 /// (`replicate::targets`, standbys only — the owner already has everything by construction), OR
 /// the volume behind a Workspace/Environment whose pod runs here right now, OR a volume this node
 /// itself owns (`spec.nodeName == me`) — the owner's row is a source for every standby, and a
@@ -547,17 +547,17 @@ fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (Str
     None
 }
 
-/// Local commits whose CR is gone entirely — retention's disk-side convergence. Pure, so
-/// `pull_volume`'s "which locals to drop" decision is testable without real btrfs (`drop_commit`
-/// itself is the engine's own concern, covered by `engine_commit.rs`'s loopback tests).
+/// Local snapshots whose CR is gone entirely — retention's disk-side convergence. Pure, so
+/// `pull_volume`'s "which locals to drop" decision is testable without real btrfs (`drop_snapshot`
+/// itself is the engine's own concern, covered by `engine_snapshot.rs`'s loopback tests).
 ///
 /// `any_pull_failed` reclaims NOTHING. The owner deletes `sync-A`'s CR the instant `sync-B` is
 /// Ready, so a replica that could not reach the owner this pass would drop its local `sync-A` and
 /// gain nothing — going from one sync point to none, in exactly the partition-then-owner-death
 /// case sync points exist for. Deferring the reclaim costs a subvolume until the next clean pass.
 /// ponytail: all-or-nothing rather than transients-only, because a retired name has no CR left to
-/// read `spec.transient` off — telling a swept commit from a swept sync point here would mean
-/// trusting the name prefix. Split it if held-back commits ever cost real space.
+/// read `spec.transient` off — telling a swept snapshot from a swept sync point here would mean
+/// trusting the name prefix. Split it if held-back snapshots ever cost real space.
 fn retired(have: &HashSet<String>, existing: &HashSet<String>, any_pull_failed: bool) -> Vec<String> {
     if any_pull_failed {
         return Vec::new();
@@ -573,8 +573,8 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     // One list, all phases: the Ready subset drives the pull below, and the FULL name set is what
     // tells a deleted CR from a Working one, below — a `Snapshot` has no finalizer (see
-    // `snapshot::reconcile_commit`'s module doc), so this diff against `local_commits` is the only
-    // place any node ever notices a commit's CR is gone.
+    // `snapshot::reconcile_snapshot`'s module doc), so this diff against `local_snapshots` is the only
+    // place any node ever notices a snapshot's CR is gone.
     let all: Vec<crd::Snapshot> = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
         Ok(list) => list.items,
         Err(e) => {
@@ -586,10 +586,10 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     let ready: Vec<crd::Snapshot> =
         all.into_iter().filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)).collect();
 
-    let mut have: HashSet<String> = match ctx.engine.local_commits(volume) {
+    let mut have: HashSet<String> = match ctx.engine.local_snapshots(volume) {
         Ok(names) => names.into_iter().collect(),
         Err(e) => {
-            tracing::warn!(%volume, error = %e, "pull: local_commits");
+            tracing::warn!(%volume, error = %e, "pull: local_snapshots");
             return false;
         }
     };
@@ -606,28 +606,28 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
 
     let replicas: Vec<&crd::VolumeReplica> = beat.replicas.iter().filter(|r| r.spec.volume == volume).collect();
     // Synced sources first — a Syncing replica may itself be mid-pull and not actually have the
-    // commit yet — falling back to any other replica of the volume (including a Syncing one)
+    // snapshot yet — falling back to any other replica of the volume (including a Syncing one)
     // rather than giving up outright. Never my own row: pulling from myself is meaningless, and
     // an owner or a re-selected standby always sees its own (possibly stale) row in this list.
     let not_me = |r: &&&crd::VolumeReplica| r.spec.node != ctx.node;
     let synced = |r: &&&crd::VolumeReplica| r.status.as_ref().is_some_and(|s| s.phase == "Synced");
     let mut sources: Vec<&str> = replicas.iter().filter(not_me).filter(synced).map(|r| r.spec.node.as_str()).collect();
     sources.extend(replicas.iter().filter(not_me).filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
-    // The OWNER, last, and only while it is live. Every commit exists on the owner by
+    // The OWNER, last, and only while it is live. Every snapshot exists on the owner by
     // construction, but a replica row for it may not exist yet (a fresh volume) or may have been
-    // reaped — which left the first standby with an empty source list and a commit it could never
+    // reaped — which left the first standby with an empty source list and a snapshot it could never
     // fetch. Last so a Synced peer is still preferred, and skipped when the owner is not in `live`
-    // so a genuinely dead owner does not cost a failed dial per commit per pass.
+    // so a genuinely dead owner does not cost a failed dial per snapshot per pass.
     if let Some(owner) = beat.volumes.iter().find(|v| v.name_any() == volume).map(|v| v.spec.node_name.as_str()) {
         if !owner.is_empty() && owner != ctx.node && live.iter().any(|n| n == owner) && !sources.contains(&owner) {
             sources.push(owner);
         }
     }
 
-    // Resolved ONCE per pass, before the commit loop: `agent_pod_addr` is a namespaced pod LIST
-    // with two selectors, and a node catching up on N commits was making N of them per source to
+    // Resolved ONCE per pass, before the snapshot loop: `agent_pod_addr` is a namespaced pod LIST
+    // with two selectors, and a node catching up on N snapshots was making N of them per source to
     // learn the same IP. A source whose pod cannot be found now is skipped for the whole pass —
-    // which is what the per-commit `continue` amounted to anyway, one list at a time.
+    // which is what the per-snapshot `continue` amounted to anyway, one list at a time.
     let mut addrs: Vec<(&str, String)> = Vec::new();
     for &source in &sources {
         match agent_pod_addr(&ctx.client, source).await {
@@ -653,12 +653,12 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
         for (source, addr) in &addrs {
             let source = *source;
             // `my_parent` is MY nearest held ancestor — the source may never have had it (it can
-            // have pulled a different, shorter chain, or dropped an old commit already). A `-p`
+            // have pulled a different, shorter chain, or dropped an old snapshot already). A `-p`
             // the source doesn't recognize fails ITS `btrfs send`, which surfaces here as a
             // truncated body after the 200 header: the same "wrong -p, retry full" case
             // `send_to_target` already handles on the push side. One retry against the SAME
             // source with no parent at all before moving on, so a single bad guess costs one
-            // extra full pull instead of losing this commit (and every descendant) forever.
+            // extra full pull instead of losing this snapshot (and every descendant) forever.
             let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref()).await;
             if result.is_err() && my_parent.is_some() {
                 tracing::warn!(%volume, %name, source, "pull: incremental receive failed, falling back to a full pull from the same source");
@@ -675,17 +675,17 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
         }
         if !pulled {
             any_pull_failed = true;
-            tracing::warn!(%volume, %name, "pull: no source could supply this commit this pass");
+            tracing::warn!(%volume, %name, "pull: no source could supply this snapshot this pass");
         }
     }
 
-    // Drop any local commit whose CR is gone entirely (not merely `Working` — `existing` holds
-    // every phase). `drop_commit` is Ok-on-absent, so every node that ever held a copy converges
+    // Drop any local snapshot whose CR is gone entirely (not merely `Working` — `existing` holds
+    // every phase). `drop_snapshot` is Ok-on-absent, so every node that ever held a copy converges
     // on the same disk state without a second round trip to confirm it.
     // Gated on `any_pull_failed` — see `retired`.
     for name in retired(&have, &existing, any_pull_failed) {
-        if let Err(e) = ctx.engine.drop_commit(volume, &name) {
-            tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired commit failed; left for the next pass");
+        if let Err(e) = ctx.engine.drop_snapshot(volume, &name) {
+            tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired snapshot failed; left for the next pass");
         } else {
             have.remove(&name);
         }
@@ -713,7 +713,7 @@ async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btrfs_bin: &st
     any_pull_failed
 }
 
-/// One `GET /peer/v1/commit/{volume}/{name}` streamed straight into `btrfs receive
+/// One `GET /peer/v1/snapshot/{volume}/{name}` streamed straight into `btrfs receive
 /// snap_dir/{volume}/`. A failed receive deletes the partial, same before/after diff the push
 /// side's `replicate` handler uses, mirrored here on the pulling node.
 #[allow(clippy::too_many_arguments)]
@@ -727,7 +727,7 @@ async fn pull_one(
     name: &str,
     parent: Option<&str>,
 ) -> Result<(), String> {
-    let mut url = format!("http://{addr}/peer/v1/commit/{volume}/{name}");
+    let mut url = format!("http://{addr}/peer/v1/snapshot/{volume}/{name}");
     if let Some(p) = parent {
         url = format!("{url}?parent={p}");
     }
@@ -782,7 +782,7 @@ pub(crate) use crd::newest_transient_of;
 /// worktree's newest Ready transient, by name — never by comparing clocks, which a skew between
 /// nodes could make an old copy look current. A worktree with no transient at all (never ran, or a
 /// fresh restore) has nothing to name, so plain `Synced` is the right bar: a Synced replica holds
-/// every Ready commit.
+/// every Ready snapshot.
 pub(crate) fn up_to_date(replica: &crd::VolumeReplica, worktree: &str, newest_transient: Option<&str>) -> bool {
     let Some(st) = replica.status.as_ref() else { return false };
     match newest_transient {
@@ -1260,21 +1260,21 @@ fn orphan_snaps(local: &[String], records: &HashSet<String>) -> Vec<String> {
 /// machine without btrfs can read, and a failed delete is retried by the next beat anyway.
 ///
 /// ponytail: one full snap listing per held volume per beat; index records by name if a volume
-/// ever grows past thousands of commits.
+/// ever grows past thousands of snapshots.
 async fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshots: &[crd::Snapshot]) -> Vec<(String, String)> {
     let api = Api::<crd::Snapshot>::all(ctx.client.clone());
     let mut dropped = Vec::new();
     for v in &beat.volumes {
         let id = v.name_any();
         // A volume being deleted takes its whole voldir with it (`cleanup_local`); racing that
-        // with per-commit deletes buys nothing.
+        // with per-snapshot deletes buys nothing.
         if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() {
             continue;
         }
-        let local = match ctx.engine.local_commits(&id) {
+        let local = match ctx.engine.local_snapshots(&id) {
             Ok(l) => l,
             Err(e) => {
-                tracing::warn!(volume = %id, error = %e, "pull: retire: listing local commits; skipping this volume");
+                tracing::warn!(volume = %id, error = %e, "pull: retire: listing local snapshots; skipping this volume");
                 continue;
             }
         };
@@ -1287,12 +1287,12 @@ async fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, sn
             if !matches!(api.get_opt(&name).await, Ok(None)) {
                 continue;
             }
-            tracing::info!(volume = %id, snapshot = %name, "pull: retire: no Snapshot CR; dropping the orphaned commit bytes");
+            tracing::info!(volume = %id, snapshot = %name, "pull: retire: no Snapshot CR; dropping the orphaned snapshot bytes");
             // btrfs delete takes a blocking flock and shells out — never on the reactor thread.
             let (engine, vol, cname) = (ctx.engine.clone(), id.clone(), name.clone());
-            match tokio::task::spawn_blocking(move || engine.drop_commit(&vol, &cname)).await {
+            match tokio::task::spawn_blocking(move || engine.drop_snapshot(&vol, &cname)).await {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: dropping orphaned commit bytes; left for the next pass"),
+                Ok(Err(e)) => tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: dropping orphaned snapshot bytes; left for the next pass"),
                 Err(e) => tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: the orphan-bytes drop task panicked"),
             }
             dropped.push((id.clone(), name));
@@ -1581,7 +1581,7 @@ mod reconcile_tests {
         })
     }
 
-    /// A `Snapshot`-list error must keep every local commit untouched and write no replica
+    /// A `Snapshot`-list error must keep every local snapshot untouched and write no replica
     /// status — the same keep-biased rule `replica_reconcile`'s lookup-error branch follows.
     #[tokio::test]
     async fn pull_volume_keeps_everything_on_a_snapshot_list_error() {
@@ -1625,7 +1625,7 @@ mod reconcile_tests {
         assert_eq!(created[0]["metadata"]["labels"]["rustic-git.io/volume"], "vol-1");
     }
 
-    /// Nothing missing (every Ready `Snapshot` is already a local commit): `pull_volume` makes no
+    /// Nothing missing (every Ready `Snapshot` is already a local snapshot): `pull_volume` makes no
     /// network pull at all and writes its own `VolumeReplica` as `Synced` — v1's branches: this
     /// task writes `branches: {}` and phase only (see the brief's allowed shortcut), Task 4 fills
     /// in the per-branch heads.
@@ -1651,7 +1651,7 @@ mod reconcile_tests {
 
         pull_volume(&ctx, &beat_of(vec![], vec![], vec![]), "btrfs", &http, "s3cret", "vol-1", &[]).await;
 
-        assert!(rec.calls().iter().all(|c| !c.contains("/peer/v1/commit/")), "nothing missing: no GET should ever be issued");
+        assert!(rec.calls().iter().all(|c| !c.contains("/peer/v1/snapshot/")), "nothing missing: no GET should ever be issued");
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1, "exactly one replica status write");
         assert_eq!(sent[0]["status"]["phase"], "Synced");
@@ -1660,9 +1660,9 @@ mod reconcile_tests {
     /// A `Snapshot` CR that has been deleted (absent from the volume's list entirely, every
     /// phase) is exactly what `retired` picks out — the "least new machinery" this task's
     /// deletion handling uses: no finalizer on the new `Snapshot` kind, so this diff against
-    /// `local_commits` is the only place any node ever notices the CR is gone. `drop_commit`
+    /// `local_snapshots` is the only place any node ever notices the CR is gone. `drop_snapshot`
     /// itself is real btrfs and is `pull_volume`'s only caller of it — covered end to end by
-    /// `engine_commit.rs`'s loopback tests, not repeated here.
+    /// `engine_snapshot.rs`'s loopback tests, not repeated here.
     #[test]
     fn retired_picks_out_locals_whose_cr_is_gone() {
         let have: HashSet<String> = ["a".into(), "b".into(), "c".into()].into_iter().collect();
@@ -1732,7 +1732,7 @@ mod reconcile_tests {
     }
 
     /// An incremental receive whose `-p` the source never had (this node's nearest held ancestor
-    /// is not necessarily one the SOURCE holds too) must not lose the commit forever: after the
+    /// is not necessarily one the SOURCE holds too) must not lose the snapshot forever: after the
     /// first attempt fails, `pull_one` is retried against the SAME source with no parent at all
     /// before moving on. The fake `btrfs receive` fails call 1 (truncated body, standing in for
     /// the source's own `-p` failure surfacing as an incomplete stream) and succeeds call 2.
@@ -1769,7 +1769,7 @@ fi
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let bin = bin.to_string_lossy().into_owned();
 
-        // The peer server: a real `commit` endpoint, so `pull_one` exercises the actual HTTP
+        // The peer server: a real `snapshot` endpoint, so `pull_one` exercises the actual HTTP
         // round trip rather than a canned kube-mock response. Its own fake `btrfs send` just
         // needs to produce SOME bytes — the receive side is what decides success or failure here.
         let send_bin = bin_dir.join("btrfs-send");
@@ -1811,7 +1811,7 @@ fi
 
         pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1", &[]).await;
 
-        assert!(tmp.path().join("vol/vol-1/snap/vol-1-child").exists(), "the full-pull retry must land the commit");
+        assert!(tmp.path().join("vol/vol-1/snap/vol-1-child").exists(), "the full-pull retry must land the snapshot");
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["status"]["phase"], "Synced", "the fallback succeeded: nothing is missing any more");
@@ -1822,7 +1822,7 @@ fi
     /// F4 (drill, 2026-09-03): with no replica row for the owner (a fresh volume, or a row the
     /// reaper took) the first standby had an EMPTY source list and could never fetch a thing. The
     /// owner is a source of last resort — and only while it is live, so a genuinely dead owner
-    /// costs no failed dial per commit per pass.
+    /// costs no failed dial per snapshot per pass.
     #[tokio::test]
     async fn the_owner_is_a_last_resort_source_only_while_it_is_live() {
         let routes = || {
@@ -1842,7 +1842,7 @@ fi
         let (ctx, rec) = test_ctx(live.path(), "node-b", routes());
         let missed = pull_volume(&ctx, &beat, "btrfs", &http, "s3cret", "v1", &["node-a".to_string()]).await;
         assert_eq!(pod_lists(&rec), 1, "the live owner is tried: {:?}", rec.calls());
-        assert!(missed, "the commit did not land, so the pass asks for a retry");
+        assert!(missed, "the snapshot did not land, so the pass asks for a retry");
 
         let dead = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(dead.path(), "node-b", routes());
@@ -1850,8 +1850,8 @@ fi
         assert_eq!(pod_lists(&rec), 0, "a dead owner is not dialled at all: {:?}", rec.calls());
     }
 
-    /// Catching up on three commits from one source resolves that source's pod address ONCE, not
-    /// once per commit: a full namespaced pod list with two selectors is not a per-commit cost.
+    /// Catching up on three snapshots from one source resolves that source's pod address ONCE, not
+    /// once per snapshot: a full namespaced pod list with two selectors is not a per-snapshot cost.
     #[tokio::test]
     async fn pull_volume_resolves_a_source_address_once_per_pass() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1871,7 +1871,7 @@ fi
         pull_volume(&ctx, &beat_of(vec![], vec![replica_of("v1", "node-b", "Synced")], vec![]), "btrfs", &http, "s3cret", "v1", &[]).await;
 
         let pod_lists = rec.calls().iter().filter(|c| c.as_str() == "GET /api/v1/namespaces/kube-system/pods").count();
-        assert_eq!(pod_lists, 1, "one address lookup per source per pass, not per commit: {:?}", rec.calls());
+        assert_eq!(pod_lists, 1, "one address lookup per source per pass, not per snapshot: {:?}", rec.calls());
     }
 
     /// The owner of a STOPPED volume (no pod, so no Workspace/Environment names it in
@@ -2550,8 +2550,8 @@ fi
         })
     }
 
-    /// A transient is addressed, pulled, and counted toward `Synced` exactly like a commit: same
-    /// `GET /peer/v1/commit/{volume}/{name}` shape (its name just happens to start with `sync-`),
+    /// A transient is addressed, pulled, and counted toward `Synced` exactly like a snapshot: same
+    /// `GET /peer/v1/snapshot/{volume}/{name}` shape (its name just happens to start with `sync-`),
     /// same replica-status write at the end of the pass. No code change should be needed for this
     /// to pass — that is the point of Task 6.
     #[tokio::test]
@@ -2584,7 +2584,7 @@ fi
         let (client, _rec) = mock_client(vec![]);
         let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin);
         // Captures every request path the real peer server sees, so we can prove the transient is
-        // fetched over `/peer/v1/commit/{volume}/{name}` — the exact same endpoint a real commit
+        // fetched over `/peer/v1/snapshot/{volume}/{name}` — the exact same endpoint a real snapshot
         // uses — rather than trusting the on-disk result alone.
         let seen_paths: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let seen_paths2 = seen_paths.clone();
@@ -2603,7 +2603,7 @@ fi
             "status": {"podIP": "127.0.0.1"},
         });
         let routes = vec![
-            // One already-local commit alongside the missing transient: proves the transient is
+            // One already-local snapshot alongside the missing transient: proves the transient is
             // just another item on the same list, not a special case that only fires when it's
             // the sole entry.
             Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("vol-1-aaaaaaaa", "vol-1", ""), ready_transient("sync-ws-1-x", "vol-1", "")]) },
@@ -2628,11 +2628,11 @@ fi
 
         pull_volume(&ctx, &beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced")], vec![]), &bin, &http, "s3cret", "vol-1", &[]).await;
 
-        assert!(tmp.path().join("vol/vol-1/snap/sync-ws-1-x").exists(), "the transient must land on disk like any other commit");
+        assert!(tmp.path().join("vol/vol-1/snap/sync-ws-1-x").exists(), "the transient must land on disk like any other snapshot");
         let paths = seen_paths.lock().unwrap().clone();
         assert!(
-            paths.iter().any(|p| p.contains("/peer/v1/commit/vol-1/sync-ws-1-")),
-            "the transient is fetched over the same commit endpoint as a real commit: {paths:?}"
+            paths.iter().any(|p| p.contains("/peer/v1/snapshot/vol-1/sync-ws-1-")),
+            "the transient is fetched over the same snapshot endpoint as a real snapshot: {paths:?}"
         );
         let created = rec.sent("POST", VOLREPLICAS);
         assert_eq!(created.len(), 1, "the replica row is created fresh (Syncing, per the mocked response) before the final status write");
@@ -2643,7 +2643,7 @@ fi
         peer_server.stop().await;
     }
 
-    /// A transient's `Snapshot` CR being gone is exactly the same "retired" case a deleted commit
+    /// A transient's `Snapshot` CR being gone is exactly the same "retired" case a deleted snapshot
     /// is — `pull_volume` diffs local names against the full CR list regardless of `transient`,
     /// so a local sync point whose CR disappeared is dropped the same way.
     #[tokio::test]
@@ -2996,7 +2996,7 @@ fi
         let dropped = sweep_orphan_snap_bytes(&ctx, &beat, &[serde_json::from_value(snap_of("v1-aaaa", "v1")).unwrap()]).await;
 
         assert_eq!(dropped, vec![("v1".to_string(), "v1-bbbb".to_string())]);
-        assert!(ctx.engine.pool.snap("v1", "v1-aaaa").exists(), "the recorded commit's bytes stay put");
+        assert!(ctx.engine.pool.snap("v1", "v1-aaaa").exists(), "the recorded snapshot's bytes stay put");
         // The BYTE sweep never touches a record: only an explicit delete kills a Snapshot CR.
         assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     }
@@ -3165,7 +3165,7 @@ fi
             transient_gen("sync-ws-1-aaaa", "vol-1", "ws-1", 10),
             transient_gen("sync-ws-1-bbbb", "vol-1", "ws-1", 42),
             transient_gen("sync-ws-2-cccc", "vol-1", "ws-2", 99),
-            ready_snapshot("vol-1-commit", "vol-1", ""),
+            ready_snapshot("vol-1-snapshot", "vol-1", ""),
         ]);
         assert_eq!(newest_transient_of(&snaps, "ws-1").as_deref(), Some("sync-ws-1-bbbb"));
         assert_eq!(newest_transient_of(&snaps, "ws-2").as_deref(), Some("sync-ws-2-cccc"));
@@ -3234,7 +3234,7 @@ fi
     }
 
     /// No transient at all (never ran, or a fresh restore): plain `Synced` is the right bar —
-    /// a Synced replica holds every Ready commit, which is all there is to hold.
+    /// a Synced replica holds every Ready snapshot, which is all there is to hold.
     #[test]
     fn with_no_transient_plain_synced_is_up_to_date() {
         let synced = replica_with_branches("vol-1", "node-b", "Synced", serde_json::json!({}));
@@ -3268,7 +3268,7 @@ fi
             Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: created },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
-        // `local_commits` is a plain listing of `snap/{volume}` — a directory per held subvolume.
+        // `local_snapshots` is a plain listing of `snap/{volume}` — a directory per held subvolume.
         for held in ["sync-ws-1-old", "sync-ws-1-aaaa", "sync-ws-2-cccc"] {
             std::fs::create_dir_all(ctx.engine.pool.snap_dir("vol-1").join(held)).unwrap();
         }
@@ -3303,7 +3303,7 @@ fi
             Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: created },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
-        // No local commits: nothing was pulled, so nothing is held.
+        // No local snapshots: nothing was pulled, so nothing is held.
         std::fs::create_dir_all(ctx.engine.pool.snap_dir("vol-1")).unwrap();
 
         let http = peer_http_client().unwrap();
@@ -3390,11 +3390,11 @@ fi
         assert_eq!(after_pass(&wake, false, &mut misses), Next::Wait, "five wakes are one permit, not five passes");
     }
 
-    /// F4 (drill, 2026-09-03): a pass that could not fetch a commit waited out the full tick. It
+    /// F4 (drill, 2026-09-03): a pass that could not fetch a snapshot waited out the full tick. It
     /// now comes back in 30 s — but a pending wake still wins, because a stop waiting on a replica
     /// must never be delayed by a retry.
     #[test]
-    fn a_pass_that_missed_a_commit_retries_soon_unless_a_wake_is_pending() {
+    fn a_pass_that_missed_a_snapshot_retries_soon_unless_a_wake_is_pending() {
         let wake = tokio::sync::Notify::new();
         let mut misses = 0;
         assert_eq!(after_pass(&wake, true, &mut misses), Next::RetrySoon(RETRY_SOON));
@@ -3402,7 +3402,7 @@ fi
         assert_eq!(after_pass(&wake, true, &mut misses), Next::RunAgain, "a pending wake beats the retry");
     }
 
-    /// Round 2: an unfetchable commit used to pin the whole node at a 30 s pass forever. The delay
+    /// Round 2: an unfetchable snapshot used to pin the whole node at a 30 s pass forever. The delay
     /// doubles per consecutive miss, caps at the ordinary tick, and a single clean pass resets it.
     #[test]
     fn consecutive_misses_back_off_to_the_ordinary_tick_and_one_clean_pass_resets() {

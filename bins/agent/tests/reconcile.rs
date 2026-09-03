@@ -97,9 +97,9 @@ fn ctx_without_homes_export(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<
 }
 
 fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
-    // Every reconcile now unconditionally may ask "does this volume have commits yet"
-    // (`claim::commit_placement`/`has_commits`, the checkout/migrate step) — a call no test fixture
-    // needed before the commit model became the only model (Task 8). Appended AFTER the caller's
+    // Every reconcile now unconditionally may ask "does this volume have snapshots yet"
+    // (`claim::placement`/`has_snapshots`, the checkout/migrate step) — a call no test fixture
+    // needed before the snapshot model became the only model (Task 8). Appended AFTER the caller's
     // own routes, so a test that mocks its own `/snapshots` response (exact history, retention,
     // …) still hits that one first; this is only the default "nothing here yet" answer for every
     // test that never cared about snapshots at all.
@@ -584,7 +584,7 @@ async fn a_clone_is_not_claimed_by_a_node_that_is_behind_on_its_source() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            // The source volume has commits and lives on node-b, so node-a claims only if it is up
+            // The source volume has snapshots and lives on node-b, so node-a claims only if it is up
             // to date for the source worktree.
             rustic_git_workspaces::kube_test::get(
                 "/apis/rustic-git.io/v1alpha1/volumes/ws-src",
@@ -593,7 +593,7 @@ async fn a_clone_is_not_claimed_by_a_node_that_is_behind_on_its_source() {
                                    "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 20}}),
             ),
             Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200,
-                    body: commit_list_of("Snapshot", vec![snapshot_cr("ws-src-a", "ws-src")]) },
+                    body: snapshot_list_of("Snapshot", vec![snapshot_cr("ws-src-a", "ws-src")]) },
             rustic_git_workspaces::kube_test::not_found(format!(
                 "/apis/rustic-git.io/v1alpha1/volumereplicas/{}",
                 crd::replica_name("ws-src", "node-a")
@@ -633,7 +633,7 @@ async fn a_clone_is_claimed_by_a_node_up_to_date_for_the_source_worktree() {
                                    "spec": {"owner": "alice", "nodeName": "node-b", "region": "r1", "quotaGb": 20}}),
             ),
             Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200,
-                    body: commit_list_of("Snapshot", vec![transient]) },
+                    body: snapshot_list_of("Snapshot", vec![transient]) },
             rustic_git_workspaces::kube_test::get(
                 format!("/apis/rustic-git.io/v1alpha1/volumereplicas/{}", crd::replica_name("ws-src", "node-a")),
                 synced,
@@ -672,11 +672,11 @@ async fn a_decommissioning_node_claims_nothing() {
     assert!(rec.sent("PUT", WS_STATUS).is_empty(), "a draining node must not claim: {:?}", rec.calls());
 }
 
-// ── commit-model placement ──────────────────────────────────────────────
+// ── snapshot-model placement ──────────────────────────────────────────────
 
 const SNAPSHOTS_LIST: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
 
-fn commit_list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
+fn snapshot_list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
     serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
 }
 
@@ -698,15 +698,15 @@ fn volume_replica(volume: &str, node: &str, phase: &str) -> serde_json::Value {
     })
 }
 
-/// A workspace whose volume already has commits and whose replica on THIS node reports Synced is
+/// A workspace whose volume already has snapshots and whose replica on THIS node reports Synced is
 /// claimed exactly like the old `compatibleNodes` arm — ruling A.
 #[tokio::test]
-async fn commit_model_a_synced_replica_claims_a_workspace_with_commits() {
+async fn snapshot_model_a_synced_replica_claims_a_workspace_with_snapshots() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
             rustic_git_workspaces::kube_test::get(
                 format!("/apis/rustic-git.io/v1alpha1/volumereplicas/{}", crd::replica_name("vol-1", "node-a")),
                 volume_replica("vol-1", "node-a", "Synced"),
@@ -754,12 +754,12 @@ async fn an_up_to_date_non_owner_does_not_claim_a_parent_whose_volume_has_a_live
 /// The same volume, but this node's replica is Syncing (or absent) — ruling A's other half: no
 /// claim, and the object is left unplaced for whichever node IS Synced.
 #[tokio::test]
-async fn commit_model_a_syncing_replica_does_not_claim_a_workspace_with_commits() {
+async fn snapshot_model_a_syncing_replica_does_not_claim_a_workspace_with_snapshots() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
             rustic_git_workspaces::kube_test::not_found(format!(
                 "/apis/rustic-git.io/v1alpha1/volumereplicas/{}",
                 crd::replica_name("vol-1", "node-a")
@@ -775,12 +775,12 @@ async fn commit_model_a_syncing_replica_does_not_claim_a_workspace_with_commits(
 /// A volume with ZERO `Snapshot` CRs is the bootstrap case (ruling B) — claimable by any pool
 /// node with no replica at all, same as the old empty-`compatibleNodes` arm.
 #[tokio::test]
-async fn commit_model_a_zero_commit_volume_is_claimable_as_bootstrap() {
+async fn snapshot_model_a_zero_snapshot_volume_is_claimable_as_bootstrap() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) },
             Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
             binding_route(),
         ],
@@ -788,13 +788,13 @@ async fn commit_model_a_zero_commit_volume_is_claimable_as_bootstrap() {
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
 
     rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
-    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "zero commits: bootstrap, claimable");
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "zero snapshots: bootstrap, claimable");
 }
 
 /// A brand-new workspace has no child `Volume` at all yet (`volumeRef` unset) — the same bootstrap
 /// case, reached with no Snapshot list at all since there is no volume to list.
 #[tokio::test]
-async fn commit_model_a_workspace_with_no_volume_yet_is_claimable_as_bootstrap() {
+async fn snapshot_model_a_workspace_with_no_volume_yet_is_claimable_as_bootstrap() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(
         tmp.path(),
@@ -825,7 +825,7 @@ async fn f1_reclaiming_an_unclaimed_workspace_preserves_head_and_volume_ref() {
     );
     let w = workspace(serde_json::json!({
         "phase": "ready", "nodeName": "", "compatibleNodes": [],
-        "volumeRef": "vol-1", "head": "vol-1-commit-a",
+        "volumeRef": "vol-1", "head": "vol-1-snapshot-a",
         "packages": {"base": [], "observed": [], "observedHash": "h1", "profile": "/nix/store/x"},
     }));
 
@@ -834,12 +834,12 @@ async fn f1_reclaiming_an_unclaimed_workspace_preserves_head_and_volume_ref() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["status"]["nodeName"], "node-a", "reclaimed by this node");
     assert_eq!(sent[0]["status"]["volumeRef"], "vol-1", "F1: volumeRef must survive the claim write");
-    assert_eq!(sent[0]["status"]["head"], "vol-1-commit-a", "F1: head must survive the claim write");
+    assert_eq!(sent[0]["status"]["head"], "vol-1-snapshot-a", "F1: head must survive the claim write");
     assert_eq!(sent[0]["status"]["packages"]["profile"], "/nix/store/x", "F1: nothing else in status is wiped either");
 }
 
 /// F4: a `Snapshot`-list error must never read as "bootstrap, claim it" — that is the exact
-/// never-started-dataless failure the commit-model arm exists to prevent.
+/// never-started-dataless failure the snapshot-model arm exists to prevent.
 #[tokio::test]
 async fn f4_a_snapshot_list_error_claims_nothing() {
     let tmp = tempfile::tempdir().unwrap();
@@ -863,7 +863,7 @@ async fn f4_a_volume_replica_get_error_claims_nothing() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) },
             Route {
                 method: "GET",
                 path: format!("/apis/rustic-git.io/v1alpha1/volumereplicas/{}", crd::replica_name("vol-1", "node-a")),
@@ -879,23 +879,23 @@ async fn f4_a_volume_replica_get_error_claims_nothing() {
     assert!(rec.sent("PUT", WS_STATUS).is_empty(), "nothing is claimed on a lookup error");
 }
 
-/// F2: `status.head` has no writer yet in this task (Task 5 commits, Task 6 clones/restores) — a
-/// workspace whose volume already has commits but whose OWN `head` is still `None` must not be
+/// F2: `status.head` has no writer yet in this task (Task 5 snapshots, Task 6 clones/restores) — a
+/// workspace whose volume already has snapshots but whose OWN `head` is still `None` must not be
 /// handed an empty bootstrap worktree. It waits, and no `checkout` (and so no worktree dir) ever
 /// happens.
 #[tokio::test]
-async fn f2_head_none_with_commits_present_requeues_without_a_checkout() {
+async fn f2_head_none_with_snapshots_present_requeues_without_a_checkout() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = ssh_routes();
     // TWICE: a re-host pass lists snapshots once for `latest_transient` and once for
-    // `has_commits`, and this mock walks a path's routes in order — with one route the second
-    // listing would fall through to the empty default and read as a zero-commit bootstrap.
+    // `has_snapshots`, and this mock walks a path's routes in order — with one route the second
+    // listing would fall through to the empty default and read as a zero-snapshot bootstrap.
     for _ in 0..2 {
         routes.push(Route {
             method: "GET",
             path: SNAPSHOTS_LIST.into(),
             status: 200,
-            body: commit_list_of("Snapshot", vec![snapshot_cr("ws-1-a", "ws-1")]),
+            body: snapshot_list_of("Snapshot", vec![snapshot_cr("ws-1-a", "ws-1")]),
         });
     }
     let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
@@ -927,7 +927,7 @@ async fn rehost_outcome(tmp: &std::path::Path, present: &[&str]) -> String {
         method: "GET",
         path: SNAPSHOTS_LIST.into(),
         status: 200,
-        body: commit_list_of(
+        body: snapshot_list_of(
             "Snapshot",
             vec![snapshot_cr("ws-1-aaaaaaaa", "ws-1"), transient("sync-ws-1-bbbbbbbb", "9"), transient("sync-ws-1-cccccccc", "4")],
         ),
@@ -947,8 +947,8 @@ async fn rehost_outcome(tmp: &std::path::Path, present: &[&str]) -> String {
 }
 
 /// Re-host: a node that has never run this worktree starts from the newest SYNC POINT, not from
-/// `status.head` — the sync beat replicated it after the last commit, so the loss window on a node
-/// death is one `WS_SYNC_SECS`. Only the gen-9 sync point is on the pool, and the head commit is
+/// `status.head` — the sync beat replicated it after the last snapshot, so the loss window on a node
+/// death is one `WS_SYNC_SECS`. Only the gen-9 sync point is on the pool, and the head snapshot is
 /// NOT, so picking the head (or the older gen-4 point) is a `NO_SUCH_RECORD`.
 #[tokio::test]
 async fn a_workspace_starting_on_a_new_node_checks_out_its_latest_sync_point_over_its_head() {
@@ -959,11 +959,11 @@ async fn a_workspace_starting_on_a_new_node_checks_out_its_latest_sync_point_ove
     assert_ne!(
         outcome,
         rustic_git_workspaces::engine::ops::NO_SUCH_RECORD,
-        "the checkout must have been asked for the local sync point, not the absent head commit"
+        "the checkout must have been asked for the local sync point, not the absent head snapshot"
     );
 }
 
-/// The other half, and the reason `latest_transient` intersects with `local_commits`: a replica one
+/// The other half, and the reason `latest_transient` intersects with `local_snapshots`: a replica one
 /// pull cycle behind sees a `Ready` transient whose subvolume has not landed here yet. Checking
 /// that out is a PERMANENT `NO_SUCH_RECORD` with no fallback, where `head` — which this node DOES
 /// hold — would have started the worktree perfectly well. Neither sync point is on the pool here,
@@ -984,7 +984,7 @@ async fn a_sync_point_this_node_has_not_pulled_yet_falls_back_to_the_head() {
 const WS_CLONE_OBJ: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-clone";
 const WS_1_OBJ: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
 
-/// A shared-volume clone workspace (`cloneOf { commit: Some(_) }`), whose worktree lives under
+/// A shared-volume clone workspace (`cloneOf { snapshot: Some(_) }`), whose worktree lives under
 /// the SOURCE volume's `live/`, not its own.
 fn clone_workspace() -> crd::Workspace {
     let mut w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-src"}));
@@ -1013,7 +1013,7 @@ async fn a_clone_reconcile_adds_the_worktree_finalizer() {
 
 /// (ii) An OWNED workspace grows the finalizer too, now that a delete has to decide whether its
 /// Volume survives: without one the parent would be gone before anything could look at its
-/// commits, and the Volume — commits and all — would go with it.
+/// snapshots, and the Volume — snapshots and all — would go with it.
 #[tokio::test]
 async fn an_owned_workspace_reconcile_adds_the_finalizer() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1032,7 +1032,7 @@ async fn an_owned_workspace_reconcile_adds_the_finalizer() {
 
 /// (iii) A deleting clone that already carries the finalizer: `reconcile_workspace` runs the
 /// `Cleanup` arm (which calls `drop_worktree` — proved for real by
-/// `engine_commit.rs`'s `drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry`; here the
+/// `engine_snapshot.rs`'s `drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry`; here the
 /// worktree is simply absent, so `drop_worktree`'s own no-op-on-absent path keeps this a pure loop
 /// test), then removes the finalizer via kube-rs's Test+Remove JSON patch.
 #[tokio::test]
@@ -1264,10 +1264,10 @@ async fn deleting_a_workspace_with_only_a_legacy_baseline_deletes_it_and_leaves_
     assert!(rec.sent("PATCH", VOL_WS1).is_empty(), "a baseline never detaches the Volume: {:?}", rec.calls());
 }
 
-/// No commit on the Volume: the ownerReference stays and ownerReference GC deletes the Volume with
+/// No snapshot on the Volume: the ownerReference stays and ownerReference GC deletes the Volume with
 /// its parent, exactly as before this existed.
 #[tokio::test]
-async fn deleting_a_workspace_without_a_commit_leaves_the_volume_to_gc() {
+async fn deleting_a_workspace_without_a_snapshot_leaves_the_volume_to_gc() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
     let routes = vec![
@@ -1345,9 +1345,9 @@ async fn deleting_an_environment_with_a_snapshot_detaches_its_volume() {
     assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE /apis/rustic-git.io/v1alpha1/volumes/")), "the Volume itself is never deleted");
 }
 
-/// The environment twin of `deleting_a_workspace_without_a_commit_leaves_the_volume_to_gc`.
+/// The environment twin of `deleting_a_workspace_without_a_snapshot_leaves_the_volume_to_gc`.
 #[tokio::test]
-async fn deleting_an_environment_without_a_commit_leaves_the_volume_to_gc() {
+async fn deleting_an_environment_without_a_snapshot_leaves_the_volume_to_gc() {
     const ENV_OBJ: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
     const VOL_ENV1: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
     let tmp = tempfile::tempdir().unwrap();
@@ -1883,7 +1883,7 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
                  "source": {"gitRepo": {"repo": "https://evil.example.com/x", "branch": "main"}}},
         "status": {"phase": "ready", "subvolumePresent": true}
     });
-    // The commit-model checkout step runs before this gate is ever reached; pre-seed an empty
+    // The snapshot-model checkout step runs before this gate is ever reached; pre-seed an empty
     // worktree so it converges on `WORKTREE_EXISTS` instead of shelling to a real `btrfs`.
     std::fs::create_dir_all(tmp.path().join("vol/ws-1/live/ws-1")).unwrap();
     let (ctx, rec) = ctx(
@@ -1992,7 +1992,7 @@ fn env_vol() -> serde_json::Value {
     })
 }
 
-fn stop_commit(status: serde_json::Value) -> serde_json::Value {
+fn stop_snapshot(status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         // `creationTimestamp` is what the whole-wait bound measures from — an hour ago, so a test
@@ -2088,7 +2088,7 @@ fn env_flush_routes(stop: serde_json::Value, replicas: serde_json::Value) -> Vec
 #[tokio::test]
 async fn a_stop_tears_down_as_soon_as_the_cut_is_ready() {
     let tmp = tempfile::tempdir().unwrap();
-    let ready = stop_commit(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(1)}));
+    let ready = stop_snapshot(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(1)}));
     // NOBODY holds it: under the old gate this was a ten-minute wait, and now it is a condition.
     let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replica_list(&[])));
 
@@ -2121,7 +2121,7 @@ async fn a_stop_tears_down_as_soon_as_the_cut_is_ready() {
 #[tokio::test]
 async fn a_stop_whose_cut_is_not_ready_still_tears_nothing_down() {
     let tmp = tempfile::tempdir().unwrap();
-    let wedged = stop_commit(serde_json::json!({"phase": "working"}));
+    let wedged = stop_snapshot(serde_json::json!({"phase": "working"}));
     let (ctx, rec) = ctx(tmp.path(), env_flush_routes(wedged, replica_list(&[])));
 
     rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
@@ -2216,7 +2216,7 @@ async fn a_workspace_stop_cuts_a_sync_point_before_deleting_the_pod() {
     rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx1).await.unwrap();
     let cut = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots");
     assert_eq!(cut.len(), 1, "one sync point: {:?}", rec.calls());
-    assert_eq!(cut[0]["spec"]["transient"], true, "a sync point, not a commit a user sees");
+    assert_eq!(cut[0]["spec"]["transient"], true, "a sync point, not a snapshot a user sees");
     assert_eq!(cut[0]["spec"]["worktree"], "ws-1", "the PARENT's name, not the volume's");
     assert_eq!(cut[0]["spec"]["state"]["kind"], "workspace", "the parent's definition rides along on the cut");
     assert_eq!(cut[0]["spec"]["state"]["image"], "nginx:alpine");
@@ -2364,7 +2364,7 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
     let routes = vec![
         Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
-        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) },
         Route { method: "PATCH", path: format!("/api/v1/namespaces/{}", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "Namespace"}) },
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/default-deny", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-dns", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
@@ -2453,9 +2453,9 @@ async fn an_environment_whose_only_delta_is_its_volume_ref_still_writes_status()
         vec![
             Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
-            rustic_git_workspaces::kube_test::get(STOP_REQ, stop_commit(serde_json::json!({"phase": "done"}))),
+            rustic_git_workspaces::kube_test::get(STOP_REQ, stop_snapshot(serde_json::json!({"phase": "done"}))),
             Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
-            Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: stop_commit(serde_json::json!({"phase": "done"})) },
+            Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: stop_snapshot(serde_json::json!({"phase": "done"})) },
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         ],
     );
@@ -2594,15 +2594,15 @@ async fn a_matching_restored_to_neither_scales_down_nor_re_wishes() {
 
 /// A granted wish stays in `spec.restore` forever, so the gate meets it on every pass. It may
 /// INITIALIZE `head` — once — and must never re-derive it afterwards: a push advances `head` to a
-/// new commit, and a gate that compared `head` against the wish would stamp it straight back, so
+/// new snapshot, and a gate that compared `head` against the wish would stamp it straight back, so
 /// an environment that was ever restored could never move past its restore point. What shipped
 /// did exactly that.
 #[tokio::test]
-async fn a_granted_wish_never_drags_head_back_off_a_pushed_commit() {
+async fn a_granted_wish_never_drags_head_back_off_a_pushed_snapshot() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut e, vol) = restoring_env(Some("snap-7"));
     // The state after a push: the wish was applied and recorded long ago, and `head` has since
-    // moved on to a commit the commit reconciler cut.
+    // moved on to a snapshot the snapshot reconciler cut.
     let mut st = e.status.clone().unwrap_or_default();
     st.head = Some("env-1-aaaaaaaa".into());
     st.restored_to = Some("snap-7".into());
@@ -2764,14 +2764,14 @@ async fn a_cloned_environment_is_claimed_by_its_source_volumes_owner() {
 #[tokio::test]
 async fn a_cloned_environment_is_not_claimed_off_its_sources_node() {
     let tmp = tempfile::tempdir().unwrap();
-    // A source with commits: bootstrap would claim anywhere, so the rule only bites once there is
+    // A source with snapshots: bootstrap would claim anywhere, so the rule only bites once there is
     // something to be up to date WITH — and node-a has no replica row for env-src at all.
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
             rustic_git_workspaces::kube_test::get(SRC_VOL, src_volume("node-b")),
             Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200,
-                    body: commit_list_of("Snapshot", vec![snapshot_cr("env-src-a", "env-src")]) },
+                    body: snapshot_list_of("Snapshot", vec![snapshot_cr("env-src-a", "env-src")]) },
         ],
     );
 
@@ -2967,7 +2967,7 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
         ),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ]);
-    // The commit-model checkout step is unconditional now (Task 8): pre-seed an empty worktree
+    // The snapshot-model checkout step is unconditional now (Task 8): pre-seed an empty worktree
     // so `Engine::checkout` converges on `WORKTREE_EXISTS` instead of shelling out to a real
     // `btrfs subvolume create` this test environment doesn't have.
     std::fs::create_dir_all(pool.join("vol/ws-1/live/ws-1")).unwrap();
@@ -3898,14 +3898,14 @@ async fn a_workspace_gets_its_pod_once_ready() {
 /// re-reconcile after an earlier pass materialized it, or a pod restarting on the same disk)
 /// converges through `WORKTREE_EXISTS` rather than erroring — the pass still reaches the pod, so
 /// materialization never blocks a workspace whose worktree is already there. Real btrfs is not
-/// available in this test environment, so this is the one commit-model path exercisable here: the
+/// available in this test environment, so this is the one snapshot-model path exercisable here: the
 /// `Engine::checkout` call, without ever shelling out, because `dst.exists()` is checked first.
 #[tokio::test]
-async fn commit_model_checkout_converges_on_an_existing_worktree() {
+async fn snapshot_model_checkout_converges_on_an_existing_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol/ws-1/live/ws-1")).unwrap();
     let mut routes = ssh_routes();
-    routes.push(Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) });
+    routes.push(Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) });
     let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), routes);
 
     apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
@@ -3920,17 +3920,17 @@ async fn commit_model_checkout_converges_on_an_existing_worktree() {
 /// into `apply_workspace` only and left the Environment path to this task (`run_environment`'s
 /// twin block, added beside `apply_workspace`'s). Same convergence trick as the workspace test
 /// above — the `live/{id}` worktree already exists, so `Engine::checkout` converges through
-/// `WORKTREE_EXISTS` without ever shelling to real btrfs — and the same zero-commit volume, so
+/// `WORKTREE_EXISTS` without ever shelling to real btrfs — and the same zero-snapshot volume, so
 /// the `HeadUnknown` gate never engages. Reaching the Namespace `ensure` call (the very next thing
 /// `run_environment` does) is the proof the checkout arm did not block the pass.
 #[tokio::test]
-async fn commit_model_environment_bootstrap_materializes_its_worktree() {
+async fn snapshot_model_environment_bootstrap_materializes_its_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol/env-1/live/env-1")).unwrap();
     let routes = vec![
         Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
-        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
     let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
@@ -3946,15 +3946,15 @@ async fn commit_model_environment_bootstrap_materializes_its_worktree() {
     );
 }
 
-// ── commit-model clone/restore (Task 6b) ────────────────────────────────
+// ── snapshot-model clone/restore (Task 6b) ────────────────────────────────
 
-/// A `Ready` `Snapshot` of the volume a `cloneOf` names — the precondition `commit_ready` checks
+/// A `Ready` `Snapshot` of the volume a `cloneOf` names — the precondition `the phase check` checks
 /// before ever letting a clone check out. Kept separate from `snapshot_cr` (worktree/parent don't
 /// matter here) so the volume and phase are the only things a test has to vary.
-fn ready_commit(name: &str, volume: &str) -> serde_json::Value {
+fn ready_snapshot(name: &str, volume: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": name, "uid": "commit-uid"},
+        "metadata": {"name": name, "uid": "snapshot-uid"},
         "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": ""},
         "status": {"phase": "ready"},
     })
@@ -3982,8 +3982,8 @@ fn ready_source_volume(id: &str) -> serde_json::Value {
     })
 }
 
-/// A workspace whose `cloneOf` carries a graft commit and no worktree yet — a fresh clone.
-fn cloned_workspace(commit: &str, head: Option<&str>) -> crd::Workspace {
+/// A workspace whose `cloneOf` carries a graft snapshot and no worktree yet — a fresh clone.
+fn cloned_workspace(snapshot: &str, head: Option<&str>) -> crd::Workspace {
     let mut status = serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]});
     if let Some(h) = head {
         status["head"] = serde_json::json!(h);
@@ -3991,19 +3991,19 @@ fn cloned_workspace(commit: &str, head: Option<&str>) -> crd::Workspace {
     let mut w = workspace(status);
     w.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
-        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: Some(commit.into()) }),
+        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: Some(snapshot.into()) }),
     });
     w
 }
 
-/// A clone with no head of its own yet checks out the GRAFTED commit (never bootstraps empty next
+/// A clone with no head of its own yet checks out the GRAFTED snapshot (never bootstraps empty next
 /// to the source's real history) and records it as its own `head` on the very first pass — the
 /// same preserve-pattern write `snapshot::advance_head` uses for a push, so retention's
 /// `worktree_heads` sees it from here on. `resolve_volume` also proves clone PLACEMENT here: the
 /// SOURCE's volume (`ws-src`), not a freshly created child, is what gets read — the route list has
 /// no `POST /volumes` at all, so `ensure_child_volume` was never called.
 #[tokio::test]
-async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head() {
+async fn snapshot_model_clone_checks_out_its_graft_snapshot_and_records_it_as_head() {
     let tmp = tempfile::tempdir().unwrap();
     // The worktree name is the WORKSPACE's own id, on the SOURCE volume's snap tree — never
     // `vol/ws-1/...`, which would be a fresh (and wrong) child volume.
@@ -4012,7 +4012,7 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
         source_workspace_exists("ws-src"),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
-        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_snapshot("ws-src-aaaaaaaa", "ws-src")),
         ready_binding(),
         ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
@@ -4028,17 +4028,17 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
     let sent = rec.sent("PATCH", WS_STATUS);
     assert!(
         sent.iter().any(|s| s["status"]["head"] == "ws-src-aaaaaaaa"),
-        "the graft commit must be recorded as this clone's own head: {sent:?}"
+        "the graft snapshot must be recorded as this clone's own head: {sent:?}"
     );
     assert!(!rec.calls().iter().any(|c| c.contains("POST") && c.contains("/volumes")), "a shared-volume clone creates no child Volume");
 }
 
 /// An environment RESTORED onto a commit (`/v1`'s `CloneOf { volume, commit }`) records that
-/// commit as its own `status.head` instead of parking forever in `HeadUnknown` — the live repro of
+/// snapshot as its own `status.head` instead of parking forever in `HeadUnknown` — the live repro of
 /// 2026-09-03. The workspace twin is
-/// `commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head`.
+/// `snapshot_model_clone_checks_out_its_graft_snapshot_and_records_it_as_head`.
 #[tokio::test]
-async fn a_restored_environment_records_its_graft_commit_as_head() {
+async fn a_restored_environment_records_its_graft_snapshot_as_head() {
     let tmp = tempfile::tempdir().unwrap();
     // The environment's OWN worktree of the SOURCE's volume — `live/env-1`, never `live/env-src`,
     // which is the source environment's live subvolume. It exists already so `checkout` converges
@@ -4046,7 +4046,7 @@ async fn a_restored_environment_records_its_graft_commit_as_head() {
     std::fs::create_dir_all(tmp.path().join("vol/env-src/live/env-1")).unwrap();
     // The source's own worktree, which this pass must not touch.
     std::fs::create_dir_all(tmp.path().join("vol/env-src/live/env-src/marker")).unwrap();
-    let (ctx, rec) = ctx(tmp.path(), restored_env_routes(ready_commit("env-src-aaaa", "env-src")));
+    let (ctx, rec) = ctx(tmp.path(), restored_env_routes(ready_snapshot("env-src-aaaa", "env-src")));
 
     // Runs past the checkout arm and then fails on the next unmocked route — the head write has
     // already landed by then, same as the workspace twin.
@@ -4055,7 +4055,7 @@ async fn a_restored_environment_records_its_graft_commit_as_head() {
     let sent = rec.sent("PATCH", ENV_STATUS_PATH);
     assert!(
         sent.iter().any(|s| s["status"]["head"] == "env-src-aaaa"),
-        "the graft commit must be recorded as this environment's head: {sent:?}"
+        "the graft snapshot must be recorded as this environment's head: {sent:?}"
     );
     assert!(
         !sent.iter().any(|s| s["status"]["conditions"][0]["reason"] == "HeadUnknown"),
@@ -4085,12 +4085,12 @@ async fn a_restored_environment_records_its_graft_commit_as_head() {
 }
 
 /// The cut `/v1` made microseconds before the object is almost always still `Working` on the first
-/// reconcile: `Creating` + `Ready=False/CommitPending` and a requeue, never a checkout and never a
+/// reconcile: `Creating` + `Ready=False/SnapshotPending` and a requeue, never a checkout and never a
 /// permanent settle.
 #[tokio::test]
-async fn a_restored_environment_waits_while_its_commit_is_still_working() {
+async fn a_restored_environment_waits_while_its_snapshot_is_still_working() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut working = ready_commit("env-src-aaaa", "env-src");
+    let mut working = ready_snapshot("env-src-aaaa", "env-src");
     working["status"]["phase"] = serde_json::json!("working");
     let (ctx, rec) = ctx(tmp.path(), restored_env_routes(working));
 
@@ -4099,11 +4099,11 @@ async fn a_restored_environment_waits_while_its_commit_is_still_working() {
 
     let last = rec.sent("PATCH", ENV_STATUS_PATH).pop().expect("a status write");
     assert_eq!(last["status"]["phase"], "creating");
-    assert_eq!(last["status"]["conditions"][0]["reason"], "CommitPending");
-    assert!(last["status"]["head"].is_null(), "no head recorded while the commit is uncut: {last}");
+    assert_eq!(last["status"]["conditions"][0]["reason"], "SnapshotPending");
+    assert!(last["status"]["head"].is_null(), "no head recorded while the snapshot is uncut: {last}");
 }
 
-/// An environment whose `cloneOf` carries a graft commit — what `POST /v1/environments/restore`
+/// An environment whose `cloneOf` carries a graft snapshot — what `POST /v1/environments/restore`
 /// writes — claimed on this node, with no head of its own yet.
 fn restored_env() -> crd::Environment {
     let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
@@ -4124,9 +4124,9 @@ fn restored_env() -> crd::Environment {
     e
 }
 
-/// `check_source` (Workspace 404 then Environment), the SOURCE's Volume, and the graft commit in
+/// `check_source` (Workspace 404 then Environment), the SOURCE's Volume, and the graft snapshot in
 /// whatever state the test wants it.
-fn restored_env_routes(commit: serde_json::Value) -> Vec<Route> {
+fn restored_env_routes(snapshot: serde_json::Value) -> Vec<Route> {
     vec![
         Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
         rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/workspaces/env-src"),
@@ -4140,7 +4140,7 @@ fn restored_env_routes(commit: serde_json::Value) -> Vec<Route> {
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-src", ready_source_volume("env-src")),
         // The restore's own attach: it becomes an OWNER of the source's Volume (design rule 6).
         Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/env-src".into(), status: 200, body: ready_source_volume("env-src") },
-        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/env-src-aaaa", commit),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/env-src-aaaa", snapshot),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         // The children `run_environment` applies before it makes the mount folders. Named for the
         // environment's OWN namespace: writing into `env-src`'s is the collision Task 2c removed.
@@ -4154,12 +4154,12 @@ fn restored_env_routes(commit: serde_json::Value) -> Vec<Route> {
     ]
 }
 
-/// A clone naming a commit that is not a `Ready` `Snapshot` of its source volume — swept by
+/// A clone naming a snapshot that is not a `Ready` `Snapshot` of its source volume — swept by
 /// retention, or simply never existed — settles PERMANENTLY with its own reason, distinct from a
 /// bad clone SOURCE (`NoSuchSource`, settled earlier by `check_source`): retrying at TICK would
 /// spin on the same missing snapshot forever.
 #[tokio::test]
-async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
+async fn snapshot_model_clone_with_a_missing_snapshot_settles_as_no_such_snapshot() {
     let tmp = tempfile::tempdir().unwrap();
     let routes = vec![
         source_workspace_exists("ws-src"),
@@ -4181,7 +4181,7 @@ async fn commit_model_clone_with_a_missing_commit_settles_as_no_such_commit() {
     let last = sent.last().expect("a status write");
     assert_eq!(last["status"]["phase"], "error");
     let cond = &last["status"]["conditions"][0];
-    assert_eq!(cond["reason"], "NoSuchCommit");
+    assert_eq!(cond["reason"], "NoSuchSnapshot");
 }
 
 /// Restoring a snapshot of a DELETED workspace — the case durable snapshots exist for. No
@@ -4196,7 +4196,7 @@ async fn a_restore_onto_a_detached_volume_is_not_no_such_source() {
         rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/environments/ws-src"),
         rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
-        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_snapshot("ws-src-aaaaaaaa", "ws-src")),
         ready_binding(),
         ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
@@ -4212,7 +4212,7 @@ async fn a_restore_onto_a_detached_volume_is_not_no_such_source() {
         !sent.iter().any(|s| s["status"]["conditions"][0]["reason"] == "NoSuchSource"),
         "a deleted source workspace must not settle a restore: {sent:?}"
     );
-    // The shared-worktree arm ran: the graft commit became this clone's own head.
+    // The shared-worktree arm ran: the graft snapshot became this clone's own head.
     assert!(sent.iter().any(|s| s["status"]["head"] == "ws-src-aaaaaaaa"), "the shared-arm path must run: {sent:?}");
 }
 
@@ -4234,7 +4234,7 @@ async fn a_restore_whose_volume_is_gone_settles_as_no_such_source() {
     assert_eq!(sent.last().expect("a status write")["status"]["conditions"][0]["reason"], "NoSuchSource");
 }
 
-/// A LIVE clone (`cloneOf` with no commit) copies from the source's live worktree, so its source
+/// A LIVE clone (`cloneOf` with no snapshot) copies from the source's live worktree, so its source
 /// parent must still exist — unchanged by the restore carve-out above.
 #[tokio::test]
 async fn a_live_clone_of_a_deleted_workspace_still_settles_as_no_such_source() {
@@ -4309,7 +4309,7 @@ async fn a_seeded_clone_creates_its_own_volume_and_leaves_the_dead_owners_pin_al
 /// A clone that already has its own `head` (it pushed since being grafted) never re-derives it
 /// from `cloneOf` — the graft is a ONE-TIME starting point, not a value this pass keeps re-reading.
 #[tokio::test]
-async fn commit_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
+async fn snapshot_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
     let routes = vec![
@@ -4319,12 +4319,12 @@ async fn commit_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
-    let w = cloned_workspace("ws-src-aaaaaaaa", Some("ws-1-own-commit"));
+    let w = cloned_workspace("ws-src-aaaaaaaa", Some("ws-1-own-snapshot"));
 
     let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await;
 
-    // No snapshot GET at all: an already-owned head skips `commit_ready`'s validation of the
-    // graft commit entirely, and no status write ever names the graft commit as `head`.
+    // No snapshot GET at all: an already-owned head skips `the phase check`'s validation of the
+    // graft snapshot entirely, and no status write ever names the graft snapshot as `head`.
     assert!(!rec.calls().iter().any(|c| c.contains("/snapshots/")), "{:?}", rec.calls());
     assert!(rec.sent("PATCH", WS_STATUS).iter().all(|s| s["status"]["head"] != "ws-src-aaaaaaaa"));
 }
@@ -4334,7 +4334,7 @@ async fn commit_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
 /// local. Real btrfs is unavailable in this test environment, so the swap itself errors past the
 /// point this asserts; the point is that nothing here ever reaches for a network call.
 #[tokio::test]
-async fn commit_model_restore_in_place_never_calls_the_registry() {
+async fn snapshot_model_restore_in_place_never_calls_the_registry() {
     let tmp = tempfile::tempdir().unwrap();
     let vol = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
@@ -4354,7 +4354,7 @@ async fn commit_model_restore_in_place_never_calls_the_registry() {
 
     assert!(
         !rec.calls().iter().any(|c| c.contains("get_history") || c.contains("registry")),
-        "commit-model restore must never fetch from the registry: {:?}", rec.calls()
+        "snapshot-model restore must never fetch from the registry: {:?}", rec.calls()
     );
 }
 
@@ -4874,7 +4874,7 @@ async fn a_restored_workspace_attaches_itself_to_the_source_volume() {
         source_workspace_exists("ws-src"),
         rustic_git_workspaces::kube_test::get(VOL_WS_SRC, ready_source_volume("ws-src")),
         Route { method: "PATCH", path: VOL_WS_SRC.into(), status: 200, body: ready_source_volume("ws-src") },
-        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_snapshot("ws-src-aaaaaaaa", "ws-src")),
         ready_binding(),
         ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
@@ -4908,7 +4908,7 @@ async fn a_second_reconcile_does_not_re_attach() {
     let routes = vec![
         source_workspace_exists("ws-src"),
         rustic_git_workspaces::kube_test::get(VOL_WS_SRC, attached),
-        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_commit("ws-src-aaaaaaaa", "ws-src")),
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_snapshot("ws-src-aaaaaaaa", "ws-src")),
         ready_binding(),
         ready_namespace(),
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },

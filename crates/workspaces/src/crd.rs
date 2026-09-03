@@ -254,7 +254,7 @@ pub struct SnapshotSpec {
     pub owner: String,
     /// The Workspace/Environment id whose worktree this cut is taken FROM — a volume can have
     /// more than one worktree (a workspace plus a clone still attached, say), so `spec.volume`
-    /// alone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The
+    /// alone does not say which one to snapshot; the creator (`/push`) names it. The
     /// snapshot reconciler only acts when THIS field's worktree is the one running on its node.
     /// Required, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored
     /// objects predating this field, so the usual back-compat exemption does not apply here.
@@ -838,7 +838,7 @@ pub const DECOMMISSION_LABEL: &str = "rustic-git.io/decommission";
 /// as labels so a watch or a list (the e2e's `-l rustic-git.io/volume=...`, `/v1`'s own reads) can
 /// select on them — a label cannot be queried out of an arbitrary spec field. A VIEW, same rule as
 /// every other label in this file: `spec` stays the truth, this is never read for authorization.
-pub fn commit_labels(owner: &str, volume: &str) -> std::collections::BTreeMap<String, String> {
+pub fn snapshot_labels(owner: &str, volume: &str) -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::from([
         ("rustic-git.io/owner".to_string(), owner.to_string()),
         (VOLUME_LABEL.to_string(), volume.to_string()),

@@ -1675,8 +1675,8 @@ async fn detaching_a_stopped_workspace_still_collects_the_environment_side_polic
 
 // ── restoring takes the snapshot's frozen definition ──────────────────────
 
-/// A `Ready` `Snapshot` CR carrying an optional `spec.state` — what `find_commit_model_snapshot_for_restore`
-/// reads, and the only source of the restored spec once the source workspace is gone.
+/// A `Ready` `Snapshot` CR carrying an optional `spec.state` — what `restore_ws`/`restore_env`
+/// read, and the only source of the restored spec once the source workspace is gone.
 fn ready_snap(name: &str, volume: &str, owner: &str, state: Option<Value>) -> Value {
     let mut spec = json!({"volume": volume, "owner": owner, "worktree": volume, "parent": ""});
     if let Some(st) = state {

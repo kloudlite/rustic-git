@@ -1252,7 +1252,7 @@
                         "type": "string"
                       },
                       "worktree": {
-                        "description": "The Workspace/Environment id whose worktree this cut is taken FROM — a volume can have\nmore than one worktree (a workspace plus a clone still attached, say), so `spec.volume`\nalone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The\nsnapshot reconciler only acts when THIS field's worktree is the one running on its node.\nRequired, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored\nobjects predating this field, so the usual back-compat exemption does not apply here.",
+                        "description": "The Workspace/Environment id whose worktree this cut is taken FROM — a volume can have\nmore than one worktree (a workspace plus a clone still attached, say), so `spec.volume`\nalone does not say which one to snapshot; the creator (`/push`) names it. The\nsnapshot reconciler only acts when THIS field's worktree is the one running on its node.\nRequired, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored\nobjects predating this field, so the usual back-compat exemption does not apply here.",
                         "type": "string"
                       }
                     },

@@ -1,4 +1,4 @@
-//! Commit/checkout primitive tests: real btrfs on a loopback pool. Every test opens with
+//! Snapshot/checkout primitive tests: real btrfs on a loopback pool. Every test opens with
 //! `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI runner) — they
 //! run for real on the btrfs review VM. Fixture copied from `engine_ops.rs`'s `LoopbackPool`:
 //! integration test files cannot share code across `tests/*.rs`.
@@ -46,7 +46,7 @@ fn engine(pool: Pool) -> Engine {
 }
 
 #[test]
-fn commit_checkout_round_trip_preserves_content() {
+fn snapshot_checkout_round_trip_preserves_content() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs/root unavailable");
         return;
@@ -54,27 +54,27 @@ fn commit_checkout_round_trip_preserves_content() {
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
-    // Bootstrap: empty worktree, write a file, commit it.
+    // Bootstrap: empty worktree, write a file, snapshot it.
     e.checkout("v1", None, "ws1").unwrap();
     let f = e.pool.worktree("v1", "ws1").join("hello.txt");
     std::fs::write(&f, b"hi from ws1").unwrap();
-    e.commit_worktree("v1", "ws1", "v1-commit1").unwrap();
+    e.snapshot_worktree("v1", "ws1", "v1-snap1").unwrap();
 
-    // Checkout that commit into a second worktree and read the content back.
-    e.checkout("v1", Some("v1-commit1"), "ws2").unwrap();
+    // Checkout that snapshot into a second worktree and read the content back.
+    e.checkout("v1", Some("v1-snap1"), "ws2").unwrap();
     let got = std::fs::read(e.pool.worktree("v1", "ws2").join("hello.txt")).unwrap();
     assert_eq!(got, b"hi from ws1");
 
-    // The commit itself must be read-only: `snapshot -r` is what makes the retention/GC story
+    // The snapshot itself must be read-only: `snapshot -r` is what makes the retention/GC story
     // safe (shared, never mutated), so writing into snap/{name} directly must fail.
-    let write_into_commit = std::fs::write(e.pool.snap("v1", "v1-commit1").join("new.txt"), b"nope");
-    assert!(write_into_commit.is_err(), "a commit subvolume must be read-only");
+    let write_into_snapshot = std::fs::write(e.pool.snap("v1", "v1-snap1").join("new.txt"), b"nope");
+    assert!(write_into_snapshot.is_err(), "a snapshot subvolume must be read-only");
 }
 
-/// F1: commit_worktree must converge, not fail, when the snapshot already exists — the shape of
+/// F1: snapshot_worktree must converge, not fail, when the snapshot already exists — the shape of
 /// a retry after a crash between the snapshot landing and the CR's status update.
 #[test]
-fn commit_worktree_is_idempotent_on_an_existing_snapshot() {
+fn snapshot_worktree_is_idempotent_on_an_existing_snapshot() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs/root unavailable");
         return;
@@ -84,20 +84,20 @@ fn commit_worktree_is_idempotent_on_an_existing_snapshot() {
 
     e.checkout("v1", None, "ws1").unwrap();
     std::fs::write(e.pool.worktree("v1", "ws1").join("f.txt"), b"payload").unwrap();
-    e.commit_worktree("v1", "ws1", "v1-commit1").unwrap();
+    e.snapshot_worktree("v1", "ws1", "v1-snap1").unwrap();
 
-    // Same name again: must return Ok, not "File exists" — and the commit's content must be
+    // Same name again: must return Ok, not "File exists" — and the snapshot's content must be
     // exactly what the first call cut, not touched by the retry.
-    e.commit_worktree("v1", "ws1", "v1-commit1").unwrap();
-    e.checkout("v1", Some("v1-commit1"), "ws2").unwrap();
+    e.snapshot_worktree("v1", "ws1", "v1-snap1").unwrap();
+    e.checkout("v1", Some("v1-snap1"), "ws2").unwrap();
     let got = std::fs::read(e.pool.worktree("v1", "ws2").join("f.txt")).unwrap();
     assert_eq!(got, b"payload");
 }
 
-/// F3: drop_commit of a commit that never existed (or was already dropped) is a no-op — retry
-/// convergence, same shape as `commit_worktree`'s.
+/// F3: drop_snapshot of a snapshot that never existed (or was already dropped) is a no-op — retry
+/// convergence, same shape as `snapshot_worktree`'s.
 #[test]
-fn drop_commit_of_an_absent_commit_is_a_no_op() {
+fn drop_snapshot_of_an_absent_snapshot_is_a_no_op() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs/root unavailable");
         return;
@@ -105,12 +105,12 @@ fn drop_commit_of_an_absent_commit_is_a_no_op() {
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
-    e.drop_commit("v1", "no-such-commit").unwrap();
+    e.drop_snapshot("v1", "no-such-snapshot").unwrap();
 }
 
-/// Task 7a F5: `drop_worktree` is what reclaims a shared-volume clone's worktree on delete (no
+/// `drop_worktree` is what reclaims a shared-volume clone's worktree on delete (no
 /// ownerReference reaches `{pool}/vol/{volume}/live/{ws}`). Same retry-convergence shape as
-/// `drop_commit`: gone once, and a second call against the same (now-absent) path is still Ok.
+/// `drop_snapshot`: gone once, and a second call against the same (now-absent) path is still Ok.
 #[test]
 fn drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry() {
     if !have_btrfs() {
@@ -123,21 +123,21 @@ fn drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry() {
     e.checkout("v1", None, "ws1").unwrap();
     assert!(e.pool.worktree("v1", "ws1").exists());
 
-    // Durable snapshots rule 1: the commits under `snap/` must outlive the parent whose delete
+    // Durable snapshots rule 1: the snapshots under `snap/` must outlive the parent whose delete
     // path calls this — and an owned workspace's worktree is named after the volume itself, so
-    // "drop the worktree" and "drop the commits" are one character apart in the pool.
-    e.commit_worktree("v1", "ws1", "c1").unwrap();
+    // "drop the worktree" and "drop the snapshots" are one character apart in the pool.
+    e.snapshot_worktree("v1", "ws1", "c1").unwrap();
 
     e.drop_worktree("v1", "ws1").unwrap();
     assert!(!e.pool.worktree("v1", "ws1").exists(), "the worktree subvolume must be gone");
-    assert!(e.pool.snap("v1", "c1").exists(), "the commit must survive its worktree");
+    assert!(e.pool.snap("v1", "c1").exists(), "the snapshot must survive its worktree");
 
     // Retried (a reconcile after this already landed, or a worktree never checked out at all).
     e.drop_worktree("v1", "ws1").unwrap();
 }
 
 #[test]
-fn checkout_of_missing_commit_errors_without_creating_anything() {
+fn checkout_of_missing_snapshot_errors_without_creating_anything() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs/root unavailable");
         return;
@@ -145,8 +145,8 @@ fn checkout_of_missing_commit_errors_without_creating_anything() {
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
-    let err = e.checkout("v1", Some("no-such-commit"), "ws1").unwrap_err();
-    assert!(err.0.contains("commit record not found"), "unexpected error: {}", err.0);
+    let err = e.checkout("v1", Some("no-such-snapshot"), "ws1").unwrap_err();
+    assert!(err.0.contains("snapshot record not found"), "unexpected error: {}", err.0);
     assert!(!e.pool.worktree("v1", "ws1").exists(), "a failed checkout must leave no worktree");
 }
 
@@ -165,11 +165,11 @@ fn bootstrap_checkout_makes_an_empty_worktree() {
     assert_eq!(std::fs::read_dir(&wt).unwrap().count(), 0, "a bootstrap worktree starts empty");
 }
 
-/// The CoW independence the commit model rests on: dropping a commit that a checkout was cut
+/// The CoW independence the snapshot model rests on: dropping a snapshot that a checkout was cut
 /// FROM must leave that checkout fully readable, because a checkout is its own snapshot the
 /// instant `btrfs subvolume snapshot` returns.
 #[test]
-fn drop_commit_leaves_a_checkout_from_it_fully_readable() {
+fn drop_snapshot_leaves_a_checkout_from_it_fully_readable() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs/root unavailable");
         return;
@@ -179,17 +179,17 @@ fn drop_commit_leaves_a_checkout_from_it_fully_readable() {
 
     e.checkout("v1", None, "ws1").unwrap();
     std::fs::write(e.pool.worktree("v1", "ws1").join("f.txt"), b"payload").unwrap();
-    e.commit_worktree("v1", "ws1", "v1-commit1").unwrap();
-    e.checkout("v1", Some("v1-commit1"), "ws2").unwrap();
+    e.snapshot_worktree("v1", "ws1", "v1-snap1").unwrap();
+    e.checkout("v1", Some("v1-snap1"), "ws2").unwrap();
 
-    e.drop_commit("v1", "v1-commit1").unwrap();
+    e.drop_snapshot("v1", "v1-snap1").unwrap();
 
     let got = std::fs::read(e.pool.worktree("v1", "ws2").join("f.txt")).unwrap();
-    assert_eq!(got, b"payload", "checkout must survive its source commit being dropped");
+    assert_eq!(got, b"payload", "checkout must survive its source snapshot being dropped");
 }
 
 #[test]
-fn local_commits_lists_committed_snapshots() {
+fn local_snapshots_lists_cut_snapshots() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs/root unavailable");
         return;
@@ -197,13 +197,13 @@ fn local_commits_lists_committed_snapshots() {
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
-    assert_eq!(e.local_commits("v1").unwrap(), Vec::<String>::new(), "no snap dir yet");
+    assert_eq!(e.local_snapshots("v1").unwrap(), Vec::<String>::new(), "no snap dir yet");
 
     e.checkout("v1", None, "ws1").unwrap();
-    e.commit_worktree("v1", "ws1", "v1-a").unwrap();
-    e.commit_worktree("v1", "ws1", "v1-b").unwrap();
+    e.snapshot_worktree("v1", "ws1", "v1-a").unwrap();
+    e.snapshot_worktree("v1", "ws1", "v1-b").unwrap();
 
-    assert_eq!(e.local_commits("v1").unwrap(), vec!["v1-a".to_string(), "v1-b".to_string()]);
+    assert_eq!(e.local_snapshots("v1").unwrap(), vec!["v1-a".to_string(), "v1-b".to_string()]);
 }
 
 #[test]
@@ -220,9 +220,9 @@ fn checkout_refuses_an_existing_worktree_path() {
     assert!(err.0.contains("worktree already exists"), "unexpected error: {}", err.0);
 }
 
-/// The full restore-in-place lifecycle, end to end: checkout a worktree from a commit, cut a
-/// second commit off it, mutate the live worktree past that point, swap it back to the FIRST
-/// commit, and prove (a) the mutation is gone — the swap actually restored old content, not a
+/// The full restore-in-place lifecycle, end to end: checkout a worktree from a snapshot, cut a
+/// second snapshot off it, mutate the live worktree past that point, swap it back to the FIRST
+/// snapshot, and prove (a) the mutation is gone — the swap actually restored old content, not a
 /// no-op — and (b) nothing is left behind: no `-restoring` staging subvolume, no
 /// `-before-restore` backup, only the swapped-in worktree. Also seeds a STALE staging subvolume
 /// from an earlier, crashed attempt first, so the same run exercises `swap_worktree`'s
@@ -238,10 +238,10 @@ fn swap_worktree_restores_old_content_and_leaves_no_staging_or_backup() {
     let volume = "vol-1";
     let ws = "ws-1";
 
-    // Bootstrap: an empty worktree, commit it as `c1`.
+    // Bootstrap: an empty worktree, snapshot it as `c1`.
     e.checkout(volume, None, ws).unwrap();
     std::fs::write(e.pool.worktree(volume, ws).join("marker.txt"), b"c1 content").unwrap();
-    e.commit_worktree(volume, ws, "c1").unwrap();
+    e.snapshot_worktree(volume, ws, "c1").unwrap();
 
     // A crashed earlier restore attempt left a staging subvolume behind — `swap_worktree` must
     // discard it, not trip over it or graft its stale content in.
@@ -268,7 +268,7 @@ fn swap_worktree_restores_old_content_and_leaves_no_staging_or_backup() {
     assert_eq!(entries, vec![std::ffi::OsString::from(ws)], "only the swapped-in worktree remains: {entries:?}");
 }
 
-/// Task 7b: an old-layout volume (`live` itself is the RW subvolume) moves to the commit model's
+/// An old-layout volume (`live` itself is the RW subvolume) moves to the snapshot model's
 /// `live/{volume}` worktree layout, and the content survives the move untouched.
 #[test]
 fn migrate_volume_moves_old_layout_live_into_a_worktree() {
@@ -309,10 +309,10 @@ fn migrate_volume_is_idempotent() {
     assert!(e.migrate_volume(volume).unwrap());
     assert!(!e.migrate_volume(volume).unwrap(), "a second call must be a no-op");
 
-    // A volume that was always commit-model-native (checkout(), never create_subvol()) migrates
+    // A volume that was always snapshot-model-native (checkout(), never create_subvol()) migrates
     // to nothing too — there is no old-layout subvolume to move.
     e.checkout("v2", None, "v2").unwrap();
-    assert!(!e.migrate_volume("v2").unwrap(), "a native commit-model volume has nothing to migrate");
+    assert!(!e.migrate_volume("v2").unwrap(), "a native snapshot-model volume has nothing to migrate");
 }
 
 /// Crash recovery: a partial migration (the first rename landed, the second didn't) is completed
@@ -340,7 +340,7 @@ fn migrate_volume_recovers_from_a_partial_rename() {
     assert_eq!(std::fs::read(wt.join("marker.txt")).unwrap(), b"pre-model content");
 }
 
-/// Task 7a's ruling: `set_quota` picks its arm by what's actually on disk (`is_subvolume`), not
+/// `set_quota` picks its arm by what's actually on disk (`is_subvolume`), not
 /// by a migration flag. An old-layout volume (`live` itself is the RW subvolume) gets the
 /// single-target arm; a migrated volume (`live` is a directory of worktrees) gets the limit
 /// applied to each worktree individually.
@@ -374,7 +374,7 @@ fn set_quota_picks_the_arm_by_the_layout_actually_on_disk() {
 /// two renames left one behind indefinitely.
 #[test]
 fn a_swap_leaves_no_worktree_shaped_leftovers() {
-    use rustic_git_workspaces::engine::commit::{before_restore_name, restoring_name};
+    use rustic_git_workspaces::engine::snapshot::{before_restore_name, restoring_name};
     // Build the two names the swap uses and assert the scanner skips them.
     for n in [restoring_name("ws-1"), before_restore_name("ws-1")] {
         assert!(n.starts_with('.'), "{n} must be skipped by the worktree scanners");

@@ -1,6 +1,6 @@
 //! Engine op tests that touch btrfs directly. Every test opens with `have_btrfs()` and returns
 //! cleanly when it's false (this Mac, any non-root CI runner) — they run for real on the btrfs
-//! review VM. Fixture copied from `engine_commit.rs`'s `LoopbackPool`: integration test files
+//! review VM. Fixture copied from `engine_snapshot.rs`'s `LoopbackPool`: integration test files
 //! cannot share code across `tests/*.rs`.
 
 use rustic_git_workspaces::engine::{Engine, Pool, have_btrfs};

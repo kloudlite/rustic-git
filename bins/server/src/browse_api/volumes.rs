@@ -30,7 +30,7 @@ pub(super) struct VolumeSummary {
     /// The volume id — the workspace/environment id it was pushed from.
     name: String,
     /// Epoch millis of the volume's last push: the mtime of the `index/vol/{owner}/{name}` marker
-    /// `append_commits` touches. `None` for a volume pushed only before the marker existed — the
+    /// `append_snapshots` touches. `None` for a volume pushed only before the marker existed — the
     /// list still names it, and `volumehistory` has the exact times.
     latest_ms: Option<i64>,
 }
@@ -89,7 +89,7 @@ pub(super) async fn volumes(
 /// node holding it may open it. Unlike `volumes` above, this one is allowed to open a database
 /// precisely BECAUSE the ownership middleware has already sent it to the right node.
 ///
-/// Answers the same `CommitRecord` shape `/vol-agent/{owner}/{name}/history` does — same records,
+/// Answers the same `SnapshotRecord` shape `/vol-agent/{owner}/{name}/history` does — same records,
 /// same order, different authentication (a person here, a region's agent there).
 pub(super) async fn volumehistory(
     State(app): State<Arc<App>>,

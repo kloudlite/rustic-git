@@ -39,7 +39,7 @@ pub(crate) use status::{conditions_eq, create_if_absent, delete_ignoring_404, en
 
 /// While an operation runs, and while a stop is waiting for its push to land. Short on purpose:
 /// these are progress checks, not retries.
-/// The commit a `cloneOf` is pinned to, if any — the graft the API recorded at clone/restore time.
+/// The snapshot a `cloneOf` is pinned to, if any — the graft the API recorded at clone/restore time.
 /// Shared because a Workspace and an Environment carry the identical `WorkspaceStorage`, and both
 /// reconcilers have to resolve it into `status.head` before they check anything out (an
 /// environment that never did parked forever in `HeadUnknown`).

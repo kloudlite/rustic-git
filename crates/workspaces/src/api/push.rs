@@ -136,7 +136,7 @@ pub(crate) async fn clone_base(
             owner: owner.to_string(),
             worktree: worktree.to_string(),
             // The previous sync point, so the puller sends a delta. Empty on a source that has
-            // never been snapshotted at all, exactly as a root commit is.
+            // never been snapshotted at all, exactly as a root snapshot is.
             parent: newest.map(|s| s.name_any()).unwrap_or_default(),
             message: Some("cloning".to_string()),
             transient: true,
@@ -146,7 +146,7 @@ pub(crate) async fn clone_base(
     // `status` on CREATE is stored verbatim, which is how this is born `Working` and reaches the
     // owning node's snapshot reconciler rather than sitting at the schema's `Pending` default.
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
-    snap.metadata.labels = Some(crd::commit_labels(owner, volume));
+    snap.metadata.labels = Some(crd::snapshot_labels(owner, volume));
     // Owned by the source parent, exactly as the sync beat's cuts are: deleting the source is the
     // whole delete, and a cut nothing points at would otherwise outlive it as a leaked subvolume.
     snap.metadata.owner_references = parent_ref.map(|r| vec![r]);
@@ -208,7 +208,7 @@ pub(crate) async fn push_env(
     create_snapshot(kube(&s)?, volume, &e.spec.owner, &id, head, msg, state).await
 }
 
-/// A `Snapshot` CR, created `Working` so the agent's `reconcile_commit` can act on the very first
+/// A `Snapshot` CR, created `Working` so the agent's `reconcile_snapshot` can act on the very first
 /// pass — CR-first (module doc).
 async fn create_snapshot(
     c: &kube::Client,
@@ -220,7 +220,7 @@ async fn create_snapshot(
     state: crd::SnapshotState,
 ) -> Result<Response, Response> {
     // F1: two pushes of the same worktree before the first is cut both read the same `head` and
-    // both claim it as `parent` — the loser becomes a Ready commit no worktree's `head` ever
+    // both claim it as `parent` — the loser becomes a Ready snapshot no worktree's `head` ever
     // reaches, and `worktree_heads`/retention only walks the WINNER's chain, so the loser is never
     // revisited: an unbounded CR+disk leak, with a `parent` that misdescribes what it holds. A
     // worktree may have at most one `Working` cut in flight at a time — refuse the second here,
@@ -245,11 +245,11 @@ async fn create_snapshot(
             state: Some(state),
         },
     );
-    snap.metadata.labels = Some(crd::commit_labels(owner, volume));
+    snap.metadata.labels = Some(crd::snapshot_labels(owner, volume));
     // `status` on CREATE is stored verbatim (the subresource split only governs UPDATE/PATCH), so
     // this is how the object is born `Working` instead of the schema's `Pending` default —
-    // `reconcile_commit` only ever acts on `Working`.
-    // Owned by the Volume so the commit record goes with it: a commit CR with no owner outlived
+    // `reconcile_snapshot` only ever acts on `Working`.
+    // Owned by the Volume so the snapshot record goes with it: a Snapshot CR with no owner outlived
     // its deleted workspace once, and its snapshot subvolume sat on a node with nothing left to
     // reap it. The agent's own cuts (sync points, stops) are owned the same way, via the parent.
     let vol = match Api::<crd::Volume>::all(c.clone()).get(volume).await {

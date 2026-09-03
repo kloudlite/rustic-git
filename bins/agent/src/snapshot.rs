@@ -1,5 +1,5 @@
-//! `Snapshot` reconciler: cuts the commit, advances the worktree's head, and retains. The OLD
-//! `SnapshotRequest` kind and its push-to-the-registry reconciler are gone (Task 8) — a commit is
+//! `Snapshot` reconciler: cuts the snapshot, advances the worktree's head, and retains. The OLD
+//! `SnapshotRequest` kind and its push-to-the-registry reconciler are gone (Task 8) — a snapshot is
 //! the CR now, not a request the CR asked to be fulfilled, so the two-object split (and the
 //! `apply`/`cleanup` finalizer dance it needed) doesn't exist any more either.
 
@@ -11,7 +11,7 @@ use rustic_git_workspaces::crd::{self, VolumeSource};
 use std::sync::Arc;
 
 // -------------------------------------------------------------------------------------------
-// The NEW `Snapshot` kind: cuts the commit, advances the worktree's head, and retains.
+// The NEW `Snapshot` kind: cuts the snapshot, advances the worktree's head, and retains.
 //
 // No finalizer — a `Snapshot`'s bytes are content-addressed btrfs, and the CR is only ever
 // deleted by retention (below) or a client, both of which mean "this record is done being
@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// exists and still points at `volume` — a stale or foreign `spec.worktree` cuts nothing rather
 /// than snapshotting the wrong disk.
 ///
-/// A home lives on shared NFS now (Task 5: the home push/commit beats are gone), so a Snapshot
+/// A home lives on shared NFS now (Task 5: the home push/snapshot beats are gone), so a Snapshot
 /// naming a home volume no longer resolves to anything here — it falls through to the
 /// Workspace/Environment lookups below, both of which miss, and the caller requeues.
 async fn worktree_node(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<(&'static str, String)>, ReconcileErr> {
@@ -49,12 +49,12 @@ async fn worktree_node(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<O
 }
 
 /// The reconciler for the `Snapshot` kind.
-pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
+pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     // `Ready` is immutable (module doc on `SnapshotSpec`), and anything but `Working` has either
     // already been cut or is a transient shape nothing here produces — no-op either way.
-    // A commit CR with NO status yet is one that has just been created and never cut: `status` is
+    // A snapshot CR with NO status yet is one that has just been created and never cut: `status` is
     // a SUBRESOURCE, so the status block a creator puts in the object literal is dropped by the
-    // API server on create, and every commit is therefore born status-less. Defaulting that to
+    // API server on create, and every snapshot is therefore born status-less. Defaulting that to
     // anything but `Working` makes the controller `await_change()` a CR nothing will ever touch
     // again — every push, every migration baseline and every home beat hanging forever, which is
     // exactly what shipped. Missing status means "not cut yet", which is `Working`.
@@ -64,7 +64,7 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     }
     let Some((kind, node)) = worktree_node(&ctx, &s.spec.volume, &s.spec.worktree).await? else {
         // F1: NOT `await_change()`. Every node runs this same reconcile, so "not mine" is usually
-        // right — but the commits controller watches ONLY Snapshots, so if this is a push racing
+        // right — but the snapshots controller watches ONLY Snapshots, so if this is a push racing
         // `volumeRef` visibility (or a pod mid-move), nothing else will ever wake this object, and
         // it sits `Working` forever with no condition: a silently hung user push. Requeue instead.
         return Ok(Action::requeue(TICK));
@@ -76,17 +76,17 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     let name = s.name_any();
     let (engine, volume, worktree) = (ctx.engine.clone(), s.spec.volume.clone(), s.spec.worktree.clone());
     let cut_name = name.clone();
-    let result = tokio::task::spawn_blocking(move || engine.commit_worktree(&volume, &worktree, &cut_name))
+    let result = tokio::task::spawn_blocking(move || engine.snapshot_worktree(&volume, &worktree, &cut_name))
         .await
         .map_err(|e| ReconcileErr(e.to_string()))?;
     if let Err(e) = result {
         // Keep-biased: a failed cut leaves the CR `Working` and no CR/disk mismatch — the next
-        // pass calls `commit_worktree` again, which converges on the same destination path.
-        tracing::warn!(snapshot = %name, error = %e.0, "commit: cutting the snapshot failed; will retry");
+        // pass calls `snapshot_worktree` again, which converges on the same destination path.
+        tracing::warn!(snapshot = %name, error = %e.0, "snapshot: cutting the snapshot failed; will retry");
         return Ok(Action::requeue(TICK));
     }
     // ponytail: no `sizeBytes` — a `du -s` over a btrfs subvolume walks every inode, which is
-    // exactly the write-amplifying scan the sync-before-snapshot comment in `commit.rs` warns
+    // exactly the write-amplifying scan the sync-before-snapshot comment in `snapshot.rs` warns
     // about paying for on the hot path. Add it as a background sweep (or read the qgroup, which
     // this pool already maintains for quota) if the UI ever needs it.
     let api = Api::<crd::Snapshot>::all(ctx.client.clone());
@@ -117,7 +117,7 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
     }
 
     // A transient (sync point) never advances the worktree's head — it replicates a live
-    // worktree continuously without ever becoming a commit the user sees or clones from.
+    // worktree continuously without ever becoming a snapshot the user sees or clones from.
     if !s.spec.transient {
         advance_head(&ctx, kind, &s.spec.worktree, &name).await?;
     }
@@ -157,17 +157,17 @@ async fn record_post_cut_generation(ctx: &Arc<Ctx>, api: &Api<crd::Snapshot>, na
     let gen = match tokio::task::spawn_blocking(move || engine.generation(&vol, &wt)).await {
         Ok(Ok(g)) => g,
         Ok(Err(e)) => {
-            tracing::warn!(snapshot = %name, error = %e.0, "commit: re-reading the post-cut generation");
+            tracing::warn!(snapshot = %name, error = %e.0, "snapshot: re-reading the post-cut generation");
             return;
         }
         Err(e) => {
-            tracing::warn!(snapshot = %name, error = %e, "commit: post-cut generation task panicked");
+            tracing::warn!(snapshot = %name, error = %e, "snapshot: post-cut generation task panicked");
             return;
         }
     };
     let body = serde_json::json!({"metadata": {"annotations": {crate::sync::SYNCED_GENERATION: gen.to_string()}}});
     if let Err(e) = api.patch(name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&body)).await {
-        tracing::warn!(snapshot = %name, error = %e, "commit: recording the post-cut generation");
+        tracing::warn!(snapshot = %name, error = %e, "snapshot: recording the post-cut generation");
     }
 }
 
@@ -179,14 +179,14 @@ async fn record_post_cut_generation(ctx: &Arc<Ctx>, api: &Api<crd::Snapshot>, na
 /// by the stop path carries no annotation at all — read as generation 0, so it loses to any
 /// annotated one but still wins over nothing.
 ///
-/// Candidates are intersected with what this node actually HOLDS (`local_commits`, a plain listing
+/// Candidates are intersected with what this node actually HOLDS (`local_snapshots`, a plain listing
 /// of `snap/`). A replica one pull cycle behind sees a `Ready` transient whose subvolume has not
 /// landed here, and checking that out fails `NO_SUCH_RECORD` — a PERMANENT error, where falling
 /// back to `head` would have started the worktree perfectly well. Not local is simply not a
 /// candidate, so the fallback chain in the caller does the rest.
 pub(crate) async fn latest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<String>, ReconcileErr> {
     let local: std::collections::HashSet<String> =
-        ctx.engine.local_commits(volume).map_err(|e| ReconcileErr(e.0))?.into_iter().collect();
+        ctx.engine.local_snapshots(volume).map_err(|e| ReconcileErr(e.0))?.into_iter().collect();
     let list = Api::<crd::Snapshot>::all(ctx.client.clone())
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
         .await?;
@@ -304,7 +304,7 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
 }
 
 #[cfg(test)]
-mod commit_tests {
+mod snapshot_tests {
     use super::*;
 
     /// A person-initiated cut always wakes; a sync cut wakes at most once per window.
@@ -401,9 +401,9 @@ mod commit_tests {
 
     /// Cutting on the node that runs the worktree: the CR goes Ready, and the workspace's
     /// `status.head` advances WITHOUT losing `podRef` — the F1 preserve pattern this write reuses.
-    /// `commit_worktree` never shells to real `btrfs`: the destination `snap/{name}` dir already
+    /// `snapshot_worktree` never shells to real `btrfs`: the destination `snap/{name}` dir already
     /// exists, so its own convergence check (`dst.exists()`) short-circuits before any command
-    /// runs — the same trick `commit_model_checkout_converges_on_an_existing_worktree` uses.
+    /// runs — the same trick `snapshot_model_checkout_converges_on_an_existing_worktree` uses.
     #[tokio::test]
     async fn cut_on_my_node_sets_ready_and_advances_head_preserving_other_status_fields() {
         let tmp = tempfile::tempdir().unwrap();
@@ -430,7 +430,7 @@ mod commit_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
-        let action = reconcile_commit(s, ctx).await.unwrap();
+        let action = reconcile_snapshot(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
 
         let snap_sent = rec.sent("PATCH", SNAP_STATUS);
@@ -453,13 +453,13 @@ mod commit_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
-        let action = reconcile_commit(s, ctx).await.unwrap();
+        let action = reconcile_snapshot(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
         assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "not mine: nothing written");
     }
 
     /// F1: an unresolvable worktree (neither a Workspace nor an Environment answers — a push
-    /// racing `volumeRef` visibility, or a pod mid-move) must NOT `await_change()`. The commits
+    /// racing `volumeRef` visibility, or a pod mid-move) must NOT `await_change()`. The snapshots
     /// controller watches ONLY `Snapshot`s, so nothing else would ever wake this object again —
     /// `await_change` there is a silently hung user push, healed only by an agent restart.
     #[tokio::test]
@@ -469,7 +469,7 @@ mod commit_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
-        let action = reconcile_commit(s, ctx).await.unwrap();
+        let action = reconcile_snapshot(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK), "must requeue, not await a watch that never fires");
         assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "nothing written for an unresolved worktree");
     }
@@ -513,7 +513,7 @@ mod commit_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
-        let action = reconcile_commit(s, ctx).await.unwrap();
+        let action = reconcile_snapshot(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
         let ws_sent = rec.sent("PATCH", WS_STATUS);
         assert_eq!(ws_sent.len(), 1, "a non-home still advances the Workspace's head");
@@ -534,7 +534,7 @@ mod commit_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, crd::Phase::Working);
 
-        let action = reconcile_commit(s, ctx).await.unwrap();
+        let action = reconcile_snapshot(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::requeue(TICK));
         assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "nothing written for an unknown volume");
     }
@@ -579,7 +579,7 @@ mod commit_tests {
     }
 
     /// A transient (sync point) cut must never advance the worktree's head — it replicates a live
-    /// worktree continuously and is never a commit the user checks out or clones from. No
+    /// worktree continuously and is never a snapshot the user checks out or clones from. No
     /// `WS_STATUS` route is registered at all, so a wrongly-issued write 404s and the reconcile
     /// itself would fail; the recorder assertion is the belt.
     #[tokio::test]
@@ -615,7 +615,7 @@ mod commit_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-1-a", "vol-1", "ws-1", "", true, crd::Phase::Working);
 
-        let action = reconcile_commit(s, ctx).await.unwrap();
+        let action = reconcile_snapshot(s, ctx).await.unwrap();
         assert_eq!(action, kube::runtime::controller::Action::await_change());
 
         assert_eq!(rec.sent("PATCH", SNAP_STATUS).len(), 1, "the cut still goes Ready");
@@ -647,7 +647,7 @@ mod commit_tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-1-a", "vol-1", "ws-1", "", true, crd::Phase::Working);
 
-        reconcile_commit(s, ctx).await.unwrap();
+        reconcile_snapshot(s, ctx).await.unwrap();
 
         assert_eq!(rec.sent("PATCH", SNAP_STATUS).len(), 1, "the cut still goes Ready");
         assert!(
@@ -665,9 +665,9 @@ mod commit_tests {
         let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", true, crd::Phase::Ready);
         let new = snapshot("sync-ws-1-b", "vol-1", "ws-1", "sync-ws-1-a", true, crd::Phase::Ready);
         let other = snapshot("sync-ws-2-c", "vol-1", "ws-2", "", true, crd::Phase::Ready);
-        // A commit is not a sync point — the transient arm must spare it too.
-        let commit = snapshot("vol-1-commit", "vol-1", "ws-1", "", false, crd::Phase::Ready);
-        let items: Vec<serde_json::Value> = [&old, &new, &other, &commit]
+        // A snapshot is not a sync point — the transient arm must spare it too.
+        let snapshot = snapshot("vol-1-snapshot", "vol-1", "ws-1", "", false, crd::Phase::Ready);
+        let items: Vec<serde_json::Value> = [&old, &new, &other, &snapshot]
             .into_iter()
             .map(|s| serde_json::to_value(s.as_ref()).unwrap())
             .collect();
@@ -685,7 +685,7 @@ mod commit_tests {
         retain(&ctx, "vol-1", "sync-ws-1-b").await;
 
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "only the same worktree's older transient is deleted, sparing the commit and the other worktree: {deletes:?}");
+        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "only the same worktree's older transient is deleted, sparing the snapshot and the other worktree: {deletes:?}");
     }
 
     /// F6/round 3: an interrupted clone names a sync cut by id and is seeded from it later, so
@@ -764,7 +764,7 @@ mod commit_tests {
     }
 
     /// `latest_transient` orders by the `SYNCED_GENERATION` annotation, never by listing order:
-    /// a commit and a `Working` transient are both ignored, an unannotated transient (the stop
+    /// a snapshot and a `Working` transient are both ignored, an unannotated transient (the stop
     /// path cuts one) reads as generation 0 and loses, and the highest generation wins — but only
     /// among transients whose subvolume is actually ON THIS POOL: `sync-ws-1-newest` has the
     /// highest generation of all and is deliberately absent from `snap/`, standing in for a replica
@@ -785,7 +785,7 @@ mod commit_tests {
             v
         };
         let items = vec![
-            snap("vol-1-commit", "ws-1", false, "ready", None),
+            snap("vol-1-snapshot", "ws-1", false, "ready", None),
             snap("sync-ws-1-none", "ws-1", true, "ready", None),
             snap("sync-ws-1-hi", "ws-1", true, "ready", Some("9")),
             snap("sync-ws-1-lo", "ws-1", true, "ready", Some("4")),
@@ -794,7 +794,7 @@ mod commit_tests {
             snap("sync-ws-1-newest", "ws-1", true, "ready", Some("99")),
         ];
         // Everything the pool holds — note `sync-ws-1-newest` is NOT here.
-        for name in ["vol-1-commit", "sync-ws-1-none", "sync-ws-1-hi", "sync-ws-1-lo", "sync-ws-1-working", "sync-ws-2-other"] {
+        for name in ["vol-1-snapshot", "sync-ws-1-none", "sync-ws-1-hi", "sync-ws-1-lo", "sync-ws-1-working", "sync-ws-2-other"] {
             std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap").join(name)).unwrap();
         }
         let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) }];
@@ -804,11 +804,11 @@ mod commit_tests {
         assert_eq!(latest_transient(&ctx, "vol-1", "ws-3").await.unwrap(), None, "a worktree with no sync point resolves to nothing");
     }
 
-    /// A commit CR is created WITHOUT status — `status` is a SUBRESOURCE, so the block a creator
+    /// A snapshot CR is created WITHOUT status — `status` is a SUBRESOURCE, so the block a creator
     /// puts in the object literal is dropped by the API server. The reconcile must read that as
     /// `Working` and cut it; any other default stalls every push and migration baseline forever.
     #[tokio::test]
-    async fn a_commit_with_no_status_at_all_is_still_cut() {
+    async fn a_snapshot_with_no_status_at_all_is_still_cut() {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![
             Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-a", "vol-1", None) },
@@ -827,7 +827,7 @@ mod commit_tests {
         // The shape the API server actually stores on create: no status at all.
         let mut s = (*snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working)).clone();
         s.status = None;
-        let action = reconcile_commit(std::sync::Arc::new(s), ctx).await.unwrap();
+        let action = reconcile_snapshot(std::sync::Arc::new(s), ctx).await.unwrap();
         // The cut itself needs btrfs, which this box has not got — it fails and takes the
         // keep-biased retry. That is fine: what this pins is that the reconcile ENGAGED at all.
         // Before the fix a status-less CR returned `await_change()` immediately and was never
@@ -835,7 +835,7 @@ mod commit_tests {
         assert_ne!(
             action,
             kube::runtime::controller::Action::await_change(),
-            "a status-less commit must not be ignored — it is a commit that has never been cut"
+            "a status-less snapshot must not be ignored — it is a snapshot that has never been cut"
         );
         let _ = &rec;
     }

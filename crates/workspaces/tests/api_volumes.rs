@@ -1,8 +1,8 @@
 //! `/v1/volumes` — the listing and the two deletes, against a mocked cluster.
 //!
 //! Everything here reads and writes CRDs: a push is a `Snapshot` CR and nothing else, so a listing
-//! that asked the registry's volume index would have gone blind on everything pushed since the
-//! commit model landed. The cluster is also what says whether a parent still exists — a display
+//! that asked the registry's volume index would have gone blind on everything pushed since
+//! Snapshots became the only mechanism. The cluster is also what says whether a parent still exists — a display
 //! detail for the listing, and a refusal for the deletes.
 
 use rustic_git_core::jwt::Jwt;

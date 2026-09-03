@@ -182,7 +182,7 @@ pub(crate) async fn restore_env(
     if let Some(r) = &body.region {
         check_region(&s, r).await?;
     }
-    // Restore-to-new is a clone at a named commit under the commit model (Task 8) — see
+    // Restore-to-new is a clone at a named snapshot under the snapshot model — see
     // `restore_ws`'s matching comment. `find_snapshot` is the ownership
     // check: CR exists, Ready, and the caller may read `spec.owner`.
     let snap = find_snapshot(&s, &caller_id, None, &body.snapshot_id).await?;
@@ -244,7 +244,7 @@ pub(crate) async fn restore_env(
         crd::EnvironmentSpec {
             owner,
             name: body.name,
-            // No per-snapshot region under the commit model (see `restore_ws`'s matching comment).
+            // No per-snapshot region under the snapshot model (see `restore_ws`'s matching comment).
             region,
             services,
             storage: Some(crd::WorkspaceStorage {
@@ -440,7 +440,7 @@ pub(crate) async fn clone_env(
     //
     // ponytail: the ceiling is that an environment clone is LOCAL-ONLY. The upgrade is the
     // workspace's shared-worktree path (a `clone-{env}-{hex}` cut, `commit: Some(_)`, and the
-    // `CommitPending` guard in this controller that `resolve_volume` would then need).
+    // `SnapshotPending` guard in this controller that `resolve_volume` would then need).
     let e = create_environment(
         c,
         &new_id,

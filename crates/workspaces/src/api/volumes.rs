@@ -3,7 +3,7 @@
 //!
 //! A snapshot is a point in time and outlives the workspace it was taken of, so none of these reads
 //! may hang off a live Workspace/Environment. The records are `Snapshot` CRs in the CLUSTER, not on
-//! the server tier — there is no registry any more under the commit model; the cluster is consulted
+//! the server tier — there is no registry any more under the snapshot model; the cluster is consulted
 //! a second time only to answer "is the parent still around?", which is a display detail, never an
 //! authorization one.
 
@@ -154,7 +154,7 @@ async fn parents_of_volume(s: &ApiState, volume: &str) -> Option<Vec<Parent>> {
     // Placed parents come back by the indexed field. Unplaced ones — created seconds ago, or
     // waiting on a node that is down — have no `volumeRef` at all, and the API server indexes that
     // as the empty string: a small, bounded set whose `spec.storage.source` says what they graft
-    // onto. Both, because Task 5's protection depends on the second.
+    // onto. Both, because an unplaced parent still needs to pin its volume against deletion.
     let placed = ListParams::default().fields(&format!("status.volumeRef={volume}"));
     let unplaced = ListParams::default().fields("status.volumeRef=");
     let mut out = vec![];
@@ -316,7 +316,7 @@ pub(crate) async fn delete_volume(
     let caller_id = caller(&s, &headers).await?;
     // The ownership check IS the snapshot listing: a volume with no `Snapshot` under a label the
     // caller may read is indistinguishable from one that does not exist.
-    commit_model_snapshots(&s, &caller_id, &name).await?;
+    snapshots_for_caller(&s, &caller_id, &name).await?;
     // Deleting the Volume CR cascades to every Snapshot on it, so a volume carrying somebody
     // else's push is not this caller's to collect — the owner-filtered listing above cannot even
     // see those, which is how one team member's delete used to take the team's whole history.
@@ -355,7 +355,7 @@ async fn delete_volume_cr(s: &ApiState, name: &str) -> Result<(), Response> {
 /// running worktree is standing on.
 ///
 /// Deleting the LAST snapshot of a volume nothing owns any more deletes the volume too: that is
-/// what Task 1-3 detached it for, and leaving it behind would leak a subvolume nothing can ever
+/// what a detach leaves it for, and leaving it behind would leak a subvolume nothing can ever
 /// reach again.
 pub(crate) async fn delete_snapshot(
     State(s): State<Arc<ApiState>>,
@@ -364,7 +364,7 @@ pub(crate) async fn delete_snapshot(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     check_path_segment(&snapshot)?;
-    let items = commit_model_snapshots(&s, &caller_id, &name).await?;
+    let items = snapshots_for_caller(&s, &caller_id, &name).await?;
     let target = items.iter().find(|sn| sn.name_any() == snapshot).ok_or_else(not_found)?;
     // `is_snapshot`, not `spec.transient`: a legacy migration baseline is a sync point by shape
     // rather than by flag, and deleting one by hand still removes a replica's send parent.
@@ -384,7 +384,7 @@ pub(crate) async fn delete_snapshot(
         Err(kube::Error::Api(ae)) if ae.code == 404 => {}
         Err(e) => return Err(kube_err(e)),
     }
-    // The same rule `cleanup_parent` detached the Volume under (Task 2d), read from the other end:
+    // The same rule `cleanup_parent` detached the Volume under, read from the other end:
     // it survives its parent only for as long as a snapshot needs it. Both halves are RE-READ
     // here rather than reused from above: a restore or a clone can attach a working copy, and
     // another push can land, in the window between those reads and this delete — deciding on the
@@ -402,22 +402,22 @@ pub(crate) async fn delete_snapshot(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// The commit-model reads for `/history` and `/refs`: `Snapshot` CRs instead of registry
+/// The snapshot-model reads for `/history` and `/refs`: `Snapshot` CRs instead of registry
 /// records. Scoped by `caller_owners` exactly like `volume_owner` — a volume under a label the
 /// caller may not read is a 404, same as the registry path.
-async fn commit_model_snapshots(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
-    let items = commit_model_snapshots_maybe_empty(s, caller_id, name).await?;
+async fn snapshots_for_caller(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
+    let items = snapshots_for_caller_maybe_empty(s, caller_id, name).await?;
     if items.is_empty() {
         return Err(not_found());
     }
     Ok(items)
 }
 
-/// `commit_model_snapshots`, minus the "no rows" 404 — F6: `/refs` on a workspace that has never
-/// pushed has zero `Snapshot` CRs, which is a real, ownable volume with no commits yet, not an
+/// `snapshots_for_caller`, minus the "no rows" 404 — F6: `/refs` on a workspace that has never
+/// pushed has zero `Snapshot` CRs, which is a real, ownable volume with no snapshots yet, not an
 /// unknown one; the registry path answers that with `{"main": null}`, never 404, and this is what
 /// lets `volume_refs` match it.
-async fn commit_model_snapshots_maybe_empty(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
+async fn snapshots_for_caller_maybe_empty(s: &ApiState, caller_id: &str, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
     check_path_segment(name)?;
     let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
     let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
@@ -446,8 +446,8 @@ async fn snapshots_on_volume(s: &ApiState, name: &str) -> Result<Vec<crd::Snapsh
         .items)
 }
 
-/// A single `Ready` commit-model snapshot, scoped by `caller_owners` exactly like
-/// `commit_model_snapshots`. A 404 here is "unknown", "not yours", "not this volume's" (when
+/// A single `Ready` snapshot, scoped by `caller_owners` exactly like
+/// `snapshots_for_caller`. A 404 here is "unknown", "not yours", "not this volume's" (when
 /// `volume` is given), or "not cut yet" alike — the caller only needs to know it cannot restore
 /// onto it, never which of those it was — "no such snapshot" and "not yours" collapse into one
 /// 404, same as everywhere else in this API.
@@ -508,7 +508,7 @@ pub(crate) async fn volume_history(
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    let items = commit_model_snapshots(&s, &caller_id, &name).await?;
+    let items = snapshots_for_caller(&s, &caller_id, &name).await?;
     Ok(Json(snapshot_rows(&items)).into_response())
 }
 
@@ -520,8 +520,8 @@ pub(crate) async fn volume_refs(
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    // F6: never 404 here — a zero-commit volume is `{"main": null}`.
-    let items = commit_model_snapshots_maybe_empty(&s, &caller_id, &name).await?;
+    // F6: never 404 here — a zero-snapshot volume is `{"main": null}`.
+    let items = snapshots_for_caller_maybe_empty(&s, &caller_id, &name).await?;
     // Never a sync point: `main` is what a clone or a restore grafts onto, and retention deletes
     // every sync point but the newest.
     let tip = items.iter().find(|sn| sn.is_snapshot()).map(|sn| sn.name_any());

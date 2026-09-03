@@ -1,4 +1,4 @@
-//! `/v1` push/history/refs served from the commit model — the only model there is (Task 8).
+//! `/v1` push/history/refs served from the snapshot model — the only model there is.
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
@@ -140,11 +140,11 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     assert!(!s.rec.calls().iter().any(|c| c.contains("snapshotrequests")), "no SnapshotRequest under the flag");
 }
 
-/// Same push, phrased as the ownership contract itself: a commit record belongs to the Volume,
+/// Same push, phrased as the ownership contract itself: a snapshot record belongs to the Volume,
 /// not the Workspace that happened to cut it — a re-clone/re-attach onto the same volume must
 /// still see the history, and a deleted workspace must not orphan it.
 #[tokio::test]
-async fn a_push_commit_is_owned_by_the_volume_not_the_workspace() {
+async fn a_push_snapshot_is_owned_by_the_volume_not_the_workspace() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
@@ -274,10 +274,10 @@ async fn history_rows_carry_the_frozen_state_or_null() {
     assert!(by_id("ws-1-bbbbbbbb")["state"].is_null());
 }
 
-/// `/refs` names the newest commit as `main` — same "first = tip" convention the registry path
+/// `/refs` names the newest snapshot as `main` — same "first = tip" convention the registry path
 /// keeps, computed here from creation order instead.
 #[tokio::test]
-async fn refs_names_the_newest_commit_as_main() {
+async fn refs_names_the_newest_snapshot_as_main() {
     let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
     root["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
     let mut tip = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "ready");
@@ -321,7 +321,7 @@ async fn history_of_an_unknown_volume_is_not_found() {
 /// Restore-in-place under the flag names a `Snapshot` CR of THIS environment's own volume — an
 /// unknown id is a 404, same as every other "no such snapshot" case.
 #[tokio::test]
-async fn restore_in_place_of_an_unknown_commit_is_not_found() {
+async fn restore_in_place_of_an_unknown_snapshot_is_not_found() {
     let env = placed_env("env-1", "karthik");
     let routes = vec![
         get(format!("{API}/environments/env-1"), env),
@@ -340,10 +340,10 @@ async fn restore_in_place_of_an_unknown_commit_is_not_found() {
     assert!(!s.rec.calls().iter().any(|c| c.contains(&format!("PATCH {API}/environments/env-1"))), "no wish written on a bad id");
 }
 
-/// A commit still `Working` (not yet `Ready`) cannot be restored onto — the swap would have
+/// A snapshot still `Working` (not yet `Ready`) cannot be restored onto — the swap would have
 /// nothing finished to check out.
 #[tokio::test]
-async fn restore_in_place_of_a_not_ready_commit_is_not_found() {
+async fn restore_in_place_of_a_not_ready_snapshot_is_not_found() {
     let env = placed_env("env-1", "karthik");
     let snap = snapshot("env-1-aaaaaaaa", "env-1", "karthik", "env-1", "", "working");
     let routes = vec![get(format!("{API}/environments/env-1"), env), get(format!("{API}/snapshots/env-1-aaaaaaaa"), snap)];
@@ -359,11 +359,11 @@ async fn restore_in_place_of_a_not_ready_commit_is_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
-/// A `Ready` commit of a DIFFERENT volume is a foreign commit — restoring onto it here would put
+/// A `Ready` snapshot of a DIFFERENT volume is a foreign snapshot — restoring onto it here would put
 /// another environment's bytes under these services, which is what `clone`/`restore`-into-a-new-
 /// object are for, not an in-place restore.
 #[tokio::test]
-async fn restore_in_place_of_a_foreign_commit_is_not_found() {
+async fn restore_in_place_of_a_foreign_snapshot_is_not_found() {
     let env = placed_env("env-1", "karthik");
     let snap = snapshot("env-2-aaaaaaaa", "env-2", "karthik", "env-2", "", "ready");
     let routes = vec![get(format!("{API}/environments/env-1"), env), get(format!("{API}/snapshots/env-2-aaaaaaaa"), snap)];
@@ -379,10 +379,10 @@ async fn restore_in_place_of_a_foreign_commit_is_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
-/// A `Ready` commit of the environment's own volume writes the wish exactly as the old path did —
+/// A `Ready` snapshot of the environment's own volume writes the wish exactly as the old path did —
 /// the controllers do the checkout-swap, not this handler.
 #[tokio::test]
-async fn restore_in_place_of_a_valid_commit_writes_the_wish() {
+async fn restore_in_place_of_a_valid_snapshot_writes_the_wish() {
     let env = placed_env("env-1", "karthik");
     let snap = snapshot("env-1-aaaaaaaa", "env-1", "karthik", "env-1", "", "ready");
     let routes = vec![
@@ -411,7 +411,7 @@ async fn restore_in_place_of_a_valid_commit_writes_the_wish() {
 }
 
 /// F1: a second push while the first is still `Working` is refused before it can create a second
-/// racing cut — the loser would become a Ready commit no worktree's `head` ever points at, so
+/// racing cut — the loser would become a Ready snapshot no worktree's `head` ever points at, so
 /// retention (which walks only the winner's chain) would never revisit and never delete it.
 #[tokio::test]
 async fn a_racing_push_while_one_is_still_working_is_refused() {
@@ -438,7 +438,7 @@ async fn a_racing_push_while_one_is_still_working_is_refused() {
 /// F2: history stays NEWEST first — the registry path's `records.first()` is always its tip, and
 /// a consumer switched over at cutover must see the same order, not a reversed one.
 #[tokio::test]
-async fn history_stays_newest_first_across_a_three_commit_chain() {
+async fn history_stays_newest_first_across_a_three_snapshot_chain() {
     let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
     root["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
     let mut mid = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "ready");
@@ -486,11 +486,11 @@ async fn history_created_at_is_rfc3339() {
     chrono::DateTime::parse_from_rfc3339(created_at).unwrap_or_else(|e| panic!("{created_at:?} is not RFC3339: {e}"));
 }
 
-/// F6: `/refs` on a volume with zero commits (never pushed) is `{"main": null}`, the same shape
+/// F6: `/refs` on a volume with zero snapshots (never pushed) is `{"main": null}`, the same shape
 /// the registry path answers with — never 404, which would read as "no such volume" instead of
-/// "no commits yet".
+/// "no snapshots yet".
 #[tokio::test]
-async fn refs_of_a_zero_commit_volume_is_null_not_not_found() {
+async fn refs_of_a_zero_snapshot_volume_is_null_not_not_found() {
     let routes = vec![get(
         format!("{API}/snapshots"),
         json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
@@ -609,7 +609,7 @@ async fn a_plain_stopped_workspace_still_starts() {
 }
 
 /// The sync-beat shape a clone grafts onto: a Ready TRANSIENT of the source worktree. `snapshot()`
-/// builds commits, and the ordering rule ignores anything that is not transient.
+/// builds snapshots, and the ordering rule ignores anything that is not transient.
 fn transient(name: &str, volume: &str, owner: &str, worktree: &str) -> Value {
     let mut s = snapshot(name, volume, owner, worktree, "", "ready");
     s["spec"]["transient"] = json!(true);
@@ -650,7 +650,7 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
 
     let cut = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
     assert!(cut["metadata"]["name"].as_str().unwrap().starts_with("clone-ws-1-"), "{cut}");
-    assert_eq!(cut["spec"]["transient"], true, "a clone cut is a sync point, not a commit in anyone's history");
+    assert_eq!(cut["spec"]["transient"], true, "a clone cut is a sync point, not a snapshot in anyone's history");
     assert_eq!(cut["spec"]["parent"], "sync-ws-1-bbbb", "parented on the newest transient so the send is a delta");
     assert_eq!(cut["spec"]["worktree"], "ws-1");
     assert_eq!(cut["metadata"]["ownerReferences"][0]["name"], "ws-1", "owned by the source: deleting it is the whole delete");
@@ -668,7 +668,7 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
 }
 
 /// A source that has never pushed and never synced is still cloneable — the cut this request makes
-/// IS its first snapshot, with an empty parent exactly as a root commit has.
+/// IS its first snapshot, with an empty parent exactly as a root snapshot has.
 #[tokio::test]
 async fn a_never_snapshotted_source_is_cloneable_and_the_cut_is_its_root() {
     let routes = vec![
@@ -692,7 +692,7 @@ async fn a_never_snapshotted_source_is_cloneable_and_the_cut_is_its_root() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 202, "no head is no longer a 400: the cut is the commit");
+    assert_eq!(r.status(), 202, "no head is no longer a 400: the cut is the snapshot");
     let cut = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
     assert_eq!(cut["spec"]["parent"], "");
 }

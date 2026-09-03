@@ -20,9 +20,9 @@ use std::sync::Arc;
 /// What the claim needs to know about the volume behind an unplaced object, gathered once in
 /// `decide` (async) and handed to the pure, testable `may_claim` below.
 struct Placement {
-    /// Any `Snapshot` CR for this volume, Ready or not — "a commit was ever started" is enough to
+    /// Any `Snapshot` CR for this volume, Ready or not — "a snapshot was ever started" is enough to
     /// leave the never-started-dataless guard armed; only a volume with none at all is bootstrap.
-    has_commits: bool,
+    has_snapshots: bool,
     /// THIS node's own replica row, or `None` when it has never pulled the volume.
     my_replica: Option<crd::VolumeReplica>,
     /// The worktree's newest Ready transient, cluster-wide — the name `my_replica` must hold.
@@ -38,10 +38,10 @@ struct Placement {
 /// and it is why a stop is now instant and a cross-node START is what waits.
 ///
 /// `compatibleNodes` is gone: it was a memory of "who held this once", and holding it once is not
-/// holding it now. A volume with no commits at all is still bootstrap, claimable by anyone,
+/// holding it now. A volume with no snapshots at all is still bootstrap, claimable by anyone,
 /// because there are no bytes anywhere for a claim to be near.
 fn may_claim(me: &str, owner: &str, p: &Placement) -> bool {
-    if !p.has_commits {
+    if !p.has_snapshots {
         return true;
     }
     if owner == me {
@@ -62,50 +62,50 @@ async fn placement(
     pinned_cut: Option<&str>,
 ) -> Result<Placement, ReconcileErr> {
     let Some(volume) = volume else {
-        return Ok(Placement { has_commits: false, my_replica: None, newest_transient: None, worktree: worktree.into() });
+        return Ok(Placement { has_snapshots: false, my_replica: None, newest_transient: None, worktree: worktree.into() });
     };
-    let has_commits = has_commits(ctx, volume).await?;
+    let has_snapshots = has_snapshots(ctx, volume).await?;
     let my_replica = Api::<crd::VolumeReplica>::all(ctx.client.clone()).get_opt(&crd::replica_name(volume, &ctx.node)).await?;
     let newest_transient = match pinned_cut {
         Some(cut) => Some(cut.to_string()),
         None => crate::peer::newest_transient(ctx, volume, worktree).await?,
     };
-    Ok(Placement { has_commits, my_replica, newest_transient, worktree: worktree.into() })
+    Ok(Placement { has_snapshots, my_replica, newest_transient, worktree: worktree.into() })
 }
 
 /// Any `Snapshot` CR for `volume`, Ready or not. Shared by the claim's own bootstrap check and by
-/// `apply_workspace`'s materialize guard (F2): both must agree on "this volume has commits", or a
+/// `apply_workspace`'s materialize guard (F2): both must agree on "this volume has snapshots", or a
 /// claim's bootstrap read and the materialize step's guard read could disagree about the same
 /// volume. Errors propagate — never read a listing failure as "bootstrap, nothing here yet".
-pub(crate) async fn has_commits(ctx: &Arc<Ctx>, volume: &str) -> Result<bool, ReconcileErr> {
+pub(crate) async fn has_snapshots(ctx: &Arc<Ctx>, volume: &str) -> Result<bool, ReconcileErr> {
     let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     Ok(!snaps.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await?.items.is_empty())
 }
 
-/// The PHASE of `commit` as a `Snapshot` of `volume`, or `None` when no such snapshot of this
-/// volume exists — the check a clone's grafted commit and a restore's wished commit both need
+/// The PHASE of `snapshot` as a `Snapshot` of `volume`, or `None` when no such snapshot of this
+/// volume exists — the check a clone's grafted snapshot and a restore's wished snapshot both need
 /// before checking out or swapping onto it, so naming a retention-deleted (or foreign-volume)
-/// commit is caught here rather than as a bare btrfs `NO_SUCH_RECORD` with no distinct reason a
-/// person could search for. Errors propagate, same rule as `has_commits`: a listing failure must
-/// never read as "no such commit".
+/// snapshot is caught here rather than as a bare btrfs `NO_SUCH_RECORD` with no distinct reason a
+/// person could search for. Errors propagate, same rule as `has_snapshots`: a listing failure must
+/// never read as "no such snapshot".
 ///
 /// The phase, not a bool: a clone is created microseconds after its own cut, so the reconcile that
 /// follows sees a `Working` snapshot almost every time. Reading that as "not ready" and settling
 /// PERMANENT killed every clone at birth. Absent is forever; `Working` is one tick away.
-pub(crate) async fn commit_phase(ctx: &Arc<Ctx>, volume: &str, commit: &str) -> Result<Option<crd::Phase>, ReconcileErr> {
+pub(crate) async fn snapshot_phase(ctx: &Arc<Ctx>, volume: &str, snapshot: &str) -> Result<Option<crd::Phase>, ReconcileErr> {
     let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     Ok(snaps
-        .get_opt(commit)
+        .get_opt(snapshot)
         .await?
         .filter(|s| s.spec.volume == volume)
         // A Snapshot with no status block yet has never been cut: `status` is a subresource, so
-        // one is born status-less and `reconcile_commit` reads that as `Working` too.
+        // one is born status-less and `reconcile_snapshot` reads that as `Working` too.
         .map(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Working)))
 }
 
-/// Whether a clone may still be waiting for this commit rather than being wrong about it forever.
+/// Whether a clone may still be waiting for this snapshot rather than being wrong about it forever.
 /// `Error` is the one terminal non-Ready phase; everything else in flight converges.
-pub(crate) fn commit_pending(phase: Option<crd::Phase>) -> bool {
+pub(crate) fn snapshot_pending(phase: Option<crd::Phase>) -> bool {
     matches!(phase, Some(crd::Phase::Working | crd::Phase::Pending | crd::Phase::Creating))
 }
 
@@ -209,8 +209,8 @@ struct Parts<'a> {
     node_name: String,
     storage: Option<&'a crd::WorkspaceStorage>,
     /// The child `Volume`'s name, once the reconciler has created and reported it — `None` for
-    /// every object that has never been placed at all, which the commit-model arm reads as "no
-    /// commits, bootstrap".
+    /// every object that has never been placed at all, which the snapshot-model arm reads as "no
+    /// snapshots, bootstrap".
     volume: Option<&'a str>,
     region: &'a str,
     owner: &'a str,
@@ -392,27 +392,27 @@ mod tests {
 
     /// `/v1` creates a clone's cut microseconds before the clone object that names it, so the very
     /// first reconcile of that clone sees a `Working` snapshot. Reading that as "not ready" and
-    /// settling `Permanent/NoSuchCommit` killed every clone at birth — the phase, not a bool, is
+    /// settling `Permanent/NoSuchSnapshot` killed every clone at birth — the phase, not a bool, is
     /// what lets the caller tell "one tick away" from "wrong forever".
     #[tokio::test]
-    async fn commit_phase_reports_working_absent_and_status_less_apart() {
+    async fn snapshot_phase_reports_working_absent_and_status_less_apart() {
         let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("ws-1", Some("working")))]);
-        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Working));
+        assert_eq!(snapshot_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Working));
 
         // Status is a SUBRESOURCE, so a Snapshot is born status-less; that is "not cut yet" too.
         let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("ws-1", None))]);
-        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Working));
+        assert_eq!(snapshot_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Working));
 
         let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("ws-1", Some("ready")))]);
-        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Ready));
+        assert_eq!(snapshot_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), Some(crd::Phase::Ready));
 
         // Retention swept it: absent is forever.
         let ctx = test_ctx(vec![not_found(format!("{SNAPS}/clone-ws-1-cafe"))]);
-        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), None);
+        assert_eq!(snapshot_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), None);
 
         // Ready, but of ANOTHER volume — as absent as a swept one, and just as permanent.
         let ctx = test_ctx(vec![get(format!("{SNAPS}/clone-ws-1-cafe"), snap_json("other-vol", Some("ready")))]);
-        assert_eq!(commit_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), None);
+        assert_eq!(snapshot_phase(&ctx, "ws-1", "clone-ws-1-cafe").await.unwrap(), None);
     }
 
     fn replica(node: &str, phase: &str, branches: &[(&str, &str)]) -> crd::VolumeReplica {
@@ -426,9 +426,9 @@ mod tests {
         .unwrap()
     }
 
-    fn p(has_commits: bool, my_replica: Option<crd::VolumeReplica>, newest: Option<&str>) -> Placement {
+    fn p(has_snapshots: bool, my_replica: Option<crd::VolumeReplica>, newest: Option<&str>) -> Placement {
         Placement {
-            has_commits,
+            has_snapshots,
             my_replica,
             newest_transient: newest.map(str::to_string),
             worktree: "ws-1".into(),
@@ -454,24 +454,24 @@ mod tests {
     }
 
     /// No transient at all: a restore-to-new, or a worktree that never ran. A `Synced` replica
-    /// holds every Ready commit, so plain `Synced` is the right bar — and the spec says so.
+    /// holds every Ready snapshot, so plain `Synced` is the right bar — and the spec says so.
     #[test]
     fn with_no_transient_a_synced_replica_may_claim() {
         assert!(may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Synced", &[])), None)));
         assert!(!may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Syncing", &[])), None)));
     }
 
-    /// Bootstrap is unchanged and is the reason `has_commits` survives: a volume nothing has ever
-    /// committed to is claimable by any node, because there are no bytes anywhere to be near.
+    /// Bootstrap is unchanged and is the reason `has_snapshots` survives: a volume nothing has ever
+    /// snapshotted to is claimable by any node, because there are no bytes anywhere to be near.
     #[test]
-    fn a_volume_with_no_commits_is_claimable_by_anyone() {
+    fn a_volume_with_no_snapshots_is_claimable_by_anyone() {
         assert!(may_claim("node-b", "node-a", &p(false, None, None)));
         assert!(may_claim("node-b", "", &p(false, None, None)), "and by anyone when nothing owns it yet");
     }
 
     /// Carried from Task 5's review: a clone of a source that had never been snapshotted read as
     /// bootstrap and was claimable ANYWHERE, on a node with none of the source's bytes. The clone
-    /// cut `/v1` now takes is a `Snapshot` CR of the source volume, so `has_commits` is true from
+    /// cut `/v1` now takes is a `Snapshot` CR of the source volume, so `has_snapshots` is true from
     /// the moment the clone exists and the up-to-date rule applies to it like everything else.
     #[test]
     fn a_clone_of_a_never_snapshotted_source_places_only_where_its_cut_is_held() {
@@ -487,7 +487,7 @@ mod tests {
     }
 
     /// The WORKING window, before the owner has taken the btrfs snapshot: the cut exists as a CR,
-    /// so `has_commits` is true, but it is not Ready and therefore not `newest_transient` — no
+    /// so `has_snapshots` is true, but it is not Ready and therefore not `newest_transient` — no
     /// node's `branches` can name it. Placement in that window falls back to the source volume's
     /// previous transient, and the OWNER is the only node guaranteed to hold it.
     #[test]
@@ -501,17 +501,17 @@ mod tests {
         assert!(may_claim("node-b", "node-a", &p(true, Some(replica("node-b", "Synced", &[("ws-1", "sync-ws-1-old")])), prev)));
     }
 
-    /// A commit still being cut is one tick away, not wrong forever — the distinction that stopped
-    /// every clone being settled `Permanent/NoSuchCommit` at birth, since `/v1` creates the cut
+    /// A snapshot still being cut is one tick away, not wrong forever — the distinction that stopped
+    /// every clone being settled `Permanent/NoSuchSnapshot` at birth, since `/v1` creates the cut
     /// microseconds before the clone object that names it.
     #[test]
-    fn a_working_commit_is_pending_and_an_absent_one_is_not() {
-        assert!(commit_pending(Some(crd::Phase::Working)));
-        assert!(commit_pending(Some(crd::Phase::Pending)));
-        assert!(commit_pending(Some(crd::Phase::Creating)));
-        assert!(!commit_pending(None), "absent is forever: retention swept it, or it was never of this volume");
-        assert!(!commit_pending(Some(crd::Phase::Error)), "a failed cut is not going to become Ready");
-        assert!(!commit_pending(Some(crd::Phase::Ready)), "Ready is not pending; it is the destination");
+    fn a_working_snapshot_is_pending_and_an_absent_one_is_not() {
+        assert!(snapshot_pending(Some(crd::Phase::Working)));
+        assert!(snapshot_pending(Some(crd::Phase::Pending)));
+        assert!(snapshot_pending(Some(crd::Phase::Creating)));
+        assert!(!snapshot_pending(None), "absent is forever: retention swept it, or it was never of this volume");
+        assert!(!snapshot_pending(Some(crd::Phase::Error)), "a failed cut is not going to become Ready");
+        assert!(!snapshot_pending(Some(crd::Phase::Ready)), "Ready is not pending; it is the destination");
     }
 
     /// A clone places over its SOURCE, whose volume name is also the source worktree's name —

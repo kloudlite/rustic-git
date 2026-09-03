@@ -1,8 +1,8 @@
-//! Engine operations that predate the commit model and still stand: subvolume creation, quota
+//! Engine operations that predate the snapshot model and still stand: subvolume creation, quota
 //! enforcement, generation reads, and the LOCAL-FIRST clone (`clone_local_ids`) that `clone_env`
-//! still uses (environments were deliberately left out of the commit model's shared-worktree
+//! still uses (environments were deliberately left out of the snapshot model's shared-worktree
 //! change — see `crates/workspaces/src/crd.rs`'s `VolumeSource::CloneOf` doc). Push, pull, squash
-//! and the object-store lineage they built on are gone; commit/checkout live in `commit.rs` now.
+//! and the object-store lineage they built on are gone; snapshot/checkout live in `snapshot.rs` now.
 
 use crate::engine::{Pool, ws_lock};
 
@@ -10,10 +10,10 @@ use crate::engine::{Pool, ws_lock};
 pub struct EngErr(pub String);
 
 /// A restore whose snapshot id has no record behind it. Named because the agent classifies it as a
-/// PERMANENT failure — a missing commit is an answer, not an outage, and retrying it once a minute
-/// forever only fills the log. Still produced by `commit.rs::checkout` for a named commit that
-/// doesn't exist locally.
-pub const NO_SUCH_RECORD: &str = "commit record not found";
+/// PERMANENT failure — a missing snapshot is an answer, not an outage, and retrying it once a
+/// minute forever only fills the log. Still produced by `snapshot.rs::checkout` for a named
+/// snapshot that doesn't exist locally.
+pub const NO_SUCH_RECORD: &str = "snapshot record not found";
 
 impl std::fmt::Display for EngErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,7 +158,8 @@ impl Engine {
     /// enables quotas on the pool. Level-triggered: the next reconcile re-applies.
     /// btrfs qgroups are per-SUBVOLUME, and `live` is a directory of worktree subvolumes
     /// (`Pool::worktree`) once a volume is migrated, not one subvolume — there is no single tree
-    /// to limit any more. RULING (Task 7a, the spec's open quota question): apply the volume's
+    /// to limit any more. RULING (see `docs/superpowers/specs/2026-09-03-durable-snapshots-design.md`):
+    /// apply the volume's
     /// `quota_gb` to EACH worktree subvolume individually, same number per tree. Not billing-exact
     /// for shared extents across worktrees of the same volume (CoW shares don't double-count in a
     /// qgroup's exclusive counter anyway, so this undercounts if anything), but it caps runaway
@@ -220,7 +221,7 @@ impl Engine {
 
     /// Commit the pool's open transaction. `generation` reads the COMMITTED number, and btrfs
     /// commits on its own only every ~30s — so a read without this can miss a write made just
-    /// before it. `commit::commit_worktree` calls this before every snapshot for the same reason.
+    /// before it. `snapshot::snapshot_worktree` calls this before every snapshot for the same reason.
     pub fn sync_pool(&self) -> Result<(), EngErr> {
         run(&["btrfs", "filesystem", "sync", self.pool.root.to_str().unwrap()])
     }
@@ -228,7 +229,7 @@ impl Engine {
     /// The btrfs generation of a worktree subvolume: a counter the filesystem bumps on every
     /// committed transaction that touched it, so "has anything changed since the last sync point"
     /// is one `subvolume show` rather than a walk of the tree. Reads the WORKTREE path
-    /// (`pool.worktree`), not `pool.live(id)` — under the commit model `live` is a directory of
+    /// (`pool.worktree`), not `pool.live(id)` — under the snapshot model `live` is a directory of
     /// per-worktree subvolumes, not a subvolume itself.
     pub fn generation(&self, volume: &str, ws: &str) -> Result<u64, EngErr> {
         self.generation_of(&self.pool.worktree(volume, ws))
@@ -251,9 +252,9 @@ impl Engine {
     }
 
     /// LOCAL-FIRST clone: snapshot `src_id`'s current live subvolume straight into `dst_id`'s —
-    /// no registry, no lineage, works even on a source that was never pushed/committed at all.
+    /// no registry, no lineage, works even on a source that was never pushed/snapshotted at all.
     /// The one caller left is `clone_env` (`api.rs`), which deliberately still copies bytes into a
-    /// fresh child `Volume` rather than sharing a worktree the way a commit-model workspace clone
+    /// fresh child `Volume` rather than sharing a worktree the way a snapshot-model workspace clone
     /// does. `src_id` not materialized on this pool (or not on this node at all, cross-pool) is a
     /// plain error now — the registry fallback that used to fetch it from elsewhere is gone.
     pub async fn clone_local_ids(&self, src_id: &str, dst_id: &str) -> Result<(), EngErr> {
@@ -271,12 +272,12 @@ impl Engine {
         Ok(())
     }
 
-    /// Seed a fresh volume from a LOCAL read-only commit of another one: the materialize step of
+    /// Seed a fresh volume from a LOCAL read-only snapshot of another one: the materialize step of
     /// `VolumeSource::SeededFrom`. Same btrfs snapshot `clone_local_ids` takes, from `snap/{name}`
     /// instead of `live` — the source's node is down, so its `live` is somewhere else entirely and
     /// the only bytes here are the copy this node pulled.
     ///
-    /// `NO_SUCH_RECORD` when the commit is not held here: the claim admits only a node whose
+    /// `NO_SUCH_RECORD` when the snapshot is not held here: the claim admits only a node whose
     /// replica names it, so a missing one means the claim and the disk disagree — permanent (see
     /// `permanent_reason`), never a retry against a path that will not appear.
     pub async fn seed_from_snapshot(&self, src_volume: &str, snapshot: &str, dst_id: &str) -> Result<(), EngErr> {
@@ -356,7 +357,7 @@ mod tests {
     /// claim and the disk disagree — permanent, not a retry. Checked BEFORE any btrfs call, which
     /// is what lets this run off a btrfs box.
     #[test]
-    fn seed_from_snapshot_refuses_a_commit_this_node_does_not_hold() {
+    fn seed_from_snapshot_refuses_a_snapshot_this_node_does_not_hold() {
         let tmp = tempfile::tempdir().unwrap();
         let e = engine(tmp.path());
         let err = futures::executor::block_on(e.seed_from_snapshot("vol-src", "sync-ws-1-aaaa", "ws-new")).unwrap_err();

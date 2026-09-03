@@ -1,16 +1,18 @@
-//! Where a volume's commit history lives: the `vol/{owner}/{name}` registry namespace.
+//! Where a volume's snapshot history lives: the `vol/{owner}/{name}` registry namespace.
 //!
 //! One keyspace over from `rustic_git_registry::store`'s image pattern, and deliberately the same
 //! shape: a volume gets its own SlateDB, opened through the same storage pool as repos and images
 //! (`vol` joins `RESERVED_OWNERS` so no repo or image can collide with it), routed by the same
-//! ownership middleware. Read-only in PRODUCTION — nothing writes a `CommitRecord` any more, the
-//! write side (`vol_agent.rs`) went with Task 8 — but `append_commits` stays because
-//! `tests/browse_http.rs` (root `rustic-git-tests`, exercising `browse_api::volumes` — FROZEN,
-//! keep-until-drained) has no other way to seed a pre-cutover row for the frozen read side to
-//! serve.
+//! ownership middleware. Read-only in PRODUCTION — nothing writes a `SnapshotRecord` any more, the
+//! write side (`vol_agent.rs`) went with the durable-snapshots cutover (see
+//! `docs/superpowers/specs/2026-09-03-durable-snapshots-design.md`) — but `append_snapshots` stays
+//! because `tests/browse_http.rs` (root `rustic-git-tests`, exercising `browse_api::volumes` —
+//! FROZEN, keep-until-drained) has no other way to seed a pre-cutover row for the frozen read side
+//! to serve.
 //!
-//! Keyspace: `commit/{id}` -> a `CommitRecord` (immutable once written — a commit is content-
-//! addressed by its own id, never mutated).
+//! Keyspace: `commit/{id}` (on-disk prefix unchanged — real production rows already use it) -> a
+//! `SnapshotRecord` (immutable once written — a snapshot is content-addressed by its own id, never
+//! mutated).
 
 use rustic_git_core::Result;
 use rustic_git_storage::store::Store;
@@ -18,18 +20,19 @@ use slatedb::object_store::ObjectStoreExt;
 use slatedb::Db;
 use std::sync::Arc;
 
-/// A volume commit: the full lineage from base to here (never another record — deleting any
-/// commit can never break a descendant), the state captured at commit time, and where the layer
-/// blobs it names actually live.
+/// A volume snapshot: the full lineage from base to here (never another record — deleting any
+/// snapshot can never break a descendant), the state captured at snapshot time, and where the
+/// layer blobs it names actually live.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CommitRecord {
+pub struct SnapshotRecord {
     pub id: String,
     /// Free-form: ports, installed packages, whatever the workspace/environment tracks. Absent on
     /// the wire deserializes to `null`, not a missing field error.
     #[serde(default)]
     pub state: serde_json::Value,
     /// Opaque now that the object-store lineage encoding (`LineageEntry`) is gone: nothing writes
-    /// a new `CommitRecord` any more (the write side, `vol_agent.rs`, is deleted with Task 8), so
+    /// a new `SnapshotRecord` any more (the write side, `vol_agent.rs`, is deleted — see
+    /// `docs/superpowers/specs/2026-09-03-durable-snapshots-design.md`), so
     /// this only ever carries an OLD record back out to a browse-API caller verbatim, never
     /// interpreted server-side. `serde_json::Value` round-trips whatever shape is already on disk.
     pub lineage: serde_json::Value,
@@ -52,7 +55,7 @@ pub fn pool_coords(owner: &str, name: &str) -> (&'static str, String) {
     ("vol", format!("{owner}/{name}"))
 }
 
-/// The per-volume listing marker, `index/vol/{owner}/{name}`, touched by `append_commits`. Its
+/// The per-volume listing marker, `index/vol/{owner}/{name}`, touched by `append_snapshots`. Its
 /// mtime is what `GET /api/{owner}/volumes` reports as `latest_ms`.
 pub fn volume_marker(owner: &str, name: &str) -> slatedb::object_store::path::Path {
     slatedb::object_store::path::Path::from(format!("{}{name}", volume_marker_prefix(owner)))
@@ -64,9 +67,10 @@ pub fn volume_marker_prefix(owner: &str) -> String {
     format!("index/vol/{owner}/")
 }
 
-const COMMIT_PREFIX: &str = "commit/";
-fn commit_key(id: &str) -> String {
-    format!("{COMMIT_PREFIX}{id}")
+// on-disk prefix stays "commit/": real production rows already use it, and this is read-only.
+const SNAPSHOT_PREFIX: &str = "commit/";
+fn snapshot_key(id: &str) -> String {
+    format!("{SNAPSHOT_PREFIX}{id}")
 }
 
 #[allow(async_fn_in_trait)]
@@ -74,9 +78,9 @@ fn commit_key(id: &str) -> String {
 /// `registry::store::ImageExt` is one: `Store` lives in the `storage` crate, and the orphan rule
 /// forbids an inherent impl on a foreign type from here.
 ///
-/// Read-only in production: nothing writes a `CommitRecord` any more (the write side,
-/// `vol_agent.rs`, was deleted with Task 8) — `append_commits` only still exists to seed the
-/// frozen `browse_api::volumes` read side in tests, see the module doc.
+/// Read-only in production: nothing writes a `SnapshotRecord` any more (the write side,
+/// `vol_agent.rs`, was deleted — durable-snapshots cutover) — `append_snapshots` only still exists
+/// to seed the frozen `browse_api::volumes` read side in tests, see the module doc.
 pub trait VolExt {
     async fn vol_db(&self, owner: &str, name: &str) -> Result<Arc<Db>>;
     /// Whether this volume's database exists, WITHOUT opening it.
@@ -86,12 +90,12 @@ pub trait VolExt {
     /// object store is a volume the owner-scoped listing shows, forever, with no history behind
     /// it. Every user-facing read guards on this first. Same rule as `image_exists`/`repo_exists`.
     async fn vol_exists(&self, owner: &str, name: &str) -> Result<bool>;
-    /// Appends a batch of commit records. Each `put` is independent (no `WriteBatch`): a partial
-    /// append leaves every already-written record valid on its own — commits never reference each
-    /// other, only their own lineage — so there is nothing for a batch to buy here.
-    async fn append_commits(&self, owner: &str, name: &str, records: &[CommitRecord]) -> Result<()>;
-    /// Every commit record, newest first.
-    async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>>;
+    /// Appends a batch of snapshot records. Each `put` is independent (no `WriteBatch`): a partial
+    /// append leaves every already-written record valid on its own — snapshots never reference
+    /// each other, only their own lineage — so there is nothing for a batch to buy here.
+    async fn append_snapshots(&self, owner: &str, name: &str, records: &[SnapshotRecord]) -> Result<()>;
+    /// Every snapshot record, newest first.
+    async fn history(&self, owner: &str, name: &str) -> Result<Vec<SnapshotRecord>>;
 }
 
 impl VolExt for Store {
@@ -105,11 +109,11 @@ impl VolExt for Store {
         self.pool.exists(o, &n).await
     }
 
-    async fn append_commits(&self, owner: &str, name: &str, records: &[CommitRecord]) -> Result<()> {
+    async fn append_snapshots(&self, owner: &str, name: &str, records: &[SnapshotRecord]) -> Result<()> {
         let db = self.vol_db(owner, name).await?;
         for r in records {
             let bytes = serde_json::to_vec(r).map_err(|e| rustic_git_core::err(e.to_string()))?;
-            db.put(commit_key(&r.id), bytes).await?;
+            db.put(snapshot_key(&r.id), bytes).await?;
         }
         // The listing marker, AFTER the records: `browse_api::volumes` reads its mtime as "last
         // pushed" without opening the database, which it may not do. A view for a listing, never
@@ -118,12 +122,12 @@ impl VolExt for Store {
         Ok(())
     }
 
-    async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>> {
+    async fn history(&self, owner: &str, name: &str) -> Result<Vec<SnapshotRecord>> {
         let db = self.vol_db(owner, name).await?;
-        let mut it = db.scan_prefix(COMMIT_PREFIX, ..).await?;
+        let mut it = db.scan_prefix(SNAPSHOT_PREFIX, ..).await?;
         let mut out = vec![];
         while let Some(kv) = it.next().await? {
-            out.push(serde_json::from_slice::<CommitRecord>(&kv.value).map_err(|e| rustic_git_core::err(e.to_string()))?);
+            out.push(serde_json::from_slice::<SnapshotRecord>(&kv.value).map_err(|e| rustic_git_core::err(e.to_string()))?);
         }
         // `scan_prefix` yields ascending key order, i.e. insertion order by id, not by time — sort
         // by `created_at` and reverse so "newest first" holds even if ids do not sort that way.

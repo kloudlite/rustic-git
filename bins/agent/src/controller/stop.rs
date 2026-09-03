@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// for as long as it is true.
 pub(crate) enum StopPush {
     Landed,
-    // No `Failed`: `commit_worktree`'s cut is keep-biased and never marks a `Snapshot` `Error` —
+    // No `Failed`: `snapshot_worktree`'s cut is keep-biased and never marks a `Snapshot` `Error` —
     // it just retries `Working` forever. A wedged stop-push is a `Waiting` that never lands, not a
     // distinct failure state, and it keeps the pod up rather than tearing down without a cut.
     Waiting,
@@ -75,8 +75,8 @@ where
         // on but itself, and tearing a pod down before it lands is the one thing that loses data.
         Some(_) => Ok(StopPush::Waiting),
         None => {
-            // A sync point, not a commit: a stop is the last moment the worktree's bytes can be
-            // replicated, and a `push` here would put a commit nobody asked for on the history the
+            // A sync point, not a snapshot: a stop is the last moment the worktree's bytes can be
+            // replicated, and a `push` here would put a snapshot nobody asked for on the history the
             // user sees. Its parent is this node's newest sync point so the puller sends a delta.
             let parent_sync = crate::snapshot::latest_transient(ctx, volume, worktree).await?.unwrap_or_default();
             let mut snap = crd::Snapshot::new(
@@ -96,7 +96,7 @@ where
             // the `Waiting` arm. The cascade delete matters too: the CR outlives the teardown as
             // the stopped worktree's sync point, so deleting the parent must take it with it.
             snap.metadata.owner_references = Some(vec![owner_ref_of_kind(parent)?]);
-            snap.metadata.labels = Some(crd::commit_labels(owner, volume));
+            snap.metadata.labels = Some(crd::snapshot_labels(owner, volume));
             // The label both parent controllers select their watch by. A view, like every label
             // here — the ownerReference above is what the mapper actually reads.
             snap.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), parent.name_any());

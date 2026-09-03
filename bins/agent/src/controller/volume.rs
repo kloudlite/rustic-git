@@ -259,7 +259,7 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                     Some(VolumeSource::GitRepo { .. }) => engine.create_subvol(id).map_err(|e| e.to_string())?,
                 }
         }
-        // In place: the wish names a commit of THIS volume's own history — a checkout swapped
+        // In place: the wish names a snapshot of THIS volume's own history — a checkout swapped
         // into the worktree that already carries this volume's own id (the API validated Ready +
         // same-volume before writing it). Never a registry fetch any more (Task 8): the old
         // staging-id fetch/swap path is gone with it.
@@ -637,7 +637,7 @@ where
     }
 
     let s = storage.as_ref().expect("settled above");
-    // Commit model: a `cloneOf` carrying a resolved commit is a second WORKTREE of the source's
+    // Snapshot model: a `cloneOf` carrying a resolved snapshot is a second WORKTREE of the source's
     // OWN volume, not a new subvolume — `ensure_child_volume` (and the btrfs clone it would
     // trigger via `clone_local_ids`) is skipped entirely, and `volumeRef` ends up naming the
     // source's volume directly. `check_source` above already proved the source object exists;
@@ -880,7 +880,7 @@ mod tests {
     }
 
     /// The migration baseline is owned by its PARENT, not its Volume (the reverse of a real push
-    /// commit — see the WHY comment on `migrate_and_seed_baseline`): a Volume that only ever had
+    /// snapshot — see the WHY comment on `migrate_and_seed_baseline`): a Volume that only ever had
     /// its baseline is not worth keeping once the workspace it was cut for is gone, so the
     /// baseline must die with the parent rather than outlive it as an orphan CR. 13 were found
     /// on the cluster that way before this had an owner at all.

@@ -24,7 +24,7 @@ use rustic_git_workspaces::crd;
 use std::sync::Arc;
 
 /// The generation the sync point was cut FROM, on the `Snapshot` itself. An annotation rather than
-/// a spec field because it is this beat's private bookkeeping — nothing else in the commit model
+/// a spec field because it is this beat's private bookkeeping — nothing else in the snapshot model
 /// has any use for a btrfs transaction id.
 ///
 /// The value is the generation read AFTER the cut (`snapshot::record_post_cut_generation`
@@ -79,7 +79,7 @@ fn build_sync_spec(live: &crate::listing::Parent, parent: String) -> crd::Snapsh
         owner: live.owner.clone(),
         worktree: live.name.clone(),
         // The previous sync point, so the puller can send a delta against what a replica
-        // already holds. Empty on the first one, exactly as a root commit is.
+        // already holds. Empty on the first one, exactly as a root snapshot is.
         parent,
         message: None,
         transient: true,
@@ -149,7 +149,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     // Owned by the worktree's object: deleting the workspace is the whole delete, and the sync
     // point has no meaning without it.
     snap.metadata.owner_references = Some(vec![live.owner_ref.clone()]);
-    snap.metadata.labels = Some(crd::commit_labels(&live.owner, &live.volume));
+    snap.metadata.labels = Some(crd::snapshot_labels(&live.owner, &live.volume));
     snap.metadata.annotations.get_or_insert_with(Default::default).insert(SYNCED_GENERATION.to_string(), gen.to_string());
     match api.create(&PostParams::default(), &snap).await {
         Ok(_) => tracing::info!(%name, worktree = %live.name, generation = gen, "sync: cut a sync point"),

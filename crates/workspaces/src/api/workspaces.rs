@@ -759,7 +759,7 @@ pub(crate) async fn storage_quota(c: &kube::Client, storage: &Option<crd::Worksp
 #[derive(serde::Deserialize)]
 pub(crate) struct RestoreBody {
     name: String,
-    // The `snapshot_id` alone is a Snapshot CR name (Task 8) — the old registry-scoped `volume`
+    // The `snapshot_id` alone is a Snapshot CR name — the old registry-scoped `volume`
     // hint that used to turn a multi-volume scan into one read no longer means anything, since
     // `find_snapshot` looks the CR up by name directly.
     snapshot_id: String,
@@ -779,7 +779,7 @@ pub(crate) struct RestoreBody {
     attached_environment: Option<String>,
 }
 
-/// New workspace grafted onto an explicit, possibly-older snapshot — a PUSHED commit, which is
+/// New workspace grafted onto an explicit, possibly-older snapshot — a PUSHED snapshot, which is
 /// what makes this different from `clone` (always a copy of the current state).
 ///
 /// The snapshot is resolved against the SERVER tier's history, not a live workspace: restoring is
@@ -793,11 +793,11 @@ pub(crate) async fn restore_ws(
     let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
     check_ws_name(&body.name)?;
-    // Restore-to-new IS a clone at a named commit (Task 8): under the commit model there is no
+    // Restore-to-new IS a clone at a named snapshot: under the snapshot model there is no
     // registry to fetch from any more, so this resolves the request's `snapshot_id` — a `Snapshot`
     // CR name — straight against the CRD, and the new workspace's source becomes
     // `CloneOf{volume, commit: Some(id)}`, exactly `Engine::clone_local_ids`/`checkout`'s own
-    // shared-worktree path (Task 6b). `find_snapshot` is the owner check:
+    // shared-worktree path. `find_snapshot` is the owner check:
     // CR exists, Ready, and the caller may read `spec.owner` — anything else is a 404, same as a
     // missing snapshot, so a caller learns nothing about volumes that are not theirs.
     let snap = find_snapshot(&s, &owner, None, &body.snapshot_id).await?;
@@ -883,7 +883,7 @@ pub(crate) async fn restore_ws(
             owner: owner.clone(),
             team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,
-            // No per-snapshot region under the commit model (single-pool, replica-based; cross-
+            // No per-snapshot region under the snapshot model (single-pool, replica-based; cross-
             // region restore is out of scope — see the design doc). A live source still knows its
             // own; for a deleted one the detached Volume holding the bytes does.
             region: match src.as_ref() {

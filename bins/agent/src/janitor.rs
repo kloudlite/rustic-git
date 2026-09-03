@@ -4,7 +4,7 @@
 //!
 //! The object-store era's sweeps (`recv/`, `stage/`, `img/`, lineage-driven snapshot retention)
 //! are gone with the subsystem they served (Task 8) — nothing writes those directories any more,
-//! and commit-model retention (which commit subvolumes to keep) is `crd::Snapshot`'s own
+//! and snapshot-model retention (which snapshot subvolumes to keep) is `crd::Snapshot`'s own
 //! reconcile, not this beat.
 
 use crate::nix;
@@ -258,7 +258,7 @@ fn subvolumes_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 /// Full local reclaim for a deleted workspace/environment: every btrfs subvolume under
-/// `{pool}/vol/{id}` (old layout's single `live`, or the commit model's `snap/*` and `live/*`
+/// `{pool}/vol/{id}` (old layout's single `live`, or the snapshot model's `snap/*` and `live/*`
 /// worktrees alike — `subvolumes_under` doesn't care which), then the directory itself. Registry/
 /// blob bytes are never a concern here any more — the object store this used to also clean up
 /// (`stage/`, `img/`) is gone with the subsystem that wrote it. Best-effort throughout (a warning,
@@ -516,10 +516,10 @@ mod janitor_tests {
     }
 
     /// `cleanup_local` must reach a nested worktree subvolume, not just the voldir's own top-level
-    /// `live` — the commit model's `live/{ws}` layout, reproduced here without a full agent: two
+    /// `live` — the snapshot model's `live/{ws}` layout, reproduced here without a full agent: two
     /// nested subvolumes (`snap/c1`, `live/ws1`) under one voldir, both gone afterward.
     #[test]
-    fn cleanup_local_deletes_nested_commit_model_subvolumes() {
+    fn cleanup_local_deletes_nested_worktree_subvolumes() {
         if !have_btrfs() {
             eprintln!("skipping: btrfs unavailable or not root");
             return;

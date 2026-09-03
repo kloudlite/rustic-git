@@ -151,7 +151,7 @@ async fn stop_environment(
     // Stopped at an OLDER generation: the services were torn down after a push that landed,
     // and nothing has run since, so there is nothing new on disk to push. A restore is the
     // common way here (`restore_gate` above bumps the generation), and pushing the freshly
-    // restored subvolume as a new commit is a snapshot nobody asked for. Observe and stop.
+    // restored subvolume as a new snapshot is a snapshot nobody asked for. Observe and stop.
     if prev.phase == crd::Phase::Stopped {
         let st = crd::EnvironmentStatus { observed_generation: Some(gen), volume_ref: Some(id), ..prev };
         write_env_status(e, st, ctx).await?;
@@ -243,14 +243,14 @@ async fn run_environment(
     let id = vol.name_any();
 
     // Same worktree materialization a workspace does before any pod is built, and the same
-    // HeadUnknown guard: an environment claimed onto this node for a volume with commits but no
+    // HeadUnknown guard: an environment claimed onto this node for a volume with snapshots but no
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
     // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
     migrate_and_seed_baseline(ctx, vol, owner_ref.clone(), &e.spec.owner, crd::SnapshotState::of_environment(e)).await?;
     // `apply_workspace`'s re-host arm, same rule: a node that has never run this worktree starts
-    // from the newest sync point rather than the last commit, so a node death costs one
+    // from the newest sync point rather than the last snapshot, so a node death costs one
     // `WS_SYNC_SECS` of edits. Resolved before the guard below — a transient is a Snapshot CR, so
-    // `has_commits` sees it too.
+    // `has_snapshots` sees it too.
     // The worktree is the environment's OWN name on whatever volume it resolved to — `id` for an
     // environment that owns its volume (the same string), the SOURCE's volume for a restored one,
     // which holds a SECOND worktree of it. Never `(id, id)`: that checked a restored environment
@@ -260,20 +260,20 @@ async fn run_environment(
     let wt = e.name_any();
     let have_worktree = ctx.engine.pool.worktree(&id, &wt).exists();
     let synced = if have_worktree { None } else { crate::snapshot::latest_transient(ctx, &id, &wt).await? };
-    // A restore/clone pinned to a commit already knows its head — grafted by `/v1` at restore
-    // time, not guessed here. Without this an environment restored onto a commit parked forever in
-    // `HeadUnknown` below: the volume HAS commits, and nothing else ever wrote this environment's
+    // A restore/clone pinned to a snapshot already knows its head — grafted by `/v1` at restore
+    // time, not guessed here. Without this an environment restored onto a snapshot parked forever in
+    // `HeadUnknown` below: the volume HAS snapshots, and nothing else ever wrote this environment's
     // head. `apply_workspace`'s twin arm, verbatim in shape.
     let clone_commit = super::clone_commit(&e.spec.storage);
     let effective_head = synced.or_else(|| prev.head.clone()).or_else(|| clone_commit.map(str::to_string));
     // `!have_worktree`: `apply_workspace`'s twin — a migrated volume's baseline is a sync point,
     // so it has records and no head, and its worktree is already on disk. See there.
-    if effective_head.is_none() && !have_worktree && crate::claim::has_commits(ctx, &id).await? {
+    if effective_head.is_none() && !have_worktree && crate::claim::has_snapshots(ctx, &id).await? {
         let st = crd::EnvironmentStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,
             conditions: vec![crd::condition(
-                "Ready", false, "HeadUnknown", "volume has commits but this environment has no recorded head yet", gen,
+                "Ready", false, "HeadUnknown", "volume has snapshots but this environment has no recorded head yet", gen,
             )],
             ..prev.clone()
         };
@@ -282,22 +282,22 @@ async fn run_environment(
     }
     // Keyed on `effective_head`, not `prev.head`, for the same reason as the workspace arm: a
     // volume that is going to check out a sync point instead was never going to touch the clone
-    // commit, so a swept one must not kill it.
+    // snapshot, so a swept one must not kill it.
     if let Some(commit) = clone_commit {
         let phase = if effective_head.as_deref() == Some(commit) {
-            crate::claim::commit_phase(ctx, &id, commit).await?
+            crate::claim::snapshot_phase(ctx, &id, commit).await?
         } else {
             Some(crd::Phase::Ready)
         };
         // `/v1` creates the cut microseconds before the object, so the first reconcile almost
         // always finds it still `Working` — one tick away, never Permanent.
-        if crate::claim::commit_pending(phase) {
+        if crate::claim::snapshot_pending(phase) {
             let st = crd::EnvironmentStatus {
                 phase: crd::Phase::Creating,
                 observed_generation: None,
                 conditions: kept_conditions(
                     &prev.conditions,
-                    crd::condition("Ready", false, "CommitPending", &format!("waiting for snapshot {commit} to be cut"), gen),
+                    crd::condition("Ready", false, "SnapshotPending", &format!("waiting for snapshot {commit} to be cut"), gen),
                 ),
                 ..prev.clone()
             };
@@ -307,7 +307,7 @@ async fn run_environment(
         if phase != Some(crd::Phase::Ready) {
             let prev = prev.clone();
             return settle(
-                Outcome::Permanent(format!("clone commit {commit} is not a ready snapshot of volume {id}"), "NoSuchCommit"),
+                Outcome::Permanent(format!("clone snapshot {commit} is not a ready snapshot of volume {id}"), "NoSuchSnapshot"),
                 e,
                 "Environment",
                 gen,
@@ -335,7 +335,7 @@ async fn run_environment(
     .map_err(|e| ReconcileErr(e.to_string()))?;
     match result {
         Ok(()) => {}
-        Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
+        Err(e) if e.0 == rustic_git_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
         Err(e) => return Err(ReconcileErr(e.0)),
     }
     // First graft: nothing else will ever write this head — a restored environment gets
@@ -518,10 +518,10 @@ async fn restore_gate(
         st.and_then(|s| s.restored_to.as_deref()),
         st.and_then(|s| s.restore_requested_at.as_deref()),
     ) {
-        // Commit model: the wish IS a commit, so a freshly granted one INITIALIZES this
+        // Snapshot model: the wish IS a snapshot, so a freshly granted one INITIALIZES this
         // environment's head — once, against the recorded wish, never against `head` itself.
         // Comparing `head` to the wish is what shipped, and it silently undid every push: a push
-        // advances `head` to the new commit, the next pass sees `head != wish` and stamps it back,
+        // advances `head` to the new snapshot, the next pass sees `head != wish` and stamps it back,
         // so an environment that was ever restored could never move past its restore point. The
         // wish stays in the spec forever (a controller does not edit desired state), so "have I
         // applied this one?" has to be a fact this environment records, exactly as the `Volume`

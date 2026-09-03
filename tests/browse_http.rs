@@ -1042,10 +1042,10 @@ async fn browse_json_is_gzipped_when_asked_for() {
 /// snapshot outlives its parent, and this is the index that survives it.
 #[tokio::test(flavor = "multi_thread")]
 async fn volumes_and_history_read_without_any_cluster_object() {
-    use rustic_git_workspaces::registry::{CommitRecord, VolExt};
+    use rustic_git_workspaces::registry::{SnapshotRecord, VolExt};
 
     let e = common::env().await;
-    let rec = |id: &str, msg: &str, at: chrono::DateTime<chrono::Utc>| CommitRecord {
+    let rec = |id: &str, msg: &str, at: chrono::DateTime<chrono::Utc>| SnapshotRecord {
         id: id.to_string(),
         state: serde_json::json!({"kind": "workspace", "name": "api-scratch"}),
         lineage: serde_json::json!([]),
@@ -1055,7 +1055,7 @@ async fn volumes_and_history_read_without_any_cluster_object() {
     };
     let now = chrono::Utc::now();
     e.store
-        .append_commits(
+        .append_snapshots(
             "alice",
             "ws-1",
             &[rec("c1", "first", now - chrono::Duration::hours(1)), rec("c2", "second", now)],
@@ -1097,11 +1097,11 @@ async fn volumes_and_history_read_without_any_cluster_object() {
 /// named (the directory is there), just undated; one whose marker is present is dated by it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_volume_listing_reads_markers_not_database_objects() {
-    use rustic_git_workspaces::registry::{volume_marker, CommitRecord, VolExt};
+    use rustic_git_workspaces::registry::{volume_marker, SnapshotRecord, VolExt};
     use slatedb::object_store::ObjectStoreExt;
 
     let e = common::env().await;
-    let rec = |id: &str| CommitRecord {
+    let rec = |id: &str| SnapshotRecord {
         id: id.to_string(),
         state: serde_json::Value::Null,
         lineage: serde_json::json!([]),
@@ -1109,8 +1109,8 @@ async fn the_volume_listing_reads_markers_not_database_objects() {
         message: None,
         created_at: chrono::Utc::now(),
     };
-    e.store.append_commits("alice", "ws-dated", &[rec("c1")]).await.unwrap();
-    e.store.append_commits("alice", "ws-legacy", &[rec("c2")]).await.unwrap();
+    e.store.append_snapshots("alice", "ws-dated", &[rec("c1")]).await.unwrap();
+    e.store.append_snapshots("alice", "ws-legacy", &[rec("c2")]).await.unwrap();
     // A volume from before markers existed: its records are there, its marker is not.
     e.store.os.delete(&volume_marker("alice", "ws-legacy")).await.unwrap();
 

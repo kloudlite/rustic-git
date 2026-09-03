@@ -201,11 +201,11 @@ const APPLY_RESYNC: Duration = Duration::from_secs(600);
 /// hand comes back on the next apply after `APPLY_RESYNC`, not on its delete event. Any path that
 /// changes a child OUTSIDE `ensure` (a scale, a delete) must `forget_applied` it first.
 /// H4: a Pod's `volumes[].hostPath` is immutable, so once a home (or any volume) migrates to the
-/// commit model's worktree layout mid-flight (H1/H3: the home beat now migrates every ready home
+/// snapshot model's worktree layout mid-flight (H1/H3: the home beat now migrates every ready home
 /// on every pass, whether or not its pod has been recreated yet), re-applying that pod's spec here
 /// with the NEW path 422s against the still-running pod's OLD one — until something deletes the
 /// pod so a fresh Apply can create it with the new hostPath. Not auto-deleted here on purpose: see
-/// `deploy/k3s/README.md`'s commit-model cutover section for the explicit
+/// `deploy/k3s/README.md`'s snapshot-model cutover section for the explicit
 /// `kubectl delete pods -l rustic-git.io/kind=...` step that closes this window operator-side.
 pub(crate) async fn ensure<K>(api: &Api<K>, obj: &K, ctx: &Ctx) -> Result<(), ReconcileErr>
 where

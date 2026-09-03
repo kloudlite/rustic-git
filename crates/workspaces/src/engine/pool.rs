@@ -18,16 +18,16 @@ impl Pool {
     pub fn live(&self, name: &str) -> PathBuf {
         self.voldir(name).join("live")
     }
-    /// `{pool}/vol/{volume}/snap` — commit subvolumes (RO), one per `Snapshot` CR, named by
-    /// commit id. Coexists with `live()`'s single-subvolume layout on a not-yet-migrated volume
-    /// (`commit::migrate_volume`), so this never touches `live()` or its callers.
+    /// `{pool}/vol/{volume}/snap` — snapshot subvolumes (RO), one per `Snapshot` CR, named by
+    /// snapshot id. Coexists with `live()`'s single-subvolume layout on a not-yet-migrated volume
+    /// (`snapshot::migrate_volume`), so this never touches `live()` or its callers.
     pub fn snap_dir(&self, volume: &str) -> PathBuf {
         self.voldir(volume).join("snap")
     }
     pub fn snap(&self, volume: &str, name: &str) -> PathBuf {
         self.snap_dir(volume).join(name)
     }
-    /// `{pool}/vol/{volume}/live/{ws}` — commit model's `live` is a DIRECTORY of worktrees, one
+    /// `{pool}/vol/{volume}/live/{ws}` — snapshot model's `live` is a DIRECTORY of worktrees, one
     /// RW subvolume per workspace checked out against this volume, not the single subvolume
     /// `live()` still names for the old layout.
     pub fn worktree(&self, volume: &str, ws: &str) -> PathBuf {
@@ -69,7 +69,7 @@ fn mountpoint_in(mounts: &str, p: &std::path::Path) -> bool {
 }
 
 #[cfg(test)]
-mod commit_path_tests {
+mod snapshot_path_tests {
     use super::Pool;
 
     #[test]
@@ -99,7 +99,7 @@ mod mount_tests {
     }
 }
 
-/// Serialize btrfs operations against one volume across processes — a checkout racing a commit
+/// Serialize btrfs operations against one volume across processes — a checkout racing a snapshot
 /// cut, or two reconcile passes landing at once, is exactly the shape of race this closes.
 pub fn ws_lock(pool: &Pool, ws: &str) -> Result<std::fs::File, String> {
     let path = pool.root.join("vol").join(format!("{ws}.lock"));

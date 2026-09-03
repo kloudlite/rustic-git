@@ -243,14 +243,14 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "ownerbinding reconcile")
             }
         });
-    // The `Snapshot` kind: no finalizer (see `snapshot::reconcile_commit`'s module doc), so a
+    // The `Snapshot` kind: no finalizer (see `snapshot::reconcile_snapshot`'s module doc), so a
     // plain watch over every one in the cluster is enough.
-    let commits = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), watcher::Config::default())
+    let snapshots = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), watcher::Config::default())
         .shutdown_on_signal()
-        .run(|s, c| timed("commit", async move { snapshot::reconcile_commit(s, c).await }), error_policy, ctx.clone())
+        .run(|s, c| timed("snapshot", async move { snapshot::reconcile_snapshot(s, c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
-                tracing::warn!(error = %e, "commit reconcile")
+                tracing::warn!(error = %e, "snapshot reconcile")
             }
         });
     let claim_env = ctx.roles.iter().any(|r| r == "env").then(|| {
@@ -270,7 +270,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             workspaces,
             environments,
             bindings,
-            commits,
+            snapshots,
             futures::future::OptionFuture::from(claim_ws),
             futures::future::OptionFuture::from(claim_env),
         );
@@ -348,7 +348,7 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
     });
 }
 
-/// The commit model's puller: its own beat, so a slow pull never delays a reconcile — plus the
+/// The snapshot model's puller: its own beat, so a slow pull never delays a reconcile — plus the
 /// wake, so a stop or a clone is replicated in seconds instead of at the next tick. A pass already
 /// running finishes and then runs ONCE more (the pending flag), never concurrently: two receives of
 /// the same volume buy nothing but disk contention.
