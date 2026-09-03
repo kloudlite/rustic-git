@@ -45,6 +45,9 @@ pub struct Parent {
     /// sweep runs on every node, and a second computation of "is it replicated" on a node that is
     /// not the owner is a second truth that can disagree with the one the UI shows.
     pub replicated: bool,
+    /// The parent's definition, as of this listing — stamped onto every cut so a snapshot names
+    /// what it was a snapshot OF without a second read back through the parent.
+    pub state: crd::SnapshotState,
 }
 
 impl Parent {
@@ -122,6 +125,7 @@ async fn parents_matching(ctx: &Arc<Ctx>, mine: &ListParams, on_node: Option<&st
                     pod_ref: st.pod_ref.clone(),
                     owner_ref,
                     replicated: is_replicated(&st.conditions),
+                    state: crd::SnapshotState::of_workspace(w),
                 });
             }
         }
@@ -153,6 +157,7 @@ async fn parents_matching(ctx: &Arc<Ctx>, mine: &ListParams, on_node: Option<&st
                     pod_ref: None,
                     owner_ref,
                     replicated: is_replicated(&st.conditions),
+                    state: crd::SnapshotState::of_environment(e),
                 });
             }
         }
@@ -281,6 +286,13 @@ mod tests {
             pod_ref: pod_ref.map(Into::into),
             owner_ref: OwnerReference::default(),
             replicated: false,
+            state: crd::SnapshotState::Workspace {
+                image: "alpine:3.20".into(),
+                packages: vec![],
+                resources: Default::default(),
+                quota_gb: 5,
+                attached_environment: None,
+            },
         }
     }
 

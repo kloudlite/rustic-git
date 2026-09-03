@@ -121,7 +121,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
             message: None,
             pinned: false,
             transient: true,
-            state: None,
+            state: Some(live.state.clone()),
         },
     );
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });

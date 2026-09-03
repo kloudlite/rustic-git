@@ -1443,6 +1443,13 @@ mod reconcile_tests {
             pod_ref: (kind == "Workspace").then(|| format!("ws-alice/{name}")),
             owner_ref: Default::default(),
             replicated,
+            state: crd::SnapshotState::Workspace {
+                image: "alpine:3.20".into(),
+                packages: vec![],
+                resources: Default::default(),
+                quota_gb: 5,
+                attached_environment: None,
+            },
         }
     }
 

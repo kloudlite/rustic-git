@@ -812,7 +812,17 @@ mod tests {
             }),
         )]);
 
-        assert!(super::super::migrate_and_seed_baseline(&ctx, &vol, "alice").await.unwrap(), "the staging dir is a real migration");
+        let state = crd::SnapshotState::Workspace {
+            image: "alpine:3.20".into(),
+            packages: vec![],
+            resources: Default::default(),
+            quota_gb: 5,
+            attached_environment: None,
+        };
+        assert!(
+            super::super::migrate_and_seed_baseline(&ctx, &vol, "alice", state).await.unwrap(),
+            "the staging dir is a real migration"
+        );
 
         let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots").remove(0);
         let owner = &sent["metadata"]["ownerReferences"][0];
@@ -820,5 +830,6 @@ mod tests {
         assert_eq!(owner["name"], "vol-1");
         assert_eq!(owner["uid"], "uid-vol-1");
         assert_eq!(owner["controller"], true);
+        assert_eq!(sent["spec"]["state"]["kind"], "workspace");
     }
 }

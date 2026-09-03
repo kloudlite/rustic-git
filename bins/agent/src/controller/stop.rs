@@ -57,6 +57,7 @@ pub(crate) async fn stop_push<P>(
     volume: &str,
     worktree: &str,
     parent: &P,
+    state: crd::SnapshotState,
     ctx: &Arc<Ctx>,
 ) -> Result<StopPush, ReconcileErr>
 where
@@ -88,7 +89,7 @@ where
                     message: Some("stopping".to_string()),
                     pinned: false,
                     transient: true,
-                    state: None,
+                    state: Some(state),
                 },
             );
             snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });

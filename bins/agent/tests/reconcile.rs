@@ -1930,6 +1930,8 @@ async fn a_workspace_stop_cuts_a_sync_point_before_deleting_the_pod() {
     assert_eq!(cut.len(), 1, "one sync point: {:?}", rec.calls());
     assert_eq!(cut[0]["spec"]["transient"], true, "a sync point, not a commit a user sees");
     assert_eq!(cut[0]["spec"]["worktree"], "ws-1", "the PARENT's name, not the volume's");
+    assert_eq!(cut[0]["spec"]["state"]["kind"], "workspace", "the parent's definition rides along on the cut");
+    assert_eq!(cut[0]["spec"]["state"]["image"], "nginx:alpine");
     assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "no delete before it lands: {:?}", rec.calls());
 
     // Second pass: the cut is Ready. Nobody holds it yet — that is the condition's business now,
@@ -4064,6 +4066,13 @@ fn parent_at(name: &str, volume: &str, phase: crd::Phase, pod: Option<&str>) -> 
         pod_ref: pod.map(Into::into),
         owner_ref: Default::default(),
         replicated: true,
+        state: crd::SnapshotState::Workspace {
+            image: "alpine:3.20".into(),
+            packages: vec![],
+            resources: Default::default(),
+            quota_gb: 5,
+            attached_environment: None,
+        },
     }
 }
 

@@ -175,7 +175,7 @@ async fn stop_environment(
     // requested.
     // The worktree is the environment's own name — the same string the sync beat cuts under, so
     // the stop's sync point extends that chain rather than starting a second one.
-    match stop_push(&stop_name(e), &e.spec.owner, &vol.name_any(), &e.name_any(), e, ctx).await? {
+    match stop_push(&stop_name(e), &e.spec.owner, &vol.name_any(), &e.name_any(), e, crd::SnapshotState::of_environment(e), ctx).await? {
         StopPush::Landed => {}
         StopPush::Waiting => {
             let st = crd::EnvironmentStatus {
@@ -243,7 +243,7 @@ async fn run_environment(
     // HeadUnknown guard: an environment claimed onto this node for a volume with commits but no
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
     // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
-    migrate_and_seed_baseline(ctx, vol, &e.spec.owner).await?;
+    migrate_and_seed_baseline(ctx, vol, &e.spec.owner, crd::SnapshotState::of_environment(e)).await?;
     // `apply_workspace`'s re-host arm, same rule: a node that has never run this worktree starts
     // from the newest sync point rather than the last commit, so a node death costs one
     // `WS_SYNC_SECS` of edits. Resolved before the guard below — a transient is a Snapshot CR, so
