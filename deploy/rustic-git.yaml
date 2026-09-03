@@ -789,37 +789,9 @@ spec:
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
-# The admin host. No IP allowlist (owner, 2026-09-04): the admin server refuses every request
-# whose session JWT lacks `superadmin: true` before routing, and the superadmin list — seeded
-# with the owner's email via RUSTIC_GIT_WORKSPACES_ADMINS above — is the only way onto it. The
-# web's /admin pages call it from the server side (Task 12), never from the client.
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: rustic-git-admin
-  namespace: rustic-git
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt
-    # Same reasoning as the app ingress: verify with `dig admin.dev.kloudlite.io` before assuming this
-    # host is Cloudflare-proxied. If it is not, this stays "false" for the same loop reason the
-    # registry's does.
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-spec:
-  ingressClassName: nginx
-  tls:
-    - hosts: [admin.dev.kloudlite.io]
-      secretName: rustic-git-admin-tls
-  rules:
-    - host: admin.dev.kloudlite.io
-      http:
-        paths:
-          - path: /admin
-            pathType: Prefix
-            backend:
-              service:
-                name: rustic-git-admin
-                port:
-                  number: 80
+# No admin Ingress on purpose: the admin api is reached only server-side by the web
+# (RUSTIC_GIT_ADMIN_API_URL=http://rustic-git-admin) — the superadmin pages live on the app host
+# at /superadmin. Nothing outside the cluster needs this process, so it has no public name.
 ---
 # The registry gets a hostname of its own rather than a path on the app's.
 #

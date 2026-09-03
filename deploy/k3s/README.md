@@ -897,11 +897,11 @@ rm -f /tmp/admin.token /tmp/admin-ca.crt /tmp/admin.kubeconfig
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml
 ```
 
-Then the AKS roll: `deploy/rustic-git.yaml` adds the `rustic-git-admin` Deployment, Service and
-Ingress — **the `admin.dev.kloudlite.io` DNS record must exist first**, or the Ingress's certificate
-request stalls the same way the app ingress's would. Repin and roll it with the rest of the tier
-(`deploy/pin.sh`, `deploy/roll.sh`), then `deploy/rustic-git-web.yaml` for the web app's
-`RUSTIC_GIT_ADMIN_API_URL` wiring to the new host.
+Then the AKS roll: `deploy/rustic-git.yaml` adds the `rustic-git-admin` Deployment and Service —
+no Ingress and no DNS: the admin api is reached only server-side by the web through
+`RUSTIC_GIT_ADMIN_API_URL=http://rustic-git-admin`, and the superadmin pages live on the app host
+at `/superadmin`. Repin and roll it with the rest of the tier (`deploy/pin.sh`, `deploy/roll.sh`),
+then `deploy/rustic-git-web.yaml` for that env var.
 
 Set `RUSTIC_GIT_WORKSPACES_ADMINS` on the admin-role Deployment before its first boot: it seeds
 those addresses into the directory's `superadmins` collection once, additively — after that boot
