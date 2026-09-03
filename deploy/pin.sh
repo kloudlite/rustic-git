@@ -49,15 +49,21 @@ if [ -n "$WEB" ]; then
 fi
 
 # Match a bare :<sha> or an already digest-pinned :<sha>@sha256:<old-digest> and replace the
-# whole tail — otherwise a second run leaves :<sha>@sha256:<old>@sha256:<new>. The tag character
+# whole tail, so a second run is a no-op. The tag character
 # class also swallows a `dev-<sha>[-dirty]` tag dev-push.sh left behind, but only on the first
 # (bare-tag) alternative — a dev tag is never digest-pinned by this script.
 pin() {
-  perl -pi -e "s#(ghcr\.io/kloudlite/$1:)(?:[A-Za-z0-9_.-]+|[0-9a-f]{40}(?:\@sha256:[0-9a-f]{64})?)#\${1}$2\@$3#" "${@:4}"
+  # The digest-pinned alternative comes FIRST: perl alternation is ordered, and the loose tag
+  # class would otherwise stop at the `@`, leave the old digest in place and append a second one.
+  # `*` on the digest group also collapses a reference that already got doubled that way.
+  perl -pi -e "s#(ghcr\.io/kloudlite/$1:)(?:[0-9a-f]{40}(?:\@sha256:[0-9a-f]{64})*|[A-Za-z0-9_.-]+)#\${1}$2\@$3#" "${@:4}"
 }
 pin 'rustic-git(?!-)' "$SHA" "${DIGEST[rustic-git]}" rustic-git.yaml
 pin 'rustic-git-agent' "$SHA" "${DIGEST[rustic-git-agent]}" k3s/agent-daemonset.yaml
 pin 'rustic-git-gateway' "$SHA" "${DIGEST[rustic-git-gateway]}" k3s/gateway.yaml
+# The workspace image is not a workload of ours: the agent hands it to tenant pods
+# (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
+pin 'rustic-git-workspace' "$SHA" "${DIGEST[rustic-git-workspace]}" k3s/agent-daemonset.yaml
 [ -z "$WEB" ] || pin 'rustic-git-web' "$WEB" "${DIGEST[rustic-git-web]}" rustic-git-web.yaml
 
 grep -rn --include='*.yaml' -E 'image: ghcr\.io/kloudlite/' . | sed 's/^\.\///'
