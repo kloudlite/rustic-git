@@ -401,7 +401,16 @@ async fn run_environment(
     for svc in &e.spec.services {
         let set = k8s::service_statefulset(svc, &e.name_any(), &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
         ensure(deployments, &set, ctx).await?;
-        ensure(&services, &k8s::service_clusterip(svc, &e.name_any(), &e.spec.owner, owner_ref), ctx).await?;
+        // A portless service (nothing declared to listen on) gets no ClusterIP — the API server
+        // rejects a Service with an empty `ports` list outright. Clean up a stale one left behind
+        // by an earlier definition that did have ports; `ensure` has no delete path of its own.
+        match k8s::service_clusterip(svc, &e.name_any(), &e.spec.owner, owner_ref) {
+            Some(cs) => ensure(&services, &cs, ctx).await?,
+            None => {
+                delete_ignoring_404(&services, &svc.name).await?;
+                forget_applied(ctx, "Service", ns, &svc.name);
+            }
+        }
     }
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported

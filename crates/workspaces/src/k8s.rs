@@ -1134,15 +1134,23 @@ pub fn service_statefulset(
 
 /// The ClusterIP that gives a service its DNS name — what makes `mongodb://db:27017` resolve from a
 /// sibling service, and from an attached workspace on another node.
+///
+/// `None` for a service with no declared ports: a `Service` with an empty `ports` list is rejected
+/// by the API server (`spec.ports: Required value`), so a worker that listens on nothing (e.g.
+/// `sleep 1d`) gets a StatefulSet but no ClusterIP — its bare name simply does not resolve, which
+/// is correct for something nothing can connect to.
 pub fn service_clusterip(
     svc: &model::Service,
     env_id: &str,
     owner: &str,
     owner_ref: &OwnerReference,
-) -> CoreService {
+) -> Option<CoreService> {
+    if svc.ports.is_empty() {
+        return None;
+    }
     let mut sel = labels(owner, "environment");
     sel.insert(SERVICE_LABEL.to_string(), svc.name.clone());
-    CoreService {
+    Some(CoreService {
         metadata: meta(
             &svc.name,
             Some(&crate::crd::env_namespace(env_id)),
@@ -1166,7 +1174,7 @@ pub fn service_clusterip(
             ..Default::default()
         }),
         ..Default::default()
-    }
+    })
 }
 
 /// The specs below are static JSON rather than nested `Some(vec![…])` structs: they never branch,
@@ -2323,7 +2331,7 @@ mod tests {
 
     #[test]
     fn a_service_gets_a_clusterip_for_each_declared_port() {
-        let s = service_clusterip(&svc("data", "/data"), "env-1", "team", &owner_ref());
+        let s = service_clusterip(&svc("data", "/data"), "env-1", "team", &owner_ref()).unwrap();
         let spec = s.spec.unwrap();
         let ports = spec.ports.unwrap();
         assert_eq!(ports.len(), 1);
@@ -2332,6 +2340,16 @@ mod tests {
         // The selector must match the Deployment's template labels or the Service selects nothing
         // and the name resolves to a black hole.
         assert_eq!(spec.selector.unwrap().get(SERVICE_LABEL).map(String::as_str), Some("web"));
+    }
+
+    #[test]
+    fn a_service_with_no_ports_gets_no_clusterip() {
+        let mut s = svc("worker", "/data");
+        s.ports.clear();
+        // An empty `ports` list on a k8s Service is rejected by the API server, so a portless
+        // service must not produce one at all — its StatefulSet still runs, it is just unreachable
+        // by name, which is correct for something that listens on nothing.
+        assert!(service_clusterip(&s, "env-1", "team", &owner_ref()).is_none());
     }
 
     /// `spec.name` is spliced into a root `/bin/sh -c` prelude, the sshd `SetEnv` list and the

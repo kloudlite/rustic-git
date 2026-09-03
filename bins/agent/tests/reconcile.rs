@@ -2345,6 +2345,82 @@ async fn an_environment_with_an_unready_volume_creates_no_deployment() {
     assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "VolumeNotReady");
 }
 
+/// A service declaring no ports (a worker with nothing to connect to, e.g. `sleep 1d`) gets a
+/// StatefulSet like any other service but no ClusterIP Service — the live repro of 2026-09-03,
+/// where the API server rejected `spec.ports: Required value` on every reconcile forever. Both
+/// services still converge and the environment reaches Running.
+#[tokio::test]
+async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/env-1/live/env-1")).unwrap();
+    let ready_sts = |name: &str| {
+        serde_json::json!({
+            "apiVersion": "apps/v1", "kind": "StatefulSet",
+            "metadata": {"name": name, "namespace": "env-1"},
+            "status": {"readyReplicas": 1},
+        })
+    };
+    let routes = vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "Namespace"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/default-deny", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-dns", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-internet-egress", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{}/rolebindings/api-secrets", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/limitranges/slot", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
+        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/web".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/web".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
+        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/worker".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        rustic_git_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets/web", ready_sts("web")),
+        rustic_git_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets/worker", ready_sts("worker")),
+        Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    e.spec.services = vec![
+        rustic_git_workspaces::model::Service {
+            name: "web".into(),
+            image: "nginx".into(),
+            command: vec![],
+            env: Default::default(),
+            mounts: vec![],
+            ports: vec![80],
+        },
+        rustic_git_workspaces::model::Service {
+            name: "worker".into(),
+            image: "alpine".into(),
+            command: vec!["sh".into(), "-c".into(), "sleep 1d".into()],
+            env: Default::default(),
+            mounts: vec![],
+            ports: vec![],
+        },
+    ];
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "both services ready: fully converged");
+
+    assert!(rec.calls().iter().any(|c| c == "PATCH /apis/apps/v1/namespaces/env-1/statefulsets/web"));
+    assert!(rec.calls().iter().any(|c| c == "PATCH /apis/apps/v1/namespaces/env-1/statefulsets/worker"));
+    assert!(
+        rec.calls().iter().any(|c| c == "PATCH /api/v1/namespaces/env-1/services/web"),
+        "the ported service gets a ClusterIP: {:?}", rec.calls()
+    );
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("PATCH") && c.contains("/services/worker")),
+        "a portless service must never be given a ClusterIP: {:?}", rec.calls()
+    );
+    assert!(
+        rec.calls().iter().any(|c| c == "DELETE /api/v1/namespaces/env-1/services/worker"),
+        "a stale ClusterIP from an earlier ported definition must be cleaned up: {:?}", rec.calls()
+    );
+
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "running", "both services converge: {:?}", st.last());
+}
+
 /// A NEW environment with no `storage` can never build a disk, and no retry adds a field.
 #[tokio::test]
 async fn a_new_environment_without_storage_fails_permanently() {
