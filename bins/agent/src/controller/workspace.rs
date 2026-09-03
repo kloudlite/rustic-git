@@ -587,10 +587,13 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 /// requeues the whole thing:
 ///   1. drop the parent's worktree — `{pool}/vol/{volume}/live/{id}`, the LIVE subvolume only;
 ///      `snap/` (the commits) is never touched, which is the whole point of the exercise.
-///   2. delete this parent's transient `Snapshot`s — sync/stop/clone cuts are worthless once the
-///      worktree they were cut from is gone, and nothing else ever reclaims them.
-///   3. if the Volume still holds a Ready commit, detach it; otherwise leave the ownerReference
-///      and let GC delete the Volume as it always did.
+///   2. delete every UNPINNED `Snapshot` record of that worktree — transients and ordinary
+///      commits alike, whatever their phase. "Snapshot" in the owner's sense means a PINNED
+///      commit; the rest is history of a worktree that no longer exists, and nothing else ever
+///      reclaims it. A pinned record is never touched here, by any parent, for any reason.
+///   3. if a PINNED Ready commit remains on the Volume — this worktree's or another's — detach it
+///      so that snapshot outlives its parent; otherwise leave the ownerReference and let GC delete
+///      the Volume as it always did.
 async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let Some(volume) = volume else { return Ok(Action::await_change()) };
     let id = id.to_string();
@@ -601,21 +604,24 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
         .map_err(|e| ReconcileErr(e.to_string()))?
         .map_err(|e| ReconcileErr(e.0))?;
 
-    // One list serves both remaining steps: the transients to delete and the "is there a commit"
-    // question. `spec.volume` is a selectable field, so this is a server-side filter.
+    // One list serves both remaining steps: what to delete, and whether a pinned snapshot remains.
+    // `spec.volume` is a selectable field, so this is a server-side filter. The two sets cannot
+    // overlap — one is `!pinned`, the other `pinned` — so the check needs no re-read.
     let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
     let items = snaps
         .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
         .await
         .map_err(|e| ReconcileErr(e.to_string()))?
         .items;
-    for s in items.iter().filter(|s| s.spec.transient && s.spec.worktree == id) {
+    for s in items.iter().filter(|s| !s.spec.pinned && s.spec.worktree == id) {
         delete_ignoring_404(&snaps, &s.name_any()).await?;
     }
-    let has_commit = items
-        .iter()
-        .any(|s| !s.spec.transient && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready));
-    if has_commit
+    // Not scoped to this worktree: a pinned snapshot of a SIBLING worktree is just as good a reason
+    // to keep the Volume alive — the bytes it names live on the same subvolume tree.
+    let has_snapshot = items.iter().any(|s| {
+        s.spec.pinned && !s.spec.transient && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)
+    });
+    if has_snapshot
         && !super::volume::detach_volume(ctx, &volume, uid).await.map_err(|e| ReconcileErr(e.to_string()))?
     {
         // Someone else rewrote the owner list under us. An Err, not a requeue: the finalizer
