@@ -5103,3 +5103,24 @@ async fn an_unknown_volume_falls_through_to_the_worktree_lookup() {
         "an empty store must not be read as 'not mine'"
     );
 }
+
+/// M1: a workspace parked in a Wait arm keeps the conditions OTHER writers own. `Replicated` is
+/// computed in one place (`replicated_condition`) and read by the per-volume sweep;
+/// `Decommissioning` is the drain notice. Dropping either on every wait arm makes the sweep read
+/// a false it did not compute.
+#[test]
+fn kept_conditions_preserves_replicated_and_decommissioning() {
+    let cond = |kind: &str, status: bool| crd::condition(kind, status, "r", "m", 1);
+    let prev = vec![
+        cond("PackagesReady", true),
+        cond("Attached", true),
+        cond("Replicated", true),
+        cond("Decommissioning", true),
+        cond("Ready", false),
+    ];
+    let kept = rustic_git_agent::controller::kept_conditions(&prev, cond("Ready", true));
+    let types: Vec<&str> = kept.iter().map(|c| c.type_.as_str()).collect();
+    assert!(types.contains(&"Replicated"), "the sweep reads this and does not write it: {types:?}");
+    assert!(types.contains(&"Decommissioning"), "the drain notice is not the wait arm's to drop: {types:?}");
+    assert_eq!(types.iter().filter(|t| **t == "Ready").count(), 1, "the new condition replaces, never doubles");
+}

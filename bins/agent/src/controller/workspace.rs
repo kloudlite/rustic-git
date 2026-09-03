@@ -410,9 +410,15 @@ fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition
 /// EVERY workspace status write goes through one of these two. Three separate sites that built the
 /// list literally each dropped `Attached` and stranded the same grant, which is why the invariant is
 /// "no literal condition list on a workspace path" rather than three more fixes.
-pub(crate) fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
+// pub so the keep-list is assertable from the integration suite — see reconcile.rs.
+pub fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
+    // Every type here is owned by a writer that is NOT this path: `PackagesReady` by the profile
+    // step, `Attached` by the pod path, `Replicated` by `replicated_condition` (which the
+    // per-volume sweep reads and never computes), `Decommissioning` by the drain notice. A wait
+    // arm dropping one makes its reader see a value nobody computed.
+    let keep = [crd::PACKAGES_READY, crd::ATTACHED, "Replicated", "Decommissioning"];
     let mut c: Vec<Condition> =
-        prev.iter().filter(|c| c.type_ == crd::PACKAGES_READY || c.type_ == crd::ATTACHED).cloned().collect();
+        prev.iter().filter(|c| keep.contains(&c.type_.as_str()) && c.type_ != ready.type_).cloned().collect();
     c.push(ready);
     c
 }

@@ -26,7 +26,9 @@ pub(crate) mod workspace;
 pub use workspace::{apply_workspace, cleanup_workspace_worktree, reconcile_environment, reconcile_workspace};
 // pub so the inode invariant is assertable from the integration suite — see reconcile.rs.
 pub use workspace::write_resolv_conf;
-pub(crate) use workspace::{kept_conditions, migrate_and_seed_baseline, replaced, write_ws_status};
+// pub so kept_conditions' keep-list is assertable from the integration suite — see reconcile.rs.
+pub use workspace::kept_conditions;
+pub(crate) use workspace::{migrate_and_seed_baseline, replaced, write_ws_status};
 pub(crate) mod volume;
 pub use volume::{apply_volume, cleanup_volume};
 pub(crate) use volume::{heal_labels, owner_ref_of_kind, reconcile_volume, resolve_volume, Resolved};
@@ -109,6 +111,10 @@ pub(crate) async fn my_node(ctx: &Ctx) -> MyNode {
 pub(crate) const DRAIN_MESSAGE: &str = "this node is being retired; stop when convenient and the next start lands elsewhere";
 
 pub(crate) fn with_drain_notice(prev: &[crd::Condition], mut conditions: Vec<crd::Condition>, decommissioning: bool, gen: i64) -> Vec<crd::Condition> {
+    // `kept_conditions` now carries `Decommissioning` across wait arms too (M1), so `conditions`
+    // may already hold a stale one from `prev` — strip it before deciding whether to re-add it,
+    // or a node that stops decommissioning never loses the notice.
+    conditions.retain(|c| c.type_ != "Decommissioning");
     if decommissioning {
         let was = prev.iter().find(|c| c.type_ == "Decommissioning");
         conditions.push(crd::condition_since(was, "Decommissioning", true, "NodeLeaving", DRAIN_MESSAGE, gen));
