@@ -108,14 +108,16 @@ Everything that needs the superadmin claim is served by a SEPARATE api process, 
   ONLY `/v1/*` and has no admin route compiled into its router — a `/v1` authorization bug cannot
   reach an admin handler because the handler is not there.
 - The admin server refuses every request whose JWT lacks `superadmin: true`, before routing.
-- Separate Deployment (`rustic-git-admin`, 1 replica), separate Service, separate ingress host
-  (`admin.` subdomain). No IP allowlist (owner, 2026-09-04): the gate is identity — the admin
-  server refuses every request whose JWT lacks `superadmin: true`, and the superadmin list is the
-  only way in. Separate ServiceAccount whose
+- Separate Deployment (`rustic-git-admin`, 1 replica) and Service — NO Ingress and no DNS
+  (owner, 2026-09-04): nothing outside the cluster calls the admin api; the web reaches it
+  server-side through `RUSTIC_GIT_ADMIN_API_URL=http://rustic-git-admin`, and the superadmin
+  pages live on the app host at `/superadmin`, reached from a "Superadmin" entry in the profile
+  dropdown that only a session with the claim sees. The gate is identity: the admin server
+  refuses every request whose JWT lacks `superadmin: true`. Separate ServiceAccount whose
   ClusterRole is the ONLY one with `create/patch/delete` on `Quota`, `QuotaRequest`, `Region`.
   The user server's role keeps `get/list` on those (it enforces limits and validates a region on
   create) plus `create` on `QuotaRequest` (a person or team admin opens one).
-- The web's `/admin` area calls the admin host; `NEXT_PUBLIC_ADMIN_API_URL` (or the server-side
+- The web's `/superadmin` area calls the admin api; `NEXT_PUBLIC_ADMIN_API_URL` (or the server-side
   equivalent) names it. Everything else in the web keeps calling `/v1`.
 - `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap runs on the admin server only, and DEFAULTS to
   `karthik@kloudlite.io` when unset (owner, 2026-09-04), so a fresh deployment always has one
