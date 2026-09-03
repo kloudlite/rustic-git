@@ -1,6 +1,7 @@
 import { CircleCheck, CircleDashed, CircleX, Loader2, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { EnvState, WsState } from "@/lib/api";
+import { noticesFor } from "@/lib/ws-status";
 
 /** Same idiom as `pull-state.tsx`'s `StateBadge`: one look per state, said the
  *  same way everywhere a workspace or environment's state is shown. Workspace
@@ -24,5 +25,23 @@ export function WsEnvStateBadge({ state, className }: { state: WsState | EnvStat
       <look.Icon className={cn("size-3.5", state === "creating" && "animate-spin")} />
       {look.label}
     </span>
+  );
+}
+
+/** The waiting-on notices: at most one, rendered where the person is already looking for state.
+ *  `text-warning` only for the interrupted case — everything else here is information, and a page
+ *  where every line is orange is a page nobody reads. Lives here rather than in either list,
+ *  beside the badge it sits under — one look, both kinds. */
+export function Notices({ w }: { w: Parameters<typeof noticesFor>[0] }) {
+  const notices = noticesFor(w);
+  if (notices.length === 0) return null;
+  return (
+    <>
+      {notices.map((n) => (
+        <span key={n.text} className={`mt-1 block text-sm2 ${n.tone === "warning" ? "text-warning" : "text-muted-foreground"}`}>
+          {n.text}
+        </span>
+      ))}
+    </>
   );
 }

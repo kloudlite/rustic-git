@@ -5,10 +5,9 @@ import { useMemo, useState } from "react";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { ChevronRight, Layers, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
+import { Notices, WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import { when } from "@/lib/time";
 import type { ApiEnvironment } from "@/lib/api";
-import { Notices } from "@/components/app/workspace-list";
 import { ArchivedSnapshots } from "@/components/app/archived-snapshots";
 import type { ArchivedRow } from "@/lib/archived";
 

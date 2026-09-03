@@ -11,9 +11,8 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
-import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
+import { Notices, WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
-import { noticesFor } from "@/lib/ws-status";
 import { CopyButton } from "@/components/repo/copy-button";
 import { useCopy } from "@/lib/use-copy";
 import { sshConfigBlock, sshOneLiner } from "@/lib/ssh-config";
@@ -165,24 +164,6 @@ function Packages({ w }: { w: ApiWorkspace }) {
         </span>
       )}
     </span>
-  );
-}
-
-/** The waiting-on notices: at most one, rendered where the person is already looking for state.
- *  `text-warning` only for the interrupted case — everything else here is information, and a page
- *  where every line is orange is a page nobody reads. Shared with `environment-list.tsx` so the
- *  two lists cannot drift apart on wording. */
-export function Notices({ w }: { w: Parameters<typeof noticesFor>[0] }) {
-  const notices = noticesFor(w);
-  if (notices.length === 0) return null;
-  return (
-    <>
-      {notices.map((n) => (
-        <span key={n.text} className={`mt-1 block text-sm2 ${n.tone === "warning" ? "text-warning" : "text-muted-foreground"}`}>
-          {n.text}
-        </span>
-      ))}
-    </>
   );
 }
 
