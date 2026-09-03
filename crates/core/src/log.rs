@@ -11,8 +11,8 @@
 //! log lines into it corrupts the payload.
 //!
 //! `RUSTIC_GIT_LOG_FORMAT=json` switches every binary to one JSON object per line, so a log
-//! pipeline can index `level`, `target`, `fields.repo` and friends instead of grepping text.
-//! The default stays the human-readable form: a developer's terminal is the other consumer.
+//! aggregator gets fields instead of a string. Not set by any manifest by default —
+//! `deploy/alerts.md` documents setting it on a pod when someone is debugging one.
 
 use tracing::Subscriber;
 use tracing_subscriber::fmt::MakeWriter;

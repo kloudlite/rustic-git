@@ -129,6 +129,8 @@ pub fn fleet_store_ok(url: &str) -> Result<()> {
     // lease, every pod is leader and every pod opens every database — the same two-writer bug the
     // `file://` refusal above exists for, with no URL scheme to give it away. The in-process test
     // fleet is the legitimate case, and it says so.
+    // Set only by this module's own unit test and by an in-process test fleet. Nothing in
+    // `deploy/` sets it, and nothing should: a real fleet on `mem://` is the two-writer bug.
     if url == "mem://" && std::env::var("RUSTIC_GIT_ALLOW_MEM_FLEET").is_err() {
         return Err(crate::err(
             "RUSTIC_GIT_S3_URL=mem:// cannot host a fleet: InMemory is per-process, so every pod \

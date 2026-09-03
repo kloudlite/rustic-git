@@ -53,9 +53,10 @@ pub fn valid_pin(pin: &str) -> bool {
 }
 
 /// What every workspace on this node gets before its own list: the tools a shell session assumes
-/// exist (`git` above all — a workspace is a checkout). `WS_BASE_PACKAGES`, whitespace-separated;
-/// the default is the set below. Prepended, never written into `spec.packages`, so it stays the
-/// platform's to change and a person cannot remove it from one workspace.
+/// exist (`git` above all — a workspace is a checkout). `WS_BASE_PACKAGES`, whitespace-separated.
+/// SET IN PRODUCTION: `deploy/k3s/agent-daemonset.yaml` passes it, so the constant below is the
+/// fallback, not the value the cluster runs. Prepended, never written into `spec.packages`, so it
+/// stays the platform's to change and a person cannot remove it from one workspace.
 pub const DEFAULT_BASE_PACKAGES: &str =
     "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils";
 

@@ -20,10 +20,10 @@ use std::sync::Arc;
 pub const DEFAULT_MAX_LAYER: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Largest single layer accepted, checked against the body's size BEFORE it is stored: an
-/// unbounded push must not be able to fill a node's disk. Override with RUSTIC_GIT_MAX_LAYER.
-///
-/// Read once and cached: this is on the hot blob path and the env var never changes after
-/// process start.
+/// unbounded push must not be able to fill a node's disk. `RUSTIC_GIT_MAX_LAYER` overrides it and
+/// has exactly one setter — `tests/registry_limits.rs`, which is its own test binary precisely
+/// because this is a process-wide `OnceLock`. No Deployment sets it; the default is the ceiling
+/// in production and changing it means a code change, which is the intent.
 pub fn max_layer() -> u64 {
     static LAYER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *LAYER.get_or_init(|| {
