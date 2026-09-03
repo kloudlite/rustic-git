@@ -2509,7 +2509,7 @@ fn a_service_statefulset_is_one_replica() {
         mounts: vec![],
         ports: vec![],
     };
-    let dep = rustic_git_workspaces::k8s::service_statefulset(&svc, "env-1", "acme", &test_pod_ctx()).unwrap();
+    let dep = rustic_git_workspaces::k8s::service_statefulset(&svc, "env-1", "env-1", "acme", &test_pod_ctx()).unwrap();
     assert_eq!(dep.spec.unwrap().replicas, Some(1));
 }
 
@@ -3836,9 +3836,12 @@ async fn commit_model_clone_checks_out_its_graft_commit_and_records_it_as_head()
 #[tokio::test]
 async fn a_restored_environment_records_its_graft_commit_as_head() {
     let tmp = tempfile::tempdir().unwrap();
-    // The worktree already exists, so `checkout` converges on WORKTREE_EXISTS instead of shelling
-    // out to btrfs — same trick the workspace twin uses.
-    std::fs::create_dir_all(tmp.path().join("vol/env-src/live/env-src")).unwrap();
+    // The environment's OWN worktree of the SOURCE's volume — `live/env-1`, never `live/env-src`,
+    // which is the source environment's live subvolume. It exists already so `checkout` converges
+    // on WORKTREE_EXISTS instead of shelling out to btrfs, the same trick the workspace twin uses.
+    std::fs::create_dir_all(tmp.path().join("vol/env-src/live/env-1")).unwrap();
+    // The source's own worktree, which this pass must not touch.
+    std::fs::create_dir_all(tmp.path().join("vol/env-src/live/env-src/marker")).unwrap();
     let (ctx, rec) = ctx(tmp.path(), restored_env_routes(ready_commit("env-src-aaaa", "env-src")));
 
     // Runs past the checkout arm and then fails on the next unmocked route — the head write has
@@ -3853,6 +3856,15 @@ async fn a_restored_environment_records_its_graft_commit_as_head() {
     assert!(
         !sent.iter().any(|s| s["status"]["conditions"][0]["reason"] == "HeadUnknown"),
         "never HeadUnknown: the head is known from the spec: {sent:?}"
+    );
+    // Task 2c: the restore holds its own worktree of the source's volume. Nothing it does may
+    // reach the SOURCE's live subvolume — two environments writing one is the bug this proves gone.
+    assert!(tmp.path().join("vol/env-src/live/env-src/marker").exists(), "the source's live worktree was touched");
+    // Its StatefulSets and Services go in ITS namespace, not the source volume's.
+    assert!(
+        rec.calls().iter().all(|c| !c.contains(&format!("/namespaces/{}/", crd::env_namespace("env-src")))),
+        "wrote into the source environment's namespace: {:?}",
+        rec.calls()
     );
 }
 
