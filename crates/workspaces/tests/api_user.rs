@@ -1970,3 +1970,40 @@ async fn an_environment_restore_refuses_a_workspace_snapshot() {
     assert_eq!(resp.status(), 400);
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
+
+/// A split that drops a route is invisible until someone clicks. An unmounted path answers 404;
+/// a mounted one answers something else — 401 once auth runs, or 415 when a `Json<T>` extractor
+/// on the handler's signature rejects the bodyless request before auth gets a turn. Either is
+/// proof the router matched; only 404 means the split dropped a route.
+#[tokio::test]
+async fn every_v1_route_is_still_mounted() {
+    let s = server(vec![]).await;
+    let c = reqwest::Client::new();
+    let routes: &[(&str, &str)] = &[
+        ("POST", "/v1/regions"), ("GET", "/v1/regions"),
+        ("POST", "/v1/workspaces"), ("GET", "/v1/workspaces"),
+        ("POST", "/v1/workspaces/restore"),
+        ("GET", "/v1/workspaces/ws-1"), ("DELETE", "/v1/workspaces/ws-1"), ("PATCH", "/v1/workspaces/ws-1"),
+        ("POST", "/v1/workspaces/ws-1/clone"), ("POST", "/v1/workspaces/ws-1/push"),
+        ("POST", "/v1/workspaces/ws-1/start"), ("POST", "/v1/workspaces/ws-1/stop"),
+        ("POST", "/v1/workspaces/ws-1/attach"), ("POST", "/v1/workspaces/ws-1/detach"),
+        ("POST", "/v1/workspaces/ws-1/ssh-session"),
+        ("POST", "/v1/environments"), ("GET", "/v1/environments"),
+        ("POST", "/v1/environments/restore"),
+        ("GET", "/v1/environments/env-1"), ("DELETE", "/v1/environments/env-1"),
+        ("POST", "/v1/environments/env-1/start"), ("POST", "/v1/environments/env-1/stop"),
+        ("POST", "/v1/environments/env-1/clone"), ("POST", "/v1/environments/env-1/push"),
+        ("POST", "/v1/environments/env-1/restore-in-place"),
+        ("GET", "/v1/volumes"), ("DELETE", "/v1/volumes/ws-1"),
+        ("GET", "/v1/volumes/ws-1/history"), ("GET", "/v1/volumes/ws-1/refs"),
+        ("DELETE", "/v1/volumes/ws-1/snapshots/ws-1-a"),
+    ];
+    for (m, p) in routes {
+        let resp = c
+            .request(reqwest::Method::from_bytes(m.as_bytes()).unwrap(), format!("{}{p}", s.base))
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), 404, "{m} {p} is not mounted");
+    }
+}
