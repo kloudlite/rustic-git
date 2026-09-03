@@ -42,6 +42,12 @@
 #                                                                       ownerReference left to GC it)
 #   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
+#   quotas (rustic-git.io)                 get,list,watch               binding/environment reconcile:
+#                                                                       the owner's effective ceiling,
+#                                                                       written into the namespace as
+#                                                                       a ResourceQuota. READ ONLY —
+#                                                                       a quota is desired state and
+#                                                                       the agent never writes one
 #   snapshots (rustic-git.io)              get,list,watch               pull_beat (missing-commit
 #                                                                       diff against local_commits);
 #                                                                       Controller (cut, retention,
@@ -162,6 +168,12 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["ownerbindings"]
     verbs: ["get", "list", "watch", "create"]
+  # Read-only, and deliberately so: a `Quota` is DESIRED state, written by a superadmin through
+  # /v1. The agent only projects it into the namespace as a `ResourceQuota`, which is why
+  # agent-admission.yaml gains nothing for this feature — there is no agent spec write to refuse.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotas"]
+    verbs: ["get", "list", "watch"]
   # `snapshots`: mostly created by `/v1` (Task 6's `/push`), CR-first per the brief — the agent
   # only cuts the btrfs snapshot and reports status, and `pull_beat` diffs the Ready set against
   # `local_commits` to decide what to fetch. `create` is also `stop_push`'s fixed-name `stop-{env}`

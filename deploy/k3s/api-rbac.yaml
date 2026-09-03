@@ -38,6 +38,18 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
     verbs: ["get", "list", "delete"]
+  # Quotas: read on every path (usage answers and enforcement both need the owner's effective
+  # limit). No write here yet — approving a request is a superadmin act that lands with the admin
+  # server (Task 10); granting `create`/`patch` now would let this tier widen an owner's ceiling.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotas"]
+    verbs: ["get", "list"]
+  # QuotaRequests: a person files one through this tier. Deciding it (writing `/status`) is the
+  # same admin-only act as above and is not granted here; requests are never deleted, so no
+  # `delete` either — the record of who asked is the point.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["quotarequests"]
+    verbs: ["get", "list", "create"]
   # Read-only, for ONE question: cloning an INTERRUPTED workspace. Its node is down, so nothing can
   # be cut there and the clone has to graft onto a sync point some OTHER node already holds — and
   # `status.branches` is the only record of who holds what. `get`/`list` and nothing else: the

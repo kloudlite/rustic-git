@@ -1491,6 +1491,310 @@
           }
         ]
       }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "quotas.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "Quota",
+          "plural": "quotas",
+          "shortNames": [
+            "qta"
+          ],
+          "singular": "quota"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.workspaces",
+                "name": "Workspaces",
+                "type": "integer"
+              },
+              {
+                "jsonPath": ".spec.environments",
+                "name": "Environments",
+                "type": "integer"
+              },
+              {
+                "jsonPath": ".spec.diskGb",
+                "name": "DiskGb",
+                "type": "integer"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for QuotaSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "What ONE owner — a person or a team slug — may allocate. Cluster-scoped, named by the owner\nslug, written only by a superadmin through `/v1`.\n\nTwo `default-*` objects are the fallback for an owner with no object of their own, because a\nslug does not say which it is: `/v1` knows (a team slug is one the directory answers for) and\npicks. Nothing here is a count of what EXISTS — usage is computed from the objects themselves\non every request (`quota::usage`), so no field of this object can drift from the truth.",
+                    "properties": {
+                      "cpu": {
+                        "description": "Whole cores, summed over live working copies' limits.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "diskGb": {
+                        "description": "Sum of `Volume.spec.quotaGb` over every volume of this owner, DETACHED INCLUDED: disk kept\nby snapshots after a working copy is deleted is still the owner's disk.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "environments": {
+                        "description": "Live working copies of kind Environment.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "memoryGb": {
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "snapshots": {
+                        "description": "Snapshots — pushes, not sync points. The agent's own transient cuts are its business and\nare never anyone's allocation.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "workspaces": {
+                        "description": "Live working copies of kind Workspace.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "cpu",
+                      "diskGb",
+                      "environments",
+                      "memoryGb",
+                      "snapshots",
+                      "workspaces"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "description": "Nothing writes this today. It exists because every CRD in this repo has a status subresource —\nwithout one a status write folds into spec and the RBAC spec/status split becomes decorative —\nand `crd_yaml.rs` enforces that for every kind.",
+                    "nullable": true,
+                    "properties": {
+                      "conditions": {
+                        "items": {
+                          "description": "Condition contains details for one aspect of the current state of this API Resource.",
+                          "properties": {
+                            "lastTransitionTime": {
+                              "description": "lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.",
+                              "format": "date-time",
+                              "type": "string"
+                            },
+                            "message": {
+                              "description": "message is a human readable message indicating details about the transition. This may be an empty string.",
+                              "type": "string"
+                            },
+                            "observedGeneration": {
+                              "description": "observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.",
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "reason": {
+                              "description": "reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.",
+                              "type": "string"
+                            },
+                            "status": {
+                              "description": "status of the condition, one of True, False, Unknown.",
+                              "type": "string"
+                            },
+                            "type": {
+                              "description": "type of condition in CamelCase or in foo.example.com/CamelCase.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "lastTransitionTime",
+                            "message",
+                            "reason",
+                            "status",
+                            "type"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "Quota",
+                "type": "object"
+              }
+            },
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "quotarequests.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "QuotaRequest",
+          "plural": "quotarequests",
+          "shortNames": [
+            "qreq"
+          ],
+          "singular": "quotarequest"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.owner",
+                "name": "Owner",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".status.state",
+                "name": "State",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".metadata.creationTimestamp",
+                "name": "Age",
+                "type": "date"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for QuotaRequestSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "A person asking for more, and the decision on it.\n\nThe one kind whose STATUS `/v1` writes rather than a controller: no controller reconciles a\nrequest — a person decides it — so the decision has nowhere else to live. Requests are never\ndeleted by the system; the record of who asked for what, and who said yes, is the point.",
+                    "properties": {
+                      "owner": {
+                        "type": "string"
+                      },
+                      "reason": {
+                        "default": "",
+                        "type": "string"
+                      },
+                      "requested": {
+                        "description": "The six fields again, every one optional: a request raises the dimensions it names and says\nnothing about the rest, so approving it must not silently reset a limit somebody already\ngranted.",
+                        "properties": {
+                          "cpu": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "diskGb": {
+                            "format": "uint64",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "environments": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "memoryGb": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "snapshots": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "workspaces": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "owner",
+                      "requested"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "nullable": true,
+                    "properties": {
+                      "decidedAt": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "decidedBy": {
+                        "description": "The deciding superadmin's email, for the audit trail. Never an owner of anything.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "note": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "state": {
+                        "description": "An enum, not a string, so the API server refuses a typo with a 422 — the same reason `Phase` is\none. A request with no status at all is pending: `/v1` creates the object and patches status\nseparately, and the window between the two must not read as \"decided\".",
+                        "enum": [
+                          "pending",
+                          "approved",
+                          "denied"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "QuotaRequest",
+                "type": "object"
+              }
+            },
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
     }
   ]
 }

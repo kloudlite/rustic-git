@@ -812,6 +812,138 @@ pub struct OwnerBindingStatus {
     pub conditions: Vec<Condition>,
 }
 
+/// What ONE owner — a person or a team slug — may allocate. Cluster-scoped, named by the owner
+/// slug, written only by a superadmin through `/v1`.
+///
+/// Two `default-*` objects are the fallback for an owner with no object of their own, because a
+/// slug does not say which it is: `/v1` knows (a team slug is one the directory answers for) and
+/// picks. Nothing here is a count of what EXISTS — usage is computed from the objects themselves
+/// on every request (`quota::usage`), so no field of this object can drift from the truth.
+#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "rustic-git.io",
+    version = "v1alpha1",
+    kind = "Quota",
+    plural = "quotas",
+    shortname = "qta",
+    status = "QuotaStatus",
+    printcolumn = r#"{"name":"Workspaces","type":"integer","jsonPath":".spec.workspaces"}"#,
+    printcolumn = r#"{"name":"Environments","type":"integer","jsonPath":".spec.environments"}"#,
+    printcolumn = r#"{"name":"DiskGb","type":"integer","jsonPath":".spec.diskGb"}"#,
+    derive = "PartialEq"
+)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSpec {
+    /// Live working copies of kind Workspace.
+    pub workspaces: u32,
+    /// Live working copies of kind Environment.
+    pub environments: u32,
+    /// Snapshots — pushes, not sync points. The agent's own transient cuts are its business and
+    /// are never anyone's allocation.
+    pub snapshots: u32,
+    /// Sum of `Volume.spec.quotaGb` over every volume of this owner, DETACHED INCLUDED: disk kept
+    /// by snapshots after a working copy is deleted is still the owner's disk.
+    pub disk_gb: u64,
+    /// Whole cores, summed over live working copies' limits.
+    pub cpu: u32,
+    pub memory_gb: u32,
+}
+
+/// Nothing writes this today. It exists because every CRD in this repo has a status subresource —
+/// without one a status write folds into spec and the RBAC spec/status split becomes decorative —
+/// and `crd_yaml.rs` enforces that for every kind.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaStatus {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+}
+
+pub const DEFAULT_USER_QUOTA: &str = "default-user";
+pub const DEFAULT_TEAM_QUOTA: &str = "default-team";
+
+/// The bootstrap table from the design doc, owner-approved 2026-09-03. In code rather than in a
+/// manifest so an owner with no `Quota` and a cluster with no `default-*` object still has a
+/// definite ceiling — a missing fallback object must not mean "unlimited".
+pub fn default_quota(team: bool) -> QuotaSpec {
+    if team {
+        QuotaSpec { workspaces: 20, environments: 8, snapshots: 80, disk_gb: 400, cpu: 32, memory_gb: 128 }
+    } else {
+        QuotaSpec { workspaces: 5, environments: 2, snapshots: 20, disk_gb: 100, cpu: 8, memory_gb: 32 }
+    }
+}
+
+/// The six fields again, every one optional: a request raises the dimensions it names and says
+/// nothing about the rest, so approving it must not silently reset a limit somebody already
+/// granted.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestedQuota {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspaces: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_gb: Option<u32>,
+}
+
+/// A person asking for more, and the decision on it.
+///
+/// The one kind whose STATUS `/v1` writes rather than a controller: no controller reconciles a
+/// request — a person decides it — so the decision has nowhere else to live. Requests are never
+/// deleted by the system; the record of who asked for what, and who said yes, is the point.
+#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "rustic-git.io",
+    version = "v1alpha1",
+    kind = "QuotaRequest",
+    plural = "quotarequests",
+    shortname = "qreq",
+    status = "QuotaRequestStatus",
+    printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
+    printcolumn = r#"{"name":"State","type":"string","jsonPath":".status.state"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    derive = "PartialEq"
+)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaRequestSpec {
+    pub owner: String,
+    pub requested: RequestedQuota,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaRequestStatus {
+    pub state: RequestState,
+    /// The deciding superadmin's email, for the audit trail. Never an owner of anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// An enum, not a string, so the API server refuses a typo with a 422 — the same reason `Phase` is
+/// one. A request with no status at all is pending: `/v1` creates the object and patches status
+/// separately, and the window between the two must not read as "decided".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RequestState {
+    #[default]
+    Pending,
+    Approved,
+    Denied,
+}
+
 /// The label a `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
 /// call rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
 /// authorization.
@@ -858,6 +990,8 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Snapshot::crd(),
         VolumeReplica::crd(),
         Region::crd(),
+        Quota::crd(),
+        QuotaRequest::crd(),
     ]
 }
 

@@ -52,6 +52,7 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
             // `.spec.volume`: `replicated_condition` and `pull_volume` both filtered client-side
             // because a selector on it was a 400. Dropping it makes both a full-cluster scan again.
             "VolumeReplica" => &[".spec.node", ".status.phase", ".spec.volume"],
+            "Quota" | "QuotaRequest" => &[],
             other => panic!("unknown kind {other}"),
         };
         if want.is_empty() {
@@ -108,7 +109,9 @@ fn every_phase_is_a_schema_enum() {
         // VolumeReplica's phase is deliberately a plain string, not `Phase` — it must be a
         // `selectableField`, and the API server only accepts a string type there.
         // Region's status is empty on purpose (no controller observes it) and has no phase at all.
-        if matches!(crd.spec.names.kind.as_str(), "OwnerBinding" | "VolumeReplica" | "Region") {
+        // Quota's status carries only conditions (nothing writes it yet); QuotaRequest's status is
+        // `state`, an enum in its own right, asserted separately in `quota_kinds_are_published`.
+        if matches!(crd.spec.names.kind.as_str(), "OwnerBinding" | "VolumeReplica" | "Region" | "Quota" | "QuotaRequest") {
             continue;
         }
         let status = crd.spec.versions[0]
@@ -350,4 +353,31 @@ fn every_namespace_the_code_makes_is_admitted() {
 fn restore_of_is_gone_from_the_published_schema() {
     let yaml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/crds.yaml")).unwrap();
     assert!(!yaml.contains("restoreOf"), "regenerate deploy/k3s/crds.yaml");
+}
+
+/// Both new kinds ship, and the request's state enum is published as an `enum` rather than a free
+/// string: a typo in `state` must be a 422 from the API server, not a request that is neither
+/// pending nor decided and so is invisible to both the queue and the one-pending check.
+#[test]
+fn quota_kinds_are_published() {
+    let kinds: Vec<String> = all_crds().into_iter().map(|c| c.spec.names.kind).collect();
+    assert!(kinds.iter().any(|k| k == "Quota"), "{kinds:?}");
+    assert!(kinds.iter().any(|k| k == "QuotaRequest"), "{kinds:?}");
+
+    let crd = all_crds().into_iter().find(|c| c.spec.names.kind == "QuotaRequest").unwrap();
+    let schema = crd.spec.versions[0].schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
+    let status = schema.properties.as_ref().unwrap()["status"].properties.as_ref().unwrap();
+    let states = status["state"].enum_.as_ref().expect("state must be an enum");
+    let words: Vec<String> = states.iter().map(|v| v.0.as_str().unwrap().to_string()).collect();
+    assert_eq!(words, vec!["pending", "approved", "denied"], "{words:?}");
+}
+
+/// The bootstrap numbers are the spec's table, and they are what an owner with no `Quota` object
+/// of their own gets — so a change here is a change to what every unlisted owner may allocate.
+#[test]
+fn the_bootstrap_defaults_are_the_specs_table() {
+    let u = rustic_git_workspaces::crd::default_quota(false);
+    assert_eq!((u.workspaces, u.environments, u.snapshots, u.disk_gb, u.cpu, u.memory_gb), (5, 2, 20, 100, 8, 32));
+    let t = rustic_git_workspaces::crd::default_quota(true);
+    assert_eq!((t.workspaces, t.environments, t.snapshots, t.disk_gb, t.cpu, t.memory_gb), (20, 8, 80, 400, 32, 128));
 }
