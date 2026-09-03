@@ -35,7 +35,7 @@ pub(crate) struct RepoOut {
 /// reorder itself at the cutover.
 pub(crate) async fn repo_listing(api: &Api, owner: &str, include_private: bool) -> Result<Vec<RepoOut>> {
     let markers =
-        crate::index::list(&api.store, crate::index::Kind::Repo, owner, include_private).await?;
+        rustic_git_storage::index::list(&api.store, rustic_git_storage::index::Kind::Repo, owner, include_private).await?;
     let mut out: Vec<RepoOut> = markers
         .into_iter()
         .map(|m| RepoOut {
@@ -102,7 +102,7 @@ pub(crate) struct NewRepo {
 /// A team that does not exist and a team the caller is not in give the same
 /// answer, so this cannot be used to enumerate teams.
 pub(crate) async fn may_act_under(
-    db: &crate::directory::Directory,
+    db: &rustic_git_pulls::directory::Directory,
     user: &str,
     owner: &str,
 ) -> Result<bool> {
@@ -135,10 +135,10 @@ pub(crate) async fn create_repo(
     // Validated HERE as well as on the node: this builds a URL from these two
     // strings, and a name carrying a slash or a dot segment would address a
     // different route than the one authorized just above.
-    if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
+    if !rustic_git_storage::store::valid_owner(owner) || !rustic_git_storage::store::valid_segment(name) {
         return (StatusCode::BAD_REQUEST, "invalid repository name").into_response();
     }
-    if crate::store::reserved_repo_name(name) {
+    if rustic_git_storage::store::reserved_repo_name(name) {
         return (
             StatusCode::BAD_REQUEST,
             format!("`{name}` is a page in this namespace, so a repository cannot be called it"),
@@ -175,7 +175,7 @@ pub(crate) async fn create_repo(
         public: visibility == "public",
         description: body.description.trim().to_string(),
         created_by: user.clone(),
-        created_at: crate::ownership::now_ms() as i64,
+        created_at: rustic_git_storage::ownership::now_ms() as i64,
     };
 
     create_upstream(&api, owner, name, visibility, repo).await
@@ -200,7 +200,7 @@ pub(crate) async fn create_upstream(api: &Api, owner: &str, name: &str, visibili
     let sent = api
         .client
         .post(url)
-        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .header(rustic_git_core::peer::PEER_HEADER, &api.secret)
         .send()
         .await;
     let status = match sent {
@@ -281,7 +281,7 @@ pub(crate) async fn get_repo(
     if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
         return r;
     }
-    match crate::index::read(&api.store.os, crate::index::Kind::Repo, &owner, &name).await {
+    match rustic_git_storage::index::read(&api.store.os, rustic_git_storage::index::Kind::Repo, &owner, &name).await {
         Some(m) => axum::Json(RepoOut {
             id: format!("{owner}/{}", m.name),
             owner: owner.clone(),
@@ -311,10 +311,10 @@ pub(crate) async fn settings_caller<'a>(
     headers: &axum::http::HeaderMap,
     owner: &str,
     name: &str,
-) -> std::result::Result<(Identity, &'a crate::directory::Directory), Response> {
+) -> std::result::Result<(Identity, &'a rustic_git_pulls::directory::Directory), Response> {
     let who = identify(api, headers)?;
     let db = directory(api)?;
-    if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
+    if !rustic_git_storage::store::valid_owner(owner) || !rustic_git_storage::store::valid_segment(name) {
         return Err((StatusCode::BAD_REQUEST, "invalid repository name").into_response());
     }
     match may_act_under(db, &who.email, owner).await {
@@ -429,7 +429,7 @@ pub(crate) async fn list_protection(
         return r;
     }
     let url = format!("{}/api/{}/{}/protect", api.upstream, encode(&owner), encode(&name));
-    let r = match api.client.get(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
+    let r = match api.client.get(url).header(rustic_git_core::peer::PEER_HEADER, &api.secret).send().await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(owner = %owner, name = %name, error = %e, "protection upstream");
@@ -506,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn a_repo_listing_reads_markers_not_mongo_rows() {
         let api = test_api_with_secret("s").await;
-        crate::index::write(&api.store, crate::index::Kind::Repo, "alice", &test_marker("web", true))
+        rustic_git_storage::index::write(&api.store, rustic_git_storage::index::Kind::Repo, "alice", &test_marker("web", true))
             .await
             .unwrap();
         let out = repo_listing(&api, "alice", true).await.unwrap();
@@ -527,7 +527,7 @@ mod tests {
     async fn a_listing_without_private_access_never_names_a_private_repo() {
         let api = test_api_with_secret("s").await;
         for m in [test_marker("web", true), test_marker("skunkworks", false)] {
-            crate::index::write(&api.store, crate::index::Kind::Repo, "alice", &m).await.unwrap();
+            rustic_git_storage::index::write(&api.store, rustic_git_storage::index::Kind::Repo, "alice", &m).await.unwrap();
         }
         let body = serde_json::to_string(&repo_listing(&api, "alice", false).await.unwrap()).unwrap();
         assert!(body.contains("web"), "the public repo is still listed");
@@ -542,12 +542,12 @@ mod tests {
     async fn a_repo_with_both_markers_lists_as_private() {
         let api = test_api_with_secret("s").await;
         let m = test_marker("web", true);
-        crate::index::put_in_place(&api.store, crate::index::Kind::Repo, "alice", &m).await.unwrap();
-        crate::index::put_in_place(
+        rustic_git_storage::index::put_in_place(&api.store, rustic_git_storage::index::Kind::Repo, "alice", &m).await.unwrap();
+        rustic_git_storage::index::put_in_place(
             &api.store,
-            crate::index::Kind::Repo,
+            rustic_git_storage::index::Kind::Repo,
             "alice",
-            &crate::index::Marker { public: false, ..m },
+            &rustic_git_storage::index::Marker { public: false, ..m },
         )
         .await
         .unwrap();

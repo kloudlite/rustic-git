@@ -11,28 +11,12 @@
 // allocation per refusal for no measurable gain.
 #![allow(clippy::result_large_err)]
 
-pub(crate) use rustic_git_core::{err, hex, jwt, Result};
-pub(crate) use rustic_git_storage::{cache, events, index, ownership, store};
-pub(crate) use rustic_git_pulls::directory;
-// The pure header helpers (`scheme`, `user_names`, `authorize`) live in `storage::auth`; the
-// `axum`-dependent ones (`bearer_token`, `basic_token`, `basic_user_names`, `unauthorized`) moved
-// to `core::httpx` because both this crate and `registry` need them and neither may depend on the
-// other. One local module keeps every `crate::auth::…` call site unchanged.
-pub(crate) mod auth {
-    pub use rustic_git_core::httpx::{basic_token, basic_user_names, bearer_token, unauthorized};
-    pub use rustic_git_storage::auth::*;
-}
-// `proxy::{PEER_HEADER, OWNER_HEADER, secret_eq}` — the peer-forwarding header names and
-// constant-time compare live in `rustic_git_core::peer` (the axum/reqwest-heavy forwarder itself
-// stays in the `git` crate, which this crate does not depend on). Aliased to keep every call
-// site (`crate::proxy::...`) unchanged.
-pub(crate) use rustic_git_core::peer as proxy;
-
 pub mod gpg;
 
-use crate::cache::Cache;
-use crate::events::Kind;
-use crate::store::Store;
+use rustic_git_core::Result;
+use rustic_git_storage::cache::Cache;
+use rustic_git_storage::events::Kind;
+use rustic_git_storage::store::Store;
 use axum::{
     extract::{Request, State},
     http::{header, HeaderMap, StatusCode},
@@ -101,10 +85,10 @@ pub struct Api {
     /// `None` when no database is configured: the browse routes still answer, and
     /// only the team routes report that they are unavailable. A missing database
     /// must not take down reads that never needed it.
-    pub directory: Option<Arc<crate::directory::Directory>>,
+    pub directory: Option<Arc<rustic_git_pulls::directory::Directory>>,
     /// Mints and verifies identity tokens. `None` leaves only the peer-header
     /// path, which is enough for internal calls but cannot issue a session.
-    pub jwt: Option<Arc<crate::jwt::Jwt>>,
+    pub jwt: Option<Arc<rustic_git_core::jwt::Jwt>>,
     /// Base URL of the git peer Service, e.g. `http://rustic-git:8081`.
     pub upstream: String,
     pub secret: String,
@@ -121,8 +105,8 @@ pub struct Api {
 pub async fn serve(
     store: Arc<Store>,
     cache: Arc<Cache>,
-    directory: Option<Arc<crate::directory::Directory>>,
-    jwt: Option<Arc<crate::jwt::Jwt>>,
+    directory: Option<Arc<rustic_git_pulls::directory::Directory>>,
+    jwt: Option<Arc<rustic_git_core::jwt::Jwt>>,
     upstream: String,
     secret: String,
     listener: tokio::net::TcpListener,
@@ -132,7 +116,7 @@ pub async fn serve(
     // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
     // an empty secret is a misconfiguration, not a valid deployment.
     if secret.is_empty() {
-        return Err(crate::err("api peer secret must not be empty"));
+        return Err(rustic_git_core::err("api peer secret must not be empty"));
     }
     let api = Arc::new(Api {
         store,
@@ -317,7 +301,7 @@ pub(crate) struct Identity {
 /// Verified ONCE per request: a handler that needs the display name as well as the email takes
 /// the whole `Identity` rather than paying for a second HMAC over the same token.
 pub(crate) fn identify(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<Identity, Response> {
-    if let Some(bearer) = crate::auth::bearer_token(headers) {
+    if let Some(bearer) = rustic_git_core::httpx::bearer_token(headers) {
         let jwt = api
             .jwt
             .as_deref()
@@ -340,7 +324,7 @@ pub(crate) async fn user_identity(
     api: &Api,
     headers: &axum::http::HeaderMap,
 ) -> std::result::Result<Identity, Response> {
-    let Some(bearer) = crate::auth::bearer_token(headers) else {
+    let Some(bearer) = rustic_git_core::httpx::bearer_token(headers) else {
         return identify(api, headers);
     };
     let jwt = api
@@ -353,7 +337,7 @@ pub(crate) async fn user_identity(
         // The row IS the revocation list: `DELETE /v1/cli/tokens/{id}` removes it, and a `cli`
         // token whose row is gone authenticates nothing until it expires on its own.
         match directory(api)?.credential(&jti).await {
-            Ok(Some(row)) if row.kind == crate::directory::CredentialKind::CliToken => {}
+            Ok(Some(row)) if row.kind == rustic_git_pulls::directory::CredentialKind::CliToken => {}
             Ok(_) => return Err((StatusCode::UNAUTHORIZED, "this CLI login was revoked").into_response()),
             Err(e) => {
                 tracing::error!(error = %e, "cli token lookup");
@@ -377,19 +361,19 @@ pub(crate) fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result:
 /// secret that admits it.
 pub(crate) fn peer_only(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
     let peer = headers
-        .get(crate::proxy::PEER_HEADER)
+        .get(rustic_git_core::peer::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    if !crate::proxy::secret_eq(peer, &api.secret) {
+    if !rustic_git_core::peer::secret_eq(peer, &api.secret) {
         return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
     }
-    match headers.get(crate::proxy::OWNER_HEADER).and_then(|v| v.to_str().ok()) {
+    match headers.get(rustic_git_core::peer::OWNER_HEADER).and_then(|v| v.to_str().ok()) {
         Some(u) if !u.trim().is_empty() => Ok(u.trim().to_string()),
         _ => Err((StatusCode::BAD_REQUEST, "caller identity required").into_response()),
     }
 }
 
-pub(crate) fn directory(api: &Api) -> std::result::Result<&crate::directory::Directory, Response> {
+pub(crate) fn directory(api: &Api) -> std::result::Result<&rustic_git_pulls::directory::Directory, Response> {
     api.directory
         .as_deref()
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "teams database not configured").into_response())
@@ -417,8 +401,8 @@ pub(crate) mod testing {
         }
     }
 
-    pub(crate) fn test_marker(name: &str, public: bool) -> crate::index::Marker {
-        crate::index::Marker {
+    pub(crate) fn test_marker(name: &str, public: bool) -> rustic_git_storage::index::Marker {
+        rustic_git_storage::index::Marker {
             name: name.into(),
             public,
             created_by: "alice@example.com".into(),
@@ -439,8 +423,8 @@ mod tests {
     async fn empty_peer_secret_never_authenticates() {
         let api = test_api_with_secret("").await;
         let mut h = axum::http::HeaderMap::new();
-        h.insert(crate::proxy::PEER_HEADER, "".parse().unwrap());
-        h.insert(crate::proxy::OWNER_HEADER, "alice".parse().unwrap());
+        h.insert(rustic_git_core::peer::PEER_HEADER, "".parse().unwrap());
+        h.insert(rustic_git_core::peer::OWNER_HEADER, "alice".parse().unwrap());
         assert!(caller(&api, &h).is_err());
     }
 }

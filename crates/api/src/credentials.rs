@@ -9,7 +9,8 @@ use super::*;
 // saying the same thing, and means a leaked laptop key cannot reach a team's repos
 // unless it was made for them.
 
-use crate::directory::{CliLogin, Credential, CredentialKind};
+use rustic_git_core::Result;
+use rustic_git_pulls::directory::{CliLogin, Credential, CredentialKind};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct NewCredential {
@@ -42,7 +43,7 @@ pub(crate) async fn credential_caller<'a>(
     api: &'a Api,
     headers: &axum::http::HeaderMap,
     owner: &str,
-) -> std::result::Result<(String, &'a crate::directory::Directory), Response> {
+) -> std::result::Result<(String, &'a rustic_git_pulls::directory::Directory), Response> {
     // `user_identity`, not `caller`: managing your own credentials is exactly what the CLI is
     // for, and this route pays for the revocation lookup a CLI token needs.
     let user = user_identity(api, headers).await?.email;
@@ -55,7 +56,7 @@ pub(crate) async fn credential_caller_as<'a>(
     api: &'a Api,
     user: String,
     owner: &str,
-) -> std::result::Result<(String, &'a crate::directory::Directory), Response> {
+) -> std::result::Result<(String, &'a rustic_git_pulls::directory::Directory), Response> {
     let db = directory(api)?;
     match may_act_under(db, &user, owner).await {
         Ok(true) => Ok((user, db)),
@@ -105,7 +106,7 @@ pub(crate) async fn create_token(
         }
     };
     let meta = Credential {
-        id: crate::store::Store::token_digest(&token),
+        id: rustic_git_storage::store::Store::token_digest(&token),
         kind: CredentialKind::Token,
         owner: owner.clone(),
         created_by: user,
@@ -245,7 +246,7 @@ use rustic_git_core::sshkeys::ssh_fingerprint;
 
 /// The credential id and the fingerprints an ssh SIGNING key answers to. Kept beside `add_key`
 /// and used by it, so a test can build exactly the row registration writes.
-pub(crate) fn ssh_signing_fingerprints(key_line: &str) -> crate::Result<(String, Vec<String>)> {
+pub(crate) fn ssh_signing_fingerprints(key_line: &str) -> Result<(String, Vec<String>)> {
     let f = ssh_fingerprint(key_line)?;
     // Lowercased: `signer_by_any` lowercases what a signature presents and Mongo's `$in` is an
     // exact match, while `SHA256:<base64>` is mixed case. Stored as-is, no ssh signature ever
@@ -283,14 +284,14 @@ fn authorized_keys_lines(keys: &[Credential]) -> String {
 }
 
 /// The `authorized_keys` file for an owner: every ssh key they have registered for access.
-pub async fn authorized_keys_for(db: &crate::directory::Directory, owner: &str) -> crate::Result<String> {
+pub async fn authorized_keys_for(db: &rustic_git_pulls::directory::Directory, owner: &str) -> Result<String> {
     let keys = db.credentials_for(owner, CredentialKind::SshKey).await?;
     Ok(authorized_keys_lines(&keys))
 }
 
 /// `(name, email)` for git to commit as inside the owner's workspaces. A handle that is not a
 /// person's (never claimed) gets empty strings: git then asks, which is the right answer.
-pub async fn git_identity_for(db: &crate::directory::Directory, owner: &str) -> crate::Result<(String, String)> {
+pub async fn git_identity_for(db: &rustic_git_pulls::directory::Directory, owner: &str) -> Result<(String, String)> {
     Ok(db.user_by_handle(owner).await?.map(|u| (u.name, u.email)).unwrap_or_default())
 }
 
@@ -326,7 +327,7 @@ pub(crate) async fn add_key(
             let key = crate::gpg::parse_key(&armoured)?;
             let fps = crate::gpg::fingerprints_of(&key);
             let email = crate::gpg::verified_emails(&key).into_iter().next();
-            crate::Result::Ok((fps, email))
+            Result::Ok((fps, email))
         })
         .await;
         match parsed {
@@ -464,7 +465,7 @@ pub(crate) async fn cli_code(
         d => d.chars().take(60).collect(),
     };
     let code = random_code();
-    let poll = crate::hex(&rand::random::<[u8; 16]>());
+    let poll = rustic_git_core::hex(&rand::random::<[u8; 16]>());
     // A row, not memory: the api has more than one replica, and the browser that approves this
     // code is routed independently of the CLI that asked for it.
     // The per-address bucket on this route (`ratelimit`, sized to `CLI_CODE_TTL`) is what caps
@@ -718,7 +719,7 @@ pub(crate) async fn list_cli_tokens(
                         "name": c.name,
                         "createdAt": rfc3339(c.created_at.timestamp_millis()),
                         "expiresAt": rfc3339(
-                            c.created_at.timestamp_millis() + crate::jwt::CLI_TTL_SECS as i64 * 1000,
+                            c.created_at.timestamp_millis() + rustic_git_core::jwt::CLI_TTL_SECS as i64 * 1000,
                         ),
                     })
                 })
@@ -941,7 +942,7 @@ mod tests {
 
     async fn cli_api() -> Arc<Api> {
         let mut api = crate::testing::test_api_with_secret("peer").await;
-        api.jwt = Some(Arc::new(crate::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()));
+        api.jwt = Some(Arc::new(rustic_git_core::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()));
         Arc::new(api)
     }
 

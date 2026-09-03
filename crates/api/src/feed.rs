@@ -1,4 +1,5 @@
 use super::*;
+use rustic_git_storage::events;
 
 /// GET a browse route from the owning node, for the feed.
 ///
@@ -262,7 +263,7 @@ mod tests {
         base: &str,
         head: &str,
     ) {
-        let at_ms = crate::ownership::now_ms() as i64;
+        let at_ms = rustic_git_storage::ownership::now_ms() as i64;
         events::publish(
             cache,
             &events::Event {

@@ -22,9 +22,9 @@ pub(crate) async fn to_owner(
     req: reqwest::RequestBuilder,
     owner: Option<&str>,
 ) -> std::result::Result<reqwest::Response, Response> {
-    let req = req.header(crate::proxy::PEER_HEADER, &api.secret);
+    let req = req.header(rustic_git_core::peer::PEER_HEADER, &api.secret);
     let req = match owner {
-        Some(o) => req.header(crate::proxy::OWNER_HEADER, o),
+        Some(o) => req.header(rustic_git_core::peer::OWNER_HEADER, o),
         None => req,
     };
     req.send().await.map_err(|e| {

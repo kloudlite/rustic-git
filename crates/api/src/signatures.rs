@@ -63,8 +63,8 @@ pub(crate) async fn commit_patch(
     let sent = api
         .client
         .post(url)
-        .header(crate::proxy::PEER_HEADER, &api.secret)
-        .header(crate::proxy::OWNER_HEADER, &owner)
+        .header(rustic_git_core::peer::PEER_HEADER, &api.secret)
+        .header(rustic_git_core::peer::OWNER_HEADER, &owner)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .body(match serde_json::to_vec(&body) {
             Ok(b) => b,
@@ -118,8 +118,8 @@ pub(crate) async fn verify_commit(
     let r = match api
         .client
         .get(url)
-        .header(crate::proxy::PEER_HEADER, &api.secret)
-        .header(crate::proxy::OWNER_HEADER, &owner)
+        .header(rustic_git_core::peer::PEER_HEADER, &api.secret)
+        .header(rustic_git_core::peer::OWNER_HEADER, &owner)
         .send()
         .await
     {
@@ -177,7 +177,7 @@ fn unverified(code: &'static str, reason: &str) -> Verification {
 /// issuers resolved to — normally a subkey's owner, because a commit is signed by a subkey while
 /// the person is the primary key behind it; `signer_by_any` walks that back.
 pub(crate) fn judge_pgp(
-    known: Option<crate::directory::Credential>,
+    known: Option<rustic_git_pulls::directory::Credential>,
     signed: &SignatureOf,
     payload: &[u8],
     sig: &pgp::composed::DetachedSignature,
@@ -221,7 +221,7 @@ pub(crate) fn judge_pgp(
 pub(crate) fn judge_ssh(
     sig: &russh::keys::ssh_key::SshSig,
     payload: &[u8],
-    known: Option<crate::directory::Credential>,
+    known: Option<rustic_git_pulls::directory::Credential>,
     author_email: &str,
 ) -> Verification {
     let Some(known) = known else {
@@ -252,7 +252,7 @@ pub(crate) fn judge_ssh(
 /// Judge one signature: decode, ask the directory who holds the key, then judge. The lookup is
 /// the only async step and the only one that needs Mongo, which is why the judgement is split
 /// off — `judge_ssh`/`judge_pgp` are tested without a directory.
-pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &SignatureOf) -> Verification {
+pub(crate) async fn verify_signature(db: &rustic_git_pulls::directory::Directory, signed: &SignatureOf) -> Verification {
     use base64::Engine;
     let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(&signed.payload_base64)
     else {
@@ -296,7 +296,7 @@ pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directory::{Credential, CredentialKind};
+    use rustic_git_pulls::directory::{Credential, CredentialKind};
     use base64::Engine;
     use russh::keys::ssh_key::{LineEnding, SshSig};
 

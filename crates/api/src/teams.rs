@@ -35,7 +35,7 @@ pub(crate) async fn create_team(
             let msg = e.to_string();
             // A rejected handle is the caller's mistake; anything else is ours and
             // must not echo the database's words back to a user.
-            if e.downcast_ref::<crate::directory::Invalid>().is_some() {
+            if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "create team");
@@ -66,7 +66,7 @@ pub(crate) async fn list_teams(State(api): State<Arc<Api>>, headers: axum::http:
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SignIn {
-    user: crate::directory::User,
+    user: rustic_git_pulls::directory::User,
     /// `None` when the server has no signing key: the user still exists, but the
     /// caller must keep using the peer path rather than silently treating an
     /// absent token as a valid one.
@@ -116,11 +116,11 @@ pub(crate) async fn upsert_user(
                 },
                 None => None,
             };
-            axum::Json(SignIn { user: u, token, expires_in: crate::jwt::TTL_SECS }).into_response()
+            axum::Json(SignIn { user: u, token, expires_in: rustic_git_core::jwt::TTL_SECS }).into_response()
         }
         Err(e) => {
             let msg = e.to_string();
-            if e.downcast_ref::<crate::directory::Invalid>().is_some() {
+            if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "upsert user");
@@ -161,14 +161,14 @@ pub(crate) async fn claim_username(
                 },
                 None => None,
             };
-            axum::Json(SignIn { user: u, token, expires_in: crate::jwt::TTL_SECS }).into_response()
+            axum::Json(SignIn { user: u, token, expires_in: rustic_git_core::jwt::TTL_SECS }).into_response()
         }
         Ok(None) => (StatusCode::CONFLICT, "that handle is taken").into_response(),
         Err(e) => {
             let msg = e.to_string();
             // Every rule in check_handle is the caller's to fix, and the message
             // says which rule — it is shown under the field.
-            if e.downcast_ref::<crate::directory::Invalid>().is_some() {
+            if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "claim username");
@@ -194,7 +194,7 @@ pub(crate) async fn claim_username(
 // says WHICH team; it never says whether the caller may touch it. A non-member gets 404, not 403,
 // so the routes cannot be used to learn which slugs exist — the same shape the repo routes use.
 
-use crate::directory::{AcceptInvite, DeleteTeam, Invite, Membership, Role, Team};
+use rustic_git_pulls::directory::{AcceptInvite, DeleteTeam, Invite, Membership, Role, Team};
 use sha2::Digest;
 
 /// A member as the page shows them: the directory row joined onto the membership entry.
@@ -251,7 +251,7 @@ async fn team_for<'a>(
     headers: &axum::http::HeaderMap,
     slug: &str,
     min: Option<Role>,
-) -> std::result::Result<(String, Team, Role, &'a crate::directory::Directory), Response> {
+) -> std::result::Result<(String, Team, Role, &'a rustic_git_pulls::directory::Directory), Response> {
     let user = caller(api, headers)?;
     let db = directory(api)?;
     let team = match db.get(slug).await {
@@ -262,7 +262,7 @@ async fn team_for<'a>(
             return Err((StatusCode::BAD_GATEWAY, "could not read team").into_response());
         }
     };
-    let Some(role) = crate::directory::Directory::role_of(&team, &user) else {
+    let Some(role) = rustic_git_pulls::directory::Directory::role_of(&team, &user) else {
         return Err((StatusCode::NOT_FOUND, "no such team").into_response());
     };
     if let Some(min) = min {
@@ -492,7 +492,7 @@ pub(crate) async fn update_team(
                     return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
                 }
             };
-            let pins = match crate::directory::check_pins(&p.pins, &names) {
+            let pins = match rustic_git_pulls::directory::check_pins(&p.pins, &names) {
                 Ok(v) => v,
                 Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
             };
@@ -505,7 +505,7 @@ pub(crate) async fn update_team(
     match db.update_team(&slug, &body.name, &body.description).await {
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such team").into_response(),
-        Err(e) if e.downcast_ref::<crate::directory::Invalid>().is_some() => {
+        Err(e) if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() => {
             return (StatusCode::BAD_REQUEST, e.to_string()).into_response()
         }
         Err(e) => return db_err("update team", &slug, e),
@@ -513,7 +513,7 @@ pub(crate) async fn update_team(
     let (Some(p), Some(pins)) = (body.profile, checked) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    let profile = crate::directory::TeamProfile {
+    let profile = rustic_git_pulls::directory::TeamProfile {
         public: p.public,
         tagline: p.tagline,
         location: p.location,
@@ -605,7 +605,7 @@ pub(crate) async fn create_invite(
     if !email.contains('@') {
         return (StatusCode::BAD_REQUEST, "a valid email is required").into_response();
     }
-    if crate::directory::Directory::role_of(&team, &email).is_some() {
+    if rustic_git_pulls::directory::Directory::role_of(&team, &email).is_some() {
         return (StatusCode::CONFLICT, "already a member").into_response();
     }
     // 32 random bytes, hex: unguessable, and URL-safe without encoding.
@@ -670,7 +670,7 @@ pub(crate) async fn preview_invite(
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
     if caller(&api, &headers).is_err() {
-        return crate::auth::unauthorized();
+        return rustic_git_core::httpx::unauthorized();
     }
     let db = match directory(&api) {
         Ok(d) => d,
@@ -741,7 +741,7 @@ pub(crate) async fn set_role(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let target = crate::directory::Directory::role_of(&team, &email);
+    let target = rustic_git_pulls::directory::Directory::role_of(&team, &email);
     // Granting the new role AND touching the old one both have to be within reach: an admin
     // may not demote an owner, however low the new role is.
     let allowed = may_grant(role, body.role) && target.is_none_or(|t| may_grant(role, t));
@@ -771,7 +771,7 @@ pub(crate) async fn remove_member(
         Err(r) => return r,
     };
     let leaving = user.eq_ignore_ascii_case(&email);
-    let target = crate::directory::Directory::role_of(&team, &email);
+    let target = rustic_git_pulls::directory::Directory::role_of(&team, &email);
     // Removing someone is the same reach as changing their role: an admin removes members and
     // admins, an owner removes anyone. Leaving is always yours to do.
     if !leaving && !target.is_some_and(|t| may_grant(role, t)) {
@@ -868,7 +868,7 @@ pub(crate) async fn create_signin_link(
         rustic_git_core::hex(&b)
     };
     let now = mongodb::bson::DateTime::now();
-    let link = crate::directory::SignInLink {
+    let link = rustic_git_pulls::directory::SignInLink {
         id: invite_id(&token),
         email: email.clone(),
         created_at: now,
@@ -903,7 +903,7 @@ pub(crate) async fn redeem_signin_link(
 #[cfg(test)]
 mod role_tests {
     use super::{rank, Role};
-    use crate::directory::{Directory, Member, Team};
+    use rustic_git_pulls::directory::{Directory, Member, Team};
     use mongodb::bson::DateTime;
 
     fn team(members: &[(&str, Role)]) -> Team {
