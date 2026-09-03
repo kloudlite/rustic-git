@@ -1382,8 +1382,14 @@ async fn restore_ws(
     // simply be gone or someone else's now, and that must not make the snapshot unrestorable.
     // `find_env` is the same visibility check `attach_ws` applies.
     let attached_environment = match body.attached_environment.clone().or_else(|| frozen.as_ref().and_then(|f| f.4.clone())) {
-        Some(e) if find_env(&s, &owner, &e).await.is_ok() => Some(e),
-        _ => None,
+        // Only a 404 is "gone, or not mine". An unreachable API server is a 5xx and must be
+        // reported as one, not laundered into a silently unattached workspace.
+        Some(e) => match find_env(&s, &owner, &e).await {
+            Ok(_) => Some(e),
+            Err(r) if r.status() == StatusCode::NOT_FOUND => None,
+            Err(r) => return Err(r),
+        },
+        None => None,
     };
     let new_id = rid("ws");
     let w = create_workspace(

@@ -3,6 +3,8 @@
  *
  *  Pure and in `lib` so the one-line summary is testable without rendering, like `ws-status.ts`:
  *  the rows render `stateSummary` and nothing decides those words twice. */
+import type { ApiService } from "@/lib/api";
+
 export type SnapshotState =
   | {
       kind: "workspace";
@@ -15,7 +17,8 @@ export type SnapshotState =
     }
   | {
       kind: "environment";
-      services: { name: string; image: string }[];
+      /** `crd::SnapshotState::Environment` freezes the whole `model::Service`, not a summary. */
+      services: ApiService[];
       quotaGb: number;
     };
 

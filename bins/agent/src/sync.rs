@@ -57,10 +57,9 @@ pub async fn sync_beat(ctx: &Arc<Ctx>) {
 }
 
 /// The pure seam: everything about a sync cut's `SnapshotSpec` that does not need a live btrfs
-/// read, split out so the state-stamping logic has a test that runs without real btrfs (`generation`
-/// is threaded through only because a caller has it in hand and future fields may want it; the
-/// spec itself does not carry it — `sync_one` stamps it into the annotation instead).
-fn build_sync_spec(live: &crate::listing::Parent, parent: String, _generation: u64) -> crd::SnapshotSpec {
+/// read, split out so the state-stamping logic has a test that runs without real btrfs. The
+/// generation is not here on purpose — `sync_one` stamps it into the annotation instead.
+fn build_sync_spec(live: &crate::listing::Parent, parent: String) -> crd::SnapshotSpec {
     crd::SnapshotSpec {
         volume: live.volume.clone(),
         owner: live.owner.clone(),
@@ -128,7 +127,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     }
 
     let name = sync_name(&live.name);
-    let mut snap = crd::Snapshot::new(&name, build_sync_spec(live, parent, gen));
+    let mut snap = crd::Snapshot::new(&name, build_sync_spec(live, parent));
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     // Owned by the worktree's object: deleting the workspace is the whole delete, and the sync
     // point has no meaning without it.
@@ -234,7 +233,7 @@ mod tests {
     #[test]
     fn the_sync_spec_carries_the_parents_fields_and_definition() {
         let live = live_fixture();
-        let spec = build_sync_spec(&live, "sync-ws-1-prev".into(), 9);
+        let spec = build_sync_spec(&live, "sync-ws-1-prev".into());
         assert_eq!(spec.volume, "vol-1");
         assert_eq!(spec.owner, "alice");
         assert_eq!(spec.worktree, "ws-1");

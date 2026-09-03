@@ -15,8 +15,9 @@ describe("stateSummary", () => {
     expect(stateSummary({ kind: "workspace", image: "alpine:3.20", packages: [], quotaGb: 5, resources })).toBe("alpine:3.20");
   });
   test("an environment counts its services", () => {
-    expect(stateSummary({ kind: "environment", services: [{ name: "db", image: "x" }, { name: "api", image: "y" }, { name: "web", image: "z" }], quotaGb: 5 })).toBe("3 services");
-    expect(stateSummary({ kind: "environment", services: [{ name: "db", image: "x" }], quotaGb: 5 })).toBe("1 service");
+    const svc = (name: string) => ({ name, image: "x", command: [], env: {}, mounts: [], ports: [] });
+    expect(stateSummary({ kind: "environment", services: [svc("db"), svc("api"), svc("web")], quotaGb: 5 })).toBe("3 services");
+    expect(stateSummary({ kind: "environment", services: [svc("db")], quotaGb: 5 })).toBe("1 service");
   });
   test("no state renders nothing", () => {
     expect(stateSummary(null)).toBe("");
@@ -36,5 +37,23 @@ describe("stateSummary", () => {
     } satisfies SnapshotState;
     expect(row.kind === "workspace" && row.resources.memoryLimit).toBe("8Gi");
     expect(stateSummary(row)).toBe("alpine:3.20 · 2 packages");
+
+    // The environment half of the same guard: the api freezes the WHOLE `model::Service`, so this
+    // fails to compile if `ApiService` and what `/v1/volumes/{name}/history` sends drift apart.
+    const envRow = {
+      kind: "environment",
+      quotaGb: 20,
+      services: [
+        {
+          name: "db",
+          image: "busybox:1.36",
+          command: ["sh", "-c", "httpd -f"],
+          env: { MODE: "test" },
+          mounts: [{ folder: "data", path: "/ws" }],
+          ports: [27017],
+        },
+      ],
+    } satisfies SnapshotState;
+    expect(stateSummary(envRow)).toBe("1 service");
   });
 });

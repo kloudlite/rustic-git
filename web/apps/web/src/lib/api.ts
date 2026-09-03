@@ -729,7 +729,9 @@ export type ApiWorkspace = {
 };
 
 export type ApiMount = { folder: string; path: string };
-export type ApiService = { name: string; image: string; command: string[]; env: Record<string, string>; mounts: ApiMount[] };
+/** `model::Service`. `ports` is `#[serde(default)]` on the Rust side, so an environment document
+ *  written before ports existed deserializes as an empty list — the wire always carries the key. */
+export type ApiService = { name: string; image: string; command: string[]; env: Record<string, string>; mounts: ApiMount[]; ports: number[] };
 
 export type ApiEnvironment = {
   id: string;

@@ -50,7 +50,9 @@ export default async function Page({
         </p>
       ) : (
         <ul className="mt-5 divide-y divide-border border border-border bg-card">
-          {history.value.map((c) => (
+          {history.value.map((c) => {
+            const summary = stateSummary(c.state);
+            return (
             <li key={c.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-3">
@@ -59,16 +61,15 @@ export default async function Page({
                     {c.message || "—"}
                   </span>
                 </div>
-                {stateSummary(c.state) && (
-                  <span className="mt-1 block text-sm2 text-muted-foreground">{stateSummary(c.state)}</span>
-                )}
+                {summary && <span className="mt-1 block text-sm2 text-muted-foreground">{summary}</span>}
                 <span className="mt-1 block text-caption text-muted-foreground">
                   {when(snapshotTime(c))}
                 </span>
               </div>
               <RestoreDialog owner={owner} snapshotId={c.id} state={c.state} />
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </section>
