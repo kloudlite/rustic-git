@@ -9,10 +9,13 @@
 //! the binding pinned every workspace of theirs to it. The home is a directory on a region-shared
 //! NFS mount now, so every node reconciles every binding (the objects below are all
 //! server-side-applied, which is convergent under concurrent appliers) and placement is the
-//! claim's own business. An old stored object may still carry `spec.nodeName`; the struct no
-//! longer has the field, so the value is ignored on read and gone on the next write.
+//! claim's own business.
 //!
-//! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
+//! ponytail: bindings are never deleted, and the node-retirement path (`decommission.rs`) does
+//! not collect them — deliberately. A binding is an OWNER's namespaces, not a node's: draining
+//! the last node an owner happened to run on must not delete the namespace their workspaces come
+//! back to. The upgrade, if orphaned bindings ever cost anything, is an owner-deletion path in
+//! `/v1`, not a node-side sweep.
 
 use crate::controller::{conditions_eq, ensure, patch_status, settle, Ctx, Outcome, ReconcileErr};
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, ResourceQuota};

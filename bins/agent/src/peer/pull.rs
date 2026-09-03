@@ -165,7 +165,7 @@ pub(crate) async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str
     missed
 }
 
-/// Every volume this node must hold a snapshot-model replica of: named by replication's rendezvous
+/// Every volume this node must hold a replica of: named by replication's rendezvous
 /// (`replicate::targets`, standbys only — the owner already has everything by construction), OR
 /// the volume behind a Workspace/Environment whose pod runs here right now, OR a volume this node
 /// itself owns (`spec.nodeName == me`) — the owner's row is a source for every standby, and a
