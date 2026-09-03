@@ -1,0 +1,218 @@
+//! Who the caller is, and what they may act on.
+//!
+//! The load-bearing part of this module is `mine`: a label selector is an INDEX and `spec.owner` is
+//! the answer, and three handlers used to get that right while four got it wrong. One function
+//! means the rule cannot be half-remembered. `snapshots_on_volume` in `volumes.rs` is the
+//! deliberate exception and says so — a decision that destroys data counts everyone's rows.
+
+use super::{kube, kube_err, not_found, ApiState};
+use crate::crd;
+use crate::k8s::{OWNER_LABEL, TEAM_LABEL};
+use kube::api::{Api, ListParams};
+use axum::{http::StatusCode, response::{IntoResponse, Response}};
+use std::collections::HashSet;
+
+pub(crate) async fn teams_for(s: &ApiState, caller: &str) -> Vec<String> {
+    match &s.directory {
+        Some(m) => m.teams_for(caller).await,
+        None => Vec::new(),
+    }
+}
+
+/// `owner` is the environment's actual owner field (a username or a team slug). Personal envs
+/// (`owner == caller`) always pass; a team env passes when the caller is a member.
+pub(crate) async fn may_act_on(s: &ApiState, caller: &str, owner: &str) -> bool {
+    caller == owner || teams_for(s, caller).await.iter().any(|t| t == owner)
+}
+
+/// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
+/// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
+/// and adding one per query axis is how a CRD becomes a database.
+pub(crate) fn owned_by(owner: &str) -> ListParams {
+    ListParams::default().labels(&format!("{OWNER_LABEL}={owner}"))
+}
+
+/// One person's workspaces in one team (empty = personal). Both labels, so a team page never
+/// shows the personal ones and the personal page never shows a team's.
+pub(crate) fn owned_in(owner: &str, team: &str) -> ListParams {
+    ListParams::default().labels(&format!("{OWNER_LABEL}={owner},{TEAM_LABEL}={team}"))
+}
+
+/// The `spec.owner` of anything this API lists. One trait so "narrow by label, DECIDE on spec" is
+/// a single function instead of a rule seven handlers each remembered or forgot.
+pub trait Owned {
+    fn owner(&self) -> &str;
+}
+
+impl Owned for crd::Workspace {
+    fn owner(&self) -> &str {
+        &self.spec.owner
+    }
+}
+
+impl Owned for crd::Environment {
+    fn owner(&self) -> &str {
+        &self.spec.owner
+    }
+}
+
+impl Owned for crd::Snapshot {
+    fn owner(&self) -> &str {
+        &self.spec.owner
+    }
+}
+
+/// Keep only what `owners` actually owns. The label selector stays as the INDEX; this is the
+/// answer. An object whose label disagrees with its spec — a restored backup, a migration, an
+/// operator with kubectl, the window before the controller re-stamps — is somebody else's.
+pub fn mine<K: Owned>(items: Vec<K>, owners: &[String]) -> Vec<K> {
+    items.into_iter().filter(|k| owners.iter().any(|o| o == k.owner())).collect()
+}
+
+/// A name is unique per (owner, team): it is also the directory the workspace mounts at inside
+/// the person's shared home (`~/workspaces/<name>`), and two workspaces on one path would be two
+/// workspaces one editor session cannot tell apart. The selector narrows the list; the decision
+/// reads `spec` (labels are a view). ponytail: a Workspace written by another path without its
+/// labels is invisible here until the controller re-stamps them — a window of one reconcile.
+pub(crate) async fn refuse_taken_name(c: &kube::Client, owner: &str, team: &str, name: &str) -> Result<(), Response> {
+    let api: Api<crd::Workspace> = Api::all(c.clone());
+    let list = api.list(&owned_in(owner, team)).await.map_err(kube_err)?;
+    if list.items.iter().any(|w| w.spec.owner == owner && w.spec.team == team && w.spec.name == name) {
+        return Err((StatusCode::CONFLICT, format!("a workspace named {name:?} already exists here")).into_response());
+    }
+    Ok(())
+}
+
+/// Refuse a create that would take this owner past their ceiling.
+///
+/// The two label-selected lists cost what `refuse_taken_name` already pays, and the DECISION reads
+/// `spec.owner` (labels are a view): an object mislabelled onto someone else must not spend their
+/// budget. Counted across both kinds — they share a node's memory and the pool.
+pub(crate) async fn refuse_over_cap(_s: &ApiState, c: &kube::Client, owner: &str) -> Result<(), Response> {
+    let max = crate::model::max_per_owner();
+    let lp = owned_by(owner);
+    let ws = Api::<crd::Workspace>::all(c.clone()).list(&lp).await.map_err(kube_err)?;
+    let envs = Api::<crd::Environment>::all(c.clone()).list(&lp).await.map_err(kube_err)?;
+    let mine = ws.items.iter().filter(|w| w.spec.owner == owner).count()
+        + envs.items.iter().filter(|e| e.spec.owner == owner).count();
+    if mine >= max {
+        // 429, not 409: nothing conflicts with a particular object — this account is asking for
+        // more than it may hold. The number is in the message so the person can ask for a raise.
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("you already have {mine} workspaces and environments; the limit is {max}"),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Every namespace name the platform would derive for this owner: their personal one, plus one
+/// per team they are in.
+///
+/// The label is a VIEW and never authority (CLAUDE.md) — the NAME is what says whose namespace
+/// this is, so it is checked by RECOMPUTING it rather than by picking the owner back out of the
+/// string. `crd::ws_namespace` hashes any name over 63 characters into a DNS label, which no
+/// prefix/suffix test can invert: the earlier `ends_with("-{owner}")` heuristic skipped exactly
+/// those, so an ssh key add never reached a workspace in a long-named team.
+pub(crate) async fn owners_namespaces(s: &ApiState, owner: &str) -> HashSet<String> {
+    let mut out = HashSet::from([crd::ws_namespace(owner, "")]);
+    out.extend(teams_for(s, owner).await.iter().map(|t| crd::ws_namespace(owner, t)));
+    out
+}
+
+/// Workspaces are strictly personal — no team ownership — so ownership is a field comparison, and
+/// someone else's workspace is a 404, never a 403.
+pub(crate) async fn my_ws(s: &ApiState, owner: &str, id: &str) -> Result<crd::Workspace, Response> {
+    let api: Api<crd::Workspace> = Api::all(kube(s)?.clone());
+    let w = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    if w.spec.owner != owner {
+        return Err(not_found());
+    }
+    Ok(w)
+}
+
+/// Resolve `NewEnvironment.owner` against the caller: personal (`None` or `caller`) always
+/// passes; a different owner must be a team the caller belongs to, which needs a directory —
+/// 503 rather than silently creating an environment nobody but this caller can ever see again.
+pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &str, owner: Option<String>) -> Result<String, Response> {
+    let Some(owner) = owner else { return Ok(caller.to_string()) };
+    if owner == caller {
+        return Ok(owner);
+    }
+    match &s.directory {
+        None => Err((StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response()),
+        Some(_) if may_act_on(s, caller, &owner).await => Ok(owner),
+        Some(_) => Err((StatusCode::FORBIDDEN, "not a member of that team").into_response()),
+    }
+}
+
+/// Finds an environment by id and authorizes the caller against its owner: their own always
+/// passes, a team's passes when they are a member. An environment they may not act on is a 404,
+/// never a 403 — the caller learns nothing about environments that are not theirs.
+pub(crate) async fn find_env(s: &ApiState, caller: &str, id: &str) -> Result<crd::Environment, Response> {
+    let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
+    let e = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    if !may_act_on(s, caller, &e.spec.owner).await {
+        return Err(not_found());
+    }
+    Ok(e)
+}
+
+/// Every owner label the caller may read volumes under: themselves, plus each team they belong to
+/// (team-owned environments). Membership is verified HERE — the server tier trusts whatever owner
+/// this tier names in `OWNER_HEADER`, so an unverified value would be a data leak.
+pub(crate) async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
+    let mut v = vec![owner.to_string()];
+    v.extend(teams_for(s, owner).await);
+    v
+}
+
+/// `OWNER_LABEL in (…)`, built only from slugs that are single validated segments.
+///
+/// `in (a,b)` is comma-delimited and paren-terminated, so one slug carrying `,` or `)` widens or
+/// breaks the set — on a listing that decides whether a row says "source deleted". Slugs are
+/// directory-validated today; every other selector in this file takes a single validated value,
+/// and this one now does too.
+pub fn owner_set_selector(owners: &[String]) -> String {
+    // `owners` is always `caller_owners`'s output, and that always starts with the caller's own
+    // (already-validated) owner — so this never filters down to an empty set.
+    let safe: Vec<&str> =
+        owners.iter().filter(|o| rustic_git_storage::store::valid_owner(o)).map(String::as_str).collect();
+    format!("{OWNER_LABEL} in ({})", safe.join(","))
+}
+
+#[cfg(test)]
+mod tests {
+    /// A team namespace is `wt-{owner}-{hash}` (and a long personal one is DNS-hashed), so it is
+    /// exactly the case the old `ends_with("-{owner}")` heuristic dropped — and dropping it meant
+    /// an ssh key add never reached that team's workspaces.
+    #[tokio::test]
+    async fn a_dns_truncated_team_namespace_is_still_the_owners() {
+        use super::{owners_namespaces, ApiState};
+        use crate::api::Directory;
+        use crate::crd;
+        use std::sync::Arc;
+
+        let long = "a".repeat(60);
+        struct Stub(String);
+        #[async_trait::async_trait]
+        impl Directory for Stub {
+            async fn teams_for(&self, _user: &str) -> Vec<String> {
+                vec![self.0.clone()]
+            }
+        }
+        let state = ApiState::new(
+            Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
+            Default::default(),
+        )
+        .with_directory(Arc::new(Stub(long.clone())));
+
+        let ns = crd::ws_namespace("karthik", &long);
+        assert!(ns.len() <= 63 && !ns.ends_with("-karthik"), "this team must be hashed: {ns}");
+        let mine = owners_namespaces(&state, "karthik").await;
+        assert!(mine.contains(&ns), "{ns} must be recognised as karthik's");
+        assert!(mine.contains(&crd::ws_namespace("karthik", "")));
+        assert!(!mine.contains(&crd::ws_namespace("someone-else", "")));
+    }
+}
