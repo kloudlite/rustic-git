@@ -32,8 +32,19 @@ field by field, and the admin UI shows all three columns (default, env, stored).
 
 ### 2. Which knobs
 
-Only non-secret, non-bootstrap tunables. Secrets never; anything that names where a process
-listens, stores, mounts or which image it runs never.
+Every non-secret knob that is not process identity. Secrets never; listen addresses, store URLs,
+pool paths, node names and region identity never (they are what makes a process the process it
+is). Everything else is a setting, and each is marked one of two ways in code:
+
+- **live** — read from the handle on every use or at the top of every beat; a change lands on the
+  next beat, no restart.
+- **boot** — read once at start (images for tenant pods such as `WS_DEFAULT_IMAGE` and
+  `WS_GIT_INIT_IMAGE`, `WS_RUNTIME_CLASS`, the git SSH host/port the init container clones from,
+  log format, worker lane counts, and every knob the inventory marked "cached once" that a
+  refactor to live would not pay for). A change to a boot setting is written the same way, and
+  then the readers are ROLLED so they start with the new value (§7).
+
+The UI shows the mark on every row, so the person saving knows whether pods will restart.
 
 **Cluster (`ClusterSettings.spec`)** — the agent's beats and limits:
 `syncSecs` (WS_SYNC_SECS), `replicaSecs` (WS_REPLICA_SECS), `decommissionSecs`
@@ -96,35 +107,44 @@ on `ClusterSettings`; the central binaries expose the loaded version on their `/
 The same area shows, read-only: image pins per tier (from the Deployments), replica counts,
 ingress hosts, each node's decommission status. No writes. A later spec may add them.
 
-### 7. Rolling the related workloads (owner, 2026-09-03)
+### 7. A boot setting change rolls its readers (owner, 2026-09-03)
 
-Changing a setting is not always enough: a bootstrap-only knob, a rotated secret, or a stuck
-process needs a restart. The admin area can roll workloads, with these limits:
+Every setting field declares its readers and its mark
+(`#[settings(mark = "boot", readers = "agent")]`, surfaced in the schema). Saving a change:
 
-- **A fixed list, never a free name.** Central: `rustic-git-srv` (StatefulSet), `rustic-git-api`,
-  `rustic-git-worker`, `rustic-git-gateway`, `rustic-git-web`, `rustic-git-admin` (Deployments).
-  Per region: `rustic-git-agent` (DaemonSet, `kube-system`) and the region gateway. Any other name
-  is a 404. The list lives in code (`admin::workloads::KNOWN`), keyed by scope.
-- **Mechanism**: `POST /admin/workloads/{scope}/{name}/roll` with a required `reason` patches the
-  pod template annotation `rustic-git.io/restarted-at: <RFC 3339>` — exactly what
-  `kubectl rollout restart` does — so Kubernetes rolls with the workload's own strategy (the
-  StatefulSet one pod at a time, the DaemonSet node by node, the Deployments by surge). The admin
-  server never deletes a pod itself.
-- **Related**: every setting field declares its readers (`#[settings(readers = "server,worker")]`,
-  surfaced in the schema); after a save the UI offers "roll N workloads" for the readers of a
-  bootstrap-only field, and shows nothing for a live field (it needs no roll).
-- **One roll in flight per workload**: a second request while `status.observedGeneration` lags
-  is a 409 with the rollout's progress. `GET /admin/workloads` lists every known workload with
-  image, ready/desired, last roll (who, when, reason) and rollout state.
-- **The server StatefulSet is special**: its roll moves database ownership between nodes (see
-  "Deploying" in CLAUDE.md); the UI says so and requires a second confirmation.
-- **Audit**: who, when and reason are written to the workload's annotations
-  (`rustic-git.io/rolled-by`, `/rolled-at`, `/roll-reason`) and to the admin audit log.
-- **RBAC**: the admin ServiceAccount gains `get/list/patch` on exactly those Deployments and the
-  StatefulSet in the central namespace, and on the agent DaemonSet in each region. Nothing wider:
-  no pod delete, no manifest edits.
+1. The admin server validates and writes the document / CR (§4).
+2. For every changed **boot** field it collects the readers, and rolls each one — the pod
+   template annotation `rustic-git.io/restarted-at: <RFC 3339>`, exactly what
+   `kubectl rollout restart` does, so Kubernetes uses the workload's own strategy (the server
+   StatefulSet one pod at a time, the agent DaemonSet node by node, Deployments by surge). The
+   admin server never deletes a pod. A **live** field rolls nothing.
+3. The UI says what will happen BEFORE the save ("Save and roll: rustic-git-agent in
+   centralindia-k3s"), and requires a second confirmation when the reader set includes the
+   server StatefulSet, whose roll moves database ownership between nodes (see "Deploying" in
+   CLAUDE.md).
 
-Not doing here: editing images, env, replicas or ingress (option 2, still deferred).
+A process reads its boot settings at start from the same `stored ?? env ?? default` chain, so a
+rolled pod comes up with the new value and the manifest's env is only the fallback.
+
+- **A fixed list, never a free name.** The readers a field may name are the known workloads:
+  central `rustic-git-srv` (StatefulSet), `rustic-git-api`, `rustic-git-worker`,
+  `rustic-git-gateway`, `rustic-git-web`, `rustic-git-admin`; per region `rustic-git-agent`
+  (DaemonSet, `kube-system`) and the region gateway. `admin::workloads::KNOWN` is that list.
+- **Manual roll too**: `POST /admin/workloads/{scope}/{name}/roll` with a required `reason`, for
+  a rotated secret or a stuck process. Same mechanism, same list.
+- **One roll in flight per workload**: a save whose readers are still rolling is a 409 naming
+  them with ready/desired; the settings write is NOT made, so the document never runs ahead of
+  the pods. `GET /admin/workloads` lists every known workload with image, ready/desired, last
+  roll (who, when, reason or the setting that caused it) and rollout state.
+- **Audit**: who, when and why go on the workload (`rustic-git.io/rolled-by`, `/rolled-at`,
+  `/roll-reason`: a free reason, or `setting:<field>`) and into the admin audit log.
+- **RBAC**: the admin ServiceAccount gains `get/list/patch` on exactly those Deployments and
+  the StatefulSet in the central namespace, and on the agent DaemonSet in each region. Nothing
+  wider: no pod delete, no manifest edits.
+
+Not doing here: editing images of the first-party workloads themselves, replicas or ingress
+(option 2, still deferred). Tenant pod images (`WS_DEFAULT_IMAGE`, `WS_GIT_INIT_IMAGE`) are
+settings because they are what the agent hands to tenants, not what the agent runs as.
 
 ## Rules
 
@@ -134,6 +154,8 @@ Not doing here: editing images, env, replicas or ingress (option 2, still deferr
 - **Last good wins.** An unparsable settings document changes nothing.
 - **A setting has a range or it is not a setting.** Unbounded knobs stay env-only.
 - **Secrets and addresses are never settings.**
+- **A boot setting change rolls its readers; a live one rolls nothing.** The UI says which
+  before the save.
 - **A roll is an annotation on a known workload, never a pod delete or a free name.**
 
 ## Cases
@@ -147,7 +169,10 @@ Not doing here: editing images, env, replicas or ingress (option 2, still deferr
 | admin server down | nothing changes; agents keep reading the CR |
 | `peerServeTimeoutSecs` lowered while a send is in flight | that send keeps its old deadline; the next one gets the new |
 | the web's clone host changed | clone menus show the new host on the next page load |
-| superadmin rolls `rustic-git-worker` with reason "rotate peer secret" | template annotation patched; Deployment surges; audit annotations written |
+| superadmin changes `defaultImage` (boot, reader: agent) for region A | CR written, then the agent DaemonSet in A rolls node by node; audit says `setting:defaultImage` |
+| superadmin changes `syncSecs` (live) | CR written, nothing rolls, agents pick it up next beat |
+| superadmin rolls `rustic-git-worker` manually with reason "rotate peer secret" | template annotation patched; Deployment surges; audit annotations written |
+| a boot save while its reader is still rolling | 409 naming the workload with ready/desired; nothing written |
 | roll requested while the previous roll is still progressing | 409 with ready/desired |
 | roll of a name not in the list | 404 |
 
