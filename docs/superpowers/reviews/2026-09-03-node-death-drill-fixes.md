@@ -186,6 +186,11 @@ is the same stranding in a different costume. The owner arm of `may_claim` is un
 asserted, but it is not the case that fires here — the source volume's owner is the DEAD node, and
 `decide` only gets past its owner guard because that owner is `unplaceable`.
 
+A seeded clone carries BYTES only, no push history from the source: it owns a fresh `Volume` whose
+chain begins at the migration baseline `migrate_volume` mints, so `history`/`refs` on it start
+there rather than continuing the source's. By design — the source's history belongs to a volume
+this clone deliberately does not share, which is the whole reason it can start at all.
+
 `/v1` writes `SeededFrom` for the interrupted branch of `clone_base` only; the non-interrupted
 clone and every other `CloneOf` are untouched. `clone_env` refuses an interrupted source outright
 and so needs nothing.
@@ -232,4 +237,38 @@ node midway through a multi-pass test.
 cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1  → exit 0
 cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
 CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml                  → exit 0
+```
+
+## Round 3 review fixes
+
+**Retention could sweep the cut out from under a seeded clone (`0dadee4e`).** The transient arm
+deletes every other `Ready` sync point for a worktree before consulting anything, so between
+`/v1`'s write and `seed_from_snapshot` the source node returning and cutting a fresh sync point was
+enough to delete the pinned one — `NO_SUCH_RECORD`, which `permanent_reason` makes terminal.
+`seeded_from_cuts` now reads the cuts named by any `Volume.spec.source` and the arm spares them,
+keep-biased like every other listing here (a failed list deletes nothing at all this pass).
+
+Protected until the Volume is MATERIALIZED, not for its whole life: once the bytes are copied the
+clone never reads the cut again, and holding it forever would pin one extra read-only subvolume per
+seeded clone on the source volume with nothing to ever release it. The `ponytail:` marker on that
+arm is updated rather than dropped — it still ignores `heads` and `spec.pinned`, but it is no
+longer true that nothing names a sync point by id.
+
+Test: `a_cut_a_seeded_clone_still_needs_survives_a_newer_one` — the same newer-cut retention pass,
+run twice: the cut survives while the clone's Volume is unmaterialized and is deleted once it is
+Ready. `test_ctx` gained a default empty `volumes` list for the new read, appended last so a test's
+own routes win.
+
+**`seed_from_snapshot` checked before it locked (`b4ee1ba1`).** `src.exists()` ran outside
+`ws_lock`, so a delete landing in that window turned a clean `NO_SUCH_RECORD` into an opaque btrfs
+error the reconciler reads as transient and retries forever. Lock first, as `clone_local_ids` does;
+the source voldir is created before the lock because `ws_lock`'s file lives under it, which is
+`checkout`'s own opening line and creates nothing for the destination. Same commit tidies
+`volume.rs`'s hand-broken `use super::{…}` list.
+
+## Gates (round 3 review fixes)
+
+```
+cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1  → exit 0
+cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
 ```
