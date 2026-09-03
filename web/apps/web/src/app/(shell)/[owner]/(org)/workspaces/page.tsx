@@ -12,19 +12,24 @@ export default async function Page({ params }: { params: Promise<{ owner: string
 
   // The URL's owner is the team when it is not the person themselves; the api decides
   // membership and answers 404 for a team they are not in.
-  const list = await listWorkspaces(token, owner === session.user.owner ? undefined : owner);
-  if (!list.ok) {
-    if (list.kind === "unauthorized") redirect("/login?from=expired");
-    if (list.kind === "notFound") notFound();
-    throw new Error(list.message);
-  }
-
+  //
   // The Snapshots section, the same one the environments page carries and for the same reason: a
   // volume whose Workspace is gone and whose snapshots are not. Deleting a workspace keeps them,
   // so this is the only way back to them — and the only place they can be deleted for good.
   // A failed read leaves the section empty rather than failing the page: the working set above is
   // what someone came here for.
-  const volumes = await listVolumes(token, "workspace", owner === session.user.owner ? undefined : owner);
+  //
+  // Neither read depends on the other; serial, they cost two 5 s timeouts instead of one.
+  const scope = owner === session.user.owner ? undefined : owner;
+  const [list, volumes] = await Promise.all([
+    listWorkspaces(token, scope),
+    listVolumes(token, "workspace", scope),
+  ]);
+  if (!list.ok) {
+    if (list.kind === "unauthorized") redirect("/login?from=expired");
+    if (list.kind === "notFound") notFound();
+    throw new Error(list.message);
+  }
 
   const rows = volumes.ok ? volumes.value : [];
   // The same listing, read once: a live workspace's Delete dialog names how many snapshots it

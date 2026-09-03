@@ -12,20 +12,22 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   // On the caller's OWN page, no owner filter: the api then aggregates personal envs plus
   // every team the caller belongs to — environments are a team-wide view. A team's page
   // keeps the filter so it shows exactly that team's.
-  const mine = owner === session.user.username;
-  const list = await listEnvironments(token, mine ? undefined : owner);
-  if (!list.ok) {
-    if (list.kind === "unauthorized") redirect("/login?from=expired");
-    if (list.kind === "notFound") notFound();
-    throw new Error(list.message);
-  }
-
+  //
   // The Snapshots section: a volume whose Environment is gone and whose snapshots are not. The
   // snapshots outlive the object and are the only thing keeping the volume, so this is the way
   // back to them — without it, deleting an environment made its own history unreachable.
   // Same `mine` rule as the environment list above: aggregate on the caller's own page, one
   // label on a team's.
-  const volumes = await listVolumes(token, "environment", mine ? undefined : owner);
+  const mine = owner === session.user.username;
+  const [list, volumes] = await Promise.all([
+    listEnvironments(token, mine ? undefined : owner),
+    listVolumes(token, "environment", mine ? undefined : owner),
+  ]);
+  if (!list.ok) {
+    if (list.kind === "unauthorized") redirect("/login?from=expired");
+    if (list.kind === "notFound") notFound();
+    throw new Error(list.message);
+  }
   const rows = volumes.ok ? volumes.value : [];
 
   // Two maps off the ONE listing, both keyed by volume id, exactly as the workspaces page does
