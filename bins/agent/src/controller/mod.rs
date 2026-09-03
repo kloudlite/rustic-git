@@ -63,7 +63,14 @@ const RETRY: Duration = Duration::from_secs(60);
 /// a paused reconcile only waits.
 pub(crate) async fn i_am_dead(ctx: &Ctx) -> bool {
     match kube::Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&ctx.node).await {
-        Ok(n) => crate::peer::node_is_dead(n.as_ref(), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
+        // Absent is not dead either: a wrong `$NODE_NAME` would otherwise freeze every reconcile
+        // on a live node with nothing but a silent requeue. The sweep sees the whole listing and is
+        // the authority on a node that is not there.
+        Ok(None) => {
+            tracing::warn!(node = %ctx.node, "reconcile: my own Node object is missing; assuming alive");
+            false
+        }
+        Ok(Some(n)) => crate::peer::node_is_dead(Some(&n), crate::peer::node_dead_secs(), k8s_openapi::jiff::Timestamp::now()),
         Err(e) => {
             tracing::warn!(node = %ctx.node, error = %e, "reconcile: reading my own Node; assuming alive");
             false

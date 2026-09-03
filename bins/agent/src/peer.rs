@@ -3007,7 +3007,7 @@ fi
     /// doubles per consecutive miss, caps at the ordinary tick, and a single clean pass resets it.
     #[test]
     fn consecutive_misses_back_off_to_the_ordinary_tick_and_one_clean_pass_resets() {
-        std::env::set_var("WS_REPLICA_SECS", "300");
+        let cap = replica_interval();
         let wake = tokio::sync::Notify::new();
         let mut misses = 0;
         let delays: Vec<Duration> = (0..6)
@@ -3024,8 +3024,8 @@ fi
                 Duration::from_secs(120),
                 Duration::from_secs(240),
                 // Capped: 480 s would be longer than the beat it is meant to accelerate.
-                Duration::from_secs(300),
-                Duration::from_secs(300),
+                cap,
+                cap,
             ]
         );
 
