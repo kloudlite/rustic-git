@@ -32,8 +32,18 @@ pub struct Claims {
     /// is refused by rule rather than by the accident of lacking `name`.
     #[serde(default)]
     pub typ: String,
+    /// Platform-wide administrator. A CLAIM, never an ownership: it says who may act, never who
+    /// owns anything, and it is minted only at sign-in from the directory's own list. Omitted when
+    /// false so an ordinary token carries no field that only ever says no, and so every token
+    /// minted before this existed keeps verifying.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub superadmin: bool,
     pub iat: u64,
     pub exp: u64,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A gateway-bound SSH session: long enough to complete a handshake, short enough that
@@ -97,13 +107,22 @@ impl Jwt {
         })
     }
 
+    /// An ordinary session. Kept at this exact signature because every existing caller uses it and
+    /// an admin flag is not something a caller should be able to pass by accident.
     pub fn mint(&self, email: &str, name: &str, username: Option<&str>) -> Result<String> {
+        self.mint_admin(email, name, username, false)
+    }
+
+    /// The same, carrying the platform-administrator claim. One caller: the sign-in path, which is
+    /// the only place that has asked the directory.
+    pub fn mint_admin(&self, email: &str, name: &str, username: Option<&str>, superadmin: bool) -> Result<String> {
         let now = now()?;
         let claims = Claims {
             sub: email.trim().to_lowercase(),
             name: name.to_string(),
             username: username.map(str::to_string),
             typ: "session".into(),
+            superadmin,
             iat: now,
             exp: now + TTL_SECS,
         };
@@ -223,6 +242,9 @@ impl Jwt {
                 name: c.name,
                 username: c.username,
                 typ: c.typ,
+                // A CLI token never carries the claim: `kl` is a workspace tool, not an admin
+                // console, and a 30-day credential is the wrong life for one.
+                superadmin: false,
                 iat: c.iat,
                 exp: c.exp,
             },
@@ -268,6 +290,7 @@ mod tests {
             name: "A".into(),
             username: None,
             typ: "session".into(),
+            superadmin: false,
             iat: 0,
             exp: 1,
         };
@@ -347,5 +370,27 @@ mod tests {
         let (claims2, jti2) = j.verify_any_user(&j.mint("a@b.c", "A", Some("a")).unwrap()).unwrap();
         assert_eq!(claims2.typ, "session");
         assert!(jti2.is_none());
+    }
+
+    /// The claim rides in the session token, so `/v1` and the web both read one fact minted in one
+    /// place. It is OMITTED when false: an ordinary token must not carry a field that only ever
+    /// says no, and an old token without it must verify as an ordinary user rather than fail.
+    #[test]
+    fn the_superadmin_claim_round_trips_and_defaults_off() {
+        let j = jwt();
+        let plain = j.mint("a@b.c", "A", Some("a")).unwrap();
+        assert!(!j.verify(&plain).unwrap().superadmin);
+        let payload = plain.split('.').nth(1).unwrap();
+        let raw = String::from_utf8(
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload).unwrap(),
+        )
+        .unwrap();
+        assert!(!raw.contains("superadmin"), "{raw}");
+
+        let admin = j.mint_admin("a@b.c", "A", Some("a"), true).unwrap();
+        assert!(j.verify(&admin).unwrap().superadmin);
+        // A CLI token never carries it: `kl` is not an admin console.
+        let (c, _) = j.verify_any_user(&j.mint_cli("a@b.c", "A", Some("a")).unwrap().0).unwrap();
+        assert!(!c.superadmin);
     }
 }

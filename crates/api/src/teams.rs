@@ -106,8 +106,12 @@ pub(crate) async fn upsert_user(
             // The token is minted here and nowhere else, so the signing key lives
             // in one process. The web app receives it and presents it on every
             // later call rather than re-asserting who the user is.
+            // Asked once, at the mint. The token is the only thing every later caller reads, so a
+            // grant or a revocation takes effect on the next sign-in and nowhere else — which is
+            // also its whole revocation story: the session's 12 h life is the window.
+            let admin = db.is_superadmin(&u.email).await.unwrap_or(false);
             let token = match api.jwt.as_deref() {
-                Some(j) => match j.mint(&u.email, &u.name, u.username.as_deref()) {
+                Some(j) => match j.mint_admin(&u.email, &u.name, u.username.as_deref(), admin) {
                     Ok(t) => Some(t),
                     Err(e) => {
                         tracing::error!(error = %e, "minting token");
@@ -151,8 +155,9 @@ pub(crate) async fn claim_username(
         Ok(Some(u)) => {
             // A new token: the old one says they have no handle, and every caller
             // reads that claim rather than asking again.
+            let admin = db.is_superadmin(&u.email).await.unwrap_or(false);
             let token = match api.jwt.as_deref() {
-                Some(j) => match j.mint(&u.email, &u.name, u.username.as_deref()) {
+                Some(j) => match j.mint_admin(&u.email, &u.name, u.username.as_deref(), admin) {
                     Ok(t) => Some(t),
                     Err(e) => {
                         tracing::error!(error = %e, "minting token");
@@ -897,6 +902,74 @@ pub(crate) async fn redeem_signin_link(
         Ok(Some(email)) => axum::Json(serde_json::json!({ "email": email })).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "that link is no longer valid").into_response(),
         Err(e) => db_err("redeem sign-in link", &id, e),
+    }
+}
+
+// ── platform administrators ─────────────────────────────────────────────────
+
+/// `POST`/`DELETE /api/admin/superadmins/{user}` — the list manages itself.
+///
+/// Superadmin-only, and it reads the CALLER's row rather than their token: this is the one surface
+/// where a 12-hour-old claim is not good enough, because a revoked administrator holding a valid
+/// token must not be able to grant themselves back.
+async fn require_superadmin(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
+    let caller = caller(api, headers)?;
+    let db = directory(api)?;
+    match db.is_superadmin(&caller).await {
+        Ok(true) => Ok(caller),
+        Ok(false) => Err((StatusCode::FORBIDDEN, "admin only").into_response()),
+        Err(e) => Err(db_err("check admin", &caller, e)),
+    }
+}
+
+pub(crate) async fn add_superadmin(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(user): axum::extract::Path<String>,
+) -> Response {
+    let by = match require_superadmin(&api, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.add_superadmin(&user, &by).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => db_err("grant admin", &user, e),
+    }
+}
+
+pub(crate) async fn remove_superadmin(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(user): axum::extract::Path<String>,
+) -> Response {
+    if let Err(r) = require_superadmin(&api, &headers).await {
+        return r;
+    }
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.remove_superadmin(&user).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => db_err("revoke admin", &user, e),
+    }
+}
+
+pub(crate) async fn list_superadmins(State(api): State<Arc<Api>>, headers: axum::http::HeaderMap) -> Response {
+    if let Err(r) = require_superadmin(&api, &headers).await {
+        return r;
+    }
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.superadmins().await {
+        Ok(rows) => axum::Json(rows).into_response(),
+        Err(e) => db_err("list admins", "", e),
     }
 }
 

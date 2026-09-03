@@ -66,6 +66,21 @@ pub struct User {
     pub last_seen_at: DateTime,
 }
 
+/// A platform administrator. One row per person, keyed by email — the same identity the session
+/// token's `sub` carries, so the mint is a single lookup.
+///
+/// A collection rather than an env var because the env var could only ever be a bootstrap: it is
+/// read by one process at boot, cannot be changed without a roll, and says nothing about who
+/// granted it. `addedBy` is the audit trail the env var never had.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SuperAdmin {
+    #[serde(rename = "_id")]
+    pub user: String,
+    pub added_at: DateTime,
+    pub added_by: String,
+}
+
 /// A claimed handle. Usernames and team slugs are the SAME namespace — both become
 /// `/{handle}` in every URL and clone address — so they are reserved in one
 /// collection. Uniqueness across both kinds is then a property of the database,
@@ -317,6 +332,7 @@ pub struct Directory {
     invites: Collection<Invite>,
     signins: Collection<SignInLink>,
     cli_logins: Collection<CliLogin>,
+    superadmins: Collection<SuperAdmin>,
 }
 
 /// A magic sign-in link, keyed by the HASH of its token — same shape as an invitation, for
@@ -378,6 +394,7 @@ impl Directory {
             invites: db.collection("invites"),
             signins: db.collection("signins"),
             cli_logins: db.collection("cli_logins"),
+            superadmins: db.collection("superadmins"),
         };
         dir.ensure_indexes().await?;
         match dir.lowercase_signing_fingerprints().await {
@@ -838,6 +855,65 @@ impl Directory {
             .await
             .map(|_| ())
             .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    // ── superadmins ─────────────────────────────────────────────────────────
+
+    pub async fn is_superadmin(&self, user: &str) -> Result<bool> {
+        Ok(self
+            .superadmins
+            .find_one(doc! { "_id": user.trim().to_lowercase() })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?
+            .is_some())
+    }
+
+    pub async fn superadmins(&self) -> Result<Vec<SuperAdmin>> {
+        use futures::TryStreamExt;
+        self.superadmins
+            .find(doc! {})
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Idempotent: granting twice is not an error, and it must not rewrite who granted it first.
+    pub async fn add_superadmin(&self, user: &str, by: &str) -> Result<()> {
+        let user = user.trim().to_lowercase();
+        let row = SuperAdmin { user: user.clone(), added_at: DateTime::now(), added_by: by.to_string() };
+        self.superadmins
+            .update_one(
+                doc! { "_id": &user },
+                doc! { "$setOnInsert": mongodb::bson::to_document(&row).map_err(|e| err(format!("bson: {e}")))? },
+            )
+            .upsert(true)
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn remove_superadmin(&self, user: &str) -> Result<()> {
+        self.superadmins
+            .delete_one(doc! { "_id": user.trim().to_lowercase() })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(())
+    }
+
+    /// The `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
+    /// is a way to get the first administrator into an empty cluster, not the list itself, so
+    /// removing an email from it must not silently revoke someone the list has since granted.
+    pub async fn ensure_superadmins(&self, emails: &[String]) -> Result<usize> {
+        let mut n = 0;
+        for e in emails {
+            if !self.is_superadmin(e).await? {
+                self.add_superadmin(e, "bootstrap").await?;
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 }
 

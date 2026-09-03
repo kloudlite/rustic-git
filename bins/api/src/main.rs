@@ -97,6 +97,21 @@ async fn run() -> Result<()> {
             let db = env("RUSTIC_GIT_MONGO_DB", "kloudlite");
             let d = rustic_git_pulls::directory::Directory::connect(&uri, &db).await?;
             tracing::info!(db = %db, "directory in mongo db");
+            // `RUSTIC_GIT_WORKSPACES_ADMINS` is a BOOTSTRAP now, not the list: it seeds the
+            // directory once so an empty cluster has a first administrator, and after that the
+            // list is managed through /api/admin/superadmins. Additive only — dropping an address
+            // from the env must not silently revoke someone.
+            let seed: Vec<String> = std::env::var("RUSTIC_GIT_WORKSPACES_ADMINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            match d.ensure_superadmins(&seed).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(added = n, "superadmins seeded from RUSTIC_GIT_WORKSPACES_ADMINS"),
+                Err(e) => tracing::warn!(error = %e, "superadmin bootstrap skipped"),
+            }
             Some(Arc::new(d))
         }
         _ => {

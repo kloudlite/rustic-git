@@ -160,6 +160,11 @@ pub async fn serve(
         // Team routes sit under /v1/, which `api_route` never parses, so they can
         // never collide with a repo path. Registered before the fallback because
         // the fallback is GET-only and would swallow the POST as a 405.
+        .route("/api/admin/superadmins", axum::routing::get(list_superadmins))
+        .route(
+            "/api/admin/superadmins/{user}",
+            axum::routing::post(add_superadmin).delete(remove_superadmin),
+        )
         .route("/v1/teams", axum::routing::post(create_team).get(list_teams))
         // Anonymous on purpose: the public face of a team. The handler itself refuses a team
         // that has not opted in, so registering it without `caller` is not a hole.
