@@ -653,8 +653,8 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
 /// `WORKTREE_EXISTS` guard converges on right below this call — so the caller needs no branch for
 /// "just migrated" vs. "always was commit-model-native".
 ///
-/// Owned by the PARENT (Workspace/Environment), not the Volume, unlike a push (`api.rs`):
-/// a baseline only ever exists because a pre-model volume was migrated under one specific parent,
+/// Owned by the PARENT (Workspace/Environment), not the Volume, unlike a push (`api.rs`): a
+/// baseline only ever exists because a pre-model volume was migrated under one specific parent,
 /// and a Volume that only ever had its baseline is not worth keeping once that parent is gone — so
 /// the baseline dies with the parent rather than outliving it as an orphan CR for a workspace that
 /// no longer exists (13 were found on the cluster that way before this had an owner at all). A

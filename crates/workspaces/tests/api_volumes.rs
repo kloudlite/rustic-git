@@ -288,6 +288,60 @@ async fn deleting_a_snapshot_removes_its_record_and_keeps_the_volume() {
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the record only: {deletes:?}");
 }
 
+/// A shared clone or a restore-to-new puts a worktree owned by ANOTHER person on the same volume,
+/// so the running-parent checks are cluster-wide, not owner-scoped: an owner-scoped listing could
+/// not see it, and both deletes would have taken bytes out from under their running pod.
+#[tokio::test]
+async fn a_foreign_worktree_on_the_volume_refuses_both_deletes() {
+    let mut foreign = ws_obj("ws-clone", "alice", "clone");
+    foreign["status"]["volumeRef"] = json!("ws-1");
+    foreign["status"]["head"] = json!("ws-1-a");
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z")])),
+        kget(format!("{API}/workspaces"), ws_list(vec![foreign])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409, "another owner's running base");
+    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1").await, 409, "another owner's live worktree");
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
+}
+
+/// `/history` and `/refs` show SNAPSHOTS only. A sync point is the agent's replication state — the
+/// next beat deletes it — and a migration baseline is nobody's push; offering either as history
+/// offers a restore onto a record that can vanish.
+#[tokio::test]
+async fn history_and_refs_skip_sync_points_and_baselines() {
+    let mut baseline = push("ws-1-base", "ws-1", "karthik", "2026-08-27T08:00:00Z");
+    baseline["spec"]["message"] = json!("migration baseline");
+    let s = server(vec![
+        kget(
+            SNAPS,
+            snap_list(vec![
+                sync_point("sync-ws-1", "ws-1", "karthik", "2026-08-27T12:00:00Z"),
+                push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z"),
+                baseline,
+            ]),
+        ),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-1/history").await;
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["ws-1-a"], "the push only: {body}");
+
+    // The sync point is the NEWEST record, so a tip that did not filter would name it.
+    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-1/refs").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["main"], "ws-1-a", "refs never name a sync point: {body}");
+}
+
 /// The last snapshot of a volume nothing owns any more takes the volume with it — that is what
 /// detaching it (`cleanup_parent`) kept it alive FOR, and leaving it would leak a subvolume
 /// nothing can ever reach again.

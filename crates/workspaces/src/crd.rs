@@ -426,8 +426,16 @@ impl Snapshot {
         !self.spec.transient && !self.is_legacy_baseline()
     }
 
+    // ponytail: a baseline is recognised by SHAPE — a root record of the volume's own worktree
+    // carrying exactly that message — because the records are already stored and a rewrite job is
+    // more machinery than a predicate. Ceiling: a person's very first push, on the volume's own
+    // worktree, whose message is exactly "migration baseline", reads as one and would be deleted
+    // with its parent. Upgrade path: a `baseline: true` field on new records, and this shape match
+    // kept only for the pre-field ones.
     fn is_legacy_baseline(&self) -> bool {
-        self.spec.parent.is_empty() && self.spec.message.as_deref() == Some(LEGACY_BASELINE_MESSAGE)
+        self.spec.parent.is_empty()
+            && self.spec.worktree == self.spec.volume
+            && self.spec.message.as_deref() == Some(LEGACY_BASELINE_MESSAGE)
     }
 }
 

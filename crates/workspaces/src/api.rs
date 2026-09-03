@@ -2088,6 +2088,36 @@ async fn live_parents(s: &ApiState, owners: &[String]) -> Option<BTreeMap<String
     Some(live)
 }
 
+/// Every live Workspace/Environment ON `volume`, whoever owns it — the check both deletes make
+/// before they take anything away.
+///
+/// UNLABELLED, unlike `live_parents`: a shared clone or a restore-to-new puts a worktree owned by a
+/// DIFFERENT owner on the same volume (`CloneOf`), and an owner-scoped listing cannot see it. That
+/// blind spot let a delete take another owner's running base out from under their pod, so this
+/// listing is cluster-wide and matches on `status.volumeRef` (the parent's own name for a parent
+/// that has not recorded one yet), exactly as the agent's own retention does.
+///
+/// `None` means the cluster could not be asked — "cannot prove nothing is running", which both
+/// callers turn into a refusal rather than a delete.
+async fn parents_of_volume(s: &ApiState, volume: &str) -> Option<Vec<Parent>> {
+    let c = s.kube.as_ref()?;
+    let on_volume = |vref: Option<String>, name: String| vref.unwrap_or(name) == volume;
+    let mut out = vec![];
+    for w in Api::<crd::Workspace>::all(c.clone()).list(&ListParams::default()).await.ok()?.items {
+        let st = w.status.as_ref();
+        if on_volume(st.and_then(|s| s.volume_ref.clone()), w.name_any()) {
+            out.push(Parent { kind: "workspace".into(), display: w.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
+        }
+    }
+    for e in Api::<crd::Environment>::all(c.clone()).list(&ListParams::default()).await.ok()?.items {
+        let st = e.status.as_ref();
+        if on_volume(st.and_then(|s| s.volume_ref.clone()), e.name_any()) {
+            out.push(Parent { kind: "environment".into(), display: e.spec.name.clone(), head: st.and_then(|s| s.head.clone()) });
+        }
+    }
+    Some(out)
+}
+
 /// What a volume is, when nothing named it: no live parent, and a record written before provenance
 /// existed (or backfilled). The ID PREFIX is authoritative — `rid("ws")` and `rid("env")` mint
 /// every id there is, so an `env-` volume is an environment, full stop. Defaulting the whole class
@@ -2220,12 +2250,10 @@ async fn delete_volume(
     // The ownership check IS the snapshot listing: a volume with no `Snapshot` under a label the
     // caller may read is indistinguishable from one that does not exist.
     commit_model_snapshots(&s, &caller_id, &name).await?;
-    let owners = caller_owners(&s, &caller_id).await;
     // A cluster that could not be listed is "cannot prove nothing is running" — the opposite bias
     // to the listing's, and the right one for a delete.
-    let live = live_parents(&s, &owners).await.ok_or_else(kube_unavailable)?;
-    if live.contains_key(&name) {
-        return Err((StatusCode::CONFLICT, "this volume still belongs to a workspace or environment").into_response());
+    if !parents_of_volume(&s, &name).await.ok_or_else(kube_unavailable)?.is_empty() {
+        return Err((StatusCode::CONFLICT, "the volume still has a workspace or environment").into_response());
     }
     delete_volume_cr(&s, &name).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -2267,11 +2295,10 @@ async fn delete_snapshot(
     if target.spec.transient {
         return Err((StatusCode::CONFLICT, "a sync point cannot be deleted by hand").into_response());
     }
-    let owners = caller_owners(&s, &caller_id).await;
-    let live = live_parents(&s, &owners).await.ok_or_else(kube_unavailable)?;
-    // Any live parent's head, not just this volume's: a restored parent holds a second worktree on
-    // the SAME volume, and its head is just as much a base as the volume's own parent's.
-    if live.values().any(|p| p.head.as_deref() == Some(snapshot.as_str())) {
+    let live = parents_of_volume(&s, &name).await.ok_or_else(kube_unavailable)?;
+    // EVERY parent on the volume, not just the caller's: a shared clone's worktree belongs to
+    // another owner, and its head is just as much a running base as this owner's own.
+    if live.iter().any(|p| p.head.as_deref() == Some(snapshot.as_str())) {
         return Err((StatusCode::CONFLICT, "this snapshot is the base of a running worktree").into_response());
     }
     let api: Api<crd::Snapshot> = Api::all(kube(&s)?.clone());
@@ -2290,7 +2317,7 @@ async fn delete_snapshot(
             && sn.is_snapshot()
             && sn.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
     });
-    if !remaining && !live.contains_key(&name) {
+    if !remaining && live.is_empty() {
         delete_volume_cr(&s, &name).await?;
     }
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -2363,9 +2390,13 @@ async fn find_commit_model_snapshot_for_restore(s: &ApiState, caller_id: &str, s
     Ok(snap)
 }
 
+/// Every row is a SNAPSHOT. A sync point is the agent's replication state, not something the
+/// person took, and the migration baseline is not either — showing them as history offers a
+/// restore onto a record that can vanish on the next sync beat.
 fn commit_model_history_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {
     items
         .iter()
+        .filter(|sn| sn.is_snapshot())
         .map(|sn| {
             let phase = sn.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending);
             serde_json::json!({
@@ -2406,7 +2437,9 @@ async fn volume_refs(
     let caller_id = caller(&s, &headers).await?;
     // F6: never 404 here — a zero-commit volume is `{"main": null}`.
     let items = commit_model_snapshots_maybe_empty(&s, &caller_id, &name).await?;
-    let tip = items.first().map(|sn| sn.name_any());
+    // Never a sync point: `main` is what a clone or a restore grafts onto, and retention deletes
+    // every sync point but the newest.
+    let tip = items.iter().find(|sn| sn.is_snapshot()).map(|sn| sn.name_any());
     Ok(Json(serde_json::json!({"main": tip})).into_response())
 }
 

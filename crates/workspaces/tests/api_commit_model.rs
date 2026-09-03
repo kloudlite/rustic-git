@@ -61,7 +61,7 @@ fn snapshot_with_state(name: &str, volume: &str, owner: &str, worktree: &str, pa
     let mut v = json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name},
-        "spec": {"volume": volume, "owner": owner, "worktree": worktree, "parent": parent, "pinned": false},
+        "spec": {"volume": volume, "owner": owner, "worktree": worktree, "parent": parent},
         "status": {"phase": phase},
     });
     if let Some(state) = state {

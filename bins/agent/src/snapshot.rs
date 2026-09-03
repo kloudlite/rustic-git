@@ -260,8 +260,8 @@ async fn seeded_from_cuts(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collectio
 /// `pull_volume` and the GC sweep both follow — retention is a nice-to-have, a wrongly deleted
 /// cut is not recoverable.
 ///
-/// ponytail: this ignores `heads` and `spec.pinned` — a sync point is never a chain member and no
-/// HEAD can name one. It does consult `seeded_from_cuts`, because an interrupted clone DOES name a
+/// ponytail: this ignores worktree heads — a sync point is never a chain member and no HEAD can
+/// name one. It does consult `seeded_from_cuts`, because an interrupted clone DOES name a
 /// sync point by id (F6). Any further verb that names one belongs in that same set.
 async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
