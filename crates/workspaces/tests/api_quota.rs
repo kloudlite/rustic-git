@@ -291,6 +291,19 @@ async fn a_plain_member_may_not_open_a_team_request() {
     assert_eq!(resp.text().await.unwrap(), "only a team admin can request a team quota");
 }
 
+/// A non-member gets 404, not 403: whether a team exists is not an outsider's to learn, the same
+/// rule every owner-scoped route follows.
+#[tokio::test]
+async fn a_non_member_cannot_tell_the_team_exists() {
+    let s = server(true, vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/quota-requests", s.base))
+        .bearer_auth(token(&s.jwt, "mallory"))
+        .json(&json!({"owner": "acme", "requested": {"workspaces": 40}, "reason": "please"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
 /// One pending request per owner. A request with no status yet counts as pending — /v1 creates the
 /// object and stamps status separately, and that window must not read as "decided".
 #[tokio::test]
