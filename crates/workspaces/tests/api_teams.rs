@@ -63,8 +63,6 @@ async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
         .put_region(&rustic_git_workspaces::model::Region {
             id: "centralindia".into(),
             name: "centralindia".into(),
-            storage_account: "acct".into(),
-            blob_container: "wslayers".into(),
             status: "active".into(),
         })
         .await

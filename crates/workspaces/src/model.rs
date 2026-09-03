@@ -5,12 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 
+/// A region a workspace may run in. `status` is `active` or `inactive`: re-registering is the only
+/// way to retire one, and a retired region must stop being offered while its records stay readable.
+///
+/// No storage account and no blob container: snapshot bytes are btrfs subvolumes replicated
+/// between agents and have never touched an object store since the durable-snapshots cutover.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Region {
     pub id: String,
     pub name: String,
-    pub storage_account: String,
-    pub blob_container: String,
     pub status: String,
 }
 

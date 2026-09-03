@@ -200,8 +200,6 @@ async fn region(store: &MemStore, id: &str) {
         .put_region(&rustic_git_workspaces::model::Region {
             id: id.into(),
             name: id.into(),
-            storage_account: "acct".into(),
-            blob_container: "wslayers".into(),
             status: "active".into(),
         })
         .await
@@ -624,7 +622,7 @@ async fn region_create_requires_admin() {
     let resp = client
         .post(format!("{}/v1/regions", s.base))
         .bearer_auth(&non_admin)
-        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
+        .json(&json!({"id": "centralindia", "name": "Central India"}))
         .send()
         .await
         .unwrap();
@@ -634,11 +632,30 @@ async fn region_create_requires_admin() {
     let resp = client
         .post(format!("{}/v1/regions", s.base))
         .bearer_auth(&admin)
-        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
+        .json(&json!({"id": "centralindia", "name": "Central India"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201);
+}
+
+/// Snapshot bytes have had no object store since the durable-snapshots cutover, so the storage
+/// account and container are dead weight — and publishing them to every signed-in caller is a free
+/// map of our infrastructure.
+#[tokio::test]
+async fn listing_regions_never_names_a_storage_account() {
+    let s = server(vec![]).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/regions", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let row = &body.as_array().unwrap()[0];
+    assert_eq!(row["id"], "centralindia");
+    assert!(row.get("storage_account").is_none(), "no infrastructure topology: {body}");
+    assert!(row.get("blob_container").is_none(), "no infrastructure topology: {body}");
 }
 
 /// Same rule as `create_ws`, on the environment side.
@@ -1228,8 +1245,6 @@ async fn an_unknown_or_inactive_region_is_refused_on_create() {
     let mut inactive = rustic_git_workspaces::model::Region {
         id: "westeurope".into(),
         name: "westeurope".into(),
-        storage_account: "acct".into(),
-        blob_container: "wslayers".into(),
         status: "inactive".into(),
     };
     s.store.put_region(&inactive).await.unwrap();

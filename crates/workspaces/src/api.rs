@@ -237,8 +237,6 @@ fn store_err(e: crate::store::StoreErr) -> Response {
 struct NewRegion {
     id: String,
     name: String,
-    storage_account: String,
-    blob_container: String,
     /// `active` or `inactive`. Re-registering a region is the only way to retire one — there is
     /// no delete — and a retired region must stop being offered to new workspaces while its
     /// existing records stay readable.
@@ -263,8 +261,6 @@ async fn create_region(
     let r = Region {
         id: body.id,
         name: body.name,
-        storage_account: body.storage_account,
-        blob_container: body.blob_container,
         status: if body.status == "inactive" { "inactive".into() } else { "active".into() },
     };
     s.store.put_region(&r).await.map_err(store_err)?;

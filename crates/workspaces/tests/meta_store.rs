@@ -9,8 +9,6 @@ fn region(id: &str, name: &str) -> Region {
     Region {
         id: id.into(),
         name: name.into(),
-        storage_account: "acct".into(),
-        blob_container: "blobs".into(),
         status: "active".into(),
     }
 }
@@ -26,8 +24,7 @@ async fn contract(store: &dyn MetaStore) {
     assert_eq!(all[0].name, "one-renamed", "the later put wins");
     let (got, want) = (&all[1], region("r2", "two"));
     assert!(
-        got.name == want.name && got.storage_account == want.storage_account && got.blob_container == want.blob_container
-            && got.status == want.status,
+        got.name == want.name && got.status == want.status,
         "every field round-trips"
     );
 }

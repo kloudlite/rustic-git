@@ -298,7 +298,7 @@ REGION_ID="e2e-$RANDOM"
 log "registering region $REGION_ID"
 REGION_JSON=$(curl -fsS -X POST "$BASE/v1/regions" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$REGION_ID\",\"name\":\"E2E Region\",\"storage_account\":\"$AZURE_ACCOUNT\",\"blob_container\":\"$AZURE_CONTAINER\"}")
+  -d "{\"id\":\"$REGION_ID\",\"name\":\"E2E Region\"}")
 echo "$REGION_JSON" | grep -q "\"$REGION_ID\"" || fail "region create did not echo the region: $REGION_JSON"
 
 # The controller shards on `spec.nodeName`, so it needs to know which node it IS. This must be the
