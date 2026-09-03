@@ -39,10 +39,9 @@ test("a third segment under environments is the environment itself, with its own
   expect(place("/team/environments/env-1/snapshots", me)).toEqual({ kind: "env", owner: "team", env: "env-1" });
 });
 
-// `/admin` hangs off the root, not off a namespace: without this the chrome reads `admin` as an
-// owner handle and shows the wrong crumb on every admin page. (`admin` is already a reserved
-// handle server-side, so nobody's namespace can collide with it.)
-test("the admin area is a root page, not an owner", () => {
-  expect(place("/admin", "karthik")).toEqual({ kind: "org", owner: "karthik" });
-  expect(place("/admin/usage", "karthik")).toEqual({ kind: "org", owner: "karthik" });
+// `/superadmin` hangs off the root, not off a namespace: without this the chrome reads
+// `superadmin` as an owner handle and shows the wrong crumb on every superadmin page.
+test("the superadmin area is a root page, not an owner", () => {
+  expect(place("/superadmin", "karthik")).toEqual({ kind: "org", owner: "karthik" });
+  expect(place("/superadmin/usage", "karthik")).toEqual({ kind: "org", owner: "karthik" });
 });

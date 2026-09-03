@@ -20,7 +20,7 @@ function dims(requested: Partial<Record<QuotaDim, number>>) {
 }
 
 export default async function Page() {
-  const { token } = await requireSuperadmin("/admin");
+  const { token } = await requireSuperadmin("/superadmin");
   const r = await api.adminListQuotaRequests(token);
   const rows = r.ok ? r.value : [];
   const pending = rows.filter((row) => row.state === "pending");

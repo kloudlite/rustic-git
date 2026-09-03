@@ -9,7 +9,7 @@ export const metadata: Metadata = { title: "Regions" };
 
 export default async function Page() {
   // Still `/v1/regions`, unmoved — only the WRITE lives on the admin host now.
-  const { token } = await requireSuperadmin("/admin/regions");
+  const { token } = await requireSuperadmin("/superadmin/regions");
   const r = await api.listRegions(token);
   const regions = r.ok ? r.value : [];
 

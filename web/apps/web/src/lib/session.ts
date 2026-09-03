@@ -13,8 +13,8 @@ export type Session = {
     username?: string;
     /** Kept for the pages still reading it; the same value as `username`. */
     owner: string;
-    /** The `superadmin` JWT claim — gates whether `/admin` exists for this person. Not an
-     *  access decision: /v1 re-checks the claim on every call the admin area makes. */
+    /** The `superadmin` JWT claim — gates whether `/superadmin` exists for this person. Not an
+     *  access decision: /v1 re-checks the claim on every call the superadmin area makes. */
     superadmin: boolean;
   };
 } | null;
@@ -72,11 +72,11 @@ export async function requireToken(next: string): Promise<{ session: NonNullable
   return { session, token };
 }
 
-/** Identity, a token, and the admin claim — or 404 for anyone without it.
+/** Identity, a token, and the superadmin claim — or 404 for anyone without it.
  *
  *  Still not an access decision: /v1 re-checks the claim on every call this area makes. This only
- *  decides whether the page exists for this person, and 404 rather than 403 because whether an
- *  admin area is here is not a non-admin's to learn. */
+ *  decides whether the page exists for this person, and 404 rather than 403 because whether a
+ *  superadmin area is here is not a non-admin's to learn. */
 export async function requireSuperadmin(next: string) {
   const { session, token } = await requireToken(next);
   if (!session.user.superadmin) notFound();

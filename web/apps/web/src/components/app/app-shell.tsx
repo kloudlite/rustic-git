@@ -79,7 +79,7 @@ export async function AppShell({
             <div className="flex-1" />
 
             <GlobalSearch me={me} owners={owners} />
-            <UserMenu name={session.user.name} email={session.user.email} />
+            <UserMenu name={session.user.name} email={session.user.email} superadmin={session.user.superadmin} />
           </div>
 
           <ShellTabs

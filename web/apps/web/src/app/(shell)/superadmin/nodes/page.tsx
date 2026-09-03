@@ -5,7 +5,7 @@ import * as api from "@/lib/api";
 export const metadata: Metadata = { title: "Nodes" };
 
 export default async function Page() {
-  const { token } = await requireSuperadmin("/admin/nodes");
+  const { token } = await requireSuperadmin("/superadmin/nodes");
   const r = await api.adminListNodes(token);
   const nodes = r.ok ? r.value : [];
 

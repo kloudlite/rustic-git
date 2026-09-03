@@ -169,9 +169,9 @@ at all, so there is no code path in the ordinary process that could leak one. `r
 runs, and region creation, quota decisions and `/api/admin/superadmins` all live only behind it.
 RBAC mirrors the split: `api-rbac.yaml` gives the `rustic-git-admin` ServiceAccount write on
 `Quota`/`QuotaRequest`/`Region` and keeps the ordinary `rustic-git-api` ServiceAccount to reads,
-so a bug that mounted the wrong router would still 403 at the Kubernetes layer. The web's `/admin`
-area calls this second process at `RUSTIC_GIT_ADMIN_API_URL`, never the ordinary API base — mixing
-them up would silently point an admin page at `/v1` instead.
+so a bug that mounted the wrong router would still 403 at the Kubernetes layer. The web's
+`/superadmin` area calls this second process at `RUSTIC_GIT_ADMIN_API_URL`, never the ordinary API
+base — mixing them up would silently point an admin page at `/v1` instead.
 
 There is no job queue, no lease,
 no agent registration and no long poll: `/v1` writes ONE unplaced object and establishes no facts

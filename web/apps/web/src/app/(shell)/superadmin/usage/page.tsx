@@ -6,7 +6,7 @@ import { QuotaBar } from "@/components/app/quota-bar";
 export const metadata: Metadata = { title: "Usage" };
 
 export default async function Page() {
-  const { token } = await requireSuperadmin("/admin/usage");
+  const { token } = await requireSuperadmin("/superadmin/usage");
   const r = await api.adminUsage(token);
   const rows = r.ok ? r.value : [];
 

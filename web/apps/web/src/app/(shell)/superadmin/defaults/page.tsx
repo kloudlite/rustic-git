@@ -30,7 +30,7 @@ function DefaultForm({ owner, title, limit }: { owner: string; title: string; li
 }
 
 export default async function Page() {
-  const { token } = await requireSuperadmin("/admin/defaults");
+  const { token } = await requireSuperadmin("/superadmin/defaults");
   const [user, team] = await Promise.all([
     api.getQuota("default-user", token),
     api.getQuota("default-team", token),

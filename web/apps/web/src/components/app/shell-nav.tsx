@@ -16,10 +16,11 @@ export type RepoTabSpec = { suffix: string; label: string; icon: React.ReactNode
 
 /** Pages that hang off the root rather than off an owner. A URL starting with one
  *  of these names nobody's namespace, so the chrome shows the person's own. */
-// ponytail: a person whose handle is one of these words would see the wrong crumb; `settings` and
-// `admin` are already refused as handles (the latter in RESERVED, crates/pulls/src/directory/mod.rs),
-// the other two are not
-const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite", "admin"];
+// ponytail: a person whose handle is one of these words would see the wrong crumb; `settings`,
+// `invite` and `admin` are already refused as handles (RESERVED, crates/pulls/src/directory/mod.rs
+// — `admin`, not `superadmin`, since the API paths this refusal guards are still `/admin/*`),
+// `new-repo` and `new-team` are not
+const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite", "superadmin"];
 
 /** Where the URL is, in the terms the chrome cares about.
  *
@@ -43,8 +44,9 @@ const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite", "admin"];
 export function place(pathname: string, me: string) {
   const parts = pathname.split("/").filter(Boolean);
   if (parts[0] && ROOT_PAGES.includes(parts[0])) {
-    // A root page owns no namespace at ANY depth — `/admin/usage` is not a repo named "usage" in
-    // nobody's namespace, it's a subpage of the admin area itself, so nothing past parts[0] is read.
+    // A root page owns no namespace at ANY depth — `/superadmin/usage` is not a repo named "usage"
+    // in nobody's namespace, it's a subpage of the superadmin area itself, so nothing past parts[0]
+    // is read.
     return { kind: "org" as const, owner: me };
   }
   const owner = parts[0] ?? me;

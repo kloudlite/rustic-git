@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { LogOut, Settings } from "lucide-react";
+import { LogOut, Settings, ShieldCheck } from "lucide-react";
 import { Initials } from "@/components/app/initials";
 import {
   DropdownMenu,
@@ -15,7 +15,15 @@ import { signOutAction } from "@/app/(auth)/actions";
 
 /** Identity, the way to your settings, and sign-out live behind the avatar. Theme
  *  is a preference, and preferences have a page — it lives in Settings, not here. */
-export function UserMenu({ name, email }: { name: string; email: string }) {
+export function UserMenu({
+  name,
+  email,
+  superadmin,
+}: {
+  name: string;
+  email: string;
+  superadmin: boolean;
+}) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -36,6 +44,12 @@ export function UserMenu({ name, email }: { name: string; email: string }) {
         <DropdownMenuItem asChild>
           <Link href="/settings"><Settings className="size-4" /> Profile settings</Link>
         </DropdownMenuItem>
+
+        {superadmin ? (
+          <DropdownMenuItem asChild>
+            <Link href="/superadmin"><ShieldCheck className="size-4" /> Superadmin</Link>
+          </DropdownMenuItem>
+        ) : null}
 
         <DropdownMenuSeparator />
 
