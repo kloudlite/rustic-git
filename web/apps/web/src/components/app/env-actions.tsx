@@ -14,6 +14,7 @@ import {
   stopEnvironment, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
 import type { EnvState } from "@/lib/api";
+import { deleteVolumeCopy, keptSnapshotsCopy } from "@/lib/archived";
 
 /** Start/stop, the bare-form idiom: one hidden id, no dialog, since neither takes a value. */
 function ToggleForm({ owner, id, running }: { owner: string; id: string; running: boolean }) {
@@ -67,8 +68,19 @@ function PushDialog({ owner, id }: { owner: string; id: string }) {
   );
 }
 
-/** The archived environment's one action: its snapshots are the last copy of that data. */
-export function DeleteSnapshotsDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+/** The deleted environment's one action: its snapshots are the last copy of that data, and the
+ *  only thing keeping its volume. */
+export function DeleteSnapshotsDialog({
+  owner,
+  id,
+  name,
+  snapshots,
+}: {
+  owner: string;
+  id: string;
+  name: string;
+  snapshots: number;
+}) {
   const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironmentSnapshots, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
   return (
@@ -81,8 +93,7 @@ export function DeleteSnapshotsDialog({ owner, id, name }: { owner: string; id: 
           <DialogHeader>
             <DialogTitle>Delete {name}&rsquo;s snapshots?</DialogTitle>
             <DialogDescription>
-              Permanent. This is the last copy of that environment&rsquo;s data — nothing else
-              references it once the row is gone.
+              {deleteVolumeCopy(snapshots)} This is the last copy of that environment&rsquo;s data.
             </DialogDescription>
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
@@ -129,9 +140,22 @@ function CloneEnvDialog({ owner, id }: { owner: string; id: string }) {
   );
 }
 
-/** Delete keeps its snapshots by DEFAULT — the row becomes archived, which is the reversible
- *  outcome. The checkbox is the irreversible one, and it is off. */
-export function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+/** Delete always keeps its snapshots — the environment then appears under Snapshots, and
+ *  deleting them for good lives there. So this dialog states what survives rather than offering
+ *  a second, irreversible choice inside a reversible one. */
+export function DeleteEnvDialog({
+  owner,
+  id,
+  name,
+  snapshots,
+}: {
+  owner: string;
+  id: string;
+  name: string;
+  /** How many snapshots the environment has, when the caller knows — the count-free sentence
+   *  otherwise, which is vaguer but never wrong. */
+  snapshots?: number | null;
+}) {
   const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironment, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
   return (
@@ -148,17 +172,9 @@ export function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string
               the node.
             </DialogDescription>
           </DialogHeader>
+          <p className="text-sm2 text-muted-foreground">{keptSnapshotsCopy(snapshots)}</p>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="id" value={id} />
-          <label className="flex items-start gap-2.5 text-sm2">
-            <input type="checkbox" name="snapshots" className="mt-0.5 size-3.5 accent-destructive" />
-            <span>
-              Also delete its snapshots
-              <span className="block text-caption text-muted-foreground">
-                Permanent. Without this the environment becomes an archived row you can restore from.
-              </span>
-            </span>
-          </label>
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>

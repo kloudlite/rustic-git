@@ -136,33 +136,26 @@ export async function cloneEnvironment(_prev: EnvActionState, formData: FormData
   return { ok: true };
 }
 
-/** Deleting an environment leaves its snapshots alone by default: a snapshot is a point in time
- *  and outlives the thing it was taken of, so the row simply becomes "archived". Checking
- *  "Also delete its snapshots" drops the volume's whole index afterwards — after, so a failed
- *  snapshot delete never leaves an environment that was already removed from the node with a
- *  history nobody can reach. */
+/** Deleting an environment always leaves its snapshots: a snapshot is a point in time, outlives
+ *  the thing it was taken of, and is kept until it is explicitly deleted. The environment then
+ *  appears under Snapshots, which is where deleting them for good lives — one destructive choice
+ *  in one place, rather than a checkbox riding along with a delete that is otherwise recoverable. */
 export async function deleteEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
-  const alsoSnapshots = formData.get("snapshots") != null;
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
 
   const r = await api.deleteEnvironment(token, id);
   if (!r.ok) return { error: r.message || "Could not delete." };
-  if (alsoSnapshots) {
-    // A volume with nothing pushed has no index to drop, and the api answers 404 for that as well
-    // as for "not yours" — the environment IS deleted either way, so this is not an error to show.
-    await api.deleteVolume(token, id);
-  }
   revalidatePath(`/${owner}/environments`);
   return { ok: true };
 }
 
-/** One record out of the lineage. The disk is not touched: what goes is the environment's record
- *  of that snapshot, which is why the dialog says so rather than warning about data loss. */
+/** One snapshot out of the lineage — the explicit delete a snapshot is kept until. The live
+ *  environment's own disk is not touched. */
 export async function deleteEnvironmentSnapshot(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
@@ -179,7 +172,8 @@ export async function deleteEnvironmentSnapshot(_prev: EnvActionState, formData:
   return { ok: true };
 }
 
-/** An archived row's own action: the environment is already gone, only its snapshots are left. */
+/** The Snapshots section's own delete: the environment is already gone, and its snapshots are the
+ *  only thing keeping its volume. `deleteWorkspaceSnapshots` is the same action for the other kind. */
 export async function deleteEnvironmentSnapshots(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };

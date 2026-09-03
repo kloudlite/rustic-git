@@ -17,6 +17,8 @@ import { noticesFor } from "@/lib/ws-status";
 import { CopyButton } from "@/components/repo/copy-button";
 import { useCopy } from "@/lib/use-copy";
 import { sshConfigBlock, sshOneLiner } from "@/lib/ssh-config";
+import { ArchivedSnapshots } from "@/components/app/archived-snapshots";
+import { keptSnapshotsCopy, type ArchivedRow } from "@/lib/archived";
 import {
   cloneWorkspace, deleteWorkspace, pushWorkspace, setPackages, startWorkspace, stopWorkspace,
   type WsActionState,
@@ -245,7 +247,19 @@ function SshDialog({ w }: { w: ApiWorkspace }) {
   );
 }
 
-function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+function DeleteDialog({
+  owner,
+  id,
+  name,
+  snapshots,
+}: {
+  owner: string;
+  id: string;
+  name: string;
+  /** The workspace's snapshot count when the listing carries one; the count-free sentence
+   *  otherwise, which is vaguer but never wrong. */
+  snapshots?: number | null;
+}) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(deleteWorkspace, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
   return (
@@ -258,10 +272,10 @@ function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: st
           <DialogHeader>
             <DialogTitle>Delete {name}?</DialogTitle>
             <DialogDescription>
-              Stops its container and removes the workspace from this node. Pushed snapshots stay
-              in the registry; anything never pushed is gone for good.
+              Stops its container and removes the workspace from this node.
             </DialogDescription>
           </DialogHeader>
+          <p className="text-sm2 text-muted-foreground">{keptSnapshotsCopy(snapshots)}</p>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="id" value={id} />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
@@ -277,7 +291,20 @@ function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: st
 
 /** Same filter idiom as `repo-list.tsx`: the whole list is already here, so
  *  filtering it locally is both simpler and faster than a round trip. */
-export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces: ApiWorkspace[] }) {
+export function WorkspaceList({
+  owner,
+  workspaces,
+  archived = [],
+  snapshots = {},
+}: {
+  owner: string;
+  workspaces: ApiWorkspace[];
+  /** Workspaces that are gone and whose snapshots are not — the Snapshots section at the bottom. */
+  archived?: ArchivedRow[];
+  /** Live workspace id → how many snapshots it has, so its Delete dialog can name the number
+   *  instead of promising vaguely. Missing means the volume listing had no row for it. */
+  snapshots?: Record<string, number>;
+}) {
   const [q, setQ] = useState("");
   // A row on its way up lands in one to three seconds; the shell's 10 s poll would show it late.
   const busy = workspaces.some((x) => x.state === "creating");
@@ -288,7 +315,13 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
     return workspaces.filter((w) => w.name.toLowerCase().includes(needle));
   }, [workspaces, q]);
 
-  if (workspaces.length === 0) {
+  const shownArchived = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return archived;
+    return archived.filter((a) => a.name.toLowerCase().includes(needle) || a.id.includes(needle));
+  }, [archived, q]);
+
+  if (workspaces.length === 0 && archived.length === 0) {
     return (
       <div className="mt-5 border border-border bg-card px-5 py-14 text-center">
         <SquareTerminal className="mx-auto size-6 text-muted-foreground" aria-hidden />
@@ -314,11 +347,13 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
         />
       </div>
 
-      {shown.length === 0 ? (
+      {shown.length === 0 && shownArchived.length === 0 ? (
         <p className="mt-5 border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
           Nothing matches that.
         </p>
       ) : (
+        <>
+        {shown.length > 0 && (
         <ul className="mt-5 divide-y divide-border border border-border bg-card">
           {shown.map((w) => (
             <li key={w.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
@@ -349,11 +384,14 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                 <PackagesDialog owner={owner} w={w} />
                 <PushDialog owner={owner} id={w.id} />
                 <CloneDialog owner={owner} id={w.id} />
-                <DeleteDialog owner={owner} id={w.id} name={w.name} />
+                <DeleteDialog owner={owner} id={w.id} name={w.name} snapshots={snapshots[w.id]} />
               </div>
             </li>
           ))}
         </ul>
+          )}
+          <ArchivedSnapshots owner={owner} kind="workspace" rows={shownArchived} />
+        </>
       )}
     </>
   );

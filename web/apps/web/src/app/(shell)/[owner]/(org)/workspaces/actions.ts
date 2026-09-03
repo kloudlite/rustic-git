@@ -118,6 +118,43 @@ export async function deleteWorkspace(_prev: WsActionState, formData: FormData):
   return { ok: true };
 }
 
+/** One snapshot out of a volume's lineage, from that workspace's Snapshots page. Deletes the
+ *  snapshot itself — a snapshot is kept until it is explicitly deleted, and this is the explicit
+ *  delete. The workspace's own disk, if it still exists, is untouched. */
+export async function deleteWorkspaceSnapshot(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That workspace is not valid." };
+  const snapshotId = String(formData.get("snapshotId") ?? "");
+
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+
+  const r = await api.deleteVolumeSnapshot(token, id, snapshotId);
+  if (!r.ok) return { error: r.message || "Could not delete the snapshot." };
+  revalidatePath(`/${owner}/workspaces/${id}/snapshots`);
+  return { ok: true };
+}
+
+/** The Snapshots section's own delete, for a workspace that is already gone: its snapshots are
+ *  the only thing keeping the volume, so dropping them drops it. `deleteEnvironmentSnapshots`
+ *  is the same action for the other kind. */
+export async function deleteWorkspaceSnapshots(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That workspace is not valid." };
+
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+
+  const r = await api.deleteVolume(token, id);
+  if (!r.ok) return { error: r.message || "Could not delete the snapshots." };
+  revalidatePath(`/${owner}/workspaces`);
+  return { ok: true };
+}
+
 /** "Open in a workspace", from the repo Clone menu and the PR header: one workspace per
  *  (repo, branch), reused if it is already there. The backend does the rest — the controller
  *  clones the repo with a token minted for this caller. */

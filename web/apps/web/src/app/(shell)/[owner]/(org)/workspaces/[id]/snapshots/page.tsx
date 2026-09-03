@@ -5,7 +5,7 @@ import { volumeHistory } from "@/lib/api";
 import { when } from "@/lib/time";
 import { snapshotTime } from "@/lib/snapshot";
 import { stateSummary } from "@/lib/snapshot-state";
-import { RestoreDialog } from "@/components/app/restore-dialog";
+import { DeleteSnapshotDialog, RestoreDialog } from "@/components/app/restore-dialog";
 import { requireToken } from "@/lib/session";
 
 /** A workspace's OWN snapshots — the only user-facing surface for them, reached from that
@@ -66,7 +66,15 @@ export default async function Page({
                   {when(snapshotTime(c))}
                 </span>
               </div>
-              <RestoreDialog owner={owner} snapshotId={c.id} state={c.state} />
+              <div className="flex shrink-0 items-center gap-1">
+                <RestoreDialog owner={owner} snapshotId={c.id} state={c.state} />
+                <DeleteSnapshotDialog
+                  owner={owner}
+                  id={id}
+                  snapshotId={c.id}
+                  label={c.message || c.id.slice(0, 8)}
+                />
+              </div>
             </li>
             );
           })}

@@ -12,5 +12,13 @@ export default async function Page({ params }: { params: Promise<{ owner: string
 
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();
-  return <EnvSettings owner={owner} id={id} name={page.name} archived={!page.env} />;
+  return (
+    <EnvSettings
+      owner={owner}
+      id={id}
+      name={page.name}
+      archived={!page.env}
+      snapshots={page.history.length}
+    />
+  );
 }

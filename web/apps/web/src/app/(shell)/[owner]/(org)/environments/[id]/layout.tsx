@@ -46,7 +46,7 @@ export default async function Layout({
       <AutoRefresh />
       {/* The crumb carries the name and the state, as a repo's does; the header below is only
           the actions and the facts, so the page reads like Code Repos rather than a document. */}
-      <SetCrumbTitle title={page.name} archived={!env} badge={env ? env.state : "archived"} />
+      <SetCrumbTitle title={page.name} archived={!env} badge={env ? env.state : "deleted"} />
       <header>
         <div className="flex flex-wrap items-center gap-3">
           {env ? (
