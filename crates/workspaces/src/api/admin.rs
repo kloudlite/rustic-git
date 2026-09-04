@@ -325,7 +325,7 @@ async fn admin_delete_ws(
 
 /// `central`, or a region id — the same encoding `POST /admin/workloads/{scope}/{name}/roll`'s
 /// one path segment uses to name either half of `KNOWN`.
-fn parse_scope(seg: &str) -> super::workloads::Scope {
+pub(crate) fn parse_scope(seg: &str) -> super::workloads::Scope {
     if seg == "central" { super::workloads::Scope::Central } else { super::workloads::Scope::Region(seg.to_string()) }
 }
 

@@ -336,3 +336,19 @@ pub async fn list_workloads(s: &ApiState, regions: &[String]) -> Result<Vec<Work
     }
     Ok(rows)
 }
+
+#[cfg(test)]
+mod scope_tests {
+    use super::Scope;
+
+    /// The wire form (`"central"` / the bare region id) is what the web reads and what a path
+    /// segment carries back; the two must agree or a roll from the infrastructure tab would target
+    /// a scope the listing never named.
+    #[test]
+    fn scope_round_trips_through_its_wire_form() {
+        for scope in [Scope::Central, Scope::Region("centralindia-k3s".into())] {
+            let wire: String = serde_json::from_str(&serde_json::to_string(&scope).unwrap()).unwrap();
+            assert_eq!(crate::api::admin::parse_scope(&wire), scope);
+        }
+    }
+}
