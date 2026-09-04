@@ -1,35 +1,79 @@
 import type { Metadata } from "next";
 import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
+import { AutoRefresh } from "@/components/app/auto-refresh";
+import { when } from "@/lib/time";
 import { PageHeader } from "../page-header";
+import { KpiStrip, KpiTile } from "../ui/kpi";
 import { RequestQueue } from "./request-queue";
 
 export const metadata: Metadata = { title: "Requests" };
 
+/** The generic queue (`Requests.dc.html`): quota, access, region and other in one table.
+ *
+ *  The tabs and the three filters live in the URL, not in component state: an operator sends
+ *  "the oldest open access requests" to a colleague as a link, and the 10 s poll re-runs this
+ *  component — state held in the client would survive that, but the shared link would not.
+ *
+ *  `owner` and `kind` narrow SERVER-side (an owner-detail link lands on that owner's requests);
+ *  the finer filters stay client-side over the one fetched page. */
 export default async function Page({
   searchParams,
 }: {
-  searchParams: Promise<{ owner?: string; state?: string }>;
+  searchParams: Promise<{ owner?: string; state?: string; kind?: string; ownerType?: string; age?: string }>;
 }) {
   const { token } = await requireSuperadmin("/superadmin/requests");
-  const { owner, state } = await searchParams;
-  // One fetch of the queue: it feeds the Pending/Decided tabs, the free-text/dimension/age
-  // filters, and a row's own owner-history in the decision panel — all client-side, since the
-  // fleet-wide queue is small. `?owner=`/`?state=` narrow it SERVER-side so an owner-detail link
-  // lands on that owner's requests rather than the whole fleet's.
-  const [reqs, owners] = await Promise.all([
-    api.adminListQuotaRequests(token, { owner, state }),
+  const sp = await searchParams;
+  const opts = { range: "7d", step: "1d" };
+  const [reqs, owners, decidedS, p50S] = await Promise.all([
+    api.adminListRequests(token, { owner: sp.owner, kind: sp.kind }),
     api.adminOwners(token),
+    api.adminSeries("decided_requests", opts, token),
+    api.adminSeries("time_to_decide_p50", opts, token),
   ]);
+  // A failed owners read costs the usage line and the owner-type filter, never the queue itself.
   const rows = reqs.ok ? reqs.value : [];
-  // `adminOwners` carries the limit and in-use count each request's diff is read against; a
-  // failed read leaves the panel showing zeros rather than taking the queue down with it.
-  const usageRows = owners.ok ? owners.value : [];
+  const usage = owners.ok ? owners.value : [];
+  const open = rows.filter((r) => r.state === "pending");
+  const oldest = [...open].sort((a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime())[0];
+  const byKind = ["quota", "access", "region", "other"]
+    .map((k) => ({ k, n: open.filter((r) => r.kind === k).length }))
+    .filter((x) => x.n > 0)
+    .map((x) => `${x.n} ${x.k}`)
+    .join(" · ");
 
   return (
-    <div>
-      <PageHeader title="Requests" purpose="Quota raise requests waiting on a decision." />
-      <RequestQueue rows={rows} usage={usageRows} />
+    <div className="space-y-4">
+      <AutoRefresh />
+      <PageHeader
+        title="Requests"
+        purpose="Every kind of request an owner can raise: quota, access, region, or anything else."
+      />
+      <KpiStrip cols={4}>
+        <KpiTile label="Open" value={open.length} sub={byKind || "nothing open"} />
+        <KpiTile
+          label="Oldest open"
+          value={oldest ? when(new Date(oldest.createdAt ?? 0).getTime()) : "—"}
+          sub={oldest ? `${oldest.owner} · ${oldest.kind}` : "nothing waiting"}
+        />
+        <KpiTile
+          label="Decided this week"
+          value={decidedS.available ? decidedS.summary.last : "—"}
+          sub={decidedS.available ? `${decidedS.summary.min}–${decidedS.summary.max} per day` : "history unavailable"}
+          series={decidedS}
+        />
+        <KpiTile
+          label="Median time to decide"
+          value={p50S.available ? `${p50S.summary.last} h` : "—"}
+          sub={
+            p50S.available
+              ? `${p50S.summary.delta > 0 ? "up" : "down"} from ${p50S.summary.last - p50S.summary.delta} h last week`
+              : "history unavailable"
+          }
+          series={p50S}
+        />
+      </KpiStrip>
+      <RequestQueue rows={rows} usage={usage} />
     </div>
   );
 }

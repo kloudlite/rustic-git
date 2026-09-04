@@ -1,156 +1,278 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { OwnerRow, QuotaRequestDoc } from "@/lib/api";
-import { DIMS, dimLabel, requestedDiffs, type QuotaDim } from "@/lib/quota";
+import type { OwnerRow, RequestDoc } from "@/lib/api";
+import { KINDS, kindLabel } from "@/lib/requests";
+import {
+  contextLine,
+  filterQueue,
+  summaryLine,
+  type QueueFilter,
+} from "@/lib/request-queue";
 import { when } from "@/lib/time";
+import { Section } from "../ui/section";
+import {
+  DataTable,
+  EmptyState,
+  RowActions,
+  Td,
+  Th,
+  Tr,
+} from "../ui/data-table";
+import { Pill } from "../ui/pill";
 import { DecisionPanel } from "./decision-panel";
 
-const AGE_MS: Record<"1d" | "7d", number> = { "1d": 86_400_000, "7d": 7 * 86_400_000 };
-
-/** The whole queue is small enough that one fetch covers Pending, Decided, and a row's own
- *  history — client-side filtering over it (owner substring, dimension, age) is the honest lazy
- *  answer over adding a server-side shape for narrowing this small a list. */
-export function RequestQueue({ rows, usage }: { rows: QuotaRequestDoc[]; usage: OwnerRow[] }) {
+export function RequestQueue({
+  rows,
+  usage,
+}: {
+  rows: RequestDoc[];
+  usage: OwnerRow[];
+}) {
   const router = useRouter();
-  const usageByOwner = useMemo(() => new Map(usage.map((u) => [u.owner, u])), [usage]);
-
-  const [tab, setTab] = useState<"pending" | "decided">("pending");
-  const [q, setQ] = useState("");
-  const [dim, setDim] = useState<QuotaDim | "any">("any");
-  const [age, setAge] = useState<"any" | "1d" | "7d">("any");
-  const [oldestFirst, setOldestFirst] = useState(false);
+  const path = usePathname();
+  const sp = useSearchParams();
+  const usageByOwner = useMemo(
+    () => new Map(usage.map((u) => [u.owner, u])),
+    [usage],
+  );
+  const teams = useMemo(
+    () => new Set(usage.filter((u) => u.isTeam).map((u) => u.owner)),
+    [usage],
+  );
   const [selected, setSelected] = useState<string | null>(null);
-
-  const pending = rows.filter((r) => r.state === "pending");
-  const decided = rows.filter((r) => r.state !== "pending");
-
-  // Read once, not on every filter pass — the render itself must stay pure, and a queue this
-  // small doesn't need the cutoff to tick while the page sits open.
+  // Read once: the render has to stay pure, and a cutoff ticking under an open page would
+  // silently drop rows out of the "older than 1 day" filter while somebody is reading them.
   const [now] = useState(() => Date.now());
 
-  const shown = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    const base = tab === "pending" ? pending : decided;
-    const filtered = base.filter((r) => {
-      if (needle && !r.owner.toLowerCase().includes(needle)) return false;
-      if (dim !== "any" && r.requested[dim] === undefined) return false;
-      if (age !== "any" && now - new Date(r.createdAt ?? 0).getTime() < AGE_MS[age]) return false;
-      return true;
-    });
-    const byAge = [...filtered].sort((a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime());
-    return oldestFirst ? byAge : byAge.reverse();
-  }, [tab, pending, decided, q, dim, age, now, oldestFirst]);
+  const tab = sp.get("state") === "decided" ? "decided" : "open";
+  const filter: QueueFilter = {
+    kind: (sp.get("kind") as QueueFilter["kind"] | null) ?? "any",
+    ownerType:
+      (sp.get("ownerType") as QueueFilter["ownerType"] | null) ?? "any",
+    age: (sp.get("age") as QueueFilter["age"] | null) ?? "any",
+  };
 
-  const active = rows.find((r) => r.id === selected) ?? null;
-
-  function decided_() {
-    setSelected(null);
-    router.refresh();
+  function setParam(key: string, value: string) {
+    const next = new URLSearchParams(sp.toString());
+    if (value === "any" || value === "") next.delete(key);
+    else next.set(key, value);
+    router.replace(`${path}?${next}`, { scroll: false });
   }
 
+  const base = rows.filter((r) =>
+    tab === "open" ? r.state === "pending" : r.state !== "pending",
+  );
+  const shown = filterQueue(
+    base,
+    filter,
+    now,
+    usage.length > 0 ? teams : undefined,
+  );
+  const active = rows.find((r) => r.id === selected) ?? null;
+
   return (
-    <div className="flex gap-5">
-      <div className="flex min-w-0 flex-1 flex-col gap-3">
-        <div className="flex items-center gap-2">
-          <Tabs value={tab} onValueChange={(v) => { setTab(v as typeof tab); setSelected(null); }}>
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
+      <Section
+        eyebrow="Queue"
+        title="Requests"
+        count={`${shown.length} ${tab}`}
+        bare
+        toolbar={
+          <Tabs
+            value={tab}
+            onValueChange={(v) => setParam("state", v === "open" ? "" : v)}
+          >
             <TabsList className="h-8">
-              <TabsTrigger value="pending" className="text-sm2">
-                Pending<span className="ml-1.5 text-muted-foreground">{pending.length}</span>
+              <TabsTrigger value="open" className="text-sm2">
+                Open
               </TabsTrigger>
               <TabsTrigger value="decided" className="text-sm2">
-                Decided<span className="ml-1.5 text-muted-foreground">{decided.length}</span>
+                Decided
               </TabsTrigger>
             </TabsList>
           </Tabs>
-          <div className="ml-auto flex items-center gap-2">
-            <Input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Filter owner"
-              aria-label="Filter by owner"
-              className="h-8 w-40 text-sm2"
-            />
-            <Select value={dim} onValueChange={(v) => setDim(v as typeof dim)}>
-              <SelectTrigger className="h-8 text-sm2"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="any">any dimension</SelectItem>
-                {DIMS.map((d) => (
-                  <SelectItem key={d} value={d}>{dimLabel(d)}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={age} onValueChange={(v) => setAge(v as typeof age)}>
-              <SelectTrigger className="h-8 text-sm2"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="any">any age</SelectItem>
-                <SelectItem value="1d">older than 1d</SelectItem>
-                <SelectItem value="7d">older than 7d</SelectItem>
-              </SelectContent>
-            </Select>
-            <button
-              type="button"
-              onClick={() => setOldestFirst((v) => !v)}
-              className="h-8 border border-border px-2.5 text-sm2 text-muted-foreground hover:bg-muted"
+        }
+      >
+        {/* The filters sit in their own row rather than the section header: three selects plus
+            the tabs do not fit beside the title at this column width, and squeezing them there
+            truncated the title itself. */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <Select
+            value={filter.kind}
+            onValueChange={(v) => setParam("kind", v)}
+          >
+            {/* The label is passed as children, not left to `SelectValue` to derive: Radix knows
+                the selected item's text only after its items mount, so the server render — and
+                any screenshot of it — would show an empty box. */}
+            <SelectTrigger className="h-8 w-28 text-sm2" aria-label="Kind">
+              <SelectValue>
+                {filter.kind === "any" ? "All kinds" : kindLabel(filter.kind)}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any">All kinds</SelectItem>
+              {KINDS.map((k) => (
+                <SelectItem key={k} value={k}>
+                  {kindLabel(k)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={filter.ownerType}
+            onValueChange={(v) => setParam("ownerType", v)}
+          >
+            <SelectTrigger
+              className="h-8 w-28 text-sm2"
+              aria-label="Owner type"
             >
-              {oldestFirst ? "oldest first" : "newest first"}
-            </button>
-          </div>
+              <SelectValue>
+                {
+                  { any: "All owners", person: "People", team: "Teams" }[
+                    filter.ownerType
+                  ]
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any">All owners</SelectItem>
+              <SelectItem value="person">People</SelectItem>
+              <SelectItem value="team">Teams</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={filter.age} onValueChange={(v) => setParam("age", v)}>
+            <SelectTrigger className="h-8 w-28 text-sm2" aria-label="Age">
+              <SelectValue>
+                {
+                  { any: "Any age", "1d": "Over 1 day", "7d": "Over 7 days" }[
+                    filter.age
+                  ]
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any">Any age</SelectItem>
+              <SelectItem value="1d">Over 1 day</SelectItem>
+              <SelectItem value="7d">Over 7 days</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
-
         {shown.length === 0 ? (
-          <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
-            Nothing matches that.
-          </p>
+          <EmptyState>No request matches these filters.</EmptyState>
         ) : (
-          <ul className="divide-y divide-border border border-border bg-card">
-            {shown.map((r) => {
-              const owned = usageByOwner.get(r.owner);
-              const diffs = owned ? requestedDiffs(owned.limit, r.requested) : [];
-              return (
-                <li key={r.id}>
-                  <button
-                    type="button"
-                    onClick={() => setSelected(r.id)}
-                    className={`flex w-full items-center gap-3 px-4 py-3 text-left text-sm2 hover:bg-muted/50 ${selected === r.id ? "bg-muted" : ""}`}
-                  >
-                    <span className="w-32 shrink-0 truncate font-medium">{r.owner}</span>
-                    <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                      {diffs.length > 0
-                        ? diffs.map((d) => `${dimLabel(d.dim)} ${d.from} → ${d.to}`).join(", ")
-                        : DIMS.filter((d) => r.requested[d] !== undefined).map((d) => dimLabel(d)).join(", ")}
+          // Fixed layout: the summary column ellipses instead of wrapping, so a long reason
+          // cannot reflow every other column under the 10 s poll.
+          <DataTable className="[&_table]:table-fixed">
+            <thead>
+              <tr>
+                <Th className="w-28">Kind</Th>
+                <Th className="w-36">Owner</Th>
+                <Th>Request</Th>
+                <Th className="w-24">Requester</Th>
+                <Th numeric className="w-24">
+                  Age
+                </Th>
+                {/* No Status column on Open: every row on this tab is open by definition. */}
+                {tab === "decided" && <Th className="w-24">Status</Th>}
+                <Th className="w-20" />
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <Tr
+                  key={r.id}
+                  className={selected === r.id ? "bg-muted" : undefined}
+                >
+                  <Td className="h-14">
+                    <Pill tone="info">{kindLabel(r.kind)}</Pill>
+                  </Td>
+                  <Td className="h-14">
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate">{r.owner}</span>
+                      {teams.has(r.owner) && <Pill tone="neutral">team</Pill>}
                     </span>
-                    {/* "at 5 of 5" without a click — the same limit/used the panel computes,
-                        just for the dimensions this request touches. */}
-                    <span className="w-32 shrink-0 truncate text-caption text-muted-foreground">
-                      {owned && diffs.length > 0
-                        ? diffs.map((d) => `${owned.used[d.dim]} of ${d.from}`).join(", ")
-                        : ""}
-                    </span>
-                    {tab === "decided" && (
-                      <Badge variant={r.state === "approved" ? "outline" : "destructive"} className="capitalize">
+                  </Td>
+                  <Td className="h-14 max-w-0">
+                    <p className="truncate">{summaryLine(r)}</p>
+                    <p className="truncate text-caption text-muted-foreground">
+                      {contextLine(r, usageByOwner.get(r.owner))}
+                    </p>
+                  </Td>
+                  <Td className="h-14 truncate text-muted-foreground">
+                    {r.requestedBy}
+                  </Td>
+                  <Td numeric className="h-14 whitespace-nowrap">
+                    {when(new Date(r.createdAt ?? 0).getTime())}
+                  </Td>
+                  {tab === "decided" && (
+                    <Td className="h-14">
+                      <Pill tone={r.state === "approved" ? "ok" : "critical"}>
                         {r.state}
-                      </Badge>
-                    )}
-                    <span className="shrink-0 text-caption text-muted-foreground">
-                      {when(new Date((tab === "decided" ? r.decidedAt : r.createdAt) ?? 0).getTime())}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                      </Pill>
+                    </Td>
+                  )}
+                  <Td className="h-14">
+                    <RowActions>
+                      <button
+                        type="button"
+                        className="text-caption text-muted-foreground hover:text-primary"
+                        onClick={() => setSelected(r.id)}
+                      >
+                        Open
+                      </button>
+                      {r.state === "pending" && (
+                        <button
+                          type="button"
+                          className="text-caption text-muted-foreground hover:text-destructive"
+                          onClick={() => setSelected(r.id)}
+                        >
+                          Deny
+                        </button>
+                      )}
+                    </RowActions>
+                  </Td>
+                </Tr>
+              ))}
+            </tbody>
+          </DataTable>
         )}
-      </div>
-
-      {active && active.state === "pending" && (
-        <DecisionPanel request={active} usage={usageByOwner.get(active.owner)} all={rows} onDecided={decided_} />
-      )}
+      </Section>
+      <DecisionPanel
+        request={active}
+        usage={active ? usageByOwner.get(active.owner) : undefined}
+        // The owner's own recent decisions, out of the page's one fetch rather than a second read.
+        history={
+          active
+            ? rows
+                .filter(
+                  (r) =>
+                    r.owner === active.owner &&
+                    r.state !== "pending" &&
+                    r.id !== active.id,
+                )
+                .sort(
+                  (a, b) =>
+                    new Date(b.decidedAt ?? 0).getTime() -
+                    new Date(a.decidedAt ?? 0).getTime(),
+                )
+                .slice(0, 3)
+            : []
+        }
+        onDone={() => {
+          setSelected(null);
+          router.refresh();
+        }}
+      />
     </div>
   );
 }

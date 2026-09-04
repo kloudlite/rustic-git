@@ -4,8 +4,9 @@ import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { when } from "@/lib/time";
-import { DIMS, dimLabel } from "@/lib/quota";
 import { deltaLabel, eventSummary } from "@/lib/history";
+import { kindLabel } from "@/lib/requests";
+import { summaryLine } from "@/lib/request-queue";
 import { PageHeader } from "./page-header";
 import { regionCapacity } from "./overview";
 import { AttentionFeed } from "./attention-feed";
@@ -20,32 +21,23 @@ export const metadata: Metadata = { title: "Overview" };
 
 const HHMM = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "UTC" });
 
-/** `QuotaRequestDoc.requested` is a sparse map, so the summary is built from `DIMS` rather than
- *  from its keys — one fixed order, the same words the requests queue uses. */
-function requestSummary(r: api.QuotaRequestDoc): string {
-  const dims = DIMS.filter((d) => r.requested[d] !== undefined).map((d) => `${dimLabel(d)} → ${r.requested[d]}`);
-  return dims.length > 0 ? dims.join(", ") : r.reason;
-}
-
 /** The landing screen (`Main.dc.html`): five KPI tiles with 7-day sparklines, a needs-attention
  *  feed beside capacity per region, then recent activity and the waiting queue.
  *
  *  One `Promise.all`, not a waterfall: eight reads at ~13 ms each in-cluster is one render, and
  *  serialising them would put the 10 s poll behind its own previous run. Every history read
  *  degrades on its own (`adminSeries` never rejects), so a missing ClickHouse costs sparklines,
- *  not the page. The pending queue comes off `/admin/overview` itself rather than a ninth call —
- *  it is the same `QuotaRequestDoc[]` the queue endpoint answers.
- *
- *  // ponytail: "Requests waiting" reads that `QuotaRequestDoc` queue, not the generic `RequestDoc`
- *  // sub-project B introduces — it has not landed in this tree. Swap to `adminListRequests` and
- *  // `kindLabel` once it does; the section's shape (kind pill, owner, summary, age) is unchanged. */
+ *  not the page. "Requests waiting" reads the generic queue rather than `/admin/overview`'s
+ *  quota-only one: the two disagree the moment an owner asks for anything else, and the tile links
+ *  straight into the queue this row came from. */
 export default async function OverviewPage() {
   const { token } = await requireSuperadmin("/superadmin");
   const opts = { range: "7d", step: "1d" };
-  const [o, clusters, events, pendingS, firingS, over80S, wsS, envS] = await Promise.all([
+  const [o, clusters, events, queued, pendingS, firingS, over80S, wsS, envS] = await Promise.all([
     api.adminOverview(token),
     api.adminClusters(token),
     api.adminHistoryEvents({ limit: 5 }, token),
+    api.adminListRequests(token, { state: "pending" }),
     api.adminSeries("pending_requests", opts, token),
     api.adminSeries("firing_signals", opts, token),
     api.adminSeries("owners_over_80", opts, token),
@@ -55,7 +47,7 @@ export default async function OverviewPage() {
   if (!o.ok) throw new Error(o.message);
   const ov = o.value;
   const regions = clusters.ok ? clusters.value : [];
-  const queue = ov.pendingRequests;
+  const queue = queued.ok ? queued.value : [];
 
   // Three more series per region. Regions are a handful, so this is one more round of parallelism
   // rather than a nested waterfall — awaiting them one at a time would cost 3n round trips.
@@ -194,13 +186,11 @@ export default async function OverviewPage() {
               <tbody>
                 {queue.slice(0, 5).map((r) => (
                   <Tr key={r.id}>
-                    {/* Quota is the only request kind the api answers today; the pill is here so the
-                        column does not move when the generic queue lands. */}
                     <Td>
-                      <Pill tone="info">quota</Pill>
+                      <Pill tone="info">{kindLabel(r.kind)}</Pill>
                     </Td>
                     <Td>{r.owner}</Td>
-                    <Td className="max-w-0 truncate">{requestSummary(r)}</Td>
+                    <Td className="max-w-0 truncate">{summaryLine(r)}</Td>
                     <Td numeric>{when(new Date(r.createdAt ?? 0).getTime())}</Td>
                   </Tr>
                 ))}

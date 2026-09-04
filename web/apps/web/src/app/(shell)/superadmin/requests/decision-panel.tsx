@@ -1,136 +1,187 @@
 "use client";
 
 import { useState } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import type { QuotaRequestDoc } from "@/lib/api";
-import { DIMS, dimLabel, requestedDiffs, type QuotaDim } from "@/lib/quota";
+import type { OwnerRow, RequestDoc } from "@/lib/api";
+import { DIMS, dimLabel, type QuotaDim } from "@/lib/quota";
+import { summaryLine } from "@/lib/request-queue";
+import { kindLabel } from "@/lib/requests";
 import { when } from "@/lib/time";
-import { decideRequest } from "../actions";
+import { decideRequestAction, type DecidePayload } from "../actions";
+import { Section } from "../ui/section";
+import { Pill } from "../ui/pill";
+import { EmptyState } from "../ui/data-table";
+import { Facts } from "./facts";
 
-/** The row a request is decided against: current limit and in-use count per dimension, so the
- *  panel needs no fetch of its own — the page already has `adminOwners` for every owner shown. */
-type OwnerUsageRow = { limit: Record<QuotaDim, number>; used: Record<QuotaDim, number> };
-
-const ZERO: Record<QuotaDim, number> = { workspaces: 0, environments: 0, snapshots: 0, diskGb: 0, cpu: 0, memoryGb: 0 };
-
-/** The facts behind one pending request, an editable grant, and the owner's recent history —
- *  everything a decision needs without a second click. `all` is the whole fetched queue (page
- *  already has it), filtered here to this owner's last three DECIDED requests rather than a
- *  second round trip. */
+/** One panel, four kinds. Approve carries the kind's own input — the edited grant for quota, a
+ *  confirmation for access and region (the api's decide body carries neither a role nor a region,
+ *  so there is nothing to edit there), and a required free-text resolution for other. Deny carries
+ *  only the note, which the api requires. A 409 (someone else decided first), a 422 and a 501 land
+ *  INLINE here, because the answer is only meaningful next to the request you were about to act on. */
 export function DecisionPanel({
   request,
   usage,
-  all,
-  onDecided,
+  history,
+  onDone,
 }: {
-  request: QuotaRequestDoc;
-  usage: OwnerUsageRow | undefined;
-  all: QuotaRequestDoc[];
-  onDecided: () => void;
+  request: RequestDoc | null;
+  usage: OwnerRow | undefined;
+  history: RequestDoc[];
+  onDone: () => void;
 }) {
-  const limit = usage?.limit ?? ZERO;
-  const used = usage?.used ?? ZERO;
-  const diffs = requestedDiffs(limit, request.requested);
-
-  const [grant, setGrant] = useState<Partial<Record<QuotaDim, number>>>(request.requested);
+  const [grant, setGrant] = useState<Record<string, string>>({});
+  const [resolution, setResolution] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
   const [note, setNote] = useState("");
-  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const history = all
-    .filter((r) => r.owner === request.owner && r.state !== "pending" && r.id !== request.id)
-    .sort((a, b) => new Date(b.decidedAt ?? 0).getTime() - new Date(a.decidedAt ?? 0).getTime())
-    .slice(0, 3);
+  if (!request) {
+    return (
+      <Section eyebrow="Decision" title="Nothing selected">
+        <EmptyState>Open a request to see its facts and decide it.</EmptyState>
+      </Section>
+    );
+  }
 
-  async function submit(decision: "approve" | "deny") {
-    if (decision === "deny" && !note.trim()) {
-      setError("A note is required to deny.");
-      return;
+  const req = request;
+  const dims = DIMS.filter((d) => req.quota?.[d] !== undefined);
+  const needsConfirm = req.kind === "access" || req.kind === "region";
+  const canApprove =
+    req.state === "pending" &&
+    !busy &&
+    (req.kind !== "other" || resolution.trim() !== "") &&
+    (!needsConfirm || confirmed);
+
+  function payload(): DecidePayload {
+    if (req.kind === "quota") {
+      const quota: Partial<Record<QuotaDim, number>> = {};
+      for (const d of dims) {
+        const n = Number(grant[d] ?? req.quota?.[d]);
+        // A non-number in the box is not a silent zero: it falls back to what was asked, which is
+        // the only value the operator ever saw beside it.
+        quota[d] = Number.isFinite(n) ? n : req.quota?.[d];
+      }
+      return { quota };
     }
-    setPending(true);
+    if (req.kind === "other") return { resolution: resolution.trim() };
+    return {};
+  }
+
+  async function decide(decision: "approve" | "deny") {
+    setBusy(true);
     setError(null);
-    const r = await decideRequest(request.id, decision, note.trim(), decision === "approve" ? grant : undefined);
-    setPending(false);
+    const r = await decideRequestAction(req.id, decision, note.trim(), decision === "deny" ? {} : payload());
+    setBusy(false);
     if (!r.ok) {
       setError(r.message);
       return;
     }
-    onDecided();
+    setNote("");
+    setGrant({});
+    setResolution("");
+    setConfirmed(false);
+    onDone();
   }
 
   return (
-    <div className="flex w-[26rem] shrink-0 flex-col gap-4 border border-border bg-card p-4">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-sm2 font-medium">{request.owner}</span>
-        <span className="text-caption text-muted-foreground">asked {when(new Date(request.createdAt ?? 0).getTime())}</span>
-      </div>
-      {request.reason && <p className="text-sm2 text-muted-foreground">&ldquo;{request.reason}&rdquo;</p>}
+    <Section
+      eyebrow="Decision"
+      title={`${req.owner} · ${summaryLine(req)}`}
+      toolbar={<Pill tone="info">{kindLabel(req.kind)}</Pill>}
+    >
+      <div className="flex flex-col gap-4">
+        <Facts request={req} usage={usage} />
 
-      <div className="flex flex-col gap-3">
-        {diffs.map(({ dim, from, to }) => (
-          <div key={dim} className="flex flex-col gap-1">
-            <div className="flex items-center justify-between text-caption text-muted-foreground">
-              <span>{dimLabel(dim)}</span>
-              <span>
-                {used[dim]} of {from} in use
-              </span>
-            </div>
-            <div className="h-2 bg-muted" role="presentation">
-              <div className="h-2 bg-primary" style={{ width: `${Math.min(100, Math.round((used[dim] / Math.max(from, 1)) * 100))}%` }} />
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm2 tabular-nums text-muted-foreground">{from} →</span>
-              <Input
-                type="number"
-                min={0}
-                value={grant[dim] ?? to}
-                onChange={(e) => setGrant((g) => ({ ...g, [dim]: Number(e.target.value) }))}
-                className="h-8 w-24"
-                aria-label={`Grant for ${dimLabel(dim)}`}
+        <div>
+          <p className="text-micro font-medium tracking-eyebrow text-muted-foreground uppercase">
+            Requester note · {req.requestedBy}, {when(new Date(req.createdAt ?? 0).getTime())}
+          </p>
+          <p className="text-sm2 whitespace-pre-wrap">{req.reason}</p>
+        </div>
+
+        <div>
+          <p className="text-micro font-medium tracking-eyebrow text-muted-foreground uppercase">
+            Last 3 decisions for {req.owner}
+          </p>
+          {history.length === 0 ? (
+            <p className="text-caption text-muted-foreground">No earlier decision for this owner.</p>
+          ) : (
+            <ul className="flex flex-col">
+              {history.map((h) => (
+                <li key={h.id} className="flex items-center gap-2 border-b border-border py-1.5 text-caption last:border-0">
+                  <Pill tone={h.state === "approved" ? "ok" : "critical"}>{h.state}</Pill>
+                  <span className="min-w-0 flex-1 truncate">{summaryLine(h)}</span>
+                  <span className="tabular-nums text-muted-foreground">
+                    {when(new Date(h.decidedAt ?? h.createdAt ?? 0).getTime())}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {req.state === "pending" ? (
+          <div className="flex flex-col gap-2 border-t border-border pt-4">
+            {req.kind === "quota" &&
+              dims.map((d) => (
+                <label key={d} className="flex items-center gap-2 text-sm2">
+                  <span className="w-28 shrink-0 text-muted-foreground">{dimLabel(d)}</span>
+                  <Input
+                    className="h-8 w-24 tabular-nums"
+                    inputMode="numeric"
+                    value={grant[d] ?? String(req.quota?.[d] ?? "")}
+                    onChange={(e) => setGrant({ ...grant, [d]: e.target.value })}
+                    aria-label={`Grant for ${dimLabel(d)}`}
+                  />
+                  <span className="text-caption text-muted-foreground">was {usage ? usage.limit[d] : "—"}</span>
+                </label>
+              ))}
+            {needsConfirm && (
+              <label className="flex items-start gap-2 text-sm2">
+                <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} className="mt-1" />
+                <span className="text-muted-foreground">
+                  {req.kind === "access"
+                    ? `Grant ${req.access?.role ?? "the role"} on ${req.access?.team ?? "the team"}.`
+                    : `Enable ${req.region?.region ?? "the region"} for ${req.owner}.`}
+                </span>
+              </label>
+            )}
+            {req.kind === "other" && (
+              <label className="flex flex-col gap-1 text-sm2">
+                <span className="text-muted-foreground">Resolution — what approving this did</span>
+                <Textarea rows={2} value={resolution} onChange={(e) => setResolution(e.target.value)} className="text-sm2" />
+              </label>
+            )}
+            <label className="flex flex-col gap-1 text-sm2">
+              <span className="text-muted-foreground">Note</span>
+              <Textarea
+                rows={3}
+                placeholder="Required to deny — the owner sees this"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                className="text-sm2"
               />
+            </label>
+            {error && <p className="text-caption text-destructive">{error}</p>}
+            <div className="flex gap-2">
+              <Button size="sm" disabled={!canApprove} onClick={() => decide("approve")}>
+                Approve
+              </Button>
+              <Button size="sm" variant="destructive" disabled={busy || note.trim() === ""} onClick={() => decide("deny")}>
+                Deny
+              </Button>
             </div>
           </div>
-        ))}
+        ) : (
+          <div className="border-t border-border pt-4 text-caption text-muted-foreground">
+            {req.state} by {req.decidedBy ?? "someone"} {when(new Date(req.decidedAt ?? 0).getTime())}
+            {req.note ? ` · ${req.note}` : ""}
+          </div>
+        )}
       </div>
-
-      {history.length > 0 && (
-        <div className="flex flex-col gap-1.5 border-t border-border pt-3">
-          <p className="text-caption text-muted-foreground">Last decisions for {request.owner}</p>
-          {history.map((h) => (
-            <div key={h.id} className="flex items-center gap-2 text-caption">
-              <Badge variant={h.state === "approved" ? "outline" : "destructive"} className="capitalize">
-                {h.state}
-              </Badge>
-              <span className="truncate text-muted-foreground">
-                {DIMS.filter((d) => h.requested[d] !== undefined).map((d) => dimLabel(d)).join(", ")}
-                {h.decidedBy ? ` · ${h.decidedBy}` : ""}
-                {h.decidedAt ? ` · ${when(new Date(h.decidedAt).getTime())}` : ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="mt-auto flex flex-col gap-2">
-        <Textarea
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="Note (required to deny, optional to approve)"
-          className="h-16 resize-none text-sm2"
-        />
-        {error && <p className="text-sm2 text-destructive">{error}</p>}
-        <div className="flex justify-end gap-2">
-          <Button variant="destructive" size="sm" disabled={pending} onClick={() => submit("deny")}>
-            Deny
-          </Button>
-          <Button size="sm" disabled={pending} onClick={() => submit("approve")}>
-            Approve
-          </Button>
-        </div>
-      </div>
-    </div>
+    </Section>
   );
 }

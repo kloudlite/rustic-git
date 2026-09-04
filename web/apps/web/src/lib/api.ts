@@ -1098,7 +1098,7 @@ export function adminListRequests(token: string, filter?: { kind?: string; owner
 export function adminDecideRequest(
   id: string,
   decision: "approve" | "deny",
-  body: { note?: string; quota?: Record<string, number>; resolution?: string },
+  body: { note?: string; quota?: Partial<Record<QuotaDim, number>>; resolution?: string },
   token: string,
 ) {
   return adminCall<RequestDoc>(`/admin/requests/${encodeURIComponent(id)}/${decision}`, {

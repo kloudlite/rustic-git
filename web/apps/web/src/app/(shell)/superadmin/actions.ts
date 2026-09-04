@@ -9,19 +9,26 @@ import type { AuditFilter, AuditPage } from "@/lib/audit";
 
 export type DecideResult = { ok: true } | { ok: false; message: string };
 
-/** The decision panel's Approve/Deny. `requested` is the operator's edited grant, one input per
- *  dimension the request touched — Deny never reads it, only the note. A 409 (someone else
- *  already decided this one) surfaces to the panel rather than a toast, so the operator sees the
- *  conflicting state next to the row they were acting on. */
-export async function decideRequest(
+/** What an approve carries beyond the note. Only two of the four kinds have anything to carry —
+ *  the api's decide body is `{ note, quota, resolution }` and nothing else, so an access or region
+ *  approve is a confirmation of what was asked, not an edit of it. */
+export type DecidePayload = { quota?: Partial<Record<QuotaDim, number>>; resolution?: string };
+
+/** One action for all four kinds, because the route is one route
+ *  (`POST /admin/requests/{id}/approve|deny`) and the panel is one panel — the payload is what
+ *  differs. Deny reads only the note, which the api requires; a 409 (someone else decided this one
+ *  first), a 422 (missing note or resolution) and a 501 (an access grant the api cannot perform)
+ *  all surface to the panel beside the row rather than as a toast, so the operator sees the state
+ *  that beat them. */
+export async function decideRequestAction(
   id: string,
   decision: "approve" | "deny",
   note: string,
-  requested: Partial<Record<QuotaDim, number>> | undefined,
+  payload: DecidePayload,
 ): Promise<DecideResult> {
   const token = await tokenOr();
   if (typeof token !== "string") return { ok: false, message: token.error };
-  const r = await api.adminDecideQuotaRequest(id, decision, note, token, requested);
+  const r = await api.adminDecideRequest(id, decision, { note: note || undefined, ...payload }, token);
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath("/superadmin/requests");
   return { ok: true };

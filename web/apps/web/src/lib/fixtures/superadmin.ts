@@ -10,6 +10,7 @@ import type {
   OwnerRow,
   Overview,
   QuotaRequestDoc,
+  RequestDoc,
   SettingsSchema,
   SignalsResponse,
   SuperAdmin,
@@ -103,6 +104,89 @@ const REQUESTS: QuotaRequestDoc[] = [
     decidedBy: "karthik",
     decidedAt: ago(139),
     note: "Cheap; snapshots are refcounted.",
+  },
+];
+
+/** The generic queue behind `/admin/requests` — all four kinds, so the Requests screen shows one
+ *  of each rather than four quota rows. Deliberately a superset of `REQUESTS` in shape, not in
+ *  identity: the two endpoints are separate CRDs and the console reads them separately. */
+const GENERIC_REQUESTS: RequestDoc[] = [
+  {
+    id: "rq-acme-ws",
+    owner: "acme",
+    kind: "quota",
+    requestedBy: "meera",
+    reason:
+      "We are onboarding six contractors on Monday and every one of them needs their own workspace. The old ones are pushed and stopped — deleting them would lose their snapshots.",
+    quota: { workspaces: 40 },
+    state: "pending",
+    createdAt: ago(53),
+  },
+  {
+    id: "rq-rahul-admin",
+    owner: "rahul",
+    kind: "access",
+    requestedBy: "rahul",
+    reason: "I run the release rota now and need to invite the new joiners myself.",
+    access: { team: "acme", role: "admin" },
+    state: "pending",
+    createdAt: ago(27),
+  },
+  {
+    id: "rq-opslab-eu",
+    owner: "ops-lab",
+    kind: "region",
+    requestedBy: "vikram",
+    reason: "The EU load tests have to run next to the customers they simulate.",
+    region: { region: "westeurope-k3s" },
+    state: "pending",
+    createdAt: ago(19),
+  },
+  {
+    id: "rq-priya-disk",
+    owner: "priya",
+    kind: "quota",
+    requestedBy: "priya",
+    reason: "Keeping a push per release candidate, and each one is about 8 GB.",
+    quota: { diskGb: 250 },
+    state: "pending",
+    createdAt: ago(6),
+  },
+  {
+    id: "rq-sana-snap",
+    owner: "sana",
+    kind: "other",
+    requestedBy: "sana",
+    reason: "It was the only copy of the migration I had.",
+    other: { title: "Restore a snapshot deleted by mistake", body: "deleted snap-4c1e at 09:40 while cleaning up\nthe volume is vol-sana-2" },
+    state: "pending",
+    createdAt: ago(0.7),
+  },
+  {
+    id: "rq-acme-snap",
+    owner: "acme",
+    kind: "quota",
+    requestedBy: "meera",
+    reason: "One push per release candidate.",
+    quota: { snapshots: 120 },
+    state: "approved",
+    decidedBy: "karthik",
+    decidedAt: ago(140),
+    note: "Cheap; snapshots are refcounted.",
+    createdAt: ago(146),
+  },
+  {
+    id: "rq-acme-cpu",
+    owner: "acme",
+    kind: "quota",
+    requestedBy: "meera",
+    reason: "The build fleet is queueing.",
+    quota: { cpu: 96 },
+    state: "denied",
+    decidedBy: "karthik",
+    decidedAt: ago(700),
+    note: "Ask again once the idle workspaces are stopped.",
+    createdAt: ago(710),
   },
 ];
 
@@ -376,6 +460,15 @@ export function fixtureFor(path: string): unknown | undefined {
     if (!values) return undefined;
     const scale = REGION_SCALE[new URLSearchParams(query).get("region") ?? ""] ?? 1;
     return series(values.map((v) => Math.round(v * scale * 100) / 100));
+  }
+  if (bare === "/admin/requests") {
+    const q = new URLSearchParams(query);
+    const owner = q.get("owner");
+    const kind = q.get("kind");
+    const state = q.get("state");
+    return GENERIC_REQUESTS.filter(
+      (r) => (!owner || r.owner === owner) && (!kind || r.kind === kind) && (!state || r.state === state),
+    );
   }
   if (bare === "/admin/quota-requests") {
     const q = new URLSearchParams(query);

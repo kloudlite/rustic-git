@@ -51,7 +51,12 @@ export function KpiTile({
 }
 
 /** Four or five tiles across at desktop, stacking down to one — the strip is the first thing on
- *  every screen and must not force a horizontal scroll on a laptop. */
-export function KpiStrip({ children }: { children: React.ReactNode }) {
-  return <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">{children}</div>;
+ *  every screen and must not force a horizontal scroll on a laptop. `cols` is the tile count, so a
+ *  four-tile screen fills the row rather than leaving a fifth column of empty page. */
+export function KpiStrip({ children, cols = 5 }: { children: React.ReactNode; cols?: 4 | 5 }) {
+  return (
+    <div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", cols === 4 ? "xl:grid-cols-4" : "xl:grid-cols-5")}>
+      {children}
+    </div>
+  );
 }
