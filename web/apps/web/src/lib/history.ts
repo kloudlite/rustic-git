@@ -91,7 +91,6 @@ const PHRASES: Record<string, string> = {
   "volume.released": "released",
   "volume.moved": "moved",
   "volume.unavailable": "made unavailable",
-  "volume.deleted": "deleted",
   "node.ready": "reported ready:",
   "node.notready": "reported not ready:",
   "node.cordoned": "cordoned",
