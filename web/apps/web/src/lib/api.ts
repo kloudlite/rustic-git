@@ -1047,17 +1047,29 @@ export function listQuotaRequests(owner: string | undefined, token: string) {
 
 // ── /admin (a separate host — crates/workspaces/src/api/admin.rs) ──────────
 
-/** The whole queue, every owner — unlike `listQuotaRequests`, there is no `owner` filter to ask for
- *  only your own. */
-export function adminListQuotaRequests(token: string) {
-  return adminCall<QuotaRequestDoc[]>("/admin/quota-requests", { method: "GET", token });
+/** The whole queue, every owner — unlike `listQuotaRequests`, there is no default `owner` filter.
+ *  `filter.owner`/`filter.state` are server-side narrowing (Task 2's `?owner=&state=`); anything
+ *  finer (free text, dimension, age) stays client-side over the fetched page, per the ladder. */
+export function adminListQuotaRequests(token: string, filter?: { owner?: string; state?: string }) {
+  const q = new URLSearchParams();
+  if (filter?.owner) q.set("owner", filter.owner);
+  if (filter?.state) q.set("state", filter.state);
+  const qs = q.toString();
+  return adminCall<QuotaRequestDoc[]>(`/admin/quota-requests${qs ? `?${qs}` : ""}`, { method: "GET", token });
 }
 
-export function adminDecideQuotaRequest(id: string, decision: "approve" | "deny", note: string, token: string) {
+/** `requested` is the operator's edited grant — omitted, approve grants exactly what was asked. */
+export function adminDecideQuotaRequest(
+  id: string,
+  decision: "approve" | "deny",
+  note: string,
+  token: string,
+  requested?: Partial<Record<QuotaDim, number>>,
+) {
   return adminCall<QuotaRequestDoc>(`/admin/quota-requests/${encodeURIComponent(id)}/${decision}`, {
     method: "POST",
     token,
-    body: JSON.stringify({ note }),
+    body: JSON.stringify({ note: note || undefined, requested }),
   });
 }
 

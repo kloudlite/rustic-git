@@ -32,6 +32,15 @@ export function atLimit(r: QuotaReport, d: QuotaDim): boolean {
   return r.used[d] >= r.limit[d];
 }
 
+/** One row per dimension the request touches: the owner's current limit next to what was asked.
+ *  A dimension not in `requested` never appears — the request didn't touch it. */
+export function requestedDiffs(
+  limit: Record<QuotaDim, number>,
+  requested: Partial<Record<QuotaDim, number>>,
+): { dim: QuotaDim; from: number; to: number }[] {
+  return DIMS.filter((d) => requested[d] !== undefined).map((d) => ({ dim: d, from: limit[d], to: requested[d]! }));
+}
+
 /** The dimension a 409 named, so the request form opens on the field that blocked them.
  *  The sentence is fixed by the api (`quota::refuse`); anything else is not a quota refusal. */
 export function dimFromRefusal(message: string): QuotaDim | null {

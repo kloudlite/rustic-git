@@ -6,14 +6,24 @@ import * as api from "@/lib/api";
 import { DIMS, type QuotaDim } from "@/lib/quota";
 import { conflictMessage } from "@/lib/settings";
 
-/** Bound with (id, decision) as the row's two buttons, so a plain form works with no client
- *  component: the note is whatever the shared field on that row held when it was pressed. */
-export async function decideRequest(id: string, decision: "approve" | "deny", formData: FormData) {
-  const note = String(formData.get("note") ?? "").trim();
+export type DecideResult = { ok: true } | { ok: false; message: string };
+
+/** The decision panel's Approve/Deny. `requested` is the operator's edited grant, one input per
+ *  dimension the request touched — Deny never reads it, only the note. A 409 (someone else
+ *  already decided this one) surfaces to the panel rather than a toast, so the operator sees the
+ *  conflicting state next to the row they were acting on. */
+export async function decideRequest(
+  id: string,
+  decision: "approve" | "deny",
+  note: string,
+  requested: Partial<Record<QuotaDim, number>> | undefined,
+): Promise<DecideResult> {
   const token = await tokenOr();
-  if (typeof token !== "string") return;
-  await api.adminDecideQuotaRequest(id, decision, note, token);
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminDecideQuotaRequest(id, decision, note, token, requested);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath("/superadmin/requests");
+  return { ok: true };
 }
 
 /** Bound with the default's own name (`default-user`/`default-team`) — the one writer

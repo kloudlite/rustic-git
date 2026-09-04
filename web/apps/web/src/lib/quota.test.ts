@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { atLimit, dimFromRefusal, dimLabel, percent, type QuotaReport } from "@/lib/quota";
+import { atLimit, dimFromRefusal, dimLabel, percent, requestedDiffs, type QuotaReport } from "@/lib/quota";
 
 const report = (used: number, limit: number): QuotaReport => ({
   owner: "karthik",
@@ -39,4 +39,14 @@ test("the refusal sentence names the dimension to ask about", () => {
 test("every dimension has a label", () => {
   expect(dimLabel("diskGb")).toBe("Disk");
   expect(dimLabel("memoryGb")).toBe("Memory");
+});
+
+test("requestedDiffs only lists dimensions the request touched", () => {
+  const limit = { workspaces: 20, environments: 2, snapshots: 20, diskGb: 100, cpu: 8, memoryGb: 32 };
+  expect(requestedDiffs(limit, { workspaces: 40 })).toEqual([{ dim: "workspaces", from: 20, to: 40 }]);
+  expect(requestedDiffs(limit, { workspaces: 40, diskGb: 250 })).toEqual([
+    { dim: "workspaces", from: 20, to: 40 },
+    { dim: "diskGb", from: 100, to: 250 },
+  ]);
+  expect(requestedDiffs(limit, {})).toEqual([]);
 });
