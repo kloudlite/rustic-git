@@ -29,6 +29,7 @@ pub mod nix;
 pub mod peer;
 pub mod snapshot;
 pub mod sshkeys;
+pub mod stats;
 pub mod sync;
 #[cfg(test)]
 mod testsupport;
@@ -242,6 +243,10 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // so the CRD's admin-written value is what a fresh pod boots with, not just what a running
     // one picks up later.
     let settings = LiveSettings::new(initial_settings(&client).await);
+    // The gauges the collector cannot get from the kubelet: the btrfs pool is this process's
+    // filesystem to read, and "working copies running here" is this node's own view. Must run
+    // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.
+    stats::spawn_stats(cfg.pool.clone(), client.clone(), cfg.node.clone());
     let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, roles, cfg.homes_export, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
     spawn_settings_reflector(client, settings);
     // Fail closed: no `WS_PEER_SECRET` means no listener at all, never one guarded by an empty
