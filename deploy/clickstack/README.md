@@ -50,8 +50,8 @@ The operators chart still installs the MongoDB operator (it has no off switch in
 HyperDX mints the key the collectors authenticate with; nothing in a values file can create it.
 
 1. Open `https://hyperdx-dev.kloudlite.io` and create the first account. Do this **immediately**
-   after the install — the first account is unauthenticated by design, which is also why the
-   ingress carries basic auth (next section) before anyone can reach that form.
+   after the install — the first account is unauthenticated by design, and from then on HyperDX's
+   own login is the only gate (no basic auth in front; it asked on every visit).
 2. Team Settings → API Keys → copy the **ingestion** key.
 3. Put it where the agent collectors read it, in **every** cluster:
 
@@ -62,17 +62,10 @@ kubectl -n rustic-git create secret generic rustic-git-otel \
   --from-literal=key='<ingestion key>'          # AKS
 ```
 
-The basic-auth Secret in front of HyperDX's ingress, created before the first sign-in above:
-
-```sh
-htpasswd -c auth <superadmin-username>
-kubectl -n clickstack create secret generic hyperdx-basic-auth --from-file=auth
-rm auth
-```
-
-That is the "restricted to the superadmin path" the values file's annotations name: nginx refuses
-the request before it reaches HyperDX, and the credentials are the superadmin's own — the same
-person the `superadmin: true` claim is minted for, and nobody else has a reason to open this host.
+Sign-up against the Cosmos account can answer `MongoServerError 16500 / TooManyRequests (429)`:
+HyperDX creates its collections and indexes in one burst and the serverless tier throttles that.
+Retrying the form works; enabling the account's `DisableRateLimitingResponses` capability
+(server-side retry) makes it a non-event.
 
 ## Wiring the admin process
 

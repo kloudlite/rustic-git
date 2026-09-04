@@ -104,6 +104,10 @@ otel-collector:
             hosts: [otel-grpc-dev.kloudlite.io]
 
 hyperdx:
+  config:
+    # The chart's default is http://localhost:3000, which is where every post-login redirect
+    # lands otherwise.
+    FRONTEND_URL: https://hyperdx-dev.kloudlite.io
   deployment:
     env:
       # A container's own `env` beats the chart's envFrom ConfigMap, so this overrides the
@@ -119,13 +123,9 @@ hyperdx:
       # ingress in deploy/rustic-git.yaml documents. TLS is the edge's; the origin cert only
       # exists so the record can go Full later without a second change.
       nginx.ingress.kubernetes.io/ssl-redirect: "false"
-      # HyperDX has its own login, but this area is superadmin-only and a second gate costs one
-      # annotation — the same "the console is not a public surface" stance the admin process takes
-      # by running as a separate process behind `refuse_without_claim`. The htpasswd Secret is
-      # created by hand, from the superadmin's own credentials; see README.md.
-      nginx.ingress.kubernetes.io/auth-type: basic
-      nginx.ingress.kubernetes.io/auth-secret: hyperdx-basic-auth
-      nginx.ingress.kubernetes.io/auth-realm: "rustic-git superadmin"
+      # No basic auth in front: HyperDX's own login is the gate. The first account was created
+      # right after the install (the sign-up form is open only until then), and a second prompt
+      # on every visit was judged not worth its cost.
     # Passed through verbatim as the Ingress `spec`, so this is Kubernetes' schema, not the
     # chart's — hence `ingressClassName` here rather than beside the annotations.
     spec:
