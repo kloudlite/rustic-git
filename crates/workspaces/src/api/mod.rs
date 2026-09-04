@@ -218,6 +218,13 @@ pub struct ApiState {
     /// /api/admin/settings`, Task 4). `None` in dev/tests: `GET /admin/settings/central` still
     /// answers from `keys`' object store directly, only the `PUT` needs this.
     pub peer: Option<admin::PeerClient>,
+    /// ClickHouse (ClickStack's), holding the collector's `default` telemetry and our own `rustic`
+    /// database. `None` when `RUSTIC_GIT_CLICKHOUSE_URL` is unset — a supported configuration, not
+    /// a degraded one: history routes answer `503 history unavailable` and the console renders a
+    /// flat placeholder. Only the ADMIN process ever sets this; the user role never constructs one,
+    /// which is what makes "the admin process is the only writer of `rustic`" a fact about the
+    /// binary rather than a convention.
+    pub history: Option<Arc<crate::history::History>>,
     /// The previous `/metrics` sweep, so the Monitoring page's rate rules have a second point to
     /// compare against without scraping twice on every request. ponytail: in-memory and
     /// single-process — a restart or the other replica just means the next request pays the 5 s
@@ -235,6 +242,7 @@ impl ApiState {
             keys: None,
             settings: LiveSettings::new(AgentSettings::from_env()),
             peer: None,
+            history: None,
             metrics_sample: Default::default(),
         }
     }
@@ -261,6 +269,11 @@ impl ApiState {
 
     pub fn with_keys(mut self, keys: Arc<rustic_git_storage::store::Store>) -> Self {
         self.keys = Some(keys);
+        self
+    }
+
+    pub fn with_history(mut self, history: Arc<crate::history::History>) -> Self {
+        self.history = Some(history);
         self
     }
 

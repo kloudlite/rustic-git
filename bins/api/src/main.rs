@@ -273,6 +273,29 @@ async fn run() -> Result<()> {
                     Err(e) => tracing::warn!(error = %e, "no in-cluster config: /admin/workloads central rolls will answer 503"),
                 }
             }
+            // ClickHouse is the admin process's alone (design §A1: it is the only writer of the
+            // `rustic` database). Optional: an unset URL leaves `history` None, every
+            // /admin/history route answers 503, and nothing is recorded — exactly how the
+            // deployment behaved before ClickStack existed.
+            if role == "admin" {
+                match rustic_git_workspaces::history::History::from_env() {
+                    Some(h) => {
+                        // Migrations at boot, so a fresh ClickStack becomes usable with no manual
+                        // step. A failure is LOGGED, not fatal: quota decisions and node drains
+                        // must not be held hostage by an analytics store, and the next restart
+                        // retries an idempotent set of statements.
+                        match rustic_git_workspaces::history::schema::migrate(&h).await {
+                            Ok(0) => tracing::info!("clickhouse schema up to date"),
+                            Ok(n) => tracing::info!(applied = n, "clickhouse migrations applied"),
+                            Err(e) => tracing::error!(error = %e, "clickhouse migrations failed; history will be incomplete until the next restart"),
+                        }
+                        state = state.with_history(Arc::new(h));
+                    }
+                    None => tracing::warn!(
+                        "RUSTIC_GIT_CLICKHOUSE_URL unset: /admin/history answers 503 and nothing is recorded"
+                    ),
+                }
+            }
             // The requeue sweep and the agent register/work/done/failed routes moved to the
             // server tier (Task 14) — this process now only serves the user-facing
             // /v1/workspaces|environments|regions|volumes routes.

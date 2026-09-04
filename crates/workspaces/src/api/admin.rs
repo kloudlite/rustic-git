@@ -90,6 +90,19 @@ pub(crate) fn require_note(note: &str) -> Result<String, Response> {
     }
     Ok(note)
 }
+
+/// The one place a history route turns "no ClickStack" into a response. 503 with this exact
+/// sentence, which the web keys its flat-placeholder rendering off — a bare status code would be
+/// indistinguishable from a real outage.
+// ponytail: no /admin/history route calls this yet (a later task adds them); unused-but-wired
+// ahead of its callers, same as every other gate in this file was before its routes landed.
+#[allow(dead_code)]
+pub(crate) fn history_or_503(s: &ApiState) -> Result<&crate::history::History, Response> {
+    s.history
+        .as_deref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "history unavailable").into_response())
+}
+
 pub use settings::PeerClient;
 
 /// Runs before ANY handler on this router. A token that fails to verify is 401; one that verifies
