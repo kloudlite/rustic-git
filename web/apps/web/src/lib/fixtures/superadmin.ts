@@ -370,7 +370,7 @@ const CENTRAL_SETTINGS: Record<string, unknown> = {
 };
 
 const SUPERADMINS: SuperAdmin[] = [
-  { _id: "karthik@kloudlite.io", addedAt: "2026-01-14T06:00:00Z", addedBy: "bootstrap (RUSTIC_GIT_WORKSPACES_ADMINS)" },
+  { _id: "karthik@kloudlite.io", addedAt: "2026-01-14T06:00:00Z", addedBy: "bootstrap" },
   { _id: "meera@kloudlite.io", addedAt: ago(48), addedBy: "karthik@kloudlite.io" },
 ];
 
@@ -394,6 +394,7 @@ const SERIES: Record<string, number[]> = {
   pool_used: [0.71, 0.73, 0.75, 0.77, 0.78, 0.79, 0.8],
   cpu_used: [0.6, 0.63, 0.65, 0.68, 0.7, 0.71, 0.72],
   memory_used: [0.7, 0.71, 0.73, 0.74, 0.75, 0.76, 0.76],
+  usage: [3, 3, 4, 4, 4, 5, 5],
 };
 
 /** A region's own gauges differ from the fleet's, so a two-region page does not draw one line

@@ -140,13 +140,7 @@ export default async function ClusterDetailPage({ params }: { params: Promise<{ 
         </p>
       </Section>
 
-      <Section
-        eyebrow="Workloads"
-        title="Region workloads"
-        count={detail.workloads.length}
-      >
-        <RollTable workloads={detail.workloads} onRoll={rollWorkloadAction} />
-      </Section>
+      <RollTable workloads={detail.workloads} onRoll={rollWorkloadAction} title="Region workloads" />
 
       <Section
         eyebrow="Configuration"

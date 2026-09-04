@@ -102,5 +102,7 @@ the manifest, the environment or the admin API.
 | Access.dc.html | `/superadmin/access` | `access/page.tsx` | `access/access-table.tsx` |
 | Configuration.dc.html | `/superadmin/configuration` | `configuration/page.tsx` | `configuration/scope-table.tsx`; `lib/config-rows.ts` |
 
-Screenshots: `cd web && RUSTIC_GIT_ADMIN_FIXTURES=1 bun run dev`, then
-`node scripts/superadmin-screens.mjs` writes each route at 1440 into `.local/screens/`.
+Screenshots:
+`cd web && RUSTIC_GIT_ADMIN_FIXTURES=1 AUTH_SECRET=dev-secret AUTH_URL=http://localhost:3000 bun run dev`,
+then `AUTH_SECRET=dev-secret node scripts/superadmin-screens.mjs [http://localhost:3000]` writes
+each route at 1440 into `.local/screens/`.

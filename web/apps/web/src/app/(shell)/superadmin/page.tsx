@@ -65,7 +65,7 @@ export default async function OverviewPage() {
   // just without the history layer's phrasing, so the section stays populated either way.
   const activity =
     events.ok && events.value.events.length > 0
-      ? events.value.events.map((e) => ({ key: e.id, ts: e.ts, actor: e.actor, text: eventSummary(e), note: e.attrs.note ?? null }))
+      ? events.value.events.map((e) => ({ key: e.id, ts: e.ts, actor: e.actor, text: eventSummary(e), note: e.attrs.note != null ? String(e.attrs.note) : null }))
       : ov.recentAudit.map((e, i) => ({
           key: `${e.ts}-${i}`,
           ts: e.ts,
@@ -86,11 +86,11 @@ export default async function OverviewPage() {
       )}
 
       <KpiStrip>
-        <KpiTile label="Pending requests" value={queue.length} sub={deltaLabel(pendingS, "requests")} series={pendingS} />
-        <KpiTile label="Firing signals" value={firingS.summary.last} sub={deltaLabel(firingS, "signals")} series={firingS} />
-        <KpiTile label="Owners over 80%" value={over80S.summary.last} sub={deltaLabel(over80S, "owners")} series={over80S} />
-        <KpiTile label="Live workspaces" value={ov.fleet.workspaces} sub={deltaLabel(wsS, "workspaces")} series={wsS} />
-        <KpiTile label="Live environments" value={ov.fleet.environments} sub={deltaLabel(envS, "environments")} series={envS} />
+        <KpiTile label="Pending requests" value={queue.length} sub={deltaLabel(pendingS)} series={pendingS} />
+        <KpiTile label="Firing signals" value={firingS.available ? firingS.summary.last : "—"} sub={deltaLabel(firingS)} series={firingS} />
+        <KpiTile label="Owners over 80%" value={over80S.available ? over80S.summary.last : "—"} sub={deltaLabel(over80S)} series={over80S} />
+        <KpiTile label="Live workspaces" value={ov.fleet.workspaces} sub={deltaLabel(wsS)} series={wsS} />
+        <KpiTile label="Live environments" value={ov.fleet.environments} sub={deltaLabel(envS)} series={envS} />
       </KpiStrip>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">

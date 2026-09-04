@@ -55,7 +55,7 @@ export default async function MonitoringPage() {
           value={notReady.length}
           sub={notReady[0] ? `${notReady[0].name} ${notReady[0].ready} of ${notReady[0].desired}` : "every workload settled"}
         />
-        <KpiTile label="Restarts" value={restartsS.summary.last} sub={deltaLabel(restartsS, "restarts")} series={restartsS} />
+        <KpiTile label="Restarts" value={restartsS.available ? restartsS.summary.last : "—"} sub={deltaLabel(restartsS)} series={restartsS} />
         <KpiTile
           label="Scrape failures"
           value={sig?.scrape_failures.length ?? 0}

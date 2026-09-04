@@ -28,6 +28,6 @@ test("owners sort by pressure, so the one about to hit a wall is first", () => {
 test("a limit is chipped by where it came from", () => {
   const own = { owner: "acme", source: "own" } as unknown as OwnerDetail;
   const fallback = { owner: "sana", source: "default" } as unknown as OwnerDetail;
-  expect(limitSource(own, "workspaces")).toBe("own");
-  expect(limitSource(fallback, "cpu")).toBe("default");
+  expect(limitSource(own)).toBe("own");
+  expect(limitSource(fallback)).toBe("default");
 });

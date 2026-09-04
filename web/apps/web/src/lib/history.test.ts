@@ -4,17 +4,17 @@ import { FLAT, deltaLabel, eventSummary, attentionTone } from "./history";
 test("an unavailable series reads as a placeholder, never as zero movement", () => {
   expect(FLAT.available).toBe(false);
   expect(FLAT.series).toEqual([]);
-  expect(deltaLabel(FLAT, "workspaces")).toBe("history unavailable");
+  expect(deltaLabel(FLAT)).toBe("history unavailable");
 });
 
 test("a delta says its direction and window in the tile's own sub-line", () => {
   const s = { series: [], summary: { last: 63, delta: 8, min: 55, max: 63 }, available: true };
-  expect(deltaLabel(s, "workspaces")).toBe("+8 in the last 7 days");
-  expect(deltaLabel({ ...s, summary: { ...s.summary, delta: -2 } }, "workspaces")).toBe("-2 in the last 7 days");
-  expect(deltaLabel({ ...s, summary: { ...s.summary, delta: 0 } }, "workspaces")).toBe("unchanged over 7 days");
+  expect(deltaLabel(s)).toBe("+8 in the last 7 days");
+  expect(deltaLabel({ ...s, summary: { ...s.summary, delta: -2 } })).toBe("-2 in the last 7 days");
+  expect(deltaLabel({ ...s, summary: { ...s.summary, delta: 0 } })).toBe("unchanged over 7 days");
 });
 
-test("an event renders one sentence even when its attrs are unknown to us", () => {
+test("an event renders one sentence from actor, phrase and subject", () => {
   expect(
     eventSummary({
       id: "1",
@@ -24,9 +24,9 @@ test("an event renders one sentence even when its attrs are unknown to us", () =
       owner: "acme",
       target: "Quota/acme",
       region: null,
-      attrs: { detail: "workspaces 20 → 40" },
+      attrs: { note: "workspaces 20 → 40" },
     }),
-  ).toBe("karthik approved a request for acme · workspaces 20 → 40");
+  ).toBe("karthik approved a request for acme");
   // A kind the console has no phrasing for still says who did what to which object, because a
   // history row is the record and dropping it would hide exactly the surprising events.
   expect(

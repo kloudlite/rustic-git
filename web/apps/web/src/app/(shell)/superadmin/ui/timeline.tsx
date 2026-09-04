@@ -20,7 +20,7 @@ export function TimelineRow({
 }) {
   return (
     <li className="flex gap-3 border-b border-border py-2 last:border-0">
-      <span className="w-14 shrink-0 pt-0.5 text-caption tabular-nums text-muted-foreground">{at}</span>
+      <span className="w-20 shrink-0 pt-0.5 text-caption tabular-nums text-muted-foreground">{at}</span>
       <span className="flex size-5 shrink-0 items-center justify-center bg-muted text-micro font-medium text-muted-foreground">
         {initials(actor)}
       </span>

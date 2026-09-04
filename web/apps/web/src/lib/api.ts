@@ -4,7 +4,7 @@ import type { Commit } from "@/lib/browse";
 import type { SnapshotState } from "@/lib/snapshot-state";
 import type { QuotaDim, QuotaReport } from "@/lib/quota";
 import { auditQueryString, type AuditEntry, type AuditFilter, type AuditPage } from "@/lib/audit";
-import { FLAT, type HistoryEvent, type HistorySeries } from "@/lib/history";
+import { FLAT, type HistoryEvent, type HistorySeries, type SeriesName } from "@/lib/history";
 import { fixtureFor } from "@/lib/fixtures/superadmin";
 
 /**
@@ -1411,8 +1411,8 @@ export function adminOverview(token: string) {
  *  a page that reads five series must not have five failure branches. Every non-ok answer is the
  *  same flat placeholder, which every tile already knows how to render. */
 export async function adminSeries(
-  name: string,
-  opts: { range?: string; step?: string; region?: string; owner?: string },
+  name: SeriesName,
+  opts: { range?: string; step?: string; region?: string; owner?: string; dimension?: string },
   token: string,
 ): Promise<HistorySeries> {
   const qs = new URLSearchParams();
@@ -1420,6 +1420,7 @@ export async function adminSeries(
   qs.set("step", opts.step ?? "1d");
   if (opts.region) qs.set("region", opts.region);
   if (opts.owner) qs.set("owner", opts.owner);
+  if (opts.dimension) qs.set("dimension", opts.dimension);
   const r = await adminCall<Omit<HistorySeries, "available">>(
     `/admin/history/${encodeURIComponent(name)}?${qs}`,
     { method: "GET", token },

@@ -28,11 +28,9 @@ export function byTightest(rows: OwnerRow[]): OwnerRow[] {
  *  Upgrade path: add a per-dimension `own: Partial<Record<QuotaDim, number>>` to the Rust
  *  `OwnerDetail` (`crates/workspaces/src/api/admin.rs`) and key off that instead.
  *
- *  `dim` is in the signature because the answer is per-dimension the moment the api can say so;
- *  today `OwnerDetail` carries ONE `source` for the whole owner (a `Quota` object replaces all
+ *  Today `OwnerDetail` carries ONE `source` for the whole owner (a `Quota` object replaces all
  *  six limits at once, `adminWriteQuota`), so every dimension reports the same word rather than
  *  the web inventing a field the api never sent. */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function limitSource(detail: OwnerDetail, dim: QuotaDim): "own" | "default" {
+export function limitSource(detail: OwnerDetail): "own" | "default" {
   return detail.source;
 }

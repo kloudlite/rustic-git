@@ -18,8 +18,9 @@ export const FLAT: HistorySeries = {
 };
 
 /** The fixed series names §A5 lists. A name not in here is a 404 upstream, so it is a typo here
- *  rather than a runtime surprise; `usage:{owner}:{dimension}` is built at the call site. */
-export const SERIES = [
+ *  rather than a runtime surprise. */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- used only as a type below (typeof SERIES)
+const SERIES = [
   "pending_requests",
   "firing_signals",
   "owners_over_80",
@@ -32,16 +33,15 @@ export const SERIES = [
   "memory_used",
   "restarts",
   "audit_events",
+  "usage",
 ] as const;
 
+export type SeriesName = (typeof SERIES)[number];
+
 /** The sub-line under a KPI's big number. Never "0" for missing history: a flat placeholder that
- *  reads as "nothing changed" is worse than one that says the source is down. `unit` names the
- *  series for the call site's own readability; the sentence itself sits under a tile that is
- *  already labelled with it, so repeating it there would only make the line wrap. */
-// `unit` stays in the signature so every tile names its series at the call site, even though the
-// sentence itself omits it (the tile above is already labelled with it).
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function deltaLabel(s: HistorySeries, unit: string): string {
+ *  reads as "nothing changed" is worse than one that says the source is down. The sentence never
+ *  names the series — the tile above is already labelled with it. */
+export function deltaLabel(s: HistorySeries): string {
   if (!s.available) return "history unavailable";
   if (s.summary.delta === 0) return "unchanged over 7 days";
   const sign = s.summary.delta > 0 ? "+" : "";
@@ -56,25 +56,58 @@ export type HistoryEvent = {
   owner: string | null;
   target: string | null;
   region: string | null;
-  attrs: Record<string, string>;
+  attrs: Record<string, string | number | boolean>;
 };
 
+/** Kinds actually emitted by `crates/workspaces/src/history/events.rs` and the `admin.*` audit
+ *  call sites — a phrase for a kind nothing writes is dead weight, and a kind with no phrase here
+ *  falls back to actor + kind + target rather than being dropped. */
 const PHRASES: Record<string, string> = {
+  "admin.set-quota": "set the quota for",
+  "admin.drain": "drained",
+  "admin.undrain": "un-drained",
+  "admin.decommission": "decommissioned",
+  "admin.roll": "rolled",
+  "admin.activate-region": "activated",
+  "admin.deactivate-region": "deactivated",
+  "admin.add-region": "added",
+  "admin.stop-workspace": "stopped the workspace for",
+  "admin.delete-workspace": "deleted the workspace for",
+  "admin.stop-environment": "stopped the environment for",
+  "admin.delete-environment": "deleted the environment for",
+  "admin.put-central-settings": "updated central settings for",
+  "admin.revert-central-settings": "reverted central settings for",
+  "request.opened": "opened a request for",
   "request.approved": "approved a request for",
   "request.denied": "denied a request for",
-  "quota.set": "set the quota for",
-  "node.drain": "drained",
-  "workload.roll": "rolled",
+  "workspace.created": "created a workspace for",
+  "workspace.started": "started the workspace for",
+  "workspace.stopped": "stopped the workspace for",
+  "workspace.deleted": "deleted the workspace for",
+  "environment.created": "created an environment for",
+  "environment.started": "started the environment for",
+  "environment.stopped": "stopped the environment for",
+  "environment.deleted": "deleted the environment for",
+  "volume.released": "released",
+  "volume.moved": "moved",
+  "volume.unavailable": "made unavailable",
+  "volume.deleted": "deleted",
+  "node.ready": "reported ready:",
+  "node.notready": "reported not ready:",
+  "node.cordoned": "cordoned",
+  "node.draining": "began draining",
+  "node.drained": "finished draining",
+  "region.activated": "activated",
+  "region.deactivated": "deactivated",
 };
 
 /** One sentence per timeline row. An unrecognised kind falls back to actor + kind + target rather
  *  than being dropped: the events nobody wrote a phrase for are exactly the ones worth seeing. */
 export function eventSummary(e: HistoryEvent): string {
   const phrase = PHRASES[e.kind];
-  const detail = e.attrs.detail ? ` · ${e.attrs.detail}` : "";
   if (!phrase) return `${e.actor} ${e.kind} ${e.target ?? ""}`.trim();
   const subject = e.owner ?? e.target ?? "";
-  return `${e.actor} ${phrase} ${subject}${detail}`.trim();
+  return `${e.actor} ${phrase} ${subject}`.trim();
 }
 
 /** `AttentionItem.kind` from `/admin/overview` (and the same words on history rows) → a tone.

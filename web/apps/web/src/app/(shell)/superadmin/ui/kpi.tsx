@@ -45,7 +45,7 @@ export function KpiTile({
       <p className="text-micro font-medium tracking-eyebrow text-muted-foreground uppercase">{label}</p>
       <p className="text-title font-semibold tabular-nums leading-title">{value}</p>
       {series && <Sparkline series={series} />}
-      <p className="truncate text-caption text-muted-foreground">{sub}</p>
+      <p className="line-clamp-2 text-caption text-muted-foreground">{sub}</p>
     </div>
   );
 }

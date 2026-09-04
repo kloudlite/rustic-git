@@ -10,7 +10,7 @@ import { eventSummary } from "@/lib/history";
 import { when } from "@/lib/time";
 import type { Tone } from "@/lib/console";
 import { Section } from "../../ui/section";
-import { KpiStrip, KpiTile } from "../../ui/kpi";
+import { KpiStrip, KpiTile, Sparkline } from "../../ui/kpi";
 import { CapacityBar } from "../../ui/capacity-bar";
 import { Pill } from "../../ui/pill";
 import { DataTable, EmptyState, Td, Th, Tr } from "../../ui/data-table";
@@ -33,16 +33,18 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
   const { token } = await requireSuperadmin(`/superadmin/owners/${slug}`);
   // ponytail: quota requests are the only request kind today; this becomes the generic requests
   // list when that lands, same table.
-  const [r, requestsR, eventsR] = await Promise.all([
+  const [r, requestsR, eventsR, dimSeries] = await Promise.all([
     api.adminOwnerDetail(slug, token),
     api.adminListQuotaRequests(token, { owner: slug }),
     api.adminHistoryEvents({ owner: slug, limit: 20 }, token),
+    Promise.all(DIMS.map((d) => api.adminSeries("usage", { owner: slug, dimension: d }, token))),
   ]);
   if (!r.ok) {
     if (r.kind === "notFound") notFound();
     throw new Error(r.message);
   }
   const owner = r.value;
+  const usageByDim = Object.fromEntries(DIMS.map((d, i) => [d, dimSeries[i]]));
   const requests = requestsR.ok ? requestsR.value : owner.requests;
   const pending = requests.filter((q) => q.state === "pending");
   const detached = owner.volumes.filter((v) => v.deleted);
@@ -105,9 +107,10 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
                 <span className="text-sm2 font-medium">{dimLabel(d)}</span>
                 {/* The source chip is the point of this grid: v1 showed six bars and never said
                     whether a limit was the owner's own or the fallback. */}
-                <Pill>{limitSource(owner, d)}</Pill>
+                <Pill>{limitSource(owner)}</Pill>
               </div>
               <CapacityBar used={owner.used[d]} limit={owner.limit[d]} unit={dimUnit(d)} />
+              <Sparkline series={usageByDim[d]} />
             </div>
           ))}
         </div>
@@ -208,7 +211,7 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
         {events.length > 0 ? (
           <Timeline>
             {events.map((e) => (
-              <TimelineRow key={e.id} at={when(new Date(e.ts).getTime())} actor={e.actor} note={e.attrs.note ?? null}>
+              <TimelineRow key={e.id} at={when(new Date(e.ts).getTime())} actor={e.actor} note={e.attrs.note != null ? String(e.attrs.note) : null}>
                 {eventSummary(e)}
               </TimelineRow>
             ))}
