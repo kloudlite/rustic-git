@@ -253,3 +253,25 @@ Outcome series added for postmortems. Each is emitted at the one place the fact 
 
 Not added: `ssh_sessions_open` — the accept/session path is `crates/git/src/ssh.rs`, outside this
 change's file scope. It is a two-line gauge in `new_client` plus `Drop for Conn`.
+
+## Metrics
+
+Our own view of every dependency, recorded at the ONE choke point each client already has — the
+metered `ObjectStore` wrapper, `cache::run_within`, the mongo driver's command events, and
+`History::post`. `kind` is a closed set (`core::metrics::ERROR_KINDS`: `timeout`, `status_5xx`,
+`status_429`, `refused`, `other`); the error TEXT stays in the logs, because a label taken from a
+message is an unbounded series.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `dependency_request_duration_seconds` | histogram | `dep`, `op` | How long one call to a dependency took, measured from our side of the wire (`dep=blob` object store, `redis`, `mongo`, `clickhouse`) |
+| `dependency_errors_total` | counter | `dep`, `op`, `kind` | One failed call, classified — never the error's text |
+| `history_stream_pending` | gauge | — | Entries the `history` consumer group has taken and not yet acked (`XPENDING` summary), read once per consumer beat; absent, not 0, when Redis cannot answer |
+
+`op` per dependency, the values `metrics::register_dependency` is given at boot:
+`blob` — get, head, put, put_multipart, delete, list, copy (`storage::metered::OPS`);
+`redis` — get, set, del, incr, eval, xadd, xack, xgroup, xreadgroup, xautoclaim, xrevrange,
+xpending, other (`storage::cache::OPS`);
+`mongo` — find, insert, update, delete, find_and_modify, count, create_indexes, other
+(`pulls::directory::OPS`, mapped from the driver's command name);
+`clickhouse` — query, insert (`workspaces::history::OPS`).

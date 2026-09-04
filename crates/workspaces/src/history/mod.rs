@@ -57,6 +57,24 @@ impl std::fmt::Display for HistoryError {
 
 impl std::error::Error for HistoryError {}
 
+const DEP: &str = "clickhouse";
+
+/// Every op, for `metrics::register_dependency` at boot. Two verbs is the whole client — see the
+/// module doc.
+pub const OPS: &[&str] = &["query", "insert"];
+
+/// The class of a failure that never reached a status line. reqwest knows which of the two it was,
+/// so nothing here has to read the message.
+fn transport_kind(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "refused"
+    } else {
+        "other"
+    }
+}
+
 #[derive(Clone)]
 pub struct History {
     url: String,
@@ -93,7 +111,11 @@ impl History {
 
     /// One POST of `sql` as the body. Credentials go in headers rather than the query string so the
     /// password never lands in ClickHouse's own `query_log`.
-    async fn post(&self, body: String) -> Result<String, HistoryError> {
+    async fn post(&self, op: &'static str, body: String) -> Result<String, HistoryError> {
+        // The two verbs both come through here, so this is the one place the dependency is timed
+        // and classified — and the reqwest error is still whole here, which is the only place the
+        // transport classes can be told apart at all (`HistoryError::Http` keeps only the text).
+        let start = std::time::Instant::now();
         let r = self
             .client
             .post(&self.url)
@@ -102,8 +124,14 @@ impl History {
             .body(body)
             .send()
             .await
-            .map_err(|e| HistoryError::Http(e.to_string()))?;
+            .map_err(|e| {
+                kloudlite_git_core::metrics::dep_done(DEP, op, start, Some(transport_kind(&e)));
+                HistoryError::Http(e.to_string())
+            })?;
         let status = r.status().as_u16();
+        let kind = (!(200..300).contains(&status))
+            .then(|| kloudlite_git_core::metrics::http_error_kind(status));
+        kloudlite_git_core::metrics::dep_done(DEP, op, start, kind);
         let body = r.text().await.map_err(|e| HistoryError::Http(e.to_string()))?;
         if !(200..300).contains(&status) {
             return Err(HistoryError::Server { status, body });
@@ -143,7 +171,7 @@ impl History {
             body.push_str(&r.to_string());
             body.push('\n');
         }
-        self.post(body).await.map(|_| ())
+        self.post("insert", body).await.map(|_| ())
     }
 
     /// `{sql} FORMAT JSONCompact`, returning just the `data` rows. Compact because every caller
@@ -151,7 +179,7 @@ impl History {
     /// passed through untouched — a series or alert query names `otel_metrics_sum` in the
     /// collector's database as readily as one of ours.
     pub async fn query(&self, sql: &str) -> Result<Vec<Vec<serde_json::Value>>, HistoryError> {
-        let text = self.post(format!("{sql} FORMAT JSONCompact")).await?;
+        let text = self.post("query", format!("{sql} FORMAT JSONCompact")).await?;
         // DDL answers 200 with an empty body — the migrations go through this same verb, and an
         // empty body is "no rows", not a malformed response.
         if text.trim().is_empty() {

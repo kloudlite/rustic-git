@@ -142,6 +142,11 @@ pub async fn consume_forever(cache: Arc<kloudlite_git_storage::cache::Cache>, hi
     let me = format!("history-{:016x}", rand::random::<u64>());
     let mut last_claim = std::time::Instant::now();
     loop {
+        // Once per beat, from the group's own PEL: how far behind this consumer is. Absent rather
+        // than 0 when Redis cannot answer — see `xpending_count`.
+        if let Some(n) = cache.xpending_count(STREAM, GROUP).await {
+            kloudlite_git_core::metrics::set_gauge("history_stream_pending", n as f64);
+        }
         let mut batch = if last_claim.elapsed() >= RECLAIM_EVERY {
             last_claim = std::time::Instant::now();
             cache.xautoclaim(STREAM, GROUP, &me, CLAIM_STALE_AFTER_MS, BATCH).await

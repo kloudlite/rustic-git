@@ -101,6 +101,11 @@ pub fn object_store_views() -> Result<StoreViews> {
     if mp.is_none() {
         tracing::info!(%url, mode = "single-part-uploads", "store.multipart.unavailable");
     }
+    // Metered here and nowhere else: every crate, every binary and SlateDB itself take their
+    // handle from this one function, so one wrapper is the whole fleet's view of the blob store.
+    // `mp` stays unwrapped — a multipart handle is the backend's own type, not a trait we can sit
+    // in front of, and its handshake is already counted through `put_multipart_opts`.
+    let os: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(crate::metered::Metered(os));
     Ok((os, mp))
 }
 

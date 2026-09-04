@@ -381,6 +381,10 @@ impl Directory {
         // re-established quickly beats a large one full of dead sockets.
         opts.app_name = Some("kloudlite-git-api".into());
         opts.max_pool_size = Some(16);
+        // The driver's own command monitoring is the ONE choke point this client has: every
+        // collection call in this file (and in `teams.rs`) ends as a command event carrying the
+        // round trip the driver measured, so nothing has to be wrapped at the ~60 call sites.
+        opts.command_event_handler = Some(mongodb::event::EventHandler::callback(on_command));
         let client = Client::with_options(opts).map_err(|e| err(format!("mongo: {e}")))?;
         let db = client.database(db);
         let dir = Directory {
@@ -924,6 +928,63 @@ pub(crate) fn lowercased(fingerprints: &[String]) -> Option<Vec<String>> {
     (lower != fingerprints).then_some(lower)
 }
 
+const DEP: &str = "mongo";
+
+/// Every op `mongo_op` can answer, for `metrics::register_dependency` at boot.
+pub const OPS: &[&str] = &[
+    "find", "insert", "update", "delete", "find_and_modify", "count", "create_indexes", "other",
+];
+
+/// One command event, timed by the driver itself. Started events carry no duration and are
+/// ignored: the pair we want is succeeded/failed, which is one record per round trip.
+fn on_command(ev: mongodb::event::command::CommandEvent) {
+    use kloudlite_git_core::metrics::dep_took;
+    use mongodb::event::command::CommandEvent::*;
+    match ev {
+        Started(_) => {}
+        Succeeded(e) => dep_took(DEP, mongo_op(&e.command_name), e.duration, None),
+        Failed(e) => {
+            dep_took(DEP, mongo_op(&e.command_name), e.duration, Some(kind_of(&e.failure)))
+        }
+    }
+}
+
+/// The server's command name, mapped to a closed set — the wire name is whatever a driver version
+/// decides to send (`hello`, `endSessions`, a future command), which is not a label we can bound.
+fn mongo_op(name: &str) -> &'static str {
+    match name {
+        "find" | "getMore" | "aggregate" | "distinct" => "find",
+        "insert" => "insert",
+        "update" => "update",
+        "delete" => "delete",
+        "findAndModify" => "find_and_modify",
+        "count" | "countDocuments" => "count",
+        "createIndexes" => "create_indexes",
+        _ => "other",
+    }
+}
+
+/// The class of a directory failure. Cosmos answers a throttled request with `16500`/`TooManyRequests`
+/// rather than an HTTP status, and that is the one class worth telling apart here: it means the
+/// collection is under-provisioned, not that anything is down.
+fn kind_of(e: &mongodb::error::Error) -> &'static str {
+    use mongodb::error::ErrorKind;
+    match &*e.kind {
+        ErrorKind::Io(io) => match io.kind() {
+            std::io::ErrorKind::TimedOut => "timeout",
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset => "refused",
+            _ => "other",
+        },
+        ErrorKind::ServerSelection { .. } | ErrorKind::ConnectionPoolCleared { .. } => "refused",
+        // 16500 is Cosmos's RU throttle; 50 is `MaxTimeMSExpired`, which is a timeout wearing a
+        // command code.
+        ErrorKind::Command(c) if c.code == 50 => "timeout",
+        ErrorKind::Command(c) if c.code == 16500 || c.code_name == "TooManyRequests" => "status_429",
+        ErrorKind::Command(_) | ErrorKind::Write(_) => "status_5xx",
+        _ => "other",
+    }
+}
+
 pub(crate) fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
     use mongodb::error::ErrorKind;
     match *e.kind {
@@ -938,6 +999,28 @@ pub(crate) fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check_handle;
+
+    #[test]
+    /// The classifier is what a rule filters on: total, and never the error's text.
+    #[test]
+    fn mongo_failures_land_in_one_of_the_five_classes() {
+        use mongodb::error::Error;
+        let io = |k: std::io::ErrorKind| Error::from(std::io::Error::from(k));
+        assert_eq!(super::kind_of(&io(std::io::ErrorKind::TimedOut)), "timeout");
+        assert_eq!(super::kind_of(&io(std::io::ErrorKind::ConnectionRefused)), "refused");
+        assert_eq!(super::kind_of(&io(std::io::ErrorKind::BrokenPipe)), "other");
+        for e in [io(std::io::ErrorKind::TimedOut), io(std::io::ErrorKind::BrokenPipe)] {
+            assert!(kloudlite_git_core::metrics::ERROR_KINDS.contains(&super::kind_of(&e)));
+        }
+    }
+
+    /// A command name the driver invents (or a handshake) must not become a new series.
+    #[test]
+    fn ops_are_a_closed_set() {
+        assert_eq!(super::mongo_op("findAndModify"), "find_and_modify");
+        assert_eq!(super::mongo_op("hello"), "other");
+        assert!(super::OPS.contains(&super::mongo_op("hello")));
+    }
 
     #[test]
     fn lowercased_only_reports_rows_that_change() {

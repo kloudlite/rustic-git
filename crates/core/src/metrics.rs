@@ -92,6 +92,64 @@ pub fn register(series: &[Series]) {
     }
 }
 
+/// One dependency call, from OUR side of the wire: the latency we saw, and — when it failed — one
+/// counted error under a short stable class. Every dependency client in the fleet routes its own
+/// choke point through here so the console charts one pair of series, not four shapes of one.
+///
+/// `kind` is deliberately a small closed set (`ERROR_KINDS`); the error TEXT stays in the logs,
+/// because a label taken from an error message is an unbounded time series.
+pub fn dep_done(dep: &'static str, op: &'static str, start: Instant, kind: Option<&'static str>) {
+    dep_took(dep, op, start.elapsed(), kind);
+}
+
+/// `dep_done` for a client that timed the call itself — the mongo driver's command events carry
+/// their own duration, and re-measuring around them would count the driver's queueing twice.
+pub fn dep_took(
+    dep: &'static str,
+    op: &'static str,
+    took: std::time::Duration,
+    kind: Option<&'static str>,
+) {
+    metrics::histogram!("dependency_request_duration_seconds", "dep" => dep, "op" => op)
+        .record(took.as_secs_f64());
+    if let Some(kind) = kind {
+        metrics::counter!("dependency_errors_total", "dep" => dep, "op" => op, "kind" => kind)
+            .increment(1);
+    }
+}
+
+/// One unlabelled gauge, for a crate that has no `metrics` dependency of its own. Same reason
+/// `dep_done` lives here rather than at each call site.
+pub fn set_gauge(name: &'static str, v: f64) {
+    metrics::gauge!(name).set(v);
+}
+
+/// The only classes `dep_done` accepts. `other` is the catch-all, and every classifier must be
+/// total: an unclassifiable failure still has to be counted.
+pub const ERROR_KINDS: [&str; 5] = ["timeout", "status_5xx", "status_429", "refused", "other"];
+
+/// The class of an HTTP-shaped failure. `429` gets its own because a throttled dependency is a
+/// capacity decision somebody made, not an outage.
+pub fn http_error_kind(status: u16) -> &'static str {
+    match status {
+        429 => "status_429",
+        500..=599 => "status_5xx",
+        _ => "other",
+    }
+}
+
+/// Bring a dependency's whole error surface into existence at boot, the same reason `register`
+/// exists: an alert over a counter that has never been touched reads `unknown`, not `ok`. The
+/// duration histogram is deliberately NOT touched — see `Kind::Histogram`.
+pub fn register_dependency(dep: &'static str, ops: &[&'static str]) {
+    for op in ops {
+        for kind in ERROR_KINDS {
+            metrics::counter!("dependency_errors_total", "dep" => dep, "op" => *op, "kind" => kind)
+                .absolute(0);
+        }
+    }
+}
+
 /// Per-request count and latency, labelled by listener, route class and status. Mount it
 /// OUTERMOST so it sees the status every inner layer (auth, routing) settles on.
 /// `axum::middleware::from_fn_with_state("peer", http_metrics)`.
@@ -150,6 +208,17 @@ fn status_class(code: u16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// Every classifier in the fleet ends here, so the HTTP one has to agree with `ERROR_KINDS`.
+    #[test]
+    fn http_error_classes_are_named_and_bounded() {
+        assert_eq!(super::http_error_kind(429), "status_429");
+        assert_eq!(super::http_error_kind(503), "status_5xx");
+        assert_eq!(super::http_error_kind(400), "other");
+        for c in [429u16, 503, 400, 200] {
+            assert!(super::ERROR_KINDS.contains(&super::http_error_kind(c)));
+        }
+    }
+
     #[test]
     fn classes_are_bounded_and_named() {
         assert_eq!(super::route_class("/alice/repo/git-receive-pack"), "git");

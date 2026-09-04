@@ -95,13 +95,14 @@ impl Cache {
         // blocking, not a slow command. A plain read plus the caller's existing idle sleep gives
         // the same wake-up latency without holding the shared connection. If a blocking read is
         // ever wanted back, it needs its OWN connection, not this one.
-        match tokio::time::timeout(CMD_TIMEOUT, cmd.query_async::<StreamReply>(&mut c)).await {
-            Ok(Ok(reply)) => reply.0,
-            Ok(Err(e)) => {
+        // Through `run_within` like every other command — same 250 ms budget, same
+        // timeout-as-error handling, and the one place Redis latency is measured from.
+        match run_within::<StreamReply>(CMD_TIMEOUT, &mut cmd, &mut c).await {
+            Ok(reply) => reply.0,
+            Err(e) => {
                 tracing::warn!(%stream, %group, op = "xreadgroup", error = %e, "cache.stream.failed");
                 Vec::new()
             }
-            Err(_) => Vec::new(), // timed out waiting; the caller's sweep covers it
         }
     }
 
@@ -174,6 +175,25 @@ impl Cache {
                 tracing::warn!(%stream, op = "xrevrange", error = %e, "cache.stream.failed");
                 Vec::new()
             }
+        }
+    }
+
+    /// `XPENDING {stream} {group}` — the summary form, whose first element is how many entries the
+    /// group has taken and not yet acked. `None` when there is nothing to ask (a disabled cache) or
+    /// the call failed: an absent gauge reads as "no data", where a substituted 0 would read as
+    /// "all caught up" and hide exactly the backlog it exists to show.
+    pub async fn xpending_count(&self, stream: &str, group: &str) -> Option<u64> {
+        let mut c = self.conn.clone()?;
+        let mut cmd = redis::cmd("XPENDING");
+        cmd.arg(stream).arg(group);
+        // `[count, min_id, max_id, [[consumer, count], …]]`; an empty PEL answers the same shape
+        // with a 0 in front.
+        match run::<redis::Value>(&mut cmd, &mut c).await {
+            Ok(redis::Value::Array(items)) => match items.first() {
+                Some(redis::Value::Int(n)) => Some((*n).max(0) as u64),
+                _ => None,
+            },
+            _ => None,
         }
     }
 }

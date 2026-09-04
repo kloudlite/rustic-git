@@ -153,7 +153,20 @@ impl Cache {
         let mut call = GET_SCRIPT.prepare_invoke();
         call.arg(repo).arg(KEY_VERSION).arg(suffix);
         let fut = call.invoke_async::<Option<Vec<u8>>>(&mut c);
+        // The one command that does not go through `run_within` (it is a script invocation, not a
+        // `Cmd`), so it records its own timing here rather than being invisible.
+        let start = Instant::now();
         let r = tokio::time::timeout(CMD_TIMEOUT, fut).await;
+        kloudlite_git_core::metrics::dep_done(
+            DEP,
+            "eval",
+            start,
+            match &r {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(kind_of(e)),
+                Err(_) => Some("timeout"),
+            },
+        );
         // Failing open is right — a miss is always safe — but silently, it is invisible: a Redis
         // that answers PING while refusing EVAL (no scripting, a proxy that drops it, a version
         // without it) turns the cache off fleet-wide and the only symptom is latency. Once per
@@ -271,15 +284,88 @@ async fn run_within<T: redis::FromRedisValue>(
     cmd: &mut redis::Cmd,
     c: &mut redis::aio::ConnectionManager,
 ) -> redis::RedisResult<T> {
-    match tokio::time::timeout(budget, cmd.query_async(c)).await {
+    // Every Redis command in the fleet funnels through here, so this is the one place the
+    // dependency has to be measured from; the op comes off the command itself rather than from a
+    // parameter nobody would keep in sync.
+    let start = Instant::now();
+    let op = op_of(cmd);
+    let r = match tokio::time::timeout(budget, cmd.query_async(c)).await {
         Ok(r) => r,
         Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
+    };
+    kloudlite_git_core::metrics::dep_done(DEP, op, start, r.as_ref().err().map(kind_of));
+    r
+}
+
+const DEP: &str = "redis";
+
+/// Every op `op_of` can answer, for `metrics::register_dependency` at boot.
+pub const OPS: &[&str] = &[
+    "get", "set", "del", "incr", "eval", "xadd", "xack", "xgroup", "xreadgroup", "xautoclaim",
+    "xrevrange", "xpending", "other",
+];
+
+/// The command name, mapped to a closed set: a label taken straight from the wire would be
+/// unbounded the day somebody sends a command this list does not know.
+fn op_of(cmd: &redis::Cmd) -> &'static str {
+    let Some(redis::Arg::Simple(name)) = cmd.args_iter().next() else { return "other" };
+    match name {
+        b"GET" => "get",
+        b"SET" => "set",
+        b"DEL" => "del",
+        b"INCR" => "incr",
+        b"XADD" => "xadd",
+        b"XACK" => "xack",
+        b"XGROUP" => "xgroup",
+        b"XREADGROUP" => "xreadgroup",
+        b"XAUTOCLAIM" => "xautoclaim",
+        b"XREVRANGE" => "xrevrange",
+        b"XPENDING" => "xpending",
+        _ => "other",
+    }
+}
+
+/// The class of a Redis failure. `run_within`'s own budget expiry arrives as an `io::TimedOut`,
+/// which is exactly what `is_timeout` reads, so both timeouts classify the same way.
+fn kind_of(e: &redis::RedisError) -> &'static str {
+    if e.is_timeout() {
+        "timeout"
+    } else if e.is_connection_refusal() || e.is_connection_dropped() {
+        "refused"
+    } else {
+        "other"
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classifier is what a rule filters on: it must be total, and it must never leak the
+    /// error's text into a label. A budget expiry and a refused connection are the two cases the
+    /// dependency charts are read for.
+    #[test]
+    fn redis_failures_land_in_one_of_the_five_classes() {
+        let io = |k: std::io::ErrorKind| redis::RedisError::from(std::io::Error::from(k));
+        assert_eq!(kind_of(&io(std::io::ErrorKind::TimedOut)), "timeout");
+        assert_eq!(kind_of(&io(std::io::ErrorKind::ConnectionRefused)), "refused");
+        let response: redis::RedisError =
+            (redis::ErrorKind::ResponseError, "ERR nope").into();
+        assert_eq!(kind_of(&response), "other");
+        for e in [io(std::io::ErrorKind::TimedOut), response] {
+            assert!(kloudlite_git_core::metrics::ERROR_KINDS.contains(&kind_of(&e)));
+        }
+    }
+
+    /// A command name that is not in the closed set must fall back, or one stray command becomes a
+    /// new series forever.
+    #[test]
+    fn ops_are_a_closed_set() {
+        assert_eq!(op_of(&redis::cmd("XADD")), "xadd");
+        assert_eq!(op_of(redis::cmd("XACK").arg("events")), "xack");
+        assert_eq!(op_of(&redis::cmd("FLUSHALL")), "other");
+        assert!(OPS.contains(&op_of(&redis::cmd("FLUSHALL"))));
+    }
 
     #[test]
     fn keys_carry_version_generation_and_repo() {
