@@ -116,6 +116,14 @@ data:
                 - source_labels: [__meta_kubernetes_pod_node_name]
                   action: keep
                   regex: ${env:K8S_NODE_NAME}
+                # Our pods only: every other annotated exporter on the node (cert-manager, the
+                # ingress) is somebody else's telemetry.
+                - source_labels: [__meta_kubernetes_namespace]
+                  action: keep
+                  regex: kube-system
+                - source_labels: [__meta_kubernetes_pod_name]
+                  action: keep
+                  regex: rustic-git-.*
                 # The annotation names the metrics port; without this rewrite discovery would
                 # scrape the pod's first declared port, which for most of ours is not 9464.
                 - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]

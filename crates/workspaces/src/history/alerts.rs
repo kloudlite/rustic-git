@@ -472,9 +472,15 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
         };
         // A region list we could not read is not a reason to write "unknown" over a good state:
         // skip the beat and try again in thirty seconds.
-        let Some(regions) = region_names(&state).await else {
+        let Some(mut regions) = region_names(&state).await else {
             continue;
         };
+        // The central tier (server, worker, gateway, api on AKS) is not a `Region` CR, but its
+        // collectors stamp `central` and six of the rules read only its metrics — without this
+        // line they sit at `unknown` forever.
+        if !regions.iter().any(|r| r == super::watch::CENTRAL) {
+            regions.push(super::watch::CENTRAL.to_string());
+        }
         let now = chrono::Utc::now();
         let mut writes = std::mem::take(&mut pending);
         for region in &regions {
