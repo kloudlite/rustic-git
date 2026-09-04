@@ -32,23 +32,121 @@ pub struct Rule {
     /// The catalogue's own "Why" column — carried so the console never has to restate it and the
     /// two can never drift.
     pub why: &'static str,
-    /// `region -> SQL`. Returns `[bucket_ts, breached]` rows, newest last.
-    pub sql: fn(&str) -> String,
+    /// `region -> SQL`, private: every caller goes through `sql_for`, which is where the region's
+    /// identifier check lives. A public field would be an unchecked way to build the same string.
+    sql: fn(&str) -> String,
     pub for_secs: u64,
 }
 
-/// A counter's per-bucket rate out of `otel_metrics_sum`, as a fragment every rate rule shares:
-/// the exporter writes cumulative values, so a rate is `max - min` inside the bucket, and a
-/// negative delta (a pod restart) is clamped to zero rather than poisoning the ratio.
+impl Rule {
+    /// This rule's SQL for one region, or `None` if the region name is not an identifier we are
+    /// willing to interpolate. The SQL itself is static text; the region is the only caller-shaped
+    /// value that reaches it, so it is CHECKED rather than escaped — a Kubernetes object name is
+    /// already `[a-z0-9.-]`, and anything else is a bug or an injection attempt.
+    pub fn sql_for(&self, region: &str) -> Option<String> {
+        let ok = !region.is_empty()
+            && region.len() <= 253
+            && region
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.');
+        ok.then(|| (self.sql)(region))
+    }
+}
+
+/// The identity of one cumulative counter SERIES: the pod that emits it and its label set. Every
+/// delta below is computed inside one series and only then summed, because `max(Value) -
+/// min(Value)` across two pods is the SPREAD between two independent cumulative counters, not an
+/// increase — two pods at 10 and 1000 would read as a permanent +990 with nothing happening.
+const SERIES: &str = "ResourceAttributes['k8s.pod.name'], Attributes";
+
+/// A counter's per-bucket increase out of `otel_metrics_sum`: per-series `max - min` inside the
+/// bucket, clamped at zero (a negative delta is a pod restart, not a decrease), then summed.
 fn bucketed_sum(metric: &str, filter: &str, region: &str, window_secs: u64) -> String {
     format!(
-        "SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
-                greatest(max(Value) - min(Value), 0) AS v \
-         FROM default.otel_metrics_sum \
-         WHERE MetricName = '{metric}' {filter} \
-           AND ResourceAttributes['region'] = '{region}' \
-           AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
+        "SELECT b, sum(d) AS v FROM (\
+            SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
+                   greatest(max(Value) - min(Value), 0) AS d \
+            FROM default.otel_metrics_sum \
+            WHERE MetricName = '{metric}' {filter} \
+              AND ResourceAttributes['region'] = '{region}' \
+              AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
+            GROUP BY b, {SERIES}) \
          GROUP BY b"
+    )
+}
+
+/// The catalogue's two ratio rules, which differ only in metric, grouping and threshold: per-series
+/// deltas first, folded into a ratio PER GROUP (a registry outage must not be hidden by healthy git
+/// traffic), and the bucket breaches if any group is over. A bucket with no traffic is `ok` at
+/// ratio 0 rather than dropped — dropping it would leave a quiet window uncovered, which
+/// `state_of` would then have to call `unknown`.
+fn ratio_rule(
+    metric: &str,
+    group: &[&str],
+    bad_label: (&str, &str),
+    threshold: f64,
+    region: &str,
+    window_secs: u64,
+) -> String {
+    let cols: Vec<String> = group
+        .iter()
+        .map(|g| format!("Attributes['{g}'] AS {g}"))
+        .collect();
+    let (cols, names) = (cols.join(", "), group.join(", "));
+    let (bad_key, bad_value) = bad_label;
+    format!(
+        "SELECT b, toUInt8(max(r) > {threshold}) FROM (\
+            SELECT b, {names}, sumIf(d, bad_label = '{bad_value}') AS bad, sum(d) AS total, \
+                   if(total > 0, bad / total, 0) AS r \
+            FROM (\
+                SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, {cols}, \
+                       Attributes['{bad_key}'] AS bad_label, \
+                       greatest(max(Value) - min(Value), 0) AS d \
+                FROM default.otel_metrics_sum \
+                WHERE MetricName = '{metric}' \
+                  AND ResourceAttributes['region'] = '{region}' \
+                  AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
+                GROUP BY b, {names}, bad_label, {SERIES}) \
+            GROUP BY b, {names}) \
+         GROUP BY b ORDER BY b"
+    )
+}
+
+/// A rule whose window is the WHOLE catalogue window rather than a bucket (`increase(x[10m]) > 0`,
+/// `increase(restarts[1h]) > 3`): one row, stamped at now, so `state_of` reads it as its single
+/// bucket. `HAVING count() > 0` is what keeps "no series at all" an empty result — an aggregate
+/// over nothing would otherwise answer 0 and read as a healthy `ok`.
+fn whole_window(inner: &str, breached: &str) -> String {
+    format!(
+        "SELECT toStartOfInterval(now(), INTERVAL {STEP_SECS} SECOND) AS b, \
+                toUInt8({breached}) \
+         FROM ({inner}) HAVING count() > 0"
+    )
+}
+
+/// The per-node worst ratio of two gauges — a fleet where one node is full and three are empty is
+/// a node that is full, so the alert is `max` over nodes and never the fleet's busiest numerator
+/// over its largest denominator.
+fn worst_node_ratio(
+    metrics: &str,
+    numerator: &str,
+    denominator: &str,
+    threshold: f64,
+    region: &str,
+) -> String {
+    format!(
+        "SELECT b, toUInt8(max(r) > {threshold}) FROM (\
+            SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
+                   ResourceAttributes['k8s.node.name'] AS node, \
+                   {numerator}, \
+                   {denominator}, \
+                   if(den > 0, num / den, 0) AS r \
+            FROM default.otel_metrics_gauge \
+            WHERE MetricName IN ({metrics}) \
+              AND ResourceAttributes['region'] = '{region}' \
+              AND TimeUnix > now() - INTERVAL 300 SECOND \
+            GROUP BY b, node) \
+         GROUP BY b ORDER BY b"
     )
 }
 
@@ -58,15 +156,18 @@ pub const CATALOGUE: &[Rule] = &[
         name: "NoLeader",
         why: "Zero: nobody holds the lease, so no claim in the fleet succeeds; two: the epoch check failed and the fence is all that stands between two writers.",
         for_secs: 120,
+        // `sum by (pod)` first: a pod reports this gauge several times inside a 30 s bucket, and a
+        // flat `sum(Value)` would count one leader as many and never see `!= 1` for what it is.
         sql: |region| format!(
-            "SELECT b, toUInt8(sum_v != 1) FROM (\
+            "SELECT b, toUInt8(sum(pod_v) != 1) FROM (\
                 SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
-                       sum(Value) AS sum_v \
+                       max(Value) AS pod_v \
                 FROM default.otel_metrics_gauge \
                 WHERE MetricName = 'ownership_is_leader' \
                   AND ResourceAttributes['region'] = '{region}' \
                   AND TimeUnix > now() - INTERVAL 120 SECOND \
-                GROUP BY b) ORDER BY b"
+                GROUP BY b, ResourceAttributes['k8s.pod.name']) \
+             GROUP BY b ORDER BY b"
         ),
     },
     Rule {
@@ -81,28 +182,33 @@ pub const CATALOGUE: &[Rule] = &[
     Rule {
         name: "DbFenceDetected",
         why: "The invariant violation: two nodes opened one SlateDB. Zero is the only acceptable value.",
-        // No `for` in the catalogue — any rise at all fires, so one breached bucket is enough.
+        // The catalogue is `increase(db_fence_detected_total[10m]) > 0` with no `for`: any rise
+        // anywhere in the ten minutes fires, and stays firing for the rest of them — a fence that
+        // happened eight minutes ago is still the invariant violated.
         for_secs: STEP_SECS,
-        sql: |region| format!(
-            "SELECT b, toUInt8(v > 0) FROM ({}) ORDER BY b",
-            bucketed_sum("db_fence_detected_total", "", region, 600)
+        sql: |region| whole_window(
+            &format!(
+                "SELECT greatest(max(Value) - min(Value), 0) AS d \
+                 FROM default.otel_metrics_sum \
+                 WHERE MetricName = 'db_fence_detected_total' \
+                   AND ResourceAttributes['region'] = '{region}' \
+                   AND TimeUnix > now() - INTERVAL 600 SECOND \
+                 GROUP BY {SERIES}"
+            ),
+            "sum(d) > 0",
         ),
     },
     Rule {
         name: "Http5xxRate",
         why: "Per listener and route class so a registry outage is not hidden by healthy git traffic.",
         for_secs: 300,
-        sql: |region| format!(
-            "SELECT b, toUInt8(bad / total > 0.05) FROM (\
-                SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
-                       greatest(sumIf(Value, Attributes['status'] = '5xx') - \
-                                minIf(Value, Attributes['status'] = '5xx'), 0) AS bad, \
-                       greatest(sum(Value) - min(Value), 0) AS total \
-                FROM default.otel_metrics_sum \
-                WHERE MetricName = 'http_requests_total' \
-                  AND ResourceAttributes['region'] = '{region}' \
-                  AND TimeUnix > now() - INTERVAL 300 SECOND \
-                GROUP BY b HAVING total > 0) ORDER BY b"
+        sql: |region| ratio_rule(
+            "http_requests_total",
+            &["listener", "class"],
+            ("status", "5xx"),
+            0.05,
+            region,
+            300,
         ),
     },
     Rule {
@@ -118,18 +224,9 @@ pub const CATALOGUE: &[Rule] = &[
         name: "ReconcileErrors",
         why: "A controller in an error loop keeps retrying with backoff; the ratio is what shows it.",
         for_secs: 300,
-        sql: |region| format!(
-            "SELECT b, toUInt8(bad / total > 0.2) FROM (\
-                SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
-                       greatest(sumIf(Value, Attributes['result'] = 'error') - \
-                                minIf(Value, Attributes['result'] = 'error'), 0) AS bad, \
-                       greatest(sum(Value) - min(Value), 0) AS total \
-                FROM default.otel_metrics_sum \
-                WHERE MetricName = 'reconciles_total' \
-                  AND ResourceAttributes['region'] = '{region}' \
-                  AND TimeUnix > now() - INTERVAL 300 SECOND \
-                GROUP BY b HAVING total > 0) ORDER BY b"
-        ),
+        // The catalogue groups by `kind`: one controller in an error loop is the alert, and folding
+        // it into the fleet's total reconciles would bury it.
+        sql: |region| ratio_rule("reconciles_total", &["kind"], ("result", "error"), 0.2, region, 600),
     },
     Rule {
         name: "TunnelSaturation",
@@ -149,19 +246,25 @@ pub const CATALOGUE: &[Rule] = &[
     Rule {
         name: "WorkerHeartbeatStale",
         why: "The liveness probe only restarts; this pages when it keeps happening.",
-        for_secs: 300,
-        // `absent(up)` has no equivalent here, and inventing one from an empty result would fire
-        // on every region that has no worker. The honest test is the catalogue's own second half:
-        // the worker's restart count rising. An absent series leaves the window uncovered, so
-        // `state_of` answers `unknown` — which is correct, not a gap.
-        sql: |region| format!(
-            "SELECT b, toUInt8(v > 3) FROM ({}) ORDER BY b",
-            bucketed_sum(
-                "k8s.container.restarts",
-                "AND ResourceAttributes['k8s.container.name'] = 'worker'",
-                region,
-                3600
-            )
+        // The catalogue's window IS the hour: `increase(restarts[1h]) > 3` is one number, so the
+        // rule has a single bucket rather than a `for` on top of it.
+        for_secs: STEP_SECS,
+        // `absent(up)` has no equivalent here, and inventing one from an empty result would fire on
+        // every region that has no worker. The honest test is the catalogue's own second half: the
+        // worker's restart count over the hour, per container — kubeletstats publishes
+        // `k8s.container.restarts` as a GAUGE, so this reads the gauge table. An absent series
+        // leaves the window uncovered, so `state_of` answers `unknown`, which is correct.
+        sql: |region| whole_window(
+            &format!(
+                "SELECT greatest(max(Value) - min(Value), 0) AS d \
+                 FROM default.otel_metrics_gauge \
+                 WHERE MetricName = 'k8s.container.restarts' \
+                   AND ResourceAttributes['k8s.container.name'] = 'worker' \
+                   AND ResourceAttributes['region'] = '{region}' \
+                   AND TimeUnix > now() - INTERVAL 3600 SECOND \
+                 GROUP BY ResourceAttributes['k8s.pod.name']"
+            ),
+            "max(d) > 3",
         ),
     },
     Rule {
@@ -170,47 +273,29 @@ pub const CATALOGUE: &[Rule] = &[
         for_secs: 300,
         // The agent's own gauges (Task 7), which is what makes this rule evaluable at all — it was
         // permanently `unknown` while it depended on a node-exporter nobody deployed.
-        sql: |region| format!(
-            "SELECT b, toUInt8(used / total > 0.8) FROM (\
-                SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
-                       maxIf(Value, MetricName = 'node_pool_bytes_used') AS used, \
-                       maxIf(Value, MetricName = 'node_pool_bytes_total') AS total \
-                FROM default.otel_metrics_gauge \
-                WHERE MetricName IN ('node_pool_bytes_used', 'node_pool_bytes_total') \
-                  AND ResourceAttributes['region'] = '{region}' \
-                  AND TimeUnix > now() - INTERVAL 300 SECOND \
-                GROUP BY b HAVING total > 0) ORDER BY b"
+        sql: |region| worst_node_ratio(
+            "'node_pool_bytes_used', 'node_pool_bytes_total'",
+            "maxIf(Value, MetricName = 'node_pool_bytes_used') AS num",
+            "maxIf(Value, MetricName = 'node_pool_bytes_total') AS den",
+            0.8,
+            region,
         ),
     },
     Rule {
         name: "NodeDiskAlmostFull",
         why: "The worker's merge caches and the slatedb object cache live on the root disk.",
         for_secs: 300,
-        // `kubeletstats`' node filesystem metric, so this needs no exporter of ours either.
-        sql: |region| format!(
-            "SELECT b, toUInt8(used / (used + avail) > 0.85) FROM (\
-                SELECT toStartOfInterval(TimeUnix, INTERVAL {STEP_SECS} SECOND) AS b, \
-                       maxIf(Value, MetricName = 'k8s.node.filesystem.usage') AS used, \
-                       maxIf(Value, MetricName = 'k8s.node.filesystem.available') AS avail \
-                FROM default.otel_metrics_gauge \
-                WHERE MetricName IN ('k8s.node.filesystem.usage', 'k8s.node.filesystem.available') \
-                  AND ResourceAttributes['region'] = '{region}' \
-                  AND TimeUnix > now() - INTERVAL 300 SECOND \
-                GROUP BY b HAVING used + avail > 0) ORDER BY b"
+        // `kubeletstats`' node filesystem metrics, so this needs no exporter of ours either.
+        sql: |region| worst_node_ratio(
+            "'k8s.node.filesystem.usage', 'k8s.node.filesystem.available'",
+            "maxIf(Value, MetricName = 'k8s.node.filesystem.usage') AS num",
+            "maxIf(Value, MetricName = 'k8s.node.filesystem.usage') + \
+             maxIf(Value, MetricName = 'k8s.node.filesystem.available') AS den",
+            0.85,
+            region,
         ),
     },
 ];
-
-/// A region name is the only caller-shaped text that reaches a rule's SQL, so it is checked as an
-/// identifier before substitution rather than escaped: a Kubernetes object name is already
-/// `[a-z0-9.-]`, and anything else is a bug or an injection attempt, never a region we should query.
-fn is_region_ident(region: &str) -> bool {
-    !region.is_empty()
-        && region.len() <= 253
-        && region
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
-}
 
 /// The one decision every rule goes through. `rows` is `[ts, breached]` newest last.
 ///
@@ -314,6 +399,54 @@ pub async fn current_signals(h: &History) -> Result<Vec<SignalRow>, HistoryError
         .collect())
 }
 
+/// What one rule's query came back with: its rows, or the error text, which is a state of its own.
+pub type RuleResult<'a> = (&'a str, Result<Vec<Vec<serde_json::Value>>, String>);
+
+/// One beat's worth of decisions for one region: `results` is `(rule name, rows or the query's own
+/// error)`, and the return is the rows to insert — only the rules whose state CHANGED.
+///
+/// Factored out of the loop because this is the whole behaviour worth testing: a second identical
+/// beat must write nothing, and a query that failed must transition to `unknown` rather than
+/// leaving yesterday's `ok` standing on the page.
+pub fn evaluate_once(
+    region: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    results: &[RuleResult<'_>],
+    last: &mut HashMap<(String, String), String>,
+) -> Vec<serde_json::Value> {
+    let mut writes = Vec::new();
+    for (name, result) in results {
+        let Some(rule) = CATALOGUE.iter().find(|r| r.name == *name) else {
+            continue;
+        };
+        let (st, detail) = match result {
+            Ok(rows) => state_of(rows, rule.for_secs, STEP_SECS),
+            // A failed query is not a healthy rule and not a stale one either: it is a state of its
+            // own, recorded like any other so the page stops showing a number nobody measured.
+            Err(e) => ("unknown", format!("query failed: {e}")),
+        };
+        let key = (region.to_string(), rule.name.to_string());
+        if last.get(&key).map(String::as_str) != Some(st) {
+            writes.push(alert_row(now, region, rule.name, st, &detail));
+            last.insert(key, st.to_string());
+        }
+    }
+    writes
+}
+
+/// The regions to evaluate: the `Region` CRs themselves, not `cluster_rows` — that walk lists every
+/// Workspace, Environment and Node in the fleet plus one settings read per region, which is a lot
+/// of API server for a list of names, every thirty seconds.
+pub(crate) async fn region_names(state: &crate::api::ApiState) -> Option<Vec<String>> {
+    use kube::api::{Api, ListParams, ResourceExt};
+    let client = crate::api::kube(state).ok()?;
+    let regions = Api::<crate::crd::Region>::all(client.clone())
+        .list(&ListParams::default())
+        .await
+        .ok()?;
+    Some(regions.iter().map(|r| r.name_any()).collect())
+}
+
 /// Evaluate every rule for every region on a 30 s beat, writing ONLY transitions.
 ///
 /// Only transitions, because `rustic.alerts` answers "when did this start", and a row per
@@ -327,30 +460,25 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
         let Some(h) = state.history.as_deref() else {
             continue;
         };
-        let regions = match crate::api::admin::clusters::cluster_rows(&state).await {
-            Ok(rows) => rows.into_iter().map(|r| r.region).collect::<Vec<_>>(),
-            // A region list we could not read is not a reason to write "unknown" over a good
-            // state: skip the beat and try again in thirty seconds.
-            Err(_) => continue,
+        // A region list we could not read is not a reason to write "unknown" over a good state:
+        // skip the beat and try again in thirty seconds.
+        let Some(regions) = region_names(&state).await else {
+            continue;
         };
         let now = chrono::Utc::now();
         let mut writes = Vec::new();
-        for region in regions.iter().filter(|r| is_region_ident(r)) {
+        for region in &regions {
+            let mut results = Vec::with_capacity(CATALOGUE.len());
             for rule in CATALOGUE {
-                let rows = match h.query(&(rule.sql)(region)).await {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        tracing::warn!(error = %e, rule = rule.name, %region, "alert query failed");
-                        continue;
-                    }
+                let Some(sql) = rule.sql_for(region) else {
+                    // Never silent: a region whose name we refuse to interpolate is invisible on
+                    // the Signals page, and only this line says why.
+                    tracing::warn!(%region, "region name is not an identifier; alerts not evaluated");
+                    break;
                 };
-                let (st, detail) = state_of(&rows, rule.for_secs, STEP_SECS);
-                let key = (region.clone(), rule.name.to_string());
-                if last.get(&key).map(String::as_str) != Some(st) {
-                    writes.push(alert_row(now, region, rule.name, st, &detail));
-                    last.insert(key, st.to_string());
-                }
+                results.push((rule.name, h.query(&sql).await.map_err(|e| e.to_string())));
             }
+            writes.extend(evaluate_once(region, now, &results, &mut last));
         }
         if let Err(e) = h.insert("alerts", &writes).await {
             // The in-memory `last` already moved, so a failed write would suppress the retry.

@@ -10,7 +10,7 @@
 //! (`"history"`) or a region nothing is reporting for (`"none"`).
 
 use crate::api::{admin::history_or_503, aks, kube_err, ApiState};
-use crate::history::alerts::{current_signals, SignalRow, CATALOGUE};
+use crate::history::alerts::{current_signals, region_names, SignalRow, CATALOGUE};
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -51,17 +51,23 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
     })?;
     let source = if recorded.is_empty() { "none" } else { "history" };
     // A region nothing has reported for still shows every rule, `unknown` with the reason — an
-    // empty table would read as "nothing is wrong".
+    // empty table would read as "nothing is wrong". The fill is per (region, rule) over the regions
+    // that exist: a row with no region names nothing an operator could act on.
     let mut signals = recorded;
-    for rule in CATALOGUE {
-        if !signals.iter().any(|r| r.alert == rule.name) {
-            signals.push(SignalRow {
-                alert: rule.name.to_string(),
-                region: String::new(),
-                state: "unknown".into(),
-                why: rule.why.to_string(),
-                detail: Some("no collector reporting for this region".into()),
-            });
+    for region in region_names(&s).await.unwrap_or_default() {
+        for rule in CATALOGUE {
+            if !signals
+                .iter()
+                .any(|r| r.alert == rule.name && r.region == region)
+            {
+                signals.push(SignalRow {
+                    alert: rule.name.to_string(),
+                    region: region.clone(),
+                    state: "unknown".into(),
+                    why: rule.why.to_string(),
+                    detail: Some("no collector reporting for this region".into()),
+                });
+            }
         }
     }
 
