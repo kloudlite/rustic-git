@@ -153,10 +153,16 @@ refuses an over-quota create, restore, clone or push with `409` and one sentence
 {used} of {limit} in use; request more under Quota"` — from `quota::refuse`, through the single
 gate `guard_alloc`; the check is read-then-write, so two concurrent creates can overshoot by one
 and the agent's per-namespace `ResourceQuota` (named `owner-quota`, written on every `OwnerBinding` and environment
-reconcile, from the same effective `Quota`) is the hard stop for cpu and memory. A raise is a
-`QuotaRequest` CR: the owner, or a team member whose directory role is at least admin, opens ONE
-pending request at a time; only a superadmin approves, which writes the `Quota` **before** marking
-the request.
+reconcile, from the same effective `Quota`) is the hard stop for cpu and memory. A raise, or anything else somebody has to be granted, is a `Request` CR (`crd::Request`, kinds
+quota / access / region / other): the owner, or a team member whose directory role is at least
+admin, opens ONE pending request per owner PER KIND, and only a superadmin decides it. Approve is
+kind-specific and always writes its effect BEFORE marking the request — quota writes the `Quota`
+through the one writer `write_quota`, access sets team membership through the directory the admin
+process already holds (`Directory::grant_access`, no peer hop: `bins/api` IS the tier with the
+directory), region appends to `Quota.spec.regions` and is a RECORDED grant only until per-owner
+region gating exists, and `other` requires a free-text resolution. `QuotaRequest` is the retired
+predecessor: still readable, unioned into `GET /admin/requests`, copied over once by
+`POST /admin/requests/migrate`, and deleted as a CRD in a later release.
 
 **Superadmin is a claim, not an owner.** `superadmin: true` in the session JWT, minted at sign-in
 from a `superadmins` collection in the directory that `RUSTIC_GIT_WORKSPACES_ADMINS` merely

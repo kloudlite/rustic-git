@@ -965,3 +965,21 @@ On the AKS side, `deploy/rustic-git.yaml`'s `rustic-git-admin-workloads` Role ga
 on `pods` (namespaced to `rustic-git`) — the Monitoring page's Signals scrape reads each pod's
 `/metrics` and `restartCount` this way instead of assuming a Prometheus. Re-apply it before
 rolling the admin image: without it Signals answers 403.
+
+## Release: generic requests (2026-09-04)
+
+`Request` generalizes `QuotaRequest` to quota/access/region/other kinds — new CRD, RBAC on it,
+no new process.
+
+```sh
+# crds.yaml: adds Request.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
+
+# api-rbac.yaml: adds `requests` to both ClusterRoles (rustic-git-api: get/list/create;
+# rustic-git-admin: get/list/create/patch/delete plus patch/update on requests/status).
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
+```
+
+Apply both BEFORE rolling the api image: without the CRD every `/v1/requests` create 404s from
+the API server, and without the RBAC the admin process 403s on the queue. Then, once per
+cluster, `POST /admin/requests/migrate` with a note — idempotent, safe to repeat.

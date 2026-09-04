@@ -444,6 +444,12 @@ WS_NS="ws-$(echo "$USER_NAME" | tr '[:upper:]' '[:lower:]')"
 # host, and confirm the limit moved — the live proof that the two-router split (Task 9/13) still
 # lets the one legitimate path through end to end, not just that the wrong host 404s.
 # ---------------------------------------------------------------------------
+log "creating a team as the admin identity, so $USER_NAME starts out NOT a member"
+E2E_TEAM="e2e-team-$(date +%s)"
+curl -fsS -X POST "$BASE/v1/teams" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"'"$E2E_TEAM"'","name":"E2E Team"}' >/dev/null || fail "team create failed"
+
 log "pinning $USER_NAME's workspace quota to what is already in use, as a superadmin"
 curl -fsS -X PUT "$ADMIN_BASE/admin/quota/$USER_NAME" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -485,6 +491,36 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/quota-requests/$
 log "checking the approval raised the limit"
 LIMIT_JSON=$(curl -fsS "$BASE/v1/quota" -H "Authorization: Bearer $USER_TOKEN")
 echo "$LIMIT_JSON" | grep -q '"workspaces":2' || fail "approval did not raise the workspace limit: $LIMIT_JSON"
+
+log "opening an access request as the user"
+ACC_JSON=$(curl -fsS -X POST "$BASE/v1/requests" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"access","reason":"e2e","access":{"team":"'"$E2E_TEAM"'","role":"member"}}')
+ACC_ID=$(echo "$ACC_JSON" | field id)
+[ -n "$ACC_ID" ] || fail "no id in access request response: $ACC_JSON"
+
+log "checking a second pending access request is refused while the quota one is not"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/requests" \
+  -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"access","reason":"again","access":{"team":"'"$E2E_TEAM"'","role":"admin"}}')
+[ "$CODE" = "409" ] || fail "a second pending access request must 409, got $CODE"
+
+log "checking the queue unions both request CRDs"
+curl -fsS "$ADMIN_BASE/admin/requests" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  | grep -q "\"id\":\"$ACC_ID\"" || fail "the access request is missing from the admin queue"
+
+log "approving the access request as a superadmin"
+curl -fsS -X POST "$ADMIN_BASE/admin/requests/$ACC_ID/approve" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"note":"e2e"}' >/dev/null || fail "access approve failed"
+
+log "checking the approval actually set the membership"
+curl -fsS "$BASE/v1/teams/$E2E_TEAM" -H "Authorization: Bearer $USER_TOKEN" \
+  | grep -q "$USER_NAME" || fail "the approved access request did not add the member"
+
+log "checking the decided request cannot be decided twice"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ADMIN_BASE/admin/requests/$ACC_ID/deny" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"note":"late"}')
+[ "$CODE" = "409" ] || fail "a second decision must 409, got $CODE"
 
 log "checking the workspace pod is running with its live subvolume mounted from the node"
 kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s \
@@ -1493,4 +1529,4 @@ curl -fsS "$ADMIN_BASE/admin/audit?action=drain" -H "Authorization: Bearer $ADMI
 log "superadmin console: node drain/undrain and audit row passed"
 
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls rustic-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds), superadmin console (node drain/undrain, audit row) passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls rustic-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds, generic requests (access request opened, one-pending-per-kind, unioned queue, approve sets membership, second decision 409s)), superadmin console (node drain/undrain, audit row) passed"
