@@ -32,6 +32,17 @@ export function atLimit(r: QuotaReport, d: QuotaDim): boolean {
   return r.used[d] >= r.limit[d];
 }
 
+/** The smallest (limit - used)/limit across the six dimensions — the Owners list's sort key,
+ *  mirroring the api's own `tightest_ratio` exactly so the two never disagree about ordering.
+ *  A zero limit reads maximally tight (negative infinity), never "infinite headroom". */
+export function tightestRatio(limit: Record<QuotaDim, number>, used: Record<QuotaDim, number>): number {
+  return DIMS.reduce((min, d) => {
+    const l = limit[d];
+    const ratio = l <= 0 ? -Infinity : (l - used[d]) / l;
+    return Math.min(min, ratio);
+  }, Infinity);
+}
+
 /** One row per dimension the request touches: the owner's current limit next to what was asked.
  *  A dimension not in `requested` never appears — the request didn't touch it. */
 export function requestedDiffs(

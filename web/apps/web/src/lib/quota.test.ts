@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { atLimit, dimFromRefusal, dimLabel, percent, requestedDiffs, type QuotaReport } from "@/lib/quota";
+import { atLimit, dimFromRefusal, dimLabel, percent, requestedDiffs, tightestRatio, type QuotaReport } from "@/lib/quota";
 
 const report = (used: number, limit: number): QuotaReport => ({
   owner: "karthik",
@@ -39,6 +39,19 @@ test("the refusal sentence names the dimension to ask about", () => {
 test("every dimension has a label", () => {
   expect(dimLabel("diskGb")).toBe("Disk");
   expect(dimLabel("memoryGb")).toBe("Memory");
+});
+
+describe("tightestRatio", () => {
+  const limit = { workspaces: 20, environments: 8, snapshots: 80, diskGb: 400, cpu: 32, memoryGb: 128 };
+  test("is the smallest headroom ratio across all six dimensions", () => {
+    const used = { workspaces: 19, environments: 6, snapshots: 64, diskGb: 310, cpu: 22, memoryGb: 96 };
+    // workspaces: (20-19)/20 = 0.05, the tightest of the six.
+    expect(tightestRatio(limit, used)).toBeCloseTo(0.05);
+  });
+  test("a zero limit is the tightest possible, ahead of a merely full one", () => {
+    const used = { workspaces: 20, environments: 0, snapshots: 0, diskGb: 0, cpu: 0, memoryGb: 0 };
+    expect(tightestRatio({ ...limit, environments: 0 }, used)).toBe(-Infinity);
+  });
 });
 
 test("requestedDiffs only lists dimensions the request touched", () => {

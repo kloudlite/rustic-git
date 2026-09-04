@@ -3,7 +3,7 @@ import { cache } from "react";
 import type { Commit } from "@/lib/browse";
 import type { SnapshotState } from "@/lib/snapshot-state";
 import type { QuotaDim, QuotaReport } from "@/lib/quota";
-import { auditQueryString, type AuditFilter, type AuditPage } from "@/lib/audit";
+import { auditQueryString, type AuditEntry, type AuditFilter, type AuditPage } from "@/lib/audit";
 
 /**
  * The api server, from the web app's server side only.
@@ -1074,11 +1074,14 @@ export function adminDecideQuotaRequest(
   });
 }
 
-export function adminWriteQuota(owner: string, spec: Record<QuotaDim, number>, token: string) {
+/** `note` required and non-empty (422 otherwise) — a quota write is dangerous per the Global
+ *  Constraint, same rule as deny/roll/drain. Sent flat alongside the six dimensions rather than
+ *  wrapped, matching how the api already deserializes the spec straight off the body. */
+export function adminWriteQuota(owner: string, spec: Record<QuotaDim, number>, note: string, token: string) {
   return adminCall<Record<QuotaDim, number>>(`/admin/quota/${encodeURIComponent(owner)}`, {
     method: "PUT",
     token,
-    body: JSON.stringify(spec),
+    body: JSON.stringify({ ...spec, note }),
   });
 }
 
@@ -1086,6 +1089,58 @@ export type OwnerUsage = { owner: string; limit: Record<QuotaDim, number>; used:
 
 export function adminUsage(token: string) {
   return adminCall<OwnerUsage[]>("/admin/usage", { method: "GET", token });
+}
+
+/** `GET /admin/owners` — every owner's usage against their limit, tightest-first (the api's own
+ *  sort, never re-sorted here except by the list's own controls). */
+export type OwnerRow = {
+  owner: string;
+  isTeam: boolean;
+  limit: Record<QuotaDim, number>;
+  used: Record<QuotaDim, number>;
+  /** `"own"` when the owner has an explicit `Quota`, `"default"` when riding the fallback table. */
+  source: "own" | "default";
+  /** A `QuotaRequest` still pending for this owner. */
+  pending: boolean;
+};
+
+export function adminOwners(token: string) {
+  return adminCall<OwnerRow[]>("/admin/owners", { method: "GET", token });
+}
+
+/** `GET /admin/owners/{slug}` — everything the detail page shows without a second click.
+ *  `requests` and `audit` are already truncated server-side (last 5 / last 10); the page links to
+ *  the Requests and Audit areas, filtered to this owner, for the rest. */
+export type OwnerDetail = OwnerRow & {
+  workspaces: ApiWorkspace[];
+  environments: ApiEnvironment[];
+  volumes: ApiVolumeSummary[];
+  requests: QuotaRequestDoc[];
+  audit: AuditEntry[];
+};
+
+export function adminOwnerDetail(slug: string, token: string) {
+  return adminCall<OwnerDetail>(`/admin/owners/${encodeURIComponent(slug)}`, { method: "GET", token });
+}
+
+// `/admin/workspaces/{id}` and `/admin/environments/{id}` reuse the SAME handlers `/v1` calls for
+// the caller's own objects, just with the owner taken from the object rather than the token — see
+// `crates/workspaces/src/api/admin.rs`'s "cross-owner list / stop / delete" section. No note: the
+// api takes none on these two routes (only quota and roll/drain/decommission require one).
+export function adminStopWorkspace(id: string, token: string) {
+  return adminCall<ApiWorkspace>(`/admin/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST", token });
+}
+
+export function adminDeleteWorkspace(id: string, token: string) {
+  return adminCall<ApiWorkspace>(`/admin/workspaces/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
+export function adminStopEnvironment(id: string, token: string) {
+  return adminCall<ApiEnvironment>(`/admin/environments/${encodeURIComponent(id)}/stop`, { method: "POST", token });
+}
+
+export function adminDeleteEnvironment(id: string, token: string) {
+  return adminCall<ApiEnvironment>(`/admin/environments/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }
 
 export type AdminNode = { name: string; ready: boolean; decommission: boolean; decommissionStatus: string | null };
