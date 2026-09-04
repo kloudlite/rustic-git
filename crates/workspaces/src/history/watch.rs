@@ -556,7 +556,10 @@ pub fn node_events(prev: Option<&Node>, next: &Node, region: &str) -> Vec<EventR
             .map(str::to_string)
     };
     let is = status_word(next);
-    if prev.and_then(status_word) != is {
+    // `prev.is_some()` like the Ready branch: the initial list is state, not a transition, and a
+    // node that already carries the stamp would otherwise re-emit it on every watch restart —
+    // each under a fresh resourceVersion, so nothing collapses them.
+    if prev.is_some() && prev.and_then(status_word) != is {
         if let Some(w) = is
             .as_deref()
             .filter(|w| *w == "draining" || *w == "drained")
