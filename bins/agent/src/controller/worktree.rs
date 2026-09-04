@@ -10,7 +10,7 @@ use super::{migrate_and_seed_baseline, Ctx, ReconcileErr, TICK};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
-use rustic_git_workspaces::crd;
+use kloudlite_git_workspaces::crd;
 use std::sync::Arc;
 
 /// What the shared gate decided. The two callers turn it into their own status type — that
@@ -134,13 +134,13 @@ pub(crate) async fn worktree_gate(
         // Quota the worktree the instant it exists — waiting for the volume's next reconcile pass
         // would leave a freshly checked-out worktree briefly unquota'd.
         engine.set_quota_worktree(&vol_id, &wt_id, quota_gb)?;
-        Ok::<_, rustic_git_workspaces::engine::ops::EngErr>(())
+        Ok::<_, kloudlite_git_workspaces::engine::ops::EngErr>(())
     })
     .await
     .map_err(|e| ReconcileErr(e.to_string()))?;
     match result {
         Ok(()) => {}
-        Err(e) if e.0 == rustic_git_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
+        Err(e) if e.0 == kloudlite_git_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
         Err(e) => return Err(ReconcileErr(e.0)),
     }
     Ok(WorktreeGate::Ready)

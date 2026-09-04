@@ -1,4 +1,4 @@
-//! Process setup for `rustic-git-agent`: the local `Engine`, the storage janitor (`janitor.rs`),
+//! Process setup for `kloudlite-git-agent`: the local `Engine`, the storage janitor (`janitor.rs`),
 //! and the
 //! Kubernetes client the node controller (`controller/`) reconciles with. The work itself is
 //! there, not here — the CRD IS the work item, so there is no queue, no lease and no poll loop.
@@ -13,10 +13,10 @@
 //! short-circuit). If you change the engine so a path that used to return early now shells out,
 //! those tests keep passing here and fail on a node — run `tests/ws_e2e.sh` on the Linux VM.
 
-use rustic_git_core::settings::LiveSettings;
-use rustic_git_workspaces::crd;
-use rustic_git_workspaces::engine::{Engine, Pool};
-use rustic_git_workspaces::settings::AgentSettings;
+use kloudlite_git_core::settings::LiveSettings;
+use kloudlite_git_workspaces::crd;
+use kloudlite_git_workspaces::engine::{Engine, Pool};
+use kloudlite_git_workspaces::settings::AgentSettings;
 use std::sync::Arc;
 
 pub mod binding;
@@ -42,7 +42,7 @@ pub struct Config {
     /// This node's name, from the downward-API `NODE_NAME`. It is the shard key: the controller
     /// watches only objects whose `spec.nodeName` equals it.
     pub node: String,
-    /// `WS_HOMES_EXPORT`, e.g. `zerofs.rustic-git-system.svc:/` — the region's shared-home NFS
+    /// `WS_HOMES_EXPORT`, e.g. `zerofs.kloudlite-git-system.svc:/` — the region's shared-home NFS
     /// export. Unset means no shared home on this node: workspace reconciles that need it park on
     /// HomeNotReady (fail closed, same shape as WS_PEER_SECRET gating the peer listener).
     pub homes_export: Option<String>,
@@ -352,13 +352,13 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
     let labels = n.metadata.labels.unwrap_or_default();
     let roles: Vec<String> = ["session", "env"]
         .into_iter()
-        .filter(|r| labels.get(&format!("rustic-git.io/{r}")).map(String::as_str) == Some("true"))
+        .filter(|r| labels.get(&format!("kloudlite-git.io/{r}")).map(String::as_str) == Some("true"))
         .map(str::to_string)
         .collect();
     if roles.is_empty() {
         // Zero roles means zero claim watches, and an agent with no claim watch looks identical to
         // a healthy one from the outside — it just never picks anything up. Say so.
-        tracing::warn!(%node, "no rustic-git.io/session or /env label: this node claims no unplaced work");
+        tracing::warn!(%node, "no kloudlite-git.io/session or /env label: this node claims no unplaced work");
     }
     roles
 }

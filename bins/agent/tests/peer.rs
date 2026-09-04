@@ -8,11 +8,11 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use rustic_git_agent::peer::{peer_http_client, pull_one, receive_ceiling, router, PeerState};
-use rustic_git_core::settings::LiveSettings;
-use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
-use rustic_git_workspaces::settings::AgentSettings;
+use kloudlite_git_agent::peer::{peer_http_client, pull_one, receive_ceiling, router, PeerState};
+use kloudlite_git_core::settings::LiveSettings;
+use kloudlite_git_workspaces::engine::{Engine, Pool as EnginePool};
+use kloudlite_git_workspaces::kube_test::{mock_client, Recorder, Route};
+use kloudlite_git_workspaces::settings::AgentSettings;
 use std::time::Duration;
 
 fn test_settings() -> LiveSettings<AgentSettings> {

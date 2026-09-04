@@ -48,7 +48,7 @@ Copied verbatim from the spec (and from `CLAUDE.md`, which binds every task):
 - "`spec: { volume, message? }` … Nothing else: a node is a controller-owned fact and the API does
   not copy facts into spec. Every agent watches all `SnapshotRequest`s (no field selector — two
   nodes today) and acts only when the named Volume's `spec.nodeName` is its own."
-- "**Finalizer** `rustic-git.io/snapshot`: a delete while `working` must wait for the in-flight
+- "**Finalizer** `kloudlite-git.io/snapshot`: a delete while `working` must wait for the in-flight
   btrfs send / upload to finish … a request is removed only when nothing is running for it."
 - "`Volume.status.lastPush`, which is **dropped**: 'the latest snapshot' is a query over
   `SnapshotRequest`s by volume label, not a second writer of the Volume's status (two controllers
@@ -129,7 +129,7 @@ writer of the Volume's status. Two controllers force-applying one status object 
 manager prune each other's fields — the Volume reconciler's next `Patch::Apply(..).force()` would
 delete any `lastSnapshot` the snapshot reconciler had written, because SSA removes fields a manager
 previously owned and no longer sets. So `api::volume_ptr` (`api.rs:334-338`) becomes a list of
-`done` SnapshotRequests by the `rustic-git.io/volume` label, and the snapshot reconciler writes
+`done` SnapshotRequests by the `kloudlite-git.io/volume` label, and the snapshot reconciler writes
 nothing outside its own object.
 
 **D5a. Where "has this ever been pushed" is computed.** `list_ws` and `list_volumes` do ONE label
@@ -138,7 +138,7 @@ than a list per row. Same shape as `volumes_of`'s existing single-call join (`ap
 
 **D6. A node's ROLE comes from its own Node labels, not a new env var.** The agent reads the `Node`
 object named `$NODE_NAME` at startup and runs the unplaced-Workspace watch iff it carries
-`rustic-git.io/session=true`, the unplaced-Environment watch iff `rustic-git.io/env=true`. Those
+`kloudlite-git.io/session=true`, the unplaced-Environment watch iff `kloudlite-git.io/env=true`. Those
 labels already exist and already drive `k8s::placement`'s nodeSelector
 (`crates/workspaces/src/k8s.rs:425-447`); a second hand-maintained copy in the DaemonSet env is a
 second thing that can be wrong.
@@ -333,7 +333,7 @@ fn every_phase_is_a_schema_enum() {
 #[test]
 fn release_one_adds_storage_and_keeps_the_legacy_spec_fields() {
     use kube::CustomResourceExt;
-    use rustic_git_workspaces::crd::{Environment, Workspace};
+    use kloudlite_git_workspaces::crd::{Environment, Workspace};
     for crd in [Workspace::crd(), Environment::crd()] {
         let v = &crd.spec.versions[0];
         let root = v.schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
@@ -360,7 +360,7 @@ fn release_one_adds_storage_and_keeps_the_legacy_spec_fields() {
 #[test]
 fn the_volume_status_has_no_push_pointer() {
     use kube::CustomResourceExt;
-    let schema = serde_json::to_string(&rustic_git_workspaces::crd::Volume::crd().spec.versions[0].schema).unwrap();
+    let schema = serde_json::to_string(&kloudlite_git_workspaces::crd::Volume::crd().spec.versions[0].schema).unwrap();
     assert!(!schema.contains("lastPush"), "lastPush must be dropped");
     assert!(!schema.contains("lastSnapshot"), "and not replaced by a second writer's field");
 }
@@ -368,7 +368,7 @@ fn the_volume_status_has_no_push_pointer() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-workspaces --test crd_yaml`
+Run: `cargo test -p kloudlite-git-workspaces --test crd_yaml`
 Expected: FAIL to compile — `crd::SnapshotRequest` does not exist.
 
 - [ ] **Step 3: Write the implementation**
@@ -391,7 +391,7 @@ Delete `LastPush` (lines 70-77) and delete `last_push` from `VolumeStatus` (line
 
 ```rust
     // No `lastSnapshot` and no `lastPush`: "the newest snapshot of this volume" is a query over
-    // `SnapshotRequest`s by the `rustic-git.io/volume` label. A second controller writing this
+    // `SnapshotRequest`s by the `kloudlite-git.io/volume` label. A second controller writing this
     // status object would prune the first one's fields — `patch_status` applies FORCED under one
     // `AGENT_FIELD_MANAGER`, and server-side apply removes fields a manager previously owned and no
     // longer sets, so the Volume reconciler's very next pass would delete whatever the snapshot
@@ -473,7 +473,7 @@ Replace the `Workspace` kube attributes and spec/status (lines 164-209) with:
 ```rust
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "rustic-git.io",
+    group = "kloudlite-git.io",
     version = "v1alpha1",
     kind = "Workspace",
     plural = "workspaces",
@@ -557,7 +557,7 @@ Add `SNAPSHOT_FINALIZER` beside `SUBVOLUME_FINALIZER` (line 37):
 /// `phase: working` leaves a btrfs RO snapshot, a stage file, an in-flight blob upload and a
 /// possible `POST /commits` with no object left to record the outcome in — and the Volume's own
 /// finalizer does not cover it, because a SnapshotRequest is deliberately not the Volume's child.
-pub const SNAPSHOT_FINALIZER: &str = "rustic-git.io/snapshot";
+pub const SNAPSHOT_FINALIZER: &str = "kloudlite-git.io/snapshot";
 ```
 
 Add the new kind, after `OwnerBindingStatus`:
@@ -574,7 +574,7 @@ Add the new kind, after `OwnerBindingStatus`:
 /// ponytail: no snapshot deletion or retention yet; the GC sweep for blobs is unchanged.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "rustic-git.io",
+    group = "kloudlite-git.io",
     version = "v1alpha1",
     kind = "SnapshotRequest",
     plural = "snapshotrequests",
@@ -626,7 +626,7 @@ pub struct SnapshotRequestStatus {
 /// The label a `SnapshotRequest` carries so `/v1/volumes/{id}/history` is one indexed list call
 /// rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
 /// authorization.
-pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
+pub const VOLUME_LABEL: &str = "kloudlite-git.io/volume";
 ```
 
 Extend `all_crds` (line 348) with `SnapshotRequest::crd(),`, and give `OwnerBinding` a
@@ -637,8 +637,8 @@ this object is what makes an owner's per-team namespaces exist on that node".
 
 - [ ] **Step 4: Regenerate the manifest and run the tests**
 
-Run: `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`
-Then: `cargo test -p rustic-git-workspaces --test crd_yaml`
+Run: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`
+Then: `cargo test -p kloudlite-git-workspaces --test crd_yaml`
 Expected: PASS, and `git diff --stat deploy/k3s/crds.yaml` shows the file moved.
 
 The rest of the workspace will not compile yet (`api.rs` and `controller.rs` still read
@@ -656,7 +656,7 @@ On the k3s VM (not this Mac), after applying the regenerated CRDs:
 ```sh
 kubectl apply -f deploy/k3s/crds.yaml
 kubectl create -f - <<'YAML'
-apiVersion: rustic-git.io/v1alpha1
+apiVersion: kloudlite-git.io/v1alpha1
 kind: Workspace
 metadata: {name: selector-probe}
 spec: {owner: probe, team: "", name: probe, region: r1, image: nginx:alpine,
@@ -707,18 +707,18 @@ git commit -m "Move placement into status and make a push an object"
 Add to `bins/agent/tests/reconcile.rs`:
 
 ```rust
-const WS_STATUS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status";
-const BINDINGS: &str = "/apis/rustic-git.io/v1alpha1/ownerbindings";
+const WS_STATUS: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status";
+const BINDINGS: &str = "/apis/kloudlite-git.io/v1alpha1/ownerbindings";
 
 fn ws_json(status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1",
+        "apiVersion": "kloudlite-git.io/v1alpha1",
         "kind": "Workspace",
         // `resourceVersion` is not decoration here: the claim carries it, and a test that omits it
         // would pass against a forced apply — the exact primitive this design refuses.
         "metadata": {"name": "ws-1", "uid": "ws-uid-1", "generation": 1, "resourceVersion": "42",
-                     "labels": {"rustic-git.io/owner": "alice", "rustic-git.io/kind": "workspace",
-                                "rustic-git.io/team": ""}},
+                     "labels": {"kloudlite-git.io/owner": "alice", "kloudlite-git.io/kind": "workspace",
+                                "kloudlite-git.io/team": ""}},
         "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1",
                  "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
         "status": status,
@@ -742,16 +742,16 @@ async fn an_unplaced_workspace_is_claimed_with_one_optimistic_status_write() {
         tmp.path(),
         vec![
             Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
-            rustic_git_workspaces::kube_test::post(
+            kloudlite_git_workspaces::kube_test::post(
                 BINDINGS,
-                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "OwnerBinding",
                                    "metadata": {"name": "r1-alice"},
                                    "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"}}),
             ),
         ],
     );
 
-    rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    kloudlite_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
 
     let sent = rec.sent("PUT", WS_STATUS);
     assert_eq!(sent.len(), 1, "exactly one status write");
@@ -767,7 +767,7 @@ async fn an_unplaced_workspace_is_claimed_with_one_optimistic_status_write() {
     );
     assert!(rec.calls().iter().any(|c| c == &format!("POST {BINDINGS}")), "the binding must exist after a claim");
     assert!(
-        !rec.calls().iter().any(|c| c == "PATCH /apis/rustic-git.io/v1alpha1/workspaces/ws-1"),
+        !rec.calls().iter().any(|c| c == "PATCH /apis/kloudlite-git.io/v1alpha1/workspaces/ws-1"),
         "a controller never patches an API-authored spec: {:?}", rec.calls()
     );
 }
@@ -780,7 +780,7 @@ async fn a_node_outside_compatible_nodes_does_not_claim() {
     let (ctx, rec) = ctx(tmp.path(), vec![]);
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "compatibleNodes": ["node-b"]}));
 
-    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
     assert!(rec.calls().is_empty(), "a node that does not hold the disk writes nothing: {:?}", rec.calls());
 }
 
@@ -792,7 +792,7 @@ async fn an_already_placed_workspace_is_left_alone() {
     let (ctx, rec) = ctx(tmp.path(), vec![]);
     let w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
 
-    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
     assert!(rec.calls().is_empty(), "{:?}", rec.calls());
 }
 
@@ -818,10 +818,10 @@ async fn a_claim_that_loses_the_race_re_reads_and_binds_nothing() {
     let won_by_peer = ws_json(serde_json::json!({"phase": "pending", "nodeName": "node-b", "compatibleNodes": ["node-b"]}));
     let (ctx, rec) = ctx(
         tmp.path(),
-        vec![conflict, rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces/ws-1", won_by_peer)],
+        vec![conflict, kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1", won_by_peer)],
     );
 
-    let action = rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    let action = kloudlite_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "the winner's write is our wake-up");
     assert!(
         !rec.calls().iter().any(|c| c.starts_with("POST")),
@@ -839,9 +839,9 @@ async fn claiming_twice_does_not_grow_compatible_nodes() {
         tmp.path(),
         vec![
             Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
-            rustic_git_workspaces::kube_test::post(
+            kloudlite_git_workspaces::kube_test::post(
                 BINDINGS,
-                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "OwnerBinding",
                                    "metadata": {"name": "r1-alice"},
                                    "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"}}),
             ),
@@ -851,7 +851,7 @@ async fn claiming_twice_does_not_grow_compatible_nodes() {
     // `compatibleNodes` and then lost its status write leaves behind.
     let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "compatibleNodes": ["node-a"]}));
 
-    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
     let sent = rec.sent("PUT", WS_STATUS);
     assert_eq!(sent[0]["status"]["compatibleNodes"], serde_json::json!(["node-a"]), "union, not append");
 }
@@ -863,7 +863,7 @@ async fn claiming_twice_does_not_grow_compatible_nodes() {
 async fn a_clone_is_claimed_only_where_its_source_lives() {
     let tmp = tempfile::tempdir().unwrap();
     let src = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": "ws-src"},
         "spec": {"owner": "alice", "team": "", "name": "src", "region": "r1",
                  "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
@@ -871,12 +871,12 @@ async fn a_clone_is_claimed_only_where_its_source_lives() {
     });
     let (ctx, rec) = ctx(
         tmp.path(),
-        vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces/ws-src", src)],
+        vec![kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-src", src)],
     );
     let mut w = workspace(serde_json::json!({}));
     w.spec.storage.source = Some(crd::VolumeSource::CloneOf { volume: "ws-src".into() });
 
-    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
     assert!(
         !rec.calls().iter().any(|c| c.starts_with("PATCH")),
         "node-a does not hold ws-src's disk and must not claim its clone: {:?}", rec.calls()
@@ -886,8 +886,8 @@ async fn a_clone_is_claimed_only_where_its_source_lives() {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p rustic-git-agent --test reconcile`
-Expected: FAIL to compile — `rustic_git_agent::claim` does not exist.
+Run: `cargo test -p kloudlite-git-agent --test reconcile`
+Expected: FAIL to compile — `kloudlite_git_agent::claim` does not exist.
 
 - [ ] **Step 3: Move `placement.rs`, then write `claim.rs`**
 
@@ -896,10 +896,10 @@ git mv crates/workspaces/src/placement.rs bins/agent/src/placement.rs
 ```
 
 In `bins/agent/src/placement.rs`, change the import at line 21 from `use crate::crd::{…}` to
-`use rustic_git_workspaces::crd::{binding_name, OwnerBinding, OwnerBindingSpec};`, and in its
+`use kloudlite_git_workspaces::crd::{binding_name, OwnerBinding, OwnerBindingSpec};`, and in its
 `#[cfg(test)] mod tests` change line 164 to
-`use rustic_git_workspaces::kube_test::{conflict, get, mock_client, not_found, post, Route};`.
-Nothing else in the file changes — same algorithm, new caller. Add `rustic-git-workspaces` with
+`use kloudlite_git_workspaces::kube_test::{conflict, get, mock_client, not_found, post, Route};`.
+Nothing else in the file changes — same algorithm, new caller. Add `kloudlite-git-workspaces` with
 `features = ["testkit"]` to `bins/agent/Cargo.toml`'s `[dev-dependencies]` if it is not already
 there (the existing `tests/reconcile.rs` already uses `kube_test`, so it is).
 
@@ -921,7 +921,7 @@ Add to `Ctx` (`bins/agent/src/controller.rs:51-69`) and its constructor:
     /// This node's region, from `WS_REGION` — the other half of an `OwnerBinding`'s identity.
     pub region: String,
     /// The roles this node carries, read ONCE from its own `Node` labels at startup
-    /// (`rustic-git.io/session`, `rustic-git.io/env`). A second, hand-maintained copy of a label
+    /// (`kloudlite-git.io/session`, `kloudlite-git.io/env`). A second, hand-maintained copy of a label
     /// the scheduler already reads is a second thing that can be wrong — see `k8s::placement`.
     pub roles: Vec<String>,
 ```
@@ -942,7 +942,7 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
     let labels = n.metadata.labels.unwrap_or_default();
     ["session", "env"]
         .into_iter()
-        .filter(|r| labels.get(&format!("rustic-git.io/{r}")).map(String::as_str) == Some("true"))
+        .filter(|r| labels.get(&format!("kloudlite-git.io/{r}")).map(String::as_str) == Some("true"))
         .map(str::to_string)
         .collect()
 }
@@ -966,7 +966,7 @@ use crate::controller::{owner_ref_of_kind, patch_status, Ctx, ReconcileErr, RETR
 use kube::api::{Api, PostParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
-use rustic_git_workspaces::crd::{self, binding_name, OwnerBinding, OwnerBindingSpec};
+use kloudlite_git_workspaces::crd::{self, binding_name, OwnerBinding, OwnerBindingSpec};
 use std::sync::Arc;
 
 /// Whether THIS node may claim `object`, given the nodes already known to hold its data.
@@ -1223,8 +1223,8 @@ as a rename of the existing private `owner_ref` (line 259).
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent --test reconcile` and
-`cargo test -p rustic-git-agent placement`
+Run: `cargo test -p kloudlite-git-agent --test reconcile` and
+`cargo test -p kloudlite-git-agent placement`
 Expected: the four new claim tests PASS and every moved `placement` unit test still passes.
 
 - [ ] **Step 5: Commit**
@@ -1253,11 +1253,11 @@ git commit -m "Claim unplaced workspaces in the agent, not the API"
 - [ ] **Step 1: Write the failing test**
 
 ```rust
-const BINDING_STATUS: &str = "/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice/status";
+const BINDING_STATUS: &str = "/apis/kloudlite-git.io/v1alpha1/ownerbindings/r1-alice/status";
 
 fn binding_json() -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "OwnerBinding",
         "metadata": {"name": "r1-alice", "uid": "ob-uid-1", "generation": 1},
         "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"}
     })
@@ -1270,13 +1270,13 @@ fn binding_json() -> serde_json::Value {
 async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let ws_list = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [ws_json(serde_json::json!({"nodeName": "node-a"}))]
     });
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/workspaces", ws_list),
             Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice".into(), status: 200,
                     body: serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ws-alice"}}) },
             Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/default-deny".into(),
@@ -1290,7 +1290,7 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
     );
     let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
 
-    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+    kloudlite_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
 
     assert!(rec.calls().iter().any(|c| c == "PATCH /api/v1/namespaces/ws-alice"), "{:?}", rec.calls());
     let sent = rec.sent("PATCH", "/api/v1/namespaces/ws-alice");
@@ -1312,8 +1312,8 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p rustic-git-agent --test reconcile a_binding_ensures`
-Expected: FAIL to compile — `rustic_git_agent::binding` does not exist.
+Run: `cargo test -p kloudlite-git-agent --test reconcile a_binding_ensures`
+Expected: FAIL to compile — `kloudlite_git_agent::binding` does not exist.
 
 - [ ] **Step 3: Write `bins/agent/src/binding.rs`**
 
@@ -1334,8 +1334,8 @@ use k8s_openapi::api::rbac::v1::RoleBinding;
 use kube::api::{Api, ListParams};
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
-use rustic_git_workspaces::crd::{self, binding_name, ws_namespace};
-use rustic_git_workspaces::k8s;
+use kloudlite_git_workspaces::crd::{self, binding_name, ws_namespace};
+use kloudlite_git_workspaces::k8s;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -1437,7 +1437,7 @@ and join it with the rest.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent --test reconcile a_binding_ensures`
+Run: `cargo test -p kloudlite-git-agent --test reconcile a_binding_ensures`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1477,7 +1477,7 @@ git commit -m "Give per-owner namespaces one reconciler that owns them"
 async fn a_workspace_with_an_unready_volume_creates_no_pod() {
     let tmp = tempfile::tempdir().unwrap();
     let vol = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
         "status": {"phase": "working", "subvolumePresent": false}
@@ -1485,13 +1485,13 @@ async fn a_workspace_with_an_unready_volume_creates_no_pod() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/volumes/ws-1", vol),
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
     let w = workspace(serde_json::json!({"nodeName": "node-a", "compatibleNodes": ["node-a"]}));
 
-    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let action = kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
     assert!(
         !rec.calls().iter().any(|c| c.contains("/pods")),
@@ -1514,10 +1514,10 @@ async fn a_placed_workspace_creates_its_volume_child_on_its_own_node() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/volumes/ws-1"),
-            rustic_git_workspaces::kube_test::post(
-                "/apis/rustic-git.io/v1alpha1/volumes",
-                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            kloudlite_git_workspaces::kube_test::not_found("/apis/kloudlite-git.io/v1alpha1/volumes/ws-1"),
+            kloudlite_git_workspaces::kube_test::post(
+                "/apis/kloudlite-git.io/v1alpha1/volumes",
+                serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
                                    "metadata": {"name": "ws-1"},
                                    "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20}}),
             ),
@@ -1526,9 +1526,9 @@ async fn a_placed_workspace_creates_its_volume_child_on_its_own_node() {
     );
     let w = workspace(serde_json::json!({"nodeName": "node-a", "compatibleNodes": ["node-a"]}));
 
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
-    let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes");
+    let sent = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/volumes");
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["spec"]["nodeName"], "node-a", "the Volume is created FROM status.nodeName");
     assert_eq!(sent[0]["spec"]["quotaGb"], 20);
@@ -1543,7 +1543,7 @@ async fn a_placed_workspace_creates_its_volume_child_on_its_own_node() {
 /// not read.
 #[test]
 fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
-    use rustic_git_workspaces::{crd, k8s};
+    use kloudlite_git_workspaces::{crd, k8s};
     let spec = crd::WorkspaceSpec {
         owner: "alice".into(),
         team: String::new(),
@@ -1587,12 +1587,12 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     assert_eq!(key.secret.as_ref().unwrap().optional, Some(false));
 }
 
-fn test_pod_ctx() -> rustic_git_workspaces::k8s::PodContext<'static> {
-    rustic_git_workspaces::k8s::PodContext {
+fn test_pod_ctx() -> kloudlite_git_workspaces::k8s::PodContext<'static> {
+    kloudlite_git_workspaces::k8s::PodContext {
         pool: "/pool",
         node_name: "node-a",
         owner_ref: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-            api_version: "rustic-git.io/v1alpha1".into(),
+            api_version: "kloudlite-git.io/v1alpha1".into(),
             kind: "Workspace".into(),
             name: "ws-1".into(),
             uid: "ws-uid-1".into(),
@@ -1606,7 +1606,7 @@ fn test_pod_ctx() -> rustic_git_workspaces::k8s::PodContext<'static> {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p rustic-git-agent --test reconcile`
+Run: `cargo test -p kloudlite-git-agent --test reconcile`
 Expected: FAIL to compile — `k8s::git_init_container` does not exist and `workspace_pod` takes
 three arguments.
 
@@ -2048,8 +2048,8 @@ Delete from `apply_workspace`'s old body: the `Namespace`, `NetworkPolicy`, `Lim
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent --test reconcile` and
-`cargo test -p rustic-git-workspaces`
+Run: `cargo test -p kloudlite-git-agent --test reconcile` and
+`cargo test -p kloudlite-git-workspaces`
 Expected: the three new tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -2082,15 +2082,15 @@ git commit -m "Make a workspace create its volume and wait for the disk"
 - [ ] **Step 1: Write the failing test**
 
 ```rust
-const SNAP_STATUS: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-1/status";
-const VOL_GET: &str = "/apis/rustic-git.io/v1alpha1/volumes/ws-1";
+const SNAP_STATUS: &str = "/apis/kloudlite-git.io/v1alpha1/snapshotrequests/snap-1/status";
+const VOL_GET: &str = "/apis/kloudlite-git.io/v1alpha1/volumes/ws-1";
 
 fn snap_json(status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequest",
         "metadata": {"name": "snap-1", "uid": "snap-uid-1", "generation": 1,
-                     "finalizers": ["rustic-git.io/snapshot"],
-                     "labels": {"rustic-git.io/owner": "alice", "rustic-git.io/volume": "ws-1"}},
+                     "finalizers": ["kloudlite-git.io/snapshot"],
+                     "labels": {"kloudlite-git.io/owner": "alice", "kloudlite-git.io/volume": "ws-1"}},
         // No `nodeName`: a node is a controller-owned fact and the API does not copy facts into
         // spec. The agent resolves it from the named Volume.
         "spec": {"volume": "ws-1", "message": "checkpoint"},
@@ -2105,7 +2105,7 @@ fn snapshot(status: serde_json::Value) -> crd::SnapshotRequest {
 /// The Volume this request names, on the node the test's `ctx` is (`node-a`) unless told otherwise.
 fn vol_on(node: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
         "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 20},
         "status": {"phase": "ready", "subvolumePresent": true}
@@ -2120,7 +2120,7 @@ async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            kloudlite_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
@@ -2130,7 +2130,7 @@ async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
     ctx.running.lock().unwrap().insert(
         "snap-uid-1".to_string(),
         (1, tokio::task::spawn_blocking(|| {
-            Ok(rustic_git_agent::controller::Done {
+            Ok(kloudlite_git_agent::controller::Done {
                 phase: crd::Phase::Done,
                 lineage_tip: Some("layer-9".into()),
             })
@@ -2138,7 +2138,7 @@ async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
     );
     wait_idle(&ctx).await;
 
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
+    let action = kloudlite_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
         .await
         .unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -2167,9 +2167,9 @@ async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
 #[tokio::test]
 async fn a_request_for_another_nodes_volume_is_left_alone() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-b"))]);
+    let (ctx, rec) = ctx(tmp.path(), vec![kloudlite_git_workspaces::kube_test::get(VOL_GET, vol_on("node-b"))]);
 
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
+    let action = kloudlite_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change());
     assert!(
         !rec.calls().iter().any(|c| c.starts_with("PATCH")),
@@ -2187,12 +2187,12 @@ async fn a_working_request_with_no_handle_fails_instead_of_pushing_twice() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            kloudlite_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
 
-    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
+    let action = kloudlite_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
         .await
         .unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "a permanent failure is not retried");
@@ -2215,7 +2215,7 @@ async fn a_done_snapshot_request_does_nothing_on_a_second_reconcile() {
     let (ctx, rec) = ctx(tmp.path(), vec![]);
     let r = snapshot(serde_json::json!({"phase": "done", "snapshotId": "layer-9", "at": "2026-08-27T00:00:00Z"}));
 
-    let action = rustic_git_agent::snapshot::apply_snapshot(&r, &ctx).await.unwrap();
+    let action = kloudlite_git_agent::snapshot::apply_snapshot(&r, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change());
     assert!(rec.calls().is_empty(), "a finished request writes nothing — not even the Volume read: {:?}", rec.calls());
     assert!(!tmp.path().join("vol/ws-1").exists(), "and starts nothing");
@@ -2233,12 +2233,12 @@ async fn deleting_a_working_request_waits_for_the_handle() {
         "snap-uid-1".to_string(),
         (1, tokio::task::spawn_blocking(|| {
             std::thread::sleep(std::time::Duration::from_millis(700));
-            Ok(rustic_git_agent::controller::Done { phase: crd::Phase::Done, lineage_tip: None })
+            Ok(kloudlite_git_agent::controller::Done { phase: crd::Phase::Done, lineage_tip: None })
         })),
     );
     let r = snapshot(serde_json::json!({"phase": "working"}));
 
-    let action = rustic_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
+    let action = kloudlite_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
     assert_eq!(
         action,
         kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)),
@@ -2247,7 +2247,7 @@ async fn deleting_a_working_request_waits_for_the_handle() {
     assert!(!ctx.running.lock().unwrap().is_empty(), "nothing was drained by a cleanup that waited");
 
     wait_idle(&ctx).await;
-    rustic_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
+    kloudlite_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
     assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained by cleanup");
 }
 
@@ -2259,19 +2259,19 @@ async fn a_volume_with_a_push_annotation_starts_no_push() {
     let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
     let mut v = volume(1);
     v.metadata.annotations =
-        Some(std::collections::BTreeMap::from([("rustic-git.io/push-requested".to_string(), "2026-08-27T00:00:00Z".to_string())]));
+        Some(std::collections::BTreeMap::from([("kloudlite-git.io/push-requested".to_string(), "2026-08-27T00:00:00Z".to_string())]));
     // Already observed: with the push branch gone there is nothing left for this pass to do.
     v.status = Some(crd::VolumeStatus { phase: crd::Phase::Ready, observed_generation: Some(1), subvolume_present: true, ..Default::default() });
 
-    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    let action = kloudlite_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "the annotation is dead weight now");
 }
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p rustic-git-agent --test reconcile`
-Expected: FAIL to compile — `rustic_git_agent::snapshot` does not exist, `Done` still has
+Run: `cargo test -p kloudlite-git-agent --test reconcile`
+Expected: FAIL to compile — `kloudlite_git_agent::snapshot` does not exist, `Done` still has
 `last_push`.
 
 - [ ] **Step 3: Write `bins/agent/src/snapshot.rs` and slim the Volume**
@@ -2292,7 +2292,7 @@ use kube::api::Api;
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::ResourceExt;
-use rustic_git_workspaces::crd;
+use kloudlite_git_workspaces::crd;
 use std::sync::Arc;
 
 /// The finalizer wrapper, exactly the shape `reconcile_volume` has: a delete routes every pass to
@@ -2383,7 +2383,7 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
                 });
                 write_status(r, st, ctx).await?;
                 // Nothing is written on the Volume. "The newest snapshot of this volume" is a query
-                // over these objects by the `rustic-git.io/volume` label — a second controller
+                // over these objects by the `kloudlite-git.io/volume` label — a second controller
                 // force-applying the Volume's status under the same field manager would have its
                 // field pruned by the Volume reconciler's very next pass.
                 Ok(Action::await_change())
@@ -2408,7 +2408,7 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
     let engine = ctx.engine.clone();
     let volume = r.spec.volume.clone();
     let message = r.spec.message.clone();
-    // `spec.owner` on the Volume is the truth; the request's `rustic-git.io/owner` label is a view
+    // `spec.owner` on the Volume is the truth; the request's `kloudlite-git.io/owner` label is a view
     // of it, and this repo never reads a label as authority.
     let owner = vol.spec.owner.clone();
     let handle = tokio::task::spawn_blocking(move || {
@@ -2547,7 +2547,7 @@ In `controller.rs`:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent --test reconcile`
+Run: `cargo test -p kloudlite-git-agent --test reconcile`
 Expected: PASS, including the pre-existing
 `deleting_a_volume_waits_for_an_in_flight_operation` and
 `a_reconcile_that_cannot_read_the_pool_deletes_nothing`.
@@ -2578,9 +2578,9 @@ git commit -m "Make a push an object with its own reconciler"
 ```rust
 fn env_json(status: serde_json::Value, desired: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Environment",
         "metadata": {"name": "env-1", "uid": "env-uid-1", "generation": 1,
-                     "labels": {"rustic-git.io/owner": "alice", "rustic-git.io/kind": "environment", "rustic-git.io/team": ""}},
+                     "labels": {"kloudlite-git.io/owner": "alice", "kloudlite-git.io/kind": "environment", "kloudlite-git.io/team": ""}},
         "spec": {"owner": "alice", "name": "app", "region": "r1", "services": [],
                  "storage": {"quotaGb": 20}, "desiredState": desired},
         "status": status,
@@ -2594,7 +2594,7 @@ fn env_json(status: serde_json::Value, desired: &str) -> serde_json::Value {
 async fn stopping_an_environment_creates_one_snapshot_request_and_deletes_nothing_yet() {
     let tmp = tempfile::tempdir().unwrap();
     let vol = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "env-1", "uid": "vol-uid-e1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
         "status": {"phase": "ready", "subvolumePresent": true}
@@ -2602,24 +2602,24 @@ async fn stopping_an_environment_creates_one_snapshot_request_and_deletes_nothin
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
-            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-env-1"),
-            rustic_git_workspaces::kube_test::post(
-                "/apis/rustic-git.io/v1alpha1/snapshotrequests",
-                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/volumes/env-1", vol),
+            kloudlite_git_workspaces::kube_test::not_found("/apis/kloudlite-git.io/v1alpha1/snapshotrequests/stop-env-1"),
+            kloudlite_git_workspaces::kube_test::post(
+                "/apis/kloudlite-git.io/v1alpha1/snapshotrequests",
+                serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequest",
                                    "metadata": {"name": "stop-env-1"},
                                    "spec": {"volume": "env-1", "message": "stop"}}),
             ),
-            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/environments/env-1/status".into(),
+            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/environments/env-1/status".into(),
                     status: 200, body: env_json(serde_json::json!({}), "stopped") },
         ],
     );
     let e: crd::Environment =
         serde_json::from_value(env_json(serde_json::json!({"nodeName": "node-a", "compatibleNodes": ["node-a"]}), "stopped")).unwrap();
 
-    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    let action = kloudlite_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
-    let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshotrequests");
+    let sent = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/snapshotrequests");
     assert_eq!(sent.len(), 1, "exactly one stop snapshot");
     assert_eq!(sent[0]["spec"]["volume"], "env-1");
     assert!(sent[0]["spec"].get("nodeName").is_none(), "a request names no node; the agent resolves it: {}", sent[0]);
@@ -2634,8 +2634,8 @@ async fn stopping_an_environment_creates_one_snapshot_request_and_deletes_nothin
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p rustic-git-agent --test reconcile stopping_an_environment`
-Expected: FAIL — the current code patches a `rustic-git.io/push-requested` annotation on the
+Run: `cargo test -p kloudlite-git-agent --test reconcile stopping_an_environment`
+Expected: FAIL — the current code patches a `kloudlite-git.io/push-requested` annotation on the
 Volume and creates nothing.
 
 - [ ] **Step 3: Write the implementation**
@@ -2829,7 +2829,7 @@ are.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent --test reconcile`
+Run: `cargo test -p kloudlite-git-agent --test reconcile`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -2864,16 +2864,16 @@ async fn the_migration_adopts_the_volume_and_backfills_one_request_per_commit() 
     // A pre-migration Workspace: no status at all, and the API server still holds a legacy
     // `spec.nodeName`/`spec.volumeRef` that the new schema prunes on read.
     let legacy = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [{
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "ws-old", "uid": "ws-uid-old"},
             "spec": {"owner": "alice", "team": "", "name": "old", "region": "r1",
                      "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"}
         }]
     });
     let vol = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-old", "uid": "vol-uid-old"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
         "status": {"phase": "ready", "subvolumePresent": true}
@@ -2881,25 +2881,25 @@ async fn the_migration_adopts_the_volume_and_backfills_one_request_per_commit() 
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", legacy),
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-old", vol.clone()),
-            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/ws-old".into(), status: 200, body: vol },
-            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-old/status".into(),
-                    status: 200, body: serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "ws-old"}}) },
-            rustic_git_workspaces::kube_test::get(
-                "/apis/rustic-git.io/v1alpha1/environments",
-                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}),
+            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/workspaces", legacy),
+            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/volumes/ws-old", vol.clone()),
+            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/ws-old".into(), status: 200, body: vol },
+            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-old/status".into(),
+                    status: 200, body: serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "ws-old"}}) },
+            kloudlite_git_workspaces::kube_test::get(
+                "/apis/kloudlite-git.io/v1alpha1/environments",
+                serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}),
             ),
         ],
     );
 
-    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+    kloudlite_git_agent::migrate::once(&ctx).await.unwrap();
 
-    let adopted = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/ws-old");
+    let adopted = rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/volumes/ws-old");
     let refs = adopted[0]["metadata"]["ownerReferences"].as_array().expect("the volume is adopted");
     assert_eq!(refs[0]["kind"], "Workspace");
     assert_eq!(refs[0]["name"], "ws-old");
-    let st = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/workspaces/ws-old/status");
+    let st = rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-old/status");
     assert_eq!(st[0]["status"]["nodeName"], "node-a", "placement is backfilled from the volume's node");
     assert_eq!(st[0]["status"]["compatibleNodes"], serde_json::json!(["node-a"]));
     assert_eq!(st[0]["status"]["volumeRef"], "ws-old");
@@ -2912,8 +2912,8 @@ the part that can be wrong silently.)
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p rustic-git-agent --test reconcile the_migration_adopts`
-Expected: FAIL to compile — `rustic_git_agent::migrate` does not exist.
+Run: `cargo test -p kloudlite-git-agent --test reconcile the_migration_adopts`
+Expected: FAIL to compile — `kloudlite_git_agent::migrate` does not exist.
 
 - [ ] **Step 3: Write `bins/agent/src/migrate.rs`**
 
@@ -2931,8 +2931,8 @@ Expected: FAIL to compile — `rustic_git_agent::migrate` does not exist.
 use crate::controller::{patch_status, Ctx, ReconcileErr};
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::{Resource, ResourceExt};
-use rustic_git_workspaces::crd;
-use rustic_git_workspaces::k8s;
+use kloudlite_git_workspaces::crd;
+use kloudlite_git_workspaces::k8s;
 use std::sync::Arc;
 
 pub async fn once(ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
@@ -3061,7 +3061,7 @@ In `bins/agent/src/lib.rs::run`, between the client construction and `controller
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent --test reconcile the_migration_adopts`
+Run: `cargo test -p kloudlite-git-agent --test reconcile the_migration_adopts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -3122,7 +3122,7 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
     assert_eq!(w["spec"]["storage"]["quotaGb"], 20);
     assert!(w["spec"].get("nodeName").is_none(), "placement is a fact the controllers establish: {w}");
     assert!(w["spec"].get("volumeRef").is_none(), "a volumeRef in spec was a wish about a fact: {w}");
-    assert_eq!(w["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
+    assert_eq!(w["metadata"]["labels"]["kloudlite-git.io/owner"], "karthik");
 }
 
 /// A clone no longer copies a node from the source: locality is the claim's job, via the source's
@@ -3130,7 +3130,7 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
 #[tokio::test]
 async fn clone_asks_for_a_clone_source_and_names_no_node() {
     let src = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": "ws-src"},
         "spec": {"owner": "karthik", "team": "", "name": "src", "region": "centralindia",
                  "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
@@ -3186,7 +3186,7 @@ async fn push_creates_a_snapshot_request_on_the_volumes_node() {
         get(format!("{API}/workspaces/ws-1"), ws),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik", NODE)),
         post(format!("{API}/snapshotrequests"), json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequest",
             "metadata": {"name": "snap-1"},
             "spec": {"volume": "ws-1", "message": "checkpoint"}
         })),
@@ -3205,7 +3205,7 @@ async fn push_creates_a_snapshot_request_on_the_volumes_node() {
     assert_eq!(r["spec"]["volume"], "ws-1");
     assert_eq!(r["spec"]["nodeName"], NODE);
     assert_eq!(r["spec"]["message"], "checkpoint");
-    assert_eq!(r["metadata"]["labels"]["rustic-git.io/volume"], "ws-1");
+    assert_eq!(r["metadata"]["labels"]["kloudlite-git.io/volume"], "ws-1");
     assert!(!s.rec.calls().iter().any(|c| c.starts_with("PATCH")), "no annotation dance: {:?}", s.rec.calls());
 }
 
@@ -3230,8 +3230,8 @@ with the helpers updated to the new schema:
 ```rust
 fn ws_obj(name: &str, owner: &str) -> Value {
     json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {
             "owner": owner, "team": "", "name": name, "region": "centralindia", "image": "nginx:alpine",
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -3245,8 +3245,8 @@ and, in `api_volumes.rs`, replace the registry-stub history tests with SnapshotR
 ```rust
 fn snap_obj(name: &str, volume: &str, id: &str, at: &str, message: Option<&str>) -> Value {
     let mut v = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": "karthik", "rustic-git.io/volume": volume}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": "karthik", "kloudlite-git.io/volume": volume}},
         "spec": {"volume": volume},
         "status": {"phase": "done", "snapshotId": id, "at": at}
     });
@@ -3261,13 +3261,13 @@ fn snap_obj(name: &str, volume: &str, id: &str, at: &str, message: Option<&str>)
 #[tokio::test]
 async fn history_lists_done_snapshot_requests_newest_first() {
     let list = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {},
         "items": [
             snap_obj("snap-a", "ws-1", "c1", "2026-08-27T09:00:00Z", Some("first")),
             snap_obj("snap-b", "ws-1", "c2", "2026-08-27T10:00:00Z", None),
             // A request still running is a wish, not a snapshot; it must not appear.
-            json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-                   "metadata": {"name": "snap-c", "labels": {"rustic-git.io/volume": "ws-1"}},
+            json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequest",
+                   "metadata": {"name": "snap-c", "labels": {"kloudlite-git.io/volume": "ws-1"}},
                    "spec": {"volume": "ws-1"}, "status": {"phase": "working"}})
         ]
     });
@@ -3296,7 +3296,7 @@ async fn history_lists_done_snapshot_requests_newest_first() {
 #[tokio::test]
 async fn refs_reports_the_newest_done_snapshot_as_main() {
     let list = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {},
         "items": [snap_obj("snap-b", "ws-1", "c2", "2026-08-27T10:00:00Z", None)]
     });
     let s = server(None, vec![
@@ -3328,7 +3328,7 @@ And one more, for the pointer that replaces `Volume.status.lastPush` (D5/D5a):
 #[tokio::test]
 async fn only_a_volume_with_a_done_snapshot_reports_a_registry_pointer() {
     let snaps = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {},
         "items": [snap_obj("snap-a", "ws-1", "c1", "2026-08-27T09:00:00Z", None)]
     });
     let s = server(
@@ -3363,7 +3363,7 @@ more): `fn vol_obj(name: &str, owner: &str, kind: &str) -> Value`.
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p rustic-git-workspaces`
+Run: `cargo test -p kloudlite-git-workspaces`
 Expected: FAIL — `api.rs` still calls `place_node`/`create_volume` and reads `spec.volume_ref`.
 
 - [ ] **Step 3: Write the implementation**
@@ -3619,13 +3619,13 @@ RBAC and DaemonSet:
   # ponytail: `patch`/`update` on the parents' main resource is wider than `heal_labels` needs — a
   # ValidatingAdmissionPolicy refusing a non-label main-resource patch from this SA is the
   # mechanical version.
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch", "update"]
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["volumes", "snapshotrequests", "ownerbindings"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources:
       ["volumes/status", "workspaces/status", "environments/status",
        "snapshotrequests/status", "ownerbindings/status"]
@@ -3633,7 +3633,7 @@ RBAC and DaemonSet:
   # Finalizers are edited on the main resource, but Kubernetes gates them behind their own verb.
   # `snapshotrequests/finalizers` is required: a delete during an in-flight push must wait, or it
   # orphans a btrfs send, a stage file and a blob upload with no object left to record the outcome.
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources:
       ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers",
        "snapshotrequests/finalizers"]
@@ -3649,18 +3649,18 @@ RBAC and DaemonSet:
 ```yaml
   # Spec is the API's to write. It never writes status — that is the controller's, and the split is
   # what stops the two overwriting each other's view of the same object.
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # A push. `create` and `delete` but deliberately NO `/status`: the outcome of a push is the
   # agent's to write, and an API that could write it could report a snapshot that never happened.
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["snapshotrequests"]
     verbs: ["get", "list", "create", "delete"]
   # Read-only, for projections. `create` went to the agent (a controller owns the children it
   # authors) and `delete` went with it — the API's delete handler is now one call to the Workspace,
   # and garbage collection follows the ownerReference to the Volume.
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["volumes"]
     verbs: ["get", "list"]
 ```
@@ -3685,7 +3685,7 @@ RBAC and DaemonSet:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-workspaces` then `cargo test --workspace`
+Run: `cargo test -p kloudlite-git-workspaces` then `cargo test --workspace`
 Expected: PASS.
 
 - [ ] **Step 5: Run clippy**
@@ -3880,7 +3880,7 @@ done
   || fail "history did not grow by exactly one after push ($SEED_BEFORE -> $SEED_AFTER)"
 echo "$SEED_HISTORY" | grep -q '"message":"seeded push"' || fail "push message missing: $SEED_HISTORY"
 echo "$SEED_HISTORY" | grep -q '"created_at":"' || fail "history lost the created_at the web reads"
-kubectl get snapshotrequests -l "rustic-git.io/volume=$SEED_ID" -o name | grep -q . \
+kubectl get snapshotrequests -l "kloudlite-git.io/volume=$SEED_ID" -o name | grep -q . \
   || fail "a push wrote no SnapshotRequest"
 
 log "deleting the seeded workspace with ONE call and letting GC take the child"
@@ -3939,7 +3939,7 @@ The operator-facing runbook goes in `deploy/k3s/README.md` under "Release 1: con
 with the exact commands — `KUBECONFIG=.local/k3s.yaml` for the k3s side, the default context for
 the AKS api tier — and two steps the yaml comment does not carry: watching the `migration:` lines
 and `kubectl get workspaces -o custom-columns=…` until `status.nodeName` is populated, then rolling
-`deploy/rustic-git.yaml` and verifying a fresh "Open in a workspace" clone. The image pins in both
+`deploy/kloudlite-git.yaml` and verifying a fresh "Open in a workspace" clone. The image pins in both
 yamls are edited after the push, once CI has built the SHAs.
 
 - [ ] **Step 6: Commit**
@@ -3992,7 +3992,7 @@ kubectl get workspaces,environments \
 # Expect: CLEAN.
 
 # (c) Every node is running the Release 1 image.
-kubectl -n kube-system get pods -l app=rustic-git-agent \
+kubectl -n kube-system get pods -l app=kloudlite-git-agent \
   -o jsonpath='{range .items[*]}{.spec.nodeName} {.spec.containers[0].image}{"\n"}{end}'
 # Expect: every btrfs node listed, all on the same Release 1 SHA.
 ```
@@ -4015,7 +4015,7 @@ Replace `release_one_adds_storage_and_keeps_the_legacy_spec_fields` in
 #[test]
 fn release_two_prunes_the_legacy_spec_fields() {
     use kube::CustomResourceExt;
-    use rustic_git_workspaces::crd::{Environment, Workspace};
+    use kloudlite_git_workspaces::crd::{Environment, Workspace};
     for crd in [Workspace::crd(), Environment::crd()] {
         let props = crd.spec.versions[0]
             .schema
@@ -4040,7 +4040,7 @@ fn release_two_prunes_the_legacy_spec_fields() {
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run: `cargo test -p rustic-git-workspaces --test crd_yaml release_two`
+Run: `cargo test -p kloudlite-git-workspaces --test crd_yaml release_two`
 Expected: FAIL — "Workspace spec still has nodeName".
 
 - [ ] **Step 4: Remove the fields**
@@ -4061,7 +4061,7 @@ restored from a backup can still present an orphan Volume.
 
 - [ ] **Step 5: Regenerate and run**
 
-Run: `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`
+Run: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`
 Then: `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 Expected: PASS.
 
@@ -4095,7 +4095,7 @@ check (a) afterwards to confirm nothing lost its `status.volumeRef`.
 | Objects: `Volume` loses `credential_secret`, keeps `team` | 1 |
 | Objects: `phase` is a Rust enum on every kind; `observedGeneration` + `conditions` everywhere | 1 |
 | Objects: `SnapshotRequest` kind, `spec: {volume, message?}` only, labels, no selector | 1, 5 |
-| Objects: `SnapshotRequest` finalizer `rustic-git.io/snapshot` | 1, 5 |
+| Objects: `SnapshotRequest` finalizer `kloudlite-git.io/snapshot` | 1, 5 |
 | Objects: `Volume.status.lastPush` DROPPED, nothing replaces it | 1 (schema), 5 (writer), 8 (query) |
 | Objects: `OwnerBinding` keeps `observedGeneration`, gains a reconciler and `.spec.nodeName` | 1, 3 |
 | Placement: unplaced watch per role, claim rules 1-3, `cloneOf` exception | 2 |
@@ -4105,7 +4105,7 @@ check (a) afterwards to confirm nothing lost its `status.volumeRef`.
 | Placement: `placement.rs` moves to `bins/agent` | 2 |
 | Placement: init image pinned in the agent's env | 4 (D7), 8 (DaemonSet) |
 | What triggers what (the watch table), incl. `cloneOf` and `SnapshotRequest`→`Volume` | 2, 3, 4, 5, 6 |
-| Watches label-selected on `rustic-git.io/kind` | 4 (Pod), 6 (Deployment) |
+| Watches label-selected on `kloudlite-git.io/kind` | 4 (Pod), 6 (Deployment) |
 | Reconcile flows: Workspace 1-6 | 4 |
 | Reconcile flows: Environment, stop gated on a `done` child | 6 |
 | Reconcile flows: Volume minus token/clone/push | 5 |
@@ -4151,7 +4151,7 @@ place that answered "has this been pushed" is `api::pushed_volumes`;
 `request_snapshot`, the Environment's `await_stop_snapshot`, the migration's `backfill_history` and
 every test fixture agree; `ensure_child_volume` has one signature, used by Tasks 4 and 6;
 `binding::NAMESPACE_READY` is the single spelling of that condition; `crd::VOLUME_LABEL` is the
-single spelling of `rustic-git.io/volume`, used by Tasks 1, 4, 5, 6, 7 and 8;
+single spelling of `kloudlite-git.io/volume`, used by Tasks 1, 4, 5, 6, 7 and 8;
 `controller::{Outcome, settle, replace_status}` are defined once in Task 2 and referenced by name
 thereafter.
 

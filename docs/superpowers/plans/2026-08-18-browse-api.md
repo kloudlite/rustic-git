@@ -4,7 +4,7 @@
 
 **Goal:** A read-only JSON API — refs, trees, blobs, log, diffs — served by its own process in front of the git nodes, with a Redis response cache.
 
-**Architecture:** Browse handlers live on the git nodes' *peer* router (port 8081, already secret-guarded), so the public git path is untouched. A separate stateless process (`rustic-git api-serve`) fronts them: it authenticates, checks Redis, and on a miss calls the git Service, whose existing `route` middleware forwards to the repo's owner. Every URL except the ref list is keyed by an immutable object id, so any api pod may serve a cached answer without involving the owner node.
+**Architecture:** Browse handlers live on the git nodes' *peer* router (port 8081, already secret-guarded), so the public git path is untouched. A separate stateless process (`kloudlite-git api-serve`) fronts them: it authenticates, checks Redis, and on a miss calls the git Service, whose existing `route` middleware forwards to the repo's owner. Every URL except the ref list is keyed by an immutable object id, so any api pod may serve a cached answer without involving the owner node.
 
 **Tech Stack:** Rust, axum 0.8, gix-odb/gix-object/gix-traverse (already present), `imara-diff` (new), `redis` (new), Azure Managed Redis, Cloudflare WAF.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Rust edition 2021. Existing deps only, plus exactly two new ones: `imara-diff = "0.1"` and `redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots"] }`.
-- No new binary target. `rustic-git api-serve` is a subcommand of the existing binary.
+- No new binary target. `kloudlite-git api-serve` is a subcommand of the existing binary.
 - A private repo and a missing repo are indistinguishable: both 404. Never 403 on a read.
 - Blob responses cap at 5 MB with `truncated: true`; blobs over 1 MB are never written to Redis.
 - Redis failure is always fail-open: log and fall through to the git nodes.
@@ -58,7 +58,7 @@ async fn visibility_defaults_private_and_round_trips() {
 
 #[test]
 fn authorize_allows_anonymous_reads_only_when_public() {
-    use rustic_git::auth::authorize;
+    use kloudlite_git::auth::authorize;
     assert!(!authorize(None, "alice", false));
     assert!(authorize(None, "alice", true));
     assert!(authorize(Some("alice"), "alice", false));
@@ -160,7 +160,7 @@ In `src/main.rs`, add the admin arm and extend the usage string:
             let public = match *vis {
                 "public" => true,
                 "private" => false,
-                _ => return Err(rustic_git::err("visibility must be public or private")),
+                _ => return Err(kloudlite_git::err("visibility must be public or private")),
             };
             store.set_public(&owner, &name, public).await?;
         }
@@ -209,7 +209,7 @@ push path, and reads it back — the same shape `tests/http_e2e.rs` uses.
 
 ```rust
 mod common;
-use rustic_git::browse;
+use kloudlite_git::browse;
 
 #[tokio::test]
 async fn reads_a_tree_a_blob_and_a_diff() {
@@ -261,7 +261,7 @@ rather than inventing a new path.
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --test browse -- --nocapture`
-Expected: FAIL — `unresolved import rustic_git::browse`.
+Expected: FAIL — `unresolved import kloudlite_git::browse`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -469,14 +469,14 @@ async fn refs_then_tree_then_blob() {
     let e = common::env().await;
     common::push_fixture(&e, "alice", "web").await;
     let app = common::app(e.store.clone()).await;
-    let router = rustic_git::http::peer_router(app);
+    let router = kloudlite_git::http::peer_router(app);
 
     let get = |path: String| {
         let router = router.clone();
         async move {
             let req = Request::builder().uri(path)
-                .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-                .header(rustic_git::proxy::OWNER_HEADER, "alice")
+                .header(kloudlite_git::proxy::PEER_HEADER, "test-peer-secret")
+                .header(kloudlite_git::proxy::OWNER_HEADER, "alice")
                 .body(axum::body::Body::empty()).unwrap();
             let r = router.oneshot(req).await.unwrap();
             let status = r.status();
@@ -509,10 +509,10 @@ async fn private_repo_is_404_to_a_stranger() {
     common::push_fixture(&e, "alice", "web").await;
     let app = common::app(e.store.clone()).await;
     let req = Request::builder().uri("/api/alice/web/refs")
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, "bob")
+        .header(kloudlite_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(kloudlite_git::proxy::OWNER_HEADER, "bob")
         .body(axum::body::Body::empty()).unwrap();
-    let r = rustic_git::http::peer_router(app).oneshot(req).await.unwrap();
+    let r = kloudlite_git::http::peer_router(app).oneshot(req).await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND, "existence must not leak");
 }
 ```
@@ -794,12 +794,12 @@ async fn a_cache_hit_does_not_touch_upstream() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
     // An in-process stand-in for Redis: the same two calls the api path makes.
-    let cache = std::sync::Arc::new(rustic_git::cache::Cache::connect(None).await);
+    let cache = std::sync::Arc::new(kloudlite_git::cache::Cache::connect(None).await);
     let al = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let aaddr = al.local_addr().unwrap();
     let store = e.store.clone();
     tokio::spawn(async move {
-        rustic_git::api::serve(store, cache, format!("http://{uaddr}"), "s".into(), al).await.unwrap()
+        kloudlite_git::api::serve(store, cache, format!("http://{uaddr}"), "s".into(), al).await.unwrap()
     });
 
     let c = reqwest::Client::new();
@@ -820,12 +820,12 @@ async fn no_token_and_a_private_repo_is_401() {
     let uaddr = ul.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(ul, upstream).await.unwrap() });
     let e = common::env().await;
-    let cache = std::sync::Arc::new(rustic_git::cache::Cache::connect(None).await);
+    let cache = std::sync::Arc::new(kloudlite_git::cache::Cache::connect(None).await);
     let al = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let aaddr = al.local_addr().unwrap();
     let store = e.store.clone();
     tokio::spawn(async move {
-        rustic_git::api::serve(store, cache, format!("http://{uaddr}"), "s".into(), al).await.unwrap()
+        kloudlite_git::api::serve(store, cache, format!("http://{uaddr}"), "s".into(), al).await.unwrap()
     });
     let r = reqwest::get(format!("http://{aaddr}/api/alice/web/refs")).await.unwrap();
     assert_eq!(r.status(), 401);
@@ -835,7 +835,7 @@ async fn no_token_and_a_private_repo_is_401() {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --test api_server -- --nocapture`
-Expected: FAIL — `unresolved import rustic_git::api`.
+Expected: FAIL — `unresolved import kloudlite_git::api`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -846,7 +846,7 @@ Expected: FAIL — `unresolved import rustic_git::api`.
 pub struct Api {
     pub store: Arc<Store>,
     pub cache: Arc<Cache>,
-    /// Base URL of the git peer Service, e.g. `http://rustic-git:8081`.
+    /// Base URL of the git peer Service, e.g. `http://kloudlite-git:8081`.
     pub upstream: String,
     pub secret: String,
     pub client: reqwest::Client,
@@ -877,7 +877,7 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // Serve from cache only when this caller is entitled to it without asking a git node.
     if let Some(v) = api.visibility(&repo).await {
         let owner = repo.split('/').next().unwrap_or_default();
-        if !rustic_git::auth::authorize(caller.as_deref(), owner, v) {
+        if !kloudlite_git::auth::authorize(caller.as_deref(), owner, v) {
             return if caller.is_none() { unauthorized() } else { not_found() };
         }
         if let Some(body) = api.cache.get(&repo, &suffix).await {
@@ -888,9 +888,9 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // Miss. The peer secret plus the owner header is exactly the identity a forwarding node
     // presents, so upstream authorizes this the way it authorizes a peer.
     let mut up = api.client.get(format!("{}{}", api.upstream, full_path(&path, req.uri().query())))
-        .header(rustic_git::proxy::PEER_HEADER, &api.secret);
+        .header(kloudlite_git::proxy::PEER_HEADER, &api.secret);
     if let Some(c) = &caller {
-        up = up.header(rustic_git::proxy::OWNER_HEADER, c);
+        up = up.header(kloudlite_git::proxy::OWNER_HEADER, c);
     }
     let r = match up.send().await { Ok(r) => r, Err(e) => { eprintln!("upstream: {e}"); return bad_gateway() } };
     let status = r.status();
@@ -919,11 +919,11 @@ In `src/main.rs`, dispatch it:
 ```rust
     if a.first() == Some(&"api-serve") {
         let store = Arc::new(Store::open(object_store()?, cache_dir()?, false).await?);
-        let cache = Arc::new(rustic_git::cache::Cache::connect(std::env::var("RUSTIC_GIT_REDIS_URL").ok().as_deref()).await);
-        let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
-        let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").map_err(|_| rustic_git::err("RUSTIC_GIT_PEER_SECRET required"))?;
-        let l = tokio::net::TcpListener::bind(env("RUSTIC_GIT_API_ADDR", "0.0.0.0:8090")).await?;
-        return rustic_git::api::serve(store, cache, upstream, secret, l).await;
+        let cache = Arc::new(kloudlite_git::cache::Cache::connect(std::env::var("KLOUDLITE_GIT_REDIS_URL").ok().as_deref()).await);
+        let upstream = env("KLOUDLITE_GIT_UPSTREAM", "http://kloudlite-git:8081");
+        let secret = std::env::var("KLOUDLITE_GIT_PEER_SECRET").map_err(|_| kloudlite_git::err("KLOUDLITE_GIT_PEER_SECRET required"))?;
+        let l = tokio::net::TcpListener::bind(env("KLOUDLITE_GIT_API_ADDR", "0.0.0.0:8090")).await?;
+        return kloudlite_git::api::serve(store, cache, upstream, secret, l).await;
     }
 ```
 
@@ -964,7 +964,7 @@ async fn a_push_drops_the_ref_entry_and_a_flip_bumps_the_generation() {
     let e = common::env().await;
     e.store.create_repo("alice", "web").await.unwrap();
 
-    let before = rustic_git::cache::key(1, "alice/web", "refs");
+    let before = kloudlite_git::cache::key(1, "alice/web", "refs");
     assert_eq!(before, "v1:1:alice/web:refs");
 
     // Visibility changes must orphan every cached answer for the repo.
@@ -987,7 +987,7 @@ Expected: FAIL — `App::new` takes 6 arguments, not 7.
 - [ ] **Step 3: Write minimal implementation**
 
 - `App::new` takes and stores `cache: Arc<Cache>`; `serve()` in `main.rs` builds one from
-  `RUSTIC_GIT_REDIS_URL` and passes it; `tests/common/mod.rs::app` passes a disabled one.
+  `KLOUDLITE_GIT_REDIS_URL` and passes it; `tests/common/mod.rs::app` passes a disabled one.
 - In `src/protocol/receive.rs`, after `update_refs` reports at least one applied update:
 
 ```rust
@@ -1028,49 +1028,49 @@ git commit -m "Invalidate refs on push and everything on a visibility change"
 ### Task 7: Deployment and docs
 
 **Files:**
-- Modify: `deploy/rustic-git.yaml` (api Deployment + Service)
+- Modify: `deploy/kloudlite-git.yaml` (api Deployment + Service)
 - Modify: `README.md:110-125` (usage), and the environment variable list
 
 **Interfaces:** none — configuration and prose only.
 
 - [ ] **Step 1: Add the api Deployment**
 
-Append to `deploy/rustic-git.yaml`. It is a Deployment, not a StatefulSet: this tier owns no repo
+Append to `deploy/kloudlite-git.yaml`. It is a Deployment, not a StatefulSet: this tier owns no repo
 and holds no lease, so pods are interchangeable.
 
 ```yaml
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: rustic-git-api, namespace: rustic-git }
+metadata: { name: kloudlite-git-api, namespace: kloudlite-git }
 spec:
   replicas: 2
-  selector: { matchLabels: { app: rustic-git-api } }
+  selector: { matchLabels: { app: kloudlite-git-api } }
   template:
-    metadata: { labels: { app: rustic-git-api } }
+    metadata: { labels: { app: kloudlite-git-api } }
     spec:
       containers:
         - name: api
-          image: rustic-git:latest
+          image: kloudlite-git:latest
           args: ["api-serve"]
           ports: [{ name: http, containerPort: 8090 }]
           env:
             # The peer Service, not the public LB: this tier speaks to the fleet as a peer.
-            - { name: RUSTIC_GIT_UPSTREAM, value: "http://rustic-git:8081" }
-            - { name: RUSTIC_GIT_API_ADDR, value: "0.0.0.0:8090" }
-            - name: RUSTIC_GIT_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
-            - name: RUSTIC_GIT_REDIS_URL
-              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url } }
-            - { name: RUSTIC_GIT_S3_URL, value: "s3://REPLACE_ME" }
+            - { name: KLOUDLITE_GIT_UPSTREAM, value: "http://kloudlite-git:8081" }
+            - { name: KLOUDLITE_GIT_API_ADDR, value: "0.0.0.0:8090" }
+            - name: KLOUDLITE_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
+            - name: KLOUDLITE_GIT_REDIS_URL
+              valueFrom: { secretKeyRef: { name: kloudlite-git-redis, key: url } }
+            - { name: KLOUDLITE_GIT_S3_URL, value: "s3://REPLACE_ME" }
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5 }
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: rustic-git-api, namespace: rustic-git }
+metadata: { name: kloudlite-git-api, namespace: kloudlite-git }
 spec:
   type: LoadBalancer
-  selector: { app: rustic-git-api }
+  selector: { app: kloudlite-git-api }
   ports: [{ name: http, port: 80, targetPort: http }]
 ```
 
@@ -1082,7 +1082,7 @@ Give `api::serve` a `/healthz` route returning 200 so the probe above has someth
 
 - [ ] **Step 2: Verify the manifest parses**
 
-Run: `kubectl apply --dry-run=client -f deploy/rustic-git.yaml`
+Run: `kubectl apply --dry-run=client -f deploy/kloudlite-git.yaml`
 Expected: every object listed as "created (dry run)", no errors.
 
 - [ ] **Step 3: Document it**
@@ -1090,13 +1090,13 @@ Expected: every object listed as "created (dry run)", no errors.
 In `README.md`, add to the usage block:
 
 ```
-rustic-git api-serve                                          # read API; needs RUSTIC_GIT_UPSTREAM
-rustic-git admin set-visibility <owner>/<name> public|private
-rustic-git admin purge-cache <owner>/<name>
+kloudlite-git api-serve                                          # read API; needs KLOUDLITE_GIT_UPSTREAM
+kloudlite-git admin set-visibility <owner>/<name> public|private
+kloudlite-git admin purge-cache <owner>/<name>
 ```
 
-Add to the environment variable list: `RUSTIC_GIT_REDIS_URL` (optional; without it the api serves
-every request from the git nodes), `RUSTIC_GIT_UPSTREAM`, `RUSTIC_GIT_API_ADDR`.
+Add to the environment variable list: `KLOUDLITE_GIT_REDIS_URL` (optional; without it the api serves
+every request from the git nodes), `KLOUDLITE_GIT_UPSTREAM`, `KLOUDLITE_GIT_API_ADDR`.
 
 Add a short `## Browsing` section: branch names appear only in `/refs`, every other URL takes the
 object id it returns, and that is what lets any api pod answer from cache without involving the
@@ -1110,6 +1110,6 @@ Run: `cargo run -- 2>&1 | head -3` and confirm the usage string lists `api-serve
 - [ ] **Step 5: Commit**
 
 ```bash
-git add deploy/rustic-git.yaml README.md src/api.rs
+git add deploy/kloudlite-git.yaml README.md src/api.rs
 git commit -m "Deploy the api tier and document it"
 ```

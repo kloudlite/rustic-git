@@ -4,9 +4,9 @@
 
 **Goal:** Make a stop take seconds instead of minutes by moving the replica wait out of `stop_push` and into placement; make an interrupted (node-dead) parent a state a person can act on rather than a wedge; and make a node's retirement a labelled, observable drain that never stops anyone's running work.
 
-**Architecture:** One truth per fact, computed once and read everywhere. `up_to_date(replica, worktree, newest_transient)` (Task 1) is the single placement bar — a replica is up to date for a worktree when its `status.branches[worktree]` names that worktree's newest Ready transient, falling back to plain `Synced` when the worktree has no transient at all. `unplaceable(node)` (Task 3) is the single "not a place to run" predicate, true for a node dead past `WS_NODE_DEAD_SECS` and for one labelled `rustic-git.io/decommission=true`. The `Replicated` condition on a stopped parent (Task 4) is the single "is it replicated" truth, written by the owner's reconcile and read by the sweep, `/v1` and the web. `volume_decision(...)` (Task 6) is the single per-volume sweep arm, called with the dead set or with the decommission set. Stop cuts and tears down at once, then POSTs `/peer/v1/wake` to every placeable node so the peers pull within seconds instead of at the next five-minute beat.
+**Architecture:** One truth per fact, computed once and read everywhere. `up_to_date(replica, worktree, newest_transient)` (Task 1) is the single placement bar — a replica is up to date for a worktree when its `status.branches[worktree]` names that worktree's newest Ready transient, falling back to plain `Synced` when the worktree has no transient at all. `unplaceable(node)` (Task 3) is the single "not a place to run" predicate, true for a node dead past `WS_NODE_DEAD_SECS` and for one labelled `kloudlite-git.io/decommission=true`. The `Replicated` condition on a stopped parent (Task 4) is the single "is it replicated" truth, written by the owner's reconcile and read by the sweep, `/v1` and the web. `volume_decision(...)` (Task 6) is the single per-volume sweep arm, called with the dead set or with the decommission set. Stop cuts and tears down at once, then POSTs `/peer/v1/wake` to every placeable node so the peers pull within seconds instead of at the next five-minute beat.
 
-**Tech Stack:** Rust (axum, kube-rs, tokio), Kubernetes CRDs in `rustic-git.io/v1alpha1`, btrfs send/receive over the agent peer listener, Next.js app router + bun test for the web half.
+**Tech Stack:** Rust (axum, kube-rs, tokio), Kubernetes CRDs in `kloudlite-git.io/v1alpha1`, btrfs send/receive over the agent peer listener, Next.js app router + bun test for the web half.
 
 **Spec:** docs/superpowers/specs/2026-09-03-stop-interrupt-decommission-design.md
 
@@ -15,7 +15,7 @@
 - Up to date, for a worktree: the replica row's `status.branches[worktree]` equals that worktree's newest Ready transient's NAME; never a clock — `lastSyncAt` is the puller's clock and `readyAt` the owner's.
 - A worktree with no transient at all (never ran, or a fresh restore) falls back to plain `phase == "Synced"`.
 - `status.branches` semantics: `worktree → snapshot name`, the newest Ready transient of that worktree this node actually holds locally, written by the pull pass that holds it.
-- One predicate for placement: `unplaceable(node)` is true when the node is dead (NotReady past `WS_NODE_DEAD_SECS`) OR carries the label `rustic-git.io/decommission=true`. `live_nodes`, `owner_alive`, `standby_count`, `may_claim` and both sweeps call it; nothing tests the two conditions separately.
+- One predicate for placement: `unplaceable(node)` is true when the node is dead (NotReady past `WS_NODE_DEAD_SECS`) OR carries the label `kloudlite-git.io/decommission=true`. `live_nodes`, `owner_alive`, `standby_count`, `may_claim` and both sweeps call it; nothing tests the two conditions separately.
 - The wake route is exactly `POST /peer/v1/wake` on the peer listener, authenticated by `x-peer-secret` like `/peer/v1/commit/{volume}/{name}`; a wake that cannot be delivered is a `tracing::warn!`, never an error — the ticker still comes.
 - The wake `Notify` coalesces: a pull pass already running finishes and runs once more via a pending flag, never concurrently.
 - `Replicated` condition on a stopped parent, written on every reconcile of a stopped parent: `False / AwaitingReplica` with message `"no other node holds the final sync point yet"`; `False / AwaitingReplica` with message `"no replica is configured for this volume"` when `spec.replicas == 1`; `True / Replicated` with message `"another node holds the final sync point"`.
@@ -26,8 +26,8 @@
 - `/v1` start answers 409 with exactly: `"workspace is interrupted: its node is down; it resumes when the node returns"` / `"environment is interrupted: its node is down; it resumes when the node returns"`.
 - Every clone response carries `basedOn: {snapshot, at, age}` and the web renders the sentence shape `"cloned from the sync point of 14:32:07, 6 minutes before the node went down"` for an interrupted source, `"cloned from the sync point of 14:32:07"` otherwise.
 - Clone cuts `clone-{ws}-{hex}` (`crd::short_hex()`), a transient `Snapshot`, exactly like a sync point.
-- Decommission label key: `rustic-git.io/decommission`, value `"true"`.
-- One decommission annotation key, `rustic-git.io/decommission-status`, with values `"draining running=N owned=N copies=N"` while in progress and `"drained <RFC 3339>"` when done.
+- Decommission label key: `kloudlite-git.io/decommission`, value `"true"`.
+- One decommission annotation key, `kloudlite-git.io/decommission-status`, with values `"draining running=N owned=N copies=N"` while in progress and `"drained <RFC 3339>"` when done.
 - The decommission beat runs every 30 s, on the decommissioning node's own agent only, and stops nothing.
 - `Decommissioning=True / NodeLeaving` on each running parent of a decommissioning node, message exactly: `"this node is being retired; stop when convenient and the next start lands elsewhere"`.
 - Deleted outright: `flush_gate`, `flush_expired`, `flush_timeout`, `NO_PEERS`, `NO_READY_AT`, `FLUSH_TIMED_OUT`, `FlushUnreplicated`, `WS_STOP_FLUSH_TIMEOUT_SECS`, `STOP_GENERATION`, `source_nodes`, `release_dead_volumes`, `unclaim_kind`'s `releasable` closures and its `running_volumes` plumbing.
@@ -61,10 +61,10 @@
 
     fn transient_gen(name: &str, volume: &str, worktree: &str, generation: u64) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1",
+            "apiVersion": "kloudlite-git.io/v1alpha1",
             "kind": "Snapshot",
             "metadata": {"name": name, "uid": format!("uid-{name}"),
-                         "annotations": {"rustic-git.io/synced-generation": generation.to_string()}},
+                         "annotations": {"kloudlite-git.io/synced-generation": generation.to_string()}},
             "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "",
                      "pinned": false, "transient": true},
             "status": {"phase": "ready"},
@@ -105,7 +105,7 @@
 
     fn replica_with_branches(volume: &str, node: &str, phase: &str, branches: serde_json::Value) -> crd::VolumeReplica {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": format!("{volume}.{node}"), "uid": format!("uid-{node}")},
             "spec": {"volume": volume, "node": node},
             "status": {"phase": phase, "branches": branches},
@@ -142,7 +142,7 @@
     async fn a_pull_pass_records_only_the_transients_it_actually_holds() {
         let tmp = tempfile::tempdir().unwrap();
         let created = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": "vol-1.node-b", "uid": "r-uid"},
             "spec": {"volume": "vol-1", "node": "node-b"},
             "status": {"phase": "Syncing", "branches": {}},
@@ -173,7 +173,7 @@
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --lib peer::reconcile_tests` fails to compile with `cannot find function `newest_transient_of` in this scope` and `cannot find function `up_to_date` in this scope`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --lib peer::reconcile_tests` fails to compile with `cannot find function `newest_transient_of` in this scope` and `cannot find function `up_to_date` in this scope`.
 
 - [ ] **Step 3: Implement** — in `bins/agent/src/peer.rs`, add above `write_replica_status` (line 625):
 
@@ -266,7 +266,7 @@ async fn write_replica_status(
 
 Update the two existing callers' expectations in `write_replica_status_stamps_the_volume_label_on_create` (line 1135) and `write_replica_status_stamps_the_listing_instant_not_the_write_instant` (line 1166) to pass `Default::default()`.
 
-- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p rustic-git-agent` then the clippy line.
+- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p kloudlite-git-agent` then the clippy line.
 - [ ] **Step 5: Commit** — `git add bins/agent/src/peer.rs && git commit -m "Record the newest held transient per worktree in replica rows"`
 
 ---
@@ -346,7 +346,7 @@ And, in `bins/agent/tests/peer.rs`, the router half (copy the file's existing `s
 async fn wake_requires_the_peer_secret_and_answers_204() {
     let tmp = tempfile::tempdir().unwrap();
     let (client, _rec) = mock_client(vec![]);
-    let state = rustic_git_agent::peer::PeerState::new(
+    let state = kloudlite_git_agent::peer::PeerState::new(
         client,
         tmp.path().to_string_lossy().into(),
         "node-a".into(),
@@ -354,7 +354,7 @@ async fn wake_requires_the_peer_secret_and_answers_204() {
         "btrfs".into(),
     );
     let notify = state.pull_wake.clone();
-    let app = rustic_git_agent::peer::router(state);
+    let app = kloudlite_git_agent::peer::router(state);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -372,7 +372,7 @@ async fn wake_requires_the_peer_secret_and_answers_204() {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent wake` fails with `cannot find function `wake_peers` in this scope` and `no field `pull_wake` on type `PeerState``.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent wake` fails with `cannot find function `wake_peers` in this scope` and `no field `pull_wake` on type `PeerState``.
 
 - [ ] **Step 3: Implement** —
 
@@ -471,7 +471,7 @@ fn spawn_pull(ctx: Arc<Ctx>) {
 
 (`use futures::FutureExt;` for `now_or_never`, already a dependency of this binary.)
 
-- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p rustic-git-agent` and `cargo test -p rustic-git-agent --test peer`.
+- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p kloudlite-git-agent` and `cargo test -p kloudlite-git-agent --test peer`.
 - [ ] **Step 5: Commit** — `git add bins/agent/src && git commit -m "Add a peer wake route and coalesce it into the pull beat"`
 
 ---
@@ -484,7 +484,7 @@ fn spawn_pull(ctx: Arc<Ctx>) {
 **Interfaces:**
 - Consumes: `k8s_openapi::api::core::v1::Node`, `node_dead_secs()` (line 289).
 - Produces:
-  - `pub(crate) const DECOMMISSION_LABEL: &str = "rustic-git.io/decommission";` in `crates/workspaces/src/crd.rs` (beside `VOLUME_LABEL`), re-exported as `crd::DECOMMISSION_LABEL`.
+  - `pub(crate) const DECOMMISSION_LABEL: &str = "kloudlite-git.io/decommission";` in `crates/workspaces/src/crd.rs` (beside `VOLUME_LABEL`), re-exported as `crd::DECOMMISSION_LABEL`.
   - `pub(crate) fn decommissioning(node: Option<&Node>) -> bool`
   - `pub(crate) fn unplaceable(node: Option<&Node>, floor: i64, now: k8s_openapi::jiff::Timestamp) -> bool`
   - `node_is_dead` stays, unchanged and still the reaper's rule — a decommissioning node's replica rows are NOT reaped.
@@ -539,18 +539,18 @@ fn spawn_pull(ctx: Arc<Ctx>) {
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --lib peer::reconcile_tests::decommissioning` fails with `cannot find function `unplaceable` in this scope` and `cannot find value `DECOMMISSION_LABEL` in `crd``.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --lib peer::reconcile_tests::decommissioning` fails with `cannot find function `unplaceable` in this scope` and `cannot find value `DECOMMISSION_LABEL` in `crd``.
 
 - [ ] **Step 3: Implement** —
 
 `crates/workspaces/src/crd.rs`, beside `VOLUME_LABEL`:
 
 ```rust
-/// Set on a `Node` by an operator (`kubectl label node <n> rustic-git.io/decommission=true`) to
+/// Set on a `Node` by an operator (`kubectl label node <n> kloudlite-git.io/decommission=true`) to
 /// retire it. A LABEL and not an annotation because it is a selector-worthy fact about the node,
 /// and because removing it is the documented abort. Only the exact value `"true"` counts: a
 /// half-typed label must never drain a node.
-pub const DECOMMISSION_LABEL: &str = "rustic-git.io/decommission";
+pub const DECOMMISSION_LABEL: &str = "kloudlite-git.io/decommission";
 ```
 
 `bins/agent/src/peer.rs`, beside `node_is_dead` (line 663):
@@ -610,29 +610,29 @@ Then swap the four call sites: `live_nodes` (line 309) filters on `!unplaceable(
 async fn a_stop_tears_down_as_soon_as_the_cut_is_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let stop = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": "stop-ws-1-3", "uid": "stop-uid"},
         "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "",
                  "pinned": false, "transient": true},
         "status": {"phase": "ready", "readyAt": "2026-09-03T10:00:00Z"},
     });
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots/stop-ws-1-3".into(), status: 200, body: stop },
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots/stop-ws-1-3".into(), status: 200, body: stop },
         // NO VolumeReplica list for a gate, and no wait: the pod delete happens on this pass.
         Route { method: "DELETE", path: "/api/v1/namespaces/ws-alice/pods/ws-1".into(), status: 200, body: json!({}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumereplicas".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": []}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "SnapshotList", "items": []}) },
-        Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200,
+        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200,
                 body: stopping_ws("ws-1") },
         // the pod lookup and volume reads the workspace path already makes
     ];
     let (ctx, rec) = ctx_with(tmp.path(), routes);
-    rustic_git_agent::controller::apply_workspace(&stopping_ws_obj("ws-1"), &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&stopping_ws_obj("ws-1"), &ctx).await.unwrap();
 
     assert_eq!(rec.calls().iter().filter(|c| c.starts_with("DELETE /api/v1/namespaces/ws-alice/pods/ws-1")).count(), 1);
-    let st = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status").remove(0);
+    let st = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status").remove(0);
     assert_eq!(st["status"]["phase"], "stopped");
     let conds = st["status"]["conditions"].as_array().unwrap();
     assert!(conds.iter().any(|c| c["type"] == "Ready" && c["reason"] == "Stopped"));
@@ -649,20 +649,20 @@ async fn a_stop_tears_down_as_soon_as_the_cut_is_ready() {
 async fn a_stopped_parent_reports_awaiting_replica_until_a_peer_holds_the_cut() {
     let tmp = tempfile::tempdir().unwrap();
     let behind = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-1.node-b"},
         "spec": {"volume": "vol-1", "node": "node-b"},
         "status": {"phase": "Synced", "branches": {"ws-1": "sync-ws-1-old"}},
     });
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-1", "ws-1", 7)]}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumereplicas".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [behind]}) },
     ];
     let (ctx, _rec) = ctx_with(tmp.path(), routes);
 
-    let c = rustic_git_agent::controller::replicated_condition(&ctx, "vol-1", "ws-1", 2, &[], 3).await.unwrap();
+    let c = kloudlite_git_agent::controller::replicated_condition(&ctx, "vol-1", "ws-1", 2, &[], 3).await.unwrap();
     assert_eq!(c.type_, "Replicated");
     assert_eq!(c.status, "False");
     assert_eq!(c.reason, "AwaitingReplica");
@@ -673,19 +673,19 @@ async fn a_stopped_parent_reports_awaiting_replica_until_a_peer_holds_the_cut() 
 async fn a_stopped_parent_reports_replicated_once_a_peer_holds_the_cut_by_name() {
     let tmp = tempfile::tempdir().unwrap();
     let holding = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-1.node-b"},
         "spec": {"volume": "vol-1", "node": "node-b"},
         "status": {"phase": "Synced", "branches": {"ws-1": "stop-ws-1-3"}},
     });
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-1", "ws-1", 7)]}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumereplicas".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [holding]}) },
     ];
     let (ctx, _rec) = ctx_with(tmp.path(), routes);
-    let c = rustic_git_agent::controller::replicated_condition(&ctx, "vol-1", "ws-1", 2, &[], 3).await.unwrap();
+    let c = kloudlite_git_agent::controller::replicated_condition(&ctx, "vol-1", "ws-1", 2, &[], 3).await.unwrap();
     assert_eq!((c.status.as_str(), c.reason.as_str()), ("True", "Replicated"));
     assert_eq!(c.message, "another node holds the final sync point");
 }
@@ -696,13 +696,13 @@ async fn a_stopped_parent_reports_replicated_once_a_peer_holds_the_cut_by_name()
 async fn replicas_one_says_so_in_the_message_not_in_a_second_reason() {
     let tmp = tempfile::tempdir().unwrap();
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "SnapshotList", "items": []}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumereplicas".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": []}) },
     ];
     let (ctx, _rec) = ctx_with(tmp.path(), routes);
-    let c = rustic_git_agent::controller::replicated_condition(&ctx, "vol-1", "ws-1", 1, &[], 3).await.unwrap();
+    let c = kloudlite_git_agent::controller::replicated_condition(&ctx, "vol-1", "ws-1", 1, &[], 3).await.unwrap();
     assert_eq!((c.status.as_str(), c.reason.as_str()), ("False", "AwaitingReplica"));
     assert_eq!(c.message, "no replica is configured for this volume");
 }
@@ -745,7 +745,7 @@ async fn get_and_stop_expose_the_replicated_condition() {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --test reconcile a_stop_tears_down` fails with `cannot find function `replicated_condition``; `cargo test -p rustic-git-workspaces --test api_commit_model get_and_stop_expose` fails on `replicated` being `null`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --test reconcile a_stop_tears_down` fails with `cannot find function `replicated_condition``; `cargo test -p kloudlite-git-workspaces --test api_commit_model get_and_stop_expose` fails on `replicated` being `null`.
 
 - [ ] **Step 3: Implement** —
 
@@ -898,7 +898,7 @@ filled in `ws_doc`/`env_doc` by `st.and_then(|s| s.conditions.iter().find(|c| c.
 
 `deploy/k3s/agent-daemonset.yaml`: delete lines 202–207.
 
-- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p rustic-git-agent && cargo test -p rustic-git-workspaces`.
+- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p kloudlite-git-agent && cargo test -p kloudlite-git-workspaces`.
 - [ ] **Step 5: Commit** — `git add bins/agent/src crates/workspaces/src deploy/k3s/agent-daemonset.yaml && git commit -m "Tear a stop down at the cut and report Replicated instead of waiting"`
 
 ---
@@ -927,7 +927,7 @@ mod tests {
 
     fn replica(node: &str, phase: &str, branches: &[(&str, &str)]) -> crd::VolumeReplica {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": format!("vol-1.{node}")},
             "spec": {"volume": "vol-1", "node": node},
             "status": {"phase": phase,
@@ -981,7 +981,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --lib claim::tests` fails with `cannot find struct `Placement` in this scope`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --lib claim::tests` fails with `cannot find struct `Placement` in this scope`.
 
 - [ ] **Step 3: Implement** — in `bins/agent/src/claim.rs`:
 
@@ -1175,9 +1175,9 @@ async fn decide(
         let old = "2000-01-01T00:00:00Z";
         let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
         let routes = vec![
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "node-b") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-clone/status".into(), status: 200, body: ws_placed("ws-clone", "node-b") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "node-b") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "node-b") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-clone/status".into(), status: 200, body: ws_placed("ws-clone", "node-b") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "node-b") },
         ];
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
@@ -1190,18 +1190,18 @@ async fn decide(
         sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(), k8s_openapi::jiff::Timestamp::now()).await;
 
         assert!(
-            !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/rustic-git.io/v1alpha1/volumes/vol-1")),
+            !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/kloudlite-git.io/v1alpha1/volumes/vol-1")),
             "the pin is never cleared while a sibling runs: {:?}",
             rec.calls()
         );
-        let stop_writes = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-stop/status");
+        let stop_writes = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status");
         assert!(
             stop_writes.iter().all(|w| w["status"]["nodeName"] == "node-b"),
             "the stopped sibling keeps its placement: {stop_writes:?}"
         );
         // Both parents carry NodeDead so the API can say why neither will start.
         for name in ["ws-stop", "ws-clone"] {
-            let sent = rec.sent("PUT", &format!("/apis/rustic-git.io/v1alpha1/workspaces/{name}/status"));
+            let sent = rec.sent("PUT", &format!("/apis/kloudlite-git.io/v1alpha1/workspaces/{name}/status"));
             assert!(sent.iter().any(|w| w["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "NodeDead")), "{name}");
         }
     }
@@ -1209,7 +1209,7 @@ async fn decide(
 
 The three sweep tests at lines 1594/1624/1697 are rewritten to build `beat.parents` the same way and call `sweep_dead_nodes`; the `PATCH`+`PUT` assertions in `a_stopped_worktree_on_a_dead_node_is_released_with_its_volume` (line 1697) are unchanged except that the volume condition's reason stays `NodeDead` (there is no `Released` reason).
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --lib peer::reconcile_tests::a_running_parent_pins` fails with `cannot find function `volume_decision``.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --lib peer::reconcile_tests::a_running_parent_pins` fails with `cannot find function `volume_decision``.
 
 - [ ] **Step 3: Implement** —
 
@@ -1441,15 +1441,15 @@ with `replaced_conditions` the JSON-side twin of `workspace::replaced`. Delete `
 async fn a_mismatch_against_a_live_owner_un_places_me() {
     let tmp = tempfile::tempdir().unwrap();
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_owned("vol-1", "node-b") },
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_owned("vol-1", "node-b") },
         Route { method: "GET", path: "/api/v1/nodes/node-b".into(), status: 200, body: node_ready("node-b") },
-        Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "node-a") },
+        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "node-a") },
     ];
     let (ctx, rec) = ctx_with(tmp.path(), routes);
 
-    let out = rustic_git_agent::controller::apply_workspace(&placed_ws_obj("ws-1", "node-a"), &ctx).await.unwrap();
+    let out = kloudlite_git_agent::controller::apply_workspace(&placed_ws_obj("ws-1", "node-a"), &ctx).await.unwrap();
 
-    let sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status");
+    let sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status");
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["status"]["nodeName"], "", "I un-place myself so the real owner reclaims it");
     assert!(out.requeue_after().is_some(), "and come back rather than awaiting a change I just caused");
@@ -1462,21 +1462,21 @@ async fn a_mismatch_against_a_live_owner_un_places_me() {
 async fn a_mismatch_against_a_dead_owner_still_refuses_and_waits() {
     let tmp = tempfile::tempdir().unwrap();
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_owned("vol-1", "node-b") },
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_owned("vol-1", "node-b") },
         Route { method: "GET", path: "/api/v1/nodes/node-b".into(), status: 200, body: node_dead("node-b", "2000-01-01T00:00:00Z") },
-        Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "node-a") },
+        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "node-a") },
     ];
     let (ctx, rec) = ctx_with(tmp.path(), routes);
 
-    rustic_git_agent::controller::apply_workspace(&placed_ws_obj("ws-1", "node-a"), &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&placed_ws_obj("ws-1", "node-a"), &ctx).await.unwrap();
 
-    let sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status");
+    let sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status");
     assert_eq!(sent[0]["status"]["nodeName"], "node-a", "a dead owner's volume is the sweep's to release, not mine");
     assert_eq!(sent[0]["status"]["conditions"][0]["reason"], "NodeMismatch");
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --test reconcile a_mismatch_against_a_live_owner` fails: `assertion `left == right` failed: left: "node-a", right: ""`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --test reconcile a_mismatch_against_a_live_owner` fails: `assertion `left == right` failed: left: "node-a", right: ""`.
 
 - [ ] **Step 3: Implement** — replace the arm at `bins/agent/src/controller/volume.rs:574`:
 
@@ -1602,7 +1602,7 @@ async fn a_plain_stopped_workspace_still_starts() {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-workspaces --test api_commit_model starting_an_interrupted` fails: `assertion `left == right` failed: left: 202, right: 409`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces --test api_commit_model starting_an_interrupted` fails: `assertion `left == right` failed: left: 202, right: 409`.
 
 - [ ] **Step 3: Implement** — in `crates/workspaces/src/api.rs`, beside `node_dead_warning`:
 
@@ -1666,7 +1666,7 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
         get(format!("{API}/snapshots"), json!({"apiVersion": "v1", "kind": "SnapshotList", "metadata": {}, "items": [
             snapshot("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1", "", "ready")
         ]})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
@@ -1713,7 +1713,7 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
         get(format!("{API}/snapshots"), json!({"apiVersion": "v1", "kind": "SnapshotList", "metadata": {}, "items": [
             snapshot("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1", "", "ready")
         ]})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
@@ -1768,7 +1768,7 @@ and, in `bins/agent/src/peer.rs` `mod reconcile_tests`, the placement half (the 
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-workspaces --test api_commit_model clone_cuts_a_transient` fails on the missing `POST /snapshots` (the recorder has none) and `body["based_on"]` being `null`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces --test api_commit_model clone_cuts_a_transient` fails on the missing `POST /snapshots` (the recorder has none) and `body["based_on"]` being `null`.
 
 - [ ] **Step 3: Implement** — in `crates/workspaces/src/api.rs`:
 
@@ -1860,7 +1860,7 @@ pub(crate) fn preferred_node(volume: &str, candidates: &[String]) -> Option<Stri
 
 The agent side of the cut needs nothing new: `snapshot::reconcile_commit` already materialises a `Working` transient on the volume's owning node, and Task 2's wake is fired by the same `apply_workspace` pass that turns it `Ready` (`wake_peers(ctx, &placeable_nodes(ctx).await)` beside the stop path's call).
 
-- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p rustic-git-workspaces && cargo test -p rustic-git-agent`.
+- [ ] **Step 4: Run tests and `cargo clippy --workspace --all-targets --locked -- -D warnings`** — `cargo test -p kloudlite-git-workspaces && cargo test -p kloudlite-git-agent`.
 - [ ] **Step 5: Commit** — `git add crates/workspaces/src bins/agent/src && git commit -m "Cut a snapshot at clone time and report what the clone is based on"`
 
 ---
@@ -1888,37 +1888,37 @@ The agent side of the cut needs nothing new: `snapshot::reconcile_commit` alread
 async fn a_movable_volume_whose_preferred_node_is_a_peer_is_released_and_un_placed() {
     let tmp = tempfile::tempdir().unwrap();
     let peer_holds = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-1.node-b"},
         "spec": {"volume": "vol-1", "node": "node-b"},
         "status": {"phase": "Synced", "branches": {"ws-1": "stop-ws-1-3", "ws-2": "stop-ws-2-1"}},
     });
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumereplicas".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [peer_holds]}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [
                     transient("stop-ws-1-3", "vol-1", "ws-1", 7), transient("stop-ws-2-1", "vol-1", "ws-2", 4)]}) },
         Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "NodeList", "items": [node_ready("node-a"), node_ready("node-b")]}) },
-        Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_owned("vol-1", "") },
-        Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "") },
-        Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-2/status".into(), status: 200, body: placed_ws("ws-2", "") },
+        Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_owned("vol-1", "") },
+        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "") },
+        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-2/status".into(), status: 200, body: placed_ws("ws-2", "") },
     ];
     let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
     // Both parents stopped: the volume is movable.
     let parents = vec![stopped_parent("ws-1", "vol-1"), stopped_parent("ws-2", "vol-1")];
 
-    let chosen = rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap();
+    let chosen = kloudlite_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap();
 
     // node-b wins the rendezvous for "vol-1" over {node-a, node-b} — deterministic, so this is a
     // fixed expectation, not a coin flip.
     assert_eq!(chosen.as_deref(), Some("node-b"));
-    let ops = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/volumes/vol-1").remove(0);
+    let ops = rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1").remove(0);
     assert_eq!(ops[0], json!({"op": "test", "path": "/spec/nodeName", "value": "node-a"}));
     assert_eq!(ops[1], json!({"op": "replace", "path": "/spec/nodeName", "value": ""}));
     for name in ["ws-1", "ws-2"] {
-        let sent = rec.sent("PUT", &format!("/apis/rustic-git.io/v1alpha1/workspaces/{name}/status"));
+        let sent = rec.sent("PUT", &format!("/apis/kloudlite-git.io/v1alpha1/workspaces/{name}/status"));
         assert_eq!(sent[0]["status"]["nodeName"], "", "every parent on the volume follows, not just the started one");
     }
 }
@@ -1931,7 +1931,7 @@ async fn a_volume_with_a_running_sibling_never_moves() {
     let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", vec![]);
     let parents = vec![running_parent("ws-1", "vol-1"), stopped_parent("ws-2", "vol-1")];
 
-    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap(), None);
+    assert_eq!(kloudlite_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap(), None);
     assert!(rec.calls().is_empty(), "not movable is decided locally, with no API calls at all: {:?}", rec.calls());
 }
 
@@ -1941,14 +1941,14 @@ async fn a_volume_with_a_running_sibling_never_moves() {
 async fn with_no_up_to_date_replica_the_owner_keeps_it() {
     let tmp = tempfile::tempdir().unwrap();
     let behind = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-1.node-b"}, "spec": {"volume": "vol-1", "node": "node-b"},
         "status": {"phase": "Synced", "branches": {"ws-1": "sync-ws-1-old"}},
     });
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumereplicas".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [behind]}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-1", "ws-1", 7)]}) },
         Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "NodeList", "items": [node_ready("node-a"), node_ready("node-b")]}) },
@@ -1956,7 +1956,7 @@ async fn with_no_up_to_date_replica_the_owner_keeps_it() {
     let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
     let parents = vec![stopped_parent("ws-1", "vol-1")];
 
-    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap(), None);
+    assert_eq!(kloudlite_git_agent::controller::start_placement(&ctx, &vol_obj("vol-1", "node-a"), &parents).await.unwrap(), None);
     assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH")), "nothing is released when there is nowhere to go");
 }
 
@@ -1965,14 +1965,14 @@ async fn with_no_up_to_date_replica_the_owner_keeps_it() {
 async fn when_the_owner_is_preferred_it_starts_here_with_no_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let holds = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-2.node-b"}, "spec": {"volume": "vol-2", "node": "node-b"},
         "status": {"phase": "Synced", "branches": {"ws-1": "stop-ws-1-3"}},
     });
     let routes = vec![
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumereplicas".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumereplicas".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [holds]}) },
-        Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/snapshots".into(), status: 200,
+        Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-2", "ws-1", 7)]}) },
         Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
                 body: json!({"apiVersion": "v1", "kind": "NodeList", "items": [node_ready("node-a"), node_ready("node-b")]}) },
@@ -1981,12 +1981,12 @@ async fn when_the_owner_is_preferred_it_starts_here_with_no_writes() {
     // directly in peer.rs's `preferred_node` test, and used here so this stays deterministic.
     let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
     let parents = vec![stopped_parent("ws-1", "vol-2")];
-    assert_eq!(rustic_git_agent::controller::start_placement(&ctx, &vol_obj("vol-2", "node-a"), &parents).await.unwrap(), None);
+    assert_eq!(kloudlite_git_agent::controller::start_placement(&ctx, &vol_obj("vol-2", "node-a"), &parents).await.unwrap(), None);
     assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH") || c.starts_with("PUT")));
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --test reconcile a_movable_volume` fails with `cannot find function `start_placement` in `rustic_git_agent::controller``.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --test reconcile a_movable_volume` fails with `cannot find function `start_placement` in `kloudlite_git_agent::controller``.
 
 - [ ] **Step 3: Implement** — in `bins/agent/src/controller/stop.rs` (it already owns the stop/placement seam):
 
@@ -2103,7 +2103,7 @@ with `listing::parents_on_volume` a small cluster-wide sibling read (the same tw
 **Interfaces:**
 - Consumes: `peer::decommissioning` (Task 3), `peer::sweep_volumes` (Task 6, made `pub(crate)`), `listing::beat`, `crd::DECOMMISSION_LABEL`.
 - Produces:
-  - `pub const DECOMMISSION_STATUS: &str = "rustic-git.io/decommission-status";`
+  - `pub const DECOMMISSION_STATUS: &str = "kloudlite-git.io/decommission-status";`
   - `pub(crate) fn drain_status(running: usize, owned: usize, copies: usize, now: &str) -> String`
   - `pub async fn decommission_beat(ctx: &Arc<Ctx>)`
   - `fn spawn_decommission(ctx: Arc<Ctx>)` on a 30 s ticker.
@@ -2130,7 +2130,7 @@ with `listing::parents_on_volume` a small cluster-wide sibling read (the same tw
             Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-run", "node-a")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-a") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-a") },
             Route { method: "PATCH", path: "/api/v1/nodes/node-a".into(), status: 200, body: node_decommissioning("node-a") },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
@@ -2142,12 +2142,12 @@ with `listing::parents_on_volume` a small cluster-wide sibling read (the same tw
             "a drain stops nothing, ever: {:?}",
             rec.calls()
         );
-        let sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-run/status").remove(0);
+        let sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-run/status").remove(0);
         let cond = sent["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "Decommissioning").expect("the condition");
         assert_eq!(cond["reason"], "NodeLeaving");
         assert_eq!(cond["message"], "this node is being retired; stop when convenient and the next start lands elsewhere");
         let ann = rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0);
-        assert_eq!(ann["metadata"]["annotations"]["rustic-git.io/decommission-status"], "draining running=1 owned=1 copies=0");
+        assert_eq!(ann["metadata"]["annotations"]["kloudlite-git.io/decommission-status"], "draining running=1 owned=1 copies=0");
     }
 
     /// Drained is a conjunction of four facts, and the annotation is the operator's gate on
@@ -2168,7 +2168,7 @@ with `listing::parents_on_volume` a small cluster-wide sibling read (the same tw
         decommission_beat(&ctx).await;
 
         let ann = rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0);
-        let v = ann["metadata"]["annotations"]["rustic-git.io/decommission-status"].as_str().unwrap();
+        let v = ann["metadata"]["annotations"]["kloudlite-git.io/decommission-status"].as_str().unwrap();
         assert!(v.starts_with("drained "), "{v}");
         assert!(chrono::DateTime::parse_from_rfc3339(v.trim_start_matches("drained ")).is_ok(), "{v}");
     }
@@ -2195,22 +2195,22 @@ with `listing::parents_on_volume` a small cluster-wide sibling read (the same tw
             Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed_stopped_replicated("ws-1", "node-a")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: ws_placed_stopped("ws-1", "") },
-            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: ws_placed_stopped("ws-1", "") },
+            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
             Route { method: "PATCH", path: "/api/v1/nodes/node-a".into(), status: 200, body: node_decommissioning("node-a") },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
         decommission_beat(&ctx).await;
 
-        let vol = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status").remove(0);
+        let vol = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status").remove(0);
         assert_eq!(vol["status"]["conditions"][0]["reason"], "Decommissioned");
-        assert_eq!(rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status")[0]["status"]["nodeName"], "");
+        assert_eq!(rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status")[0]["status"]["nodeName"], "");
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-agent --lib decommission` fails with `unresolved module `decommission``.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent --lib decommission` fails with `unresolved module `decommission``.
 
 - [ ] **Step 3: Implement** — `bins/agent/src/decommission.rs`:
 
@@ -2229,14 +2229,14 @@ use crate::controller::Ctx;
 use k8s_openapi::api::core::v1::Node;
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::ResourceExt;
-use rustic_git_workspaces::crd;
+use kloudlite_git_workspaces::crd;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The operator's one window into a drain, rewritten each beat and readable with
 /// `kubectl describe node`. ONE key: `draining …` while there is work left, `drained <RFC 3339>`
 /// when there is not. Two keys would be two things to check and one to forget.
-pub const DECOMMISSION_STATUS: &str = "rustic-git.io/decommission-status";
+pub const DECOMMISSION_STATUS: &str = "kloudlite-git.io/decommission-status";
 
 /// `WS_DECOMMISSION_SECS`, default 30 — fast, because everything it does is idempotent and cheap,
 /// and because the thing it is waiting for (a person stopping their workspace) deserves a prompt
@@ -2341,7 +2341,7 @@ called from `run` beside `spawn_sync(ctx.clone());` (line 65).
 #                                                                       the decommission label
 #                                          patch                        decommission_beat, THIS
 #                                                                       node's own
-#                                                                       `rustic-git.io/decommission-
+#                                                                       `kloudlite-git.io/decommission-
 #                                                                       status` annotation only
 ```
 
@@ -2349,7 +2349,7 @@ and the rule (lines 214–216):
 
 ```yaml
   # `patch` is annotations in practice — the decommission beat writes this node's own
-  # `rustic-git.io/decommission-status`, which is how an operator watches a drain and learns when
+  # `kloudlite-git.io/decommission-status`, which is how an operator watches a drain and learns when
   # the VM is safe to delete. RBAC cannot narrow `patch` to one annotation on one node, and the
   # admission policy does not match `nodes`, so this is a broad verb taken KNOWINGLY: the agent
   # already runs as root with the host PID namespace on that node, so a compromised agent could
@@ -2394,12 +2394,12 @@ fn compatible_nodes_is_gone_from_the_published_schema() {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p rustic-git-workspaces --test crd_yaml` fails: `regenerate deploy/k3s/crds.yaml`, and the existing round-trip assertion fails first with a diff on the two parent schemas.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces --test crd_yaml` fails: `regenerate deploy/k3s/crds.yaml`, and the existing round-trip assertion fails first with a diff on the two parent schemas.
 
 - [ ] **Step 3: Implement** — regenerate with the crate's own generator (the same one `crd_yaml.rs` compares against) and commit the result:
 
 ```sh
-cargo run -p rustic-git-workspaces --bin crdgen > deploy/k3s/crds.yaml
+cargo run -p kloudlite-git-workspaces --bin crdgen > deploy/k3s/crds.yaml
 ```
 
 If no `crdgen` binary exists, `crd_yaml.rs`'s failure message names the generating expression; write the file from that same `serde_yaml::to_string(&crd::Workspace::crd())` sequence rather than hand-editing the yaml — a hand edit is how the checked-in schema and the code drift.
@@ -2653,7 +2653,7 @@ and, replacing the dead-node sentence at lines 146–152:
 
 ```
 When a node is unplaceable — dead for `WS_NODE_DEAD_SECS`, or labelled
-`rustic-git.io/decommission=true` (`peer::unplaceable`, one predicate for both) — the sweep decides
+`kloudlite-git.io/decommission=true` (`peer::unplaceable`, one predicate for both) — the sweep decides
 PER VOLUME, never per parent: any Running parent on it pins the whole volume (`Unavailable/NodeDead`,
 `Degraded/NodeDead` on every parent, nothing moves); otherwise any stopped parent that is not yet
 `Replicated` pins it too; otherwise the pin is cleared and every parent un-placed, so an up-to-date
@@ -2663,7 +2663,7 @@ from the last synced point, whose response and page state the cut's age. A decom
 planned version of the same thing with one difference — whatever runs there keeps running; the
 node's own agent beats every 30 s, tells its running parents (`Decommissioning/NodeLeaving`),
 releases each volume as it becomes releasable, and stamps
-`rustic-git.io/decommission-status: draining running=N owned=N copies=N` until it can stamp
+`kloudlite-git.io/decommission-status: draining running=N owned=N copies=N` until it can stamp
 `drained <RFC 3339>`, which is the operator's gate on deleting the VM.
 ```
 
@@ -2688,11 +2688,11 @@ and a new section after "Node death":
 The planned version of node death. It never stops anyone's work; the node drains at the people's
 pace, and an operator in a hurry stops those workspaces through `/v1` like anyone else.
 
-1. `kubectl label node <n> rustic-git.io/decommission=true`. From that moment every other agent
+1. `kubectl label node <n> kloudlite-git.io/decommission=true`. From that moment every other agent
    treats it as unplaceable — it wins no rendezvous slot, counts as no copy, and refuses claims —
    while it keeps serving pulls and keeps running everything already on it.
 2. Watch the one annotation: `kubectl describe node <n> | grep decommission-status`, or
-   `kubectl get node <n> -o jsonpath='{.metadata.annotations.rustic-git\.io/decommission-status}'`.
+   `kubectl get node <n> -o jsonpath='{.metadata.annotations.kloudlite-git\.io/decommission-status}'`.
    It reads `draining running=N owned=N copies=N` and is rewritten every 30 s. `running` is people's
    workspaces — it only falls when they stop them. `owned` falls as each volume becomes releasable
    (everything on it stopped AND replicated); `copies` falls as its replicas re-home and its own

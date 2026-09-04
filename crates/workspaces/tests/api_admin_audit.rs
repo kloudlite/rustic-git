@@ -2,13 +2,13 @@
 //! `api::admin::router` against a mocked kube API and an in-memory object store, same harness
 //! shape `api_settings.rs` uses for the settings scope.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{admin::router, ApiState};
-use rustic_git_workspaces::kube_test::{get, mock_client, patch, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{admin::router, ApiState};
+use kloudlite_git_workspaces::kube_test::{get, mock_client, patch, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/rustic-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite-git.io/v1alpha1";
 
 fn jwt() -> Arc<Jwt> {
     Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap())
@@ -18,10 +18,10 @@ fn admin_token(jwt: &Jwt) -> String {
     jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
-async fn keys_store() -> Arc<rustic_git_storage::store::Store> {
+async fn keys_store() -> Arc<kloudlite_git_storage::store::Store> {
     let tmp = tempfile::tempdir().unwrap();
     Arc::new(
-        rustic_git_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
+        kloudlite_git_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
             .await
             .unwrap(),
     )
@@ -32,7 +32,7 @@ struct Server {
     jwt: Arc<Jwt>,
 }
 
-async fn admin_server(routes: Vec<Route>, keys: Arc<rustic_git_storage::store::Store>) -> Server {
+async fn admin_server(routes: Vec<Route>, keys: Arc<kloudlite_git_storage::store::Store>) -> Server {
     admin_server_with_history(routes, keys, None).await
 }
 
@@ -40,8 +40,8 @@ async fn admin_server(routes: Vec<Route>, keys: Arc<rustic_git_storage::store::S
 /// ClickHouse behind it to observe (or fail) the copy without touching a real server.
 async fn admin_server_with_history(
     routes: Vec<Route>,
-    keys: Arc<rustic_git_storage::store::Store>,
-    history: Option<Arc<rustic_git_workspaces::history::History>>,
+    keys: Arc<kloudlite_git_storage::store::Store>,
+    history: Option<Arc<kloudlite_git_workspaces::history::History>>,
 ) -> Server {
     let jwt = jwt();
     let mut state = ApiState::new(jwt.clone());
@@ -82,8 +82,8 @@ async fn canned(status: u16, reply: &'static str) -> (String, std::sync::Arc<std
 
 fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "QuotaRequest",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "QuotaRequest",
+        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}
     });
     if let Some(st) = state {
@@ -136,7 +136,7 @@ async fn deny_quota_request_writes_an_audit_row() {
 async fn audit_list_filters_by_actor_action_and_target() {
     let keys = keys_store().await;
     for (actor, action, target) in [("a@x.com", "deny", "acme"), ("b@x.com", "approve", "acme"), ("b@x.com", "roll", "central/worker")] {
-        let entry = rustic_git_workspaces::audit::AuditEntry {
+        let entry = kloudlite_git_workspaces::audit::AuditEntry {
             ts: chrono::Utc::now().to_rfc3339(),
             actor: actor.into(),
             action: action.into(),
@@ -144,7 +144,7 @@ async fn audit_list_filters_by_actor_action_and_target() {
             reason: None,
             result: "ok".into(),
         };
-        rustic_git_workspaces::audit::record(&keys.os, &entry).await.unwrap();
+        kloudlite_git_workspaces::audit::record(&keys.os, &entry).await.unwrap();
     }
     let s = admin_server(vec![], keys).await;
 
@@ -169,7 +169,7 @@ async fn audit_list_filters_by_actor_action_and_target() {
     assert_eq!(get_rows("actor=b@x.com".into(), &s).await, 2);
 }
 
-/// The dual write: a successful admin write copies the audit row into `rustic.events` too, with
+/// The dual write: a successful admin write copies the audit row into `kloudlite.events` too, with
 /// `kind = "admin.<action>"` — the shape `crate::history::events::audit_event` promises.
 #[tokio::test]
 async fn admin_write_dual_writes_an_events_row() {
@@ -182,7 +182,7 @@ async fn admin_write_dual_writes_an_events_row() {
     ];
     let keys = keys_store().await;
     let (ch_url, seen) = canned(200, "").await;
-    let history = Arc::new(rustic_git_workspaces::history::History::new(&ch_url, "default", ""));
+    let history = Arc::new(kloudlite_git_workspaces::history::History::new(&ch_url, "default", ""));
     let s = admin_server_with_history(routes, keys, Some(history)).await;
 
     let resp = reqwest::Client::new()
@@ -196,7 +196,7 @@ async fn admin_write_dual_writes_an_events_row() {
 
     let bodies = seen.lock().unwrap().clone();
     assert_eq!(bodies.len(), 1, "{bodies:?}");
-    assert!(bodies[0].starts_with("INSERT INTO rustic.events FORMAT JSONEachRow\n"), "{}", bodies[0]);
+    assert!(bodies[0].starts_with("INSERT INTO kloudlite.events FORMAT JSONEachRow\n"), "{}", bodies[0]);
     assert!(bodies[0].contains(r#""kind":"admin.deny""#), "{}", bodies[0]);
 }
 
@@ -213,7 +213,7 @@ async fn admin_write_survives_a_dead_clickhouse() {
     ];
     let keys = keys_store().await;
     let (ch_url, _seen) = canned(500, "DB::Exception: down").await;
-    let history = Arc::new(rustic_git_workspaces::history::History::new(&ch_url, "default", ""));
+    let history = Arc::new(kloudlite_git_workspaces::history::History::new(&ch_url, "default", ""));
     let s = admin_server_with_history(routes, keys, Some(history)).await;
 
     let resp = reqwest::Client::new()

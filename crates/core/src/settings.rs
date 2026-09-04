@@ -59,7 +59,7 @@ impl<T> LiveSettings<T> {
     }
 }
 
-/// Central-tier tunables (server/worker/gateway/api), sourced from `RUSTIC_GIT_*` env at boot and
+/// Central-tier tunables (server/worker/gateway/api), sourced from `KLOUDLITE_GIT_*` env at boot and
 /// overridable from the `cluster/settings` object-store document thereafter. Every numeric field
 /// has a range enforced by the admin write path (Task 4/5), not here — a struct with an
 /// out-of-range value can still exist transiently between `from_env()` and the first merge.
@@ -111,7 +111,7 @@ impl Default for CentralSettings {
 }
 
 impl CentralSettings {
-    /// Env ?? built-in default, one field per existing `RUSTIC_GIT_*` var — this is the FLOOR
+    /// Env ?? built-in default, one field per existing `KLOUDLITE_GIT_*` var — this is the FLOOR
     /// `merged_with` overrides from the stored document, never the other way around.
     /// The floor before any env var or stored document is consulted — split out of `from_env`
     /// so `api::admin::settings`'s schema route (`GET /admin/settings/schema`) can report a
@@ -148,13 +148,13 @@ impl CentralSettings {
 
         let d = Self::built_in_defaults();
         Self {
-            max_body: env_u64("RUSTIC_GIT_MAX_BODY", d.max_body),
-            max_layer: env_u64("RUSTIC_GIT_MAX_LAYER", d.max_layer),
-            upload_grace_secs: env_u64("RUSTIC_GIT_UPLOAD_GRACE_SECS", d.upload_grace_secs),
-            clone_host: env_string("RUSTIC_GIT_CLONE_HOST"),
-            ssh_host: env_string("RUSTIC_GIT_SSH_HOST"),
-            ssh_port: env_u16("RUSTIC_GIT_SSH_PORT", d.ssh_port),
-            registry_host: env_string("RUSTIC_GIT_REGISTRY_HOST"),
+            max_body: env_u64("KLOUDLITE_GIT_MAX_BODY", d.max_body),
+            max_layer: env_u64("KLOUDLITE_GIT_MAX_LAYER", d.max_layer),
+            upload_grace_secs: env_u64("KLOUDLITE_GIT_UPLOAD_GRACE_SECS", d.upload_grace_secs),
+            clone_host: env_string("KLOUDLITE_GIT_CLONE_HOST"),
+            ssh_host: env_string("KLOUDLITE_GIT_SSH_HOST"),
+            ssh_port: env_u16("KLOUDLITE_GIT_SSH_PORT", d.ssh_port),
+            registry_host: env_string("KLOUDLITE_GIT_REGISTRY_HOST"),
             ..d
         }
     }
@@ -455,7 +455,7 @@ mod tests {
     fn merge_precedence() {
         // SAFETY: test-only, single-threaded within this test's scope.
         unsafe {
-            std::env::set_var("RUSTIC_GIT_SSH_PORT", "2222");
+            std::env::set_var("KLOUDLITE_GIT_SSH_PORT", "2222");
         }
         let base = CentralSettings::from_env();
         assert_eq!(base.ssh_port, 2222, "env must override the built-in default");
@@ -470,7 +470,7 @@ mod tests {
         );
 
         unsafe {
-            std::env::remove_var("RUSTIC_GIT_SSH_PORT");
+            std::env::remove_var("KLOUDLITE_GIT_SSH_PORT");
         }
     }
 

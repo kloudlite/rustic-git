@@ -1,13 +1,13 @@
 //! `api::admin::router` in isolation: every request answers 401/403 without the claim, and every
 //! `/v1` path 404s here — the two routers must never both answer the same URL.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{admin::router, ApiState, Directory, TeamRole};
-use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{admin::router, ApiState, Directory, TeamRole};
+use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/rustic-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite-git.io/v1alpha1";
 
 /// `karthik` is a member of team `acme`, exercised by the approve-a-team-request case moved here
 /// from `api_quota.rs`.
@@ -34,7 +34,7 @@ impl Directory for StubMembership {
     }
 
     // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
-    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
         None
     }
 }
@@ -68,13 +68,13 @@ fn admin_token(jwt: &Jwt) -> String {
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "QuotaRequest",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "QuotaRequest",
+        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}
     });
     if let Some(st) = state {
@@ -125,7 +125,7 @@ async fn a_superadmin_may_register_a_region_on_the_admin_host() {
         method: "PATCH",
         path: format!("{API}/regions/us"),
         status: 200,
-        body: json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+        body: json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
                       "metadata": {"name": "us"}, "spec": {"name": "US", "status": "active"}}),
     }];
     let s = admin_server(routes).await;
@@ -147,7 +147,7 @@ async fn approving_writes_the_quota_then_marks_the_request() {
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
         post(format!("{API}/quotas"), json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
             "metadata": {"name": "karthik"},
             "spec": {"workspaces": 10, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 8, "memoryGb": 32}
         })),
@@ -180,7 +180,7 @@ async fn approving_a_team_request_seeds_the_team_defaults() {
         not_found(format!("{API}/quotas/acme")),
         not_found(format!("{API}/quotas/default-team")),
         post(format!("{API}/quotas"), json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
             "metadata": {"name": "acme"},
             "spec": {"workspaces": 10, "environments": 8, "snapshots": 80, "diskGb": 400, "cpu": 32, "memoryGb": 128}
         })),
@@ -236,8 +236,8 @@ async fn a_decided_request_cannot_be_decided_again() {
 #[tokio::test]
 async fn a_superadmin_listing_by_owner_gets_that_owners_workspaces() {
     let ws = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": "ws-1", "labels": {"rustic-git.io/owner": "karthik"}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": "ws-1", "labels": {"kloudlite-git.io/owner": "karthik"}},
         "spec": {"owner": "karthik", "team": "", "name": "ws-1", "region": "centralindia",
                  "image": "img:1", "desiredState": "running", "packages": [],
                  "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
@@ -267,8 +267,8 @@ async fn admin_nodes_reports_decommission_status_camel_case() {
         "apiVersion": "v1", "kind": "Node",
         "metadata": {
             "name": "node-1",
-            "labels": {"rustic-git.io/decommission": "true"},
-            "annotations": {"rustic-git.io/decommission-status": "drained 2026-09-04T00:00:00Z"}
+            "labels": {"kloudlite-git.io/decommission": "true"},
+            "annotations": {"kloudlite-git.io/decommission-status": "drained 2026-09-04T00:00:00Z"}
         },
         "status": {"conditions": [{"type": "Ready", "status": "True"}]}
     });
@@ -327,7 +327,7 @@ async fn approve_with_an_edited_body_grants_the_edited_values() {
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
         post(format!("{API}/quotas"), json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
             "metadata": {"name": "karthik"},
             "spec": {"workspaces": 6, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 8, "memoryGb": 32}
         })),
@@ -357,7 +357,7 @@ async fn approve_with_no_body_still_grants_exactly_what_was_asked() {
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
         post(format!("{API}/quotas"), json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
             "metadata": {"name": "karthik"},
             "spec": {"workspaces": 10, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 8, "memoryGb": 32}
         })),

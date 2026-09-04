@@ -8,18 +8,18 @@ use super::{
     Outcome, ReconcileErr, Work, RETRY, TICK,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
-use rustic_git_workspaces::k8s;
+use kloudlite_git_workspaces::k8s;
 use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd::{self, Phase, VolumeSource};
-use rustic_git_workspaces::engine::Engine;
+use kloudlite_git_workspaces::crd::{self, Phase, VolumeSource};
+use kloudlite_git_workspaces::engine::Engine;
 use std::sync::Arc;
 
 /// Heal the listing labels from the spec.
 ///
-/// `spec.owner` is the truth; `rustic-git.io/owner` is a VIEW of it that exists because label
+/// `spec.owner` is the truth; `kloudlite-git.io/owner` is a VIEW of it that exists because label
 /// selectors are indexed by every API server and an arbitrary spec field is not. Same rule the
 /// registry states for its `index/` markers: a view for listings, never authorization, reconciled
 /// by the owner.
@@ -220,7 +220,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
 /// The engine's named permanent failures, mapped to the condition `reason` a person reads in
 /// `kubectl describe`. Anything else is transient and retried.
 fn permanent_reason(e: &str) -> Option<&'static str> {
-    use rustic_git_workspaces::engine::ops::NO_SUCH_RECORD;
+    use kloudlite_git_workspaces::engine::ops::NO_SUCH_RECORD;
     [(NO_SUCH_RECORD, "NoSuchSnapshot")]
         .into_iter()
         .find(|(marker, _)| e.contains(marker))
@@ -776,13 +776,13 @@ where
 mod tests {
     use super::*;
     use crate::testsupport::test_ctx;
-    use rustic_git_workspaces::kube_test::{get, mock_client, post, Route};
+    use kloudlite_git_workspaces::kube_test::{get, mock_client, post, Route};
 
-    const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
+    const VOLUMES: &str = "/apis/kloudlite-git.io/v1alpha1/volumes";
 
     fn volume_json(name: &str, node: &str) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
@@ -830,23 +830,23 @@ mod tests {
     async fn a_decommissioning_owner_is_alive_so_the_loser_un_places_itself() {
         let tmp = tempfile::tempdir().unwrap();
         let src = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "vol-1", "uid": "uid-src", "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "name": "src", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
             "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1"},
         });
         let parent_json = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "ws-2", "uid": "uid-ws-2", "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "name": "copy", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
             "status": {"phase": "ready", "nodeName": "node-b", "volumeRef": "vol-1"},
         });
         let routes = vec![
-            get("/apis/rustic-git.io/v1alpha1/workspaces/vol-1", src),
+            get("/apis/kloudlite-git.io/v1alpha1/workspaces/vol-1", src),
             get(
-                "/apis/rustic-git.io/v1alpha1/volumes/vol-1",
+                "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1",
                 serde_json::json!({
-                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                    "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
                     "metadata": {"name": "vol-1", "uid": "uid-vol-1", "generation": 1, "resourceVersion": "9"},
                     "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
                     "status": {"phase": "ready"},
@@ -856,13 +856,13 @@ mod tests {
                 "/api/v1/nodes/node-a",
                 serde_json::json!({
                     "apiVersion": "v1", "kind": "Node",
-                    "metadata": {"name": "node-a", "labels": {rustic_git_workspaces::crd::DECOMMISSION_LABEL: "true"}},
+                    "metadata": {"name": "node-a", "labels": {kloudlite_git_workspaces::crd::DECOMMISSION_LABEL: "true"}},
                     "status": {"conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2000-01-01T00:00:00Z"}]},
                 }),
             ),
             Route {
                 method: "PUT",
-                path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-2/status".into(),
+                path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-2/status".into(),
                 status: 200,
                 body: parent_json.clone(),
             },
@@ -877,7 +877,7 @@ mod tests {
         let out = resolve_volume(&parent, "alice", "", "r1", &storage, "node-b", &[], 1, &ctx).await.unwrap();
 
         assert!(matches!(out, Resolved::Settled(_)), "the loser settles by un-placing, not by waiting on an error");
-        let sent = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-2/status").remove(0);
+        let sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-2/status").remove(0);
         assert_eq!(sent["status"]["nodeName"], "", "un-placed, so the live draining owner reclaims it");
         assert_ne!(sent["status"]["phase"], "error", "a live owner is not an error: {sent}");
     }
@@ -894,23 +894,23 @@ mod tests {
         // without needing btrfs, which is what mints the baseline CR.
         std::fs::create_dir_all(tmp.path().join("vol/vol-1/live-migrating")).unwrap();
         let vol: crd::Volume = serde_json::from_value(serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "vol-1", "uid": "uid-vol-1", "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
         }))
         .unwrap();
         let parent: crd::Workspace = serde_json::from_value(serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "vol-1", "uid": "uid-ws-1", "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "name": "src", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
             "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1"},
         }))
         .unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![post(
-            "/apis/rustic-git.io/v1alpha1/snapshots",
+            "/apis/kloudlite-git.io/v1alpha1/snapshots",
             serde_json::json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": "vol-1.aaaa"},
                 "spec": {"volume": "vol-1", "owner": "alice", "worktree": "vol-1", "parent": "", "transient": false},
             }),
@@ -929,7 +929,7 @@ mod tests {
             "the staging dir is a real migration"
         );
 
-        let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshots").remove(0);
+        let sent = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/snapshots").remove(0);
         let owner = &sent["metadata"]["ownerReferences"][0];
         assert_eq!(owner["kind"], "Workspace");
         assert_eq!(owner["name"], "vol-1");

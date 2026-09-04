@@ -19,7 +19,7 @@ use crate::controller::Ctx;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::ListParams;
 use kube::{Api, ResourceExt};
-use rustic_git_workspaces::crd;
+use kloudlite_git_workspaces::crd;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -200,20 +200,20 @@ pub async fn beat(ctx: &Arc<Ctx>) -> Option<Beat> {
 mod tests {
     use super::*;
     use crate::testsupport::test_ctx;
-    use rustic_git_workspaces::kube_test::Route;
+    use kloudlite_git_workspaces::kube_test::Route;
 
     fn list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
     }
 
-    const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
-    const VOLREPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
-    const WORKSPACES: &str = "/apis/rustic-git.io/v1alpha1/workspaces";
-    const ENVIRONMENTS: &str = "/apis/rustic-git.io/v1alpha1/environments";
+    const VOLUMES: &str = "/apis/kloudlite-git.io/v1alpha1/volumes";
+    const VOLREPLICAS: &str = "/apis/kloudlite-git.io/v1alpha1/volumereplicas";
+    const WORKSPACES: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces";
+    const ENVIRONMENTS: &str = "/apis/kloudlite-git.io/v1alpha1/environments";
 
     fn ws(name: &str, node: &str, volume: &str) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": name, "uid": format!("{name}-uid")},
             "spec": {"owner": "alice", "team": "", "name": name, "region": "r1",
                      "image": "", "packages": [], "desiredState": "running"},

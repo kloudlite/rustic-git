@@ -85,7 +85,7 @@ pub(crate) fn split_api_path(path: &str, query: Option<&str>) -> Option<Parsed> 
     // The repo half of the key must be a real repo name, or `alice/web:c` (invalid, always a 404
     // upstream) keys identically to `alice/web` with tail `c`. Nothing is cached under a 404 today,
     // so this closes the class rather than a live bug — and saves the upstream round trip.
-    if !rustic_git_storage::store::valid_segment(owner) || !rustic_git_storage::store::valid_segment(name) {
+    if !kloudlite_git_storage::store::valid_segment(owner) || !kloudlite_git_storage::store::valid_segment(name) {
         return None;
     }
     let mut suffix = tail.iter().map(|s| escape(s)).collect::<Vec<_>>().join(":");
@@ -108,12 +108,12 @@ pub(crate) fn split_api_path(path: &str, query: Option<&str>) -> Option<Parsed> 
 
 /// The token a client presented, Basic (git's own shape: `x:<token>`) or Bearer.
 pub(crate) fn bearer_or_basic(headers: &HeaderMap) -> Option<String> {
-    rustic_git_core::httpx::bearer_token(headers)
+    kloudlite_git_core::httpx::bearer_token(headers)
         .map(str::to_string)
-        .or_else(|| rustic_git_core::httpx::basic_token(headers))
+        .or_else(|| kloudlite_git_core::httpx::basic_token(headers))
 }
 
-pub(crate) use rustic_git_core::httpx::unauthorized;
+pub(crate) use kloudlite_git_core::httpx::unauthorized;
 
 /// A private repo and a missing repo must be indistinguishable — including in their headers, so
 /// this is built exactly as a forwarded 404 is.
@@ -209,7 +209,7 @@ impl Membership {
 /// `may_act_under`, through `Membership`. Only the browse path uses this: a write still asks
 /// the directory every time, because a minute of stale "yes" on a read is a tolerable window and
 /// on a write it is not.
-async fn may_read_under(api: &Api, db: &rustic_git_pulls::directory::Directory, user: &str, owner: &str) -> Result<bool> {
+async fn may_read_under(api: &Api, db: &kloudlite_git_pulls::directory::Directory, user: &str, owner: &str) -> Result<bool> {
     if let Some(yes) = api.membership.get(user, owner) {
         return Ok(yes);
     }
@@ -243,7 +243,7 @@ pub(crate) async fn browse_caller(
     let Some(token) = bearer_or_basic(headers) else {
         // No credential is anonymous; a credential that does not decode is refused. The registry
         // draws the same line for the same header, and a public listing must not blur it.
-        if rustic_git_core::httpx::basic_malformed(headers) {
+        if kloudlite_git_core::httpx::basic_malformed(headers) {
             return Err(unauthorized());
         }
         return Ok(None);
@@ -271,7 +271,7 @@ pub(crate) async fn browse_caller(
     match api.store.owner_for_token(&token).await {
         // A Basic username that does not name the token's owner did not verify: refuse it rather
         // than fall through to anonymous. git's `x` placeholder carries no name and is allowed.
-        Ok(Some(o)) if rustic_git_core::httpx::basic_user_names(headers, &o, true) => Ok(Some(o)),
+        Ok(Some(o)) if kloudlite_git_core::httpx::basic_user_names(headers, &o, true) => Ok(Some(o)),
         Ok(_) => Err(unauthorized()),
         Err(e) => {
             tracing::error!(error = %e, "token lookup");
@@ -295,7 +295,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
 
     // Serve from cache only when this caller is entitled to it without asking a git node.
     if let Some(public) = api.visibility(&repo).await {
-        if !rustic_git_storage::auth::authorize(caller.as_deref(), &owner_of_repo, public) {
+        if !kloudlite_git_storage::auth::authorize(caller.as_deref(), &owner_of_repo, public) {
             return if caller.is_none() {
                 unauthorized()
             } else {
@@ -319,9 +319,9 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
     let mut up = api
         .client
         .get(url)
-        .header(rustic_git_core::peer::PEER_HEADER, &api.secret);
+        .header(kloudlite_git_core::peer::PEER_HEADER, &api.secret);
     if let Some(c) = &caller {
-        up = up.header(rustic_git_core::peer::OWNER_HEADER, c);
+        up = up.header(kloudlite_git_core::peer::OWNER_HEADER, c);
     }
     let r = match up.send().await {
         Ok(r) => r,
@@ -331,7 +331,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
         }
     };
     let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let body = match rustic_git_core::httpx::read_bounded(r).await {
+    let body = match kloudlite_git_core::httpx::read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
             tracing::error!(repo = %repo, error = %e, "upstream body");

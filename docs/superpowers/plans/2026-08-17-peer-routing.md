@@ -13,15 +13,15 @@
 ## Global Constraints
 
 - A repo's database may be open on exactly **one** node. Two nodes opening it is safe (SlateDB fences) but costs a failed request — never design for it deliberately.
-- The public listeners (`8080`, `2222`) must **never** honour `X-Rustic-Git-Owner` or any identity claim. Only the peer listeners (`8081`, `8082`) do.
+- The public listeners (`8080`, `2222`) must **never** honour `X-Kloudlite-Git-Owner` or any identity claim. Only the peer listeners (`8081`, `8082`) do.
 - Failover happens **only** on connection-level failures. An HTTP error from a peer that answered is returned to the client unchanged.
 - **A node may serve a repo only if every higher-ranked node is unreachable from two vantage points: its own probe, and one other reachable peer's probe.** With no second vantage available it returns 503. A lower-ranked node never takes a repo on one node's word, including its own. This is the rule that keeps two nodes from holding one repo; every routing decision goes through `Membership::decide`.
 - Only a failed **probe** (`GET /healthz` ≠ 200) marks a peer down. A failed **forward** never does — routing runs before authentication, so anything a forward failure could trigger, an unauthenticated client can trigger.
 - The "down" memory only skips forward attempts. It never by itself promotes a node to serve; serving as a non-top candidate always re-probes.
 - Candidates are the top three **by rank**, then filtered — never the top three that happen to be up.
 - Hash on the peer's stable pod **name**, never its IP. A restarted pod must own the same repos.
-- A request is forwarded at most twice (`X-Rustic-Git-Hops`, or the hop count in the stream header). A request out of hops is served where it lands. **The public listener strips this header** — a client must not be able to force a node to serve a repo it does not own.
-- The peer listeners require `X-Rustic-Git-Peer: <secret>` (HTTP) / the secret in the stream header, from a Kubernetes Secret. Wrong or missing secret → 403, close. **This is in addition to the separate port, not instead of it**: `kolomi-cluster` runs with `networkPolicy: none`, so a NetworkPolicy would be silently accepted and enforce nothing, and pod networking is flat.
+- A request is forwarded at most twice (`X-Kloudlite-Git-Hops`, or the hop count in the stream header). A request out of hops is served where it lands. **The public listener strips this header** — a client must not be able to force a node to serve a repo it does not own.
+- The peer listeners require `X-Kloudlite-Git-Peer: <secret>` (HTTP) / the secret in the stream header, from a Kubernetes Secret. Wrong or missing secret → 403, close. **This is in addition to the separate port, not instead of it**: `kolomi-cluster` runs with `networkPolicy: none`, so a NetworkPolicy would be silently accepted and enforce nothing, and pod networking is flat.
 - Reachability means the peer's application answers `GET /healthz` **200, with the secret**, not that its kernel accepts a TCP connection. A pod mid-shutdown accepts TCP and then dies. A probe without the secret would be refused by the peer listener and read as "down" — routing would silently collapse to every node serving everything.
 - `/healthz` reports the result of a recent object-store round trip. A node whose blob-store client is dead must fail it, or it keeps its repos and 500s forever.
 - Existing behaviour must not regress: run `cargo test --release` before every commit; all 26 existing tests must stay green.
@@ -63,7 +63,7 @@ mod tests {
     /// Peers are identified by stable pod name, never by IP: a StatefulSet pod keeps its name across
     /// restarts but not its IP, and hashing on IP would make every restart a new peer.
     fn peers(n: usize) -> Vec<String> {
-        (0..n).map(|i| format!("rustic-git-{i}")).collect()
+        (0..n).map(|i| format!("kloudlite-git-{i}")).collect()
     }
 
     /// The property everything rests on: the same inputs give the same answer, so two nodes
@@ -183,7 +183,7 @@ fn score(repo: &str, peer: &str) -> u64 {
     fnv1a(&buf)
 }
 
-/// Every peer, best first. `peers` are stable pod names (`rustic-git-0`), never IPs — a restarted
+/// Every peer, best first. `peers` are stable pod names (`kloudlite-git-0`), never IPs — a restarted
 /// pod must come back owning the same repos. Ties break on the name so the order cannot depend on
 /// how DNS happened to order its answer — two nodes resolving the same Service must rank
 /// identically.
@@ -249,7 +249,7 @@ Append inside `mod tests` in `src/peers.rs`:
         Peer { name: name.into(), addr: format!("10.244.0.{}:8081", name.len()) }
     }
     fn fleet(n: usize) -> Vec<Peer> {
-        (0..n).map(|i| peer(&format!("rustic-git-{i}"))).collect()
+        (0..n).map(|i| peer(&format!("kloudlite-git-{i}"))).collect()
     }
     fn names(f: &[Peer]) -> Vec<String> {
         f.iter().map(|p| p.name.clone()).collect()
@@ -282,8 +282,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn the_top_candidate_serves_without_probing() {
         let f = fleet(3);
-        let repo = repo_where_i_rank(&f, "rustic-git-0", 0);
-        let m = Membership::fixed(f, "rustic-git-0".into());
+        let repo = repo_where_i_rank(&f, "kloudlite-git-0", 0);
+        let m = Membership::fixed(f, "kloudlite-git-0".into());
         let probed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pr = probed.clone();
         let route = m
@@ -299,11 +299,11 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn second_forwards_up_when_first_answers() {
         let f = fleet(3);
-        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-1", 1);
         let n = names(&f);
         let first = rank(&repo, &n)[0].clone();
-        let m = Membership::fixed(f.clone(), "rustic-git-1".into());
-        let up: &'static [&str] = &["rustic-git-0", "rustic-git-1", "rustic-git-2"];
+        let m = Membership::fixed(f.clone(), "kloudlite-git-1".into());
+        let up: &'static [&str] = &["kloudlite-git-0", "kloudlite-git-1", "kloudlite-git-2"];
         let route = m.decide(&repo, probe_where(up), vantage_agreeing(up)).await;
         assert_eq!(route, Route::Peer(f.iter().find(|p| p.name == first).unwrap().clone()));
     }
@@ -312,12 +312,12 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn second_serves_when_first_is_down_from_two_vantages() {
         let f = fleet(3);
-        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-1", 1);
         let n = names(&f);
         let first = rank(&repo, &n)[0].clone();
         // everyone except `first` is up; the third node is our second vantage
-        let up: &'static [&str] = if first == "rustic-git-0" { &["rustic-git-1", "rustic-git-2"] } else { &["rustic-git-0", "rustic-git-1"] };
-        let m = Membership::fixed(f, "rustic-git-1".into());
+        let up: &'static [&str] = if first == "kloudlite-git-0" { &["kloudlite-git-1", "kloudlite-git-2"] } else { &["kloudlite-git-0", "kloudlite-git-1"] };
+        let m = Membership::fixed(f, "kloudlite-git-1".into());
         assert_eq!(m.decide(&repo, probe_where(up), vantage_agreeing(up)).await, Route::Local);
     }
 
@@ -327,10 +327,10 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn second_returns_unavailable_when_a_second_vantage_reaches_the_first() {
         let f = fleet(3);
-        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-1", 1);
         let n = names(&f);
         let first = rank(&repo, &n)[0].clone();
-        let m = Membership::fixed(f.clone(), "rustic-git-1".into());
+        let m = Membership::fixed(f.clone(), "kloudlite-git-1".into());
         let fc = first.clone();
         let route = m
             .decide(&repo,
@@ -345,8 +345,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn the_top_candidate_probes_nobody_even_with_non_candidates_present() {
         let f = fleet(5);
-        let repo = repo_where_i_rank(&f, "rustic-git-0", 0);
-        let m = Membership::fixed(f, "rustic-git-0".into());
+        let repo = repo_where_i_rank(&f, "kloudlite-git-0", 0);
+        let m = Membership::fixed(f, "kloudlite-git-0".into());
         let probed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pr = probed.clone();
         let route = m
@@ -362,8 +362,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn a_reachable_first_costs_exactly_one_probe() {
         let f = fleet(6);
-        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
-        let m = Membership::fixed(f, "rustic-git-1".into());
+        let repo = repo_where_i_rank(&f, "kloudlite-git-1", 1);
+        let m = Membership::fixed(f, "kloudlite-git-1".into());
         let probed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pr = probed.clone();
         let _ = m
@@ -378,8 +378,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn second_returns_unavailable_with_no_second_vantage() {
         let f = fleet(3);
-        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
-        let m = Membership::fixed(f, "rustic-git-1".into());
+        let repo = repo_where_i_rank(&f, "kloudlite-git-1", 1);
+        let m = Membership::fixed(f, "kloudlite-git-1".into());
         let route = m
             .decide(&repo, |_: &Peer| std::future::ready(false), |_: &Peer, _: &Peer| std::future::ready(None))
             .await;
@@ -390,11 +390,11 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn third_defers_to_a_reachable_second() {
         let f = fleet(4);
-        let repo = repo_where_i_rank(&f, "rustic-git-2", 2);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-2", 2);
         let n = names(&f);
         let ranked = rank(&repo, &n);
         let (first, second) = (ranked[0].clone(), ranked[1].clone());
-        let m = Membership::fixed(f.clone(), "rustic-git-2".into());
+        let m = Membership::fixed(f.clone(), "kloudlite-git-2".into());
         let fc = first.clone();
         let fc2 = first.clone();
         let route = m
@@ -410,8 +410,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn a_node_outside_the_candidates_never_serves() {
         let f = fleet(6);
-        let repo = repo_where_i_rank(&f, "rustic-git-5", 5);
-        let m = Membership::fixed(f.clone(), "rustic-git-5".into());
+        let repo = repo_where_i_rank(&f, "kloudlite-git-5", 5);
+        let m = Membership::fixed(f.clone(), "kloudlite-git-5".into());
         let n = names(&f);
         let top = rank(&repo, &n)[0].clone();
         let r = m.decide(&repo, |_: &Peer| std::future::ready(true), |_: &Peer, _: &Peer| std::future::ready(Some(true))).await;
@@ -426,8 +426,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn candidates_are_top_three_by_rank_not_top_three_that_are_up() {
         let f = fleet(5);
-        let repo = repo_where_i_rank(&f, "rustic-git-3", 3);
-        let m = Membership::fixed(f.clone(), "rustic-git-3".into());
+        let repo = repo_where_i_rank(&f, "kloudlite-git-3", 3);
+        let m = Membership::fixed(f.clone(), "kloudlite-git-3".into());
         let r = m.decide(&repo, |_: &Peer| std::future::ready(false), |_: &Peer, _: &Peer| std::future::ready(Some(false))).await;
         assert_eq!(r, Route::Unavailable);
     }
@@ -438,11 +438,11 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn in_a_three_node_fleet_the_third_forwards_to_second_or_reports_unavailable() {
         let f = fleet(3);
-        let repo = repo_where_i_rank(&f, "rustic-git-2", 2);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-2", 2);
         let n = names(&f);
         let ranked = rank(&repo, &n);
         let (first, second) = (ranked[0].clone(), ranked[1].clone());
-        let m = Membership::fixed(f.clone(), "rustic-git-2".into());
+        let m = Membership::fixed(f.clone(), "kloudlite-git-2".into());
         let f1 = first.clone();
         let r = m.decide(&repo,
             move |p: &Peer| std::future::ready(p.name != f1),
@@ -463,11 +463,11 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn a_lower_ranked_candidate_may_vouch_for_the_second() {
         let f = fleet(3);
-        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-1", 1);
         let n = names(&f);
         let ranked = rank(&repo, &n);
         let (first, third) = (ranked[0].clone(), ranked[2].clone());
-        let m = Membership::fixed(f.clone(), "rustic-git-1".into());
+        let m = Membership::fixed(f.clone(), "kloudlite-git-1".into());
         let f1 = first.clone(); let f2 = first.clone(); let t3 = third.clone();
         let r = m.decide(&repo,
             move |p: &Peer| std::future::ready(p.name != f1),
@@ -483,11 +483,11 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn phase_two_forwards_to_a_higher_rank_that_answers_as_a_vantage() {
         let f = fleet(4);
-        let repo = repo_where_i_rank(&f, "rustic-git-2", 2);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-2", 2);
         let n = names(&f);
         let ranked = rank(&repo, &n);
         let (first, second) = (ranked[0].clone(), ranked[1].clone());
-        let m = Membership::fixed(f.clone(), "rustic-git-2".into());
+        let m = Membership::fixed(f.clone(), "kloudlite-git-2".into());
         let (f1, s1) = (first.clone(), second.clone());
         let (f2, s2) = (first.clone(), second.clone());
         let r = m.decide(&repo,
@@ -506,11 +506,11 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn phase_two_requires_a_vantage_on_every_target() {
         let f = fleet(4);
-        let repo = repo_where_i_rank(&f, "rustic-git-2", 2);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-2", 2);
         let n = names(&f);
         let ranked = rank(&repo, &n);
         let (first, second) = (ranked[0].clone(), ranked[1].clone());
-        let m = Membership::fixed(f.clone(), "rustic-git-2".into());
+        let m = Membership::fixed(f.clone(), "kloudlite-git-2".into());
         let (f1, s1) = (first.clone(), second.clone());
         let (f2, s2) = (first.clone(), second.clone());
         let r = m.decide(&repo,
@@ -528,11 +528,11 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn any_positive_vantage_vetoes_serving() {
         let f = fleet(4);
-        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
+        let repo = repo_where_i_rank(&f, "kloudlite-git-1", 1);
         let n = names(&f);
         let ranked = rank(&repo, &n);
         let (first, third) = (ranked[0].clone(), ranked[2].clone());
-        let m = Membership::fixed(f.clone(), "rustic-git-1".into());
+        let m = Membership::fixed(f.clone(), "kloudlite-git-1".into());
         let f1 = first.clone(); let t3 = third.clone();
         let r = m.decide(&repo,
             move |p: &Peer| std::future::ready(p.name != f1),
@@ -546,8 +546,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn higher_ranks_are_probed_concurrently() {
         let f = fleet(4);
-        let repo = repo_where_i_rank(&f, "rustic-git-3", 3);
-        let m = std::sync::Arc::new(Membership::fixed(f.clone(), "rustic-git-3".into()));
+        let repo = repo_where_i_rank(&f, "kloudlite-git-3", 3);
+        let m = std::sync::Arc::new(Membership::fixed(f.clone(), "kloudlite-git-3".into()));
         let started = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let st = started.clone();
         let notify = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -573,8 +573,8 @@ Append inside `mod tests` in `src/peers.rs`:
     #[tokio::test]
     async fn self_is_a_member_only_when_dns_lists_it() {
         let f = fleet(3);
-        let m = Membership::fixed(f.clone(), "rustic-git-9".into());
-        assert!(!m.peers().await.iter().any(|p| p.name == "rustic-git-9"));
+        let m = Membership::fixed(f.clone(), "kloudlite-git-9".into());
+        assert!(!m.peers().await.iter().any(|p| p.name == "kloudlite-git-9"));
         let repo = "o/r";
         // Not in the set → never Local. Forward to top, or Unavailable.
         let r = m.decide(repo, |_: &Peer| std::future::ready(true), |_: &Peer, _: &Peer| std::future::ready(Some(true))).await;
@@ -629,7 +629,7 @@ pub enum Route {
 /// pod keeps its name across restarts but not its IP, so hashing on IP would make every restart a
 /// new peer and move nearly every repo twice per roll.
 pub struct Membership {
-    /// SRV name to resolve, e.g. `_peer._tcp.rustic-git.rustic-git.svc.cluster.local`. Empty
+    /// SRV name to resolve, e.g. `_peer._tcp.kloudlite-git.kloudlite-git.svc.cluster.local`. Empty
     /// when the set is fixed.
     srv: String,
     self_name: String,
@@ -919,7 +919,7 @@ Forwards one request to a peer, streams the response, and provides the two probe
 
 **Interfaces:**
 - Produces:
-  - `pub const OWNER_HEADER: &str = "x-rustic-git-owner"`, `pub const HOPS_HEADER: &str = "x-rustic-git-hops"`, `pub const PEER_HEADER: &str = "x-rustic-git-peer"`, `pub const MAX_HOPS: u32 = 2`
+  - `pub const OWNER_HEADER: &str = "x-kloudlite-git-owner"`, `pub const HOPS_HEADER: &str = "x-kloudlite-git-hops"`, `pub const PEER_HEADER: &str = "x-kloudlite-git-peer"`, `pub const MAX_HOPS: u32 = 2`
   - `pub struct Forwarder { pub client: reqwest::Client, pub secret: String }`
   - `pub fn Forwarder::new(secret: String) -> Forwarder`
   - `pub async fn Forwarder::reachable(&self, addr: &str) -> bool` — `GET /healthz` **with the secret** returned 200
@@ -937,7 +937,7 @@ Create `tests/proxy.rs`:
 ```rust
 //! Forwarding and probing against a stub peer, so these cover the mechanics only.
 use axum::{routing::{any, get}, Router};
-use rustic_git::proxy::{Forwarder, HOPS_HEADER, OWNER_HEADER, PEER_HEADER};
+use kloudlite_git::proxy::{Forwarder, HOPS_HEADER, OWNER_HEADER, PEER_HEADER};
 
 const SECRET: &str = "s3cret";
 
@@ -1049,15 +1049,15 @@ async fn concurrent_probes_of_one_address_are_single_flight() {
 #[tokio::test]
 async fn probe_via_distinguishes_no_from_could_not_ask() {
     let f = Forwarder::new(SECRET.into());
-    assert_eq!(f.probe_via(&stub_peer(true).await, "rustic-git-0").await, Some(true));
-    assert_eq!(f.probe_via(&stub_peer(false).await, "rustic-git-0").await, Some(false));
-    assert_eq!(f.probe_via("127.0.0.1:1", "rustic-git-0").await, None);
+    assert_eq!(f.probe_via(&stub_peer(true).await, "kloudlite-git-0").await, Some(true));
+    assert_eq!(f.probe_via(&stub_peer(false).await, "kloudlite-git-0").await, Some(false));
+    assert_eq!(f.probe_via("127.0.0.1:1", "kloudlite-git-0").await, None);
 }
 ```
 
 - [ ] **Step 3: Run to verify it fails**
 
-`cargo test --test proxy` → FAIL to compile, `unresolved import rustic_git::proxy`.
+`cargo test --test proxy` → FAIL to compile, `unresolved import kloudlite_git::proxy`.
 
 - [ ] **Step 4: Implement**
 
@@ -1074,13 +1074,13 @@ use crate::Result;
 use std::time::Duration;
 
 /// Identity of the client the *forwarding* node authenticated. Honoured only on the peer listener.
-pub const OWNER_HEADER: &str = "x-rustic-git-owner";
+pub const OWNER_HEADER: &str = "x-kloudlite-git-owner";
 /// How many times this request has been forwarded. Bounds re-forwarding.
-pub const HOPS_HEADER: &str = "x-rustic-git-hops";
+pub const HOPS_HEADER: &str = "x-kloudlite-git-hops";
 /// Shared secret on every peer request. The peer ports are separate and unpublished, but this
 /// cluster runs with `networkPolicy: none`, so any pod can reach them; this is defence in depth on
 /// top of the port, not instead of it.
-pub const PEER_HEADER: &str = "x-rustic-git-peer";
+pub const PEER_HEADER: &str = "x-kloudlite-git-peer";
 /// Candidates are three deep, so two forwards reach the last of them. Past this, serve here.
 pub const MAX_HOPS: u32 = 2;
 
@@ -1325,8 +1325,8 @@ Create `tests/routing.rs`. The helpers first:
 //! Which node ends up serving a repo, and who may claim an identity.
 mod common;
 
-use rustic_git::peers::{Membership, Peer};
-use rustic_git::App;
+use kloudlite_git::peers::{Membership, Peer};
+use kloudlite_git::App;
 use std::sync::Arc;
 
 const SECRET: &str = "test-peer-secret";
@@ -1335,7 +1335,7 @@ const SECRET: &str = "test-peer-secret";
 /// see which node opened a repo. One shared Store would mean one shared pool, and "exactly one
 /// opener" could never fail.
 struct Node {
-    store: Arc<rustic_git::store::Store>,
+    store: Arc<kloudlite_git::store::Store>,
     public: String,
     peer: String,
     _tmp: tempfile::TempDir,
@@ -1345,7 +1345,7 @@ struct Node {
 /// every node so they agree; a node's own entry is what makes it Local for repos it ranks first on.
 async fn node(os: Arc<dyn slatedb::object_store::ObjectStore>, name: &str, fleet: &[(String, String)]) -> Node {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(rustic_git::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap());
+    let store = Arc::new(kloudlite_git::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap());
     let peers: Vec<Peer> = fleet.iter().map(|(n, a)| Peer { name: n.clone(), addr: a.clone() }).collect();
     let app = Arc::new(App::new(store.clone(), Arc::new(Membership::fixed(peers, name.into())), SECRET.into()));
     let pub_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1354,8 +1354,8 @@ async fn node(os: Arc<dyn slatedb::object_store::ObjectStore>, name: &str, fleet
     let my_addr = fleet.iter().find(|(n, _)| n == name).map(|(_, a)| a.clone()).expect("node must be in its own fleet");
     let peer_l = tokio::net::TcpListener::bind(&my_addr).await.unwrap();
     let a2 = app.clone();
-    tokio::spawn(async move { axum::serve(pub_l, rustic_git::http::router(a2)).await.unwrap() });
-    tokio::spawn(async move { axum::serve(peer_l, rustic_git::http::peer_router(app)).await.unwrap() });
+    tokio::spawn(async move { axum::serve(pub_l, kloudlite_git::http::router(a2)).await.unwrap() });
+    tokio::spawn(async move { axum::serve(peer_l, kloudlite_git::http::peer_router(app)).await.unwrap() });
     Node { store, public, peer: my_addr, _tmp: tmp }
 }
 
@@ -1384,14 +1384,14 @@ fn fleet_of(names: &[&str]) -> Vec<(String, String)> {
 /// A repo whose top-ranked node in `fleet` is `want`.
 fn repo_owned_by(fleet: &[(String, String)], want: &str) -> String {
     let names: Vec<String> = fleet.iter().map(|(n, _)| n.clone()).collect();
-    (0..500).map(|i| format!("alice/w{i}")).find(|r| rustic_git::peers::rank(r, &names)[0] == want).unwrap()
+    (0..500).map(|i| format!("alice/w{i}")).find(|r| kloudlite_git::peers::rank(r, &names)[0] == want).unwrap()
 }
 
 /// A repo whose full ranking (top N) is exactly `want`, so a test can pin every candidate's rank.
 fn repo_ranked(fleet: &[(String, String)], want: &[&str]) -> String {
     let names: Vec<String> = fleet.iter().map(|(n, _)| n.clone()).collect();
     (0..5000).map(|i| format!("alice/w{i}"))
-        .find(|r| rustic_git::peers::rank(r, &names).iter().take(want.len()).map(String::as_str).eq(want.iter().copied()))
+        .find(|r| kloudlite_git::peers::rank(r, &names).iter().take(want.len()).map(String::as_str).eq(want.iter().copied()))
         .expect("some repo has that ranking")
 }
 
@@ -1410,7 +1410,7 @@ async fn the_public_listener_ignores_a_claimed_identity() {
     let a = node(e.store.os.clone(), "a", &f).await;
     let res = client().await
         .get(format!("http://{}/alice/web/info/refs?service=git-upload-pack", a.public))
-        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header(kloudlite_git::proxy::OWNER_HEADER, "alice")
         .send().await.unwrap();
     assert_eq!(res.status(), 401);
 }
@@ -1431,7 +1431,7 @@ async fn the_public_listener_ignores_a_claimed_hop_count() {
     let res = client().await
         .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.public))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
-        .header(rustic_git::proxy::HOPS_HEADER, rustic_git::proxy::MAX_HOPS.to_string())
+        .header(kloudlite_git::proxy::HOPS_HEADER, kloudlite_git::proxy::MAX_HOPS.to_string())
         .send().await.unwrap();
     assert_eq!(res.status(), 200);
     assert_eq!(a.store.pool.warm_count(), 1, "A served");
@@ -1448,8 +1448,8 @@ async fn the_peer_listener_requires_the_secret() {
     for wrong in [None, Some("nope")] {
         let mut r = client().await
             .get(format!("http://{}/alice/web/info/refs?service=git-upload-pack", a.peer))
-            .header(rustic_git::proxy::OWNER_HEADER, "alice").header("git-protocol", "version=2");
-        if let Some(w) = wrong { r = r.header(rustic_git::proxy::PEER_HEADER, w); }
+            .header(kloudlite_git::proxy::OWNER_HEADER, "alice").header("git-protocol", "version=2");
+        if let Some(w) = wrong { r = r.header(kloudlite_git::proxy::PEER_HEADER, w); }
         assert_eq!(r.send().await.unwrap().status(), 403, "secret {wrong:?}");
     }
 }
@@ -1465,14 +1465,14 @@ async fn the_peer_listener_serves_probes_and_honours_identity() {
     let a = node(e.store.os.clone(), "a", &f).await;
     let c = client().await;
     let ok = |p: &str| format!("http://{}{p}", a.peer);
-    assert_eq!(c.get(ok("/healthz")).header(rustic_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().status(), 200);
+    assert_eq!(c.get(ok("/healthz")).header(kloudlite_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().status(), 200);
     assert_eq!(c.get(ok("/healthz")).send().await.unwrap().status(), 403);
     let res = c.get(ok("/alice/web/info/refs?service=git-upload-pack"))
-        .header(rustic_git::proxy::OWNER_HEADER, "alice").header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(kloudlite_git::proxy::OWNER_HEADER, "alice").header(kloudlite_git::proxy::PEER_HEADER, SECRET)
         .header("git-protocol", "version=2").send().await.unwrap();
     assert_eq!(res.status(), 200);
     // /probe: a reports whether it can reach a named peer. It can reach itself.
-    let body = c.get(ok("/probe")).query(&[("peer", "a")]).header(rustic_git::proxy::PEER_HEADER, SECRET)
+    let body = c.get(ok("/probe")).query(&[("peer", "a")]).header(kloudlite_git::proxy::PEER_HEADER, SECRET)
         .send().await.unwrap().text().await.unwrap();
     assert_eq!(body.trim(), "up");
 }
@@ -1492,7 +1492,7 @@ async fn a_lower_ranked_node_forwards_up_when_the_owner_is_reachable() {
     let res = client().await
         .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", c.peer))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
-        .header(rustic_git::proxy::HOPS_HEADER, "1").header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(kloudlite_git::proxy::HOPS_HEADER, "1").header(kloudlite_git::proxy::PEER_HEADER, SECRET)
         .send().await.unwrap();
     assert_eq!(res.status(), 200);
     assert_eq!(a.store.pool.warm_count(), 1, "A must have served it");
@@ -1515,8 +1515,8 @@ async fn a_request_out_of_hops_is_refused_unless_local() {
     let res = client().await
         .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.peer))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
-        .header(rustic_git::proxy::HOPS_HEADER, rustic_git::proxy::MAX_HOPS.to_string())
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(kloudlite_git::proxy::HOPS_HEADER, kloudlite_git::proxy::MAX_HOPS.to_string())
+        .header(kloudlite_git::proxy::PEER_HEADER, SECRET)
         .send().await.unwrap();
     assert_eq!(res.status(), 503, "out of hops but A is reachable: refuse, do not open");
     assert_eq!(b.store.pool.warm_count(), 0, "B must not open a repo it does not own");
@@ -1567,7 +1567,7 @@ async fn a_confirmed_outage_lets_the_second_candidate_serve() {
     let b = node(e.store.os.clone(), "b", &f).await;
     let c = node(e.store.os.clone(), "c", &f).await;
     let names: Vec<String> = f.iter().map(|(n, _)| n.clone()).collect();
-    let second_name = rustic_git::peers::rank(&repo, &names)[1].clone();
+    let second_name = kloudlite_git::peers::rank(&repo, &names)[1].clone();
     let (second, third) = if second_name == "b" { (&b, &c) } else { (&c, &b) };
     let res = client().await
         .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", second.public))
@@ -1996,7 +1996,7 @@ async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
     let a = node(e.store.os.clone(), "a", &f).await;
     let adb = a.store.pool.get(o, n).await.unwrap(); // a holds it — kept, see the not-owner test
     // a stray opener (an admin command, say) takes the writer epoch
-    let stray = slatedb::Db::builder(rustic_git::pool::path(o, n), e.store.os.clone()).build().await.unwrap();
+    let stray = slatedb::Db::builder(kloudlite_git::pool::path(o, n), e.store.os.clone()).build().await.unwrap();
     stray.put(b"k", b"v").await.unwrap();
     // wait for a's handle to observe the fence
     {
@@ -2052,7 +2052,7 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
     drop(bdb);
     // b's next get must report the fence and evict — never reopen.
     let e2 = b.store.pool.get(o, n).await.expect_err("fenced handle must be reported, not reopened");
-    assert!(rustic_git::pool::is_fenced(&e2), "got: {e2}");
+    assert!(kloudlite_git::pool::is_fenced(&e2), "got: {e2}");
     assert_eq!(b.store.pool.warm_count(), 0, "b must have evicted and NOT reopened");
     assert_eq!(a.store.pool.warm_count(), 1);
     // And a request to b for the repo is routed to a, not served from a reopened handle.
@@ -2109,11 +2109,11 @@ routing, fenced means someone else believes they own this."
 - [ ] **Step 1: Failing tests** — append to `tests/routing.rs`:
 
 ```rust
-async fn stream_listener(store: Arc<rustic_git::store::Store>) -> String {
+async fn stream_listener(store: Arc<kloudlite_git::store::Store>) -> String {
     let app = common::app(store);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    tokio::spawn(async move { rustic_git::proxy::serve_peer_streams(app, l).await });
+    tokio::spawn(async move { kloudlite_git::proxy::serve_peer_streams(app, l).await });
     addr
 }
 
@@ -2217,7 +2217,7 @@ async fn a_two_hop_ssh_forward_relays_the_status_line() {
     let c = node(e.store.os.clone(), "c", &f).await;
     // Talk to C's STREAM port directly as if we were B, hops=1. C is not the owner and can reach A,
     // so C forwards to A and must relay A's status. (node() starts the stream listener too — Step 1b.)
-    let mut sock = tokio::net::TcpStream::connect(rustic_git::proxy::stream_addr(&c.peer)).await.unwrap();
+    let mut sock = tokio::net::TcpStream::connect(kloudlite_git::proxy::stream_addr(&c.peer)).await.unwrap();
     sock.write_all(format!("{SECRET} git-upload-pack {repo} alice 1\n").as_bytes()).await.unwrap();
     let mut r = BufReader::new(sock);
     let mut line = String::new();
@@ -2248,7 +2248,7 @@ async fn a_peer_stream_rejects_bad_headers_silently() {
 async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     if !common::have_git() || !common::have_ssh() { return; }
     // Build two nodes a and b (fleet_of, node()) so a owns the repo. Additionally start
-    // rustic_git::ssh::serve for b on a random port with a generated host key (see ssh_e2e.rs for
+    // kloudlite_git::ssh::serve for b on a random port with a generated host key (see ssh_e2e.rs for
     // the exact calls) and register a client key for "alice". Push one commit via a's HTTP public
     // port, then:
     //   GIT_SSH_COMMAND="ssh -i <key> -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p <b ssh port>"
@@ -2265,7 +2265,7 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
 
 `todo!()` panics; that is deliberate. This test **must be written** before Task 5's step 6 passes, and the plan's expected result for that step reflects it.
 
-- [ ] **Step 1b: `node()` starts the stream listener too** — in `tests/routing.rs`'s `node()`, after binding the peer listener, also bind `rustic_git::proxy::stream_addr(&my_addr)` and spawn `serve_peer_streams(app.clone(), l)` on it, so two-hop SSH tests can reach a node's stream port.
+- [ ] **Step 1b: `node()` starts the stream listener too** — in `tests/routing.rs`'s `node()`, after binding the peer listener, also bind `kloudlite_git::proxy::stream_addr(&my_addr)` and spawn `serve_peer_streams(app.clone(), l)` on it, so two-hop SSH tests can reach a node's stream port.
 
 - [ ] **Step 2: Run** — `cargo test --test routing a_peer_stream` → compile error, `serve_peer_streams` not found.
 
@@ -2495,7 +2495,7 @@ where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
             let piped = crate::proxy::stream_to_peer(&app.forwarder.secret, &crate::proxy::stream_addr(&peer.addr), service, &repo_path, &authed, 0, &mut stream, false).await;
             let code = match &piped {
                 Ok(()) => 0,
-                Err(e) => { let _ = handle.extended_data(id, 1, format!("rustic-git: {e}\n").into_bytes()).await; 1 }
+                Err(e) => { let _ = handle.extended_data(id, 1, format!("kloudlite-git: {e}\n").into_bytes()).await; 1 }
             };
             let _ = handle.exit_status_request(id, code).await;
             // No explicit handle.eof(): copy_bidirectional's shutdown already sent the channel EOF
@@ -2540,28 +2540,28 @@ EOF is issued because the pipe's shutdown already sent one."
 
 ```rust
 async fn serve() -> Result<()> {
-    let store = Arc::new(Store::open(object_store()?, env("RUSTIC_GIT_CACHE_DIR", "./cache").into(), true).await?);
+    let store = Arc::new(Store::open(object_store()?, env("KLOUDLITE_GIT_CACHE_DIR", "./cache").into(), true).await?);
     store.spawn_health_probe();
 
-    let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
+    let peer_addr = env("KLOUDLITE_GIT_PEER_ADDR", "0.0.0.0:8081");
     let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(8081);
     // Multi-node needs all three; a default for any of them fails silently (a phantom peer, an
     // open port), so refuse to start instead.
-    let (peers, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_DNS") {
+    let (peers, peer_secret) = match std::env::var("KLOUDLITE_GIT_PEER_DNS") {
         Ok(dns) if !dns.is_empty() => {
-            let me = std::env::var("RUSTIC_GIT_SELF").ok().filter(|s| !s.is_empty())
-                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_SELF (this pod's name) is required with RUSTIC_GIT_PEER_DNS"))?;
-            let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok().filter(|s| !s.is_empty())
-                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_SECRET is required with RUSTIC_GIT_PEER_DNS"))?;
-            (rustic_git::peers::Membership::new(format!("_peer._tcp.{dns}:{peer_port}"), me), secret)
+            let me = std::env::var("KLOUDLITE_GIT_SELF").ok().filter(|s| !s.is_empty())
+                .ok_or_else(|| kloudlite_git::err("KLOUDLITE_GIT_SELF (this pod's name) is required with KLOUDLITE_GIT_PEER_DNS"))?;
+            let secret = std::env::var("KLOUDLITE_GIT_PEER_SECRET").ok().filter(|s| !s.is_empty())
+                .ok_or_else(|| kloudlite_git::err("KLOUDLITE_GIT_PEER_SECRET is required with KLOUDLITE_GIT_PEER_DNS"))?;
+            (kloudlite_git::peers::Membership::new(format!("_peer._tcp.{dns}:{peer_port}"), me), secret)
         }
         _ => {
             // Single node: owns everything; random secret so nothing can drive the peer port.
             use rand::RngCore;
             let mut b = [0u8; 32]; rand::thread_rng().fill_bytes(&mut b);
             let secret: String = b.iter().map(|x| format!("{x:02x}")).collect();
-            let solo = rustic_git::peers::Peer { name: "solo".into(), addr: format!("127.0.0.1:{peer_port}") };
-            (rustic_git::peers::Membership::fixed(vec![solo], "solo".into()), secret)
+            let solo = kloudlite_git::peers::Peer { name: "solo".into(), addr: format!("127.0.0.1:{peer_port}") };
+            (kloudlite_git::peers::Membership::fixed(vec![solo], "solo".into()), secret)
         }
     };
     let peers = Arc::new(peers);
@@ -2571,9 +2571,9 @@ async fn serve() -> Result<()> {
     // ready, and while self is unlisted `decide` returns Unavailable (self is not in the set, so
     // it never ranks Local). A background task warns if self stays absent well past readiness,
     // which is the reverse-DNS-returning-garbage case worth being loud about.
-    if std::env::var("RUSTIC_GIT_PEER_DNS").map(|d| !d.is_empty()).unwrap_or(false) {
+    if std::env::var("KLOUDLITE_GIT_PEER_DNS").map(|d| !d.is_empty()).unwrap_or(false) {
         let p = peers.clone();
-        let me = std::env::var("RUSTIC_GIT_SELF").unwrap_or_default();
+        let me = std::env::var("KLOUDLITE_GIT_SELF").unwrap_or_default();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             loop {
@@ -2585,14 +2585,14 @@ async fn serve() -> Result<()> {
             }
         });
     }
-    let app = Arc::new(rustic_git::App::new(store.clone(), peers, peer_secret));
+    let app = Arc::new(kloudlite_git::App::new(store.clone(), peers, peer_secret));
     store.pool.spawn_sweeper();
 
-    let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
-    let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
+    let http = tokio::net::TcpListener::bind(env("KLOUDLITE_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
+    let ssh = tokio::net::TcpListener::bind(env("KLOUDLITE_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
     let peer_http = tokio::net::TcpListener::bind(&peer_addr).await?;
-    let peer_stream = tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
-    let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;
+    let peer_stream = tokio::net::TcpListener::bind(kloudlite_git::proxy::stream_addr(&peer_addr)).await?;
+    let key = host_key(&env("KLOUDLITE_GIT_HOST_KEY", "./host_key"))?;
     eprintln!("http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
         http.local_addr()?, ssh.local_addr()?, peer_http.local_addr()?, peer_stream.local_addr()?, store.pool.max_warm);
 
@@ -2611,15 +2611,15 @@ async fn serve() -> Result<()> {
     });
     let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move { while !*rx.borrow() { if rx.changed().await.is_err() { break; } } };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
-    let http_srv = axum::serve(http, rustic_git::http::router(a2)).with_graceful_shutdown(wait(term_rx.clone()));
-    let peer_srv = axum::serve(peer_http, rustic_git::http::peer_router(a3)).with_graceful_shutdown(wait(term_rx.clone()));
+    let http_srv = axum::serve(http, kloudlite_git::http::router(a2)).with_graceful_shutdown(wait(term_rx.clone()));
+    let peer_srv = axum::serve(peer_http, kloudlite_git::http::peer_router(a3)).with_graceful_shutdown(wait(term_rx.clone()));
     // Both HTTP servers as ONE select arm: select! returns when its first arm resolves, and if
     // each server were its own arm the first to finish draining would end the select and
     // pool.close() would run under the other's in-flight requests. try_join waits for both.
     tokio::select! {
         r = async { tokio::try_join!(http_srv, peer_srv) } => { r?; }
-        r = rustic_git::proxy::serve_peer_streams(a4, peer_stream) => { r?; }
-        r = rustic_git::ssh::serve(app, ssh, key) => { r?; }
+        r = kloudlite_git::proxy::serve_peer_streams(a4, peer_stream) => { r?; }
+        r = kloudlite_git::ssh::serve(app, ssh, key) => { r?; }
     }
     // ponytail: the SSH and peer-stream listeners stop on select! exit without draining; the
     // preStop delay is what makes that rare (the pod has left DNS before it stops). Add per-session
@@ -2651,20 +2651,20 @@ nothing."
 
 ### Task 7: Deployment
 
-**Files:** `deploy/rustic-git.yaml`, `README.md`
+**Files:** `deploy/kloudlite-git.yaml`, `README.md`
 
 - [ ] **Step 0** — `az aks show -n kolomi-cluster -g kolomi-rg --query networkProfile.networkPolicy -o tsv` → `none`. This is why the secret exists.
-- [ ] **Step 1** — `kubectl -n rustic-git create secret generic rustic-git-peer --from-literal=secret="$(openssl rand -hex 32)"`.
-- [ ] **Step 2** — Manifest. Delete the Ingress and `rustic-git-http`. On the container:
+- [ ] **Step 1** — `kubectl -n kloudlite-git create secret generic kloudlite-git-peer --from-literal=secret="$(openssl rand -hex 32)"`.
+- [ ] **Step 2** — Manifest. Delete the Ingress and `kloudlite-git-http`. On the container:
 
 ```yaml
           env:
-            - name: RUSTIC_GIT_PEER_DNS
-              value: rustic-git.rustic-git.svc.cluster.local
-            - name: RUSTIC_GIT_SELF
+            - name: KLOUDLITE_GIT_PEER_DNS
+              value: kloudlite-git.kloudlite-git.svc.cluster.local
+            - name: KLOUDLITE_GIT_SELF
               valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name — the hash key
-            - name: RUSTIC_GIT_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            - name: KLOUDLITE_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
           ports:
             - { name: peer, containerPort: 8081 }
             - { name: peer-stream, containerPort: 8082 }
@@ -2686,7 +2686,7 @@ nothing."
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:
-                labelSelector: { matchLabels: { app: rustic-git } }
+                labelSelector: { matchLabels: { app: kloudlite-git } }
                 topologyKey: kubernetes.io/hostname
 ```
 
@@ -2696,7 +2696,7 @@ The headless Service needs the peer port **named** so its A records carry throug
   ports:
     - { name: http, port: 8080, targetPort: http }
     - { name: ssh, port: 2222, targetPort: ssh }
-    - { name: peer, port: 8081, targetPort: peer }   # SRV: _peer._tcp.rustic-git.rustic-git.svc
+    - { name: peer, port: 8081, targetPort: peer }   # SRV: _peer._tcp.kloudlite-git.kloudlite-git.svc
 ```
 
 Add the public LoadBalancer and the NetworkPolicy:
@@ -2706,11 +2706,11 @@ Add the public LoadBalancer and the NetworkPolicy:
 apiVersion: v1
 kind: Service
 metadata:
-  name: rustic-git-lb
-  namespace: rustic-git
+  name: kloudlite-git-lb
+  namespace: kloudlite-git
 spec:
   type: LoadBalancer
-  selector: { app: rustic-git }
+  selector: { app: kloudlite-git }
   ports:
     - { name: http, port: 80, targetPort: http }
     - { name: ssh, port: 2222, targetPort: ssh }
@@ -2720,16 +2720,16 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: rustic-git-peers-only
-  namespace: rustic-git
+  name: kloudlite-git-peers-only
+  namespace: kloudlite-git
 spec:
   podSelector:
-    matchLabels: { app: rustic-git }
+    matchLabels: { app: kloudlite-git }
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
-            matchLabels: { app: rustic-git }
+            matchLabels: { app: kloudlite-git }
       ports:
         - { protocol: TCP, port: 8081 }
         - { protocol: TCP, port: 8082 }
@@ -2740,7 +2740,7 @@ spec:
 
 - [ ] **Step 3** — Apply; `rollout status`; three pods `1/1`.
 - [ ] **Step 4** — Six `git ls-remote` through the LB, all ok.
-- [ ] **Step 5** — Exactly one pod's `/healthz` (via `kubectl exec ... wget -qO- --header="X-Rustic-Git-Peer: $SECRET" localhost:8081/healthz`) shows a non-zero warm count. Two → stop.
+- [ ] **Step 5** — Exactly one pod's `/healthz` (via `kubectl exec ... wget -qO- --header="X-Kloudlite-Git-Peer: $SECRET" localhost:8081/healthz`) shows a non-zero warm count. Two → stop.
 - [ ] **Step 6** — Roll under load: a 90-second `ls-remote` loop during `rollout restart`; expect 0 FAIL. Then a **long clone** (a repo with a >50 MB pack) started just before `rollout restart`; expect it to complete — this is the SIGTERM handler.
 - [ ] **Step 7** — README: replace the multi-node section. State the rule and its trade plainly, and these three limits by name:
   - **`replicas >= 3` is required for failover.** With two nodes there is no second vantage: an unreachable owner's repos return 503 until Kubernetes drops it from DNS.
@@ -2752,7 +2752,7 @@ spec:
 - [ ] **Step 8** — Commit:
 
 ```bash
-git add deploy/rustic-git.yaml README.md
+git add deploy/kloudlite-git.yaml README.md
 git commit -m "Front the fleet with a plain load balancer
 
 The nodes route repos to each other, so nothing in front needs to understand

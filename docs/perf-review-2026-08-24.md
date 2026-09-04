@@ -71,7 +71,7 @@ concurrent push) — the download path at `:391-394` already streams for exactly
 **Fix:** compute the commit list once and share it. *(CPU + object reads)*
 
 ### 9. Tokio/V8 sized from the node, not the cgroup
-`src/main.rs:710`, `src/bin/{api,worker}.rs`; `deploy/rustic-git-web.yaml`. Bare
+`src/main.rs:710`, `src/bin/{api,worker}.rs`; `deploy/kloudlite-git-web.yaml`. Bare
 `#[tokio::main]` on a 64-core node spawns 64 worker threads inside a 100m-CPU / 512Mi pod;
 Node's V8 heap ceiling is sized from host memory, so the web pod OOMKills instead of GC'ing.
 **Fix:** `TOKIO_WORKER_THREADS=4` env on the Rust pods; `NODE_OPTIONS=--max-old-space-size=384`

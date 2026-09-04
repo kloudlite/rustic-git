@@ -17,12 +17,12 @@ import { fixtureFor } from "@/lib/fixtures/superadmin";
  * is, and one process holding the credentials.
  */
 
-const BASE = (process.env.RUSTIC_GIT_API_URL ?? "http://rustic-git-api").replace(/\/$/, "");
+const BASE = (process.env.KLOUDLITE_GIT_API_URL ?? "http://kloudlite-git-api").replace(/\/$/, "");
 // A second base, because the admin surface is a SEPARATE process on a separate host (design doc
 // §5) — pointing this at the same host as `BASE` would be a silent way to lose the whole point of
-// the split, so there is no fallback to `RUSTIC_GIT_API_URL` here.
-const ADMIN_BASE = (process.env.RUSTIC_GIT_ADMIN_API_URL ?? "http://rustic-git-admin").replace(/\/$/, "");
-const PEER_SECRET = process.env.RUSTIC_GIT_PEER_SECRET ?? "";
+// the split, so there is no fallback to `KLOUDLITE_GIT_API_URL` here.
+const ADMIN_BASE = (process.env.KLOUDLITE_GIT_ADMIN_API_URL ?? "http://kloudlite-git-admin").replace(/\/$/, "");
+const PEER_SECRET = process.env.KLOUDLITE_GIT_PEER_SECRET ?? "";
 /** How long a call may take before it is answered `unavailable` instead. */
 export const TIMEOUT_MS = 5_000;
 /** For the calls that run git upstream — a compare or a commit is not a row read. */
@@ -54,7 +54,7 @@ async function callAgainst<T>(
   path: string,
   init: RequestInit & { token?: string; asUser?: string },
 ): Promise<ApiResult<T>> {
-  // `RUSTIC_GIT_ADMIN_FIXTURES=1` answers READS from a seeded module instead of the network, so
+  // `KLOUDLITE_GIT_ADMIN_FIXTURES=1` answers READS from a seeded module instead of the network, so
   // every superadmin screen renders with realistic data on a laptop with no cluster (spec §C: the
   // screens are verified by screenshot before merge). It sits in `callAgainst` rather than in
   // `adminCall` because three of the console's reads — the superadmin list, the regions list and
@@ -64,7 +64,7 @@ async function callAgainst<T>(
   //
   // Only GET is faked: a decision, a roll or a drain must still reach the real api, because a
   // write that "succeeds" against nothing is a screenshot that lies.
-  if (process.env.RUSTIC_GIT_ADMIN_FIXTURES === "1" && (init.method ?? "GET") === "GET") {
+  if (process.env.KLOUDLITE_GIT_ADMIN_FIXTURES === "1" && (init.method ?? "GET") === "GET") {
     const seeded = fixtureFor(path);
     if (seeded !== undefined) return { ok: true, value: seeded as T };
   }
@@ -76,8 +76,8 @@ async function callAgainst<T>(
   } else if (init.asUser) {
     // Only for sign-in, which is where a token comes from. Every later call
     // carries the user's own token instead.
-    headers.set("x-rustic-git-peer", PEER_SECRET);
-    headers.set("x-rustic-git-owner", init.asUser);
+    headers.set("x-kloudlite-git-peer", PEER_SECRET);
+    headers.set("x-kloudlite-git-owner", init.asUser);
   }
 
   let res: Response;
@@ -1366,7 +1366,7 @@ export type SignalsResponse = {
   // most admin responses.
   scrape_failures: [string, string][];
   pods_listed: number;
-  /** Absent (not null — `skip_serializing_if`) unless `RUSTIC_GIT_HYPERDX_URL` is configured, so
+  /** Absent (not null — `skip_serializing_if`) unless `KLOUDLITE_GIT_HYPERDX_URL` is configured, so
    *  a monitoring page never renders a dead link. */
   hyperdx_url?: string;
 };

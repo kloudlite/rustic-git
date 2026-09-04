@@ -2,9 +2,9 @@
 //! server — the recorder is what proves "409, nothing written" is enforced by `roll_readers`
 //! itself (zero patch calls on a conflict), not merely documented.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{admin::router, ApiState};
-use rustic_git_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{admin::router, ApiState};
+use kloudlite_git_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ const APPS: &str = "/apis/apps/v1";
 fn deployment(name: &str, ready: i32, desired: i32) -> serde_json::Value {
     json!({
         "apiVersion": "apps/v1", "kind": "Deployment",
-        "metadata": {"name": name, "namespace": "rustic-git"},
+        "metadata": {"name": name, "namespace": "kloudlite-git"},
         "spec": {"replicas": desired, "template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "ghcr.io/x:1"}]}}},
         "status": {"readyReplicas": ready},
     })
@@ -46,23 +46,23 @@ fn admin_token(jwt: &Jwt) -> String {
 #[tokio::test]
 async fn roll_patches_when_settled() {
     let s = admin_server(vec![
-        get(format!("{APPS}/namespaces/rustic-git/deployments/rustic-git-api"), deployment("rustic-git-api", 2, 2)),
-        patch(format!("{APPS}/namespaces/rustic-git/deployments/rustic-git-api"), deployment("rustic-git-api", 2, 2)),
+        get(format!("{APPS}/namespaces/kloudlite-git/deployments/kloudlite-git-api"), deployment("kloudlite-git-api", 2, 2)),
+        patch(format!("{APPS}/namespaces/kloudlite-git/deployments/kloudlite-git-api"), deployment("kloudlite-git-api", 2, 2)),
     ])
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/workloads/central/rustic-git-api/roll", s.base))
+        .post(format!("{}/admin/workloads/central/kloudlite-git-api/roll", s.base))
         .bearer_auth(admin_token(&s.jwt))
         .json(&json!({"reason": "rotate secret"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
 
-    let sent = s.rec.sent("PATCH", &format!("{APPS}/namespaces/rustic-git/deployments/rustic-git-api"));
+    let sent = s.rec.sent("PATCH", &format!("{APPS}/namespaces/kloudlite-git/deployments/kloudlite-git-api"));
     assert_eq!(sent.len(), 1);
     let ann = &sent[0]["spec"]["template"]["metadata"]["annotations"];
-    assert!(ann["rustic-git.io/restarted-at"].is_string());
-    assert_eq!(ann["rustic-git.io/roll-reason"], "rotate secret");
+    assert!(ann["kloudlite-git.io/restarted-at"].is_string());
+    assert_eq!(ann["kloudlite-git.io/roll-reason"], "rotate secret");
 }
 
 /// Ready < desired: 409, and the recorder shows the patch was never sent — the atomic half of
@@ -70,13 +70,13 @@ async fn roll_patches_when_settled() {
 #[tokio::test]
 async fn roll_conflicts_mid_rollout() {
     let s = admin_server(vec![get(
-        format!("{APPS}/namespaces/rustic-git/deployments/rustic-git-api"),
-        deployment("rustic-git-api", 1, 2),
+        format!("{APPS}/namespaces/kloudlite-git/deployments/kloudlite-git-api"),
+        deployment("kloudlite-git-api", 1, 2),
     )])
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/workloads/central/rustic-git-api/roll", s.base))
+        .post(format!("{}/admin/workloads/central/kloudlite-git-api/roll", s.base))
         .bearer_auth(admin_token(&s.jwt))
         .json(&json!({"reason": "rotate secret"}))
         .send().await.unwrap();
@@ -84,7 +84,7 @@ async fn roll_conflicts_mid_rollout() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["ready"], 1);
     assert_eq!(body["desired"], 2);
-    assert!(s.rec.sent("PATCH", &format!("{APPS}/namespaces/rustic-git/deployments/rustic-git-api")).is_empty());
+    assert!(s.rec.sent("PATCH", &format!("{APPS}/namespaces/kloudlite-git/deployments/kloudlite-git-api")).is_empty());
 }
 
 /// A name outside `KNOWN` for the scope is a 404, never a passthrough to the cluster.
@@ -107,7 +107,7 @@ async fn roll_unknown_name_is_404() {
 async fn roll_unknown_region_is_404() {
     let s = admin_server(vec![]).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/workloads/no-such-region/rustic-git-agent/roll", s.base))
+        .post(format!("{}/admin/workloads/no-such-region/kloudlite-git-agent/roll", s.base))
         .bearer_auth(admin_token(&s.jwt))
         .json(&json!({"reason": "x"}))
         .send().await.unwrap();
@@ -121,7 +121,7 @@ async fn roll_unknown_region_is_404() {
 async fn roll_empty_reason_is_400() {
     let s = admin_server(vec![]).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/workloads/central/rustic-git-api/roll", s.base))
+        .post(format!("{}/admin/workloads/central/kloudlite-git-api/roll", s.base))
         .bearer_auth(admin_token(&s.jwt))
         .json(&json!({"reason": "   "}))
         .send().await.unwrap();
@@ -133,22 +133,22 @@ async fn roll_empty_reason_is_400() {
 /// read off the fetched object, `last_roll` absent until a roll has happened.
 #[tokio::test]
 async fn list_workloads_shape() {
-    let names = ["rustic-git-srv", "rustic-git-api", "rustic-git-worker", "rustic-git-web", "rustic-git-admin"];
+    let names = ["kloudlite-git-srv", "kloudlite-git-api", "kloudlite-git-worker", "kloudlite-git-web", "kloudlite-git-admin"];
     let mut routes = vec![get(
-        "/apis/rustic-git.io/v1alpha1/regions",
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": []}),
+        "/apis/kloudlite-git.io/v1alpha1/regions",
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": []}),
     )];
     routes.push(get(
-        format!("{APPS}/namespaces/rustic-git/statefulsets/rustic-git-srv"),
+        format!("{APPS}/namespaces/kloudlite-git/statefulsets/kloudlite-git-srv"),
         json!({
             "apiVersion": "apps/v1", "kind": "StatefulSet",
-            "metadata": {"name": "rustic-git-srv", "namespace": "rustic-git"},
+            "metadata": {"name": "kloudlite-git-srv", "namespace": "kloudlite-git"},
             "spec": {"replicas": 3, "template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "ghcr.io/x:2"}]}}},
             "status": {"readyReplicas": 3},
         }),
     ));
     for name in &names[1..] {
-        routes.push(get(format!("{APPS}/namespaces/rustic-git/deployments/{name}"), deployment(name, 1, 1)));
+        routes.push(get(format!("{APPS}/namespaces/kloudlite-git/deployments/{name}"), deployment(name, 1, 1)));
     }
     let s = admin_server(routes).await;
 
@@ -159,7 +159,7 @@ async fn list_workloads_shape() {
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
     let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(rows.len(), names.len());
-    let srv = rows.iter().find(|r| r["name"] == "rustic-git-srv").unwrap();
+    let srv = rows.iter().find(|r| r["name"] == "kloudlite-git-srv").unwrap();
     assert_eq!(srv["ready"], 3);
     assert_eq!(srv["desired"], 3);
     assert_eq!(srv["rolloutState"], "Stable");
@@ -173,39 +173,39 @@ async fn list_workloads_shape() {
 #[tokio::test]
 async fn list_workloads_region_scope_is_plain_string() {
     let mut routes = vec![get(
-        "/apis/rustic-git.io/v1alpha1/regions",
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": [
-            {"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region", "metadata": {"name": "centralindia"}, "spec": {"name": "centralindia", "status": "active"}},
+        "/apis/kloudlite-git.io/v1alpha1/regions",
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": [
+            {"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region", "metadata": {"name": "centralindia"}, "spec": {"name": "centralindia", "status": "active"}},
         ]}),
     )];
     // `admin_server` wires both `aks` and `kube` to the same mock client, so `list_workloads`'s
     // central half still runs and needs its own routes even though this test's assertions are
     // about the region half.
     routes.push(get(
-        format!("{APPS}/namespaces/rustic-git/statefulsets/rustic-git-srv"),
+        format!("{APPS}/namespaces/kloudlite-git/statefulsets/kloudlite-git-srv"),
         json!({
             "apiVersion": "apps/v1", "kind": "StatefulSet",
-            "metadata": {"name": "rustic-git-srv", "namespace": "rustic-git"},
+            "metadata": {"name": "kloudlite-git-srv", "namespace": "kloudlite-git"},
             "spec": {"replicas": 1, "template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "ghcr.io/x:1"}]}}},
             "status": {"readyReplicas": 1},
         }),
     ));
-    for name in ["rustic-git-api", "rustic-git-worker", "rustic-git-web", "rustic-git-admin"] {
-        routes.push(get(format!("{APPS}/namespaces/rustic-git/deployments/{name}"), deployment(name, 1, 1)));
+    for name in ["kloudlite-git-api", "kloudlite-git-worker", "kloudlite-git-web", "kloudlite-git-admin"] {
+        routes.push(get(format!("{APPS}/namespaces/kloudlite-git/deployments/{name}"), deployment(name, 1, 1)));
     }
     routes.extend([
         get(
-            "/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent",
+            "/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-git-agent",
             json!({
                 "apiVersion": "apps/v1", "kind": "DaemonSet",
-                "metadata": {"name": "rustic-git-agent", "namespace": "kube-system"},
+                "metadata": {"name": "kloudlite-git-agent", "namespace": "kube-system"},
                 "spec": {"template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "ghcr.io/x:1"}]}}},
                 "status": {"numberReady": 1, "desiredNumberScheduled": 1},
             }),
         ),
         get(
-            format!("{APPS}/namespaces/rustic-git-system/deployments/rustic-git-gateway"),
-            deployment("rustic-git-gateway", 1, 1),
+            format!("{APPS}/namespaces/kloudlite-git-system/deployments/kloudlite-git-gateway"),
+            deployment("kloudlite-git-gateway", 1, 1),
         ),
     ]);
     let s = admin_server(routes).await;
@@ -216,6 +216,6 @@ async fn list_workloads_region_scope_is_plain_string() {
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
     let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
-    let agent = rows.iter().find(|r| r["name"] == "rustic-git-agent").unwrap();
+    let agent = rows.iter().find(|r| r["name"] == "kloudlite-git-agent").unwrap();
     assert_eq!(agent["scope"], "centralindia");
 }

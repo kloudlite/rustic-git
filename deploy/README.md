@@ -14,5 +14,5 @@ the part upload and the sidecar write, and `WriteMultipart::finish` failing mid-
 leave parts in the bucket that no object ever references. The bucket needs its own rule for them:
 
 - S3: a lifecycle rule with `AbortIncompleteMultipartUpload` at 1 day (longer than
-  `RUSTIC_GIT_UPLOAD_GRACE_SECS`, default 24 h, so the rule never races a live session).
+  `KLOUDLITE_GIT_UPLOAD_GRACE_SECS`, default 24 h, so the rule never races a live session).
 - Azure Blob: uncommitted blocks expire after 7 days on their own; nothing to configure.

@@ -18,8 +18,8 @@ use axum::{
     Json,
 };
 use futures::StreamExt;
-use rustic_git_core::httpx::Trusted;
-use rustic_git_workspaces::registry::{volume_marker_prefix, VolExt};
+use kloudlite_git_core::httpx::Trusted;
+use kloudlite_git_workspaces::registry::{volume_marker_prefix, VolExt};
 use serde::Serialize;
 use slatedb::object_store::ObjectStore;
 use std::collections::BTreeMap;
@@ -59,7 +59,7 @@ pub(super) async fn volumes(
         Ok(_) => return hidden(),
         Err(r) => return r,
     }
-    let names = match rustic_git_registry::list_dir_names(&app.store.os, &format!("{}/", crate::pool::path("vol", &owner))).await {
+    let names = match kloudlite_git_registry::list_dir_names(&app.store.os, &format!("{}/", crate::pool::path("vol", &owner))).await {
         Ok(n) => n,
         Err(e) => return internal(e),
     };

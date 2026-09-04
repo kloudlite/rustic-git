@@ -35,7 +35,7 @@ export default async function ConfigurationPage() {
       const res = clusterSettled[i];
       return {
         title: `Cluster · ${rg.id} · ClusterSettings/default`,
-        readers: "Read by rustic-git-agent on every node · watched through a reflector",
+        readers: "Read by kloudlite-git-agent on every node · watched through a reflector",
         rows: schema.cluster,
         stored: res?.ok ? res.value.spec : {},
         error: res && !res.ok ? res.message : null,

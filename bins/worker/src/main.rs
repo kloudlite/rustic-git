@@ -3,7 +3,7 @@
 //! It merges again — but not the way it used to. Merging is a fetch, a three-way merge and a
 //! push, all of it expressible over the git protocol, so it does NOT have to happen where the
 //! repo's database is. It happens here, by running the real `git` binary
-//! (`rustic_git_pulls::merge_worker`) against a bare cache clone, authenticated to the fleet as a
+//! (`kloudlite_git_pulls::merge_worker`) against a bare cache clone, authenticated to the fleet as a
 //! peer.
 //!
 //! That keeps two rules intact at once. The database still has exactly one opener — this process
@@ -25,17 +25,17 @@
 //! `App::announce_stranded_merges`), which need neither Redis nor Mongo: a nudge that never arrives, or
 //! a worker that dies mid-merge, costs a change one lease of latency, never the work.
 
-use rustic_git_core::err;
-use rustic_git_core::Result;
-use rustic_git_registry::uploads::UploadsExt;
-use rustic_git_storage::config::{env, install_crypto_provider, open_store};
+use kloudlite_git_core::err;
+use kloudlite_git_core::Result;
+use kloudlite_git_registry::uploads::UploadsExt;
+use kloudlite_git_storage::config::{env, install_crypto_provider, open_store};
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    rustic_git_core::log::init();
-    rustic_git_core::metrics::init();
-    rustic_git_core::metrics::serve_if_configured().await;
+    kloudlite_git_core::log::init();
+    kloudlite_git_core::metrics::init();
+    kloudlite_git_core::metrics::serve_if_configured().await;
     if let Err(e) = run().await {
         tracing::error!("{e}");
         std::process::exit(2);
@@ -45,7 +45,7 @@ async fn main() {
 /// How long to wait when there was nothing to do.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The one stream every repo's events multiplex onto (see `rustic_git_storage::events`), and the
+/// The one stream every repo's events multiplex onto (see `kloudlite_git_storage::events`), and the
 /// one consumer group every merge-worker lane/replica competes on.
 const EVENTS_STREAM: &str = "events";
 const EVENTS_GROUP: &str = "merge-worker";
@@ -62,24 +62,24 @@ async fn run() -> Result<()> {
     // `false`: compaction and garbage collection belong to the node that owns the
     // repository. This process only ever adds packs.
     let store = open_store(false).await?;
-    let central = rustic_git_core::settings::LiveSettings::new(
-        rustic_git_core::settings::CentralSettings::from_env(),
+    let central = kloudlite_git_core::settings::LiveSettings::new(
+        kloudlite_git_core::settings::CentralSettings::from_env(),
     );
-    if let Some(bytes) = rustic_git_storage::config::get_central(&store.os).await {
+    if let Some(bytes) = kloudlite_git_storage::config::get_central(&store.os).await {
         match serde_json::from_slice(&bytes) {
             Ok(doc) => central.store(
-                rustic_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+                kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
             ),
             Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
         }
     }
-    tokio::spawn(rustic_git_core::settings::refresh_central_beat(
-        rustic_git_storage::config::central_fetch(store.os.clone()),
+    tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
+        kloudlite_git_storage::config::central_fetch(store.os.clone()),
         central.clone(),
     ));
-    let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
-    let secret = std::env::var("RUSTIC_GIT_PEER_SECRET")
-        .map_err(|_| err("RUSTIC_GIT_PEER_SECRET required"))?;
+    let upstream = env("KLOUDLITE_GIT_UPSTREAM", "http://kloudlite-git:8081");
+    let secret = std::env::var("KLOUDLITE_GIT_PEER_SECRET")
+        .map_err(|_| err("KLOUDLITE_GIT_PEER_SECRET required"))?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -88,20 +88,20 @@ async fn run() -> Result<()> {
     // Nudging is mostly waiting on the fleet, so one lane leaves the worker idle whenever a
     // node is slow to answer. Independent tasks, each reading the stream for itself — the
     // consumer group is what keeps them from delivering the same entry twice.
-    let lanes: usize = env("RUSTIC_GIT_WORKER_CONCURRENCY", "4").parse().unwrap_or(4).clamp(1, 64);
+    let lanes: usize = env("KLOUDLITE_GIT_WORKER_CONCURRENCY", "4").parse().unwrap_or(4).clamp(1, 64);
     // Liveness for a process with no listener: every lane touches its OWN file at the top of each
     // iteration, and the Deployment's probe counts how many are fresh. One file per lane, not one
     // shared file: with a shared one a single live lane keeps the heartbeat young while the other
     // N-1 sit wedged, which is exactly the failure the probe exists to catch. A lane can be slow
     // (sixteen nudges at the client's 60s timeout is sixteen minutes) but not silent; the probe
     // window is wider than the slowest honest iteration, so it only fires for a truly stuck loop.
-    let cache = std::path::PathBuf::from(env("RUSTIC_GIT_CACHE_DIR", "./.local/cache"));
+    let cache = std::path::PathBuf::from(env("KLOUDLITE_GIT_CACHE_DIR", "./.local/cache"));
     let _ = std::fs::create_dir_all(&cache);
     tracing::info!(lanes, %upstream, "merge worker ready");
     // Checked once, here, rather than discovered per merge: without git this process still nudges
     // and still sweeps blobs, so it looks healthy while refusing every merge it is handed. Loud at
     // startup is the difference between "the image is wrong" and "merges mysteriously fail".
-    if !rustic_git_pulls::merge_worker::available() {
+    if !kloudlite_git_pulls::merge_worker::available() {
         tracing::error!(
             "merge worker: no `git` on PATH — every merge will be REFUSED. Install git in the \
              runtime image (bookworm's 2.39 is new enough); mergeability for diverged changes \
@@ -112,11 +112,11 @@ async fn run() -> Result<()> {
     // does not — the floor is the owning node's own periodic lane, which needs neither Redis nor
     // Mongo. What is lost without Redis is only speed: no nudges reach this worker, so every
     // change waits for that lane's drift ceiling instead of being looked at within seconds. Loud
-    // on purpose, so a missing `RUSTIC_GIT_REDIS_URL` shows up in logs rather than showing up as
+    // on purpose, so a missing `KLOUDLITE_GIT_REDIS_URL` shows up in logs rather than showing up as
     // "mergeability takes a minute to update now".
     if !store.cache.connected() {
         tracing::warn!(
-            "merge worker: no Redis (RUSTIC_GIT_REDIS_URL unset or unreachable) — no live stream \
+            "merge worker: no Redis (KLOUDLITE_GIT_REDIS_URL unset or unreachable) — no live stream \
              nudges; mergeability checks fall back to each owning node's own sweep and will be \
              much slower to notice changes"
         );
@@ -133,7 +133,7 @@ async fn run() -> Result<()> {
 
     // The blob sweep is unrelated work — it touches the object store directly, never a repo's
     // refs or packs — so it gets its own lane rather than competing with merge lanes for a slot.
-    let grace = rustic_git_registry::gc::BLOB_GRACE;
+    let grace = kloudlite_git_registry::gc::BLOB_GRACE;
     let gc_store = Arc::clone(&store);
     let gc_cache = cache.clone();
     let gc_central = central.clone();
@@ -188,7 +188,7 @@ async fn first_exit(tasks: Vec<tokio::task::JoinHandle<()>>) -> String {
 /// through four functions: the merge path needs all of them, and the next thing added would have
 /// to be added in four places.
 struct Worker {
-    store: Arc<rustic_git_storage::store::Store>,
+    store: Arc<kloudlite_git_storage::store::Store>,
     client: reqwest::Client,
     upstream: String,
     secret: String,
@@ -251,8 +251,8 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
 /// legacy `PullOpened`/`PullCommented` with `number: 0` must stay a (no-op) single-PR lookup,
 /// not fan out to the whole repo. Pulled out as a pure predicate so this can be unit-tested
 /// without a `Directory`/Mongo fixture.
-fn targets_whole_repo(e: &rustic_git_storage::events::Event) -> bool {
-    e.number == 0 && matches!(e.kind, rustic_git_storage::events::Kind::HeadMoved)
+fn targets_whole_repo(e: &kloudlite_git_storage::events::Event) -> bool {
+    e.number == 0 && matches!(e.kind, kloudlite_git_storage::events::Kind::HeadMoved)
 }
 
 /// Turn one delivered stream entry into work.
@@ -262,7 +262,7 @@ fn targets_whole_repo(e: &rustic_git_storage::events::Event) -> bool {
 /// owner never heard about is redone by its own periodic sweep. That floor, not this path, is
 /// what makes it safe for all of this to depend on Redis and on the fleet being reachable.
 async fn handle_event(w: &Worker, fields: &[(String, String)]) {
-    let Some(e) = rustic_git_storage::events::from_fields(fields) else { return };
+    let Some(e) = kloudlite_git_storage::events::from_fields(fields) else { return };
     let Some((owner, name)) = e.repo.split_once('/') else { return };
     let (owner, name) = (owner.to_string(), name.to_string());
     // One merge cache per repo, and one lane in it at a time: two lanes fetching and merging in
@@ -271,7 +271,7 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
     let lock = w.store.keyed_lock(&format!("merge/{owner}/{name}"));
     let _guard = lock.lock().await;
 
-    if matches!(e.kind, rustic_git_storage::events::Kind::MergeRequested) {
+    if matches!(e.kind, kloudlite_git_storage::events::Kind::MergeRequested) {
         merge_one(w, &owner, &name, e.number).await;
         return;
     }
@@ -283,7 +283,7 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
     // Kinds with no mergeability effect cost the owner one cheap no-op, so they are not filtered
     // here — `pulls::check` returns without writing when nothing moved, and a closed change is
     // skipped outright.
-    let deep: Vec<rustic_git_pulls::pulls::Deep> =
+    let deep: Vec<kloudlite_git_pulls::pulls::Deep> =
         match post(w, &owner, &name, number, "check", None).await {
             Ok(Some(v)) => v,
             Ok(None) => Vec::new(),
@@ -311,7 +311,7 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
         let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
         let (o, n) = (owner.clone(), name.clone());
         let synced = tokio::task::spawn_blocking(move || {
-            rustic_git_pulls::merge_worker::sync_branches(&cache, &upstream, &secret, &o, &n, &branches)
+            kloudlite_git_pulls::merge_worker::sync_branches(&cache, &upstream, &secret, &o, &n, &branches)
         })
         .await;
         if let Ok(Err(why)) = &synced {
@@ -339,10 +339,10 @@ async fn post<T: serde::de::DeserializeOwned>(
     let mut req = w
         .client
         .post(url)
-        .header(rustic_git_core::peer::PEER_HEADER, &w.secret)
+        .header(kloudlite_git_core::peer::PEER_HEADER, &w.secret)
         // The identity the owner authorizes these routes as. The repo's owner, because that is
         // whose repo the worker is acting on — see `browse_api::pulls::as_owner`.
-        .header(rustic_git_core::peer::OWNER_HEADER, owner);
+        .header(kloudlite_git_core::peer::OWNER_HEADER, owner);
     if let Some(b) = body {
         req = req.json(&b);
     }
@@ -364,7 +364,7 @@ async fn post<T: serde::de::DeserializeOwned>(
 /// ends the job: if this process dies between the merge and the report, the merge itself was a
 /// push (idempotent, and already landed or not) and the lease brings the job back.
 async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
-    let claimed = post::<rustic_git_pulls::merge_worker::Job>(
+    let claimed = post::<kloudlite_git_pulls::merge_worker::Job>(
         w,
         owner,
         name,
@@ -382,7 +382,7 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
     let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
     let started = std::time::Instant::now();
     let done = tokio::task::spawn_blocking(move || {
-        rustic_git_pulls::merge_worker::run(&job, &cache, &upstream, &secret)
+        kloudlite_git_pulls::merge_worker::run(&job, &cache, &upstream, &secret)
     })
     .await;
     metrics::histogram!("merge_duration_seconds").record(started.elapsed().as_secs_f64());
@@ -417,8 +417,8 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
 
 /// The trial merge for one diverged change, and the verdict sent back. Purely local: the caller
 /// has already fetched every branch of the fan-out in one go.
-async fn check_one(w: &Worker, owner: &str, name: &str, d: &rustic_git_pulls::pulls::Deep) {
-    let job = rustic_git_pulls::merge_worker::Job {
+async fn check_one(w: &Worker, owner: &str, name: &str, d: &kloudlite_git_pulls::pulls::Deep) {
+    let job = kloudlite_git_pulls::merge_worker::Job {
         owner: owner.to_string(),
         name: name.to_string(),
         number: d.number,
@@ -430,7 +430,7 @@ async fn check_one(w: &Worker, owner: &str, name: &str, d: &rustic_git_pulls::pu
     };
     let cache = w.cache.clone();
     let verdict =
-        tokio::task::spawn_blocking(move || rustic_git_pulls::merge_worker::check_local(&job, &cache))
+        tokio::task::spawn_blocking(move || kloudlite_git_pulls::merge_worker::check_local(&job, &cache))
             .await;
     let verdict = match verdict {
         Ok(Ok(v)) => v,
@@ -476,7 +476,7 @@ const GC_OWNER_GAP: std::time::Duration = std::time::Duration::from_secs(5);
 /// were all deleted but whose manifests remain, and one whose image database exists with nothing
 /// pushed yet — both still need their listing markers reconciled. A prefix that fails to list is
 /// logged and skipped: the others still get their turn.
-async fn image_owners(store: &rustic_git_storage::store::Store) -> std::collections::BTreeSet<String> {
+async fn image_owners(store: &kloudlite_git_storage::store::Store) -> std::collections::BTreeSet<String> {
     let mut owners = std::collections::BTreeSet::new();
     for prefix in ["blobs/", "manifests/", "repo/img/"] {
         owners.extend(owners_under(store, prefix).await);
@@ -486,8 +486,8 @@ async fn image_owners(store: &rustic_git_storage::store::Store) -> std::collecti
 
 /// The owner names directly under one prefix. A prefix that fails to list warns and yields none:
 /// the sweep is keep-biased, so a missing owner costs this pass and nothing more.
-async fn owners_under(store: &rustic_git_storage::store::Store, prefix: &str) -> Vec<String> {
-    match rustic_git_registry::list_dir_names(&store.os, prefix).await {
+async fn owners_under(store: &kloudlite_git_storage::store::Store, prefix: &str) -> Vec<String> {
+    match kloudlite_git_registry::list_dir_names(&store.os, prefix).await {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(%prefix, error = %e, "gc: listing prefix");
@@ -507,13 +507,13 @@ const CACHE_KEEP: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 
 /// The byte budget the merge caches are pruned to, least recently used first, whatever their age.
 /// 60 % of the 20 Gi emptyDir in the deploy yaml, leaving room for the worktree a rebase checks
 /// out beside the caches.
-const RUSTIC_GIT_MERGE_CACHE_BYTES: u64 = 12 << 30;
+const KLOUDLITE_GIT_MERGE_CACHE_BYTES: u64 = 12 << 30;
 
 async fn gc_lane(
-    store: &rustic_git_storage::store::Store,
+    store: &kloudlite_git_storage::store::Store,
     grace: std::time::Duration,
     cache: &std::path::Path,
-    central: rustic_git_core::settings::LiveSettings<rustic_git_core::settings::CentralSettings>,
+    central: kloudlite_git_core::settings::LiveSettings<kloudlite_git_core::settings::CentralSettings>,
 ) {
     loop {
         // Read at the top of the iteration, not captured once at spawn — an admin-lowered
@@ -523,7 +523,7 @@ async fn gc_lane(
         let gc_pass_gap =
             std::time::Duration::from_secs(central.load().gc_interval_secs);
         // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
-        match rustic_git_pulls::merge_worker::prune(cache, CACHE_KEEP, RUSTIC_GIT_MERGE_CACHE_BYTES) {
+        match kloudlite_git_pulls::merge_worker::prune(cache, CACHE_KEEP, KLOUDLITE_GIT_MERGE_CACHE_BYTES) {
             0 => {}
             n => tracing::info!(dropped = n, "gc: dropped idle merge cache(s)"),
         }
@@ -541,12 +541,12 @@ async fn gc_lane(
             continue;
         }
         for owner in &owners {
-            match rustic_git_registry::gc::sweep_owner(store, owner, grace).await {
+            match kloudlite_git_registry::gc::sweep_owner(store, owner, grace).await {
                 Ok(n) if n > 0 => tracing::info!(%owner, blobs = n, "gc: swept blob(s) for owner"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(%owner, error = %e, "gc: sweeping owner"),
             }
-            match rustic_git_registry::gc::reconcile_owner(store, owner).await {
+            match kloudlite_git_registry::gc::reconcile_owner(store, owner).await {
                 Ok(n) if n > 0 => tracing::info!(%owner, markers = n, "gc: reconciled listing marker(s) for owner"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(%owner, error = %e, "gc: reconciling markers for owner"),
@@ -554,7 +554,7 @@ async fn gc_lane(
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
         for owner in repo_owners.iter().filter(|o| o.as_str() != "img") {
-            match rustic_git_registry::gc::reconcile_repo_owner(store, owner).await {
+            match kloudlite_git_registry::gc::reconcile_repo_owner(store, owner).await {
                 Ok(n) if n > 0 => tracing::info!(%owner, markers = n, "gc: reconciled repo listing marker(s) for owner"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(%owner, error = %e, "gc: reconciling repo markers for owner"),
@@ -576,7 +576,7 @@ async fn gc_lane(
 #[cfg(test)]
 mod targets_whole_repo_tests {
     use super::targets_whole_repo;
-    use rustic_git_storage::events::{Event, Kind};
+    use kloudlite_git_storage::events::{Event, Kind};
 
     fn event(kind: Kind, number: i64) -> Event {
         Event {
@@ -646,7 +646,7 @@ mod image_owners_tests {
     #[tokio::test]
     async fn owners_are_the_union_of_blobs_manifests_and_image_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = rustic_git_storage::store::Store::open(Arc::new(InMemory::new()), tmp.path().join("cache"), false)
+        let store = kloudlite_git_storage::store::Store::open(Arc::new(InMemory::new()), tmp.path().join("cache"), false)
             .await
             .unwrap();
         for p in ["blobs/alpha/sha256/aa", "manifests/beta/nginx/sha256/bb", "repo/img/gamma/nginx/manifest/0.sst"] {

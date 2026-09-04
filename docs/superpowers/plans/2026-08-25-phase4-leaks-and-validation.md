@@ -114,7 +114,7 @@ stage sweep's crash-window tolerance).
       no `/tmp/wssquash-*` directory the squash created survives.
 - [ ] **Step 2:** Run it and watch it fail (on a non-btrfs box it self-skips — say so in the
       commit body and rely on the unit tests in Step 5):
-      `cargo test -p rustic-git-workspaces --test engine_ops squash_deletes_its_build_image`
+      `cargo test -p kloudlite-git-workspaces --test engine_ops squash_deletes_its_build_image`
 - [ ] **Step 3:** In `ops.rs`, make the throwaway mount unconditional-cleanup and delete the
       image after upload:
 
@@ -140,13 +140,13 @@ stage sweep's crash-window tolerance).
 
       and replace every `self.pool.root.join("img")` with `self.pool.img_dir()`.
 - [ ] **Step 4:** Run it green:
-      `cargo test -p rustic-git-workspaces --test engine_ops squash_deletes_its_build_image`
+      `cargo test -p kloudlite-git-workspaces --test engine_ops squash_deletes_its_build_image`
 - [ ] **Step 5:** Add a failing unit test in `bins/agent/src/lib.rs`'s `janitor_tests` —
       `sweeps_old_unattached_images_keeps_young_ones`: write two files into `pool.img_dir()`,
       backdate one past the age floor with `filetime`-free means (create it, then call the
       sweep with `min_age = Duration::ZERO` for the "old" case and a large `min_age` for the
       "young" case), and assert the sweep's return count and which files survive.
-      Run: `cargo test -p rustic-git-agent-bin janitor_tests::sweeps_old_unattached_images` (fails).
+      Run: `cargo test -p kloudlite-git-agent-bin janitor_tests::sweeps_old_unattached_images` (fails).
 - [ ] **Step 6:** Implement the sweep in `bins/agent/src/lib.rs` and call it from
       `spawn_janitor`'s tick beside `janitor_sweep_stage`:
 
@@ -191,7 +191,7 @@ fn janitor_sweep_images(engine: &Engine, min_age: std::time::Duration) -> usize 
 
       In `spawn_janitor`: `let images = janitor_sweep_images(&engine, std::time::Duration::from_secs(3600));`
       and fold `images` into the existing summary eprintln.
-- [ ] **Step 7:** Run green: `cargo test -p rustic-git-agent-bin janitor_tests` and
+- [ ] **Step 7:** Run green: `cargo test -p kloudlite-git-agent-bin janitor_tests` and
       `cargo clippy --workspace -- -D warnings`
 - [ ] **Step 8:** Commit:
       `git add -A && git commit -m "Delete the squash build image and sweep stray block images"`
@@ -228,7 +228,7 @@ fn squash_latch_stale_after() -> std::time::Duration;
       `stale_latch_does_not_block_forever` — build an `Engine` over a `tempfile::tempdir()`
       pool, write the latch file, assert `engine.latch_is_stale(id)` is false immediately and
       true when `WSSNAP_SQUASH_LATCH_SECS=0`.
-- [ ] **Step 2:** Run it fail: `cargo test -p rustic-git-workspaces latch_tests`
+- [ ] **Step 2:** Run it fail: `cargo test -p kloudlite-git-workspaces latch_tests`
 - [ ] **Step 3:** Implement in `ops.rs`:
 
 ```rust
@@ -258,13 +258,13 @@ fn squash_latch_stale_after() -> std::time::Duration;
       and in `upload_core` replace the `if latch.exists()` branch with
       `if latch.exists() && !self.latch_is_stale(id) { … } else { … }`, using
       `let latch = self.squash_latch(id);`. Change `Engine::squash` to use `self.squash_latch(&ws.id)`.
-- [ ] **Step 4:** Run green: `cargo test -p rustic-git-workspaces latch_tests`
+- [ ] **Step 4:** Run green: `cargo test -p kloudlite-git-workspaces latch_tests`
 - [ ] **Step 5:** Fix the root cause in `bins/agent/src/main.rs`'s `squash`: clear the latch on
       every exit path, including the ones that never reach `Engine::squash`:
 
 ```rust
 async fn squash(ws_id: Option<&String>) -> Result<(), String> {
-    let ws_id = ws_id.ok_or("usage: rustic-git-agent squash <ws-id>")?;
+    let ws_id = ws_id.ok_or("usage: kloudlite-git-agent squash <ws-id>")?;
     let cfg = Config::from_env();
     // Every early return below happens BEFORE `Engine::squash` (which owns clearing the latch
     // itself), so a missing owner breadcrumb or a deleted workspace doc used to leave the latch
@@ -279,7 +279,7 @@ async fn squash(ws_id: Option<&String>) -> Result<(), String> {
 ```
 
       with the existing body moved verbatim into `squash_inner(cfg: &Config, ws_id: &str)`.
-- [ ] **Step 6:** Run: `cargo test -p rustic-git-agent-bin && cargo clippy --workspace -- -D warnings`
+- [ ] **Step 6:** Run: `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace -- -D warnings`
 - [ ] **Step 7:** Commit:
       `git add -A && git commit -m "Clear the squash latch on every failure path and expire a stale one"`
 
@@ -306,7 +306,7 @@ fn forget_agent_id(pool: &str);
       (`re_registers_after_work_404`): seed `{pool}/agent-id` with `agent-gone`, run the loop
       against the in-process work surface, and assert that within a few seconds a *new*
       `AgentDoc` exists in the `MemStore` and `{pool}/agent-id` holds that new id.
-- [ ] **Step 2:** Run it fail: `cargo test -p rustic-git-agent-bin --test loop re_registers_after_work_404`
+- [ ] **Step 2:** Run it fail: `cargo test -p kloudlite-git-agent-bin --test loop re_registers_after_work_404`
 - [ ] **Step 3:** Implement in `bins/agent/src/lib.rs`:
 
 ```rust
@@ -335,7 +335,7 @@ fn forget_agent_id(pool: &str) {
             continue;
         }
 ```
-- [ ] **Step 4:** Run green: `cargo test -p rustic-git-agent-bin --test loop`
+- [ ] **Step 4:** Run green: `cargo test -p kloudlite-git-agent-bin --test loop`
 - [ ] **Step 5:** Commit:
       `git add -A && git commit -m "Re-register the agent when the work poll reports an unknown id"`
 
@@ -357,7 +357,7 @@ async fn known_region(s: &ApiState, id: &str) -> Result<(), Response>;
       `create_ws_rejects_bad_name` (empty, 200 chars, `"a\u{7}b"` → 400 each), and the same two
       for `POST /v1/environments`.
 - [ ] **Step 2:** Run them fail:
-      `cargo test -p rustic-git-workspaces --test api_user rejects_`
+      `cargo test -p kloudlite-git-workspaces --test api_user rejects_`
 - [ ] **Step 3:** Implement in `api.rs`:
 
 ```rust
@@ -395,7 +395,7 @@ async fn known_region(s: &ApiState, id: &str) -> Result<(), Response> {
 
       and validate `body.name` the same way in `clone_ws`, `clone_env` and `restore_ws` (they
       all mint a doc from a user-supplied name too).
-- [ ] **Step 4:** Run green: `cargo test -p rustic-git-workspaces --test api_user`
+- [ ] **Step 4:** Run green: `cargo test -p kloudlite-git-workspaces --test api_user`
       (existing tests seed a region doc via `put_region`; any that don't must be updated to —
       that update is the documented migration for this behavior change.)
 - [ ] **Step 5:** Commit:
@@ -422,7 +422,7 @@ the API docs — what would bring it back is a per-workspace filesystem that can
 ```rust
 // bins/agent/src/lib.rs
 /// Applies `w.quota_gb` as a btrfs qgroup limit on `{pool}/vol/{id}/live`. Idempotent.
-fn enforce_quota(engine: &Engine, w: &rustic_git_workspaces::model::Workspace);
+fn enforce_quota(engine: &Engine, w: &kloudlite_git_workspaces::model::Workspace);
 ```
 
 - [ ] **Step 1:** Add a failing btrfs-gated test to `crates/workspaces/tests/engine_ops.rs`
@@ -430,7 +430,7 @@ fn enforce_quota(engine: &Engine, w: &rustic_git_workspaces::model::Workspace);
       apply a 1 GiB limit through the same code path, and assert `btrfs qgroup show -re {live}`
       output contains `1.00GiB`.
 - [ ] **Step 2:** Run it fail:
-      `cargo test -p rustic-git-workspaces --test engine_ops quota_limit_is_visible`
+      `cargo test -p kloudlite-git-workspaces --test engine_ops quota_limit_is_visible`
 - [ ] **Step 3:** Add the applier to `ops.rs` next to `create_subvol` (the engine already owns
       every other `btrfs` call, and both the agent and the tests need it):
 
@@ -453,7 +453,7 @@ fn enforce_quota(engine: &Engine, w: &rustic_git_workspaces::model::Workspace);
     }
 ```
 - [ ] **Step 4:** Run green:
-      `cargo test -p rustic-git-workspaces --test engine_ops quota_limit_is_visible`
+      `cargo test -p kloudlite-git-workspaces --test engine_ops quota_limit_is_visible`
 - [ ] **Step 5:** Call it from `bins/agent/src/lib.rs` in the `WsCreate`, `WsClone` (workspace
       arm) and `WsRestore` arms, right after the live subvolume exists and before
       `container::start`:
@@ -466,7 +466,7 @@ fn enforce_quota(engine: &Engine, w: &rustic_git_workspaces::model::Workspace);
                 eprintln!("agent: quota {}: {e}", w.id); // ponytail: eprintln
             }
 ```
-- [ ] **Step 6:** Run: `cargo test -p rustic-git-agent-bin && cargo clippy --workspace -- -D warnings`
+- [ ] **Step 6:** Run: `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace -- -D warnings`
 - [ ] **Step 7:** Commit:
       `git add -A && git commit -m "Enforce quota_gb as a btrfs qgroup limit on the live subvolume"`
 
@@ -488,7 +488,7 @@ fn live_env(e: &Environment) -> Result<(), Response>;
       and `push_start_stop_clone_on_a_deleted_ws_conflict` (each route → 409, no new job), plus
       the environment mirrors (`delete_env`, `start_env`, `stop_env`, `push_env`, `clone_env`).
 - [ ] **Step 2:** Run them fail:
-      `cargo test -p rustic-git-workspaces --test api_user deleted`
+      `cargo test -p kloudlite-git-workspaces --test api_user deleted`
 - [ ] **Step 3:** Implement in `api.rs`:
 
 ```rust
@@ -513,7 +513,7 @@ fn live_env(e: &Environment) -> Result<(), Response> {
       and add `live_ws(&w)?;` / `live_env(&e)?;` immediately after the `get_ws`/`find_env` in
       `delete_ws`, `start_ws`, `stop_ws`, `push_ws`, `clone_ws` (guard the SOURCE), `restore_ws`
       (guard the source), `delete_env`, `start_env`, `stop_env`, `push_env`, `clone_env`.
-- [ ] **Step 4:** Run green: `cargo test -p rustic-git-workspaces --test api_user`
+- [ ] **Step 4:** Run green: `cargo test -p kloudlite-git-workspaces --test api_user`
 - [ ] **Step 5:** Commit:
       `git add -A && git commit -m "Refuse workspace and environment mutations on deleted docs"`
 
@@ -541,7 +541,7 @@ async fn owns_volume(s: &ApiState, caller: &str, name: &str) -> Result<String, R
       putting the caller in `team-a`, then `GET /v1/volumes/env-1/history` and assert the
       records come back (and `/refs` reports the tip) rather than `[]`.
 - [ ] **Step 2:** Run it fail:
-      `cargo test -p rustic-git-workspaces --test api_volumes team_env_history`
+      `cargo test -p kloudlite-git-workspaces --test api_volumes team_env_history`
 - [ ] **Step 3:** Implement — change the three `return Ok(())` sites to return the namespace and
       thread it through both handlers:
 
@@ -569,7 +569,7 @@ async fn owns_volume(s: &ApiState, caller: &str, name: &str) -> Result<String, R
 
       In `volume_history` and `volume_refs`:
       `let ns = owns_volume(&s, &owner, &name).await?;` then `reg.get_history(&ns, &name)`.
-- [ ] **Step 4:** Run green: `cargo test -p rustic-git-workspaces --test api_volumes`
+- [ ] **Step 4:** Run green: `cargo test -p kloudlite-git-workspaces --test api_volumes`
 - [ ] **Step 5:** Commit:
       `git add -A && git commit -m "Read volume history from the volume's owning namespace"`
 
@@ -601,7 +601,7 @@ struct PageQuery { #[serde(default)] limit: Option<usize>, #[serde(default)] aft
 - [ ] **Step 1:** Add a failing unit test in `model.rs`:
       `terminal_job_serializes_a_ttl_and_a_live_one_does_not` — assert `serde_json::to_value` of
       a `Job` with `ttl: None` has no `"ttl"` key, and one with `ttl: Some(604800)` has it.
-      Run: `cargo test -p rustic-git-workspaces terminal_job_serializes` (fails to compile — the
+      Run: `cargo test -p kloudlite-git-workspaces terminal_job_serializes` (fails to compile — the
       field does not exist).
 - [ ] **Step 2:** Add the field to `Job` with the WHY comment:
 
@@ -615,7 +615,7 @@ struct PageQuery { #[serde(default)] limit: Option<usize>, #[serde(default)] aft
 ```
 
       Fix every `Job { … }` literal in the crate, its tests and `bins/*` (add `ttl: None`).
-- [ ] **Step 3:** Run green: `cargo test -p rustic-git-workspaces terminal_job_serializes`
+- [ ] **Step 3:** Run green: `cargo test -p kloudlite-git-workspaces terminal_job_serializes`
 - [ ] **Step 4:** Give the `jobs` container a `default_ttl` in `cosmos.rs` — per-item `ttl` is
       ignored unless the container has TTL enabled, and `ContainerProperties::default_ttl` is
       `Option<Duration>` (no `-1` representation in this SDK), so a long container default plus
@@ -668,7 +668,7 @@ const TERMINAL_JOB_TTL_SECS: i64 = 7 * 24 * 3600;
 - [ ] **Step 8:** Add a failing test in `store.rs`'s `mod tests`:
       `queued_jobs_respects_the_limit` — create 5 queued jobs, assert
       `store.queued_jobs("r", 2).await.unwrap().len() == 2`.
-      Run: `cargo test -p rustic-git-workspaces queued_jobs_respects_the_limit`
+      Run: `cargo test -p kloudlite-git-workspaces queued_jobs_respects_the_limit`
 - [ ] **Step 9:** Add the `limit` parameter to the trait and both impls:
 
 ```rust
@@ -686,7 +686,7 @@ const TERMINAL_JOB_TTL_SECS: i64 = 7 * 24 * 3600;
       // ORDER BY c._ts (and the matching composite index) if queue fairness ever matters.`
 - [ ] **Step 10:** Update the two callers: `vol_agent.rs`'s `work` → `queued_jobs(&region.id, 32)`,
       `lease.rs`'s re-placement pass → `queued_jobs(region, 256)`, plus the test call sites.
-- [ ] **Step 11:** Run green: `cargo test -p rustic-git-workspaces && cargo test -p rustic-git-server`
+- [ ] **Step 11:** Run green: `cargo test -p kloudlite-git-workspaces && cargo test -p kloudlite-git-server`
 - [ ] **Step 12:** Commit:
       `git add -A && git commit -m "Bound the queued-jobs read with a TOP N query"`
 
@@ -697,7 +697,7 @@ const TERMINAL_JOB_TTL_SECS: i64 = 7 * 24 * 3600;
       a `next` cursor, and `?limit=2&after={next}` returns the following 2 with the newest-first
       order preserved; `history_without_limit_is_unchanged` freezes the existing plain-array
       response for current callers.
-      Run: `cargo test -p rustic-git-workspaces --test api_volumes history_limit`
+      Run: `cargo test -p kloudlite-git-workspaces --test api_volumes history_limit`
 - [ ] **Step 14:** Implement in `api.rs`. Keeping the un-paginated response a bare array is what
       makes this additive — the paginated shape only appears when `?limit=` is passed:
 
@@ -751,7 +751,7 @@ fn page<T, K: Fn(&T) -> String>(items: Vec<T>, q: &PageQuery, key: K) -> (Vec<T>
       `// ponytail: the page is sliced after the full store read — it bounds the RESPONSE, not
       // the Cosmos scan. Push `after`/`TOP` into the query when a single owner's list is big
       // enough to matter.`
-- [ ] **Step 15:** Run green: `cargo test -p rustic-git-workspaces --test api_volumes && cargo test -p rustic-git-workspaces --test api_user`
+- [ ] **Step 15:** Run green: `cargo test -p kloudlite-git-workspaces --test api_volumes && cargo test -p kloudlite-git-workspaces --test api_user`
 - [ ] **Step 16:** Commit:
       `git add -A && git commit -m "Add opt-in pagination to volume history and the list routes"`
 
@@ -774,7 +774,7 @@ commit.
       `/dev/loop0 /mnt/pool/vol/ws\040one btrfs rw 0 0` and assert it matches
       `/mnt/pool/vol/ws one`.
 - [ ] **Step 2:** Run them fail:
-      `cargo test -p rustic-git-workspaces parse_survives_a_truncated_line mountpoint_matches`
+      `cargo test -p kloudlite-git-workspaces parse_survives_a_truncated_line mountpoint_matches`
 - [ ] **Step 3:** Implement. `model.rs`:
 
 ```rust
@@ -890,7 +890,7 @@ fn uuid() -> Result<String, EngErr> {
 - [ ] **Step 4:** Run green and check every `LineageEntry::parse` caller compiles against the
       new `Option` (the `pool.rs` reader is the only production one; `migrate_tests` and the
       agent's `janitor_tests` construct entries directly):
-      `cargo test -p rustic-git-workspaces && cargo test -p rustic-git-agent-bin && cargo clippy --workspace -- -D warnings`
+      `cargo test -p kloudlite-git-workspaces && cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace -- -D warnings`
 - [ ] **Step 5:** Commit:
       `git add -A && git commit -m "Harden lineage parsing, uuid reads, mount matching and block-stream decoding"`
 

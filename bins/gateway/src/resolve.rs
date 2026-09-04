@@ -8,7 +8,7 @@
 use axum::http::StatusCode;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use rustic_git_workspaces::crd::{Phase, Workspace};
+use kloudlite_git_workspaces::crd::{Phase, Workspace};
 use std::net::SocketAddr;
 
 /// The pod's sshd address, and the owner the tunnel is charged to.

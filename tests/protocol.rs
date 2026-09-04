@@ -1,8 +1,8 @@
 mod common;
-use rustic_git_core::pktline;
-use rustic_git_git::gc::RepackExt;
-use rustic_git_gitbase::refs::UpdateRefsExt;
-use rustic_git_git::protocol::{receive, upload};
+use kloudlite_git_core::pktline;
+use kloudlite_git_git::gc::RepackExt;
+use kloudlite_git_gitbase::refs::UpdateRefsExt;
+use kloudlite_git_git::protocol::{receive, upload};
 use std::io::{Cursor, Write};
 
 /// A ref name that isn't valid UTF-8 must be rejected outright, not silently rewritten
@@ -623,7 +623,7 @@ async fn head_falls_back_to_existing_branch() {
     s.create_repo("a", "r").await.unwrap();
     let repo = s.open_repo("a", "r").await.unwrap().unwrap();
     let oid = gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
-    let ls_refs = |s: std::sync::Arc<rustic_git_storage::store::Store>| async move {
+    let ls_refs = |s: std::sync::Arc<kloudlite_git_storage::store::Store>| async move {
         let repo = s.open_repo("a", "r").await.unwrap().unwrap();
         let mut req = Vec::new();
         pktline::write_text(&mut req, "command=ls-refs").unwrap();
@@ -654,7 +654,7 @@ async fn head_falls_back_to_existing_branch() {
     // only master exists: HEAD -> master
     s.update_refs(
         &repo,
-        &[rustic_git_gitbase::refs::RefUpdate {
+        &[kloudlite_git_gitbase::refs::RefUpdate {
             name: "refs/heads/master".into(),
             old: None,
             new: Some(oid),
@@ -668,7 +668,7 @@ async fn head_falls_back_to_existing_branch() {
     // main appears: HEAD -> main again
     s.update_refs(
         &repo,
-        &[rustic_git_gitbase::refs::RefUpdate {
+        &[kloudlite_git_gitbase::refs::RefUpdate {
             name: "refs/heads/main".into(),
             old: None,
             new: Some(oid),
@@ -992,7 +992,7 @@ async fn protection_rejected_push_leaves_no_pack_in_store() {
     s.set_protection(
         "a",
         "r",
-        &rustic_git_gitbase::refs::Protection {
+        &kloudlite_git_gitbase::refs::Protection {
             pattern: "main".into(),
             no_force: true,
             no_delete: true,
@@ -1211,7 +1211,7 @@ async fn cannot_claim_sibling_object_as_tip() {
         .unwrap();
     s.update_refs(
         &fork,
-        &[rustic_git_gitbase::refs::RefUpdate {
+        &[kloudlite_git_gitbase::refs::RefUpdate {
             name: "refs/heads/main".into(),
             old: Some(victim_oid),
             new: None,
@@ -1453,7 +1453,7 @@ async fn an_object_no_ref_reaches_is_refused() {
     let oid = s.get_ref(&src, "refs/heads/main").await.unwrap().unwrap();
     s.update_refs(
         &fork,
-        &[rustic_git_gitbase::refs::RefUpdate {
+        &[kloudlite_git_gitbase::refs::RefUpdate {
             name: "refs/heads/main".into(),
             old: Some(oid),
             new: None,
@@ -1512,15 +1512,15 @@ async fn squash_and_merge_commit_land_the_right_shape() {
         let odb = repo.odb().unwrap();
         let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
         // Two commits back is the "base" the branch left.
-        let log = rustic_git_git::browse::log(&odb, head, 3).unwrap();
+        let log = kloudlite_git_git::browse::log(&odb, head, 3).unwrap();
         let base: gix_hash::ObjectId = log[2].oid.parse().unwrap();
 
         let mut buf = Vec::new();
         let head_tree = gix_object::FindExt::find_commit(&odb, &head, &mut buf).unwrap().tree();
-        let landed = rustic_git_gitbase::objects::write_commit(
+        let landed = kloudlite_git_gitbase::objects::write_commit(
             &s,
             &repo,
-            rustic_git_gitbase::objects::NewCommit {
+            kloudlite_git_gitbase::objects::NewCommit {
                 tree: head_tree,
                 parents: if strategy == "squash" { vec![base] } else { vec![base, head] },
                 message: format!("{strategy} landing\n"),
@@ -1546,7 +1546,7 @@ async fn squash_and_merge_commit_land_the_right_shape() {
 
         // And it is a real commit as far as everything else is concerned.
         let moved = s
-            .update_refs(&repo2, &[rustic_git_gitbase::refs::RefUpdate {
+            .update_refs(&repo2, &[kloudlite_git_gitbase::refs::RefUpdate {
                 name: "refs/heads/master".into(),
                 old: Some(head),
                 new: Some(landed),
@@ -1572,8 +1572,8 @@ async fn squash_and_merge_commit_land_the_right_shape() {
 
 /// Drive `upload::serve` with one fetch command and return the raw pack bytes it streamed.
 fn fetch_pack_bytes(
-    s: &std::sync::Arc<rustic_git_storage::store::Store>,
-    repo: &rustic_git_storage::store::Repo,
+    s: &std::sync::Arc<kloudlite_git_storage::store::Store>,
+    repo: &kloudlite_git_storage::store::Repo,
     lines: &[String],
 ) -> Vec<u8> {
     let mut req = Vec::new();

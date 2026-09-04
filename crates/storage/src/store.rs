@@ -93,7 +93,7 @@ pub struct Store {
     /// Whether the object store answered recently. Sampled by a background task; read by /healthz.
     pub healthy: std::sync::atomic::AtomicBool,
     /// The shared response cache, so the write paths can invalidate what they invalidate.
-    /// Disabled unless a caller replaces it (main.rs does, from `RUSTIC_GIT_REDIS_URL`), which
+    /// Disabled unless a caller replaces it (main.rs does, from `KLOUDLITE_GIT_REDIS_URL`), which
     /// keeps every other caller — tests included — free of a handle they do not need.
     pub cache: Arc<crate::cache::Cache>,
     /// Per-key async locks for read-modify-write sequences that a single node can still run

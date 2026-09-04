@@ -20,7 +20,7 @@
 - `OwnerBindingSpec.node_name` and `home_quota_gb` stay in the schema (existing objects must parse) but nothing may read them after Task 7.
 - Every task: `cargo test --workspace --locked` green and `cargo clippy --workspace -- -D warnings` clean before its commit. btrfs-gated engine tests only count from a build-0 run (`rsync` → `cargo test --no-run` → `sudo <binary>`).
 - Commit subjects: imperative sentence case, no tool attribution.
-- CRD schema changes regenerate `deploy/k3s/crds.yaml` via `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`.
+- CRD schema changes regenerate `deploy/k3s/crds.yaml` via `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`.
 
 ---
 
@@ -36,12 +36,12 @@
 - Produces: `Cfg.homes_export: Option<String>` (NFS `host:/path`), mount at `{pool}/homes`; `pub fn homes_root(pool: &str) -> PathBuf` returning `{pool}/homes`.
 - Later tasks rely on: `{pool}/homes/{owner}` existing as a path convention (Task 3 creates per-owner dirs).
 
-- [ ] **Step 1: Write `deploy/k3s/zerofs.yaml`** — Deployment (1 replica, `rustic-git-system` namespace, image pinned to an exact ZeroFS release tag — resolve the current release at implementation time from https://github.com/Barre/ZeroFS and pin it; never `latest`), a ClusterIP Service `zerofs` exposing NFS port 2049, env from a new Secret `zerofs-store` (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_ENDPOINT_URL` for the region's Azure blob via its S3-compatible gateway, or Azurite-style credentials — match what the region's blob account offers), `SLATEDB_PREFIX=homes`, resource requests `cpu: 500m, memory: 1Gi`. Header comment: single replica ON PURPOSE — SlateDB is single-writer (writer-epoch fencing, same invariant as the repo databases); a second replica fences the first. Availability ruling from the spec: a down ZeroFS hangs `/home/kl` region-wide until reschedule; accepted.
+- [ ] **Step 1: Write `deploy/k3s/zerofs.yaml`** — Deployment (1 replica, `kloudlite-git-system` namespace, image pinned to an exact ZeroFS release tag — resolve the current release at implementation time from https://github.com/Barre/ZeroFS and pin it; never `latest`), a ClusterIP Service `zerofs` exposing NFS port 2049, env from a new Secret `zerofs-store` (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_ENDPOINT_URL` for the region's Azure blob via its S3-compatible gateway, or Azurite-style credentials — match what the region's blob account offers), `SLATEDB_PREFIX=homes`, resource requests `cpu: 500m, memory: 1Gi`. Header comment: single replica ON PURPOSE — SlateDB is single-writer (writer-epoch fencing, same invariant as the repo databases); a second replica fences the first. Availability ruling from the spec: a down ZeroFS hangs `/home/kl` region-wide until reschedule; accepted.
 - [ ] **Step 2: Add `homes_export` to `Cfg`** in `bins/agent/src/lib.rs`:
 
 ```rust
 // In Cfg:
-/// `WS_HOMES_EXPORT`, e.g. `zerofs.rustic-git-system.svc:/` — the region's shared-home NFS
+/// `WS_HOMES_EXPORT`, e.g. `zerofs.kloudlite-git-system.svc:/` — the region's shared-home NFS
 /// export. Unset means no shared home on this node: workspace reconciles that need it park on
 /// HomeNotReady (fail closed, same shape as WS_PEER_SECRET gating the peer listener).
 pub homes_export: Option<String>,
@@ -88,7 +88,7 @@ fn already_mounted_matches_the_target_column_exactly() {
 }
 ```
 
-- [ ] **Step 5: Add `WS_HOMES_EXPORT` env** to `deploy/k3s/agent-daemonset.yaml` (value `zerofs.rustic-git-system.svc:/`), with a comment pointing at zerofs.yaml. Do NOT apply to the cluster in this task.
+- [ ] **Step 5: Add `WS_HOMES_EXPORT` env** to `deploy/k3s/agent-daemonset.yaml` (value `zerofs.kloudlite-git-system.svc:/`), with a comment pointing at zerofs.yaml. Do NOT apply to the cluster in this task.
 - [ ] **Step 6: Run `cargo test --workspace --locked` and clippy; commit** `Add the region ZeroFS deployment and the agent's homes mount`.
 
 ### Task 2: Pod layout — shared home, local cache, env redirection
@@ -137,7 +137,7 @@ fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail** — `cargo test -p rustic-git-workspaces the_home_is_the_shared` — FAIL (old paths / missing vars).
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p kloudlite-git-workspaces the_home_is_the_shared` — FAIL (old paths / missing vars).
 - [ ] **Step 3: Implement.** `home_volume(pool, owner)` → `host_dir("home", format!("{pool}/homes/{owner}"))`; delete the `home_volume_name`-based call at k8s.rs:886 and pass `&spec.owner`. Add `homecache_volume` and the four subPath mounts (subPaths `cache`, `vscode-server`, `cursor-server`, `state` — subPath so ONE volume serves all four and the janitor deletes one subvolume). Extend `login_env` with the vars above plus `HISTFILE`. Keep `ZDOTDIR` unchanged (configs stay shared; only history moves via `HISTFILE`). Apply the same mounts to the environment pod builder ONLY if it mounts a home today — it does not; touch nothing there.
 - [ ] **Step 4: Run the tests — PASS. Fix any sibling tests still asserting the old `vol/home-{owner}/live/...` path (`a_workspace_pods_host_paths_match_the_agents_layout` and the two at 1829/1873).**
 - [ ] **Step 5: Commit** `Mount the shared home and a local cache into workspace pods`.
@@ -206,7 +206,7 @@ async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx_without_homes_export(tmp.path(), vec![patch_ok(WS_STATUS)]); // fixture variant
     let w = placed_ws(); // existing fixture: status.nodeName == this node
-    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let action = kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
     let st = rec.sent("PATCH", WS_STATUS);
     assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "HomeNotReady");
@@ -215,7 +215,7 @@ async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a
 ```
 
 (Adapt fixture names to what `reconcile.rs` actually exports — read its `ctx()` helper first.)
-- [ ] **Step 5: Run agent tests locally; run `engine_ops` on build-0 (20.219.21.58): rsync tree, `cargo test --no-run -p rustic-git-workspaces --test engine_ops`, `sudo <binary> ensure_homecache`. Both green.**
+- [ ] **Step 5: Run agent tests locally; run `engine_ops` on build-0 (20.219.21.58): rsync tree, `cargo test --no-run -p kloudlite-git-workspaces --test engine_ops`, `sudo <binary> ensure_homecache`. Both green.**
 - [ ] **Step 6: Commit** `Provision the shared home and local cache from the workspace reconcile`.
 
 ### Task 4: Stop path — drop the home-push gate
@@ -239,7 +239,7 @@ async fn a_stop_deletes_the_pod_without_any_home_push_gate() {
         Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
     let w = stopping_ws();
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")));
     assert!(rec.calls().iter().all(|c| !c.contains("snapshots/stop-home")), "no stop-home gate: {:?}", rec.calls());
 }
@@ -257,7 +257,7 @@ async fn a_stop_deletes_the_pod_without_any_home_push_gate() {
 
 **Interfaces:** none produced; Task 6 consumes the now-dead `home_target` plumbing.
 
-- [ ] **Step 1: Record the test COUNT** of `cargo test -p rustic-git-agent-bin --all-targets` (the deleted-8-tests lesson: compare counts, not colors).
+- [ ] **Step 1: Record the test COUNT** of `cargo test -p kloudlite-git-agent-bin --all-targets` (the deleted-8-tests lesson: compare counts, not colors).
 - [ ] **Step 2: Delete** `spawn_home_push` + its call at controller.rs:256, `home_push_interval`, `homes_to_push`, `home_commit_beat`, `home_commit_beat_one`, `migrate_and_seed_baseline` (home-layout migration — moot, homes leave btrfs). In snapshot.rs: `worktree_node`'s `("Home", ...)` arm (a Snapshot naming a home volume can no longer resolve — returns `Ok(None)`, requeue, and after Task 6 no such Snapshot is created), the `kind == "Home"` branch of `reconcile_commit`, the home-pin block in `worktree_heads`. Then chase `never used` warnings iteratively (`pushed_generation`, `record_pushed_gen`, `pushed_gen`, `WS_HOME_PUSH_SECS` docs) until clippy is silent — same rmdead sweep as the replicate_beat deletion.
 - [ ] **Step 3: Delete their tests; diff the count from Step 1 — every disappearance must be a home-beat test you can name.** Run workspace tests + clippy.
 - [ ] **Step 4: Commit** `Delete the home push and commit beats`.
@@ -306,7 +306,7 @@ Flesh the fixture from the existing claim tests in `reconcile.rs` (grep `claim_w
 - [ ] **Step 2: Run — FAIL (claim defers). Delete `bound_elsewhere` and its call; run — PASS.**
 - [ ] **Step 3: Binding on every node**: change the bindings controller's watch config from `mine_bindings` to `watcher::Config::default()`. AUDIT `apply_binding` for convergence under two concurrent reconcilers: `ensure(...)` is create-or-server-side-apply (verify by reading `ensure`); `write_binding_status` must tolerate 409 (it PATCHes status — confirm; if it PUTs with resourceVersion, make lost races a requeue, not an error). Delete `ensure_home(b, ctx)` call and the fn. Rewrite the module doc: the binding is the owner's namespace ensurer; `node_name` is a historical field nothing reads.
 - [ ] **Step 4: Update `agent-admission.yaml`**: the Volume validation drops the `quotaGb`/OwnerBinding exception — expression becomes `restoreTo`-only. (Applied to the cluster at rollout, Task 9.)
-- [ ] **Step 5: crd.rs doc-comment updates + `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`. Full tests + clippy. Commit** `Retire the owner-to-node pin; bindings ensure namespaces from every node`.
+- [ ] **Step 5: crd.rs doc-comment updates + `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`. Full tests + clippy. Commit** `Retire the owner-to-node pin; bindings ensure namespaces from every node`.
 
 ### Task 8: API and CRD surface cleanup
 
@@ -329,7 +329,7 @@ Flesh the fixture from the existing claim tests in `reconcile.rs` (grep `claim_w
 - Modify: `tests/ws_e2e.sh` (ZeroFS prerequisite → exit 77 without it; drop home-push assertions)
 
 - [ ] **Step 1: Write the runbook** in README.md, this order: (1) create the `zerofs-store` Secret, `kubectl apply -f zerofs.yaml`, wait Ready; (2) add `WS_HOMES_EXPORT` to agent-daemonset.yaml, roll agents (they mount on start); (3) **migrate**: for each owner with a home Volume — stop their pods; on the binding's node `rsync -a --exclude='.cache' --exclude='.npm' --exclude='.cargo/registry' --exclude='.local/share/pnpm' --exclude='.vscode-server' --exclude='.cursor-server' /wspool-prod/vol/home-{owner}/live/home-{owner}/ /wspool-prod/homes/{owner}/` (trailing slashes matter); restart; (4) apply the new `agent-admission.yaml`; (5) **days later, irreversible**: delete each `home-{owner}` Volume CR (finalizer cleans the subvolume) and remove `is_home_volume` if it was retained. Mark step 5 with the same days-gated warning the registry-blob cleanup section uses.
-- [ ] **Step 2: Update `ws_e2e.sh`**: prerequisite check `kubectl -n rustic-git-system get deploy zerofs` (missing → `exit 77`); delete home-push wait sections; add one assertion — write a file in `~/` in workspace A, stop A, start a workspace on the OTHER node (now legal), read the file back over NFS.
+- [ ] **Step 2: Update `ws_e2e.sh`**: prerequisite check `kubectl -n kloudlite-git-system get deploy zerofs` (missing → `exit 77`); delete home-push wait sections; add one assertion — write a file in `~/` in workspace A, stop A, start a workspace on the OTHER node (now legal), read the file back over NFS.
 - [ ] **Step 3: Commit** `Document the shared-home rollout and migration`.
 
 ### Task 10: Cluster verification (the payoff)

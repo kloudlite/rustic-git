@@ -26,7 +26,7 @@ pub use teams::{
 use mongodb::bson::{doc, DateTime};
 use mongodb::options::ClientOptions;
 use mongodb::{Client, Collection, IndexModel};
-use rustic_git_core::{err, Result};
+use kloudlite_git_core::{err, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -281,7 +281,7 @@ impl std::fmt::Display for Invalid {
 
 impl std::error::Error for Invalid {}
 
-pub(crate) fn invalid(msg: &str) -> rustic_git_core::Error {
+pub(crate) fn invalid(msg: &str) -> kloudlite_git_core::Error {
     Box::new(Invalid(msg.to_string()))
 }
 
@@ -311,7 +311,7 @@ pub fn check_handle(h: &str) -> Result<()> {
     if RESERVED.contains(&h) {
         return Err(invalid("that handle is reserved"));
     }
-    if !rustic_git_storage::store::valid_owner(h) {
+    if !kloudlite_git_storage::store::valid_owner(h) {
         return Err(invalid("that handle cannot be used"));
     }
     Ok(())
@@ -379,7 +379,7 @@ impl Directory {
         let mut opts = ClientOptions::parse(uri).await.map_err(|e| err(format!("mongo: {e}")))?;
         // Cosmos closes idle connections aggressively; a small pool that is
         // re-established quickly beats a large one full of dead sockets.
-        opts.app_name = Some("rustic-git-api".into());
+        opts.app_name = Some("kloudlite-git-api".into());
         opts.max_pool_size = Some(16);
         let client = Client::with_options(opts).map_err(|e| err(format!("mongo: {e}")))?;
         let db = client.database(db);
@@ -902,7 +902,7 @@ impl Directory {
         Ok(())
     }
 
-    /// The `RUSTIC_GIT_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
+    /// The `KLOUDLITE_GIT_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
     /// is a way to get the first administrator into an empty cluster, not the list itself, so
     /// removing an email from it must not silently revoke someone the list has since granted.
     pub async fn ensure_superadmins(&self, emails: &[String]) -> Result<usize> {

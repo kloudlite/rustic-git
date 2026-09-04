@@ -3,7 +3,7 @@
 //! point at which allocations start failing (which is exactly what `PoolAlmostFull` exists to
 //! catch). Untrusted text: this runs on whatever the installed btrfs-progs prints.
 
-use rustic_git_agent::stats::{parse_btrfs_usage, statvfs_usage};
+use kloudlite_git_agent::stats::{parse_btrfs_usage, statvfs_usage};
 
 const USAGE: &str = "\
 Overall:

@@ -2,8 +2,8 @@
 //! worker links. No gix here: that is `check`, behind its own feature.
 
 use crate::directory::{MergeState, MergeableState};
-use rustic_git_core::{err, Result};
-use rustic_git_storage::store::Store;
+use kloudlite_git_core::{err, Result};
+use kloudlite_git_storage::store::Store;
 use serde::{Deserialize, Serialize};
 use slatedb::Db;
 
@@ -420,7 +420,7 @@ async fn is_migrated(db: &Db) -> Result<bool> {
 /// question nobody asked.
 ///
 /// Lives here rather than in `check`, deliberately: `bins/worker/src/main.rs` names
-/// `rustic_git_pulls::pulls::Deep`, and the worker links this crate WITHOUT the `check` feature.
+/// `kloudlite_git_pulls::pulls::Deep`, and the worker links this crate WITHOUT the `check` feature.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deep {

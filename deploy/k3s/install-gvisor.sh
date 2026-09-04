@@ -65,9 +65,9 @@ sleep 5
 runsc --version | head -1
 cat <<'MSG'
 installed. Enabling it is three more steps, on EVERY pool node before the last one:
-  kubectl label node <this node> rustic-git.io/gvisor=true     # runtimeclass.yaml schedules on it
+  kubectl label node <this node> kloudlite-git.io/gvisor=true     # runtimeclass.yaml schedules on it
   kubectl apply -f deploy/k3s/runtimeclass.yaml
-  add WS_RUNTIME_CLASS=gvisor to the rustic-git-agent Secret and restart the DaemonSet
+  add WS_RUNTIME_CLASS=gvisor to the kloudlite-git-agent Secret and restart the DaemonSet
   (see the comment on WS_RUNTIME_CLASS in agent-daemonset.yaml — a node without the label
   leaves every tenant pod placed there Pending).
 MSG

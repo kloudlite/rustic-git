@@ -23,7 +23,7 @@ there are no `FailedScheduling` events. The wait is upstream of it.
 of a claim that sometimes binds on the event and sometimes falls through to the periodic sync.
 
 **The cause is which side we pre-bind from.** `k8s::claim` sets `volume_name` on the PVC. A claim
-naming its volume opts out of delayed binding, so it never takes the path `rustic-git-local`
+naming its volume opts out of delayed binding, so it never takes the path `kloudlite-git-local`
 (`volumeBindingMode: WaitForFirstConsumer`) is configured for, and is left to the controller's own
 schedule.
 

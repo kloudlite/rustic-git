@@ -8,7 +8,7 @@
 #   PORT      default 8080 (the PUBLIC listener)
 #   SSH_KEY   optional — a private key registered for OWNER; SSH_BAD_KEY an unregistered one.
 #             Both set ⇒ the ssh section runs; otherwise it is skipped.
-TOKEN="${TOKEN:?run: cargo run --bin rustic-git -- admin add-token <owner>, and export TOKEN}"
+TOKEN="${TOKEN:?run: cargo run --bin kloudlite-git -- admin add-token <owner>, and export TOKEN}"
 OWNER="${OWNER:-karthik}"; REPO="${REPO:-demo}"; FORK="${FORK:-demo-fork}"; PORT="${PORT:-8080}"
 T="$TOKEN"
 U="http://x:$T@127.0.0.1:$PORT/$OWNER/$REPO.git"

@@ -35,7 +35,7 @@ pub(crate) async fn create_team(
             let msg = e.to_string();
             // A rejected handle is the caller's mistake; anything else is ours and
             // must not echo the database's words back to a user.
-            if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() {
+            if e.downcast_ref::<kloudlite_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "create team");
@@ -66,7 +66,7 @@ pub(crate) async fn list_teams(State(api): State<Arc<Api>>, headers: axum::http:
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SignIn {
-    user: rustic_git_pulls::directory::User,
+    user: kloudlite_git_pulls::directory::User,
     /// `None` when the server has no signing key: the user still exists, but the
     /// caller must keep using the peer path rather than silently treating an
     /// absent token as a valid one.
@@ -120,11 +120,11 @@ pub(crate) async fn upsert_user(
                 },
                 None => None,
             };
-            axum::Json(SignIn { user: u, token, expires_in: rustic_git_core::jwt::TTL_SECS }).into_response()
+            axum::Json(SignIn { user: u, token, expires_in: kloudlite_git_core::jwt::TTL_SECS }).into_response()
         }
         Err(e) => {
             let msg = e.to_string();
-            if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() {
+            if e.downcast_ref::<kloudlite_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "upsert user");
@@ -166,14 +166,14 @@ pub(crate) async fn claim_username(
                 },
                 None => None,
             };
-            axum::Json(SignIn { user: u, token, expires_in: rustic_git_core::jwt::TTL_SECS }).into_response()
+            axum::Json(SignIn { user: u, token, expires_in: kloudlite_git_core::jwt::TTL_SECS }).into_response()
         }
         Ok(None) => (StatusCode::CONFLICT, "that handle is taken").into_response(),
         Err(e) => {
             let msg = e.to_string();
             // Every rule in check_handle is the caller's to fix, and the message
             // says which rule — it is shown under the field.
-            if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() {
+            if e.downcast_ref::<kloudlite_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "claim username");
@@ -199,7 +199,7 @@ pub(crate) async fn claim_username(
 // says WHICH team; it never says whether the caller may touch it. A non-member gets 404, not 403,
 // so the routes cannot be used to learn which slugs exist — the same shape the repo routes use.
 
-use rustic_git_pulls::directory::{AcceptInvite, DeleteTeam, Invite, Membership, Role, Team};
+use kloudlite_git_pulls::directory::{AcceptInvite, DeleteTeam, Invite, Membership, Role, Team};
 use sha2::Digest;
 
 /// A member as the page shows them: the directory row joined onto the membership entry.
@@ -256,7 +256,7 @@ async fn team_for<'a>(
     headers: &axum::http::HeaderMap,
     slug: &str,
     min: Option<Role>,
-) -> std::result::Result<(String, Team, Role, &'a rustic_git_pulls::directory::Directory), Response> {
+) -> std::result::Result<(String, Team, Role, &'a kloudlite_git_pulls::directory::Directory), Response> {
     let user = caller(api, headers)?;
     let db = directory(api)?;
     let team = match db.get(slug).await {
@@ -267,7 +267,7 @@ async fn team_for<'a>(
             return Err((StatusCode::BAD_GATEWAY, "could not read team").into_response());
         }
     };
-    let Some(role) = rustic_git_pulls::directory::Directory::role_of(&team, &user) else {
+    let Some(role) = kloudlite_git_pulls::directory::Directory::role_of(&team, &user) else {
         return Err((StatusCode::NOT_FOUND, "no such team").into_response());
     };
     if let Some(min) = min {
@@ -497,7 +497,7 @@ pub(crate) async fn update_team(
                     return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
                 }
             };
-            let pins = match rustic_git_pulls::directory::check_pins(&p.pins, &names) {
+            let pins = match kloudlite_git_pulls::directory::check_pins(&p.pins, &names) {
                 Ok(v) => v,
                 Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
             };
@@ -510,7 +510,7 @@ pub(crate) async fn update_team(
     match db.update_team(&slug, &body.name, &body.description).await {
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such team").into_response(),
-        Err(e) if e.downcast_ref::<rustic_git_pulls::directory::Invalid>().is_some() => {
+        Err(e) if e.downcast_ref::<kloudlite_git_pulls::directory::Invalid>().is_some() => {
             return (StatusCode::BAD_REQUEST, e.to_string()).into_response()
         }
         Err(e) => return db_err("update team", &slug, e),
@@ -518,7 +518,7 @@ pub(crate) async fn update_team(
     let (Some(p), Some(pins)) = (body.profile, checked) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    let profile = rustic_git_pulls::directory::TeamProfile {
+    let profile = kloudlite_git_pulls::directory::TeamProfile {
         public: p.public,
         tagline: p.tagline,
         location: p.location,
@@ -590,7 +590,7 @@ pub(crate) struct IssuedInvite {
 const INVITE_TTL_DAYS: i64 = 7;
 
 fn invite_id(token: &str) -> String {
-    rustic_git_core::hex(&sha2::Sha256::digest(token.as_bytes()))
+    kloudlite_git_core::hex(&sha2::Sha256::digest(token.as_bytes()))
 }
 
 pub(crate) async fn create_invite(
@@ -610,7 +610,7 @@ pub(crate) async fn create_invite(
     if !email.contains('@') {
         return (StatusCode::BAD_REQUEST, "a valid email is required").into_response();
     }
-    if rustic_git_pulls::directory::Directory::role_of(&team, &email).is_some() {
+    if kloudlite_git_pulls::directory::Directory::role_of(&team, &email).is_some() {
         return (StatusCode::CONFLICT, "already a member").into_response();
     }
     // 32 random bytes, hex: unguessable, and URL-safe without encoding.
@@ -618,7 +618,7 @@ pub(crate) async fn create_invite(
         use rand::RngCore;
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
-        rustic_git_core::hex(&b)
+        kloudlite_git_core::hex(&b)
     };
     let now = mongodb::bson::DateTime::now();
     let invite = Invite {
@@ -675,7 +675,7 @@ pub(crate) async fn preview_invite(
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
     if caller(&api, &headers).is_err() {
-        return rustic_git_core::httpx::unauthorized();
+        return kloudlite_git_core::httpx::unauthorized();
     }
     let db = match directory(&api) {
         Ok(d) => d,
@@ -746,7 +746,7 @@ pub(crate) async fn set_role(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let target = rustic_git_pulls::directory::Directory::role_of(&team, &email);
+    let target = kloudlite_git_pulls::directory::Directory::role_of(&team, &email);
     // Granting the new role AND touching the old one both have to be within reach: an admin
     // may not demote an owner, however low the new role is.
     let allowed = may_grant(role, body.role) && target.is_none_or(|t| may_grant(role, t));
@@ -776,7 +776,7 @@ pub(crate) async fn remove_member(
         Err(r) => return r,
     };
     let leaving = user.eq_ignore_ascii_case(&email);
-    let target = rustic_git_pulls::directory::Directory::role_of(&team, &email);
+    let target = kloudlite_git_pulls::directory::Directory::role_of(&team, &email);
     // Removing someone is the same reach as changing their role: an admin removes members and
     // admins, an owner removes anyone. Leaving is always yours to do.
     if !leaving && !target.is_some_and(|t| may_grant(role, t)) {
@@ -870,10 +870,10 @@ pub(crate) async fn create_signin_link(
         use rand::RngCore;
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
-        rustic_git_core::hex(&b)
+        kloudlite_git_core::hex(&b)
     };
     let now = mongodb::bson::DateTime::now();
-    let link = rustic_git_pulls::directory::SignInLink {
+    let link = kloudlite_git_pulls::directory::SignInLink {
         id: invite_id(&token),
         email: email.clone(),
         created_at: now,
@@ -931,12 +931,12 @@ fn is_same_user(a: &str, b: &str) -> bool {
 /// "No one is left standing after this write" — the only shape that matters is the roster having
 /// exactly one row and that row being the target, so this takes the roster rather than a count:
 /// a count alone can't say WHICH one is left.
-fn is_last_superadmin(admins: &[rustic_git_pulls::directory::SuperAdmin], target: &str) -> bool {
+fn is_last_superadmin(admins: &[kloudlite_git_pulls::directory::SuperAdmin], target: &str) -> bool {
     matches!(admins, [only] if is_same_user(&only.user, target))
 }
 
 async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, reason: String, result: &'static str) {
-    let entry = rustic_git_workspaces::audit::AuditEntry {
+    let entry = kloudlite_git_workspaces::audit::AuditEntry {
         ts: chrono::Utc::now().to_rfc3339(),
         actor: actor.to_string(),
         action: action.to_string(),
@@ -944,7 +944,7 @@ async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str,
         reason: Some(reason),
         result: result.into(),
     };
-    if let Err(e) = rustic_git_workspaces::audit::record(&api.store.os, &entry).await {
+    if let Err(e) = kloudlite_git_workspaces::audit::record(&api.store.os, &entry).await {
         tracing::error!(error = %e, actor, action, target, "audit row not written");
     }
 }
@@ -1053,7 +1053,7 @@ pub(crate) async fn list_superadmins(State(api): State<Arc<Api>>, headers: axum:
 /// serde-json renders as `{"$date":{"$numberLong":…}}` — a string `new Date()` cannot parse. Every
 /// other timestamp this API returns is RFC 3339, so this one is converted rather than the web
 /// learning to read bson.
-fn superadmin_doc(a: &rustic_git_pulls::directory::SuperAdmin) -> serde_json::Value {
+fn superadmin_doc(a: &kloudlite_git_pulls::directory::SuperAdmin) -> serde_json::Value {
     serde_json::json!({
         "_id": a.user,
         "addedAt": a.added_at.try_to_rfc3339_string().unwrap_or_default(),
@@ -1064,7 +1064,7 @@ fn superadmin_doc(a: &rustic_git_pulls::directory::SuperAdmin) -> serde_json::Va
 #[cfg(test)]
 mod role_tests {
     use super::{rank, Role};
-    use rustic_git_pulls::directory::{Directory, Member, Team};
+    use kloudlite_git_pulls::directory::{Directory, Member, Team};
     use mongodb::bson::DateTime;
 
     fn team(members: &[(&str, Role)]) -> Team {
@@ -1165,7 +1165,7 @@ mod profile_tests {
 mod superadmin_rule_tests {
     use super::{is_last_superadmin, is_same_user, require_note, SuperadminNote};
     use mongodb::bson::DateTime;
-    use rustic_git_pulls::directory::SuperAdmin;
+    use kloudlite_git_pulls::directory::SuperAdmin;
 
     /// An empty or whitespace-only note is refused before either removal rule runs.
     #[test]

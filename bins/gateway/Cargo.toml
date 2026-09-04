@@ -1,26 +1,26 @@
 [package]
-name = "rustic-git-gateway-bin"
+name = "kloudlite-git-gateway-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "rustic_git_gateway"
+name = "kloudlite_git_gateway"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustic-git-gateway"
+name = "kloudlite-git-gateway"
 path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
 metrics = { workspace = true }
-rustic-git-core = { path = "../../crates/core" }
-rustic-git-workspaces = { path = "../../crates/workspaces" }
+kloudlite-git-core = { path = "../../crates/core" }
+kloudlite-git-workspaces = { path = "../../crates/workspaces" }
 # The one place this binary touches the object store: a minimal, read-only GET of
 # `cluster/settings` on the refresh beat (`crates/storage::config::{object_store_views,
 # get_central, central_fetch}`) — nothing else here needs `Store`'s SlateDB pool machinery.
-rustic-git-storage = { path = "../../crates/storage" }
+kloudlite-git-storage = { path = "../../crates/storage" }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 # `ws` is what this binary is: the tunnel is a WebSocket upgrade and nothing else.
@@ -32,7 +32,7 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-rustic-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
+kloudlite-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
 # The tests are the gateway's own CLIENT — the same library axum's `ws` feature is built on, so
 # the lock pins one version for both.
 tokio-tungstenite = { workspace = true }

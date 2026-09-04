@@ -1,18 +1,18 @@
 [package]
-name = "rustic-git-app"
+name = "kloudlite-git-app"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "rustic_git_app"
+name = "kloudlite_git_app"
 
 [dependencies]
 tracing = { workspace = true }
 metrics = { workspace = true }
-rustic-git-core = { path = "../core" }
-rustic-git-storage = { path = "../storage" }
-rustic-git-pulls = { path = "../pulls" }
+kloudlite-git-core = { path = "../core" }
+kloudlite-git-storage = { path = "../storage" }
+kloudlite-git-pulls = { path = "../pulls" }
 tokio = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }

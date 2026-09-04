@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use rustic_git_core::jwt::Jwt;
+use kloudlite_git_core::jwt::Jwt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -50,7 +50,7 @@ pub struct Gateway {
     /// handle exists only for `/healthz`'s version and for parity with the other three central
     /// binaries.
     pub central:
-        rustic_git_core::settings::LiveSettings<rustic_git_core::settings::CentralSettings>,
+        kloudlite_git_core::settings::LiveSettings<kloudlite_git_core::settings::CentralSettings>,
 }
 
 impl Gateway {
@@ -64,8 +64,8 @@ impl Gateway {
             per_ws: Mutex::new(HashMap::new()),
             per_owner: Mutex::new(HashMap::new()),
             tunnels: Arc::new(Semaphore::new(MAX_TUNNELS)),
-            central: rustic_git_core::settings::LiveSettings::new(
-                rustic_git_core::settings::CentralSettings::from_env(),
+            central: kloudlite_git_core::settings::LiveSettings::new(
+                kloudlite_git_core::settings::CentralSettings::from_env(),
             ),
         }
     }
@@ -155,7 +155,7 @@ pub fn app(gw: Arc<Gateway>) -> Router {
             }),
         )
         .route("/tunnel/{ws}", get(tunnel))
-        .layer(axum::middleware::from_fn_with_state("gateway", rustic_git_core::metrics::http_metrics))
+        .layer(axum::middleware::from_fn_with_state("gateway", kloudlite_git_core::metrics::http_metrics))
         .with_state(gw)
 }
 
@@ -168,7 +168,7 @@ async fn tunnel(
     // Every refusal below is the same 401 on purpose: which of the checks failed is the caller's
     // business only insofar as "get a new token", and saying more distinguishes a real workspace
     // from an invented one for someone holding a token for neither.
-    let token = rustic_git_core::httpx::bearer_token(&headers).unwrap_or_default();
+    let token = kloudlite_git_core::httpx::bearer_token(&headers).unwrap_or_default();
     let claims = match gw.jwt.verify_ssh_session(token) {
         Ok(c) => c,
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
@@ -282,7 +282,7 @@ mod tests {
     use super::*;
 
     fn gw() -> Arc<Gateway> {
-        let (client, _) = rustic_git_workspaces::kube_test::mock_client(vec![]);
+        let (client, _) = kloudlite_git_workspaces::kube_test::mock_client(vec![]);
         Arc::new(Gateway::new(Jwt::new("0123456789abcdef0123456789abcdef").unwrap(), "r".into(), client, 22))
     }
 

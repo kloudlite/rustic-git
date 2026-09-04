@@ -23,7 +23,7 @@ The only new cross-crate interfaces are `Job::volume_key()` (model.rs) and the t
 - Comments explain WHY, never what; match the density of the file being edited.
 - Preserve every `// ponytail:` marker near an edit; adjust one only where the task removes the ceiling it names, and add one where a task cuts a corner with a known ceiling.
 - Commit subjects are imperative sentence case, no tool attribution, no Claude reference.
-- btrfs-touching tests stay gated on `rustic_git_workspaces::engine::have_btrfs()` and skip cleanly (this Mac and non-root CI are not root-capable btrfs hosts). Any test that must run everywhere must not shell out to `btrfs`.
+- btrfs-touching tests stay gated on `kloudlite_git_workspaces::engine::have_btrfs()` and skip cleanly (this Mac and non-root CI are not root-capable btrfs hosts). Any test that must run everywhere must not shell out to `btrfs`.
 - Line numbers below were verified against the working tree at plan time — re-read the quoted anchor before editing; if it moved, follow the quote, not the number.
 
 ## File Structure
@@ -116,7 +116,7 @@ fn set_lineage_returns_err_instead_of_panicking_on_an_unwritable_pool() {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** `cargo test -p rustic-git-workspaces --test engine_pool set_lineage` — expect a compile error (`set_lineage` returns `()`, `.unwrap()` invalid), which is the failure.
+- [ ] **Step 2: Run it, watch it fail.** `cargo test -p kloudlite-git-workspaces --test engine_pool set_lineage` — expect a compile error (`set_lineage` returns `()`, `.unwrap()` invalid), which is the failure.
 
 - [ ] **Step 3: Implement.** Replace `pool.rs:53-56` with:
 
@@ -137,7 +137,7 @@ fn set_lineage_returns_err_instead_of_panicking_on_an_unwritable_pool() {
 
 Then apply the 9 caller edits from the table above.
 
-- [ ] **Step 4: Run it, watch it pass.** `cargo test -p rustic-git-workspaces --test engine_pool` then `cargo test` and `cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 4: Run it, watch it pass.** `cargo test -p kloudlite-git-workspaces --test engine_pool` then `cargo test` and `cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
 ```sh
@@ -176,7 +176,7 @@ const STAGE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
             Pool::new(pool_root),
             std::sync::Arc::new(object_store::memory::InMemory::new()),
             std::sync::Arc::new(MemStore::new()),
-            rustic_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", "unused"),
+            kloudlite_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", "unused"),
         )
     }
 
@@ -233,9 +233,9 @@ const STAGE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
     }
 ```
 
-`filetime` is needed as a dev-dependency of `bins/agent`. Add to `bins/agent/Cargo.toml` under `[dev-dependencies]`: `filetime = "0.2"`. (Check `cargo tree -p rustic-git-agent-bin | grep filetime` first — if it is already in the lock graph, pin the same version.)
+`filetime` is needed as a dev-dependency of `bins/agent`. Add to `bins/agent/Cargo.toml` under `[dev-dependencies]`: `filetime = "0.2"`. (Check `cargo tree -p kloudlite-git-agent-bin | grep filetime` first — if it is already in the lock graph, pin the same version.)
 
-- [ ] **Step 2: Run it, watch it fail.** `cargo test -p rustic-git-agent-bin --lib janitor_tests` — `stage_sweep_spares_a_file_staged_seconds_ago_with_no_lineage_entry_yet` and `an_empty_lineage_file_...` fail (sweep returns 1, files gone).
+- [ ] **Step 2: Run it, watch it fail.** `cargo test -p kloudlite-git-agent-bin --lib janitor_tests` — `stage_sweep_spares_a_file_staged_seconds_ago_with_no_lineage_entry_yet` and `an_empty_lineage_file_...` fail (sweep returns 1, files gone).
 
 - [ ] **Step 3: Implement.** Replace `janitor_sweep_stage` (lib.rs:290-305) with:
 
@@ -284,7 +284,7 @@ fn janitor_sweep_stage(engine: &Engine, keep: &std::collections::HashSet<String>
 
 Then extend `spawn_janitor`'s doc comment (lib.rs:220-227) with one sentence naming the floor.
 
-- [ ] **Step 4: Run it, watch it pass.** `cargo test -p rustic-git-agent-bin --lib janitor_tests` then `cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 4: Run it, watch it pass.** `cargo test -p kloudlite-git-agent-bin --lib janitor_tests` then `cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
 ```sh
@@ -348,7 +348,7 @@ async fn clone_into_an_existing_live_subvolume_is_idempotent() {
 
 (`engine_for(&lp)` — reuse the helper already in that file; if it is named differently there, use the existing one rather than adding a second.)
 
-- [ ] **Step 2: Run it, watch it fail.** On a btrfs-capable Linux box, as root: `cargo test -p rustic-git-workspaces --test engine_ops idempotent`. On this Mac the gate skips — implement against the code review, and note in the commit that the assertion ran in the VM. If no VM is available, the fallback verification is the shell one-liner in Step 4.
+- [ ] **Step 2: Run it, watch it fail.** On a btrfs-capable Linux box, as root: `cargo test -p kloudlite-git-workspaces --test engine_ops idempotent`. On this Mac the gate skips — implement against the code review, and note in the commit that the assertion ran in the VM. If no VM is available, the fallback verification is the shell one-liner in Step 4.
 
 - [ ] **Step 3: Implement.** In `create_subvol` (ops.rs:166):
 
@@ -388,7 +388,7 @@ In `clone_running_local`'s closure, guard the snapshot at ops.rs:706-712 identic
 
 `pull_core` (ops.rs:476) already has this shape (`if !self.pool.live(name).exists()`) — leave it, and match its wording.
 
-- [ ] **Step 4: Run it, watch it pass.** `cargo test -p rustic-git-workspaces` plus, on a btrfs host, `cargo test -p rustic-git-workspaces --test engine_ops idempotent`. Cross-check the guard by hand where btrfs is unavailable:
+- [ ] **Step 4: Run it, watch it pass.** `cargo test -p kloudlite-git-workspaces` plus, on a btrfs host, `cargo test -p kloudlite-git-workspaces --test engine_ops idempotent`. Cross-check the guard by hand where btrfs is unavailable:
 ```sh
 grep -n "subvolume\", \"create\"\|subvolume\", \"snapshot\"" crates/workspaces/src/engine/ops.rs
 ```
@@ -437,7 +437,7 @@ const RENEW_EVERY: std::time::Duration = std::time::Duration::from_secs(40);
 - [ ] **Step 1: Failing test — renew extends the lease, and only for the leaseholder.** Add to `mod tests` in `bins/server/src/vol_agent.rs`:
 
 ```rust
-    use rustic_git_workspaces::store::MemStore;
+    use kloudlite_git_workspaces::store::MemStore;
 
     fn leased_job(region: &str, agent: &str, until: chrono::DateTime<chrono::Utc>) -> Job {
         Job {
@@ -478,7 +478,7 @@ const RENEW_EVERY: std::time::Duration = std::time::Duration::from_secs(40);
     }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** `cargo test -p rustic-git-server --lib vol_agent::tests::renew` — fails to compile (`renew_lease` does not exist).
+- [ ] **Step 2: Run it, watch it fail.** `cargo test -p kloudlite-git-server --lib vol_agent::tests::renew` — fails to compile (`renew_lease` does not exist).
 
 - [ ] **Step 3: Implement — server side.** In `vol_agent.rs`, add near `JobsState`:
 
@@ -541,7 +541,7 @@ and widen `vol_agent_job_shape` (line 72) so the pre-auth router lets it through
     )
 ```
 
-- [ ] **Step 4: Run the server tests, watch them pass.** `cargo test -p rustic-git-server --lib vol_agent`.
+- [ ] **Step 4: Run the server tests, watch them pass.** `cargo test -p kloudlite-git-server --lib vol_agent`.
 
 - [ ] **Step 5: Implement — agent side.** In `bins/agent/src/lib.rs`, add:
 
@@ -565,7 +565,7 @@ fn spawn_lease_renewal(
         let url = format!("{api}/vol-agent/jobs/{job_id}/renew?agent={agent_id}");
         loop {
             tokio::time::sleep(RENEW_EVERY).await;
-            match client.post(&url).header(rustic_git_workspaces::api::WS_AGENT_HEADER, &token).send().await {
+            match client.post(&url).header(kloudlite_git_workspaces::api::WS_AGENT_HEADER, &token).send().await {
                 Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
                     eprintln!("agent: job {job_id} lease lost (no longer the holder)"); // ponytail: eprintln
                     return;
@@ -603,7 +603,7 @@ Wire it into the spawn block at lib.rs:208-216, so it starts before the blocking
         });
 ```
 
-- [ ] **Step 6: Run everything.** `cargo test` and `cargo clippy --workspace -- -D warnings`. On a btrfs host also `cargo test -p rustic-git-agent-bin --test loop`.
+- [ ] **Step 6: Run everything.** `cargo test` and `cargo clippy --workspace -- -D warnings`. On a btrfs host also `cargo test -p kloudlite-git-agent-bin --test loop`.
 
 - [ ] **Step 7: Commit.**
 ```sh
@@ -676,7 +676,7 @@ async fn env_up_creates_a_fresh_subvolume_when_there_is_no_history() {
 
 (`env_harness()` builds the same in-process vol-agent server + `LoopbackPool` + `Engine` the file's existing test already assembles — extract it from that test rather than duplicating the setup.)
 
-- [ ] **Step 2: Run it, watch it fail.** `cargo test -p rustic-git-agent-bin --test loop env_up_` — fails to compile (`recover_env_volume` does not exist). On a non-btrfs machine the gate skips; run this one on the Linux VM.
+- [ ] **Step 2: Run it, watch it fail.** `cargo test -p kloudlite-git-agent-bin --test loop env_up_` — fails to compile (`recover_env_volume` does not exist). On a non-btrfs machine the gate skips; run this one on the Linux VM.
 
 - [ ] **Step 3: Implement.** Add to `bins/agent/src/lib.rs`, next to the other job helpers:
 
@@ -720,7 +720,7 @@ Then fix `model.rs:86` and `model.rs:232` to stop asserting a write that does no
     /// not the current half-state.
 ```
 
-- [ ] **Step 4: Run it, watch it pass.** On the btrfs VM: `cargo test -p rustic-git-agent-bin --test loop`. Everywhere: `cargo test && cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 4: Run it, watch it pass.** On the btrfs VM: `cargo test -p kloudlite-git-agent-bin --test loop`. Everywhere: `cargo test && cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
 ```sh
@@ -745,7 +745,7 @@ pub async fn mark_ws_error(store: &dyn MetaStore, kind: JobKind, payload: &serde
 pub async fn mark_env_error(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value);
 ```
 
-`bins/server/src/vol_agent.rs`'s `job_failed` then calls `rustic_git_workspaces::lease::mark_ws_error(&**store, job.kind, &job.payload).await` and the `mark_env_error` twin. `mark_ws_ready`, `mark_ws_stopped` and `mark_env_state` stay in `vol_agent.rs` — only the sweep needs the error pair.
+`bins/server/src/vol_agent.rs`'s `job_failed` then calls `kloudlite_git_workspaces::lease::mark_ws_error(&**store, job.kind, &job.payload).await` and the `mark_env_error` twin. `mark_ws_ready`, `mark_ws_stopped` and `mark_env_state` stay in `vol_agent.rs` — only the sweep needs the error pair.
 
 - [ ] **Step 1: Failing test.** Add to `crates/workspaces/src/lease.rs` a `#[cfg(test)] mod tests`:
 
@@ -844,7 +844,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** `cargo test -p rustic-git-workspaces --lib lease::` — `an_exhausted_job_marks_its_workspace_error` fails on the last assert (`Creating` != `Error`).
+- [ ] **Step 2: Run it, watch it fail.** `cargo test -p kloudlite-git-workspaces --lib lease::` — `an_exhausted_job_marks_its_workspace_error` fails on the last assert (`Creating` != `Error`).
 
 - [ ] **Step 3: Implement.** Cut `mark_ws_error` (vol_agent.rs:474-493) and `mark_env_error` (vol_agent.rs:525-546) into `crates/workspaces/src/lease.rs` verbatim, made `pub`, with their doc comments carried over and their `WsState`/`EnvState`/`StoreErr`/`JobKind` imports adjusted to the crate-local paths (`use crate::model::{EnvState, JobKind, WsState};`, `use crate::store::StoreErr;`). Then in the sweep loop:
 
@@ -869,12 +869,12 @@ In `bins/server/src/vol_agent.rs`, point `job_failed`'s two calls at the moved h
 
 ```rust
     if exhausted {
-        rustic_git_workspaces::lease::mark_ws_error(&**store, job.kind, &job.payload).await;
-        rustic_git_workspaces::lease::mark_env_error(&**store, job.kind, &job.payload).await;
+        kloudlite_git_workspaces::lease::mark_ws_error(&**store, job.kind, &job.payload).await;
+        kloudlite_git_workspaces::lease::mark_env_error(&**store, job.kind, &job.payload).await;
     }
 ```
 
-- [ ] **Step 4: Run it, watch it pass.** `cargo test -p rustic-git-workspaces --lib lease::` then `cargo test && cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 4: Run it, watch it pass.** `cargo test -p kloudlite-git-workspaces --lib lease::` then `cargo test && cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
 ```sh
@@ -974,7 +974,7 @@ And in `bins/server/src/vol_agent.rs`'s `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run them, watch them fail.** `cargo test -p rustic-git-workspaces --lib job_key_tests` and `cargo test -p rustic-git-server --lib vol_agent::tests::a_volume` — both fail to compile.
+- [ ] **Step 2: Run them, watch them fail.** `cargo test -p kloudlite-git-workspaces --lib job_key_tests` and `cargo test -p kloudlite-git-server --lib vol_agent::tests::a_volume` — both fail to compile.
 
 - [ ] **Step 3: Implement.** In `model.rs`, after the `Job` struct:
 
@@ -1018,10 +1018,10 @@ async fn busy_volume_keys(store: &dyn MetaStore, region: &str) -> std::collectio
 /// `push_env`s snapshotting the same subvolume (audit M7). Skipping just leaves the job Queued;
 /// the next poll iteration a second later picks it up.
 fn pick_leasable(
-    queued: Vec<(Job, rustic_git_workspaces::store::Etag)>,
+    queued: Vec<(Job, kloudlite_git_workspaces::store::Etag)>,
     agent: &str,
     busy: &std::collections::HashSet<String>,
-) -> Option<(Job, rustic_git_workspaces::store::Etag)> {
+) -> Option<(Job, kloudlite_git_workspaces::store::Etag)> {
     queued.into_iter().find(|(j, _)| {
         j.agent.as_deref().is_none_or(|a| a == agent)
             && j.volume_key().is_none_or(|k| !busy.contains(&k))
@@ -1037,7 +1037,7 @@ Replace `work`'s lines 395-397 with:
         let mine = pick_leasable(queued, &q.agent, &busy);
 ```
 
-- [ ] **Step 4: Run them, watch them pass.** `cargo test -p rustic-git-workspaces --lib job_key_tests && cargo test -p rustic-git-server --lib vol_agent` then `cargo test && cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 4: Run them, watch them pass.** `cargo test -p kloudlite-git-workspaces --lib job_key_tests && cargo test -p kloudlite-git-server --lib vol_agent` then `cargo test && cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
 ```sh
@@ -1050,6 +1050,6 @@ git add -A && git commit -m "Skip leasing a job whose volume already has one in 
 
 - [ ] `cargo clippy --workspace -- -D warnings`
 - [ ] `cargo test`
-- [ ] On a root-capable btrfs Linux VM (not this Mac): `cargo test -p rustic-git-workspaces --test engine_ops`, `cargo test -p rustic-git-agent-bin --test loop`, and `./tests/ws_e2e.sh` (exit 77 means a prerequisite was missing — that is not a pass).
+- [ ] On a root-capable btrfs Linux VM (not this Mac): `cargo test -p kloudlite-git-workspaces --test engine_ops`, `cargo test -p kloudlite-git-agent-bin --test loop`, and `./tests/ws_e2e.sh` (exit 77 means a prerequisite was missing — that is not a pass).
 - [ ] `grep -rn "set_lineage" --include="*.rs" crates bins` — every call site handles the `Result`.
 - [ ] Confirm no task widened a window on unpushed data: the janitor's keep-set may only grow, `cleanup_local`'s cross-volume guards are untouched, and no new path deletes a stage file.

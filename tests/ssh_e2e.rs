@@ -25,7 +25,7 @@ async fn ssh_clone_push() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = common::app(s.clone()).await;
-    tokio::spawn(async move { rustic_git_git::ssh::serve(app, l, host_key).await.unwrap() });
+    tokio::spawn(async move { kloudlite_git_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     let ssh_cmd = format!(
         "ssh -i {} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes",
@@ -97,7 +97,7 @@ async fn ssh_rejects_other_owner() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = common::app(s.clone()).await;
-    tokio::spawn(async move { rustic_git_git::ssh::serve(app, l, host_key).await.unwrap() });
+    tokio::spawn(async move { kloudlite_git_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     let ssh_cmd = format!(
         "ssh -i {} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes",
@@ -148,11 +148,11 @@ async fn ssh_serves_after_a_stray_fence_when_still_the_owner() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = common::app(s.clone()).await;
-    tokio::spawn(async move { rustic_git_git::ssh::serve(app, l, host_key).await.unwrap() });
+    tokio::spawn(async move { kloudlite_git_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     // This node holds the repo; a stray opener takes the writer epoch out from under it.
     let held = s.pool.get("alice", "proj").await.unwrap();
-    let stray = slatedb::Db::builder(rustic_git_storage::pool::path("alice", "proj"), s.os.clone())
+    let stray = slatedb::Db::builder(kloudlite_git_storage::pool::path("alice", "proj"), s.os.clone())
         .build()
         .await
         .unwrap();

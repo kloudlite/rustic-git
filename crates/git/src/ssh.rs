@@ -136,7 +136,7 @@ impl Handler for Conn {
         tokio::spawn(async move {
             if let Err(e) = run(app, auth_owner, &cmd, v2, channel, &handle, id).await {
                 let _ = handle
-                    .extended_data(id, 1, format!("rustic-git: {e}\n").into_bytes())
+                    .extended_data(id, 1, format!("kloudlite-git: {e}\n").into_bytes())
                     .await;
                 let _ = handle.exit_status_request(id, 1).await;
                 let _ = handle.eof(id).await;
@@ -206,7 +206,7 @@ async fn run(
                 Ok(()) => 0,
                 Err(e) => {
                     let _ = handle
-                        .extended_data(id, 1, format!("rustic-git: {e}\n").into_bytes())
+                        .extended_data(id, 1, format!("kloudlite-git: {e}\n").into_bytes())
                         .await;
                     1
                 }
@@ -255,7 +255,7 @@ async fn run(
         Ok(()) => 0,
         Err(e) => {
             let _ = handle
-                .extended_data(id, 1, format!("rustic-git: {e}\n").into_bytes())
+                .extended_data(id, 1, format!("kloudlite-git: {e}\n").into_bytes())
                 .await;
             1
         }

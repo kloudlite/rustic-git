@@ -4,7 +4,7 @@
 > subagent, in order, each finishing with its stated verification output pasted back.
 
 **Goal:** move the workspace/environment control plane off the hand-rolled Cosmos job queue and onto
-the Kubernetes API. `/v1` writes CRDs; a per-node controller in `rustic-git-agent` watches only its
+the Kubernetes API. `/v1` writes CRDs; a per-node controller in `kloudlite-git-agent` watches only its
 own node's objects and reconciles btrfs + pods; `Job`/`JobKind`/`JobState`, `lease.rs`, `spawn_sweep`,
 the four `/vol-agent` job routes, `AgentDoc` and heartbeats are deleted. The btrfs engine
 (`engine/{ops,blob,pool,fsck}.rs`) and the registry `vol/{owner}/{id}` surface do not change.
@@ -12,14 +12,14 @@ the four `/vol-agent` job routes, `AgentDoc` and heartbeats are deleted. The btr
 **Architecture:**
 
 ```
-bins/api (/v1)  --writes CRD spec-->  k3s API server  --watch spec.nodeName==$NODE_NAME-->  rustic-git-agent (DaemonSet)
+bins/api (/v1)  --writes CRD spec-->  k3s API server  --watch spec.nodeName==$NODE_NAME-->  kloudlite-git-agent (DaemonSet)
       ^                                    |                                                    |
       |                                    | status subresource                                 +-- btrfs (Engine, spawn_blocking)
       +--- list/get read status back <-----+                                                    +-- Namespace/Pod/Deployment/Service/NetworkPolicy
                                                                                                 +-- registry vol/{owner}/{id} (unchanged, over HTTP)
 ```
 
-Three cluster-scoped CRDs in `rustic-git.io/v1alpha1`: `Volume` (btrfs lifecycle), `Workspace`
+Three cluster-scoped CRDs in `kloudlite-git.io/v1alpha1`: `Volume` (btrfs lifecycle), `Workspace`
 (one pinned Pod), `Environment` (one namespace of Deployments+Services), plus a fourth,
 `OwnerBinding`, replacing `Binding` in Cosmos. `Region` stays in Cosmos and is the only thing left
 there that this plan reads.
@@ -122,11 +122,11 @@ Phase 2A Task 6 installs, so it lands first.
 
 ```rust
 // crates/workspaces/src/crd.rs
-pub const GROUP: &str = "rustic-git.io";
+pub const GROUP: &str = "kloudlite-git.io";
 pub const VERSION: &str = "v1alpha1";
-pub const FIELD_MANAGER: &str = "rustic-git";          // /v1 writes spec under this
-pub const AGENT_FIELD_MANAGER: &str = "rustic-git-agent"; // the controller writes status under this
-pub const SUBVOLUME_FINALIZER: &str = "rustic-git.io/subvolume";
+pub const FIELD_MANAGER: &str = "kloudlite-git";          // /v1 writes spec under this
+pub const AGENT_FIELD_MANAGER: &str = "kloudlite-git-agent"; // the controller writes status under this
+pub const SUBVOLUME_FINALIZER: &str = "kloudlite-git.io/subvolume";
 
 pub struct VolumeSpec  { pub owner: String, pub node_name: String, pub region: String,
                          pub quota_gb: u64, pub source: Option<VolumeSource> }
@@ -167,10 +167,10 @@ reads.
 - [ ] **Step 1:** Failing test first. Create `crates/workspaces/tests/crd_yaml.rs`:
   ```rust
   //! `deploy/k3s/crds.yaml` is a GENERATED artifact — Phase 2A installs exactly what the Rust
-  //! types say. This test is the generator (`CRD_REGEN=1 cargo test -p rustic-git-workspaces
+  //! types say. This test is the generator (`CRD_REGEN=1 cargo test -p kloudlite-git-workspaces
   //! --test crd_yaml`) and the drift check in one, so a field added to a spec struct cannot ship
   //! without the manifest moving with it.
-  use rustic_git_workspaces::crd::all_crds;
+  use kloudlite_git_workspaces::crd::all_crds;
 
   #[test]
   fn generated_crds_match_the_committed_manifest() {
@@ -204,8 +204,8 @@ reads.
       }
   }
   ```
-  Command: `cargo test -p rustic-git-workspaces --test crd_yaml`
-  Expected failure: `error[E0433]: failed to resolve: could not find 'crd' in 'rustic_git_workspaces'`.
+  Command: `cargo test -p kloudlite-git-workspaces --test crd_yaml`
+  Expected failure: `error[E0433]: failed to resolve: could not find 'crd' in 'kloudlite_git_workspaces'`.
 - [ ] **Step 2:** Add the dependencies. In the root `Cargo.toml` `[workspace.dependencies]`:
   ```toml
   # The Kubernetes API is the reconcile substrate (Phase 2B). kube 4.2 pins k8s-openapi 0.28
@@ -219,7 +219,7 @@ reads.
   already installs a **ring** rustls provider in `main()`, and letting kube pull `aws-lc-rs` would
   put a second TLS stack in the graph — the same rule the root `rustls` comment states.
   Add `kube`, `k8s-openapi`, `schemars` to `crates/workspaces/Cargo.toml` `[dependencies]`.
-  Verify: `cargo tree -p rustic-git-workspaces -i k8s-openapi | head -3` names 0.28.0 exactly once,
+  Verify: `cargo tree -p kloudlite-git-workspaces -i k8s-openapi | head -3` names 0.28.0 exactly once,
   and `cargo tree -d | grep -c rustls` does not increase versus `git stash`ed HEAD.
 - [ ] **Step 3:** Write `crates/workspaces/src/crd.rs`. Shape, `Volume` in full — the other three
   follow it exactly:
@@ -233,7 +233,7 @@ reads.
   /// `.spec.nodeName`, and `selectableFields` is matched as a string by the API server.
   #[derive(CustomResource, Clone, Debug, Serialize, Deserialize, JsonSchema)]
   #[kube(
-      group = "rustic-git.io",
+      group = "kloudlite-git.io",
       version = "v1alpha1",
       kind = "Volume",
       plural = "volumes",
@@ -275,7 +275,7 @@ reads.
   change `model.rs` takes in this task).
   Then `pub mod crd;` in `lib.rs`.
 - [ ] **Step 4:** Generate and commit the manifest.
-  `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml && cargo test -p rustic-git-workspaces --test crd_yaml`
+  `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml && cargo test -p kloudlite-git-workspaces --test crd_yaml`
   Expected: first run writes, second run passes both tests with no `CRD_REGEN`.
   Sanity-check the artifact matches what Phase 2A Task 6 Step 5 demands:
   `grep -c '"jsonPath": ".spec.nodeName"' deploy/k3s/crds.yaml` → `3`.
@@ -312,7 +312,7 @@ signature — only its one call site is wrong.
       // second call left the subvolume's contents alone (write a marker file between calls).
   }
   ```
-  Command: `sudo -E cargo test -p rustic-git-workspaces --test engine_ops idempotent`
+  Command: `sudo -E cargo test -p kloudlite-git-workspaces --test engine_ops idempotent`
   Expected failure on a btrfs box: `ERROR: cannot create subvolume - already exists` surfaced as
   `EngErr`. On this Mac the test skips — say so and run it on the btrfs VM.
 - [ ] **Step 2:** Make `create_subvol` tolerant (`ops.rs:166`):
@@ -346,7 +346,7 @@ signature — only its one call site is wrong.
   ```
   The binding is now unused, so the match becomes `Some(_)`. This code moves into the controller in
   Task 6; fixing it here means the fix is reviewable on its own and survives the move.
-- [ ] **Step 4:** `sudo -E cargo test -p rustic-git-workspaces --test engine_ops` on the btrfs VM,
+- [ ] **Step 4:** `sudo -E cargo test -p kloudlite-git-workspaces --test engine_ops` on the btrfs VM,
   then `cargo clippy --workspace -- -D warnings && cargo test` locally.
   Expected: the new test passes; nothing else moves.
   Commit: `Make subvolume create and clone tolerate an existing live subvolume`
@@ -432,7 +432,7 @@ pub fn attach_policy(env_ns: &str, ws_ns: &str, owner_ref: &OwnerReference) -> N
       assert!(r.requests.as_ref().unwrap().contains_key("memory") && r.limits.as_ref().unwrap().contains_key("memory"));
   }
   ```
-  Command: `cargo test -p rustic-git-workspaces k8s::`
+  Command: `cargo test -p kloudlite-git-workspaces k8s::`
   Expected failure: `could not find 'k8s' in the crate root`.
 - [ ] **Step 2:** Implement `k8s.rs`. Load-bearing details, each one a real bug if missed:
   - The hostPath source is `format!("{}/vol/{}/live/volumes/{}", pool, env_id, m.folder)` **after**
@@ -442,7 +442,7 @@ pub fn attach_policy(env_ns: &str, ws_ns: &str, owner_ref: &OwnerReference) -> N
     workspace's own files with zero configuration. Carry `container.rs`'s comment across.
   - `spec.nodeName` is set directly (not `nodeAffinity`): the node is already decided, and naming
     it is both simpler and what makes an unschedulable pod fail visibly instead of silently
-    pending on an unsatisfiable expression. Keep the `nodeSelector` on `rustic-git.io/role` and the
+    pending on an unsatisfiable expression. Keep the `nodeSelector` on `kloudlite-git.io/role` and the
     matching `toleration` — the label without the taint toleration schedules nothing.
   - `restart_policy: Always` on the workspace Pod is what `--restart unless-stopped` became.
   - Every child object carries `owner_references: vec![owner_ref]` with `controller: Some(true)`
@@ -451,7 +451,7 @@ pub fn attach_policy(env_ns: &str, ws_ns: &str, owner_ref: &OwnerReference) -> N
     `250m`/`512Mi`, limit `2`/`4Gi`.
   - `image_pull_policy` left unset — the kubelet's `IfNotPresent` default for a tagged image is
     already what we want, and pinning it would break `:latest`.
-- [ ] **Step 3:** `cargo test -p rustic-git-workspaces k8s:: && cargo clippy --workspace -- -D warnings && cargo test`
+- [ ] **Step 3:** `cargo test -p kloudlite-git-workspaces k8s:: && cargo clippy --workspace -- -D warnings && cargo test`
   Expected: new tests pass; `compose.rs`'s original test still passes (it has not been deleted yet
   — deliberate duplication for exactly one commit's worth of overlap).
   Commit: `Build namespaces, pods, deployments and policies from the workspace domain types`
@@ -494,7 +494,7 @@ async fn free_mem_bytes(client: &kube::Client, node: &str) -> Result<i64, kube::
   `owner_pins_to_their_binding_regardless_of_later_load_changes`,
   `concurrent_first_objects_for_one_owner_converge_on_one_binding` (the 409-adopt path),
   `dead_bound_node_leaves_placement_pinned_without_rehoming`.
-  Command: `cargo test -p rustic-git-workspaces placement::`
+  Command: `cargo test -p kloudlite-git-workspaces placement::`
   Expected failure: module not found.
 - [ ] **Step 2:** Implement. `bind_owner`'s conflict-adopt logic carries over **verbatim** in shape;
   only the error type changes:
@@ -519,7 +519,7 @@ async fn free_mem_bytes(client: &kube::Client, node: &str) -> Result<i64, kube::
   differing only in case flattening to one RFC-1123 name), return an error rather than adopting
   someone else's node. `// ponytail: case-flattened binding names; a hash suffix if slugs ever
   collide for real.`
-- [ ] **Step 3:** `cargo test -p rustic-git-workspaces placement:: && cargo clippy --workspace -- -D warnings && cargo test`
+- [ ] **Step 3:** `cargo test -p kloudlite-git-workspaces placement:: && cargo clippy --workspace -- -D warnings && cargo test`
   Commit: `Place owners on nodes with an OwnerBinding CRD and real node allocatable`
 
 ---
@@ -574,7 +574,7 @@ in a local helper — grep `ApiState::new` before starting; there are no others)
   #[tokio::test]
   async fn a_workspace_never_names_a_node_its_volume_does_not() { … }
   ```
-  Command: `cargo test -p rustic-git-workspaces --test api_user`
+  Command: `cargo test -p kloudlite-git-workspaces --test api_user`
   Expected failure: `no method named 'queued_jobs'` is *not* what you should see yet — at this
   point it still exists, so the failure is the new assertions failing on 202-with-no-CRD-written.
 - [ ] **Step 2:** Replace `ws_job`/`env_job`/`push_job` with CRD writes. The mapping, handler by
@@ -584,7 +584,7 @@ in a local helper — grep `ApiState::new` before starting; there are no others)
   | --- | --- | --- |
   | `POST /v1/workspaces` | doc + `WsCreate` job | `place()`, then create `Volume{source: None}` + `Workspace{desiredState: Running}` |
   | `POST /v1/workspaces/{id}/start` \| `/stop` | `WsStart`/`WsStop` job | `patch` `spec.desiredState` = Running/Stopped |
-  | `POST /v1/workspaces/{id}/push` | `Push` job | `patch` an annotation `rustic-git.io/push-requested: {rfc3339}` on the `Volume` — a spec-level generation bump the controller converges toward, keeping "push is the one mutating verb" while the *object* stays the work item |
+  | `POST /v1/workspaces/{id}/push` | `Push` job | `patch` an annotation `kloudlite-git.io/push-requested: {rfc3339}` on the `Volume` — a spec-level generation bump the controller converges toward, keeping "push is the one mutating verb" while the *object* stays the work item |
   | `POST /v1/workspaces/{id}/clone` | `WsClone` job | new `Volume{source: CloneOf{volume: src}}` + `Workspace` |
   | `POST /v1/workspaces/restore` | `WsRestore` job | new `Volume{source: RestoreOf{volume, snapshotId}}` + `Workspace` |
   | `DELETE /v1/workspaces/{id}` | doc + `WsDelete` job | `api.delete()` the `Workspace`, then the `Volume`; the finalizer orders subvolume removal after container removal |
@@ -592,12 +592,12 @@ in a local helper — grep `ApiState::new` before starting; there are no others)
   | `/environments/{id}/start` \| `/stop` | `EnvUp`/`EnvDown` | `patch` `spec.desiredState` |
   | `/environments/{id}/clone` | `WsClone` job w/ `stop_project` | `Volume{source: CloneOf}` + `Environment`; `stop_project` and `crate::engine::compose::project` disappear from this file |
   | `DELETE /v1/environments/{id}` | `EnvDelete` job | `api.delete()` both |
-  | `GET` list/get (`list_ws`, `get_ws`, `list_env`, `get_env`, `list_volumes`) | store read | `api.list(&ListParams::default().labels(&format!("rustic-git.io/owner={owner}")))`, projecting `spec` + `status` into the same JSON body the web app already parses |
+  | `GET` list/get (`list_ws`, `get_ws`, `list_env`, `get_env`, `list_volumes`) | store read | `api.list(&ListParams::default().labels(&format!("kloudlite-git.io/owner={owner}")))`, projecting `spec` + `status` into the same JSON body the web app already parses |
 
   The list filter is a **label**, not a field selector: `metadata.labels` is indexed for label
   selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry
   (we have one, for `nodeName`, and adding one per query axis is how a CRD becomes a database).
-  Stamp `rustic-git.io/owner` and `rustic-git.io/kind` on every object at create time.
+  Stamp `kloudlite-git.io/owner` and `kloudlite-git.io/kind` on every object at create time.
 
   `state`/`WsState`/`EnvState` in the response body come from `status.phase`, defaulting to
   `creating` when `status` is absent — a just-created object has no status until the controller
@@ -608,7 +608,7 @@ in a local helper — grep `ApiState::new` before starting; there are no others)
   ```rust
   // In-cluster config when the pod has a ServiceAccount, else the operator's kubeconfig. `None`
   // is a legitimate dev configuration (no cluster) — workspace routes answer 503, the same shape
-  // RUSTIC_GIT_VOL_AGENT_URL being unset already has.
+  // KLOUDLITE_GIT_VOL_AGENT_URL being unset already has.
   match kube::Client::try_default().await {
       Ok(c) => state = state.with_kube(c),
       Err(e) => eprintln!("no kubernetes config ({e}): /v1 workspace routes will answer 503"), // ponytail: eprintln
@@ -616,7 +616,7 @@ in a local helper — grep `ApiState::new` before starting; there are no others)
   ```
   The Cosmos store construction stays exactly as it is — `Region` still lives there, and it is
   cross-cluster metadata that cannot live in any one cluster's API server.
-- [ ] **Step 4:** `cargo test -p rustic-git-workspaces && cargo clippy --workspace -- -D warnings && cargo test`
+- [ ] **Step 4:** `cargo test -p kloudlite-git-workspaces && cargo clippy --workspace -- -D warnings && cargo test`
   Expected: rewritten API tests pass; `scheduler.rs`'s and `lease.rs`'s own tests still pass
   (unreached but not yet deleted).
   Commit: `Write workspace and environment CRDs from the /v1 API`
@@ -678,8 +678,8 @@ unchanged. `Config` gains `node: String` (from `NODE_NAME`) and loses `cpu`/`mem
   #[tokio::test]
   async fn a_reconcile_that_cannot_read_the_pool_deletes_nothing() { … }
   ```
-  Command: `cargo test -p rustic-git-agent-bin --test reconcile`
-  Expected failure: `unresolved import rustic_git_agent::controller`.
+  Command: `cargo test -p kloudlite-git-agent-bin --test reconcile`
+  Expected failure: `unresolved import kloudlite_git_agent::controller`.
 - [ ] **Step 2:** Write `controller.rs`. The exact kube-rs surface, all verified against 4.2.0:
   ```rust
   use kube::runtime::controller::{Action, Controller};
@@ -745,7 +745,7 @@ unchanged. `Config` gains `node: String` (from `NODE_NAME`) and loses `cpu`/`mem
   // exactly the status fields it sets, so two writers cannot silently clobber each other.
   api.patch_status(&name, &PatchParams::apply(crd::AGENT_FIELD_MANAGER).force(),
       &Patch::Apply(serde_json::json!({
-          "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+          "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
           "status": { "phase": phase, "observedGeneration": gen, "conditions": conds }
       }))).await?;
   ```
@@ -787,7 +787,7 @@ unchanged. `Config` gains `node: String` (from `NODE_NAME`) and loses `cpu`/`mem
   exactly this; uncomment it there in the same commit.
   Delete `bins/agent/tests/loop.rs` in this commit: it drives `/vol-agent/register|work|jobs/*`,
   which the next task removes and which nothing can replace.
-- [ ] **Step 4:** `cargo test -p rustic-git-agent-bin && cargo clippy --workspace -- -D warnings && cargo test`
+- [ ] **Step 4:** `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace -- -D warnings && cargo test`
   Expected: `reconcile.rs` passes; the janitor tests still pass; `loop.rs` is gone from the test
   listing.
   Commit: `Rewrite the agent as a node-scoped Kubernetes controller`
@@ -853,7 +853,7 @@ migration was scoped correctly. Four things change, plus three new assertions.
 - [ ] **Step 1:** Prerequisites. Add to the existing 77-skip block, keeping its shape:
   ```sh
   kubectl version --request-timeout=5s >/dev/null 2>&1 || { echo "SKIP: no reachable kubernetes cluster" >&2; exit 77; }
-  kubectl get crd volumes.rustic-git.io >/dev/null 2>&1 || { echo "SKIP: rustic-git CRDs not installed (deploy/k3s/crds.yaml)" >&2; exit 77; }
+  kubectl get crd volumes.kloudlite-git.io >/dev/null 2>&1 || { echo "SKIP: kloudlite-git CRDs not installed (deploy/k3s/crds.yaml)" >&2; exit 77; }
   ```
   A single-node k3s in the CI VM is enough — one node carrying both role labels with taints
   relaxed. Nothing about this test's value depends on there being two nodes.

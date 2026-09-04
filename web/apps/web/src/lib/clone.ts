@@ -50,14 +50,14 @@ function host(fromCentral: string, envName: string): string {
 
 export async function registryHost() {
   const c = await centralSettings();
-  return host(c.registryHost, "RUSTIC_GIT_REGISTRY_HOST");
+  return host(c.registryHost, "KLOUDLITE_GIT_REGISTRY_HOST");
 }
 
 export async function cloneUrls(owner: string, repo: string): Promise<CloneUrls> {
   const c = await centralSettings();
-  const httpHost = host(c.cloneHost, "RUSTIC_GIT_CLONE_HOST");
-  const sshHost = host(c.sshHost, "RUSTIC_GIT_SSH_HOST");
-  const sshPort = c.sshPort || Number(process.env.RUSTIC_GIT_SSH_PORT ?? 22);
+  const httpHost = host(c.cloneHost, "KLOUDLITE_GIT_CLONE_HOST");
+  const sshHost = host(c.sshHost, "KLOUDLITE_GIT_SSH_HOST");
+  const sshPort = c.sshPort || Number(process.env.KLOUDLITE_GIT_SSH_PORT ?? 22);
   const path = `${owner}/${repo}.git`;
   return {
     https: `https://${httpHost}/${path}`,

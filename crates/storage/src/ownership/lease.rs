@@ -140,31 +140,31 @@ mod tests {
     #[tokio::test]
     async fn create_wins_once() {
         let os = mem();
-        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().expect("first take wins");
-        assert_eq!(a.lease, Lease { node: "rustic-git-srv-0".into(), epoch: 1, expires_ms: 1_000 + TTL });
+        let a = take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().expect("first take wins");
+        assert_eq!(a.lease, Lease { node: "kloudlite-git-srv-0".into(), epoch: 1, expires_ms: 1_000 + TTL });
         // A second candidate that read nothing (it raced the first) is refused by the store, not by us.
-        assert!(take(os.as_ref(), "rustic-git-srv-1", 1_000, None).await.unwrap().is_none());
-        assert_eq!(read(os.as_ref()).await.unwrap().unwrap().lease.node, "rustic-git-srv-0");
+        assert!(take(os.as_ref(), "kloudlite-git-srv-1", 1_000, None).await.unwrap().is_none());
+        assert_eq!(read(os.as_ref()).await.unwrap().unwrap().lease.node, "kloudlite-git-srv-0");
     }
 
     #[tokio::test]
     async fn a_live_lease_held_by_another_is_never_taken() {
         let os = mem();
-        take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        assert!(take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL - 1, cur.as_ref()).await.unwrap().is_none());
+        assert!(take(os.as_ref(), "kloudlite-git-srv-1", 1_000 + TTL - 1, cur.as_ref()).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn an_expired_lease_is_taken_with_the_next_epoch() {
         let os = mem();
-        take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        let b = take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL, cur.as_ref())
+        let b = take(os.as_ref(), "kloudlite-git-srv-1", 1_000 + TTL, cur.as_ref())
             .await
             .unwrap()
             .expect("expired: up for grabs");
-        assert_eq!((b.lease.node.as_str(), b.lease.epoch), ("rustic-git-srv-1", 2));
+        assert_eq!((b.lease.node.as_str(), b.lease.epoch), ("kloudlite-git-srv-1", 2));
     }
 
     /// The holder that missed its own beats finds the lease expired and naming itself. It may take
@@ -172,18 +172,18 @@ mod tests {
     #[tokio::test]
     async fn the_holder_retakes_its_own_expired_lease() {
         let os = mem();
-        take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        let again = take(os.as_ref(), "rustic-git-srv-0", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
+        let again = take(os.as_ref(), "kloudlite-git-srv-0", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
         assert_eq!(again.lease.epoch, 2);
     }
 
     #[tokio::test]
     async fn renew_with_a_stale_version_fails() {
         let os = mem();
-        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        let a = take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        let b = take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
+        let b = take(os.as_ref(), "kloudlite-git-srv-1", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
         assert!(renew(os.as_ref(), &a, 1_000 + TTL + 1).await.unwrap().is_none(), "the old holder's version is stale");
         let b2 = renew(os.as_ref(), &b, 1_000 + TTL + 1).await.unwrap().expect("the holder renews");
         assert_eq!(b2.lease.epoch, 2);
@@ -196,20 +196,20 @@ mod tests {
     #[tokio::test]
     async fn a_released_lease_is_expired_and_taken_at_once() {
         let os = mem();
-        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        let a = take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         release(os.as_ref(), &a).await.unwrap().expect("the holder releases");
         let cur = read(os.as_ref()).await.unwrap().unwrap();
         assert!(is_expired(&cur.lease, 1_001), "released means expired, on any clock");
-        let b = take(os.as_ref(), "rustic-git-srv-1", 1_001, Some(&cur)).await.unwrap().expect("no TTL to wait out");
+        let b = take(os.as_ref(), "kloudlite-git-srv-1", 1_001, Some(&cur)).await.unwrap().expect("no TTL to wait out");
         assert_eq!(b.lease.epoch, 2);
     }
 
     #[tokio::test]
     async fn release_with_a_stale_version_is_a_no_op() {
         let os = mem();
-        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        let a = take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        let b = take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
+        let b = take(os.as_ref(), "kloudlite-git-srv-1", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
         assert!(release(os.as_ref(), &a).await.unwrap().is_none(), "not ours any more");
         let live = read(os.as_ref()).await.unwrap().unwrap().lease;
         assert_eq!(live, b.lease, "the new holder's lease is untouched");
@@ -220,7 +220,7 @@ mod tests {
         let os = mem();
         let takers = (0..8).map(|i| {
             let os = os.clone();
-            async move { take(os.as_ref(), &format!("rustic-git-srv-{i}"), 1_000, None).await.unwrap() }
+            async move { take(os.as_ref(), &format!("kloudlite-git-srv-{i}"), 1_000, None).await.unwrap() }
         });
         let won: Vec<Held> = futures::future::join_all(takers).await.into_iter().flatten().collect();
         assert_eq!(won.len(), 1, "exactly one Create may land");

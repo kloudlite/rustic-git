@@ -1,10 +1,10 @@
 //! Mergeability checking — the gix graph walk. Feature-gated: the worker links `pulls`
-//! without `check` and must not pull in gix or `rustic-git-gitbase`.
+//! without `check` and must not pull in gix or `kloudlite-git-gitbase`.
 
 use super::model::{get, put, open_only, Deep, Mergeability, PullState};
 use crate::directory::MergeableState;
-use rustic_git_core::{err, Result};
-use rustic_git_storage::store::{Repo, Store};
+use kloudlite_git_core::{err, Result};
+use kloudlite_git_storage::store::{Repo, Store};
 
 /// The most graph walks one repo-wide sweep will do. A `HeadMoved` fan-out and the owner's
 /// periodic lane share it: neither may turn one push into an unbounded serial graph walk that
@@ -81,11 +81,11 @@ async fn check_with(
             const BUDGET: usize = 50_000;
             let repo2 = repo.clone();
             let mb = tokio::task::spawn_blocking(move || {
-                repo2.odb().map(|odb| rustic_git_gitbase::merge_base(&odb, b, h, BUDGET))
+                repo2.odb().map(|odb| kloudlite_git_gitbase::merge_base(&odb, b, h, BUDGET))
             })
             .await
             .map_err(|e| err(format!("comparing: {e}")))??;
-            use rustic_git_gitbase::MergeBase;
+            use kloudlite_git_gitbase::MergeBase;
             // Three answers this node can give for free, and one it cannot. Ancestry is a graph
             // walk over data already here; whether two diverged trees COMBINE is a merge, and a
             // merge is the worker's job — see the module doc on `crate::merge_worker`.
@@ -113,7 +113,7 @@ async fn check_with(
                 state,
                 base_oid: now_base.clone(),
                 head_oid: now_head.clone(),
-                checked_at_ms: rustic_git_storage::ownership::now_ms() as i64,
+                checked_at_ms: kloudlite_git_storage::ownership::now_ms() as i64,
                 detail,
                 fast_forward: ff,
             }
@@ -124,7 +124,7 @@ async fn check_with(
             state: MergeableState::Unknown,
             base_oid: now_base,
             head_oid: now_head,
-            checked_at_ms: rustic_git_storage::ownership::now_ms() as i64,
+            checked_at_ms: kloudlite_git_storage::ownership::now_ms() as i64,
             detail: Some("one of the branches is gone".to_string()),
             fast_forward: false,
         },

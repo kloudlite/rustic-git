@@ -99,7 +99,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
     let per_node = |metric: &str| {
         format!(
             "SELECT {bucket}(ts) AS b, node, argMaxMerge(last_value) AS v \
-             FROM rustic.metrics_5m \
+             FROM kloudlite.metrics_5m \
              WHERE metric = '{metric}' AND ts > now() - INTERVAL {days} DAY {region_filter} \
              GROUP BY b, node"
         )
@@ -116,14 +116,14 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
     };
     let event_count = |kinds: &str| {
         format!(
-            "SELECT {bucket}(ts) AS b, count() AS v FROM rustic.events FINAL \
+            "SELECT {bucket}(ts) AS b, count() AS v FROM kloudlite.events FINAL \
              WHERE kind IN ({kinds}) AND ts > now() - INTERVAL {days} DAY {region_filter} \
              GROUP BY b ORDER BY b"
         )
     };
     let fleet_max = |column: &str| {
         format!(
-            "SELECT {bucket}(ts) AS b, max({column}) AS v FROM rustic.fleet_hourly \
+            "SELECT {bucket}(ts) AS b, max({column}) AS v FROM kloudlite.fleet_hourly \
              WHERE ts > now() - INTERVAL {days} DAY {region_filter} GROUP BY b ORDER BY b"
         )
     };
@@ -137,7 +137,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
                 SELECT {bucket}(ts) AS b, \
                        toInt64(countIf(kind = 'request.opened')) - \
                        toInt64(countIf(kind IN ('request.approved', 'request.denied'))) AS v \
-                FROM rustic.events FINAL \
+                FROM kloudlite.events FINAL \
                 WHERE kind LIKE 'request.%' AND ts > now() - INTERVAL {days} DAY \
                       {region_filter} \
                 GROUP BY b) ORDER BY b"
@@ -148,7 +148,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
         // namespace is the contract rather than a list of actions, which goes stale the day
         // somebody adds one.
         "audit_events" => format!(
-            "SELECT {bucket}(ts) AS b, count() AS v FROM rustic.events FINAL \
+            "SELECT {bucket}(ts) AS b, count() AS v FROM kloudlite.events FINAL \
              WHERE kind LIKE 'admin.%' AND ts > now() - INTERVAL {days} DAY \
              GROUP BY b ORDER BY b"
         ),
@@ -159,10 +159,10 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
         "pool_used" => format!(
             "SELECT {bucket}(ts) AS b, \
                     max(pool_used_bytes) / nullIf(max(pool_total_bytes), 0) AS v \
-             FROM rustic.fleet_hourly \
+             FROM kloudlite.fleet_hourly \
              WHERE ts > now() - INTERVAL {days} DAY {region_filter} GROUP BY b ORDER BY b"
         ),
-        // `rustic.alerts` holds TRANSITIONS only, so a rule that began firing before the range and
+        // `kloudlite.alerts` holds TRANSITIONS only, so a rule that began firing before the range and
         // never changed since has no row in any bucket — a per-bucket argMax over the range would
         // draw the longest-running alert in the fleet as not firing. State is carried forward
         // instead: buckets are generated from the range, every (region, rule) is paired with every
@@ -173,7 +173,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
                 SELECT b, region, rule, argMaxIf(state, ts, ts <= b) AS s \
                 FROM (SELECT {bucket}(now() - INTERVAL n HOUR) AS b \
                       FROM numbers({days} * 24)) AS buckets \
-                CROSS JOIN (SELECT ts, region, rule, state FROM rustic.alerts FINAL \
+                CROSS JOIN (SELECT ts, region, rule, state FROM kloudlite.alerts FINAL \
                             WHERE 1 = 1 {region_filter}) AS a \
                 GROUP BY b, region, rule) GROUP BY b ORDER BY b"
         ),
@@ -181,7 +181,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
         // strip shows is "owners who need attention", not "owner-dimension pairs".
         "owners_over_80" => format!(
             "SELECT b, uniqExact(owner) AS v FROM (\
-                SELECT {bucket}(ts) AS b, owner FROM rustic.usage_hourly \
+                SELECT {bucket}(ts) AS b, owner FROM kloudlite.usage_hourly \
                 WHERE ts > now() - INTERVAL {days} DAY AND `limit` > 0 AND used / `limit` > 0.8) \
              GROUP BY b ORDER BY b"
         ),
@@ -192,7 +192,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
                     SELECT target, \
                            minIf(ts, kind = 'request.opened') AS opened, \
                            maxIf(ts, kind IN ('request.approved', 'request.denied')) AS decided \
-                    FROM rustic.events FINAL \
+                    FROM kloudlite.events FINAL \
                     WHERE kind LIKE 'request.%' AND ts > now() - INTERVAL {days} DAY \
                           {region_filter} \
                     GROUP BY target \
@@ -211,7 +211,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
                 SELECT b, node, attributes, greatest(max(v) - min(v), 0) AS rise FROM (\
                     SELECT {bucket}(ts) AS b, ts, node, attributes, \
                            maxMerge(max_value) AS v \
-                    FROM rustic.metrics_5m \
+                    FROM kloudlite.metrics_5m \
                     WHERE metric = 'k8s.container.restarts' \
                       AND ts > now() - INTERVAL {days} DAY {region_filter} \
                     GROUP BY b, ts, node, attributes) \
@@ -221,7 +221,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
             let owner = ident(q.owner.as_deref()?)?;
             let dimension = ident(q.dimension.as_deref()?)?;
             format!(
-                "SELECT {bucket}(ts) AS b, max(used) AS v FROM rustic.usage_hourly \
+                "SELECT {bucket}(ts) AS b, max(used) AS v FROM kloudlite.usage_hourly \
                  WHERE owner = '{owner}' AND dimension = '{dimension}' \
                    AND ts > now() - INTERVAL {days} DAY GROUP BY b ORDER BY b"
             )

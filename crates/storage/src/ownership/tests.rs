@@ -6,9 +6,9 @@ fn entry(node: &str, expires_ms: u64) -> Entry {
 
 #[test]
 fn claim_on_absent_entry_grants() {
-    match decide_claim(None, "rustic-git-1", 1_000) {
+    match decide_claim(None, "kloudlite-git-1", 1_000) {
         Grant::Granted(e) => {
-            assert_eq!(e.node, "rustic-git-1");
+            assert_eq!(e.node, "kloudlite-git-1");
             assert_eq!(e.expires_ms, 1_000 + LEASE_TTL.as_millis() as u64);
         }
         Grant::HeldBy(_) => panic!("absent entry must grant"),
@@ -17,8 +17,8 @@ fn claim_on_absent_entry_grants() {
 
 #[test]
 fn claim_on_live_entry_held_by_someone_else_returns_held_by() {
-    let cur = entry("rustic-git-1", 5_000);
-    match decide_claim(Some(&cur), "rustic-git-2", 1_000) {
+    let cur = entry("kloudlite-git-1", 5_000);
+    match decide_claim(Some(&cur), "kloudlite-git-2", 1_000) {
         Grant::HeldBy(e) => assert_eq!(e, cur),
         Grant::Granted(_) => panic!("live entry held by another node must not grant"),
     }
@@ -26,19 +26,19 @@ fn claim_on_live_entry_held_by_someone_else_returns_held_by() {
 
 #[test]
 fn claim_on_expired_entry_grants() {
-    let cur = entry("rustic-git-1", 1_000);
-    match decide_claim(Some(&cur), "rustic-git-2", 2_000) {
-        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+    let cur = entry("kloudlite-git-1", 1_000);
+    match decide_claim(Some(&cur), "kloudlite-git-2", 2_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "kloudlite-git-2"),
         Grant::HeldBy(_) => panic!("expired entry must grant"),
     }
 }
 
 #[test]
 fn reclaim_by_current_holder_grants_and_extends() {
-    let cur = entry("rustic-git-1", 5_000);
-    match decide_claim(Some(&cur), "rustic-git-1", 4_000) {
+    let cur = entry("kloudlite-git-1", 5_000);
+    match decide_claim(Some(&cur), "kloudlite-git-1", 4_000) {
         Grant::Granted(e) => {
-            assert_eq!(e.node, "rustic-git-1");
+            assert_eq!(e.node, "kloudlite-git-1");
             assert_eq!(e.expires_ms, 4_000 + LEASE_TTL.as_millis() as u64);
         }
         Grant::HeldBy(_) => panic!("re-claim by the current holder must be idempotent"),
@@ -47,16 +47,16 @@ fn reclaim_by_current_holder_grants_and_extends() {
 
 #[test]
 fn renew_by_holder_extends() {
-    let cur = entry("rustic-git-1", 5_000);
-    let renewed = decide_renew(Some(&cur), "rustic-git-1", 4_000).unwrap();
-    assert_eq!(renewed.node, "rustic-git-1");
+    let cur = entry("kloudlite-git-1", 5_000);
+    let renewed = decide_renew(Some(&cur), "kloudlite-git-1", 4_000).unwrap();
+    assert_eq!(renewed.node, "kloudlite-git-1");
     assert_eq!(renewed.expires_ms, 4_000 + LEASE_TTL.as_millis() as u64);
 }
 
 #[test]
 fn renew_by_non_holder_returns_none() {
-    let cur = entry("rustic-git-1", 5_000);
-    assert!(decide_renew(Some(&cur), "rustic-git-2", 4_000).is_none());
+    let cur = entry("kloudlite-git-1", 5_000);
+    assert!(decide_renew(Some(&cur), "kloudlite-git-2", 4_000).is_none());
 }
 
 /// A lapsed clock must not take a repo from the node still holding it. The leader is the only node
@@ -64,9 +64,9 @@ fn renew_by_non_holder_returns_none() {
 /// closes a database that is serving fine.
 #[test]
 fn renew_of_a_lapsed_entry_by_the_holder_extends_it() {
-    let cur = entry("rustic-git-1", 1_000);
-    let renewed = decide_renew(Some(&cur), "rustic-git-1", 2_000).unwrap();
-    assert_eq!(renewed.node, "rustic-git-1");
+    let cur = entry("kloudlite-git-1", 1_000);
+    let renewed = decide_renew(Some(&cur), "kloudlite-git-1", 2_000).unwrap();
+    assert_eq!(renewed.node, "kloudlite-git-1");
     assert_eq!(renewed.expires_ms, 2_000 + LEASE_TTL.as_millis() as u64);
 }
 
@@ -74,18 +74,18 @@ fn renew_of_a_lapsed_entry_by_the_holder_extends_it() {
 /// database, so the lease follows the handle back.
 #[test]
 fn renew_of_a_pruned_entry_regrants_it_to_the_holder() {
-    let renewed = decide_renew(None, "rustic-git-1", 2_000).unwrap();
-    assert_eq!(renewed.node, "rustic-git-1");
+    let renewed = decide_renew(None, "kloudlite-git-1", 2_000).unwrap();
+    assert_eq!(renewed.node, "kloudlite-git-1");
 }
 
 /// Safety is unchanged: once the map names somebody else, the asker has genuinely lost it and must
 /// close — expired or not.
 #[test]
 fn renew_is_declined_once_the_map_names_another_node() {
-    let cur = entry("rustic-git-2", 1_000);
-    assert!(decide_renew(Some(&cur), "rustic-git-1", 2_000).is_none());
-    let live = entry("rustic-git-2", 9_000);
-    assert!(decide_renew(Some(&live), "rustic-git-1", 2_000).is_none());
+    let cur = entry("kloudlite-git-2", 1_000);
+    assert!(decide_renew(Some(&cur), "kloudlite-git-1", 2_000).is_none());
+    let live = entry("kloudlite-git-2", 9_000);
+    assert!(decide_renew(Some(&live), "kloudlite-git-1", 2_000).is_none());
 }
 
 /// Release is a plain delete, and it runs only after the database is closed — so the guard that
@@ -93,18 +93,18 @@ fn renew_is_declined_once_the_map_names_another_node() {
 /// release from a node that already lost the repo must not delete the new owner's entry.
 #[test]
 fn only_the_holder_may_release() {
-    let cur = entry("rustic-git-1", 50_000);
-    assert!(may_release(Some(&cur), "rustic-git-1"));
-    assert!(!may_release(Some(&cur), "rustic-git-2"), "a stale release must not delete the owner");
-    assert!(!may_release(None, "rustic-git-1"));
+    let cur = entry("kloudlite-git-1", 50_000);
+    assert!(may_release(Some(&cur), "kloudlite-git-1"));
+    assert!(!may_release(Some(&cur), "kloudlite-git-2"), "a stale release must not delete the owner");
+    assert!(!may_release(None, "kloudlite-git-1"));
 }
 
 /// Once released, the repo is claimable at once by anyone — there is no tombstone and no drain
 /// left to wait out, because the releasing node closed its database before releasing.
 #[test]
 fn a_released_repo_is_claimable_immediately() {
-    match decide_claim(None, "rustic-git-2", 1_000) {
-        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+    match decide_claim(None, "kloudlite-git-2", 1_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "kloudlite-git-2"),
         g => panic!("a released repo must be claimable at once: {g:?}"),
     }
 }
@@ -115,8 +115,8 @@ fn a_released_repo_is_claimable_immediately() {
 /// case it exists for (the entry was pruned while the owner was gone).
 #[test]
 fn force_claim_on_absent_entry_grants() {
-    match decide_force_claim(None, "rustic-git-2", 10_000) {
-        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+    match decide_force_claim(None, "kloudlite-git-2", 10_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "kloudlite-git-2"),
         g => panic!("absent entry must grant: {g:?}"),
     }
 }
@@ -126,9 +126,9 @@ fn force_claim_on_absent_entry_grants() {
 #[test]
 fn force_claim_on_a_live_but_unreachable_holder_grants() {
     // Written at 1_000 (expiry 11_000), so it is live at 5_000 and well past FORCE_MIN_AGE.
-    let cur = entry("rustic-git-1", 1_000 + LEASE_TTL.as_millis() as u64);
-    match decide_force_claim(Some(&cur), "rustic-git-2", 5_000) {
-        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+    let cur = entry("kloudlite-git-1", 1_000 + LEASE_TTL.as_millis() as u64);
+    match decide_force_claim(Some(&cur), "kloudlite-git-2", 5_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "kloudlite-git-2"),
         g => panic!("a live entry whose holder is unreachable must be forced over: {g:?}"),
     }
 }
@@ -137,9 +137,9 @@ fn force_claim_on_a_live_but_unreachable_holder_grants() {
 /// the ordinary one.
 #[test]
 fn force_claim_on_a_stale_entry_grants() {
-    let cur = entry("rustic-git-1", 1_000);
-    match decide_force_claim(Some(&cur), "rustic-git-2", 20_000) {
-        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+    let cur = entry("kloudlite-git-1", 1_000);
+    match decide_force_claim(Some(&cur), "kloudlite-git-2", 20_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "kloudlite-git-2"),
         g => panic!("expired entry must grant: {g:?}"),
     }
 }
@@ -148,10 +148,10 @@ fn force_claim_on_a_stale_entry_grants() {
 /// already holds must stay idempotent, not be told it lost its own repo.
 #[test]
 fn force_claim_by_the_current_holder_grants() {
-    let cur = entry("rustic-git-1", 10_500);
-    match decide_force_claim(Some(&cur), "rustic-git-1", 10_000) {
+    let cur = entry("kloudlite-git-1", 10_500);
+    match decide_force_claim(Some(&cur), "kloudlite-git-1", 10_000) {
         Grant::Granted(e) => {
-            assert_eq!(e.node, "rustic-git-1");
+            assert_eq!(e.node, "kloudlite-git-1");
             assert_eq!(e.expires_ms, 10_000 + LEASE_TTL.as_millis() as u64);
         }
         g => panic!("re-claim by the holder must be idempotent: {g:?}"),
@@ -163,15 +163,15 @@ fn force_claim_by_the_current_holder_grants() {
 #[test]
 fn force_claim_refuses_an_entry_written_moments_ago() {
     // Written at 10_000 by node 3; node 2 asks 500ms later.
-    let cur = entry("rustic-git-3", 10_000 + LEASE_TTL.as_millis() as u64);
-    match decide_force_claim(Some(&cur), "rustic-git-2", 10_500) {
+    let cur = entry("kloudlite-git-3", 10_000 + LEASE_TTL.as_millis() as u64);
+    match decide_force_claim(Some(&cur), "kloudlite-git-2", 10_500) {
         Grant::HeldBy(e) => assert_eq!(e, cur, "must name the winner so the caller forwards there"),
         g => panic!("a just-granted entry must not be forced over: {g:?}"),
     }
     // And exactly at the threshold it is fair game again.
     let now = 10_000 + FORCE_MIN_AGE.as_millis() as u64;
-    match decide_force_claim(Some(&cur), "rustic-git-2", now) {
-        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+    match decide_force_claim(Some(&cur), "kloudlite-git-2", now) {
+        Grant::Granted(e) => assert_eq!(e.node, "kloudlite-git-2"),
         g => panic!("past FORCE_MIN_AGE a forced claim must grant: {g:?}"),
     }
 }
@@ -277,7 +277,7 @@ async fn checkpointing_after_a_write_returns() {
     let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let store = OwnershipStore::open(os);
     store.promote().await.unwrap();
-    store.put("alice/web", &entry("rustic-git-1", 1)).await.unwrap();
+    store.put("alice/web", &entry("kloudlite-git-1", 1)).await.unwrap();
 
     let r = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
     assert!(r.is_ok(), "a checkpoint with work to do must not block the lease loop either");

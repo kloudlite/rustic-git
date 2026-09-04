@@ -84,7 +84,7 @@ And in `bins/agent/tests/reconcile.rs`:
 async fn an_existing_persistent_volume_is_not_re_applied() {
     let (ctx, rec) = ctx_with_existing_pvs();
     let w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert!(
         rec.calls().iter().all(|c| !(c.0 == "PATCH" && c.1.contains("/persistentvolumes/"))),
         "an existing PV is left alone"
@@ -97,8 +97,8 @@ builder by registering PV routes that answer `200` for a GET. Match the tree.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-workspaces names_its_claim` and
-`CARGO_INCREMENTAL=0 cargo test -p rustic-git-agent-bin not_re_applied`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces names_its_claim` and
+`CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin not_re_applied`
 Expected: FAIL — `local_pv` takes six arguments and the claim still sets `volume_name`.
 
 - [ ] **Step 3: Name the claim on the PV**
@@ -161,7 +161,7 @@ claim's namespace and name to `local_pv`. Leave the claim on `ensure`. Add a com
 
 - [ ] **Step 6: Run the tests**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-workspaces -p rustic-git-agent-bin`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin`
 Expected: PASS. Existing tests that assert the PV or claim shape will need updating — update what
 they EXPECT of the new shape, never what they are checking. If an assertion about exclusivity or
 about the gate has to change, stop and report it.

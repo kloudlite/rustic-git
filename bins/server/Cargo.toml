@@ -1,28 +1,28 @@
 [package]
-name = "rustic-git-server"
+name = "kloudlite-git-server"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]                      # thin lib so the workspace test host (Task 11) can drive the router
-name = "rustic_git_server"
+name = "kloudlite_git_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustic-git"        # binary name unchanged
+name = "kloudlite-git"        # binary name unchanged
 path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
 metrics = { workspace = true }
-rustic-git-core = { path = "../../crates/core", features = ["ssh"] }
-rustic-git-storage = { path = "../../crates/storage" }
-rustic-git-gitbase = { path = "../../crates/gitbase" }
-rustic-git-pulls = { path = "../../crates/pulls", features = ["check"] }
-rustic-git-app = { path = "../../crates/app" }
-rustic-git-git = { path = "../../crates/git" }
-rustic-git-registry = { path = "../../crates/registry" }
-rustic-git-workspaces = { path = "../../crates/workspaces" }
+kloudlite-git-core = { path = "../../crates/core", features = ["ssh"] }
+kloudlite-git-storage = { path = "../../crates/storage" }
+kloudlite-git-gitbase = { path = "../../crates/gitbase" }
+kloudlite-git-pulls = { path = "../../crates/pulls", features = ["check"] }
+kloudlite-git-app = { path = "../../crates/app" }
+kloudlite-git-git = { path = "../../crates/git" }
+kloudlite-git-registry = { path = "../../crates/registry" }
+kloudlite-git-workspaces = { path = "../../crates/workspaces" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

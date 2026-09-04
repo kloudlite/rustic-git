@@ -9,8 +9,8 @@ use super::*;
 // saying the same thing, and means a leaked laptop key cannot reach a team's repos
 // unless it was made for them.
 
-use rustic_git_core::Result;
-use rustic_git_pulls::directory::{CliLogin, Credential, CredentialKind};
+use kloudlite_git_core::Result;
+use kloudlite_git_pulls::directory::{CliLogin, Credential, CredentialKind};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct NewCredential {
@@ -43,7 +43,7 @@ pub(crate) async fn credential_caller<'a>(
     api: &'a Api,
     headers: &axum::http::HeaderMap,
     owner: &str,
-) -> std::result::Result<(String, &'a rustic_git_pulls::directory::Directory), Response> {
+) -> std::result::Result<(String, &'a kloudlite_git_pulls::directory::Directory), Response> {
     // `user_identity`, not `caller`: managing your own credentials is exactly what the CLI is
     // for, and this route pays for the revocation lookup a CLI token needs.
     let user = user_identity(api, headers).await?.email;
@@ -56,7 +56,7 @@ pub(crate) async fn credential_caller_as<'a>(
     api: &'a Api,
     user: String,
     owner: &str,
-) -> std::result::Result<(String, &'a rustic_git_pulls::directory::Directory), Response> {
+) -> std::result::Result<(String, &'a kloudlite_git_pulls::directory::Directory), Response> {
     let db = directory(api)?;
     match may_act_under(db, &user, owner).await {
         Ok(true) => Ok((user, db)),
@@ -106,7 +106,7 @@ pub(crate) async fn create_token(
         }
     };
     let meta = Credential {
-        id: rustic_git_storage::store::Store::token_digest(&token),
+        id: kloudlite_git_storage::store::Store::token_digest(&token),
         kind: CredentialKind::Token,
         owner: owner.clone(),
         created_by: user,
@@ -242,7 +242,7 @@ pub(crate) async fn revoke(
 }
 
 // One copy, in core — this crate and the server binary both index keys by it.
-use rustic_git_core::sshkeys::ssh_fingerprint;
+use kloudlite_git_core::sshkeys::ssh_fingerprint;
 
 /// The credential id and the fingerprints an ssh SIGNING key answers to. Kept beside `add_key`
 /// and used by it, so a test can build exactly the row registration writes.
@@ -284,14 +284,14 @@ fn authorized_keys_lines(keys: &[Credential]) -> String {
 }
 
 /// The `authorized_keys` file for an owner: every ssh key they have registered for access.
-pub async fn authorized_keys_for(db: &rustic_git_pulls::directory::Directory, owner: &str) -> Result<String> {
+pub async fn authorized_keys_for(db: &kloudlite_git_pulls::directory::Directory, owner: &str) -> Result<String> {
     let keys = db.credentials_for(owner, CredentialKind::SshKey).await?;
     Ok(authorized_keys_lines(&keys))
 }
 
 /// `(name, email)` for git to commit as inside the owner's workspaces. A handle that is not a
 /// person's (never claimed) gets empty strings: git then asks, which is the right answer.
-pub async fn git_identity_for(db: &rustic_git_pulls::directory::Directory, owner: &str) -> Result<(String, String)> {
+pub async fn git_identity_for(db: &kloudlite_git_pulls::directory::Directory, owner: &str) -> Result<(String, String)> {
     Ok(db.user_by_handle(owner).await?.map(|u| (u.name, u.email)).unwrap_or_default())
 }
 
@@ -465,7 +465,7 @@ pub(crate) async fn cli_code(
         d => d.chars().take(60).collect(),
     };
     let code = random_code();
-    let poll = rustic_git_core::hex(&rand::random::<[u8; 16]>());
+    let poll = kloudlite_git_core::hex(&rand::random::<[u8; 16]>());
     // A row, not memory: the api has more than one replica, and the browser that approves this
     // code is routed independently of the CLI that asked for it.
     // The per-address bucket on this route (`ratelimit`, sized to `CLI_CODE_TTL`) is what caps
@@ -723,7 +723,7 @@ pub(crate) async fn list_cli_tokens(
                         "name": c.name,
                         "createdAt": rfc3339(c.created_at.timestamp_millis()),
                         "expiresAt": rfc3339(
-                            c.created_at.timestamp_millis() + rustic_git_core::jwt::CLI_TTL_SECS as i64 * 1000,
+                            c.created_at.timestamp_millis() + kloudlite_git_core::jwt::CLI_TTL_SECS as i64 * 1000,
                         ),
                     })
                 })
@@ -770,7 +770,7 @@ fn generate_ed25519() -> std::io::Result<(String, String)> {
 
     let mut key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    key.set_comment("rustic-git");
+    key.set_comment("kloudlite-git");
     let private = key.to_openssh(LineEnding::LF).map_err(|e| std::io::Error::other(e.to_string()))?;
     let public = key.public_key().to_openssh().map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok((private.to_string(), public))
@@ -958,7 +958,7 @@ mod tests {
 
     async fn cli_api() -> Arc<Api> {
         let mut api = crate::testing::test_api_with_secret("peer").await;
-        api.jwt = Some(Arc::new(rustic_git_core::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()));
+        api.jwt = Some(Arc::new(kloudlite_git_core::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()));
         Arc::new(api)
     }
 

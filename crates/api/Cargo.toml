@@ -1,18 +1,18 @@
 [package]
-name = "rustic-git-api"
+name = "kloudlite-git-api"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "rustic_git_api"
+name = "kloudlite_git_api"
 
 [dependencies]
 tracing = { workspace = true }
-rustic-git-core = { path = "../core", features = ["ssh"] }
-rustic-git-storage = { path = "../storage" }
-rustic-git-pulls = { path = "../pulls" }
-rustic-git-workspaces = { path = "../workspaces" }
+kloudlite-git-core = { path = "../core", features = ["ssh"] }
+kloudlite-git-storage = { path = "../storage" }
+kloudlite-git-pulls = { path = "../pulls" }
+kloudlite-git-workspaces = { path = "../workspaces" }
 tokio = { workspace = true }
 futures = { workspace = true }
 slatedb = { workspace = true }

@@ -191,7 +191,7 @@ pub fn owner_set_selector(owners: &[String]) -> String {
     // `owners` is always `caller_owners`'s output, and that always starts with the caller's own
     // (already-validated) owner — so this never filters down to an empty set.
     let safe: Vec<&str> =
-        owners.iter().filter(|o| rustic_git_storage::store::valid_owner(o)).map(String::as_str).collect();
+        owners.iter().filter(|o| kloudlite_git_storage::store::valid_owner(o)).map(String::as_str).collect();
     format!("{OWNER_LABEL} in ({})", safe.join(","))
 }
 
@@ -238,7 +238,7 @@ mod tests {
             }
         }
         let state = ApiState::new(
-            Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
+            Arc::new(kloudlite_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
         )
         .with_directory(Arc::new(Stub(long.clone())));
 

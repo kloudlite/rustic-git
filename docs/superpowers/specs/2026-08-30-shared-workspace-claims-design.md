@@ -77,10 +77,10 @@ Drop the `attach-{ns}` PV and `attach` claim. Write the rendered file inside the
 subvolume and mount it from the claim already there:
 
 ```
-live-ws-{id}  →  subPath: .rustic/resolv.conf  →  /etc/resolv.conf   (read-only)
+live-ws-{id}  →  subPath: .kloudlite/resolv.conf  →  /etc/resolv.conf   (read-only)
 ```
 
-The agent writes `{pool}/vol/{id}/live/.rustic/resolv.conf` instead of
+The agent writes `{pool}/vol/{id}/live/.kloudlite/resolv.conf` instead of
 `{pool}/attach/{id}/resolv.conf`. Everything else about attachment is unchanged: the same renderer,
 the same in-place write, the same two NetworkPolicies, the same no-restart behaviour. Multiple
 mounts from one volume with different subPaths are ordinary Kubernetes.
@@ -92,10 +92,10 @@ the janitor's `janitor_sweep_attach` all go with it — the directory being swep
 
 Platform state moves inside user data. The file travels into every snapshot, push, clone and
 restore of that workspace, and it is visible in the user's tree at
-`~/workspaces/{name}/.rustic/resolv.conf`.
+`~/workspaces/{name}/.kloudlite/resolv.conf`.
 
 More importantly it becomes **user-writable territory**: the prelude chowns the workspace directory
-to `kl`, so the person in the workspace can delete `.rustic` outright. That is survivable but must
+to `kl`, so the person in the workspace can delete `.kloudlite` outright. That is survivable but must
 be deliberate:
 
 - Deleting it while the pod runs changes nothing — the pod holds the inode, exactly as fact 5
@@ -118,7 +118,7 @@ stands on its own.
 | Pod mounts `nix` before the binding created it | Pod stays `Pending` on the claim, as it already does for `home`. The `namespace_ready` gate makes this the same window that exists today. |
 | A workspace pod predating phase 1 is running | Keeps mounting `nix-ws-{id}`; unaffected until its next recreation. |
 | The old `nix-ws-{id}` PVC is deleted while a pod mounts it | `pvc-protection` holds it `Terminating` until the pod goes. Nothing in this design deletes it; only workspace deletion does, which deletes the pod too. |
-| Phase 2: user deletes `~/workspaces/{name}/.rustic` while running | DNS keeps working — the pod holds the inode. Restored before the next pod start. |
+| Phase 2: user deletes `~/workspaces/{name}/.kloudlite` while running | DNS keeps working — the pod holds the inode. Restored before the next pod start. |
 | Phase 2: user replaces the file with a directory | The reconciler's existing directory-recovery branch removes it and rewrites the file before the pod is created. |
 | Phase 2: clone or restore carries a stale resolv.conf | Rewritten on the first reconcile of the destination workspace. |
 | `/nix` missing on a node | Unchanged from today: the PV points at a path the node must have; the mount fails and the pod does not start. |
@@ -134,7 +134,7 @@ renderer.
 
 - `crates/workspaces` units: `nix_pv_name(ns)` and `NIX_CLAIM` naming; `workspace_pod` mounts the
   claim `nix` and no longer a per-workspace one; phase 2 — the `/etc/resolv.conf` mount names the
-  `live` claim with `subPath: .rustic/resolv.conf`.
+  `live` claim with `subPath: .kloudlite/resolv.conf`.
 - `bins/agent/tests/reconcile.rs`: the binding reconciler creates the `nix` pair with the binding's
   ownerReference, in every namespace it already creates `home` for; `apply_workspace` no longer
   creates a nix pair; phase 2 — the reconciler writes the file inside the live subvolume and the

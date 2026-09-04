@@ -29,7 +29,7 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: rustic-git-agent-spec-is-read-only
+  name: kloudlite-git-agent-spec-is-read-only
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -45,13 +45,13 @@ spec:
       # and `stop_push` legitimately create transient Snapshots naming a parent, so denying a
       # non-empty parent would break both. The chain `/v1` reads back is `!transient` only, and a
       # transient never becomes one, so a forged parent on a transient never enters the history.
-      - apiGroups: ["rustic-git.io"]
+      - apiGroups: ["kloudlite-git.io"]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["workspaces", "environments", "volumes", "ownerbindings", "snapshots", "volumereplicas"]
   matchConditions:
     - name: from-the-agent
-      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:rustic-git-agent'"
+      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-git-agent'"
   validations:
     # A create has no oldObject, so it gets its own arm. The only Volume the agent authors is a
     # PARENT'S CHILD (`ensure_child_volume`, which sets an ownerReference and lets garbage
@@ -67,14 +67,14 @@ spec:
                                      || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
                   && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
                : object.spec == oldObject.spec)
-      message: "rustic-git-agent writes status, not spec (exceptions: Volume.spec.restoreTo, Volume.spec.nodeName owned->'' or ''->node, and a created Volume must be a parent's child)"
+      message: "kloudlite-git-agent writes status, not spec (exceptions: Volume.spec.restoreTo, Volume.spec.nodeName owned->'' or ''->node, and a created Volume must be a parent's child)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: rustic-git-agent-spec-is-read-only
+  name: kloudlite-git-agent-spec-is-read-only
 spec:
-  policyName: rustic-git-agent-spec-is-read-only
+  policyName: kloudlite-git-agent-spec-is-read-only
   validationActions: ["Deny"]
 ---
 # 2. `bind` on a ClusterRole plus `rolebindings: create` is, to RBAC, "grant that role to any
@@ -82,7 +82,7 @@ spec:
 #    `secrets` there. The same shape is true of `pods: create`, which the role holds cluster-wide:
 #    a privileged `hostPath: /` pod in kube-system turns root-on-one-node into root-on-the-cluster
 #    and mints any user's token, and the pod fence in workspace-admission.yaml cannot refuse it
-#    because that binding is scoped to namespaces carrying `rustic-git.io/kind`. So this pins EVERY
+#    because that binding is scoped to namespaces carrying `kloudlite-git.io/kind`. So this pins EVERY
 #    namespaced kind the agent writes — pods, statefulsets, services, networkpolicies, limitranges,
 #    secrets, rolebindings — to the tenant namespaces it makes (`ws-`/`wt-` for workspaces, `env-`
 #    for environments; `wt-` is the team pair, see `crd::ws_namespace`), every RoleBinding to the
@@ -103,7 +103,7 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: rustic-git-agent-tenant-namespaces-only
+  name: kloudlite-git-agent-tenant-namespaces-only
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -142,7 +142,7 @@ spec:
         resources: ["networkpolicies"]
   matchConditions:
     - name: from-the-agent
-      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:rustic-git-agent'"
+      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-git-agent'"
   validations:
     # A delete the agent legitimately makes is always inside a namespace it reconciles: a
     # workspace pod, an environment's StatefulSets and Services, an attachment NetworkPolicy.
@@ -155,7 +155,7 @@ spec:
           || oldObject.metadata.namespace.startsWith('ws-')
           || oldObject.metadata.namespace.startsWith('wt-')
           || oldObject.metadata.namespace.startsWith('env-')
-      message: "rustic-git-agent may only delete namespaced objects in ws-/wt-/env- namespaces"
+      message: "kloudlite-git-agent may only delete namespaced objects in ws-/wt-/env- namespaces"
     - expression: >-
         request.operation == 'DELETE' ? true :
         object.kind == 'Namespace'
@@ -170,22 +170,22 @@ spec:
               || object.metadata.namespace.startsWith('wt-')
               || object.metadata.namespace.startsWith('env-'))
              && object.roleRef.kind == 'ClusterRole'
-             && object.roleRef.name in ['rustic-git-api-secrets', 'rustic-git-agent-ws-secrets']
+             && object.roleRef.name in ['kloudlite-git-api-secrets', 'kloudlite-git-agent-ws-secrets']
              && has(object.subjects)
              && object.subjects.all(s, s.kind == 'ServiceAccount'
                                        && s.namespace == 'kube-system'
-                                       && s.name in ['rustic-git-api', 'rustic-git-agent']))
+                                       && s.name in ['kloudlite-git-api', 'kloudlite-git-agent']))
         : (object.kind in ['Pod', 'StatefulSet', 'Service', 'NetworkPolicy', 'LimitRange'])
           ? (object.metadata.namespace.startsWith('ws-')
              || object.metadata.namespace.startsWith('wt-')
              || object.metadata.namespace.startsWith('env-'))
         : false
-      message: "rustic-git-agent may only write ws-/wt-/env- namespaces and namespaced objects inside them, ws-ssh-* Secrets, and the two api/agent secret RoleBindings"
+      message: "kloudlite-git-agent may only write ws-/wt-/env- namespaces and namespaced objects inside them, ws-ssh-* Secrets, and the two api/agent secret RoleBindings"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: rustic-git-agent-tenant-namespaces-only
+  name: kloudlite-git-agent-tenant-namespaces-only
 spec:
-  policyName: rustic-git-agent-tenant-namespaces-only
+  policyName: kloudlite-git-agent-tenant-namespaces-only
   validationActions: ["Deny"]

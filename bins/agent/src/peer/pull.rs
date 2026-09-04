@@ -9,9 +9,9 @@ use crate::controller::{replace_status, Ctx};
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::api::{Api, ListParams, PostParams};
 use kube::ResourceExt;
-use rustic_git_workspaces::crd;
-use rustic_git_workspaces::engine::Engine;
-use rustic_git_workspaces::replicate;
+use kloudlite_git_workspaces::crd;
+use kloudlite_git_workspaces::engine::Engine;
+use kloudlite_git_workspaces::replicate;
 use futures::TryStreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -51,12 +51,12 @@ pub fn replica_interval(settings: &crate::controller::Settings) -> std::time::Du
     std::time::Duration::from_secs(settings.load().replica_secs)
 }
 
-/// `{pod ip}:8444` for the `rustic-git-agent` pod on `node` — the peer listener's own address,
+/// `{pod ip}:8444` for the `kloudlite-git-agent` pod on `node` — the peer listener's own address,
 /// found through the ClusterRole's existing pods get/list grant rather than a DNS name, since a
 /// DaemonSet pod has no stable per-node service.
 pub(crate) async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<String, String> {
     let api: kube::Api<Pod> = kube::Api::namespaced(client.clone(), "kube-system");
-    let lp = ListParams::default().labels("app=rustic-git-agent").fields(&format!("spec.nodeName={node}"));
+    let lp = ListParams::default().labels("app=kloudlite-git-agent").fields(&format!("spec.nodeName={node}"));
     let pods = api.list(&lp).await.map_err(|e| e.to_string())?;
     let ip = pods
         .items
@@ -64,9 +64,9 @@ pub(crate) async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<
         // The label and the node are a selector, not an identity: a pod created in `kube-system`
         // by anyone can wear both. The ServiceAccount is the thing only our DaemonSet has, and a
         // pull redirected to an impostor is a root `btrfs receive` of whatever it answers with.
-        .filter(|p| p.spec.as_ref().and_then(|s| s.service_account_name.as_deref()) == Some("rustic-git-agent"))
+        .filter(|p| p.spec.as_ref().and_then(|s| s.service_account_name.as_deref()) == Some("kloudlite-git-agent"))
         .find_map(|p| p.status.and_then(|s| s.pod_ip))
-        .ok_or_else(|| format!("no ready rustic-git-agent pod on {node}"))?;
+        .ok_or_else(|| format!("no ready kloudlite-git-agent pod on {node}"))?;
     Ok(format!("{ip}:8444"))
 }
 
@@ -504,7 +504,7 @@ pub(crate) async fn write_replica_status(
         None => {
             let spec = crd::VolumeReplicaSpec { volume: volume.to_string(), node: ctx.node.clone() };
             let mut r = crd::VolumeReplica::new(&name, spec);
-            // H2: owner is unknown here (only the volume id is), so only `rustic-git.io/volume`
+            // H2: owner is unknown here (only the volume id is), so only `kloudlite-git.io/volume`
             // is stamped — the e2e (`tests/ws_e2e.sh`) selects on exactly that.
             r.metadata.labels = Some(std::collections::BTreeMap::from([(crd::VOLUME_LABEL.to_string(), volume.to_string())]));
             api.create(&PostParams::default(), &r).await?

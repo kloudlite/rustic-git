@@ -22,10 +22,10 @@ use kube::api::{Api, Patch, PatchParams};
 
 /// A roll only ever patches an existing pod-template annotation — never a pod delete, never a
 /// scale. This is what `kubectl rollout restart` sends.
-const RESTARTED_AT: &str = "rustic-git.io/restarted-at";
-const ROLLED_BY: &str = "rustic-git.io/rolled-by";
-const ROLLED_AT: &str = "rustic-git.io/rolled-at";
-const ROLL_REASON: &str = "rustic-git.io/roll-reason";
+const RESTARTED_AT: &str = "kloudlite-git.io/restarted-at";
+const ROLLED_BY: &str = "kloudlite-git.io/rolled-by";
+const ROLLED_AT: &str = "kloudlite-git.io/rolled-at";
+const ROLL_REASON: &str = "kloudlite-git.io/roll-reason";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,27 +66,27 @@ impl serde::Serialize for Scope {
 /// The fixed list — never a free string. A roll target not named here is a 404, both from the
 /// settings-save path (Task 6) and the manual route below.
 pub const KNOWN_CENTRAL: &[(&str, Kind)] = &[
-    ("rustic-git-srv", Kind::StatefulSet),
-    ("rustic-git-api", Kind::Deployment),
-    ("rustic-git-worker", Kind::Deployment),
-    ("rustic-git-web", Kind::Deployment),
-    ("rustic-git-admin", Kind::Deployment),
+    ("kloudlite-git-srv", Kind::StatefulSet),
+    ("kloudlite-git-api", Kind::Deployment),
+    ("kloudlite-git-worker", Kind::Deployment),
+    ("kloudlite-git-web", Kind::Deployment),
+    ("kloudlite-git-admin", Kind::Deployment),
 ];
 
-/// Per region: resolved against that region's client, same as `ClusterSettings`. `rustic-git-gateway`
+/// Per region: resolved against that region's client, same as `ClusterSettings`. `kloudlite-git-gateway`
 /// is exclusively a per-region k3s Deployment (Step 1) — there is no central gateway entry.
 pub const KNOWN_PER_REGION: &[(&str, Kind)] = &[
-    ("rustic-git-agent", Kind::DaemonSet),
-    ("rustic-git-gateway", Kind::Deployment),
+    ("kloudlite-git-agent", Kind::DaemonSet),
+    ("kloudlite-git-gateway", Kind::Deployment),
 ];
 
 /// `spec.template` lives under a different namespace per name, not per cluster — the agent's
 /// DaemonSet is cluster-infra (`kube-system`), the gateway is its own namespace.
 fn namespace(scope: &Scope, name: &str) -> &'static str {
     match scope {
-        Scope::Central => "rustic-git",
-        Scope::Region(_) if name == "rustic-git-agent" => "kube-system",
-        Scope::Region(_) => "rustic-git-system",
+        Scope::Central => "kloudlite-git",
+        Scope::Region(_) if name == "kloudlite-git-agent" => "kube-system",
+        Scope::Region(_) => "kloudlite-git-system",
     }
 }
 

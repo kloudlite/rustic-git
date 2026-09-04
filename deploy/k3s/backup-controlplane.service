@@ -7,9 +7,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# The SAS is read by the script from /etc/rustic-git/k3s-backup.sas. This optional file carries
+# The SAS is read by the script from /etc/kloudlite-git/k3s-backup.sas. This optional file carries
 # the rest: SNITCH_URL=https://hc-ping.com/<uuid>, and ACCOUNT/CONTAINER when not the defaults.
-EnvironmentFile=-/etc/rustic-git/k3s-backup.env
+EnvironmentFile=-/etc/kloudlite-git/k3s-backup.env
 ExecStart=/usr/local/bin/backup-controlplane.sh
 # A run stuck on a hung upload must not pile up behind the next one: the timer skips while this
 # unit is still active, and this cap frees it well inside the hour.

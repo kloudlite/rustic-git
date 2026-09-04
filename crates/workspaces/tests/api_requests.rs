@@ -1,13 +1,13 @@
 //! `/v1/requests` against a mocked API server. The stub `Directory` is the one `api_quota.rs`
 //! uses: `karthik` is an admin of team `acme`, `bob` a plain member.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState, Directory, TeamRole};
-use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{router, ApiState, Directory, TeamRole};
+use kloudlite_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/rustic-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite-git.io/v1alpha1";
 
 struct StubMembership;
 
@@ -26,7 +26,7 @@ impl Directory for StubMembership {
     async fn is_live(&self, _jti: &str) -> bool {
         false
     }
-    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
         None
     }
     async fn is_team(&self, slug: &str) -> bool {
@@ -56,13 +56,13 @@ fn token(jwt: &Jwt, username: &str) -> String {
 }
 
 fn list_of(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "RequestList", "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "RequestList", "metadata": {}, "items": items})
 }
 
 fn stored(id: &str, owner: &str, kind: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Request",
-        "metadata": {"name": id, "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Request",
+        "metadata": {"name": id, "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {"owner": owner, "kind": kind, "requestedBy": owner, "reason": "r",
                  "other": {"title": "t", "body": "b"}},
     });
@@ -93,7 +93,7 @@ async fn a_create_takes_its_author_from_the_claims() {
     let sent = s.rec.sent("POST", &format!("{API}/requests")).remove(0);
     assert_eq!(sent["spec"]["requestedBy"], "karthik");
     assert_eq!(sent["spec"]["owner"], "karthik");
-    assert_eq!(sent["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
+    assert_eq!(sent["metadata"]["labels"]["kloudlite-git.io/owner"], "karthik");
 }
 
 /// One pending per owner PER KIND: a pending `other` must not block a `quota`.

@@ -37,7 +37,7 @@ below carry measured numbers from it.
 
 ## Decisions (settled)
 
-- **The storage registry is a rustic-git namespace.** Volumes live at `vol/{owner}/{name}`
+- **The storage registry is a kloudlite-git namespace.** Volumes live at `vol/{owner}/{name}`
   — a third keyspace beside git repos and container images, with its own per-volume SlateDB
   routed by the existing ownership middleware (`vol` joins the reserved owner names). A
   volume's DB holds its HISTORY: commit records (lineage + state + message + timestamps),
@@ -54,7 +54,7 @@ below carry measured numbers from it.
 - **Cosmos DB keeps only the scheduling plane**: regions, agents, jobs, environments
   (composition + placement + runtime state), and slim workspace docs (scheduling identity +
   a pointer to their `vol/{owner}/{name}`). No snapshot/lineage data in Cosmos.
-- **Audience-split surfaces.** `rustic-git-api` is the FRONTEND's door only (user CRUD,
+- **Audience-split surfaces.** `kloudlite-git-api` is the FRONTEND's door only (user CRUD,
   history browse, auth) — agents never talk to it. The agent-facing surface lives on the
   server tier next to the registry it writes: register / long-poll work / done / failed
   (handlers read-write Cosmos — any node can serve those, no routing) plus the registry
@@ -69,8 +69,8 @@ below carry measured numbers from it.
   from VMs, works behind NAT, no connection registry; Cosmos is the record, the poll is
   only transport.
 - **New crate + new binary**: `crates/workspaces` (models, scheduler, snapshot engine) and
-  `bins/agent` (`rustic-git-agent`). The central API mounts as new routes in the existing
-  `rustic-git-api` binary.
+  `bins/agent` (`kloudlite-git-agent`). The central API mounts as new routes in the existing
+  `kloudlite-git-api` binary.
 - **V1 scope**: control plane + workspace operations end to end. Environments are stored,
   scheduled, and started/stopped by shelling out to `docker compose`; real orchestration
   (networking, health, per-service lifecycle) is later work.
@@ -89,7 +89,7 @@ Partition keys chosen for the dominant query: agent work by region, snapshots by
 ```json
 { "id": "centralindia",
   "name": "Central India",
-  "storage_account": "rusticgitkolomi",
+  "storage_account": "kloudlitegitkolomi",
   "blob_container": "wslayers",
   "status": "active" }
 ```
@@ -222,7 +222,7 @@ Direct port of the POC with its fixes:
 - **restore**: new workspace grafted onto an EXPLICIT past snapshot record (not necessarily
   the source's current tip), inheriting its lineage AND its state (ports, packages, ...).
 
-## API (new routes in rustic-git-api)
+## API (new routes in kloudlite-git-api)
 
 User-facing (existing bearer token auth):
 ```
@@ -278,7 +278,7 @@ alongside these handlers.
 4. Requeue sweep: leased jobs past `lease_until`, and all leased jobs of agents whose
    heartbeat aged out, go back to `queued`.
 
-## Agent (bins/agent → rustic-git-agent)
+## Agent (bins/agent → kloudlite-git-agent)
 
 Config: region, API base URL, region token, pool path, storage account creds (or SAS).
 Loop: register → forever { long-poll work → execute via engine → report done/failed }.

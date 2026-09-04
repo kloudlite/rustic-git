@@ -78,7 +78,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     // Image pull counters are tallied in memory on the GET path and land here; losing one
     // window of counts to a crash is the accepted price of a lock-free pull.
     lane(app.clone(), 30, |a| async move {
-        use rustic_git_registry::store::ImageExt;
+        use kloudlite_git_registry::store::ImageExt;
         if let Err(e) = a.store.flush_pulls().await {
             tracing::warn!(error = %e, "flushing pull counters");
         }
@@ -164,7 +164,7 @@ pub async fn reconcile_owned_markers(app: &App) {
         if let Err(e) = app.store.reconcile_marker(owner, name, kind, db_public).await {
             tracing::warn!(owner = %owner, repo = %name, error = %e, "reconcile marker");
         }
-        tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
     }
 }
 
@@ -189,7 +189,7 @@ pub async fn check_owned_pulls(app: &App) {
         if let Err(e) = crate::pulls::check_repo(&app.store, owner, name).await {
             tracing::warn!(owner = %owner, repo = %name, error = %e, "checking mergeability");
         }
-        tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
     }
 }
 
@@ -241,7 +241,7 @@ pub async fn announce_stranded_merges(app: &App) {
                 tracing::warn!(owner = %owner, repo = %name, number = pr.number, error = %e, "stamping the merge announcement");
             }
         }
-        tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
     }
 }
 
@@ -272,6 +272,6 @@ pub async fn consolidate_owned_packs(app: &App, max_packs: usize) {
             }
             Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "consolidating packs"),
         }
-        tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
     }
 }

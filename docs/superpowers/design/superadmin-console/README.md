@@ -103,6 +103,6 @@ the manifest, the environment or the admin API.
 | Configuration.dc.html | `/superadmin/configuration` | `configuration/page.tsx` | `configuration/scope-table.tsx`; `lib/config-rows.ts` |
 
 Screenshots:
-`cd web && RUSTIC_GIT_ADMIN_FIXTURES=1 AUTH_SECRET=dev-secret AUTH_URL=http://localhost:3000 bun run dev`,
+`cd web && KLOUDLITE_GIT_ADMIN_FIXTURES=1 AUTH_SECRET=dev-secret AUTH_URL=http://localhost:3000 bun run dev`,
 then `AUTH_SECRET=dev-secret node scripts/superadmin-screens.mjs [http://localhost:3000]` writes
 each route at 1440 into `.local/screens/`.

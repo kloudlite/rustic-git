@@ -22,7 +22,7 @@
 - Perf fixes must not change behavior; where a regression test is impractical (pure config, RSC payload shape) the task says so and relies on existing tests plus lint/tsc.
 
 **Deliberately excluded spec findings** (say why once, here):
-- *Ops P1 "server memory requests → 256Mi"*: stale. `deploy/rustic-git.yaml` already requests 384Mi on `rustic-git-srv` with a measured rationale in the comment above it, 96Mi on the leader (measured 8Mi steady), and 256Mi on api/worker. Nothing to change; tell the user to re-validate against live RSS if they still want to.
+- *Ops P1 "server memory requests → 256Mi"*: stale. `deploy/kloudlite-git.yaml` already requests 384Mi on `kloudlite-git-srv` with a measured rationale in the comment above it, 96Mi on the leader (measured 8Mi steady), and 256Mi on api/worker. Nothing to change; tell the user to re-validate against live RSS if they still want to.
 
 ---
 
@@ -31,14 +31,14 @@
 ### Task 1: Size tokio and V8 from the pod, not the node (P0-9 + P2 probe)
 
 **Files:**
-- Modify: `deploy/rustic-git.yaml` — the `env:` blocks of all four Rust workloads: `rustic-git-leader` (env starts ~line 56), `rustic-git-srv` (~line 288), `rustic-git-api` (~line 608), `rustic-git-worker` (~line 715). (Spec says "three workloads"; there are four — leader, srv, api, worker — all get the var.)
-- Modify: `deploy/rustic-git-web.yaml` — web `env:` block (~line 34) and the readinessProbe `periodSeconds: 5` at line 90.
+- Modify: `deploy/kloudlite-git.yaml` — the `env:` blocks of all four Rust workloads: `kloudlite-git-leader` (env starts ~line 56), `kloudlite-git-srv` (~line 288), `kloudlite-git-api` (~line 608), `kloudlite-git-worker` (~line 715). (Spec says "three workloads"; there are four — leader, srv, api, worker — all get the var.)
+- Modify: `deploy/kloudlite-git-web.yaml` — web `env:` block (~line 34) and the readinessProbe `periodSeconds: 5` at line 90.
 
 **Context:** Bare `#[tokio::main]` sizes worker threads from the node's cores; tokio reads `TOKIO_WORKER_THREADS` from the environment (verified in vendored `tokio-1.53.1/src/runtime/builder.rs:473` — the builder default reads it). Node's V8 old-space ceiling is sized from host memory, so the 512Mi web pod OOMKills instead of GC'ing; `--max-old-space-size=384` leaves headroom under the limit.
 
 **Interfaces:** none — pure yaml. No test possible; `kubectl apply` validation is the check.
 
-- [ ] **Step 1:** In `deploy/rustic-git.yaml`, add to each of the four containers' `env:` lists (comment once per workload, WHY-style):
+- [ ] **Step 1:** In `deploy/kloudlite-git.yaml`, add to each of the four containers' `env:` lists (comment once per workload, WHY-style):
 
 ```yaml
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -47,7 +47,7 @@
               value: "4"
 ```
 
-- [ ] **Step 2:** In `deploy/rustic-git-web.yaml`, add to the web container's `env:`:
+- [ ] **Step 2:** In `deploy/kloudlite-git-web.yaml`, add to the web container's `env:`:
 
 ```yaml
             # V8 sizes its heap from HOST memory, so the pod OOMKills instead of
@@ -57,7 +57,7 @@
 ```
 
 - [ ] **Step 3:** Same file, readinessProbe `periodSeconds: 5` → `10` (line 90). The startup probe already owns cold start; 5s readiness polling on a Next server buys nothing.
-- [ ] **Step 4:** `kubectl apply --dry-run=client -f deploy/rustic-git.yaml -f deploy/rustic-git-web.yaml` to validate syntax (or `kubectl create --dry-run=client` if not connected — any yaml parse is enough).
+- [ ] **Step 4:** `kubectl apply --dry-run=client -f deploy/kloudlite-git.yaml -f deploy/kloudlite-git-web.yaml` to validate syntax (or `kubectl create --dry-run=client` if not connected — any yaml parse is enough).
 - [ ] **Step 5:** Commit: `git add deploy/ && git commit -m "Size tokio and V8 from the pod, not the node"`
 
 ### Task 2: `panic = "abort"` in the release profile (Ops P1)
@@ -99,7 +99,7 @@
 #[tokio::test(flavor = "multi_thread")]
 async fn browse_json_is_gzipped_when_asked_for() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = kloudlite_git::http::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     let body = format!(
         r#"{{"title":"{}","body":"","base":"refs/heads/main","head":"refs/heads/topic","author":"a@example.com"}}"#,
@@ -110,8 +110,8 @@ async fn browse_json_is_gzipped_when_asked_for() {
 
     let req = Request::builder()
         .uri("/api/alice/widget/pulls")
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header(kloudlite_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(kloudlite_git::proxy::OWNER_HEADER, "alice")
         .header("accept-encoding", "gzip")
         .body(axum::body::Body::empty())
         .unwrap();
@@ -192,7 +192,7 @@ async fn getting_one_repo_asks_the_directory_before_anything_else() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/repos/alice/web"))
         .header("authorization", format!("Bearer {token}"))
@@ -265,7 +265,7 @@ pub(crate) async fn get_repo(
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pull_list_carries_a_comment_count_not_the_comments() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = kloudlite_git::http::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     let open = r#"{"title":"t","body":"","base":"refs/heads/main","head":"refs/heads/topic","author":"a@example.com"}"#;
     assert!(post_json_as(&router, "alice", "/api/alice/widget/pulls", open).await.is_success());

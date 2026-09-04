@@ -2,7 +2,7 @@
 //! rather than plumbing, and the property that matters most is the one the previous, scrape-based
 //! evaluator could not hold: a rule whose window is not fully covered says `unknown`, never `ok`.
 
-use rustic_git_workspaces::history::alerts::{alert_row, evaluate_once, state_of, CATALOGUE};
+use kloudlite_git_workspaces::history::alerts::{alert_row, evaluate_once, state_of, CATALOGUE};
 use std::collections::HashMap;
 
 /// One bucket per `step`, newest last, as `[ts, breached]` — the shape every catalogue query
@@ -126,7 +126,7 @@ fn rows(breaches: &[u8]) -> Result<Vec<Vec<serde_json::Value>>, String> {
     Ok(buckets(breaches))
 }
 
-/// A beat writes only what CHANGED: `rustic.alerts` answers "when did this start", and a row per
+/// A beat writes only what CHANGED: `kloudlite.alerts` answers "when did this start", and a row per
 /// evaluation would bury that under a hundred million rows saying nothing happened.
 #[test]
 fn a_second_identical_beat_writes_nothing() {
@@ -167,13 +167,13 @@ fn an_alert_row_is_keyed_so_a_retried_write_collapses() {
     assert_eq!(a["state"], serde_json::json!("firing"));
 }
 
-/// `current_signals` is the read half: the latest row per (region, rule) out of `rustic.alerts`,
+/// `current_signals` is the read half: the latest row per (region, rule) out of `kloudlite.alerts`,
 /// mapped onto the shape the Signals table renders — including the catalogue's "Why", which is
 /// carried in code rather than stored per row.
 #[tokio::test]
 async fn current_signals_maps_stored_rows_onto_the_response_shape() {
     use axum::{routing::post, Router};
-    use rustic_git_workspaces::history::{alerts::current_signals, History};
+    use kloudlite_git_workspaces::history::{alerts::current_signals, History};
 
     let app = Router::new().route(
         "/",

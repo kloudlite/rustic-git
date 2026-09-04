@@ -826,8 +826,8 @@ async fn concurrent_claims_never_grant_one_repo_twice() {
     let leader = test_leader_app(/* replicas */ 3).await;
     // two different askers race for the same, currently-unowned repo
     let (a, b) = tokio::join!(
-        leader.grant_claim("alice/web", "rustic-git-1", false),
-        leader.grant_claim("alice/web", "rustic-git-2", false),
+        leader.grant_claim("alice/web", "kloudlite-git-1", false),
+        leader.grant_claim("alice/web", "kloudlite-git-2", false),
     );
     // exactly one Granted; the map names a single holder
     let granted = [a.unwrap(), b.unwrap()].iter().filter(|g| matches!(g, Grant::Granted(_))).count();

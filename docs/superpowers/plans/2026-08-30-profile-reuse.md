@@ -63,7 +63,7 @@ Add to `mod tests` in `crates/workspaces/src/packages.rs`:
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-workspaces the_expression_does_not_depend`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces the_expression_does_not_depend`
 Expected: FAIL — `expression` still takes three arguments, so this does not compile.
 
 - [ ] **Step 3: Drop the id**
@@ -82,7 +82,7 @@ In `crates/workspaces/src/packages.rs`, change the signature and the name:
 pub fn expression(pin: &str, packages: &[String]) -> String {
     let paths: Vec<String> = packages.iter().map(|p| format!("pkgs.{p}")).collect();
     format!(
-        "let pkgs = import (builtins.getFlake \"{pin}\") {{ }}; in pkgs.buildEnv {{ name = \"rustic-ws-env\"; paths = [ {} ]; }}",
+        "let pkgs = import (builtins.getFlake \"{pin}\") {{ }}; in pkgs.buildEnv {{ name = \"kloudlite-ws-env\"; paths = [ {} ]; }}",
         paths.join(" ")
     )
 }
@@ -99,7 +99,7 @@ Then `cargo check --workspace` and update the one caller in `bins/agent/src/cont
 
 - [ ] **Step 5: Run the tests**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-workspaces -p rustic-git-agent-bin`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -172,7 +172,7 @@ Add to `mod tests` in `bins/agent/src/nix.rs`:
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-agent-bin index_entry`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin index_entry`
 Expected: FAIL — `cannot find function 'record_index'`.
 
 - [ ] **Step 3: Implement**
@@ -227,7 +227,7 @@ pub fn link_profile(root: &Path, id: &str, store_path: &Path) -> std::io::Result
 
 - [ ] **Step 4: Run them and watch them pass**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-agent-bin`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -263,11 +263,11 @@ async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
     // Seed the index as a previous build would have.
     let store = ctx.profiles_dir.join("seeded-store-path");
     std::fs::create_dir_all(&store).unwrap();
-    let hash = rustic_git_workspaces::packages::hash(&nixpkgs_pin_for_test(), &base_plus(&["hello"]));
-    rustic_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &store).unwrap();
+    let hash = kloudlite_git_workspaces::packages::hash(&nixpkgs_pin_for_test(), &base_plus(&["hello"]));
+    kloudlite_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &store).unwrap();
 
     let w: crd::Workspace = serde_json::from_value(ws_json_with_packages(&["hello"])).unwrap();
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     assert_eq!(fake_nix_builds(&ctx), 0, "an indexed profile must not be rebuilt");
     let st = rec.sent("PATCH", WS_STATUS);
@@ -282,11 +282,11 @@ async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
 #[tokio::test]
 async fn an_index_entry_pointing_at_nothing_still_builds() {
     let (ctx, _rec) = ctx_full_default();
-    let hash = rustic_git_workspaces::packages::hash(&nixpkgs_pin_for_test(), &base_plus(&["hello"]));
-    rustic_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &ctx.profiles_dir.join("gone")).unwrap();
+    let hash = kloudlite_git_workspaces::packages::hash(&nixpkgs_pin_for_test(), &base_plus(&["hello"]));
+    kloudlite_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &ctx.profiles_dir.join("gone")).unwrap();
 
     let w: crd::Workspace = serde_json::from_value(ws_json_with_packages(&["hello"])).unwrap();
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     assert_eq!(fake_nix_builds(&ctx), 1, "a miss builds");
 }
@@ -300,7 +300,7 @@ fake rather than introducing a new one.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-agent-bin already_built`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin already_built`
 Expected: FAIL — the build runs anyway.
 
 - [ ] **Step 3: Consult the index**
@@ -343,7 +343,7 @@ failure to record is logged and nothing more: the profile is correct, only the s
 
 - [ ] **Step 5: Run them and watch them pass**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-agent-bin`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -378,9 +378,9 @@ bounds the set; it is not meant to reclaim quickly.
         let root = tmp.path();
         let store = root.join("store-x");
         std::fs::create_dir_all(&store).unwrap();
-        rustic_git_agent::nix::record_index(root, "orphan", &store).unwrap();
+        kloudlite_git_agent::nix::record_index(root, "orphan", &store).unwrap();
         assert_eq!(janitor_sweep_profiles(root, std::time::Duration::ZERO), 1);
-        assert!(rustic_git_agent::nix::indexed(root, "orphan").is_none());
+        assert!(kloudlite_git_agent::nix::indexed(root, "orphan").is_none());
     }
 
     /// An entry a live workspace points at is never swept, however old.
@@ -390,10 +390,10 @@ bounds the set; it is not meant to reclaim quickly.
         let root = tmp.path();
         let store = root.join("store-y");
         std::fs::create_dir_all(&store).unwrap();
-        rustic_git_agent::nix::record_index(root, "used", &store).unwrap();
-        rustic_git_agent::nix::link_profile(root, "ws-1", &store).unwrap();
+        kloudlite_git_agent::nix::record_index(root, "used", &store).unwrap();
+        kloudlite_git_agent::nix::link_profile(root, "ws-1", &store).unwrap();
         assert_eq!(janitor_sweep_profiles(root, std::time::Duration::ZERO), 0);
-        assert!(rustic_git_agent::nix::indexed(root, "used").is_some());
+        assert!(kloudlite_git_agent::nix::indexed(root, "used").is_some());
     }
 
     /// Keep-biased, like every other sweep: an unreadable directory reclaims nothing.
@@ -406,7 +406,7 @@ bounds the set; it is not meant to reclaim quickly.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-agent-bin profile_sweep`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin profile_sweep`
 Expected: FAIL — `cannot find function 'janitor_sweep_profiles'`.
 
 - [ ] **Step 3: Implement, mirroring `janitor_sweep_attach`**
@@ -423,7 +423,7 @@ Add it to `janitor_beat` beside the other sweeps, counted into the same tuple an
 
 - [ ] **Step 5: Run them and watch them pass**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p rustic-git-agent-bin`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -453,7 +453,7 @@ In the agent container's `env`, beside the existing `NIX_REMOTE`/`WS_NIXPKGS` en
             # re-evaluates nixpkgs — measured at 28 s, against 0.3 s warm. `/nix` is a hostPath
             # this container already mounts, so the cache outlives the pod. ~400 MB.
             - name: XDG_CACHE_HOME
-              value: /nix/var/rustic/cache
+              value: /nix/var/kloudlite/cache
 ```
 
 - [ ] **Step 2: Check the manifest parses**

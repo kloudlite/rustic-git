@@ -1,7 +1,7 @@
 mod common;
 use axum::http::StatusCode;
-use rustic_git_registry::store::ImageExt;
-use rustic_git_registry::Digest;
+use kloudlite_git_registry::store::ImageExt;
+use kloudlite_git_registry::Digest;
 
 const MEDIA: &str = "application/vnd.oci.image.manifest.v1+json";
 
@@ -143,8 +143,8 @@ async fn deleting_a_manifest_by_digest_drops_its_media_type_row_and_spares_its_b
     assert!(db.get(key.clone()).await.unwrap().is_some(), "row exists before delete");
 
     use slatedb::object_store::ObjectStoreExt;
-    let layer = rustic_git_registry::store::blob_path("acme", &Digest::of(b"layer"));
-    let cfg = rustic_git_registry::store::blob_path("acme", &Digest::of(b"cfg"));
+    let layer = kloudlite_git_registry::store::blob_path("acme", &Digest::of(b"layer"));
+    let cfg = kloudlite_git_registry::store::blob_path("acme", &Digest::of(b"cfg"));
     assert!(e.store.os.head(&layer).await.is_ok(), "the layer is there before the delete");
 
     let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{d}"))
@@ -441,7 +441,7 @@ async fn a_push_refreshes_the_image_marker() {
         .body(m.clone()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
 
-    let marker = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx")
+    let marker = kloudlite_git_storage::index::read(&e.store.os, kloudlite_git_storage::index::Kind::Img, "acme", "nginx")
         .await
         .expect("first push must create the marker");
     assert!(!marker.public, "a first push must create the marker private, fail closed");
@@ -460,7 +460,7 @@ async fn a_push_refreshes_the_image_marker() {
         .body(m2).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
 
-    let marker = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx")
+    let marker = kloudlite_git_storage::index::read(&e.store.os, kloudlite_git_storage::index::Kind::Img, "acme", "nginx")
         .await
         .expect("marker must still exist after the second push");
     assert_eq!(marker.manifests, 2);
@@ -825,7 +825,7 @@ async fn a_tag_whose_manifest_is_gone_is_not_counted_as_a_pull() {
 
     // Take the bytes away behind the tag, and clear the cached copy so the GET reaches the store.
     e.store.manifests().remove(&format!("acme/nginx/{d}"));
-    e.store.os.delete(&rustic_git_registry::store::manifest_path("acme", "nginx", &d)).await.unwrap();
+    e.store.os.delete(&kloudlite_git_registry::store::manifest_path("acme", "nginx", &d)).await.unwrap();
     let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);

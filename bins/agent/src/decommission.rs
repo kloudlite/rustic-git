@@ -132,13 +132,13 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
 mod tests {
     use super::*;
     use crate::testsupport::test_ctx;
-    use rustic_git_workspaces::kube_test::{get, Route};
+    use kloudlite_git_workspaces::kube_test::{get, Route};
 
     const NODES: &str = "/api/v1/nodes";
-    const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
-    const VOLREPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
-    const WORKSPACES: &str = "/apis/rustic-git.io/v1alpha1/workspaces";
-    const ENVIRONMENTS: &str = "/apis/rustic-git.io/v1alpha1/environments";
+    const VOLUMES: &str = "/apis/kloudlite-git.io/v1alpha1/volumes";
+    const VOLREPLICAS: &str = "/apis/kloudlite-git.io/v1alpha1/volumereplicas";
+    const WORKSPACES: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces";
+    const ENVIRONMENTS: &str = "/apis/kloudlite-git.io/v1alpha1/environments";
 
     fn list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
@@ -155,7 +155,7 @@ mod tests {
     fn node_decommissioning(name: &str) -> serde_json::Value {
         let mut n = node_ready_json(name);
         n["metadata"]["labels"] =
-            serde_json::json!({ rustic_git_workspaces::crd::DECOMMISSION_LABEL: "true" });
+            serde_json::json!({ kloudlite_git_workspaces::crd::DECOMMISSION_LABEL: "true" });
         n
     }
 
@@ -167,7 +167,7 @@ mod tests {
 
     fn vol_owned(name: &str, node: &str) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
@@ -182,7 +182,7 @@ mod tests {
 
     fn replica_of(volume: &str, node: &str, phase: &str) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": format!("{volume}.{node}"), "uid": format!("uid-{node}")},
             "spec": {"volume": volume, "node": node},
             "status": {"phase": phase, "branches": {}},
@@ -193,7 +193,7 @@ mod tests {
     /// one nothing is writing to the subvolume, which is exactly the distinction the beat turns on.
     fn ws(name: &str, node: &str, volume: &str, desired: &str, pod: bool, replicated: bool) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
             "spec": {"owner": "alice", "name": name, "region": "r1", "image": "img", "desiredState": desired, "packages": []},
             "status": {
@@ -278,7 +278,7 @@ mod tests {
             rec.calls()
         );
         let ann = rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0);
-        assert_eq!(ann["metadata"]["annotations"]["rustic-git.io/decommission-status"], "draining running=1 owned=1 copies=0 thin=1");
+        assert_eq!(ann["metadata"]["annotations"]["kloudlite-git.io/decommission-status"], "draining running=1 owned=1 copies=0 thin=1");
     }
 
     /// Drained is a conjunction of the three counts, and the annotation is the operator's gate on
@@ -299,7 +299,7 @@ mod tests {
         decommission_beat(&ctx).await;
 
         let ann = rec.sent("PATCH", "/api/v1/nodes/node-a").remove(0);
-        let v = ann["metadata"]["annotations"]["rustic-git.io/decommission-status"].as_str().unwrap();
+        let v = ann["metadata"]["annotations"]["kloudlite-git.io/decommission-status"].as_str().unwrap();
         assert!(v.starts_with("drained "), "{v}");
         assert!(chrono::DateTime::parse_from_rfc3339(v.trim_start_matches("drained ")).is_ok(), "{v}");
     }
@@ -326,19 +326,19 @@ mod tests {
             Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_stopped_replicated("ws-1", "node-a", "vol-1")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            get("/apis/rustic-git.io/v1alpha1/workspaces/ws-1", ws_stopped_replicated("ws-1", "node-a", "vol-1")),
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: ws_stopped_replicated("ws-1", "", "vol-1") },
-            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
+            get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1", ws_stopped_replicated("ws-1", "node-a", "vol-1")),
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: ws_stopped_replicated("ws-1", "", "vol-1") },
+            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
             Route { method: "PATCH", path: "/api/v1/nodes/node-a".into(), status: 200, body: node_decommissioning("node-a") },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
         decommission_beat(&ctx).await;
 
-        let vol = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status").remove(0);
+        let vol = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status").remove(0);
         assert_eq!(vol["status"]["conditions"][0]["reason"], "Decommissioned");
-        let ws = rec.sent("PUT", "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status").remove(0);
+        let ws = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status").remove(0);
         assert_eq!(ws["status"]["nodeName"], "");
         // A stopped, fully replicated workspace is HEALTHY: it is being moved, not broken. The
         // word the claim itself owns is `Placed`, and `Degraded` here would paint it red in the
@@ -405,8 +405,8 @@ mod tests {
             Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
-            Route { method: "PATCH", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
-            Route { method: "PUT", path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
+            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
+            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
             Route { method: "PATCH", path: "/api/v1/nodes/node-a".into(), status: 200, body: node_drained("node-a", stamped) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);

@@ -12,13 +12,13 @@
 
 ## Global Constraints
 
-- Session token: JWT `typ: "ssh-session"`, claims `{ sub: <owner username>, ws: <workspace id>, region, jti, iat, exp }`, `exp - iat = 60`. Single use per gateway replica (in-memory `jti` set with expiry). Signed with the same `RUSTIC_GIT_JWT_SECRET` the api uses; the gateway gets it from Secret `rustic-git-jwt` in `kube-system` (k3s).
+- Session token: JWT `typ: "ssh-session"`, claims `{ sub: <owner username>, ws: <workspace id>, region, jti, iat, exp }`, `exp - iat = 60`. Single use per gateway replica (in-memory `jti` set with expiry). Signed with the same `KLOUDLITE_GIT_JWT_SECRET` the api uses; the gateway gets it from Secret `kloudlite-git-jwt` in `kube-system` (k3s).
 - CLI token: JWT `typ: "cli"`, 30 days, `jti`; revocable — the directory stores `Credential { kind: CliToken, id: jti }` and `caller()` refuses a `cli` token whose `jti` is not present (revoke = delete the row). `caller()` accepts `typ` `session` or `cli`.
 - Gateway route `GET /tunnel/{ws-id}` with `Authorization: Bearer <session token>`; the token's `ws` must equal the path; 401 bad/expired/used token, 404 no such workspace, 409 not ready, 502 dial failed; otherwise `101` and binary frames. Idle timeout 30 min; 64 KiB max frame; limits: 10 concurrent per workspace, 100 per owner (per replica).
-- Pod: default image only; command `["/nix/profile/current/bin/sshd", "-D", "-e", "-f", "/etc/ssh/sshd_config"]`; `/etc/ssh` from Secret `ws-ssh-{id}` (`ssh_host_ed25519_key` 0400, `ssh_host_ed25519_key.pub`, `sshd_config`), `/root/.ssh/authorized_keys` from Secret `user-key` key `authorized_keys` (0600). `sshd_config` exactly as in the spec. NetworkPolicy: ingress 22 only from pods labelled `app=rustic-git-gateway` in namespace `kube-system`.
+- Pod: default image only; command `["/nix/profile/current/bin/sshd", "-D", "-e", "-f", "/etc/ssh/sshd_config"]`; `/etc/ssh` from Secret `ws-ssh-{id}` (`ssh_host_ed25519_key` 0400, `ssh_host_ed25519_key.pub`, `sshd_config`), `/root/.ssh/authorized_keys` from Secret `user-key` key `authorized_keys` (0600). `sshd_config` exactly as in the spec. NetworkPolicy: ingress 22 only from pods labelled `app=kloudlite-git-gateway` in namespace `kube-system`.
 - `status.sshHostKey` on the Workspace = the public host key line.
 - Registered SSH keys store their material from now on (`Credential.material` for `SshKey`); `authorized_keys` = all the owner's SshKey material lines, rewritten on every add/remove and on `install_user_key`.
-- `/v1` is public on `dev.kloudlite.io` via a path rule to `rustic-git-api`, rate-limited like the app.
+- `/v1` is public on `dev.kloudlite.io` via a path rule to `kloudlite-git-api`, rate-limited like the app.
 - Hostnames: `ws-<region-id>.khost.dev` (e.g. `ws-centralindia-k3s.khost.dev`).
 - The only inbound on a node is 443 from Cloudflare's published ranges (node firewall); nothing else changes.
 - Tokens never logged. CLI config `~/.config/kl/config.json` mode 0600.
@@ -95,9 +95,9 @@ fn a_cli_token_is_a_user_token_with_an_id_and_a_month() {
     assert!(jti2.is_none());
 }
 ```
-- [ ] **Step 2: Run** `cargo test -p rustic-git-core jwt` → compile error.
+- [ ] **Step 2: Run** `cargo test -p kloudlite-git-core jwt` → compile error.
 - [ ] **Step 3: Implement** — one private `fn now()`; `jti` = 16 random bytes (`rand::random::<[u8;16]>()`, hex) ; `verify_typed` helper decoding into a generic `serde_json::Value` first to read `typ` cheaply, then into the concrete struct. `verify_any_user`: try `verify` (session) else decode as `CliClaims` with `typ == "cli"` and map to `Claims { typ: "cli", .. }`.
-- [ ] **Step 4: Run** `cargo test -p rustic-git-core && cargo clippy -p rustic-git-core -- -D warnings`.
+- [ ] **Step 4: Run** `cargo test -p kloudlite-git-core && cargo clippy -p kloudlite-git-core -- -D warnings`.
 - [ ] **Step 5: Commit** `Mint single-purpose ssh-session and cli tokens`.
 
 ---
@@ -119,7 +119,7 @@ fn a_cli_token_is_a_user_token_with_an_id_and_a_month() {
 - [ ] **Step 1: Failing tests** — in `credentials.rs` tests (the module has a mongo-less unit style for parsing; add): `an_ssh_key_keeps_its_material_and_a_gpg_key_still_keeps_its_own`, `authorized_keys_is_one_line_per_key_and_skips_keys_added_before_material_was_kept`, `the_cli_code_flow_hands_out_a_token_exactly_once` (drive the three handlers with a fake state: code → approve with a minted session → poll 200 → poll 410).
 - [ ] **Step 2: Run** → failures.
 - [ ] **Step 3: Implement.** Material normalization: take the first three whitespace fields of `body.key`. `caller`-style helper for `/v1/cli/tokens` reuses `credential_caller`. Revocation: `DELETE` removes the row; a `cli` JWT whose `jti` row is missing is refused by `credential_caller` (and by Task 3's `caller()`).
-- [ ] **Step 4: Run** `cargo test -p rustic-git-api && cargo clippy -p rustic-git-api -- -D warnings`.
+- [ ] **Step 4: Run** `cargo test -p kloudlite-git-api && cargo clippy -p kloudlite-git-api -- -D warnings`.
 - [ ] **Step 5: Commit** `Keep SSH key material and issue revocable CLI tokens`.
 
 ---
@@ -139,7 +139,7 @@ fn a_cli_token_is_a_user_token_with_an_id_and_a_month() {
 - [ ] **Step 1: Failing tests** (api.rs tests + the crate's router tests): `a_cli_token_is_a_caller_until_it_is_revoked`, `an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_on` (mocked kube: ready ws with `sshHostKey` → 201 with `ws` claim = id, gateway URL as constrained; not-ready → 409; other owner → 404), `the_user_key_secret_carries_authorized_keys`.
 - [ ] **Step 2: Run** → failures.
 - [ ] **Step 3: Implement.** Gateway URL = `format!("wss://ws-{}.khost.dev/tunnel/{}", region, id)` — a const `GATEWAY_DOMAIN: &str = "khost.dev"` in api.rs with a WHY comment (one domain, DNS per region created by `cloudflare-tunnel.sh`).
-- [ ] **Step 4: Run** `cargo test -p rustic-git-workspaces && cargo clippy -p rustic-git-workspaces -p rustic-git-api-bin -- -D warnings` (check the api bin's package name).
+- [ ] **Step 4: Run** `cargo test -p kloudlite-git-workspaces && cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-api-bin -- -D warnings` (check the api bin's package name).
 - [ ] **Step 5: Commit** `Mint ssh sessions and keep authorized_keys in every workspace namespace`.
 
 ---
@@ -160,12 +160,12 @@ fn a_cli_token_is_a_user_token_with_an_id_and_a_month() {
   ```
   `Ctx.host_keys: Arc<dyn HostKeys>` (test fake returns fixed strings). Secret `ws-ssh-{id}` created once (get → absent → generate → create); the public line is read back from the Secret on later passes.
   Pod (default image): command per constraints; volumes `ws-ssh` (Secret `ws-ssh-{id}`, defaultMode 0o400) at `/etc/ssh` (read-only) and `user-key` subPath `authorized_keys` at `/root/.ssh/authorized_keys` (read-only, mode 0o600 via `items`). Ports `22`.
-  NetworkPolicy `allow-gateway-ssh`: ingress port 22 from `namespaceSelector kubernetes.io/metadata.name=kube-system` + `podSelector app=rustic-git-gateway`.
+  NetworkPolicy `allow-gateway-ssh`: ingress port 22 from `namespaceSelector kubernetes.io/metadata.name=kube-system` + `podSelector app=kloudlite-git-gateway`.
 
 - [ ] **Step 1: Failing tests**: k8s.rs — `the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_keys` (command, both mounts, port 22, read-only, no hostPath), `a_custom_image_keeps_its_entrypoint_and_gets_no_sshd`, `only_the_gateway_may_reach_port_22`; reconcile.rs — `a_workspace_gets_a_host_key_secret_before_its_pod` (fake HostKeys; Secret POST precedes pod POST; status `sshHostKey` set), `an_existing_host_key_is_reused` (GET returns a Secret → no generate).
 - [ ] **Step 2: Run** → failures.
 - [ ] **Step 3: Implement.** `ensure_ssh` sits after `ensure_profile` (the pod must not start before both). Agent boot: `host_keys: Arc::new(SshKeygen)`. RBAC: `secrets: get, create, patch` cluster-wide (WHY: per-workspace names). Dockerfile agent stage: `openssh-client`.
-- [ ] **Step 4: Run** `cargo test -p rustic-git-workspaces -p rustic-git-agent-bin && cargo clippy --workspace -- -D warnings && CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`.
+- [ ] **Step 4: Run** `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin && cargo clippy --workspace -- -D warnings && CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`.
 - [ ] **Step 5: Commit** `Run sshd in every default workspace pod with a per-workspace host key`.
 
 ---
@@ -173,9 +173,9 @@ fn a_cli_token_is_a_user_token_with_an_id_and_a_month() {
 ### Task 5: The gateway
 
 **Files:**
-- Create: `bins/gateway/Cargo.toml` (package `rustic-git-gateway-bin`, bin `rustic-git-gateway`), `bins/gateway/src/main.rs`, `bins/gateway/src/lib.rs` (`tunnel.rs`: auth + pump; `resolve.rs`: pod IP), `bins/gateway/tests/tunnel.rs`
-- Modify: root `Cargo.toml` members; `Dockerfile` (a `gateway` stage from the same builder: debian-slim, non-root uid 1001, `ENTRYPOINT ["rustic-git-gateway"]`); `.github/workflows/image.yml` (build/push `ghcr.io/kloudlite/rustic-git-gateway:<sha>`)
-- Create: `deploy/k3s/gateway.yaml` (ServiceAccount + ClusterRole `get` workspaces, `get` pods; Deployment 2 replicas in `kube-system`, label `app=rustic-git-gateway`, env `RUSTIC_GIT_JWT_SECRET` from Secret `rustic-git-jwt`, `WS_REGION`; Service `rustic-git-gateway:8080`)
+- Create: `bins/gateway/Cargo.toml` (package `kloudlite-git-gateway-bin`, bin `kloudlite-git-gateway`), `bins/gateway/src/main.rs`, `bins/gateway/src/lib.rs` (`tunnel.rs`: auth + pump; `resolve.rs`: pod IP), `bins/gateway/tests/tunnel.rs`
+- Modify: root `Cargo.toml` members; `Dockerfile` (a `gateway` stage from the same builder: debian-slim, non-root uid 1001, `ENTRYPOINT ["kloudlite-git-gateway"]`); `.github/workflows/image.yml` (build/push `ghcr.io/kloudlite/kloudlite-git-gateway:<sha>`)
+- Create: `deploy/k3s/gateway.yaml` (ServiceAccount + ClusterRole `get` workspaces, `get` pods; Deployment 2 replicas in `kube-system`, label `app=kloudlite-git-gateway`, env `KLOUDLITE_GIT_JWT_SECRET` from Secret `kloudlite-git-jwt`, `WS_REGION`; Service `kloudlite-git-gateway:8080`)
 
 **Interfaces:**
 - `axum` with `ws` feature; `GET /tunnel/{ws}`; `GET /healthz`.
@@ -186,7 +186,7 @@ fn a_cli_token_is_a_user_token_with_an_id_and_a_month() {
 - [ ] **Step 1: Failing tests** (`bins/gateway/tests/tunnel.rs`, using the crate's `kube_test` mock pattern from `crates/workspaces` for the Workspace/Pod GETs, and a local TCP echo listener): `a_valid_session_is_pumped_to_the_pod_and_spent` (client sends bytes over ws, gets them echoed; a second upgrade with the same token → 401), `a_token_for_another_workspace_is_refused` (401), `an_unready_workspace_is_409`, `an_expired_token_is_401`.
 - [ ] **Step 2: Run** → failures.
 - [ ] **Step 3: Implement.** Logging: `owner, ws, bytes_in, bytes_out, secs` at close. Concurrency counters per ws and per owner (`Mutex<HashMap<String, usize>>`), decremented on close.
-- [ ] **Step 4: Run** `cargo test -p rustic-git-gateway-bin && cargo clippy -p rustic-git-gateway-bin -- -D warnings`; `kubectl apply --dry-run=client -f deploy/k3s/gateway.yaml`.
+- [ ] **Step 4: Run** `cargo test -p kloudlite-git-gateway-bin && cargo clippy -p kloudlite-git-gateway-bin -- -D warnings`; `kubectl apply --dry-run=client -f deploy/k3s/gateway.yaml`.
 - [ ] **Step 5: Commit** `Add the workspace SSH gateway`.
 
 ---
@@ -198,7 +198,7 @@ the nodes' public interface itself; Cloudflare proxies the hostname; the node fi
 443 from Cloudflare's ranges only. No tunnel connector.
 
 **Files:**
-- Modify: `deploy/k3s/gateway.yaml` (from Task 5: add `hostPort: 443` on the container, `podAntiAffinity` one-per-node, `nodeSelector rustic-git.io/pool=true`, a `gateway-tls` Secret mount at `/etc/gateway/tls` — `tls.crt`/`tls.key` are a Cloudflare **Origin CA** certificate for `ws-*.khost.dev`, created by the operator in the dashboard (SSL/TLS → Origin Server → Create Certificate, 15 years) and installed with `kubectl -n kube-system create secret tls gateway-tls --cert=… --key=…`)
+- Modify: `deploy/k3s/gateway.yaml` (from Task 5: add `hostPort: 443` on the container, `podAntiAffinity` one-per-node, `nodeSelector kloudlite-git.io/pool=true`, a `gateway-tls` Secret mount at `/etc/gateway/tls` — `tls.crt`/`tls.key` are a Cloudflare **Origin CA** certificate for `ws-*.khost.dev`, created by the operator in the dashboard (SSL/TLS → Origin Server → Create Certificate, 15 years) and installed with `kubectl -n kube-system create secret tls gateway-tls --cert=… --key=…`)
 - Modify: `bins/gateway` — serve TLS itself (`axum-server` with `rustls` from the mounted files; `GATEWAY_TLS_DIR` env; plain HTTP on 8080 stays for tests/health), listen `0.0.0.0:443`.
 - Modify: `deploy/k3s/harden-node.sh` — `CF_CIDRS` env (the published v4 list): `iifname "$IFACE" tcp dport 443 ip saddr { <cidrs> } accept`; README documents refreshing it.
 - DNS (operator, dashboard): `ws-centralindia-k3s.khost.dev` **A** `40.80.82.158` and **A** `20.219.22.61`, both **proxied**; SSL/TLS mode **Full (strict)** for `khost.dev`.
@@ -238,9 +238,9 @@ the nodes' public interface itself; Cloudflare proxies the hostname; the node fi
 
 **Files:**
 - Create: `web/apps/web/src/app/(shell)/cli/authorize/page.tsx` (+ action), `web/apps/web/src/components/app/cli-tokens.tsx`
-- Modify: `web/apps/web/src/lib/api.ts` (`ApiWorkspace.ssh?: { gateway: string; host_key: string }`, `ApiCredential.material?: string`, cli token calls), `web/apps/web/src/app/(shell)/[owner]/(org)/settings/page.tsx` (CLI tokens section), `web/apps/web/src/components/app/workspace-list.tsx` (an `ssh` popover on the row: `kl ws ssh <name>` + "copy ssh config" of the Host block; hidden when `ssh` is absent), the keys settings component (badge "re-add to use for SSH" when `material` is empty), `deploy/rustic-git-web.yaml` (path rule `/v1/(.*)` → `rustic-git-api:80` before `/`, same rate-limit annotations)
+- Modify: `web/apps/web/src/lib/api.ts` (`ApiWorkspace.ssh?: { gateway: string; host_key: string }`, `ApiCredential.material?: string`, cli token calls), `web/apps/web/src/app/(shell)/[owner]/(org)/settings/page.tsx` (CLI tokens section), `web/apps/web/src/components/app/workspace-list.tsx` (an `ssh` popover on the row: `kl ws ssh <name>` + "copy ssh config" of the Host block; hidden when `ssh` is absent), the keys settings component (badge "re-add to use for SSH" when `material` is empty), `deploy/kloudlite-git-web.yaml` (path rule `/v1/(.*)` → `kloudlite-git-api:80` before `/`, same rate-limit annotations)
 - [ ] **Step 1**: tsc/lint-driven; a bun test for the ssh-config block renderer shared with the snippet.
-- [ ] **Step 2–4**: implement; `bunx tsc --noEmit -p apps/web/tsconfig.json && bun run lint && bun test`; `kubectl apply --dry-run=client -f deploy/rustic-git-web.yaml`.
+- [ ] **Step 2–4**: implement; `bunx tsc --noEmit -p apps/web/tsconfig.json && bun run lint && bun test`; `kubectl apply --dry-run=client -f deploy/kloudlite-git-web.yaml`.
 - [ ] **Step 5: Commit** `Approve CLI logins, list CLI tokens, show the ssh one-liner`.
 
 ---
@@ -256,7 +256,7 @@ the nodes' public interface itself; Cloudflare proxies the hostname; the node fi
 ### Task 10: Rollout
 
 1. Operator at Cloudflare: proxied A records `ws-centralindia-k3s.khost.dev` → `40.80.82.158`, `20.219.22.61`; SSL mode Full (strict); an Origin CA certificate for `*.khost.dev` installed as Secret `gateway-tls` in k3s `kube-system`; token permission *Zone → WAF: Edit* for the rate-limit rule.
-2. k3s: `kubectl apply -f crds.yaml -f agent-rbac.yaml`; copy `rustic-git-jwt` Secret from AKS to k3s `kube-system`; `-f gateway.yaml -f cloudflared.yaml`; agent DaemonSet repin.
+2. k3s: `kubectl apply -f crds.yaml -f agent-rbac.yaml`; copy `kloudlite-git-jwt` Secret from AKS to k3s `kube-system`; `-f gateway.yaml -f cloudflared.yaml`; agent DaemonSet repin.
 3. AKS: api/web repin; the `/v1` path rule.
 4. Cloudflare rate limit on `/tunnel/*` (30/10 s per IP) once WAF: Edit is granted.
 5. Prove: re-add an SSH key in the UI → `kl login` → `kl ws ssh gh -- git --version`; VS Code Remote-SSH to `gh`.
@@ -267,4 +267,4 @@ the nodes' public interface itself; Cloudflare proxies the hostname; the node fi
 
 - Spec coverage: sessions (T1/T3), keys + authorized_keys (T2/T3), host keys + pod + policy (T4), gateway (T5), tunnel + Cloudflare (T6), CLI (T7), web + public /v1 (T8), e2e (T9), rollout (T10). Team members' keys, non-root user, custom images, session cut on key removal: out of scope per spec.
 - Deviation from the spec, ruled: the gateway validates the session token **locally** with the shared JWT secret and tracks `jti` single-use in memory, instead of calling the api — no cross-cluster round trip on every connect, no api dependency for open sessions; the spec's "single use" holds per replica (2 replicas → a token can be used at most twice within 60 s, both by the same authorized holder). The spec's `GET /v1/ssh-sessions/{token}` is therefore not built.
-- Types: `SshSessionClaims`/`CliClaims` (T1) used by T3/T5/T7; `Workspace.ssh` (T3) by T8; `ws-ssh-{id}` + `authorized_keys` (T3/T4) by T5's NetworkPolicy assumption (gateway label `app=rustic-git-gateway` in `kube-system`, T5/T4 agree).
+- Types: `SshSessionClaims`/`CliClaims` (T1) used by T3/T5/T7; `Workspace.ssh` (T3) by T8; `ws-ssh-{id}` + `authorized_keys` (T3/T4) by T5's NetworkPolicy assumption (gateway label `app=kloudlite-git-gateway` in `kube-system`, T5/T4 agree).

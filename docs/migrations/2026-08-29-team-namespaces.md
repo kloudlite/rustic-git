@@ -39,8 +39,8 @@ it on one team namespace first and watch the workspace come back before doing th
    `ws-{owner}` for the owner label it carries:
 
    ```sh
-   kubectl get ns -l rustic-git.io/kind=workspace -o json \
-     | jq -r '.items[] | select(.metadata.name != "ws-" + .metadata.labels["rustic-git.io/owner"]) | .metadata.name'
+   kubectl get ns -l kloudlite-git.io/kind=workspace -o json \
+     | jq -r '.items[] | select(.metadata.name != "ws-" + .metadata.labels["kloudlite-git.io/owner"]) | .metadata.name'
    ```
 
 4. For each: note the workspace ids of its PVCs (`live-{id}`), delete the namespace (pods and

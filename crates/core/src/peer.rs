@@ -4,13 +4,13 @@ use crate::Result;
 use std::time::Duration;
 
 /// Identity of the client the *forwarding* node authenticated. Honoured only on the peer listener.
-pub const OWNER_HEADER: &str = "x-rustic-git-owner";
+pub const OWNER_HEADER: &str = "x-kloudlite-git-owner";
 /// How many times this request has been forwarded. Bounds re-forwarding.
-pub const HOPS_HEADER: &str = "x-rustic-git-hops";
+pub const HOPS_HEADER: &str = "x-kloudlite-git-hops";
 /// Shared secret on every peer request. The peer ports are separate and unpublished, but this
 /// cluster runs with `networkPolicy: none`, so any pod can reach them; this is defence in depth on
 /// top of the port, not instead of it.
-pub const PEER_HEADER: &str = "x-rustic-git-peer";
+pub const PEER_HEADER: &str = "x-kloudlite-git-peer";
 /// A forward happens only when a node's copy of the map is behind, and the leader corrects that
 /// in one round trip — so two hops is already slack. Past this, refuse rather than bounce.
 pub const MAX_HOPS: u32 = 2;

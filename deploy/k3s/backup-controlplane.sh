@@ -59,9 +59,9 @@ k3s kubectl get volumes,workspaces,environments,snapshots,volumereplicas,ownerbi
   || { crd_ok=1; echo "CRD dump failed: $(cat "$WORK/objects.err")" >&2; : > "$WORK/objects.yaml"; }
 tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz objects.yaml
 
-: "${SAS_FILE:=/etc/rustic-git/k3s-backup.sas}"
-: "${KEY_FILE:=/etc/rustic-git/k3s-backup.key}"
-: "${ACCOUNT:=rusticgitkolomi}"
+: "${SAS_FILE:=/etc/kloudlite-git/k3s-backup.sas}"
+: "${KEY_FILE:=/etc/kloudlite-git/k3s-backup.key}"
+: "${ACCOUNT:=kloudlitegitkolomi}"
 : "${CONTAINER:=k3s-backup}"
 [ -s "$KEY_FILE" ] || { echo "no encryption key at $KEY_FILE — see deploy/k3s/README.md, Control-plane backup step 1b" >&2; exit 1; }
 openssl enc -aes-256-cbc -pbkdf2 -salt -pass "file:$KEY_FILE" -in "$WORK/k3s-backup.tgz" -out "$WORK/k3s-backup.tgz.enc"
@@ -112,10 +112,10 @@ exit "$crd_ok"
 #        curl -sS --fail -K /tmp/get.cfg -o /tmp/b.tgz.enc
 #        echo 'url = "https://ACCOUNT.blob.core.windows.net/k3s-backup/daily-Mon.tgz.enc.hmac?SAS"' > /tmp/get-hmac.cfg
 #        curl -sS --fail -K /tmp/get-hmac.cfg -o /tmp/b.tgz.enc.hmac
-#        openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(od -An -tx1 < /etc/rustic-git/k3s-backup.key | tr -d ' \n')" \
+#        openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(od -An -tx1 < /etc/kloudlite-git/k3s-backup.key | tr -d ' \n')" \
 #          -r /tmp/b.tgz.enc | cut -d' ' -f1 > /tmp/b.tgz.enc.hmac.check
 #        diff /tmp/b.tgz.enc.hmac /tmp/b.tgz.enc.hmac.check   # mismatch => do not restore
-#        openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/rustic-git/k3s-backup.key -in /tmp/b.tgz.enc -out /tmp/b.tgz
+#        openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/kloudlite-git/k3s-backup.key -in /tmp/b.tgz.enc -out /tmp/b.tgz
 #        tar -xzf /tmp/b.tgz -C /tmp
 #        install -m600 /tmp/state.db /var/lib/rancher/k3s/server/db/state.db
 #        rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/rancher/k3s/server/db/state.db-shm

@@ -2,7 +2,7 @@
 //!
 //! The api server mints these; every other service only verifies them. That is
 //! the point of using a signed token rather than a header: a caller asserting
-//! `x-rustic-git-owner: alice` is only as trustworthy as the caller, so every
+//! `x-kloudlite-git-owner: alice` is only as trustworthy as the caller, so every
 //! service that reads it has to hold the peer secret and be trusted not to lie.
 //! A signature moves the trust to the key — a service can verify who the user is
 //! without being able to mint a different answer.

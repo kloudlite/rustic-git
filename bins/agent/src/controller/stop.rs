@@ -11,7 +11,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::api::core::v1::Node;
 use kube::api::{ListParams, PostParams};
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd;
+use kloudlite_git_workspaces::crd;
 use std::collections::HashSet;
 use std::sync::Arc;
 

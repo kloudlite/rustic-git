@@ -4,13 +4,13 @@
 
 **Goal:** Replace rank-and-probe routing with an ownership map that pod zero writes and every node reads.
 
-**Architecture:** `cluster/ownership` is a SlateDB database. `rustic-git-0` opens it for writing and is the only writer; every other node opens it read-only (`DbReader`, `FollowLatest`, 200ms poll). Routing reads the map locally; claims are an HTTP call to pod zero over the existing peer port. The pool's lifecycle drives claim/renew/release.
+**Architecture:** `cluster/ownership` is a SlateDB database. `kloudlite-git-0` opens it for writing and is the only writer; every other node opens it read-only (`DbReader`, `FollowLatest`, 200ms poll). Routing reads the map locally; claims are an HTTP call to pod zero over the existing peer port. The pool's lifecycle drives claim/renew/release.
 
 **Spec:** `docs/superpowers/specs/2026-08-18-ownership-registry-design.md`
 
 ## Global Constraints
 
-- **Only pod zero writes the map.** Followers never open it for writing. `rustic-git-0` is derived from `RUSTIC_GIT_SELF` by stripping the trailing `-{ordinal}` and appending `-0`.
+- **Only pod zero writes the map.** Followers never open it for writing. `kloudlite-git-0` is derived from `KLOUDLITE_GIT_SELF` by stripping the trailing `-{ordinal}` and appending `-0`.
 - **`manifest_poll_interval` = 200ms** for follower readers. **`flush_interval` = 10ms** for the ownership DB.
 - **Follower staleness must never grant.** A follower's read can be wrong; only pod zero's decision grants ownership. A node asked for a repo it does not hold consults pod zero rather than serving.
 - **The lifecycle invariant:** a node holds a repo's lease exactly as long as it holds that repo's database open. Claim precedes open; release precedes close.
@@ -31,7 +31,7 @@ Pure state and decisions, no I/O: what an entry is, what the leader decides on c
 **Produces:**
 - `pub struct Entry { pub node: String, pub expires_ms: u64 }` — `expires_ms` is Unix epoch millis, so it survives the round trip through SlateDB
 - `pub const LEASE_TTL: Duration = Duration::from_secs(10)`, `pub const RENEW_EVERY: Duration = Duration::from_secs(3)`, `pub const DRAIN: Duration = Duration::from_millis(500)`
-- `pub fn leader_of(self_name: &str) -> crate::Result<String>` — `"rustic-git-2"` → `"rustic-git-0"`; `Err` if the name has no `-{ordinal}` suffix
+- `pub fn leader_of(self_name: &str) -> crate::Result<String>` — `"kloudlite-git-2"` → `"kloudlite-git-0"`; `Err` if the name has no `-{ordinal}` suffix
 - `pub enum Grant { Granted(Entry), HeldBy(Entry) }`
 - `pub fn decide_claim(current: Option<&Entry>, asker: &str, now_ms: u64) -> Grant` — grants if `current` is `None` or expired, or if `current.node == asker` (re-claim of one's own is idempotent); otherwise `HeldBy`
 - `pub fn decide_renew(current: Option<&Entry>, asker: &str, now_ms: u64) -> Option<Entry>` — extends only if the asker still holds it and it has not expired; `None` means the asker lost it and must close
@@ -89,7 +89,7 @@ Claims over the peer port; routing reads the map. Deletes the rank-and-probe mac
 - `route` middleware in `http.rs` becomes: read the map → `Some(e)` naming us → serve; `Some(e)` naming another → forward; `None`/expired → `claim()` → granted? serve : forward to the holder. On `claim()` failure (pod zero down) → **503**, never serve.
 - SSH `run` uses the same three-way decision before `open_repo`.
 
-**Deleted:** `peers::{rank, Membership, decide, Route, Peer}`, `proxy::{reachable, probe_via, probe_once_with_retry, probe_via_once, PROBE_*, in_flight, via_in_flight, up_cache}`, the `/probe` handler, `RUSTIC_GIT_REPLICAS`. Keep `PEER_HEADER`, `HOPS_HEADER`, `MAX_HOPS`, `OWNER_HEADER`, `forward`, `stream_to_peer`, `serve_peer_streams`, `stream_addr`.
+**Deleted:** `peers::{rank, Membership, decide, Route, Peer}`, `proxy::{reachable, probe_via, probe_once_with_retry, probe_via_once, PROBE_*, in_flight, via_in_flight, up_cache}`, the `/probe` handler, `KLOUDLITE_GIT_REPLICAS`. Keep `PEER_HEADER`, `HOPS_HEADER`, `MAX_HOPS`, `OWNER_HEADER`, `forward`, `stream_to_peer`, `serve_peer_streams`, `stream_addr`.
 
 Tests in `tests/routing.rs` — **rewrite the helpers**: `node()` now takes `(os, name, svc_hosts)` and opens an `OwnershipStore` per node with `is_leader = name ends with -0`. Keep every existing *behavioural* test that is still meaningful (forwarding, peer secret, hop bound, fence handling, real git push/clone, real SSH clone) and add:
 - a claim on an unowned repo is granted, and only the claimant's pool goes warm
@@ -104,12 +104,12 @@ Tests in `tests/routing.rs` — **rewrite the helpers**: `node()` now takes `(os
 
 ### Task 4: Lifecycle, wiring, and deployment
 
-**Files:** Modify `src/pool.rs`, `src/main.rs`, `deploy/rustic-git.yaml`, `README.md`.
+**Files:** Modify `src/pool.rs`, `src/main.rs`, `deploy/kloudlite-git.yaml`, `README.md`.
 
 - `Pool` gains a release hook: `pub fn on_release(&self, f: impl Fn(String) -> BoxFuture<'static, ()>)` or an `Arc<dyn OwnershipHooks>` — whichever is cleaner. Eviction (idle and `MAX_WARM`) becomes: call release → **spawn** a task that sleeps `DRAIN` then closes the handle. The sweeper must not block for the drain.
 - A node that learns it has lost a lease (a `renew` returning `None`) closes that database immediately.
-- `main.rs`: derive `leader = leader_of(self_name)?`; open `OwnershipStore` with `is_leader`; spawn a renewal task every `RENEW_EVERY` that renews everything the pool holds; spawn a prune task on the leader that drops expired entries. Single-node (`RUSTIC_GIT_PEER_SVC` unset) keeps working with no ownership store at all — one node owns everything by construction.
-- Manifest: drop `RUSTIC_GIT_REPLICAS`; nothing else changes (the peer ports and secret are unchanged).
+- `main.rs`: derive `leader = leader_of(self_name)?`; open `OwnershipStore` with `is_leader`; spawn a renewal task every `RENEW_EVERY` that renews everything the pool holds; spawn a prune task on the leader that drops expired entries. Single-node (`KLOUDLITE_GIT_PEER_SVC` unset) keeps working with no ownership store at all — one node owns everything by construction.
+- Manifest: drop `KLOUDLITE_GIT_REPLICAS`; nothing else changes (the peer ports and secret are unchanged).
 - README + spec: reflect what shipped.
 
 **Commit:** `Bind the lease to the open database, and wire it up`

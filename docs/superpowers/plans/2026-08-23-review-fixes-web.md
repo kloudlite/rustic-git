@@ -17,7 +17,7 @@
 - House style (`CLAUDE.md`): comments explain WHY, never what. Deliberate shortcuts are marked `// ponytail: <ceiling and upgrade path>`. Commit subjects are imperative sentence case, NO tool attribution, no "claude" anywhere in the message.
 - `import "server-only"` modules (`lib/api.ts`, `lib/browse.ts`, `lib/passkey.ts`, `lib/session.ts`, …) cannot be imported by `"use client"` components except as `import type`. Anything a client component needs at runtime goes in a module without that import (`lib/utils.ts`, a new file, or the component itself).
 - We are in implementation phase: where a feature does not exist, render an honest empty state; do NOT build the feature.
-- The web image only rebuilds when `web/**` changes and `deploy/rustic-git-web.yaml` is pinned by hand (see `CLAUDE.md` "Deploying"). Deploying is outside this plan.
+- The web image only rebuilds when `web/**` changes and `deploy/kloudlite-git-web.yaml` is pinned by hand (see `CLAUDE.md` "Deploying"). Deploying is outside this plan.
 
 ---
 
@@ -342,7 +342,7 @@ git commit -m "Render unknown fence languages as text and load grammars on deman
 - Modify: `web/apps/web/src/components/app/app-shell.tsx` (whole file)
 - Modify: `web/apps/web/src/components/app/global-search.tsx` (whole file)
 
-**Context:** `app-shell.tsx:50` takes `owner = session.user.owner` and builds every org tab, crumb link and the team switcher from it — so on `/some-team/...` the chrome shows the person's own namespace. The shell is a layout that stays mounted across navigations, so the fix is the one the file's own comment describes: the client components read the URL. `place()` in `shell-nav.tsx` already parses it; it just never returned the owner for the org case. `global-search.tsx` renders hard-coded mock groups (`REPOS`, `WORKSPACE_SESSIONS`, …) linking to a non-existent `rustic` repo; it gets the real repo list instead (fetched once per shell render for every owner the person can act in) and the mock groups go.
+**Context:** `app-shell.tsx:50` takes `owner = session.user.owner` and builds every org tab, crumb link and the team switcher from it — so on `/some-team/...` the chrome shows the person's own namespace. The shell is a layout that stays mounted across navigations, so the fix is the one the file's own comment describes: the client components read the URL. `place()` in `shell-nav.tsx` already parses it; it just never returned the owner for the org case. `global-search.tsx` renders hard-coded mock groups (`REPOS`, `WORKSPACE_SESSIONS`, …) linking to a non-existent `kloudlite` repo; it gets the real repo list instead (fetched once per shell render for every owner the person can act in) and the mock groups go.
 
 **Interfaces:**
 - Produces: `place(pathname: string, me: string)` and `useOwner(me: string): string` exported from `shell-nav.tsx`. `ShellTabs({ repoTabs, imageTabs, me, className })`, `ShellCrumb({ me, owners })`, `GlobalSearch({ me, owners, repos })`.
@@ -887,7 +887,7 @@ git commit -m "Serve team pages for any owner and replace mock team data with em
 - Delete: `web/apps/web/src/app/(shell)/[owner]/[repo]/compare/page.tsx`, `src/components/repo/compare.tsx`, `src/components/repo/issues.tsx`, `src/lib/mock-repo.ts`
 - Modify: `web/apps/web/src/app/(shell)/[owner]/[repo]/issues/page.tsx`
 
-**Context:** `compare/` duplicates `pulls/new` with a form that has no action and mock commits; nothing links to it (`grep -rn "/compare" src` finds only the api call in `lib/api.ts`). `issues.tsx` renders `ISSUES` from `lib/mock-repo.ts` against a hard-coded `rustic` repo. The Issues tab stays in `REPO_TABS`; the page says what it is.
+**Context:** `compare/` duplicates `pulls/new` with a form that has no action and mock commits; nothing links to it (`grep -rn "/compare" src` finds only the api call in `lib/api.ts`). `issues.tsx` renders `ISSUES` from `lib/mock-repo.ts` against a hard-coded `kloudlite` repo. The Issues tab stays in `REPO_TABS`; the page says what it is.
 
 - [ ] **Step 1: Delete**
 
@@ -1147,7 +1147,7 @@ export default function Loading() {
 
 - [ ] **Step 3: Verify and commit**
 
-From `web/`: `bun run lint` and `bunx tsc --noEmit -p apps/web/tsconfig.json` → clean. Manual: stop the api (or point `RUSTIC_GIT_API_URL` at a dead port), open a repo — the error page renders inside the shell with a working "Try again".
+From `web/`: `bun run lint` and `bunx tsc --noEmit -p apps/web/tsconfig.json` → clean. Manual: stop the api (or point `KLOUDLITE_GIT_API_URL` at a dead port), open a repo — the error page renders inside the shell with a working "Try again".
 
 ```bash
 git add "web/apps/web/src/app/(shell)/error.tsx" "web/apps/web/src/app/(shell)/[owner]/[repo]/loading.tsx"
@@ -2249,4 +2249,4 @@ git commit -m "Move shadcn and tw-animate-css to devDependencies"
 - [ ] From `web/`: `bun run lint`, `bunx tsc --noEmit -p apps/web/tsconfig.json`, `bun run build` → all clean.
 - [ ] `grep -rn "lib/mock\|mock-repo\|dev-auth\|lib/sso\|theme-picker\|setTimeout" web/apps/web/src` → only `lib/use-copy.ts` matches.
 - [ ] Re-read `docs/code-review-2026-08-23.md` sections 2–6 and check every `web/` row maps to a landed commit.
-- [ ] Deploy is a separate step: the web image rebuilds on push (`web/**` changed); pin the SHA in `deploy/rustic-git-web.yaml` per `CLAUDE.md`.
+- [ ] Deploy is a separate step: the web image rebuilds on push (`web/**` changed); pin the SHA in `deploy/kloudlite-git-web.yaml` per `CLAUDE.md`.

@@ -1,18 +1,18 @@
 [package]
-name = "rustic-git-registry"
+name = "kloudlite-git-registry"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "rustic_git_registry"
+name = "kloudlite_git_registry"
 
 [dependencies]
 tracing = { workspace = true }
 metrics = { workspace = true }
-rustic-git-core = { path = "../core" }
-rustic-git-storage = { path = "../storage" }
-rustic-git-app = { path = "../app" }
+kloudlite-git-core = { path = "../core" }
+kloudlite-git-storage = { path = "../storage" }
+kloudlite-git-app = { path = "../app" }
 tokio = { workspace = true }
 slatedb = { workspace = true }
 sha2 = { workspace = true }

@@ -11,7 +11,7 @@ use crate::janitor;
 use k8s_openapi::api::core::v1::Node;
 use kube::api::{Api, ListParams};
 use kube::ResourceExt;
-use rustic_git_workspaces::{crd, replicate};
+use kloudlite_git_workspaces::{crd, replicate};
 use std::collections::HashSet;
 use std::sync::Arc;
 

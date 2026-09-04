@@ -1,7 +1,7 @@
 //! Process bootstrap: environment, object store, and the store itself.
 //!
 //! In the library rather than in a binary because there is more than one binary.
-//! `rustic-git` serves git and `rustic-git-api` serves the read/team API; they are
+//! `kloudlite-git` serves git and `kloudlite-git-api` serves the read/team API; they are
 //! separate processes with separate lifecycles, and both need exactly this.
 
 use crate::store::Store;
@@ -41,13 +41,13 @@ pub type StoreViews = (
 );
 
 /// Two ways to run: `AWS_*` in the environment (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`,
-/// `AWS_REGION`, `AWS_ENDPOINT`) with an `s3://bucket` URL, or `RUSTIC_GIT_S3_URL=file://./dir`
+/// `AWS_REGION`, `AWS_ENDPOINT`) with an `s3://bucket` URL, or `KLOUDLITE_GIT_S3_URL=file://./dir`
 /// (or `mem://`) with no credentials at all. `~/.aws` profiles are NOT read — export the env or
 /// use a file/mem URL.
 pub fn object_store_views() -> Result<StoreViews> {
-    let url = std::env::var("RUSTIC_GIT_S3_URL").map_err(|_| {
+    let url = std::env::var("KLOUDLITE_GIT_S3_URL").map_err(|_| {
         crate::err(
-            "RUSTIC_GIT_S3_URL required (e.g. s3://bucket; mem:// or file://./dir for testing)",
+            "KLOUDLITE_GIT_S3_URL required (e.g. s3://bucket; mem:// or file://./dir for testing)",
         )
     })?;
     use slatedb::object_store::multipart::MultipartStore;
@@ -68,9 +68,9 @@ pub fn object_store_views() -> Result<StoreViews> {
         // raised: repack uploads a whole repository in one PUT, and object_store's 180s default
         // aborts that on a slow or distant link.
         use slatedb::object_store::{aws::AmazonS3Builder, ClientOptions};
-        let timeout = env("RUSTIC_GIT_S3_TIMEOUT_SECS", "900")
+        let timeout = env("KLOUDLITE_GIT_S3_TIMEOUT_SECS", "900")
             .parse()
-            .map_err(|_| crate::err("RUSTIC_GIT_S3_TIMEOUT_SECS must be a number"))?;
+            .map_err(|_| crate::err("KLOUDLITE_GIT_S3_TIMEOUT_SECS must be a number"))?;
         let mut b = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
             .with_client_options(
@@ -119,7 +119,7 @@ pub fn object_store_views() -> Result<StoreViews> {
 pub fn fleet_store_ok(url: &str) -> Result<()> {
     if url.starts_with("file://") {
         return Err(crate::err(
-            "RUSTIC_GIT_S3_URL=file:// cannot host a fleet: the leader lease needs conditional \
+            "KLOUDLITE_GIT_S3_URL=file:// cannot host a fleet: the leader lease needs conditional \
              updates, which LocalFileSystem lacks; use s3:// / az:// \
              — and on s3://, an endpoint with conditional_put disabled is just as unfenced, \
              because the lease's compare-and-swap silently becomes an overwrite",
@@ -131,10 +131,10 @@ pub fn fleet_store_ok(url: &str) -> Result<()> {
     // fleet is the legitimate case, and it says so.
     // Set only by this module's own unit test and by an in-process test fleet. Nothing in
     // `deploy/` sets it, and nothing should: a real fleet on `mem://` is the two-writer bug.
-    if url == "mem://" && std::env::var("RUSTIC_GIT_ALLOW_MEM_FLEET").is_err() {
+    if url == "mem://" && std::env::var("KLOUDLITE_GIT_ALLOW_MEM_FLEET").is_err() {
         return Err(crate::err(
-            "RUSTIC_GIT_S3_URL=mem:// cannot host a fleet: InMemory is per-process, so every pod \
-             would be its own leader and open every database; set RUSTIC_GIT_ALLOW_MEM_FLEET=1 \
+            "KLOUDLITE_GIT_S3_URL=mem:// cannot host a fleet: InMemory is per-process, so every pod \
+             would be its own leader and open every database; set KLOUDLITE_GIT_ALLOW_MEM_FLEET=1 \
              only for an in-process test fleet",
         ));
     }
@@ -146,7 +146,7 @@ pub fn fleet_store_ok(url: &str) -> Result<()> {
 /// whatever `LiveSettings` already holds.
 pub async fn get_central(os: &Arc<dyn slatedb::object_store::ObjectStore>) -> Option<Vec<u8>> {
     use slatedb::object_store::{path::Path as OsPath, ObjectStoreExt};
-    let key = OsPath::from(rustic_git_core::settings::CENTRAL_SETTINGS_KEY);
+    let key = OsPath::from(kloudlite_git_core::settings::CENTRAL_SETTINGS_KEY);
     match os.get(&key).await {
         Ok(r) => r.bytes().await.ok().map(|b| b.to_vec()),
         Err(_) => None,
@@ -155,7 +155,7 @@ pub async fn get_central(os: &Arc<dyn slatedb::object_store::ObjectStore>) -> Op
 
 /// A `CentralFetch` closure over a concrete object store — the one thing `refresh_central_beat`
 /// needs and `crates/core` cannot build itself (no object-store dependency there).
-pub fn central_fetch(os: Arc<dyn slatedb::object_store::ObjectStore>) -> rustic_git_core::settings::CentralFetch {
+pub fn central_fetch(os: Arc<dyn slatedb::object_store::ObjectStore>) -> kloudlite_git_core::settings::CentralFetch {
     std::sync::Arc::new(move || {
         let os = os.clone();
         Box::pin(async move { get_central(&os).await })
@@ -167,12 +167,12 @@ pub async fn open_store(background: bool) -> Result<Arc<Store>> {
     install_crypto_provider();
     let (os, mp) = object_store_views()?;
     let mut store =
-        Store::open(os, env("RUSTIC_GIT_CACHE_DIR", "./.local/cache").into(), background).await?;
+        Store::open(os, env("KLOUDLITE_GIT_CACHE_DIR", "./.local/cache").into(), background).await?;
     store.mp = mp;
     // Every process that can write refs or flip visibility needs the handle to invalidate through
     // — including the admin CLI, which is where purge-cache and set-visibility run.
     store.cache = Arc::new(
-        crate::cache::Cache::connect(std::env::var("RUSTIC_GIT_REDIS_URL").ok().as_deref())
+        crate::cache::Cache::connect(std::env::var("KLOUDLITE_GIT_REDIS_URL").ok().as_deref())
             .await,
     );
     Ok(Arc::new(store))
@@ -190,7 +190,7 @@ mod tests {
     fn azure_url_gets_a_multipart_view() {
         let _guard = ENV_LOCK.lock().unwrap();
         // Edition 2021: `set_var` is a safe fn.
-        std::env::set_var("RUSTIC_GIT_S3_URL", "az://c");
+        std::env::set_var("KLOUDLITE_GIT_S3_URL", "az://c");
         std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "acct");
         std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", "a2V5"); // any valid base64
         let (_, mp) = super::object_store_views().unwrap();
@@ -211,10 +211,10 @@ mod tests {
     #[test]
     fn mem_is_not_a_fleet_store_unless_opted_into() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("RUSTIC_GIT_ALLOW_MEM_FLEET");
+        std::env::remove_var("KLOUDLITE_GIT_ALLOW_MEM_FLEET");
         assert!(super::fleet_store_ok("mem://").is_err());
-        std::env::set_var("RUSTIC_GIT_ALLOW_MEM_FLEET", "1");
+        std::env::set_var("KLOUDLITE_GIT_ALLOW_MEM_FLEET", "1");
         assert!(super::fleet_store_ok("mem://").is_ok());
-        std::env::remove_var("RUSTIC_GIT_ALLOW_MEM_FLEET");
+        std::env::remove_var("KLOUDLITE_GIT_ALLOW_MEM_FLEET");
     }
 }

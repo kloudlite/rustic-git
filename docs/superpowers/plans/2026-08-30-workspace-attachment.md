@@ -69,7 +69,7 @@ fn the_attached_environment_is_an_optional_string() {
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `cargo test -p rustic-git-workspaces --test crd_yaml the_attached_environment -- --nocapture`
+Run: `cargo test -p kloudlite-git-workspaces --test crd_yaml the_attached_environment -- --nocapture`
 Expected: FAIL — panics on `expect("attachedEnvironment in the schema")`.
 
 - [ ] **Step 3: Add the field**
@@ -91,15 +91,15 @@ In `crates/workspaces/src/crd.rs`, inside `WorkspaceSpec`:
 
 - [ ] **Step 4: Run it and watch it pass**
 
-Run: `cargo test -p rustic-git-workspaces --test crd_yaml the_attached_environment`
+Run: `cargo test -p kloudlite-git-workspaces --test crd_yaml the_attached_environment`
 Expected: PASS.
 
 - [ ] **Step 5: Regenerate the CRD manifests**
 
 The `crd_yaml` test is its own generator and fails loudly on drift.
 
-Run: `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`
-Then: `cargo test -p rustic-git-workspaces --test crd_yaml` (must pass with no `CRD_REGEN`)
+Run: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`
+Then: `cargo test -p kloudlite-git-workspaces --test crd_yaml` (must pass with no `CRD_REGEN`)
 Then: `git diff --stat deploy/k3s/crds.yaml` — expect the file to have changed.
 
 - [ ] **Step 6: Build the rest of the tree**
@@ -174,7 +174,7 @@ Add to the `mod tests` in `crates/workspaces/src/k8s.rs`:
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cargo test -p rustic-git-workspaces resolv_conf`
+Run: `cargo test -p kloudlite-git-workspaces resolv_conf`
 Expected: FAIL — `cannot find function 'resolv_conf'`.
 
 - [ ] **Step 3: Implement it**
@@ -221,7 +221,7 @@ pub fn resolv_conf(template: &str, ws_ns: &str, env_ns: Option<&str>) -> String 
 
 - [ ] **Step 4: Run them and watch them pass**
 
-Run: `cargo test -p rustic-git-workspaces resolv_conf`
+Run: `cargo test -p kloudlite-git-workspaces resolv_conf`
 Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Commit**
@@ -289,7 +289,7 @@ under that name, use whatever the neighbouring `workspace_pod` tests already bui
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cargo test -p rustic-git-workspaces attach_claim_is_one_per_namespace mounts_its_own_resolv`
+Run: `cargo test -p kloudlite-git-workspaces attach_claim_is_one_per_namespace mounts_its_own_resolv`
 Expected: FAIL — `cannot find function 'attach_pv_name'`.
 
 - [ ] **Step 3: Implement the names**
@@ -357,7 +357,7 @@ and, in the workspace container's `volume_mounts`:
 
 - [ ] **Step 5: Run them and watch them pass**
 
-Run: `cargo test -p rustic-git-workspaces`
+Run: `cargo test -p kloudlite-git-workspaces`
 Expected: PASS. Other `workspace_pod` tests that count volumes or mounts may need their expected
 counts updated — update the count, never the assertion's meaning.
 
@@ -419,7 +419,7 @@ Use whatever `owner_ref()` helper the neighbouring policy tests in that module a
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cargo test -p rustic-git-workspaces attachment_egress attachment_ingress`
+Run: `cargo test -p kloudlite-git-workspaces attachment_egress attachment_ingress`
 Expected: FAIL — `cannot find function 'attach_egress'`.
 
 - [ ] **Step 3: Implement them**
@@ -490,7 +490,7 @@ pub fn attach_ingress(
 
 - [ ] **Step 4: Run them and watch them pass**
 
-Run: `cargo test -p rustic-git-workspaces attachment_egress attachment_ingress`
+Run: `cargo test -p kloudlite-git-workspaces attachment_egress attachment_ingress`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -526,7 +526,7 @@ async fn an_attached_workspace_gets_both_halves_of_the_grant() {
     let (ctx, rec) = ctx_full_default();
     let mut w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
     w.spec.attached_environment = Some("env-abc".into());
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     let egress = rec.sent_to("POST", "/apis/networking.k8s.io/v1/namespaces/ws-acme/networkpolicies");
     assert!(egress.iter().any(|b| b["metadata"]["name"] == "attach-ws-1"), "workspace-side policy");
@@ -541,7 +541,7 @@ async fn a_workspace_attached_to_a_missing_environment_reconciles_unattached() {
     let (ctx, rec) = ctx_full_with_missing_env();
     let mut w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
     w.spec.attached_environment = Some("env-gone".into());
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     let posts = rec.sent_to("POST", "/apis/networking.k8s.io/v1/namespaces/env-gone/networkpolicies");
     assert!(posts.is_empty(), "no grant for an environment that is not there");
@@ -560,7 +560,7 @@ async fn a_cross_region_attachment_is_refused() {
     let (ctx, rec) = ctx_full_with_env_in_region("other-region");
     let mut w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
     w.spec.attached_environment = Some("env-abc".into());
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     let posts = rec.sent_to("POST", "/apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies");
     assert!(posts.is_empty(), "no grant across a region boundary");
@@ -576,7 +576,7 @@ register objects with the recorder — do not invent a new fixture style.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cargo test -p rustic-git-agent-bin attached`
+Run: `cargo test -p kloudlite-git-agent-bin attached`
 Expected: FAIL — the helpers and the behaviour do not exist.
 
 - [ ] **Step 3: Write the file writer**
@@ -687,7 +687,7 @@ it is a refusal, and absent when the workspace is not attached at all.
 
 - [ ] **Step 6: Run the tests and watch them pass**
 
-Run: `cargo test -p rustic-git-agent-bin`
+Run: `cargo test -p kloudlite-git-agent-bin`
 Expected: PASS, including the three new tests.
 
 - [ ] **Step 7: Commit**
@@ -721,7 +721,7 @@ async fn deleting_an_attached_workspace_removes_the_environment_side_grant() {
     let mut w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
     w.spec.attached_environment = Some("env-abc".into());
     w.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()));
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     let deletes = rec.sent_to("DELETE", "/apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1");
     assert_eq!(deletes.len(), 1, "the environment-side policy is deleted by name");
@@ -730,7 +730,7 @@ async fn deleting_an_attached_workspace_removes_the_environment_side_grant() {
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `cargo test -p rustic-git-agent-bin deleting_an_attached_workspace`
+Run: `cargo test -p kloudlite-git-agent-bin deleting_an_attached_workspace`
 Expected: FAIL — no DELETE is sent.
 
 - [ ] **Step 3: Implement it**
@@ -755,7 +755,7 @@ In the workspace's finalizer branch, before the volume teardown it already does:
 
 - [ ] **Step 4: Run it and watch it pass**
 
-Run: `cargo test -p rustic-git-agent-bin`
+Run: `cargo test -p kloudlite-git-agent-bin`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -789,7 +789,7 @@ async fn attaching_sets_the_spec_field() {
     let (app, rec) = user_app_with(vec![ws_obj("ws-1", "alice", "r1"), env_obj("env-1", "alice", "r1")]);
     let r = post(&app, "/v1/workspaces/ws-1/attach", json!({"environment": "env-1"})).await;
     assert_eq!(r.status(), 202);
-    let patch = rec.last_patch("/apis/rustic-git.io/v1alpha1/workspaces/ws-1");
+    let patch = rec.last_patch("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1");
     assert_eq!(patch["spec"]["attachedEnvironment"], "env-1");
     assert!(patch["status"].is_null(), "the API writes spec only");
 }
@@ -827,7 +827,7 @@ way the environment tests in `api_teams.rs` build theirs.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cargo test -p rustic-git-workspaces --test api_user attach`
+Run: `cargo test -p kloudlite-git-workspaces --test api_user attach`
 Expected: FAIL — 404 from the router, the routes do not exist.
 
 - [ ] **Step 3: Add the routes**
@@ -914,7 +914,7 @@ agent's job:
 
 - [ ] **Step 6: Run them and watch them pass**
 
-Run: `cargo test -p rustic-git-workspaces --test api_user`
+Run: `cargo test -p kloudlite-git-workspaces --test api_user`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**

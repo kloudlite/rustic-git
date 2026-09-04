@@ -87,7 +87,7 @@ Biggest latency lever in the plan and it is configuration only. Today `Pool::new
 or a ref read is an S3 GET. Separately, `Db::builder` installs `default_db_cache()` **per
 database** (verified in `~/.cargo/registry/.../slatedb-0.15.0/src/db/builder.rs:206,1892`): a
 512 MiB block cache plus a 128 MiB meta cache *each*, and this pool holds up to
-`RUSTIC_GIT_MAX_WARM=64` databases open. Sharing one cache is therefore a memory-safety fix as
+`KLOUDLITE_GIT_MAX_WARM=64` databases open. Sharing one cache is therefore a memory-safety fix as
 much as a hit-rate fix.
 
 Verified API (do not substitute names):
@@ -117,7 +117,7 @@ use slatedb::db_cache::{foyer::{FoyerCache, FoyerCacheOptions}, DbCache, SplitCa
 /// One cache for every repo database on this node, not one per database.
 ///
 /// `Db::builder` installs its own 512 MiB block + 128 MiB meta cache when none is given, and this
-/// pool holds `RUSTIC_GIT_MAX_WARM` (64) databases open — 40 GiB of nominal cache against a pod
+/// pool holds `KLOUDLITE_GIT_MAX_WARM` (64) databases open — 40 GiB of nominal cache against a pod
 /// limit measured in single-digit GiB. SlateDB scopes each database's keys inside the wrapper, so
 /// sharing is safe; it also never closes a cache passed this way, which is what we want when the
 /// pool outlives every database in it.
@@ -143,11 +143,11 @@ Inside `Pool::new`, after the existing `wal_gc` block:
 // ref read. The disk cache is what turns the second one into a local file read; it is OFF by
 // default (`root_folder: None`), which is how it has been running. Sized by env because the
 // budget is the pod's ephemeral disk, not anything this code can see: default 4 GiB, and
-// `RUSTIC_GIT_SLATEDB_DISK_CACHE_MB=0` turns it back off for a node with no scratch space.
+// `KLOUDLITE_GIT_SLATEDB_DISK_CACHE_MB=0` turns it back off for a node with no scratch space.
 // `cache_on_flush`/`cache_on_compaction` are left OFF: this pool runs neither by default
 // (see `background`), and a leader that does would be writing SSTs it is not about to re-read.
-let cache_mb = env_u64("RUSTIC_GIT_SLATEDB_DISK_CACHE_MB", 4096);
-let root = std::path::PathBuf::from(std::env::var("RUSTIC_GIT_CACHE_DIR")
+let cache_mb = env_u64("KLOUDLITE_GIT_SLATEDB_DISK_CACHE_MB", 4096);
+let root = std::path::PathBuf::from(std::env::var("KLOUDLITE_GIT_CACHE_DIR")
     .unwrap_or_else(|_| "./.local/cache".into())).join("slatedb");
 let object_store_cache_options = slatedb::config::ObjectStoreCacheOptions {
     root_folder: (cache_mb > 0).then(|| root.clone()),
@@ -169,8 +169,8 @@ Db::builder(path(owner, name), self.os.clone())
 `…/slatedb-ownership` — one database, read on every route decision, and it must not share an
 eviction budget with the repo pool.
 
-Budgets: `RUSTIC_GIT_SLATEDB_BLOCK_CACHE_MB` (default 256) and
-`RUSTIC_GIT_SLATEDB_META_CACHE_MB` (default 64). Both are node-wide totals now, so the defaults
+Budgets: `KLOUDLITE_GIT_SLATEDB_BLOCK_CACHE_MB` (default 256) and
+`KLOUDLITE_GIT_SLATEDB_META_CACHE_MB` (default 64). Both are node-wide totals now, so the defaults
 are *below* SlateDB's per-database defaults on purpose — document that in the comment.
 
 **Expected win + how measured.** Warm-path metadata reads (tag read, `is_public`, ref list) drop
@@ -203,8 +203,8 @@ issues strictly fewer GETs than the first", which is the property, and print the
       (before/after GET counts in the body).
 
 > Deploy note for whoever rolls this: Rust pods run as uid 1001 with a read-only root, so
-> `RUSTIC_GIT_CACHE_DIR` must already be a writable mount — it is (the pack cache lives there) —
-> and the mount's size request has to cover `RUSTIC_GIT_SLATEDB_DISK_CACHE_MB`. Repin the image
+> `KLOUDLITE_GIT_CACHE_DIR` must already be a writable mount — it is (the pack cache lives there) —
+> and the mount's size request has to cover `KLOUDLITE_GIT_SLATEDB_DISK_CACHE_MB`. Repin the image
 > before the yaml, per CLAUDE.md.
 
 ---
@@ -489,7 +489,7 @@ async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> Result<()>;
 
 `PartId { content_id: String }` is a plain serializable struct. `MultipartStore` is implemented by
 `AmazonS3`, `MicrosoftAzure`, `GoogleCloudStorage` and `InMemory` — **not** by `LocalFileSystem`,
-which is `RUSTIC_GIT_S3_URL=file://` (dev). So this is an *optional* fast path with the current
+which is `KLOUDLITE_GIT_S3_URL=file://` (dev). So this is an *optional* fast path with the current
 code as the fallback, not a replacement.
 
 Two hard constraints from S3 that shape the design:

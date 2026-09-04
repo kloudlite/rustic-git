@@ -14,7 +14,7 @@ use k8s_openapi::api::core::v1::Node;
 use kube::api::{Api, ListParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Resource, ResourceExt};
-use rustic_git_workspaces::crd::{self, binding_name, OwnerBinding, OwnerBindingSpec};
+use kloudlite_git_workspaces::crd::{self, binding_name, OwnerBinding, OwnerBindingSpec};
 use std::sync::Arc;
 
 /// What the claim needs to know about the volume behind an unplaced object, gathered once in
@@ -341,20 +341,20 @@ pub async fn ensure_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result
 mod tests {
     use super::*;
     use crate::testsupport::test_ctx as shared_test_ctx;
-    use rustic_git_workspaces::kube_test::{get, not_found};
+    use kloudlite_git_workspaces::kube_test::{get, not_found};
 
-    const SNAPS: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
+    const SNAPS: &str = "/apis/kloudlite-git.io/v1alpha1/snapshots";
 
     // This module never shells to btrfs or inspects the Recorder, so the shared fixture's pool
     // path and second return value are irrelevant here — discarded rather than threaded through
     // every call site.
-    fn test_ctx(routes: Vec<rustic_git_workspaces::kube_test::Route>) -> Arc<Ctx> {
+    fn test_ctx(routes: Vec<kloudlite_git_workspaces::kube_test::Route>) -> Arc<Ctx> {
         shared_test_ctx(std::path::Path::new("/tmp/claim-test"), "node-a", routes).0
     }
 
     fn snap_json(volume: &str, phase: Option<&str>) -> serde_json::Value {
         let mut v = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "clone-ws-1-cafe"},
             "spec": {"volume": volume, "owner": "karthik", "worktree": "ws-1", "parent": "", "transient": true},
         });
@@ -391,7 +391,7 @@ mod tests {
 
     fn replica(node: &str, phase: &str, branches: &[(&str, &str)]) -> crd::VolumeReplica {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": format!("vol-1.{node}")},
             "spec": {"volume": "vol-1", "node": node},
             "status": {"phase": phase,

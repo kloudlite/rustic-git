@@ -4,7 +4,7 @@
 //! is one request and one response, so it is reverse-proxied. An SSH session is a stream carrying
 //! an advertisement and then repeated commands, so it is piped (see `stream`).
 
-pub use rustic_git_core::peer::*;
+pub use kloudlite_git_core::peer::*;
 
 use crate::Result;
 use std::time::Duration;

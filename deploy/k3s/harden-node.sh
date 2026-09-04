@@ -75,7 +75,7 @@ table inet node {
     # above already covers every reply, and a second copy reads like it grants something.
     # Not a blank exception: kube-proxy DNATs ClusterIP 10.43.0.1:443 to this node's 6443 with the
     # pod's own saddr preserved, so every pod using in-cluster config (coredns, metrics-server,
-    # every rustic-git-agent pod — the DaemonSet is not hostNetwork — the gateways) reaches the
+    # every kloudlite-git-agent pod — the DaemonSet is not hostNetwork — the gateways) reaches the
     # apiserver this way. RBAC is still the real lock on what that connection can do.
     tcp dport 6443 ip saddr $POD_CIDR accept
     # metrics-server scrapes nodeIP:10250 from its pod IP; kubelet's own webhook authn/authz is the

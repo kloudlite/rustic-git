@@ -81,7 +81,7 @@ documented, and the tests cover the failure modes the comments name. The finding
   multi-pod deployment `InMemory` is per-process: every pod takes epoch 1 of its own lease, every
   pod is leader, and every pod opens every database — precisely the two-writer bug the guard
   exists to prevent. It is fine for the in-process test fleet, which is what the message means.
-- Fix: gate `mem://` on `#[cfg(test)]`/an explicit `RUSTIC_GIT_ALLOW_MEM_FLEET`, or refuse it here
+- Fix: gate `mem://` on `#[cfg(test)]`/an explicit `KLOUDLITE_GIT_ALLOW_MEM_FLEET`, or refuse it here
   and let the test fleet call the inner check directly.
 
 ### L2. `forget_pack_public` is a one-caller `pub` alias for a private method
@@ -91,7 +91,7 @@ documented, and the tests cover the failure modes the comments name. The finding
 ### L3. `ssh_fingerprint` is duplicated body-identically across crates
 - `bins/server/src/boot.rs:38-42` and `crates/api/src/credentials.rs` (the comment says so and asks
   for manual mirroring). Two copies of a security-relevant parse is the kind of thing that drifts.
-- Fix: a tiny `rustic-git-ssh-keys` helper, or move it into `core` behind a feature so `storage`
+- Fix: a tiny `kloudlite-git-ssh-keys` helper, or move it into `core` behind a feature so `storage`
   keeps its no-ssh-dependency property.
 
 ### L4. `revoke_tokens_for` is a full LIST plus one GET per token

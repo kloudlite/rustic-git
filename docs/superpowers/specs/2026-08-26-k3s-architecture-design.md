@@ -47,11 +47,11 @@ minutes means "no new workspaces, no lifecycle changes" — the same blast radiu
 
 ```
 control-plane node   k3s server, no workloads       node-role.kubernetes.io/control-plane:NoSchedule
-session node         32 OCPU / 128 GB, btrfs pool   rustic-git.io/role=session
-env node             16 OCPU / 128 GB, btrfs pool   rustic-git.io/role=env
+session node         32 OCPU / 128 GB, btrfs pool   kloudlite-git.io/role=session
+env node             16 OCPU / 128 GB, btrfs pool   kloudlite-git.io/role=env
 ```
 
-Listing labels are a reconciled view, not a record. `rustic-git.io/owner` and `rustic-git.io/kind`
+Listing labels are a reconciled view, not a record. `kloudlite-git.io/owner` and `kloudlite-git.io/kind`
 are stamped by `/v1` at create AND re-stamped by the node controller on every reconcile, because a
 label is how a list stays indexed while `spec.owner` stays the truth. An object whose label is
 missing is owned correctly and invisible to `/v1`'s list — so the controller heals it rather than
@@ -59,9 +59,9 @@ trusting whoever wrote the object. Authorization never reads the label.
 
 Node roles are label + taint, both:
 
-- Label `rustic-git.io/role=session|env` — the *positive* half; every workspace pod carries a
+- Label `kloudlite-git.io/role=session|env` — the *positive* half; every workspace pod carries a
   `nodeSelector` for it.
-- Taint `rustic-git.io/role=session:NoSchedule` (and `=env`) — the *negative* half; nothing
+- Taint `kloudlite-git.io/role=session:NoSchedule` (and `=env`) — the *negative* half; nothing
   lands there without a matching toleration.
 
 A label alone lets a stray pod (a debug shell, a DaemonSet, an operator) drift onto a workload
@@ -78,9 +78,9 @@ Three custom resources, all cluster-scoped except where noted:
 
 | CRD | Spec (desired) | Status (observed) |
 |---|---|---|
-| `Volume` (`volumes.rustic-git.io`) | `owner`, `nodeName`, `quotaGb`, `source` (empty / clone-of / restore-of `{volume, snapshotId}`) | `phase`, `subvolumePresent`, `lineageTip`, `lastPush{commit,sha,at}`, `conditions` |
-| `Workspace` (`workspaces.rustic-git.io`) | `owner`, `name`, `region`, `image`, `volumeRef`, `nodeName`, `desiredState` (Running/Stopped), `resources` | `phase`, `podRef`, `conditions` |
-| `Environment` (`environments.rustic-git.io`) | `owner`, `name`, `region`, `services[]` (the existing `Service` struct verbatim), `volumeRef`, `nodeName`, `desiredState` | `phase`, `serviceStatus[]`, `conditions` |
+| `Volume` (`volumes.kloudlite-git.io`) | `owner`, `nodeName`, `quotaGb`, `source` (empty / clone-of / restore-of `{volume, snapshotId}`) | `phase`, `subvolumePresent`, `lineageTip`, `lastPush{commit,sha,at}`, `conditions` |
+| `Workspace` (`workspaces.kloudlite-git.io`) | `owner`, `name`, `region`, `image`, `volumeRef`, `nodeName`, `desiredState` (Running/Stopped), `resources` | `phase`, `podRef`, `conditions` |
+| `Environment` (`environments.kloudlite-git.io`) | `owner`, `name`, `region`, `services[]` (the existing `Service` struct verbatim), `volumeRef`, `nodeName`, `desiredState` | `phase`, `serviceStatus[]`, `conditions` |
 
 `Volume` is separate from `Workspace`/`Environment` on purpose, and it is the load-bearing
 choice in this design. Both a workspace and an environment own exactly one btrfs subvolume with
@@ -131,7 +131,7 @@ The one place a Lease *would* be needed is a future cluster-wide controller (the
 placement decider, if it ever leaves the API); note it there, do not build it here.
 
 ```yaml
-# deploy/rustic-git-agent.yaml (sketch — the parts that are load-bearing)
+# deploy/kloudlite-git-agent.yaml (sketch — the parts that are load-bearing)
 kind: DaemonSet
 spec:
   template:
@@ -139,7 +139,7 @@ spec:
       hostPID: false
       nodeSelector: {}            # runs on every worker; tolerates both role taints
       tolerations:
-        - { key: rustic-git.io/role, operator: Exists, effect: NoSchedule }
+        - { key: kloudlite-git.io/role, operator: Exists, effect: NoSchedule }
       containers:
         - name: agent
           securityContext:
@@ -151,7 +151,7 @@ spec:
             - { name: WS_POOL, value: /mnt/wspool }
             # still the server tier: the Engine's RegistryClient pushes commit records and
             # moves `vol/{owner}/{id}` refs there. That surface is unchanged by this design.
-            - { name: WS_REGISTRY_URL, value: http://rustic-git-srv:8081 }
+            - { name: WS_REGISTRY_URL, value: http://kloudlite-git-srv:8081 }
             - { name: NODE_NAME, valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
       volumes:
         - { name: pool, hostPath: { path: /mnt/wspool, type: Directory } }
@@ -185,7 +185,7 @@ watch is narrowed), namespaced for the workloads it creates:
 
 | Verb set | Resources | Scope |
 |---|---|---|
-| get, list, **watch** | `volumes`, `workspaces`, `environments` (`*.rustic-git.io`) | cluster |
+| get, list, **watch** | `volumes`, `workspaces`, `environments` (`*.kloudlite-git.io`) | cluster |
 | update, patch | `volumes/status`, `workspaces/status`, `environments/status` | cluster |
 | get, list, watch, create, update, delete | `deployments`, `services`, `configmaps`, `networkpolicies`, `pods` | namespaces `env-*`, `ws-*` |
 | get, list, watch, create, delete | `namespaces` | cluster |
@@ -353,7 +353,7 @@ Standard controller semantics, with one keep-biased rule added:
   their CRD, so **deletion cascades via garbage collection**. `EnvDelete`'s container half stops
   being code we write.
 - The btrfs half cannot cascade — the GC does not know about subvolumes — so `Volume` carries a
-  **finalizer** (`rustic-git.io/subvolume`). Deleting a `Volume` blocks until the node controller
+  **finalizer** (`kloudlite-git.io/subvolume`). Deleting a `Volume` blocks until the node controller
   has run `cleanup_local` and removed the finalizer. That is the correct ordering guarantee for
   free: containers gone (GC), then subvolume gone (finalizer), then the object disappears.
 - **Keep-biased**: a reconcile that cannot read what it needs deletes nothing. An API error, an
@@ -428,7 +428,7 @@ The bespoke queue was an orchestrator we wrote because we had none. We have one 
 | `Workspace`, `Environment`, `Service`, `Mount`, `WsState`, `EnvState` | **survive as CRD types** | same structs, `state` becomes `spec.desiredState` + `status.phase` |
 
 **Note the two beats in `bins/server/src/lanes.rs` and the git-side merge job system are NOT in
-scope.** `crates/pulls`' merge jobs run in `rustic-git-worker` against SlateDB and have nothing
+scope.** `crates/pulls`' merge jobs run in `kloudlite-git-worker` against SlateDB and have nothing
 to do with volumes. This section deletes the *volume* job system only.
 
 ### Who decides placement
@@ -572,7 +572,7 @@ loss. Bringing an environment up already implies a restart.
    (audit M1) as part of it — under k3s nothing writes them again, so this is a one-time sweep
    rather than the ongoing cleanup the replaced design had to add.
 
-No dual-run compatibility shim. The replaced design needed one ("match either `rustic-git.id`
+No dual-run compatibility shim. The replaced design needed one ("match either `kloudlite-git.id`
 or `com.docker.compose.project` for one release") because it was replacing docker *with docker*.
 Here the two worlds do not share a node, so the cutover is per-environment and reversible by
 pointing the old VM's agent back at the queue — **as long as the Cosmos job documents are left
@@ -614,7 +614,7 @@ Cancelled outright, from the replaced design (never built):
 
 - The bollard direct-runtime module (`bins/agent/src/runtime/` — `mod.rs`, `spec.rs`,
   `reconcile.rs`, `net.rs`), ~250-300 lines of reconcile logic, and the bollard dependency.
-- The label schema (`rustic-git.owner`/`.kind`/`.id`/`.service`/`.spec`) and spec-hashing —
+- The label schema (`kloudlite-git.owner`/`.kind`/`.id`/`.service`/`.spec`) and spec-hashing —
   k8s labels, ownerReferences and the Deployment's own generation do this.
 - Per-environment bridge network creation, network aliases, and connect/disconnect.
 - **The per-node IPAM block allocator**: fixed node blocks, `/26` per environment,

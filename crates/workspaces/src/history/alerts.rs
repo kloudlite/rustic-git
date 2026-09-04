@@ -343,7 +343,7 @@ pub fn state_of(
     }
 }
 
-/// A row for `rustic.alerts`. `ts` is when the transition was OBSERVED, and `id` is that instant
+/// A row for `kloudlite.alerts`. `ts` is when the transition was OBSERVED, and `id` is that instant
 /// plus the transition's coordinates. The sort key is `(region, rule, ts, id)`, so FINAL can only
 /// collapse rows that agree on `ts` too — which means a retry must carry the ORIGINAL row and never
 /// a row re-stamped with the retrying beat's clock. `evaluate_forever` buffers rather than
@@ -382,7 +382,7 @@ pub async fn current_signals(h: &History) -> Result<Vec<SignalRow>, HistoryError
     let rows = h
         .query(
             "SELECT region, rule, argMax(state, ts), argMax(detail, ts) \
-             FROM rustic.alerts FINAL GROUP BY region, rule",
+             FROM kloudlite.alerts FINAL GROUP BY region, rule",
         )
         .await?;
     let why: HashMap<&str, &str> = CATALOGUE.iter().map(|r| (r.name, r.why)).collect();
@@ -452,7 +452,7 @@ pub(crate) async fn region_names(state: &crate::api::ApiState) -> Option<Vec<Str
 
 /// Evaluate every rule for every region on a 30 s beat, writing ONLY transitions.
 ///
-/// Only transitions, because `rustic.alerts` answers "when did this start", and a row per
+/// Only transitions, because `kloudlite.alerts` answers "when did this start", and a row per
 /// evaluation would turn a 400-day retention into a hundred million rows saying nothing changed.
 pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
     /// Roughly a day of transitions for a large fleet: enough that an outage of hours loses

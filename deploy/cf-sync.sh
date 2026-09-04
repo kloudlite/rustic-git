@@ -46,7 +46,7 @@ while IFS= read -r c; do [ -n "$c" ] && cidrs+=("$c"); done < "$LIST"
 # LoadBalancer must admit 80/443 from Cloudflare's edge only; the cloud controller turns this list
 # into the NSG rule on the LB. Without it, anyone can skip the edge and hit the origin directly:
 # the WAF and rate limits are bypassed and `CF-Connecting-IP`/`X-Real-IP` become attacker-chosen —
-# which is exactly what the registry `limit-whitelist` and `RUSTIC_GIT_AGENT_SOURCES` trust.
+# which is exactly what the registry `limit-whitelist` and `KLOUDLITE_GIT_AGENT_SOURCES` trust.
 #
 # This is a partial object on a Helm-managed Service, so it is applied server-side:
 #   kubectl apply --server-side --force-conflicts -f deploy/ingress-nginx-service.yaml
@@ -83,7 +83,7 @@ else
 cf-sync: DRIFT — the files above were rewritten. Commit them, then re-apply the copies that live
 outside git (each is a hand step, on purpose — this script touches no cluster):
   kubectl apply --server-side --force-conflicts -f $SVC -f $CM
-  az network nsg rule update -g rustic-git-k3s --nsg-name k3s-nsg -n gateway-cloudflare \\
+  az network nsg rule update -g kloudlite-git-k3s --nsg-name k3s-nsg -n gateway-cloudflare \\
     --source-address-prefixes ${cidrs[*]}
   CF_CIDRS='$joined' on each pool node via harden-node.sh (deploy/k3s/README.md, Gateway step 6)
 EOF

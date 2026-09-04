@@ -65,8 +65,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/kloudlite/rustic-git-web:latest
-            ghcr.io/kloudlite/rustic-git-web:${{ github.sha }}
+            ghcr.io/kloudlite/kloudlite-git-web:latest
+            ghcr.io/kloudlite/kloudlite-git-web:${{ github.sha }}
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 

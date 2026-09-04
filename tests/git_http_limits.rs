@@ -80,7 +80,7 @@ async fn a_third_concurrent_push_gets_503() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_body_past_max_body_is_refused_as_it_streams() {
     let _serial = SERIAL.lock().await;
-    std::env::set_var("RUSTIC_GIT_MAX_BODY", "65536");
+    std::env::set_var("KLOUDLITE_GIT_MAX_BODY", "65536");
     let (base, e) = common::serve_public().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
@@ -88,7 +88,7 @@ async fn a_push_body_past_max_body_is_refused_as_it_streams() {
     let mut body = Vec::new();
     for _ in 0..4 {
         let line = format!("{} {} refs/heads/{}", "0".repeat(40), "1".repeat(40), "x".repeat(60_000));
-        rustic_git_core::pktline::write_text(&mut body, &line).unwrap();
+        kloudlite_git_core::pktline::write_text(&mut body, &line).unwrap();
     }
     let r = reqwest::Client::new()
         .post(format!("{base}/alice/web.git/git-receive-pack"))
@@ -130,7 +130,7 @@ async fn an_oversized_upload_pack_negotiation_is_refused_anonymously() {
     // And a real-sized negotiation still gets through to the protocol, so the cap is not simply
     // refusing everything: a v2 command with no flush is a client error, never a 413.
     let mut body = Vec::new();
-    rustic_git_core::pktline::write_text(&mut body, "command=ls-refs").unwrap();
+    kloudlite_git_core::pktline::write_text(&mut body, "command=ls-refs").unwrap();
     let r = reqwest::Client::new()
         .post(format!("{base}/alice/web.git/git-upload-pack"))
         .header("content-type", "application/x-git-upload-pack-request")

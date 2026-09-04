@@ -7,7 +7,7 @@ use crate::controller::{patch_status, write_env_status, write_ws_status, Ctx, Re
 use kube::api::ListParams;
 use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
-use rustic_git_workspaces::crd::{self, VolumeSource};
+use kloudlite_git_workspaces::crd::{self, VolumeSource};
 use std::sync::Arc;
 
 // -------------------------------------------------------------------------------------------
@@ -342,7 +342,7 @@ mod snapshot_tests {
         assert_eq!(last.load(std::sync::atomic::Ordering::Relaxed), claimed, "a person-initiated wake never moves the sync window");
     }
     use crate::testsupport::test_ctx as shared_test_ctx;
-    use rustic_git_workspaces::kube_test::{not_found, Recorder, Route};
+    use kloudlite_git_workspaces::kube_test::{not_found, Recorder, Route};
 
     // Wraps the shared fixture: `retain` consults `seeded_from_cuts` (a GET of every `Volume`)
     // whenever the cut it is retiring is a transient, so every such test needs that route even
@@ -351,7 +351,7 @@ mod snapshot_tests {
     fn test_ctx(pool: &std::path::Path, node: &str, mut routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
         routes.push(Route {
             method: "GET",
-            path: "/apis/rustic-git.io/v1alpha1/volumes".into(),
+            path: "/apis/kloudlite-git.io/v1alpha1/volumes".into(),
             status: 200,
             body: list_of("Volume", vec![]),
         });
@@ -360,7 +360,7 @@ mod snapshot_tests {
 
     fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
         let v = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": name, "uid": format!("{name}-uid"), "generation": 1},
             "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "transient": transient},
             "status": {"phase": phase},
@@ -372,7 +372,7 @@ mod snapshot_tests {
     /// `podRef` standing in for "everything else a status write must not prune" — F1's own shape.
     fn ws_status_json(node: &str, volume: &str, head: Option<&str>) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
             "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1", "image": "img", "desiredState": "running"},
             "status": {"phase": "ready", "nodeName": node, "volumeRef": volume, "podRef": "pod-x", "head": head},
@@ -380,12 +380,12 @@ mod snapshot_tests {
     }
 
 
-    const WS_GET: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
-    const WS_STATUS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status";
-    const SNAP_STATUS: &str = "/apis/rustic-git.io/v1alpha1/snapshots/vol-1-a/status";
-    const SNAPSHOTS_LIST: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
-    const WORKSPACES_LIST: &str = "/apis/rustic-git.io/v1alpha1/workspaces";
-    const ENVIRONMENTS_LIST: &str = "/apis/rustic-git.io/v1alpha1/environments";
+    const WS_GET: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1";
+    const WS_STATUS: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status";
+    const SNAP_STATUS: &str = "/apis/kloudlite-git.io/v1alpha1/snapshots/vol-1-a/status";
+    const SNAPSHOTS_LIST: &str = "/apis/kloudlite-git.io/v1alpha1/snapshots";
+    const WORKSPACES_LIST: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces";
+    const ENVIRONMENTS_LIST: &str = "/apis/kloudlite-git.io/v1alpha1/environments";
 
     fn list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
@@ -411,7 +411,7 @@ mod snapshot_tests {
                 path: SNAP_STATUS.into(),
                 status: 200,
                 body: serde_json::json!({
-                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                    "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
                     "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                     "status": {"phase": "ready"},
@@ -460,7 +460,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn an_unresolvable_worktree_requeues_instead_of_awaiting() {
         let tmp = tempfile::tempdir().unwrap();
-        let routes = vec![not_found(WS_GET), not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1")];
+        let routes = vec![not_found(WS_GET), not_found("/apis/kloudlite-git.io/v1alpha1/environments/ws-1")];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
 
@@ -479,10 +479,10 @@ mod snapshot_tests {
             // A plain workspace volume, no home Volume kind involved.
             Route {
                 method: "GET",
-                path: "/apis/rustic-git.io/v1alpha1/volumes/vol-1".into(),
+                path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(),
                 status: 200,
                 body: serde_json::json!({
-                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                    "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
                     "metadata": {"name": "vol-1", "uid": "vol-1-uid", "generation": 1},
                     "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 2},
                     "status": {"phase": "ready"},
@@ -494,7 +494,7 @@ mod snapshot_tests {
                 path: SNAP_STATUS.into(),
                 status: 200,
                 body: serde_json::json!({
-                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                    "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
                     "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                     "status": {"phase": "ready"},
@@ -522,9 +522,9 @@ mod snapshot_tests {
     async fn an_unknown_volume_still_requeues() {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![
-            not_found("/apis/rustic-git.io/v1alpha1/volumes/vol-ghost"),
-            not_found("/apis/rustic-git.io/v1alpha1/workspaces/ws-1"),
-            not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1"),
+            not_found("/apis/kloudlite-git.io/v1alpha1/volumes/vol-ghost"),
+            not_found("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1"),
+            not_found("/apis/kloudlite-git.io/v1alpha1/environments/ws-1"),
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let s = snapshot("vol-ghost-a", "vol-ghost", "ws-1", "", false, crd::Phase::Working);
@@ -545,7 +545,7 @@ mod snapshot_tests {
         for i in 0..13 {
             let parent = if i == 0 { String::new() } else { name(i - 1) };
             items.push(serde_json::json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": name(i), "uid": format!("{}-uid", name(i))},
                 "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": parent},
                 "status": {"phase": "ready"},
@@ -589,7 +589,7 @@ mod snapshot_tests {
                 path: SNAP_STATUS.into(),
                 status: 200,
                 body: serde_json::json!({
-                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                    "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
                     "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
                     "status": {"phase": "ready"},
@@ -600,7 +600,7 @@ mod snapshot_tests {
                 path: SNAPSHOTS_LIST.into(),
                 status: 200,
                 body: list_of("Snapshot", vec![serde_json::json!({
-                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                    "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                     "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
                     "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
                     "status": {"phase": "ready"},
@@ -629,7 +629,7 @@ mod snapshot_tests {
         std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-a")).unwrap();
         std::fs::create_dir_all(tmp.path().join("vol/vol-1/live/ws-1")).unwrap();
         let ready = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
             "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
             "status": {"phase": "ready"},
@@ -646,7 +646,7 @@ mod snapshot_tests {
 
         assert_eq!(rec.sent("PATCH", SNAP_STATUS).len(), 1, "the cut still goes Ready");
         assert!(
-            rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/snapshots/vol-1-a").is_empty(),
+            rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/snapshots/vol-1-a").is_empty(),
             "no annotation write when the generation cannot be read: {:?}",
             rec.calls()
         );
@@ -694,7 +694,7 @@ mod snapshot_tests {
         let items: Vec<serde_json::Value> =
             [&old, &new].into_iter().map(|s| serde_json::to_value(s.as_ref()).unwrap()).collect();
         let seeded_volume = |phase: &str, present: bool| {
-            serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
                                "metadata": {"name": "ws-2", "uid": "ws-2-uid"},
                                "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20,
                                         "source": {"seededFrom": {"volume": "vol-1", "snapshot": "sync-ws-1-a"}}},
@@ -703,7 +703,7 @@ mod snapshot_tests {
         let routes = |vol: serde_json::Value| {
             vec![
                 Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items.clone()) },
-                Route { method: "GET", path: "/apis/rustic-git.io/v1alpha1/volumes".into(), status: 200, body: list_of("Volume", vec![vol]) },
+                Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/volumes".into(), status: 200, body: list_of("Volume", vec![vol]) },
                 Route {
                     method: "DELETE",
                     path: format!("{SNAPSHOTS_LIST}/sync-ws-1-a"),
@@ -739,13 +739,13 @@ mod snapshot_tests {
     async fn a_working_previous_transient_is_never_deleted() {
         let tmp = tempfile::tempdir().unwrap();
         let old = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "sync-ws-1-a", "uid": "a-uid"},
             "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "transient": true},
             "status": {"phase": "working"},
         });
         let new = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": "sync-ws-1-b", "uid": "b-uid"},
             "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "sync-ws-1-a", "transient": true},
             "status": {"phase": "ready"},
@@ -769,7 +769,7 @@ mod snapshot_tests {
         let tmp = tempfile::tempdir().unwrap();
         let snap = |name: &str, worktree: &str, transient: bool, phase: &str, gen: Option<&str>| {
             let mut v = serde_json::json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": name, "uid": format!("{name}-uid")},
                 "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "transient": transient},
                 "status": {"phase": phase},
@@ -808,7 +808,7 @@ mod snapshot_tests {
         let routes = vec![
             Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-a", "vol-1", None) },
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: serde_json::json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
                 "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": ""},
                 "status": {"phase": "ready"},
@@ -841,7 +841,7 @@ mod snapshot_tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![Route {
             method: "GET",
-            path: "/apis/rustic-git.io/v1alpha1/snapshots".into(),
+            path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(),
             status: 500,
             body: serde_json::json!({}),
         }];

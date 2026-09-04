@@ -37,8 +37,8 @@ databases:
   `otel_metrics_sum`, `otel_metrics_histogram`, `otel_logs`, `otel_traces`
   (`TimeUnix`, `MetricName`, `Value`, `Attributes`, `ResourceAttributes`, …). Retention is the
   exporter's `ttl` (30 d for raw metrics) plus a materialized 5-minute rollup we add
-  (`rustic.metrics_5m`, 400 d) for the long sparklines.
-- `rustic` — ours, owned by the admin process (`bins/api`, role `admin`, the only writer of
+  (`kloudlite.metrics_5m`, 400 d) for the long sparklines.
+- `kloudlite` — ours, owned by the admin process (`bins/api`, role `admin`, the only writer of
   this database, migrations at boot from `crates/workspaces/src/history/schema.rs`):
   `events` (ReplacingMergeTree on `id`; `ts, kind, actor, owner, target, region, attrs`;
   no TTL — the record), `usage_hourly` (`owner, is_team, dimension, used, limit`; 2 y),
@@ -46,8 +46,8 @@ databases:
   live_environments, snapshots, disk_gb, cpu, memory_gb, pool_used_bytes, pool_total_bytes`;
   2 y), `alerts` (ReplacingMergeTree; `region, rule, state, detail`; 400 d).
 
-Credentials: the chart's ClickHouse secret; the admin process gets `RUSTIC_GIT_CLICKHOUSE_URL`
-(HTTP, 8123, user with rights on `rustic` and read on `default`). Optional everywhere — a
+Credentials: the chart's ClickHouse secret; the admin process gets `KLOUDLITE_GIT_CLICKHOUSE_URL`
+(HTTP, 8123, user with rights on `kloudlite` and read on `default`). Optional everywhere — a
 process without it runs as today and the console shows "history unavailable" for a series.
 Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in,
 `JSONCompact` out); no new crate.
@@ -56,11 +56,11 @@ Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in
 
 - **Gateway collector** — the chart's OTel collector in `clickstack` (OTLP gRPC 4317 / HTTP
   4318, `authorization: <ingestion API key>` from HyperDX Team Settings; the key lives in
-  Secret `rustic-git-otel` and is what every sender uses). Exposed to the regions through an
+  Secret `kloudlite-git-otel` and is what every sender uses). Exposed to the regions through an
   Ingress path `otel-dev.kloudlite.io` (TLS, HTTP/2 for gRPC) — the k3s clusters cannot reach
   a ClusterIP on AKS.
 - **Agent collectors** — the official `opentelemetry-collector-contrib` as a Deployment in
-  every cluster (`deploy/k3s/otel-agent.yaml` per region; the same manifest in `rustic-git`
+  every cluster (`deploy/k3s/otel-agent.yaml` per region; the same manifest in `kloudlite-git`
   on AKS), config in a ConfigMap: `prometheus` receiver scraping every pod annotated
   `prometheus.io/scrape: "true"` (`kubernetes_sd_configs`, 15 s), `k8s_cluster` and
   `kubeletstats` receivers for node/pod CPU, memory and filesystem, `k8sattributes` +
@@ -71,7 +71,7 @@ Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in
 - **Logs** — the same agent collectors ship pod logs (`filelog` receiver on
   `/var/log/pods`) so HyperDX has logs beside metrics; our binaries keep plain `tracing`
   output, unchanged.
-- **Node gauges** — `rustic-git-agent` gains a 15 s stats beat on its own `/metrics`:
+- **Node gauges** — `kloudlite-git-agent` gains a 15 s stats beat on its own `/metrics`:
   `node_pool_bytes_total`, `node_pool_bytes_used` (btrfs usage of the pool),
   `node_working_copies_running`. CPU, memory and load come from `kubeletstats`, not from us.
 
@@ -81,12 +81,12 @@ The catalogue in `deploy/alerts.md` is evaluated in two places on purpose: Hyper
 (saved searches with thresholds, notifying by webhook/email — the operator's pager) are
 created once from the catalogue and documented beside it; and the admin process evaluates the
 same rules every 30 s as SQL over `otel_metrics_*` with real `for` windows, writing state
-transitions to `rustic.alerts`, which is what the console's Signals table and Overview read.
+transitions to `kloudlite.alerts`, which is what the console's Signals table and Overview read.
 Two evaluators, one catalogue, so a difference is a bug in one of them, never a mystery. Rules without a `for` use the table's default 5 m except `DbFenceDetected` (fires on one breached bucket); `WorkerHeartbeatStale` is evaluated by its restart-count half (`absent(up)` has no SQL equivalent); the two node-exporter rules read the agent's pool gauges and kubelet filesystem metrics instead.
 The previous on-request scrape (`GET /admin/monitoring/signals`) keeps its response shape and
-reads `rustic.alerts`; a region with no collector reporting shows every rule `unknown`.
+reads `kloudlite.alerts`; a region with no collector reporting shows every rule `unknown`.
 
-### A4. Feeds into `rustic`
+### A4. Feeds into `kloudlite`
 
 Unchanged from the first draft: the Redis `events` stream consumer group `history` in the
 admin process (XREADGROUP/XAUTOCLAIM as the worker, XACK after insert — the stream stays a
@@ -102,25 +102,25 @@ from CRDs every run.
 needs (`pending_requests`, `firing_signals`, `owners_over_80`, `live_workspaces`,
 `live_environments`, `decided_requests`, `time_to_decide_p50`, `pool_used`, `cpu_used`,
 `memory_used`, `restarts`, `audit_events`, and `usage` with required `owner=` and `dimension=` params — colons in a path segment were refused); each series is one
-SQL statement in `history/series.rs` over `rustic.*` or `otel_metrics_*`; unknown series 404;
+SQL statement in `history/series.rs` over `kloudlite.*` or `otel_metrics_*`; unknown series 404;
 no ClickHouse → `503 history unavailable` (the web renders a flat placeholder).
-`GET /admin/history/events?kind=&owner=&region=&from=&to=&cursor=` pages `rustic.events`.
-A "Open in HyperDX" link on Monitoring uses `RUSTIC_GIT_HYPERDX_URL` when set.
+`GET /admin/history/events?kind=&owner=&region=&from=&to=&cursor=` pages `kloudlite.events`.
+A "Open in HyperDX" link on Monitoring uses `KLOUDLITE_GIT_HYPERDX_URL` when set.
 
 ### A6. Deploy
 
 `deploy/clickstack/` — the two Helm value files (operators, clickstack: one ClickHouse
 replica with the PVC, HyperDX behind `hyperdx-dev.kloudlite.io` gated to superadmin emails at
 the Ingress, the gateway collector with its Ingress), a README with the exact `helm` commands
-and the one manual step (create the ingestion API key, store it in `rustic-git-otel`).
-`deploy/rustic-git.yaml`: `RUSTIC_GIT_CLICKHOUSE_URL` and `RUSTIC_GIT_HYPERDX_URL` on the admin
+and the one manual step (create the ingestion API key, store it in `kloudlite-git-otel`).
+`deploy/kloudlite-git.yaml`: `KLOUDLITE_GIT_CLICKHOUSE_URL` and `KLOUDLITE_GIT_HYPERDX_URL` on the admin
 Deployment, the AKS agent collector. `deploy/k3s/otel-agent.yaml` per region;
 `agent-peer.yaml`'s metrics NetworkPolicy admits the collector's namespace. `deploy/alerts.md`
 gains the HyperDX alert definitions.
 
 ## B. Generic requests
 
-One cluster-scoped CRD `Request` (`rustic-git.io/v1alpha1`) replaces `QuotaRequest` for new
+One cluster-scoped CRD `Request` (`kloudlite-git.io/v1alpha1`) replaces `QuotaRequest` for new
 requests; existing `QuotaRequest` objects stay readable (the admin list unions both until a
 one-shot migration copies them, then the old CRD is retired in a later release).
 

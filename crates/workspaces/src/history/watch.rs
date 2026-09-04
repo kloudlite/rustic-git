@@ -1,4 +1,4 @@
-//! Kubernetes watches turned into `rustic.events` rows: one reflector set per region, plus one for
+//! Kubernetes watches turned into `kloudlite.events` rows: one reflector set per region, plus one for
 //! central, in the admin process.
 //!
 //! Every mapper here is PURE — previous state, next state, out come rows — so the transitions are
@@ -13,7 +13,7 @@
 //! copy of the same fact.
 //!
 //! `spec.owner` is truth (CLAUDE.md): every `owner` field below reads the spec, never the
-//! `rustic-git.io/owner` label, which is a view maintained for label selectors.
+//! `kloudlite-git.io/owner` label, which is a view maintained for label selectors.
 
 use super::events::{write_events, EventRow};
 use super::History;

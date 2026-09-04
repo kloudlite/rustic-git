@@ -55,7 +55,7 @@ This is the entire caching design; everything below is bookkeeping.
                                  └───────────────┘
 ```
 
-Same binary, new subcommand: `rustic-git api-serve`. A stateless Deployment — no SlateDB, no local
+Same binary, new subcommand: `kloudlite-git api-serve`. A stateless Deployment — no SlateDB, no local
 disk, no ownership awareness, scaled by replica count alone. It needs object-store credentials
 (for token lookups), the peer secret, and Redis.
 

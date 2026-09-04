@@ -7,7 +7,7 @@ use crate::controller::Ctx;
 use k8s_openapi::api::core::v1::Node;
 use kube::api::{Api, ListParams};
 use kube::ResourceExt;
-use rustic_git_workspaces::{crd, replicate};
+use kloudlite_git_workspaces::{crd, replicate};
 use std::sync::Arc;
 
 /// The ordering key and the "newest transient" rule both live in `crd` now: `/v1` picks a clone
@@ -15,11 +15,11 @@ use std::sync::Arc;
 /// how two tiers disagree about which cut is newest.
 pub(crate) use crd::newest_transient_of;
 
-/// The pool-eligible nodes, `rustic-git.io/pool=true`, name-sorted so `replicate::targets`'
+/// The pool-eligible nodes, `kloudlite-git.io/pool=true`, name-sorted so `replicate::targets`'
 /// rendezvous scoring is deterministic across every node running this beat.
 pub(crate) async fn pool_nodes(client: &kube::Client) -> Result<Vec<String>, String> {
     let api: kube::Api<Node> = kube::Api::all(client.clone());
-    let lp = ListParams::default().labels("rustic-git.io/pool=true");
+    let lp = ListParams::default().labels("kloudlite-git.io/pool=true");
     let list = api.list(&lp).await.map_err(|e| e.to_string())?;
     let mut names: Vec<String> = list.items.into_iter().map(|n| n.name_any()).collect();
     names.sort();

@@ -24,16 +24,16 @@ echo "==> syncing to $BUILD_HOST"
 # --delete so a file removed locally cannot linger on the builder and get compiled in.
 rsync -az --delete \
   --exclude target --exclude .git --exclude node_modules --exclude web \
-  "$REPO_ROOT/" "$BUILD_HOST:~/rustic-git/"
+  "$REPO_ROOT/" "$BUILD_HOST:~/kloudlite-git/"
 
 echo "==> building $TAG (profile dev-image)"
 # The Dockerfile is runtime-only (see its header): cargo runs on the VM itself, against its warm
 # target dir, and the two docker builds only COPY target/dev-image/. The VM needs rustup's stable
 # toolchain; the compile lands binaries for bookworm as long as the VM's glibc is <= 2.36.
-ssh "$BUILD_HOST" "cd ~/rustic-git && \
+ssh "$BUILD_HOST" "cd ~/kloudlite-git && \
   cargo build --profile dev-image --locked && \
-  sudo docker build --build-arg PROFILE=dev-image --target server -t '$REG/rustic-git:$TAG' . && \
-  sudo docker build --build-arg PROFILE=dev-image --target agent  -t '$REG/rustic-git-agent:$TAG' ."
+  sudo docker build --build-arg PROFILE=dev-image --target server -t '$REG/kloudlite-git:$TAG' . && \
+  sudo docker build --build-arg PROFILE=dev-image --target agent  -t '$REG/kloudlite-git-agent:$TAG' ."
 
 echo "==> pushing"
 # GHCR needs a token with write:packages on the builder, once:
@@ -41,16 +41,16 @@ echo "==> pushing"
 # NOT `gh auth token` — the CLI's default scopes do not include write:packages, and the push fails
 # with `permission_denied: The token provided does not match expected scopes` only at the very end,
 # after the whole build. Use a PAT created with write:packages.
-ssh "$BUILD_HOST" "sudo docker push '$REG/rustic-git:$TAG' && sudo docker push '$REG/rustic-git-agent:$TAG'"
+ssh "$BUILD_HOST" "sudo docker push '$REG/kloudlite-git:$TAG' && sudo docker push '$REG/kloudlite-git-agent:$TAG'"
 
 echo "==> rolling"
 # Through the manifest, never `kubectl set image` on the live DaemonSet: that left the yaml
 # claiming a SHA that was not running, with nothing in `git status` to say so. Now the yaml is
 # the thing that changed — `git diff` shows the dev tag, and putting CI's pin back is
 # `deploy/pin.sh <sha>` (or `git checkout -- agent-daemonset.yaml`) plus one more apply.
-perl -pi -e "s#^(\s+image: ).*/rustic-git-agent:\S+#\${1}$REG/rustic-git-agent:$TAG#" agent-daemonset.yaml
+perl -pi -e "s#^(\s+image: ).*/kloudlite-git-agent:\S+#\${1}$REG/kloudlite-git-agent:$TAG#" agent-daemonset.yaml
 kubectl apply -f agent-daemonset.yaml
-kubectl -n kube-system rollout status daemonset/rustic-git-agent --timeout=300s
+kubectl -n kube-system rollout status daemonset/kloudlite-git-agent --timeout=300s
 echo "agent-daemonset.yaml now pins $TAG — a dev image. Do not commit it; restore CI's pin with deploy/pin.sh <sha> and apply again."
-echo "server image: $REG/rustic-git:$TAG  (roll it with your own context, this script does not
+echo "server image: $REG/kloudlite-git:$TAG  (roll it with your own context, this script does not
 touch the server tier — it lives on a different cluster)"

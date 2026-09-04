@@ -135,7 +135,7 @@ in-cluster and already annotated for scraping) and evaluates the alert catalogue
 `deploy/alerts.md` where a single scrape can (leader count, fence detections, 5xx ratio over the
 last window it can compute from two scrapes, reconcile error ratio, open tunnels). Each rule is a
 row: firing / ok / unknown (needs a metric we cannot scrape, like node-exporter), with the
-"why" from the catalogue. A link to Grafana appears only if `RUSTIC_GIT_GRAFANA_URL` is set.
+"why" from the catalogue. A link to Grafana appears only if `KLOUDLITE_GIT_GRAFANA_URL` is set.
 
 Later (not in this plan): deploy Prometheus and read alerts from Alertmanager instead of scraping.
 

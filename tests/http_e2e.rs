@@ -226,7 +226,7 @@ async fn clone_push_fetch() {
     assert!(r.starts_with("HTTP/1.1 401"), "{r}");
     assert!(
         r.to_lowercase()
-            .contains("www-authenticate: basic realm=\"rustic-git\""),
+            .contains("www-authenticate: basic realm=\"kloudlite-git\""),
         "{r}"
     );
     let r = raw_get(port, refs, Some(&bob));
@@ -821,9 +821,9 @@ async fn lane_consolidates_packs_past_threshold() {
     assert_eq!(packs().await, 4);
 
     // at the threshold: untouched; past it: one pack
-    rustic_git_server::lanes::consolidate_owned_packs(&app, 4).await;
+    kloudlite_git_server::lanes::consolidate_owned_packs(&app, 4).await;
     assert_eq!(packs().await, 4);
-    rustic_git_server::lanes::consolidate_owned_packs(&app, 3).await;
+    kloudlite_git_server::lanes::consolidate_owned_packs(&app, 3).await;
     assert_eq!(packs().await, 1);
 
     common::git(w.path(), &["clone", "-q", &url, "again"]);
@@ -848,7 +848,7 @@ async fn consolidation_crash_before_retire_leaves_duplicates_not_holes() {
         eprintln!("skip: no git");
         return;
     }
-    use rustic_git_server::gc::RepackExt;
+    use kloudlite_git_server::gc::RepackExt;
     let e = common::env().await;
     let s = e.store.clone();
     s.create_repo("alice", "crash").await.unwrap();
@@ -872,7 +872,7 @@ async fn consolidation_crash_before_retire_leaves_duplicates_not_holes() {
 
     // the "crash": rebuild ran, retire never did
     let repo = s.open_repo("alice", "crash").await.unwrap().unwrap();
-    let old = rustic_git_server::gc::rebuild(&s, &repo, false).await.unwrap().unwrap();
+    let old = kloudlite_git_server::gc::rebuild(&s, &repo, false).await.unwrap().unwrap();
     assert_eq!(old.iter().filter(|(f, _)| f.ends_with(".pack")).count(), 3);
     assert_eq!(packs().await, 4);
     // a cold cache is what a restart sees: every indexed pack must still be fetchable

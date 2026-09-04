@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: rustic-git
+  name: kloudlite-git
 ---
 # Stable identity per pod is the point of a StatefulSet here, not just the disks: a Deployment's
 # rolling update briefly runs the old and new pod together, and for the repos they share that
@@ -12,19 +12,19 @@ metadata:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: rustic-git-srv
-  namespace: rustic-git
+  name: kloudlite-git-srv
+  namespace: kloudlite-git
 spec:
-  serviceName: rustic-git
+  serviceName: kloudlite-git
   # Every ordinal holds repositories, and every ordinal is a candidate for the ownership map's
   # writer: whichever pod holds the lease at `cluster/leader` opens the map, the rest follow it
   # read-only. There is no preferred ordinal — the object store's conditional put decides.
   replicas: 3
   selector:
-    matchLabels: { app: rustic-git, role: server }
+    matchLabels: { app: kloudlite-git, role: server }
   template:
     metadata:
-      labels: { app: rustic-git, role: server }
+      labels: { app: kloudlite-git, role: server }
       # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
       # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
       annotations:
@@ -37,7 +37,7 @@ spec:
       # user — and one an RCE in the git server would otherwise find at a well-known path.
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
-      # uid 1001 is the image's `rustic` user. fsGroup is what makes the mounted Secret readable
+      # uid 1001 is the image's `kloudlite` user. fsGroup is what makes the mounted Secret readable
       # and the emptyDir writable without root: the kubelet chowns volume contents to this group.
       securityContext:
         runAsNonRoot: true
@@ -51,30 +51,30 @@ spec:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:
-                labelSelector: { matchLabels: { app: rustic-git } }
+                labelSelector: { matchLabels: { app: kloudlite-git } }
                 topologyKey: kubernetes.io/hostname
       containers:
-        - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+        - name: kloudlite-git
+          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
           args: ["serve"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
-            - name: RUSTIC_GIT_LOG_FORMAT
+            - name: KLOUDLITE_GIT_LOG_FORMAT
               value: json
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS
               value: "4"
-            - name: RUSTIC_GIT_S3_URL
-              value: az://rustic-git
+            - name: KLOUDLITE_GIT_S3_URL
+              value: az://kloudlite-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: key } }
             # Close a repo's database once nobody has touched it for this long. Reopening costs
             # a few object-store round trips; holding it costs a memtable. 5 minutes is the
             # default in code, set explicitly here so it is visible where it is operated.
-            - name: RUSTIC_GIT_WARM_TTL_SECS
+            - name: KLOUDLITE_GIT_WARM_TTL_SECS
               value: "300"
             # Hard ceiling on simultaneously open databases, so a burst across many repos cannot
             # pin one memtable each. The least recently used is closed once this is passed.
@@ -82,44 +82,44 @@ spec:
             # (64MB) per database, so 16 bounds the worst case at 1GB against a 4GB limit. Real
             # usage is far lower — refs are 40-byte strings — but the ceiling should not equal
             # the limit, because exceeding it is an OOMKill rather than an eviction.
-            - name: RUSTIC_GIT_MAX_WARM
+            - name: KLOUDLITE_GIT_MAX_WARM
               value: "16"
             # Where the registry's auth challenge tells a client to fetch its token.
             # It must be a URL the CLIENT can reach, not this pod's address — a
             # `docker login` follows the realm verbatim, so the in-code default
             # (localhost:8080) sends every client somewhere it cannot go.
-            - name: RUSTIC_GIT_EXTERNAL_URL
+            - name: KLOUDLITE_GIT_EXTERNAL_URL
               value: https://cr.khost.dev
             # Signs the registry's bearer tokens. Every node must share ONE key: `/v2/token` is
             # answered by whichever node the request lands on, while the push that presents the
             # token routes to the node owning the image. Unset, each pod invents its own secret at
             # startup, so a token minted by one is refused by the other and every push 401s after
             # a successful login.
-            - name: RUSTIC_GIT_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
-            - name: RUSTIC_GIT_HOST_KEY
-              value: /etc/rustic-git/host_key
-            - name: RUSTIC_GIT_CACHE_DIR
-              value: /var/cache/rustic-git
+            - name: KLOUDLITE_GIT_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-jwt, key: secret } }
+            - name: KLOUDLITE_GIT_HOST_KEY
+              value: /etc/kloudlite-git/host_key
+            - name: KLOUDLITE_GIT_CACHE_DIR
+              value: /var/cache/kloudlite-git
             # Each region's agent token is only honoured from that region's node addresses (the k3s
             # VMs' public IPs — see deploy/k3s/README.md). A leaked token is useless elsewhere.
-            - name: RUSTIC_GIT_AGENT_SOURCES
+            - name: KLOUDLITE_GIT_AGENT_SOURCES
               value: "centralindia-k3s=40.80.82.158/32,20.219.22.61/32"
-            - name: RUSTIC_GIT_PEER_SVC
-              value: rustic-git.rustic-git.svc.cluster.local
-            - name: RUSTIC_GIT_SELF
+            - name: KLOUDLITE_GIT_PEER_SVC
+              value: kloudlite-git.kloudlite-git.svc.cluster.local
+            - name: KLOUDLITE_GIT_SELF
               valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name, which the lease records as the holder
             # This cluster runs networkPolicy: none, so anything on the pod network can reach the
             # peer ports; the shared secret is what keeps a stray client from forwarding traffic in.
-            - name: RUSTIC_GIT_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            - name: KLOUDLITE_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
             # The git nodes are where invalidation happens: a push drops the repo's `refs` entry,
             # and a visibility flip or delete bumps its generation. Without this the api tier caches
             # answers that nothing can ever purge, and `set-visibility private` silently orphans
             # nothing — a disabled cache reports success, because for reads that is the correct
             # behaviour. Same secret the api tier reads.
-            - name: RUSTIC_GIT_REDIS_URL
-              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
+            - name: KLOUDLITE_GIT_REDIS_URL
+              valueFrom: { secretKeyRef: { name: kloudlite-git-redis, key: url, optional: true } }
             # The owning node copies a repo's pre-move pull requests out of the directory on first
             # touch, so THIS is where the migration reads from. Deliberately NOT `optional: true`:
             # an absent variable is indistinguishable from "single-node, nothing to migrate", and
@@ -128,19 +128,19 @@ spec:
             # stop the pod, not quietly empty the repositories. Configured-but-unreachable is the
             # other case and is already loud: git keeps serving, pull routes fail until restart.
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
-            - name: RUSTIC_GIT_MONGO_URI
-              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
+            - name: KLOUDLITE_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: kloudlite-git-mongo, key: uri } }
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
             # (exit 137) and took every repo it owned down with it, answering the client 502.
             # 512MB keeps the peak near 1.5Gi and turns that crash into a clean 413. Raise it only
             # after the receive path streams to storage instead of buffering.
-            - name: RUSTIC_GIT_MAX_BODY
+            - name: KLOUDLITE_GIT_MAX_BODY
               value: "536870912"
             # Metrics on a port of their own: 8081 requires the peer secret, which Prometheus
             # cannot present, and the scrape text enumerates every repo this node has touched.
-            - name: RUSTIC_GIT_METRICS_ADDR
+            - name: KLOUDLITE_GIT_METRICS_ADDR
               value: 0.0.0.0:9464
           ports:
             - { name: http, containerPort: 8080 }
@@ -204,7 +204,7 @@ spec:
           # memtables of a normally busy node with room to spare.
           #
           # The LIMIT stays 4Gi and must: the receive path buffers a whole pack, and a 500MB push
-          # was measured peaking at 1.46Gi (see RUSTIC_GIT_MAX_BODY above). Lowering the limit to
+          # was measured peaking at 1.46Gi (see KLOUDLITE_GIT_MAX_BODY above). Lowering the limit to
           # match the request would turn that push into an OOMKill, taking every repo the pod owns
           # with it. Burst is exactly what the gap between request and limit is for.
           resources:
@@ -215,16 +215,16 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
-            - { name: cache, mountPath: /var/cache/rustic-git }
-          # The image's RUSTIC_GIT_CACHE_DIR pins /var/cache/rustic-git, so the mount must land
+            - { name: hostkey, mountPath: /etc/kloudlite-git, readOnly: true }
+            - { name: cache, mountPath: /var/cache/kloudlite-git }
+          # The image's KLOUDLITE_GIT_CACHE_DIR pins /var/cache/kloudlite-git, so the mount must land
           # exactly there — with a read-only root the directory has to be a mount.
       volumes:
         # One SSH host key shared by every pod. Per-pod keys would make each pod a different
         # host to ssh, and clients would report a changed host key depending on where they land.
         - name: hostkey
           secret:
-            secretName: rustic-git-hostkey
+            secretName: kloudlite-git-hostkey
             # 0440, not 0400: the file is root-owned and the process is uid 1001 — group read via
             # fsGroup is the only way a non-root process opens it.
             defaultMode: 0440
@@ -244,20 +244,20 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: rustic-git-srv
-  namespace: rustic-git
+  name: kloudlite-git-srv
+  namespace: kloudlite-git
 spec:
   maxUnavailable: 1
   selector:
-    matchLabels: { app: rustic-git, role: server }
+    matchLabels: { app: kloudlite-git, role: server }
 ---
-# Headless: gives each pod a stable DNS name (rustic-git-0.rustic-git.rustic-git.svc) and, more
+# Headless: gives each pod a stable DNS name (kloudlite-git-0.kloudlite-git.kloudlite-git.svc) and, more
 # importantly, makes the pod endpoints individually addressable for the ingress's hash routing.
 apiVersion: v1
 kind: Service
 metadata:
-  name: rustic-git
-  namespace: rustic-git
+  name: kloudlite-git
+  namespace: kloudlite-git
 spec:
   clusterIP: None
   # Peers must resolve each other the moment the process binds, not when the readiness probe first
@@ -266,36 +266,36 @@ spec:
   # the peer port is secret-guarded, ownership is decided by the map rather than by reachability,
   # and a node that cannot serve already answers 503 on its own health check.
   publishNotReadyAddresses: true
-  selector: { app: rustic-git }
+  selector: { app: kloudlite-git }
   ports:
     - { name: http, port: 8080, targetPort: http }
     - { name: ssh, port: 2222, targetPort: ssh }
-    - { name: peer, port: 8081, targetPort: peer }   # named so it resolves; the code queries _peer._tcp.rustic-git.rustic-git.svc.cluster.local:8081
+    - { name: peer, port: 8081, targetPort: peer }   # named so it resolves; the code queries _peer._tcp.kloudlite-git.kloudlite-git.svc.cluster.local:8081
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: rustic-git-http
-  namespace: rustic-git
+  name: kloudlite-git-http
+  namespace: kloudlite-git
 spec:
   # Cluster-local HTTP for the two Ingress objects (git smart HTTP on the app's host, /v2 on the
   # registry's). Every pod serves; the role selector is kept so a future non-serving role can opt out.
-  selector: { app: rustic-git, role: server }
+  selector: { app: kloudlite-git, role: server }
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: rustic-git-lb
-  namespace: rustic-git
+  name: kloudlite-git-lb
+  namespace: kloudlite-git
 spec:
   type: LoadBalancer
   # Every pod serves; the role selector is kept so a future non-serving role can opt out.
-  selector: { app: rustic-git, role: server }
+  selector: { app: kloudlite-git, role: server }
   # SSH only. HTTP used to be published here too, straight to the internet with no TLS, which
   # let Basic credentials travel in the clear past both ingresses; HTTP now reaches the fleet
-  # only through rustic-git-http behind an Ingress. SSH has no ingress to hide behind.
+  # only through kloudlite-git-http behind an Ingress. SSH has no ingress to hide behind.
   ports:
     # Port 22 is what `git@host:owner/repo.git` means — scp-style remotes carry no
     # port, so anything else forces every user to write `ssh://…:2222/…` instead.
@@ -310,16 +310,16 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: rustic-git-peers-only
-  namespace: rustic-git
+  name: kloudlite-git-peers-only
+  namespace: kloudlite-git
 spec:
   podSelector:
-    matchLabels: { app: rustic-git }
+    matchLabels: { app: kloudlite-git }
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
-            matchLabels: { app: rustic-git }
+            matchLabels: { app: kloudlite-git }
       ports:
         - { protocol: TCP, port: 8081 }
         - { protocol: TCP, port: 8082 }
@@ -327,14 +327,14 @@ spec:
     # 8081 — and only 8081: it takes no part in leases or routing (8082).
     - from:
         - podSelector:
-            matchLabels: { app: rustic-git-api }
+            matchLabels: { app: kloudlite-git-api }
       ports:
         - { protocol: TCP, port: 8081 }
     # The merge worker asks the owning node to move a ref, which is a peer route.
     # Also 8081 only: it holds no lease and takes no part in routing either.
     - from:
         - podSelector:
-            matchLabels: { app: rustic-git-worker }
+            matchLabels: { app: kloudlite-git-worker }
       ports:
         - { protocol: TCP, port: 8081 }
     - ports:
@@ -354,15 +354,15 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rustic-git-api
-  namespace: rustic-git
+  name: kloudlite-git-api
+  namespace: kloudlite-git
 spec:
   replicas: 2
   selector:
-    matchLabels: { app: rustic-git-api }
+    matchLabels: { app: kloudlite-git-api }
   template:
     metadata:
-      labels: { app: rustic-git-api }
+      labels: { app: kloudlite-git-api }
       # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
       # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
       annotations:
@@ -386,64 +386,64 @@ spec:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:
-                labelSelector: { matchLabels: { app: rustic-git-api } }
+                labelSelector: { matchLabels: { app: kloudlite-git-api } }
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
-          command: ["rustic-git-api"]
+          command: ["kloudlite-git-api"]
           ports:
             - { name: http, containerPort: 8090 }
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
-            - name: RUSTIC_GIT_LOG_FORMAT
+            - name: KLOUDLITE_GIT_LOG_FORMAT
               value: json
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS
               value: "4"
-            - name: RUSTIC_GIT_S3_URL
-              value: az://rustic-git
+            - name: KLOUDLITE_GIT_S3_URL
+              value: az://kloudlite-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: key } }
             # Browse routes live on the git nodes' PEER listener (8081), never the public one, so
             # this must point at the peer Service, not the LoadBalancer.
-            - name: RUSTIC_GIT_UPSTREAM
-              value: http://rustic-git:8081
-            - name: RUSTIC_GIT_API_ADDR
+            - name: KLOUDLITE_GIT_UPSTREAM
+              value: http://kloudlite-git:8081
+            - name: KLOUDLITE_GIT_API_ADDR
               value: 0.0.0.0:8090
             # A separate listener: 8090 is what the ingress forwards /v1 to.
-            - name: RUSTIC_GIT_METRICS_ADDR
+            - name: KLOUDLITE_GIT_METRICS_ADDR
               value: 0.0.0.0:9464
             # Who may register regions (admin-gated route); everything else is owner-scoped.
-            - name: RUSTIC_GIT_WORKSPACES_ADMINS
+            - name: KLOUDLITE_GIT_WORKSPACES_ADMINS
               value: karthik@kloudlite.io
-            - name: RUSTIC_GIT_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            - name: KLOUDLITE_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
             # Optional: without it every request still answers, just always from a git node
             # instead of the cache. See the Redis Deployment/config below for the policy this
             # relies on.
-            - name: RUSTIC_GIT_REDIS_URL
+            - name: KLOUDLITE_GIT_REDIS_URL
               # `optional` is what makes the comment above true: without it a missing secret keeps
               # the pod out of Ready forever, which is not "answers without the cache".
-              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-redis, key: url, optional: true } }
             # Teams and users live in Cosmos (Mongo API). Optional for the same reason
             # the cache is: without it the browse routes still answer and only /v1/*
             # reports unavailable. A database outage must not stop reads.
-            - name: RUSTIC_GIT_MONGO_URI
-              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri, optional: true } }
-            - name: RUSTIC_GIT_MONGO_DB
+            - name: KLOUDLITE_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: kloudlite-git-mongo, key: uri, optional: true } }
+            - name: KLOUDLITE_GIT_MONGO_DB
               value: kloudlite
             # Signs the identity tokens the web app presents — and, on the git
             # nodes, the registry's bearer tokens. One key across every process
             # that mints or verifies one. Required: a pod that starts without it
             # mints tokens nobody else can verify, which is a silent outage.
-            - name: RUSTIC_GIT_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
+            - name: KLOUDLITE_GIT_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-jwt, key: secret } }
             # The workspace CRDs live in the k3s workload cluster, not this one. `Config::infer`
             # tries a kubeconfig BEFORE in-cluster config, so pointing KUBECONFIG at the mounted
             # file is what makes /v1 write to that cluster instead of this pod's own API server —
@@ -453,7 +453,7 @@ spec:
             # (docs/superpowers/specs/2026-08-26-cluster-sync-design.md) replaces this with each
             # cluster syncing its own desired state, and this Secret goes away with it.
             - name: KUBECONFIG
-              value: /etc/rustic-git/k3s/config
+              value: /etc/kloudlite-git/k3s/config
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
@@ -471,21 +471,21 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: cache, mountPath: /var/cache/rustic-git }
-            - { name: k3s-kubeconfig, mountPath: /etc/rustic-git/k3s, readOnly: true }
+            - { name: cache, mountPath: /var/cache/kloudlite-git }
+            - { name: k3s-kubeconfig, mountPath: /etc/kloudlite-git/k3s, readOnly: true }
       volumes:
-        # The image's RUSTIC_GIT_CACHE_DIR points here and the root filesystem is read-only, so
+        # The image's KLOUDLITE_GIT_CACHE_DIR points here and the root filesystem is read-only, so
         # the directory must be a mount even though this tier reads repos through the git nodes
         # and writes almost nothing locally. Small on purpose.
         - name: cache
           emptyDir:
             sizeLimit: 1Gi
-        # A ServiceAccount token for the k3s cluster, scoped to the rustic-git.io CRDs plus
+        # A ServiceAccount token for the k3s cluster, scoped to the kloudlite-git.io CRDs plus
         # read-only nodes/pods for placement. Not optional: without it /v1 workspace routes answer
         # 503, which reads as "feature missing" rather than "misconfigured".
         - name: k3s-kubeconfig
           secret:
-            secretName: rustic-git-k3s-kubeconfig
+            secretName: kloudlite-git-k3s-kubeconfig
             defaultMode: 0400
 ---
 # A drain may not evict both api pods at once: this tier is the whole browse API and every /v1
@@ -493,16 +493,16 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: rustic-git-api
-  namespace: rustic-git
+  name: kloudlite-git-api
+  namespace: kloudlite-git
 spec:
   minAvailable: 1
   selector:
-    matchLabels: { app: rustic-git-api }
+    matchLabels: { app: kloudlite-git-api }
 ---
 # The merge worker. Scale it with `replicas`, freely: every job is claimed
 # atomically, so two pods can never take the same one. Each pod also runs several
-# lanes (RUSTIC_GIT_WORKER_CONCURRENCY), which is the same mechanism — to the
+# lanes (KLOUDLITE_GIT_WORKER_CONCURRENCY), which is the same mechanism — to the
 # database a lane and a pod are indistinguishable. Reach for lanes first: they
 # cost a task, where a pod costs a container.
 #
@@ -522,7 +522,7 @@ spec:
 # never the record: a periodic ~60s pull_to_check Mongo sweep is the actual
 # floor, verified to still find all queued work with Redis entirely down. That
 # floor is what protects this worker from the Redis instance's eviction
-# policy: verified against the live rustic-git-redis (Azure Managed Redis,
+# policy: verified against the live kloudlite-git-redis (Azure Managed Redis,
 # Enterprise tier) via `az redisenterprise database list`, since Azure blocks
 # CONFIG GET on this SKU — the policy is VolatileLRU, not noeviction. Stream
 # keys carry no TTL, so VolatileLRU currently leaves them alone (it only
@@ -531,12 +531,12 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rustic-git-worker
-  namespace: rustic-git
+  name: kloudlite-git-worker
+  namespace: kloudlite-git
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: rustic-git-worker }
+    matchLabels: { app: kloudlite-git-worker }
   # Surge, never dip: with one replica the default 25%/25% rounds to "kill the old pod, then
   # start the new one", and every merge clicked in that window waits for the stranded-job
   # re-announce instead of running. The two pods overlapping is fine — jobs are claimed atomically.
@@ -545,7 +545,7 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   template:
     metadata:
-      labels: { app: rustic-git-worker }
+      labels: { app: kloudlite-git-worker }
       # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
       # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
       annotations:
@@ -564,37 +564,37 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
-          command: ["rustic-git-worker"]
+          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+          command: ["kloudlite-git-worker"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
-            - name: RUSTIC_GIT_LOG_FORMAT
+            - name: KLOUDLITE_GIT_LOG_FORMAT
               value: json
-            - name: RUSTIC_GIT_METRICS_ADDR
+            - name: KLOUDLITE_GIT_METRICS_ADDR
               value: 0.0.0.0:9464
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS
               value: "4"
-            - name: RUSTIC_GIT_S3_URL
-              value: az://rustic-git
+            - name: KLOUDLITE_GIT_S3_URL
+              value: az://kloudlite-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: key } }
             # The peer listener, like the api tier: the merge route is peer-only.
-            - name: RUSTIC_GIT_UPSTREAM
-              value: http://rustic-git:8081
-            - name: RUSTIC_GIT_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
-            - name: RUSTIC_GIT_CACHE_DIR
-              value: /var/cache/rustic-git
+            - name: KLOUDLITE_GIT_UPSTREAM
+              value: http://kloudlite-git:8081
+            - name: KLOUDLITE_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
+            - name: KLOUDLITE_GIT_CACHE_DIR
+              value: /var/cache/kloudlite-git
             # Optional here too (see api/git tiers): without it a lane still runs, just on
             # `SWEEP_EVERY` alone instead of the stream nudge — see the startup warning in
             # `worker.rs` for why that is now a performance regression worth noticing, not a
             # silent default.
-            - name: RUSTIC_GIT_REDIS_URL
-              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
+            - name: KLOUDLITE_GIT_REDIS_URL
+              valueFrom: { secretKeyRef: { name: kloudlite-git-redis, key: url, optional: true } }
             # Jobs are mostly waiting — on the fleet, on the database — so a lane
             # is cheap. Raise it before adding replicas.
             #
@@ -602,7 +602,7 @@ spec:
             # compares against the raw value it reads here. Set it above 64 and the
             # worker runs 64 lanes, writes 64 heartbeat files, and the probe demands
             # more than that forever — a restart loop. Keep it within 1..64.
-            - name: RUSTIC_GIT_WORKER_CONCURRENCY
+            - name: KLOUDLITE_GIT_WORKER_CONCURRENCY
               value: "4"
           resources:
             requests: { cpu: 250m, memory: 256Mi }
@@ -610,24 +610,24 @@ spec:
           # The worker has no listener, so liveness counts heartbeat files instead: each lane
           # touches worker-alive.{i} at the top of every loop and again before EVERY event it
           # handles (see `lane` in worker.rs), and this fails unless ALL
-          # RUSTIC_GIT_WORKER_CONCURRENCY of them are fresh — so one lane wedging restarts the pod
+          # KLOUDLITE_GIT_WORKER_CONCURRENCY of them are fresh — so one lane wedging restarts the pod
           # rather than hiding behind its siblings.
           #
           # The window is sized by the one silence a lane is allowed: a single merge job. The
-          # worker kills a job itself at RUSTIC_GIT_MERGE_JOB_TIMEOUT (25 min by default, see
+          # worker kills a job itself at KLOUDLITE_GIT_MERGE_JOB_TIMEOUT (25 min by default, see
           # `merge_worker.rs`), so a lane that has not touched its file in 30 minutes is not
           # running a slow job — it is stuck somewhere no ceiling covers (a hung Redis call, a
           # deadlock), and the restart is the only cure. Lowering this below the job ceiling
           # restarts the pod mid-merge for nothing. One failure is enough: file mtimes are not a
           # flaky signal, and three strikes only pushed the restart to 33 minutes.
           #
-          # $RUSTIC_GIT_WORKER_CONCURRENCY, not $(...): kubelet expands $(VAR) in a container's
+          # $KLOUDLITE_GIT_WORKER_CONCURRENCY, not $(...): kubelet expands $(VAR) in a container's
           # command/args but NOT in a probe's exec command, so the value has to come from the
           # shell reading the container's own environment — which is the same env block below,
           # and stays correct if that number is changed in one place.
           livenessProbe:
             exec:
-              command: ["sh", "-c", "test \"$(find /var/cache/rustic-git -maxdepth 1 -name 'worker-alive.*' -mmin -30 2>/dev/null | wc -l)\" -ge \"$RUSTIC_GIT_WORKER_CONCURRENCY\""]
+              command: ["sh", "-c", "test \"$(find /var/cache/kloudlite-git -maxdepth 1 -name 'worker-alive.*' -mmin -30 2>/dev/null | wc -l)\" -ge \"$KLOUDLITE_GIT_WORKER_CONCURRENCY\""]
             initialDelaySeconds: 60
             periodSeconds: 60
             failureThreshold: 1
@@ -636,7 +636,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: cache, mountPath: /var/cache/rustic-git }
+            - { name: cache, mountPath: /var/cache/kloudlite-git }
       volumes:
         # Scratch only: packs are read from and written to object storage, and
         # anything here can be rebuilt by fetching again. Bounded so a leak here
@@ -656,13 +656,13 @@ spec:
 # Two things this Service does NOT fix, both load-bearing on how it's exposed:
 #   - loadBalancerSourceRanges below MUST be restricted to Cloudflare's published ranges, or the
 #     WAF/rate-limiting in front of it is one direct `curl` to the LB IP away from irrelevant.
-#   - SSH (port 2222, on the rustic-git-lb Service above) does not go through Cloudflare at all —
+#   - SSH (port 2222, on the kloudlite-git-lb Service above) does not go through Cloudflare at all —
 #     it is unrated and unshielded on the LoadBalancer regardless of this restriction.
 apiVersion: v1
 kind: Service
 metadata:
-  name: rustic-git-api
-  namespace: rustic-git
+  name: kloudlite-git-api
+  namespace: kloudlite-git
 spec:
   # ClusterIP until Cloudflare fronts this tier. Switching to LoadBalancer without the WAF in
   # front of it exposes the browse API with no rate limiting at all; restore `type: LoadBalancer`
@@ -677,41 +677,41 @@ spec:
   # Do not delete this field to "fix" the apply error — an absent field is silently open, which is
   # worse than a loud rejection.
   # loadBalancerSourceRanges: ["<cloudflare-cidrs>"]   # required when type becomes LoadBalancer
-  selector: { app: rustic-git-api }
+  selector: { app: kloudlite-git-api }
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
 # The admin process's authority over ITS OWN cluster (AKS) — distinct from the k3s ClusterRole
-# `rustic-git-admin` already holds in deploy/k3s/api-rbac.yaml, which is a different cluster
+# `kloudlite-git-admin` already holds in deploy/k3s/api-rbac.yaml, which is a different cluster
 # entirely. Scoped tightly: get/list/patch, only on the five Deployments/StatefulSet
 # `admin::workloads::KNOWN_CENTRAL` names — not create or delete, because a roll only ever
 # patches an object that already exists, and resourceNames so a bug here cannot touch any other
-# workload in the namespace (rustic-git-web lives in this same namespace too, see
-# deploy/rustic-git-web.yaml, hence it is on this list rather than needing a second Role).
+# workload in the namespace (kloudlite-git-web lives in this same namespace too, see
+# deploy/kloudlite-git-web.yaml, hence it is on this list rather than needing a second Role).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: rustic-git-admin
-  namespace: rustic-git
+  name: kloudlite-git-admin
+  namespace: kloudlite-git
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: rustic-git-admin-workloads
-  namespace: rustic-git
+  name: kloudlite-git-admin-workloads
+  namespace: kloudlite-git
 rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
-    resourceNames: ["rustic-git-srv"]
+    resourceNames: ["kloudlite-git-srv"]
     verbs: ["get", "list", "patch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    resourceNames: ["rustic-git-api", "rustic-git-worker", "rustic-git-web", "rustic-git-admin"]
+    resourceNames: ["kloudlite-git-api", "kloudlite-git-worker", "kloudlite-git-web", "kloudlite-git-admin"]
     verbs: ["get", "list", "patch"]
   # The Monitoring page scrapes each pod's own /metrics (deploy/alerts.md) instead of assuming a
   # Prometheus, so it needs the pod list to find the IPs and the annotations — and the same list
   # carries `restartCount`, which is the restarts column. Read-only, no `resourceNames` (a list
-  # cannot be name-restricted), and namespaced to `rustic-git`: pod metadata here names no Secret,
+  # cannot be name-restricted), and namespaced to `kloudlite-git`: pod metadata here names no Secret,
   # and nothing on this page ever writes.
   - apiGroups: [""]
     resources: ["pods"]
@@ -720,45 +720,45 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: rustic-git-admin-workloads
-  namespace: rustic-git
+  name: kloudlite-git-admin-workloads
+  namespace: kloudlite-git
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: rustic-git-admin-workloads
+  name: kloudlite-git-admin-workloads
 subjects:
   - kind: ServiceAccount
-    name: rustic-git-admin
-    namespace: rustic-git
+    name: kloudlite-git-admin
+    namespace: kloudlite-git
 ---
-# The superadmin-only surface. Same image and binary as rustic-git-api, one env apart
-# (RUSTIC_GIT_API_ROLE=admin) — see CLAUDE.md "Admin APIs live on their own server". One replica:
+# The superadmin-only surface. Same image and binary as kloudlite-git-api, one env apart
+# (KLOUDLITE_GIT_API_ROLE=admin) — see CLAUDE.md "Admin APIs live on their own server". One replica:
 # losing this pod for a few minutes during a roll is acceptable (nothing here is on any ordinary
-# request's path), and two would mean two places RUSTIC_GIT_WORKSPACES_ADMINS seeds from, which
+# request's path), and two would mean two places KLOUDLITE_GIT_WORKSPACES_ADMINS seeds from, which
 # is harmless but pointless. No podAntiAffinity: with exactly one pod a spread rule can never fire.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rustic-git-admin
-  namespace: rustic-git
+  name: kloudlite-git-admin
+  namespace: kloudlite-git
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: rustic-git-admin }
+    matchLabels: { app: kloudlite-git-admin }
   template:
     metadata:
-      labels: { app: rustic-git-admin }
+      labels: { app: kloudlite-git-admin }
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9464"
         prometheus.io/path: /metrics
     spec:
-      # Unlike rustic-git-api: this process ALSO talks to its own cluster now
+      # Unlike kloudlite-git-api: this process ALSO talks to its own cluster now
       # (admin::workloads' central-scope rolls), over a projected ServiceAccount token — nothing
       # to rotate, unlike the mounted k3s kubeconfig Secret it still uses for region CRDs. Bound
-      # to the rustic-git-admin ServiceAccount and its namespaced Role below, get/list/patch on
+      # to the kloudlite-git-admin ServiceAccount and its namespaced Role below, get/list/patch on
       # exactly the workloads in admin::workloads::KNOWN_CENTRAL.
-      serviceAccountName: rustic-git-admin
+      serviceAccountName: kloudlite-git-admin
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
@@ -767,55 +767,55 @@ spec:
         fsGroup: 1001
       containers:
         - name: admin
-          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
-          command: ["rustic-git-api"]
+          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+          command: ["kloudlite-git-api"]
           ports:
             - { name: http, containerPort: 8090 }
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
-            - name: RUSTIC_GIT_LOG_FORMAT
+            - name: KLOUDLITE_GIT_LOG_FORMAT
               value: json
             - name: TOKIO_WORKER_THREADS
               value: "2"
             # The only line that turns this binary into the admin process: mounts
             # api::admin::router() instead of api::router() and runs the superadmin bootstrap.
-            - name: RUSTIC_GIT_API_ROLE
+            - name: KLOUDLITE_GIT_API_ROLE
               value: admin
-            - name: RUSTIC_GIT_S3_URL
-              value: az://rustic-git
+            - name: KLOUDLITE_GIT_S3_URL
+              value: az://kloudlite-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
-            - name: RUSTIC_GIT_UPSTREAM
-              value: http://rustic-git:8081
-            - name: RUSTIC_GIT_API_ADDR
+              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: key } }
+            - name: KLOUDLITE_GIT_UPSTREAM
+              value: http://kloudlite-git:8081
+            - name: KLOUDLITE_GIT_API_ADDR
               value: 0.0.0.0:8090
-            - name: RUSTIC_GIT_METRICS_ADDR
+            - name: KLOUDLITE_GIT_METRICS_ADDR
               value: 0.0.0.0:9464
             # The bootstrap: seeds these addresses into the directory's superadmins collection at
             # boot (Task 10). Unset here and the admin process starts with no administrator except
             # whoever the directory already lists — fine after the first boot, fatal on a fresh
             # cluster, so this must be set on THIS Deployment's first rollout.
-            - name: RUSTIC_GIT_WORKSPACES_ADMINS
+            - name: KLOUDLITE_GIT_WORKSPACES_ADMINS
               value: karthik@kloudlite.io
-            - name: RUSTIC_GIT_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
-            - name: RUSTIC_GIT_REDIS_URL
-              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
-            - name: RUSTIC_GIT_MONGO_URI
-              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri, optional: true } }
-            - name: RUSTIC_GIT_MONGO_DB
+            - name: KLOUDLITE_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
+            - name: KLOUDLITE_GIT_REDIS_URL
+              valueFrom: { secretKeyRef: { name: kloudlite-git-redis, key: url, optional: true } }
+            - name: KLOUDLITE_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: kloudlite-git-mongo, key: uri, optional: true } }
+            - name: KLOUDLITE_GIT_MONGO_DB
               value: kloudlite
-            - name: RUSTIC_GIT_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
-            # Its own kubeconfig, bound to the rustic-git-admin ServiceAccount (Task 10) rather
-            # than rustic-git-api's — the split RBAC only means something if the admin process
+            - name: KLOUDLITE_GIT_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-jwt, key: secret } }
+            # Its own kubeconfig, bound to the kloudlite-git-admin ServiceAccount (Task 10) rather
+            # than kloudlite-git-api's — the split RBAC only means something if the admin process
             # authenticates as the admin SA. Secret not created by this task; see
-            # deploy/k3s/README.md for the rotation recipe rustic-git-k3s-kubeconfig already
+            # deploy/k3s/README.md for the rotation recipe kloudlite-git-k3s-kubeconfig already
             # documents, repeated for this name.
             - name: KUBECONFIG
-              value: /etc/rustic-git/k3s/config
+              value: /etc/kloudlite-git/k3s/config
             # ClickStack. Optional by design: without these the admin process runs exactly as
             # before and every /admin/history route answers 503 (crates/workspaces/src/history).
             # The ClickHouse Service is created by the ClickHouse OPERATOR from the CR, not by a
@@ -823,21 +823,21 @@ spec:
             # chart's fullname; re-check `kubectl -n clickstack get svc` after a chart bump — a
             # wrong host here is a silent 503 on every /admin/history route, which is exactly
             # what an unset variable looks like.
-            - name: RUSTIC_GIT_CLICKHOUSE_URL
+            - name: KLOUDLITE_GIT_CLICKHOUSE_URL
               value: http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123
-            - name: RUSTIC_GIT_CLICKHOUSE_USER
-              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: user, optional: true } }
-            - name: RUSTIC_GIT_CLICKHOUSE_PASSWORD
-              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: password, optional: true } }
+            - name: KLOUDLITE_GIT_CLICKHOUSE_USER
+              valueFrom: { secretKeyRef: { name: kloudlite-git-clickhouse, key: user, optional: true } }
+            - name: KLOUDLITE_GIT_CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: kloudlite-git-clickhouse, key: password, optional: true } }
             # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
-            - name: RUSTIC_GIT_HYPERDX_URL
+            - name: KLOUDLITE_GIT_HYPERDX_URL
               value: https://hyperdx-dev.kloudlite.io
             # The region the MOUNTED KUBECONFIG points at, and the label that cluster's watch
             # stamps on its event rows — this process's own cluster is always `central`, hard-coded
-            # in bins/api/src/main.rs, so this is never that. It must equal the `RUSTIC_GIT_REGION`
+            # in bins/api/src/main.rs, so this is never that. It must equal the `KLOUDLITE_GIT_REGION`
             # on that region's deploy/k3s/otel-agent.yaml, or a chart joins telemetry to events
             # from a different region and neither side looks wrong.
-            - name: RUSTIC_GIT_REGION
+            - name: KLOUDLITE_GIT_REGION
               value: centralindia-k3s
           readinessProbe:
             httpGet: { path: /healthz, port: http }
@@ -854,32 +854,32 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: cache, mountPath: /var/cache/rustic-git }
-            - { name: k3s-kubeconfig, mountPath: /etc/rustic-git/k3s, readOnly: true }
+            - { name: cache, mountPath: /var/cache/kloudlite-git }
+            - { name: k3s-kubeconfig, mountPath: /etc/kloudlite-git/k3s, readOnly: true }
       volumes:
         - name: cache
           emptyDir:
             sizeLimit: 1Gi
         - name: k3s-kubeconfig
           secret:
-            secretName: rustic-git-admin-k3s-kubeconfig
+            secretName: kloudlite-git-admin-k3s-kubeconfig
             defaultMode: 0400
 ---
-# rustic-git-admin has no repo-request path, so no PodDisruptionBudget: an eviction during a
+# kloudlite-git-admin has no repo-request path, so no PodDisruptionBudget: an eviction during a
 # drain is exactly the "a few minutes' outage is fine" tradeoff replicas:1 above already made.
 apiVersion: v1
 kind: Service
 metadata:
-  name: rustic-git-admin
-  namespace: rustic-git
+  name: kloudlite-git-admin
+  namespace: kloudlite-git
 spec:
   type: ClusterIP
-  selector: { app: rustic-git-admin }
+  selector: { app: kloudlite-git-admin }
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
 # No admin Ingress on purpose: the admin api is reached only server-side by the web
-# (RUSTIC_GIT_ADMIN_API_URL=http://rustic-git-admin) — the superadmin pages live on the app host
+# (KLOUDLITE_GIT_ADMIN_API_URL=http://kloudlite-git-admin) — the superadmin pages live on the app host
 # at /superadmin. Nothing outside the cluster needs this process, so it has no public name.
 ---
 # The registry gets a hostname of its own rather than a path on the app's.
@@ -900,8 +900,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: rustic-git-registry
-  namespace: rustic-git
+  name: kloudlite-git-registry
+  namespace: kloudlite-git
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
     # NOT "true": despite the paragraph above, `dig cr.khost.dev` resolves to Cloudflare today, and
@@ -920,7 +920,7 @@ metadata:
     # Per client IP (real IP via deploy/ingress-nginx-config.yaml). A docker push is a handful of
     # large requests, not many small ones, so 50 r/s with a 5x burst never touches a real client;
     # a scraper hammering /v2 does. The region agents are exempt: they are the platform — this
-    # list is the node addresses in RUSTIC_GIT_AGENT_SOURCES above, and must move with them.
+    # list is the node addresses in KLOUDLITE_GIT_AGENT_SOURCES above, and must move with them.
     # (A third address, 4.224.42.0/32, sat here from 146b604 with no record of what it was and
     # no place in AGENT_SOURCES; dropped 2026-08-29 — being rate-limited is the worst it can
     # suffer, and a 429 from it is how we learn its name.)
@@ -931,7 +931,7 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts: [cr.khost.dev]
-      secretName: rustic-git-registry-tls
+      secretName: kloudlite-git-registry-tls
   rules:
     - host: cr.khost.dev
       http:
@@ -942,16 +942,16 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: rustic-git-http
+                name: kloudlite-git-http
                 port:
                   number: 80
 ---
 # The AKS collectors: deploy/k3s/otel-agent.yaml, copied, with THREE changes and no others — keep
 # it that way, and diff the two files when either is edited:
 #
-#   1. namespace `rustic-git` instead of `kube-system` (this cluster has no pooled nodes, so the
+#   1. namespace `kloudlite-git` instead of `kube-system` (this cluster has no pooled nodes, so the
 #      agent's DaemonSet namespace is meaningless here and the workloads it scrapes live here).
-#   2. `RUSTIC_GIT_REGION: central` — the label bins/api hard-codes for this, its own, cluster.
+#   2. `KLOUDLITE_GIT_REGION: central` — the label bins/api hard-codes for this, its own, cluster.
 #   3. the exporters point at the gateway's ClusterIP, not `otel-dev.kloudlite.io`: the gateway
 #      runs in this same cluster, so leaving through the ingress would cost a TLS handshake and a
 #      round trip through nginx to arrive back three namespaces away.
@@ -961,13 +961,13 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: rustic-git-otel-agent
-  namespace: rustic-git
+  name: kloudlite-git-otel-agent
+  namespace: kloudlite-git
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: rustic-git-otel-agent
+  name: kloudlite-git-otel-agent
 rules:
   - apiGroups: [""]
     resources: ["pods", "nodes", "namespaces", "services", "endpoints"]
@@ -1006,22 +1006,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: rustic-git-otel-agent
+  name: kloudlite-git-otel-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: rustic-git-otel-agent
+  name: kloudlite-git-otel-agent
 subjects:
   - kind: ServiceAccount
-    name: rustic-git-otel-agent
-    namespace: rustic-git
+    name: kloudlite-git-otel-agent
+    namespace: kloudlite-git
 ---
 # The per-node half.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: rustic-git-otel-agent
-  namespace: rustic-git
+  name: kloudlite-git-otel-agent
+  namespace: kloudlite-git
 data:
   config.yaml: |
     receivers:
@@ -1047,7 +1047,7 @@ data:
                 # ingress) is somebody else's telemetry.
                 - source_labels: [__meta_kubernetes_namespace]
                   action: keep
-                  regex: rustic-git
+                  regex: kloudlite-git
                 # The annotation names the metrics port; without this rewrite discovery would
                 # scrape the pod's first declared port, which for most of ours is not 9464.
                 - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
@@ -1069,19 +1069,19 @@ data:
         endpoint: https://${env:K8S_NODE_IP}:10250
         insecure_skip_verify: true
         metric_groups: [node, pod, container]
-      # OUR pods' logs only (everything in the rustic-git namespace), so HyperDX has logs beside metrics
+      # OUR pods' logs only (everything in the kloudlite-git namespace), so HyperDX has logs beside metrics
       # without ingesting every workspace container on the node. Our binaries keep plain
-      # tracing output; `RUSTIC_GIT_LOG_FORMAT=json` makes them structured here without
+      # tracing output; `KLOUDLITE_GIT_LOG_FORMAT=json` makes them structured here without
       # changing the code.
       filelog:
-        include: [/var/log/pods/rustic-git_*/*/*.log]
+        include: [/var/log/pods/kloudlite-git_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
-        exclude: [/var/log/pods/*_rustic-git-otel-*/*/*.log]
+        exclude: [/var/log/pods/*_kloudlite-git-otel-*/*/*.log]
         include_file_path: true
         operators:
           - type: container
             id: container-parser
-          # Our binaries run with RUSTIC_GIT_LOG_FORMAT=json (one object per event, fields
+          # Our binaries run with KLOUDLITE_GIT_LOG_FORMAT=json (one object per event, fields
           # flattened next to `level`/`target`/`message`), so level, module and call-site fields
           # become real columns instead of text inside a coloured string. A line that is not
           # JSON (a panic backtrace, a child process) passes through as plain body.
@@ -1131,11 +1131,11 @@ data:
       # fleet as one node and both rules would silently report one node's disk as everyone's.
       resource:
         attributes:
-          - { key: region, value: "${env:RUSTIC_GIT_REGION}", action: upsert }
+          - { key: region, value: "${env:KLOUDLITE_GIT_REGION}", action: upsert }
           - { key: k8s.node.name, value: "${env:K8S_NODE_NAME}", action: insert }
       # One identity on every log row and metric point, the same four keys everywhere:
-      # `service.name` is the WORKLOAD (rustic-git-srv, -api, -admin, -worker, -gateway, -agent),
-      # never the container name (the server's container is called `rustic-git`) and never the
+      # `service.name` is the WORKLOAD (kloudlite-git-srv, -api, -admin, -worker, -gateway, -agent),
+      # never the container name (the server's container is called `kloudlite-git`) and never the
       # scrape job; `service.instance.id` is the pod; `tier` says central or region so a query
       # can pick a control plane without listing regions. Resource-level, so it lands beside
       # `region` and the k8s.* keys k8sattributes resolved just before.
@@ -1145,7 +1145,7 @@ data:
         error_mode: ignore
         metrics:
           metric:
-            - 'resource.attributes["k8s.pod.name"] != nil and resource.attributes["k8s.namespace.name"] != "rustic-git"'
+            - 'resource.attributes["k8s.pod.name"] != nil and resource.attributes["k8s.namespace.name"] != "kloudlite-git"'
       transform/identity:
         error_mode: ignore
         log_statements:
@@ -1194,8 +1194,8 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: rustic-git-otel-cluster
-  namespace: rustic-git
+  name: kloudlite-git-otel-cluster
+  namespace: kloudlite-git
 data:
   config.yaml: |
     receivers:
@@ -1207,7 +1207,7 @@ data:
       # and already carry the right one per datapoint — stamping this pod's would be a lie.
       resource:
         attributes:
-          - { key: region, value: "${env:RUSTIC_GIT_REGION}", action: upsert }
+          - { key: region, value: "${env:KLOUDLITE_GIT_REGION}", action: upsert }
       batch:
         timeout: 10s
         send_batch_size: 1024
@@ -1230,16 +1230,16 @@ data:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: rustic-git-otel-agent
-  namespace: rustic-git
+  name: kloudlite-git-otel-agent
+  namespace: kloudlite-git
 spec:
   selector:
-    matchLabels: { app: rustic-git-otel-agent }
+    matchLabels: { app: kloudlite-git-otel-agent }
   template:
     metadata:
-      labels: { app: rustic-git-otel-agent }
+      labels: { app: kloudlite-git-otel-agent }
     spec:
-      serviceAccountName: rustic-git-otel-agent
+      serviceAccountName: kloudlite-git-otel-agent
       # Control-plane nodes run pods too (the gateway, ZeroFS), and their logs and kubelet stats
       # are as interesting as any worker's — a collector that skipped them would leave a hole
       # nothing else fills.
@@ -1260,7 +1260,7 @@ spec:
             # The kubelet is dialled by IP: a node NAME is not something pod DNS resolves.
             - name: K8S_NODE_IP
               valueFrom: { fieldRef: { fieldPath: status.hostIP } }
-            - name: RUSTIC_GIT_REGION
+            - name: KLOUDLITE_GIT_REGION
               # Edit per region before applying — this is the value every console query filters
               # on, and it must equal the region's `Region` CR id or its charts stay empty.
               value: central
@@ -1268,7 +1268,7 @@ spec:
               # No `optional: true`: a collector that started without the key would export nothing
               # and look healthy, which is strictly worse than the CrashLoopBackOff a missing
               # Secret gives. Create it first — deploy/clickstack/README.md.
-              valueFrom: { secretKeyRef: { name: rustic-git-otel, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-otel, key: key } }
           volumeMounts:
             - { name: conf, mountPath: /conf }
             - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
@@ -1277,35 +1277,35 @@ spec:
             limits: { memory: 512Mi }
       volumes:
         - name: conf
-          configMap: { name: rustic-git-otel-agent }
+          configMap: { name: kloudlite-git-otel-agent }
         - name: varlogpods
           hostPath: { path: /var/log/pods }
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rustic-git-otel-cluster
-  namespace: rustic-git
+  name: kloudlite-git-otel-cluster
+  namespace: kloudlite-git
 spec:
   # ONE, and it must stay one: `k8s_cluster` reports the whole cluster, so a second replica is a
   # second copy of every cluster metric, not redundancy.
   replicas: 1
   selector:
-    matchLabels: { app: rustic-git-otel-cluster }
+    matchLabels: { app: kloudlite-git-otel-cluster }
   template:
     metadata:
-      labels: { app: rustic-git-otel-cluster }
+      labels: { app: kloudlite-git-otel-cluster }
     spec:
-      serviceAccountName: rustic-git-otel-agent
+      serviceAccountName: kloudlite-git-otel-agent
       containers:
         - name: collector
           image: otel/opentelemetry-collector-contrib:0.109.0@sha256:af0f72b2d2493fc17f06cf3bc136548240cd7ebb2c8b1c8a7be6f3eb03068389
           args: ["--config=/conf/config.yaml"]
           env:
-            - name: RUSTIC_GIT_REGION
+            - name: KLOUDLITE_GIT_REGION
               value: central
             - name: OTEL_INGESTION_KEY
-              valueFrom: { secretKeyRef: { name: rustic-git-otel, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-git-otel, key: key } }
           volumeMounts:
             - { name: conf, mountPath: /conf }
           resources:
@@ -1313,4 +1313,4 @@ spec:
             limits: { memory: 256Mi }
       volumes:
         - name: conf
-          configMap: { name: rustic-git-otel-cluster }
+          configMap: { name: kloudlite-git-otel-cluster }

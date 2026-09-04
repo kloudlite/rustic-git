@@ -2,7 +2,7 @@
 //! statements are built from an ALLOW-LIST — a range, a step and a series name that came off the
 //! wire must never reach a query as text.
 
-use rustic_git_workspaces::history::series::{
+use kloudlite_git_workspaces::history::series::{
     parse_range, parse_step, sql_for, summarize, SeriesQuery,
 };
 
@@ -46,11 +46,11 @@ fn every_named_series_the_console_asks_for_has_a_statement() {
 #[test]
 fn every_series_reads_a_known_table_and_buckets_by_the_step() {
     let tables = [
-        "rustic.events",
-        "rustic.usage_hourly",
-        "rustic.fleet_hourly",
-        "rustic.alerts",
-        "rustic.metrics_5m",
+        "kloudlite.events",
+        "kloudlite.usage_hourly",
+        "kloudlite.fleet_hourly",
+        "kloudlite.alerts",
+        "kloudlite.metrics_5m",
     ];
     for name in NAMES {
         let sql = sql_for(name, &q()).unwrap();
@@ -119,9 +119,9 @@ fn the_used_series_are_ratios() {
 #[test]
 fn the_deduplicated_tables_are_read_final() {
     for name in ["pending_requests", "decided_requests", "audit_events", "time_to_decide_p50"] {
-        assert!(sql_for(name, &q()).unwrap().contains("rustic.events FINAL"), "{name}");
+        assert!(sql_for(name, &q()).unwrap().contains("kloudlite.events FINAL"), "{name}");
     }
-    assert!(sql_for("firing_signals", &q()).unwrap().contains("rustic.alerts FINAL"));
+    assert!(sql_for("firing_signals", &q()).unwrap().contains("kloudlite.alerts FINAL"));
 }
 
 /// `usage` needs an owner and a dimension; without them it is a 404-shaped miss rather than a query
@@ -158,7 +158,7 @@ fn a_quote_in_an_owner_or_region_is_refused_not_escaped() {
     };
     assert!(sql_for("usage", &bad).is_none());
     let bad = SeriesQuery {
-        region: Some("eu'; DROP TABLE rustic.events; --".into()),
+        region: Some("eu'; DROP TABLE kloudlite.events; --".into()),
         ..q()
     };
     assert!(sql_for("pool_used", &bad).is_none());
@@ -200,7 +200,7 @@ fn an_empty_series_summarizes_to_zeros() {
     assert_eq!((s.last, s.delta, s.min, s.max), (0.0, 0.0, 0.0, 0.0));
 }
 
-/// `rustic.alerts` holds transitions only, so a rule that began firing before the window has no row
+/// `kloudlite.alerts` holds transitions only, so a rule that began firing before the window has no row
 /// in it. The statement must carry state forward: buckets generated from the range, and the alerts
 /// side read WITHOUT a range filter so an older transition still decides those buckets. A range
 /// filter there is exactly the bug — it draws the longest-running alert in the fleet as ok.
@@ -209,7 +209,7 @@ fn firing_signals_carries_state_forward_past_the_range() {
     let sql = sql_for("firing_signals", &q()).unwrap();
     assert!(sql.contains("argMaxIf(state, ts, ts <= b)"), "{sql}");
     assert!(sql.contains("numbers(7 * 24)"), "{sql}");
-    let alerts_side = sql.split("rustic.alerts").nth(1).unwrap();
+    let alerts_side = sql.split("kloudlite.alerts").nth(1).unwrap();
     assert!(
         !alerts_side.contains("INTERVAL"),
         "the alerts side must not be range-filtered: {sql}"

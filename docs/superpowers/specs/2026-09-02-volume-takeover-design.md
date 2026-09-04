@@ -30,7 +30,7 @@ without anyone's involvement. Moving the LIVE worktree is the separate, person-o
 described below.
 
 Today it does not happen. `pull_beat` computes `replicate::targets` over `pool_nodes()`, which
-is every node labelled `rustic-git.io/pool=true` — dead or alive. The rendezvous hash keeps
+is every node labelled `kloudlite-git.io/pool=true` — dead or alive. The rendezvous hash keeps
 pointing at the corpse, `reap_dead_replicas` deletes its row every beat, and no third node ever
 finds itself a target. A cluster with three nodes and `replicas: 2` sits at one live copy until
 the dead node returns.

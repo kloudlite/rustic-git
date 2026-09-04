@@ -4,7 +4,7 @@
 
 use super::{check_handle, is_duplicate_key, Directory, HandleKind, Member, Role, User};
 use mongodb::bson::{doc, to_bson, DateTime};
-use rustic_git_core::{err, Result};
+use kloudlite_git_core::{err, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

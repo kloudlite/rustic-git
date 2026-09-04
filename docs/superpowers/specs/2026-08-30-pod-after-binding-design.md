@@ -44,7 +44,7 @@ provoke by creating the pod too early.
 
 ## Why the claims cannot simply use WaitForFirstConsumer
 
-`rustic-git-local` already IS `WaitForFirstConsumer`. The scheduler nevertheless calls these claims
+`kloudlite-git-local` already IS `WaitForFirstConsumer`. The scheduler nevertheless calls these claims
 "immediate" because `k8s::claim` sets `volume_name`, and a claim that names its PV opts out of
 delayed binding.
 

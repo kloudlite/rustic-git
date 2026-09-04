@@ -1,4 +1,4 @@
-# rustic-git — architecture
+# kloudlite-git — architecture
 
 A git host, an OCI container registry and a btrfs-backed workspace/environment control plane,
 sharing one object store and one identity. Repositories and images live as per-repo SlateDB
@@ -22,31 +22,31 @@ flowchart TB
   CF[Cloudflare<br/>proxy + WAF + TLS for the app host]
   U --> CF
   G -- HTTPS --> CF
-  G -- "SSH :22 (git.khost.dev, DNS-only)" --> LB[Service rustic-git-lb<br/>LoadBalancer]
+  G -- "SSH :22 (git.khost.dev, DNS-only)" --> LB[Service kloudlite-git-lb<br/>LoadBalancer]
   D -- "cr.khost.dev" --> INGR
 
-  subgraph aks[Azure AKS - namespace rustic-git]
-    CF --> INGW[Ingress rustic-git-web]
-    INGR[Ingress rustic-git-registry]
-    INGW --> WEB[rustic-git-web<br/>Next.js, 2 replicas]
-    WEB --> API[rustic-git-api<br/>Deployment, 2 replicas, :8090]
+  subgraph aks[Azure AKS - namespace kloudlite-git]
+    CF --> INGW[Ingress kloudlite-git-web]
+    INGR[Ingress kloudlite-git-registry]
+    INGW --> WEB[kloudlite-git-web<br/>Next.js, 2 replicas]
+    WEB --> API[kloudlite-git-api<br/>Deployment, 2 replicas, :8090]
     API -- "peer :8081 + peer secret" --> SRV
     INGR --> SRV
     LB --> SRV
-    SRV[rustic-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs;<br/>one of them holds the leader lease and writes the ownership map]
-    WRK[rustic-git-worker<br/>merge + blob GC]
+    SRV[kloudlite-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs;<br/>one of them holds the leader lease and writes the ownership map]
+    WRK[kloudlite-git-worker<br/>merge + blob GC]
     WRK -- "fetch/push over peer listener" --> SRV
   end
 
   subgraph k3s[k3s workload cluster]
     APIS[(kube-apiserver<br/>CRDs: Workspace, Environment,<br/>Volume, OwnerBinding, Snapshot, VolumeReplica)]
-    AG[rustic-git-agent<br/>DaemonSet, privileged,<br/>nodes labelled rustic-git.io/pool]
+    AG[kloudlite-git-agent<br/>DaemonSet, privileged,<br/>nodes labelled kloudlite-git.io/pool]
     POOL[(btrfs pool /wspool-prod<br/>subvolumes, snapshots)]
     PODS[Workspace pods / Environment<br/>Deployments in ws-owner, env-id]
     APIS --> AG
     AG --> POOL
     AG --> PODS
-    AG -- "btrfs send over the peer listener" --> AG2[rustic-git-agent<br/>on the region's other pool nodes]
+    AG -- "btrfs send over the peer listener" --> AG2[kloudlite-git-agent<br/>on the region's other pool nodes]
   end
 
   API -- "writes spec via KUBECONFIG" --> APIS
@@ -68,7 +68,7 @@ flowchart TB
   WEB --> RES
   WEB --> OAUTH
 
-  GH[GitHub Actions] --> GHCR[(ghcr.io/kloudlite<br/>rustic-git, rustic-git-web,<br/>rustic-git-agent)]
+  GH[GitHub Actions] --> GHCR[(ghcr.io/kloudlite<br/>kloudlite-git, kloudlite-git-web,<br/>kloudlite-git-agent)]
   GHCR -.image pulls.-> aks
   GHCR -.image pulls.-> k3s
 ```
@@ -77,18 +77,18 @@ flowchart TB
 
 | Component | Binary / package | Runs where | Owns | Talks to | Source of truth it holds |
 | --- | --- | --- | --- | --- | --- |
-| Server tier | `rustic-git` (`bins/server`, args `serve`) | AKS, StatefulSet `rustic-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases; the ownership map, on whichever pod holds the lease at `cluster/leader` | Object store, Redis, Cosmos (Mongo URI, pull migration read), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
-| Read/team API | `rustic-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos (directory), Redis cache, k3s API server (mounted KUBECONFIG, writer of every CRD incl. `Region`) | None for repos — writes CR **spec**, `Region` included |
-| Merge worker | `rustic-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
-| Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot cut, sync-point beat, per-owner home directories | k3s API (watch/status), peer agents (btrfs send over HTTP) — and nothing else | CR **status** only; snapshot bytes as local btrfs subvolumes |
-| Web app | `rustic-git-web` (`web/apps/web`, Next.js app router) | AKS Deployment, 2 replicas, :3000, `/api/health` probe | Browser UI, Auth.js session | `rustic-git-api` only (server-side), Resend, OAuth providers | None — no DB connection, no signing key |
-| CRDs (7) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment`, `Region` (API-written), `Volume`, `OwnerBinding`, `Snapshot`, `VolumeReplica` (controller-written children) | — | The truth for workspaces, environments, regions, volumes and snapshots alike |
+| Server tier | `kloudlite-git` (`bins/server`, args `serve`) | AKS, StatefulSet `kloudlite-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases; the ownership map, on whichever pod holds the lease at `cluster/leader` | Object store, Redis, Cosmos (Mongo URI, pull migration read), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
+| Read/team API | `kloudlite-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos (directory), Redis cache, k3s API server (mounted KUBECONFIG, writer of every CRD incl. `Region`) | None for repos — writes CR **spec**, `Region` included |
+| Merge worker | `kloudlite-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
+| Node agent | `kloudlite-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector kloudlite-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot cut, sync-point beat, per-owner home directories | k3s API (watch/status), peer agents (btrfs send over HTTP) — and nothing else | CR **status** only; snapshot bytes as local btrfs subvolumes |
+| Web app | `kloudlite-git-web` (`web/apps/web`, Next.js app router) | AKS Deployment, 2 replicas, :3000, `/api/health` probe | Browser UI, Auth.js session | `kloudlite-git-api` only (server-side), Resend, OAuth providers | None — no DB connection, no signing key |
+| CRDs (7) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `kloudlite-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment`, `Region` (API-written), `Volume`, `OwnerBinding`, `Snapshot`, `VolumeReplica` (controller-written children) | — | The truth for workspaces, environments, regions, volumes and snapshots alike |
 | SlateDB per repo / image / volume | `crates/storage`, `crates/gitbase` | inside the server tier process, backed by the object store | `repo/{owner}/{name}`, `repo/img/{owner}/{name}`, `repo/vol/{owner}/{id}` | object store | Everything per-repo/image/volume; exactly one opener |
-| Object store | Azure Blob `az://rustic-git` (prod), `s3://`, `file://`, `mem://` | external | packs, SlateDB files, `blobs/{owner}/{algo}/{hex}`, `manifests/{owner}/{name}/{algo}/{hex}`, `index/{public,private}/...` markers, `auth/...` records | — | Bytes; credentials live here as plain keys so any node can authenticate |
-| Cosmos DB | Mongo API (`RUSTIC_GIT_MONGO_URI`, db `kloudlite`) | external, Azure | Directory (users, teams, memberships, invites) | api tier (writer), server tier (pull migration read) | Directory only |
-| Redis | `RUSTIC_GIT_REDIS_URL` (Azure Managed Redis) | external | one `events` stream + the api tier's read cache | server, api, worker | Nothing — a nudge and a view, never the record |
+| Object store | Azure Blob `az://kloudlite-git` (prod), `s3://`, `file://`, `mem://` | external | packs, SlateDB files, `blobs/{owner}/{algo}/{hex}`, `manifests/{owner}/{name}/{algo}/{hex}`, `index/{public,private}/...` markers, `auth/...` records | — | Bytes; credentials live here as plain keys so any node can authenticate |
+| Cosmos DB | Mongo API (`KLOUDLITE_GIT_MONGO_URI`, db `kloudlite`) | external, Azure | Directory (users, teams, memberships, invites) | api tier (writer), server tier (pull migration read) | Directory only |
+| Redis | `KLOUDLITE_GIT_REDIS_URL` (Azure Managed Redis) | external | one `events` stream + the api tier's read cache | server, api, worker | Nothing — a nudge and a view, never the record |
 | The region's btrfs pools | `{pool}/vol/{volume}/snap/` on every pool node | in-cluster | snapshot bytes as read-only btrfs subvolumes, replicated node-to-node by `btrfs send` over the peer listener | agent | Snapshot bytes (the records are the `Snapshot`/`Volume` CRs) |
-| GHCR | `ghcr.io/kloudlite/{rustic-git,rustic-git-web,rustic-git-agent}` | external | container images, pinned by commit SHA | CI pushes, kubelets pull | — |
+| GHCR | `ghcr.io/kloudlite/{kloudlite-git,kloudlite-git-web,kloudlite-git-agent}` | external | container images, pinned by commit SHA | CI pushes, kubelets pull | — |
 | GitHub Actions | `.github/workflows/{image,web}.yml` | external | builds/pushes images, cargo test/clippy/audit/deny, bun checks | GHCR | — |
 | Resend | `https://api.resend.com/emails` (`web/apps/web/src/lib/mail.ts`) | external | invite and sign-in emails | web | — |
 | OAuth providers | GitHub, Google, Microsoft Entra ID (Auth.js) | external | sign-in | web | — |
@@ -98,23 +98,23 @@ flowchart TB
 
 | Service | Used for | Which component | Credential env / secret | Without it |
 | --- | --- | --- | --- | --- |
-| Object store (Azure Blob / S3) | every byte: SlateDB, packs, registry blobs, index markers, auth records | server, api, worker | `RUSTIC_GIT_S3_URL` + `AZURE_STORAGE_ACCOUNT_NAME`/`_KEY` (Secret `rustic-git-storage`), or AWS env | Nothing works |
-| Cosmos DB (Mongo API) | directory: users, teams, invites; server tier's pull-request migration read | api (writer), server | `RUSTIC_GIT_MONGO_URI`, `RUSTIC_GIT_MONGO_DB` (Secret `rustic-git-mongo`) | api: team routes report unavailable, browse reads keep working. server: **not** optional — pod must not start without it, or pull requests get orphaned |
-| Redis | `events` nudge stream + api read cache | server, api, worker | `RUSTIC_GIT_REDIS_URL` (Secret `rustic-git-redis`, optional) | No data loss: merges fall back to the owner's periodic lanes, the feed's PR half goes quiet (only `repo_created` survives), cache disabled (reads still correct) |
-| Peer agents (btrfs send over HTTP) | replicating snapshot bytes between the region's pool nodes | agent | `WS_PEER_SECRET` (Secret `rustic-git-agent`, created by hand) | Replication goes idle: pushes and restores still work on the owning node, but nothing is held anywhere else |
-| k3s API server | the CRDs = truth for workspaces | api (spec), agent (status) | `KUBECONFIG` mounted secret on api; ServiceAccount `rustic-git-agent` on the agent | No workspaces or environments at all |
-| Peer secret | node-to-node and api→server authentication | server, api, worker, web (once, at sign-in) | `RUSTIC_GIT_PEER_SECRET` (Secret `rustic-git-peer`) | Fleet cannot forward; api cannot read |
-| JWT signing key | registry bearer tokens + user tokens, fleet-wide | server, api | `RUSTIC_GIT_JWT_SECRET` (Secret `rustic-git-jwt`) | Pods fail closed in fleet mode; per-pod random keys would 401 every push after a successful login |
+| Object store (Azure Blob / S3) | every byte: SlateDB, packs, registry blobs, index markers, auth records | server, api, worker | `KLOUDLITE_GIT_S3_URL` + `AZURE_STORAGE_ACCOUNT_NAME`/`_KEY` (Secret `kloudlite-git-storage`), or AWS env | Nothing works |
+| Cosmos DB (Mongo API) | directory: users, teams, invites; server tier's pull-request migration read | api (writer), server | `KLOUDLITE_GIT_MONGO_URI`, `KLOUDLITE_GIT_MONGO_DB` (Secret `kloudlite-git-mongo`) | api: team routes report unavailable, browse reads keep working. server: **not** optional — pod must not start without it, or pull requests get orphaned |
+| Redis | `events` nudge stream + api read cache | server, api, worker | `KLOUDLITE_GIT_REDIS_URL` (Secret `kloudlite-git-redis`, optional) | No data loss: merges fall back to the owner's periodic lanes, the feed's PR half goes quiet (only `repo_created` survives), cache disabled (reads still correct) |
+| Peer agents (btrfs send over HTTP) | replicating snapshot bytes between the region's pool nodes | agent | `WS_PEER_SECRET` (Secret `kloudlite-git-agent`, created by hand) | Replication goes idle: pushes and restores still work on the owning node, but nothing is held anywhere else |
+| k3s API server | the CRDs = truth for workspaces | api (spec), agent (status) | `KUBECONFIG` mounted secret on api; ServiceAccount `kloudlite-git-agent` on the agent | No workspaces or environments at all |
+| Peer secret | node-to-node and api→server authentication | server, api, worker, web (once, at sign-in) | `KLOUDLITE_GIT_PEER_SECRET` (Secret `kloudlite-git-peer`) | Fleet cannot forward; api cannot read |
+| JWT signing key | registry bearer tokens + user tokens, fleet-wide | server, api | `KLOUDLITE_GIT_JWT_SECRET` (Secret `kloudlite-git-jwt`) | Pods fail closed in fleet mode; per-pod random keys would 401 every push after a successful login |
 | Cloudflare | TLS, WAF, rate limiting for the app host | web ingress | — | Origin exposed unfiltered; SSH (2222/22) never traversed it anyway |
 | GHCR | image distribution (public packages, no pull secret) | all deployments | CI's `GITHUB_TOKEN` (`packages: write`) | No rollouts |
 | GitHub Actions | build + test + image push | CI | repo-scoped `GITHUB_TOKEN` | No new images; deploy yamls pin SHAs, so running pods are unaffected |
-| Resend | invites, email sign-in links | web | `RESEND_API_KEY`, `RESEND_FROM` (Secret `rustic-git-mail`, optional) | Invite still created; the inviter is shown the link to pass on by hand |
-| GitHub / Google / Microsoft Entra ID OAuth | sign-in | web | `AUTH_{GITHUB,GOOGLE,MICROSOFT_ENTRA_ID}_{ID,SECRET}` (Secret `rustic-git-web`, optional) | Provider simply not offered; email + shared password remains if `AUTH_ALLOWED_EMAILS` + `AUTH_SHARED_PASSWORD` are set |
+| Resend | invites, email sign-in links | web | `RESEND_API_KEY`, `RESEND_FROM` (Secret `kloudlite-git-mail`, optional) | Invite still created; the inviter is shown the link to pass on by hand |
+| GitHub / Google / Microsoft Entra ID OAuth | sign-in | web | `AUTH_{GITHUB,GOOGLE,MICROSOFT_ENTRA_ID}_{ID,SECRET}` (Secret `kloudlite-git-web`, optional) | Provider simply not offered; email + shared password remains if `AUTH_ALLOWED_EMAILS` + `AUTH_SHARED_PASSWORD` are set |
 | `alpine/git:2.45.2` | init container that seeds a `gitRepo` workspace over SSH | agent | `WS_GIT_INIT_IMAGE`, `WS_GIT_SSH_HOST`/`PORT` | Git-seeded workspaces cannot clone |
 | cert-manager | TLS on the registry ingress (`cr.khost.dev`) | AKS ingress | cluster issuer | Registry TLS expires |
 | Azure (AKS, VMs, VNet/NSG) | the two clusters themselves (`deploy/k3s/provision-azure.sh`) | everything | Azure CLI credentials | — |
 
-No DeepSeek / `rustic-git-ai` key, secret, or reference exists anywhere in this repo (grepped
+No DeepSeek / `kloudlite-git-ai` key, secret, or reference exists anywhere in this repo (grepped
 across `*.rs`, `*.ts`, `*.tsx`, `*.yaml`, `*.yml`, `*.sh`, `*.md`) — if such a Secret exists in the
 cluster, nothing here reads it.
 
@@ -126,7 +126,7 @@ cluster, nothing here reads it.
 - **The ownership map has one writer, elected.** The pod holding the lease at `cluster/leader`
   (conditional puts in the object store — `crates/storage/src/ownership/lease.rs`, TTL 10 s,
   renewed every 3 s) opens `cluster/ownership` as the writer; the lease epoch is checked on every
-  map write and SlateDB's writer fence is the backstop. Any `rustic-git-srv` pod may lead; a dead
+  map write and SlateDB's writer fence is the backstop. Any `kloudlite-git-srv` pod may lead; a dead
   leader is replaced within about 15 s with no operator.
 - **Manifest bytes are stored and returned verbatim**; only an explicit `DELETE` or the keep-biased
   GC sweep (`crates/registry/src/gc.rs`) ever removes a blob.
@@ -138,7 +138,7 @@ cluster, nothing here reads it.
   etcd — the only workspace state outside the cluster.
 - **Cosmos holds only the directory** (users, teams, memberships, invites). `Region` is a CRD like
   every other kind here, written by `/v1/regions`.
-- **Views, never authorization:** `index/` markers, the `rustic-git.io/owner` and `/kind` labels
+- **Views, never authorization:** `index/` markers, the `kloudlite-git.io/owner` and `/kind` labels
   (`spec.owner` is the truth; controllers re-stamp labels on reconcile), and the Redis `events`
   stream. Every consumer of `events` keeps a fallback that works with Redis down.
 - **Placement is a fact, not a wish:** `Workspace`/`Environment` select on `.status.nodeName`,
@@ -148,16 +148,16 @@ cluster, nothing here reads it.
 ## Request flows
 
 **git push over HTTP or SSH.** The client hits the app host (Cloudflare → ingress) or SSH on
-`git.khost.dev:22` → `rustic-git-lb`. The routing middleware derives `{owner}/{name}` from the URL,
+`git.khost.dev:22` → `kloudlite-git-lb`. The routing middleware derives `{owner}/{name}` from the URL,
 and if this node isn't the owner it forwards to the peer that is (or asks the leader to place it).
 The owning node authenticates against `auth/...` in the object store, buffers the pack (capped by
-`RUSTIC_GIT_MAX_BODY`, 512 MiB in prod), writes objects, and updates refs in its own SlateDB. It
+`KLOUDLITE_GIT_MAX_BODY`, 512 MiB in prod), writes objects, and updates refs in its own SlateDB. It
 drops the repo's cached `refs` entry in Redis and publishes an `events` nudge. Neither the cache nor
 the nudge is required for correctness.
 
 **docker pull.** `cr.khost.dev` (its own ingress, its own TLS) → `/v2/...`. `docker login` gets a
 bearer token from `/v2/token`, answered by whichever node it lands on and signed with the
-fleet-wide `RUSTIC_GIT_JWT_SECRET`. The manifest request routes on `img/{owner}/{name}` to the node
+fleet-wide `KLOUDLITE_GIT_JWT_SECRET`. The manifest request routes on `img/{owner}/{name}` to the node
 holding that image's DB, which returns the stored manifest bytes verbatim. Layers are read from
 `blobs/{owner}/{algo}/{hex}` in the object store — per-owner and shared across that owner's images,
 which is why no manifest path ever deletes a blob.
@@ -225,12 +225,12 @@ NetworkPolicies open the path; detaching, or attaching elsewhere, removes them.
 | `crates/api` | the read/browse API served by `bins/api` |
 | `crates/app` | shared server application state and lanes |
 | `crates/workspaces` | CRDs, `/v1` routes, snapshot engine |
-| `bins/server` | `rustic-git` — git + registry, routing, ownership |
-| `bins/api` | `rustic-git-api` — `/v1` and browse, cannot open a repo for writing |
-| `bins/worker` | `rustic-git-worker` — merges and blob GC |
-| `bins/agent` | `rustic-git-agent` — privileged node controller, btrfs |
+| `bins/server` | `kloudlite-git` — git + registry, routing, ownership |
+| `bins/api` | `kloudlite-git-api` — `/v1` and browse, cannot open a repo for writing |
+| `bins/worker` | `kloudlite-git-worker` — merges and blob GC |
+| `bins/agent` | `kloudlite-git-agent` — privileged node controller, btrfs |
 | `web/` | turborepo; the Next.js app in `web/apps/web` |
-| `deploy/` | `rustic-git.yaml`, `rustic-git-web.yaml` (AKS) and `deploy/k3s/*` (CRDs, agent, RBAC, provisioning) |
+| `deploy/` | `kloudlite-git.yaml`, `kloudlite-git-web.yaml` (AKS) and `deploy/k3s/*` (CRDs, agent, RBAC, provisioning) |
 | `tests/` | integration suite hosted by the near-empty root package, plus `registry_e2e.sh`, `ws_e2e.sh` |
 | `docs/` | design docs and plans under `docs/superpowers/`, benchmarks and reviews alongside |
 
@@ -241,7 +241,7 @@ cargo test                                   # workspace units + tests/*.rs
 cargo test --test registry_blobs             # one integration file
 cargo clippy --workspace -- -D warnings      # what CI gates on
 
-RUSTIC_GIT_S3_URL=file://./x cargo run -p rustic-git-server -- serve   # no S3; mem:// is lost on exit
+KLOUDLITE_GIT_S3_URL=file://./x cargo run -p kloudlite-git-server -- serve   # no S3; mem:// is lost on exit
                                              # local scratch (host key, cache) lands under ./.local/
 
 cd web && bun install && bun run dev         # lint / typecheck / build / test also available

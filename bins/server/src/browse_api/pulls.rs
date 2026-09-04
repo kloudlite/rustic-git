@@ -21,7 +21,7 @@
 //! `events::publish` is fire-and-forget, and a Redis outage must cost a consumer one fallback
 //! poll, never a user's operation.
 use crate::router::internal;
-use rustic_git_core::httpx::Trusted;
+use kloudlite_git_core::httpx::Trusted;
 use super::{hidden, open_ro};
 use crate::pulls::{self, Comment, MergeJob, PullRequest, PullState};
 use crate::App;

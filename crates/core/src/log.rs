@@ -10,9 +10,9 @@
 //! wire protocol on the ssh path, `docker compose` output on the agent), and interleaving
 //! log lines into it corrupts the payload.
 //!
-//! `RUSTIC_GIT_LOG_FORMAT=json` switches every binary to one JSON object per line, and every
+//! `KLOUDLITE_GIT_LOG_FORMAT=json` switches every binary to one JSON object per line, and every
 //! deployed pod sets it: the collectors (`deploy/k3s/otel-agent.yaml`, the AKS twin in
-//! `deploy/rustic-git.yaml`) parse that object so level, module (`target`) and the call-site
+//! `deploy/kloudlite-git.yaml`) parse that object so level, module (`target`) and the call-site
 //! fields become columns in HyperDX rather than text inside a coloured string. Unset — a
 //! laptop, a test — gives the human-readable form.
 
@@ -20,7 +20,7 @@ use tracing::Subscriber;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::{fmt, EnvFilter};
 
-const DEFAULT_FILTER: &str = "warn,rustic_git=info,rustic_git_core=info,rustic_git_storage=info,rustic_git_gitbase=info,rustic_git_pulls=info,rustic_git_app=info,rustic_git_git=info,rustic_git_registry=info,rustic_git_api=info,rustic_git_workspaces=info,rustic_git_server=info,rustic_git_worker=info,rustic_git_agent=info";
+const DEFAULT_FILTER: &str = "warn,kloudlite_git=info,kloudlite_git_core=info,kloudlite_git_storage=info,kloudlite_git_gitbase=info,kloudlite_git_pulls=info,kloudlite_git_app=info,kloudlite_git_git=info,kloudlite_git_registry=info,kloudlite_git_api=info,kloudlite_git_workspaces=info,kloudlite_git_server=info,kloudlite_git_worker=info,kloudlite_git_agent=info";
 
 /// Install the process-wide subscriber. Reads `RUST_LOG`; defaults to `info` for our own
 /// crates and `warn` for everything else, because the dependency graph (hyper, russh,
@@ -29,7 +29,7 @@ const DEFAULT_FILTER: &str = "warn,rustic_git=info,rustic_git_core=info,rustic_g
 /// A second call is a no-op, not a panic — same contract as `install_crypto_provider`,
 /// so a test or an embedded second entry point can call it freely.
 pub fn init() {
-    let json = std::env::var("RUSTIC_GIT_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let json = std::env::var("KLOUDLITE_GIT_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     // `try_set_global_default` rather than `init`: the second caller gets an Err, not a panic.
     let _ = tracing::subscriber::set_global_default(subscriber(json, std::io::stderr));
 }
@@ -90,7 +90,7 @@ mod tests {
         let line = out.lines().next().expect("one line");
         let v: serde_json::Value = serde_json::from_str(line).expect("parseable json");
         assert_eq!(v["level"], "WARN");
-        assert_eq!(v["target"], "rustic_git_core::log::tests");
+        assert_eq!(v["target"], "kloudlite_git_core::log::tests");
         assert_eq!(v["message"], "lease lost");
         assert_eq!(v["repo"], "alice/x");
     }

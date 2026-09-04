@@ -6,7 +6,7 @@
 
 **Architecture:** `bins/agent` is a controller, not a worker: it watches its own node's objects and converges them. Every fix here keeps the two rules the crate is built on — a sweep is keep-biased (a fresh read before any delete, a partial view acts on nothing), and a running working copy never moves. Three Criticals are missing keep-bias guards on delete paths; the Importants are cost and bounding (blocking work off the reactor, a floor on a peer-driven beat, a server-side send bound, a receive ceiling, a correct ordering key, a node-scoped watch); the rest is mechanical.
 
-**Tech Stack:** Rust, `kube` 0.99-era (`Api`, `Controller`, `watcher::Config`), `json_patch`, `axum` for the peer listener, `tokio` (`spawn_blocking` for all btrfs work), `tempfile` + `rustic_git_workspaces::kube_test` (`mock_client`/`Recorder`/`Route`) for tests.
+**Tech Stack:** Rust, `kube` 0.99-era (`Api`, `Controller`, `watcher::Config`), `json_patch`, `axum` for the peer listener, `tokio` (`spawn_blocking` for all btrfs work), `tempfile` + `kloudlite_git_workspaces::kube_test` (`mock_client`/`Recorder`/`Route`) for tests.
 
 **Spec:** `docs/superpowers/specs/2026-09-03-stop-interrupt-decommission-design.md` and `docs/superpowers/specs/2026-09-03-durable-snapshots-design.md` (the vocabulary note — read **snapshot** for **commit** — and simplifications 2, 6, 9, 11 are cited by individual tasks). Review: `docs/superpowers/reviews/2026-09-03-details/agent.md`; summary `docs/superpowers/reviews/2026-09-03-codebase-review.md`.
 
@@ -19,7 +19,7 @@
 - **Every sweep is keep-biased:** a fresh read immediately before a delete, an unreadable or partial view deletes nothing, a list error aborts the whole pass.
 - **Gate for every task** (run unpiped, exactly this, both commands, before the commit step):
   ```
-  cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings
   ```
   `--test-threads=1` because several tests in this crate set process env (`WS_DEFAULT_IMAGE`, `WS_NODE_DEAD_SECS`). Expect `exit=0`. Clippy `--all-targets` has pre-existing lints in test targets: the bar is **no new warning in a file you touched**.
@@ -120,8 +120,8 @@ Add to `mod reconcile_tests` in `bins/agent/src/peer.rs`, beside `pull_volume_ke
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin a_push_that_landed_during_the_pass -- --test-threads=1; echo exit=$?`
-Expected: FAIL — no `GET /apis/rustic-git.io/v1alpha1/snapshots/push-late` in `rec.calls()`, and the directory is gone.
+Run: `cargo test -p kloudlite-git-agent-bin a_push_that_landed_during_the_pass -- --test-threads=1; echo exit=$?`
+Expected: FAIL — no `GET /apis/kloudlite-git.io/v1alpha1/snapshots/push-late` in `rec.calls()`, and the directory is gone.
 
 - [ ] **Step 3: Add the guard at the call site**
 
@@ -165,7 +165,7 @@ The function is still the decision; only the evidence changed. Append to its doc
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 Expected: no new warning in `peer.rs`.
@@ -206,7 +206,7 @@ Add to `bins/agent/tests/reconcile.rs` (follow the file's existing `mock_client`
 async fn deleting_a_parent_keeps_a_sync_point_a_seeded_clone_still_names() {
     let tmp = tempfile::tempdir().unwrap();
     let seeded_vol = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-rescue", "uid": "v-rescue"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5,
                  "replicas": 2, "source": {"seededFrom": {"volume": "vol-1", "snapshot": "sync-a"}}},
@@ -264,7 +264,7 @@ async fn a_failed_seeded_listing_deletes_no_sync_points() {
 ```rust
 fn transient_snapshot(name: &str, volume: &str, worktree: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name, "uid": format!("uid-{name}")},
         "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "", "transient": true},
         "status": {"phase": "ready"},
@@ -285,7 +285,7 @@ pub async fn cleanup_parent_for_test(ctx: &Arc<Ctx>, id: &str, uid: &str, volume
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin --test reconcile deleting_a_parent_keeps_a_sync_point -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin --test reconcile deleting_a_parent_keeps_a_sync_point -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `DELETE .../snapshots/sync-a` is in `rec.calls()` (and, before the helper exists, a compile error naming `cleanup_parent_for_test`).
 
 - [ ] **Step 3: Make `seeded_from_cuts` reachable**
@@ -323,7 +323,7 @@ In `bins/agent/src/controller/workspace.rs`, between the `snaps.list(...)` that 
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 Expected: no new warning.
@@ -365,7 +365,7 @@ Add to `mod reconcile_tests` in `bins/agent/src/peer.rs`:
     async fn an_empty_pinned_volume_with_placed_parents_is_still_unplaced() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "ws-1", "uid": "ws-uid"},
             "spec": {"owner": "alice", "name": "ws-1", "desiredState": "Stopped"},
             "status": {"phase": "stopped", "nodeName": "node-dead", "volumeRef": "vol-1"},
@@ -378,7 +378,7 @@ Add to `mod reconcile_tests` in `bins/agent/src/peer.rs`:
 
         // The volume as the crash left it: empty pin, and a parent still placed on the dead node.
         let vol = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "vol-1", "uid": "v1"},
             "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1",
                      "quotaGb": 5, "replicas": 2},
@@ -413,7 +413,7 @@ Add to `mod reconcile_tests` in `bins/agent/src/peer.rs`:
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![]);
         let vol = serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "vol-1", "uid": "v1"},
             "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 2},
         });
@@ -436,7 +436,7 @@ Add to `mod reconcile_tests` in `bins/agent/src/peer.rs`:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin an_empty_pinned_volume -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin an_empty_pinned_volume -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `an_empty_pinned_volume_with_placed_parents_is_still_unplaced` sees zero PUTs, because the `owner.is_empty()` guard skipped the volume.
 
 - [ ] **Step 3: Make an unowned volume a sweepable case**
@@ -506,7 +506,7 @@ In `bins/agent/src/controller/stop.rs:190-192`, the claim "a cleared pin with pl
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`. Both new tests pass and every existing `sweep_volumes` test still passes — in particular the drain tests, which pass `mark_running: false` and must be unaffected (a drained node's volumes have a non-empty pin).
 
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
@@ -571,7 +571,7 @@ There is no way to assert "did not block the reactor" from a unit test without a
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-agent-bin the_retire_pass_does_not_walk -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin the_retire_pass_does_not_walk -- --test-threads=1; echo exit=$?`
 Expected: FAIL — the assertion on the reclaimed directory passes, but the test hangs or the `spawn_blocking` call sites do not exist yet; on a `current_thread` runtime the inline walk starves `ticker`. (If it happens to pass by scheduling luck, it still fails at Step 5's clippy or review — the code change below is the deliverable and the test is its regression net.)
 
 - [ ] **Step 3: Move each of the three call sites onto `spawn_blocking`**
@@ -644,7 +644,7 @@ Update the one call site in `pull_beat_with`: `for id in interesting_volumes(ctx
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -712,7 +712,7 @@ Add beside the existing `after_pass` tests in `mod reconcile_tests`:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin a_wake_arriving_inside_the_floor -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin a_wake_arriving_inside_the_floor -- --test-threads=1; echo exit=$?`
 Expected: FAIL to compile — `after_pass` takes three arguments and `MIN_WAKE_GAP` does not exist.
 
 - [ ] **Step 3: Add the floor**
@@ -766,7 +766,7 @@ In `bins/agent/src/controller/run.rs`, `spawn_pull`:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -832,7 +832,7 @@ Add the `slow` variant to the file's existing fake-btrfs script builder (it alre
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-agent-bin --test peer a_stalled_puller -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin --test peer a_stalled_puller -- --test-threads=1; echo exit=$?`
 Expected: FAIL — the 5 s timeout on the second request elapses, because the first holds the lock for the whole 60 s sleep.
 
 - [ ] **Step 3: Bound the served stream**
@@ -904,7 +904,7 @@ In `deploy/k3s/agent.yaml`, in the DaemonSet's container env beside `WS_PEER_SEN
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -967,7 +967,7 @@ async fn a_ceiling_below_the_volumes_quota_is_refused_with_413() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin the_receive_ceiling_follows -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin the_receive_ceiling_follows -- --test-threads=1; echo exit=$?`
 Expected: FAIL to compile — `receive_ceiling` does not exist.
 
 - [ ] **Step 3: Add the ceiling and cap the copy**
@@ -1078,7 +1078,7 @@ and, after the `valid_segment` checks and before the send lock:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`. Existing `pull_one` tests need the new argument — pass `receive_ceiling(0)` in each.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1182,7 +1182,7 @@ Then the tests assert on `newest_recorded` directly rather than through a `_for_
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin the_newest_sync_point_wins -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin the_newest_sync_point_wins -- --test-threads=1; echo exit=$?`
 Expected: FAIL to compile — `newest_recorded` does not exist.
 
 - [ ] **Step 3: Use it in `sync_one`**
@@ -1210,7 +1210,7 @@ Everything below (`recorded`, `recorded_state`, `parent`) reads the same as befo
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1256,7 +1256,7 @@ async fn a_snapshot_on_another_nodes_volume_makes_no_api_calls() {
     seed_volume_store(&ctx, vec![volume_json("vol-mine", "node-a")]);
 
     let s = Arc::new(snapshot_cr("push-1", "vol-elsewhere", "ws-1"));
-    let action = rustic_git_agent::snapshot::reconcile_commit(s, ctx.clone()).await.expect("no error");
+    let action = kloudlite_git_agent::snapshot::reconcile_commit(s, ctx.clone()).await.expect("no error");
 
     assert!(rec.calls().is_empty(), "a foreign volume's snapshot must cost nothing: {:?}", rec.calls());
     assert_eq!(action, kube::runtime::controller::Action::await_change());
@@ -1276,10 +1276,10 @@ async fn a_snapshot_on_my_volume_still_resolves_its_worktree() {
     seed_volume_store(&ctx, vec![volume_json("vol-mine", "node-a")]);
 
     let s = Arc::new(snapshot_cr("push-1", "vol-mine", "ws-1"));
-    let action = rustic_git_agent::snapshot::reconcile_commit(s, ctx.clone()).await.expect("no error");
+    let action = kloudlite_git_agent::snapshot::reconcile_commit(s, ctx.clone()).await.expect("no error");
 
     assert!(rec.calls().contains(&format!("GET {WORKSPACES}/ws-1")));
-    assert_eq!(action, kube::runtime::controller::Action::requeue(rustic_git_agent::controller::TICK));
+    assert_eq!(action, kube::runtime::controller::Action::requeue(kloudlite_git_agent::controller::TICK));
 }
 
 /// A volume the store has not seen yet is NOT "not mine": the store is a cache, and a Volume
@@ -1295,7 +1295,7 @@ async fn an_unknown_volume_falls_through_to_the_worktree_lookup() {
     // Store deliberately EMPTY — not yet populated, which is not evidence of anything.
     seed_volume_store(&ctx, vec![]);
 
-    let _ = rustic_git_agent::snapshot::reconcile_commit(Arc::new(snapshot_cr("push-1", "vol-x", "ws-1")), ctx.clone()).await;
+    let _ = kloudlite_git_agent::snapshot::reconcile_commit(Arc::new(snapshot_cr("push-1", "vol-x", "ws-1")), ctx.clone()).await;
 
     assert!(rec.calls().contains(&format!("GET {WORKSPACES}/ws-1")), "an empty store must not be read as 'not mine'");
 }
@@ -1313,7 +1313,7 @@ async fn an_unknown_volume_falls_through_to_the_worktree_lookup() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin --test reconcile a_snapshot_on_another_nodes_volume -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin --test reconcile a_snapshot_on_another_nodes_volume -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `rec.calls()` contains the `Workspace` GET and the `Environment` GET.
 
 - [ ] **Step 3: Read the store first**
@@ -1353,7 +1353,7 @@ In `bins/agent/src/controller/run.rs:248-255`, replace the `Snapshot` controller
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1396,7 +1396,7 @@ fn kept_conditions_preserves_replicated_and_decommissioning() {
         cond("Decommissioning", true),
         cond("Ready", false),
     ];
-    let kept = rustic_git_agent::controller::workspace::kept_conditions(&prev, cond("Ready", true));
+    let kept = kloudlite_git_agent::controller::workspace::kept_conditions(&prev, cond("Ready", true));
     let types: Vec<&str> = kept.iter().map(|c| c.type_.as_str()).collect();
     assert!(types.contains(&"Replicated"), "the sweep reads this and does not write it: {types:?}");
     assert!(types.contains(&"Decommissioning"), "the drain notice is not the wait arm's to drop: {types:?}");
@@ -1406,7 +1406,7 @@ fn kept_conditions_preserves_replicated_and_decommissioning() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-agent-bin kept_conditions_preserves -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin kept_conditions_preserves -- --test-threads=1; echo exit=$?`
 Expected: FAIL — neither type survives.
 
 - [ ] **Step 3: Keep them**
@@ -1428,7 +1428,7 @@ pub(crate) fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condi
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1468,7 +1468,7 @@ git commit -m "Keep the conditions other writers own across a workspace wait arm
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-agent-bin the_dead_node_floor_defaults -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin the_dead_node_floor_defaults -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `600 != 180`. (`--test-threads=1` matters here: this test mutates process env.)
 
 - [ ] **Step 3: Move the default**
@@ -1501,7 +1501,7 @@ In `bins/agent/src/peer.rs:198-202`, the marker's ceiling has moved:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`. Any test that assumed a 600 s default needs its fixture timestamps checked — `grep -rn "WS_NODE_DEAD_SECS\|600" bins/agent/src bins/agent/tests` before you commit.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1545,7 +1545,7 @@ git commit -m "Default the dead-node floor to the 180 s the cluster runs"
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0` — if a test hard-codes 40 route repetitions for the drain, adjust it to 20 and say so in the diff.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1581,7 +1581,7 @@ Body below unchanged.
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1604,7 +1604,7 @@ git commit -m "Pass the subvolume path to btrfs without a UTF-8 unwrap"
 - Modify: `bins/agent/src/peer.rs:467-481` (`sweep_dead_nodes` — comment only)
 - Test: `bins/agent/src/peer.rs` `mod reconcile_tests`
 
-**Why (M7):** the peer address for a node is whichever pod in `kube-system` carries `app=rustic-git-agent` and `spec.nodeName={node}`. Anyone who can create a pod in `kube-system` can redirect a pull. That is already a cluster-admin-adjacent capability, so this is hardening rather than a hole — and a `spec.serviceAccountName` check closes it for one line.
+**Why (M7):** the peer address for a node is whichever pod in `kube-system` carries `app=kloudlite-git-agent` and `spec.nodeName={node}`. Anyone who can create a pod in `kube-system` can redirect a pull. That is already a cluster-admin-adjacent capability, so this is hardening rather than a hole — and a `spec.serviceAccountName` check closes it for one line.
 
 **Why M5 and M6 change nothing:**
 - **M5** (the dead-node sweep runs identically on every live node, paying `N ×` the writes and `N ×` the GET-per-parent) is correct as written; only one node wins the release CAS and the `mark_parent_of` idle check keeps the marks from churning. A rendezvous over `live` keyed by volume id is the named upgrade if the write volume ever shows up — it is not worth a lease. Record it as a `ponytail:` marker rather than building it.
@@ -1623,7 +1623,7 @@ git commit -m "Pass the subvolume path to btrfs without a UTF-8 unwrap"
             "apiVersion": "v1", "kind": "PodList",
             "items": [{
                 "apiVersion": "v1", "kind": "Pod",
-                "metadata": {"name": "not-us", "namespace": "kube-system", "labels": {"app": "rustic-git-agent"}},
+                "metadata": {"name": "not-us", "namespace": "kube-system", "labels": {"app": "kloudlite-git-agent"}},
                 "spec": {"nodeName": "node-b", "serviceAccountName": "default"},
                 "status": {"podIp": "10.0.0.9"},
             }],
@@ -1637,7 +1637,7 @@ git commit -m "Pass the subvolume path to btrfs without a UTF-8 unwrap"
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-agent-bin a_pod_wearing_the_label -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin a_pod_wearing_the_label -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `Ok("10.0.0.9:8444")`.
 
 - [ ] **Step 3: Check the ServiceAccount**
@@ -1649,9 +1649,9 @@ Expected: FAIL — `Ok("10.0.0.9:8444")`.
         // The label and the node are a selector, not an identity: a pod created in `kube-system`
         // by anyone can wear both. The ServiceAccount is the thing only our DaemonSet has, and a
         // pull redirected to an impostor is a root `btrfs receive` of whatever it answers with.
-        .filter(|p| p.spec.as_ref().and_then(|s| s.service_account_name.as_deref()) == Some("rustic-git-agent"))
+        .filter(|p| p.spec.as_ref().and_then(|s| s.service_account_name.as_deref()) == Some("kloudlite-git-agent"))
         .find_map(|p| p.status.and_then(|s| s.pod_ip))
-        .ok_or_else(|| format!("no ready rustic-git-agent pod on {node}"))?;
+        .ok_or_else(|| format!("no ready kloudlite-git-agent pod on {node}"))?;
 ```
 
 - [ ] **Step 4: Record M5 and M6 where a reader will hit them**
@@ -1677,7 +1677,7 @@ Above `sweep_dead_nodes`:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1735,7 +1735,7 @@ Add, above `volume_work`'s `match &source`:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0` after deleting any test naming `RESTORE_OF_GONE` (`grep -rn "RESTORE_OF_GONE" bins crates`).
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1810,7 +1810,7 @@ git commit -m "Delete the agent's dead restore-of arms"
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-agent-bin cas_reads_a_conflict -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin cas_reads_a_conflict -- --test-threads=1; echo exit=$?`
 Expected: FAIL to compile — `cas` does not exist.
 
 - [ ] **Step 3: Write the helper**
@@ -1899,7 +1899,7 @@ Keep both doc comments — they explain the two-claimant rule at the point a rea
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`. Watch the sweep tests: the release arm now makes one more `PUT .../status` attempt (the 409 + re-read) on the release path than it did when it adopted the patched object. If a test asserts an exact PUT count on a release, update it and note the extra round trip in the diff.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -1948,7 +1948,7 @@ git commit -m "Share one compare-and-set for every guarded volume patch"
 
 - [ ] **Step 1: Record the baseline**
 
-Run: `cargo test -p rustic-git-agent-bin -- --test-threads=1 2>&1 | tail -5; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -- --test-threads=1 2>&1 | tail -5; echo exit=$?`
 Write down the test count. It must be identical after the split — a test lost in a move is the failure mode of this kind of task.
 
 - [ ] **Step 2: Create `peer/placement.rs`**
@@ -1999,7 +1999,7 @@ Move: `reap_dead_replicas`, `volume_decision`, `VolumeVerdict`, `sweep_volumes`,
 
 - [ ] **Step 8: Verify nothing moved but the code**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0` **and the same test count as Step 1**.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 Expected: no new warning. `git diff --stat` should show near-zero net line change outside the module docs.
@@ -2056,7 +2056,7 @@ git commit -m "Split the peer module into pull, sweeps, wake and placement"
 
 - [ ] **Step 1: Record the baseline**
 
-Run: `cargo test -p rustic-git-agent-bin --test reconcile -- --test-threads=1 2>&1 | tail -5; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin --test reconcile -- --test-threads=1 2>&1 | tail -5; echo exit=$?`
 Note the count. The two parents' existing tests are what proves this task.
 
 - [ ] **Step 2: Move the start-spread block**
@@ -2105,7 +2105,7 @@ Module doc for the new file:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`, same count as Step 1, **no test edited**.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -2144,7 +2144,7 @@ Remove `&& a.compatible_nodes == b.compatible_nodes` from `workspace.rs:1284` an
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`, including `crd.rs`'s tolerated-unknown parse test.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -2263,7 +2263,7 @@ Replace the marker, whose deferred work now exists and is deliberately not done:
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
@@ -2287,7 +2287,7 @@ git commit -m "Say snapshot where the agent still said commit"
 - Modify: `bins/agent/src/janitor.rs:523`, `snapshot.rs`, `bins/agent/tests/reconcile.rs`, `bins/agent/tests/peer.rs` — mark the gated tests
 - Create: `bins/agent/tests/README.md`? **No.** Put the list in `bins/agent/src/lib.rs`'s module doc, where a reader editing the engine will hit it.
 
-**Why (K8):** six near-identical copies of the same ~30 lines (`NoopNix` + `test_ctx`). One shared fixture deletes ~150 lines. Note the review's suggestion of `rustic_git_workspaces::kube_test` is **not** taken: `Ctx` and `Nix` are the agent binary's own types, and a workspaces-crate helper cannot name them without the crate depending on the binary. A `#[cfg(test)]` module in the agent crate is the right home.
+**Why (K8):** six near-identical copies of the same ~30 lines (`NoopNix` + `test_ctx`). One shared fixture deletes ~150 lines. Note the review's suggestion of `kloudlite_git_workspaces::kube_test` is **not** taken: `Ctx` and `Nix` are the agent binary's own types, and a workspaces-crate helper cannot name them without the crate depending on the binary. A `#[cfg(test)]` module in the agent crate is the right home.
 
 **Why (the gated tests):** CI runs on a container with no loopback btrfs and no root, so `janitor.rs::cleanup_local_deletes_nested_commit_model_subvolumes` — the **only** test of `cleanup_local` against real subvolumes — never runs there, and every other `cleanup_local`/`drop_stale_worktrees` test exercises `btrfs_delete`'s `#[cfg(test)]` `remove_dir_all` fallback, proving the fallback rather than the production path. Several more pass on a Mac only because the code short-circuits before touching btrfs. A reader editing the engine has no way to know which.
 
@@ -2301,8 +2301,8 @@ git commit -m "Say snapshot where the agent still said commit"
 //! two different worlds.
 
 use crate::controller::Ctx;
-use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
+use kloudlite_git_workspaces::engine::{Engine, Pool as EnginePool};
+use kloudlite_git_workspaces::kube_test::{mock_client, Recorder, Route};
 use std::sync::Arc;
 
 pub(crate) struct NoopNix;
@@ -2325,7 +2325,7 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
     let engine = Engine::new(EnginePool::new(pool));
     // Set, not read from the environment: a pod spec built without an image is a reconcile error,
     // and every test in this binary shares one process env — hence `--test-threads=1`.
-    std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
+    std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-git-workspace:deadbeef");
     (
         Arc::new(Ctx::new(
             client,
@@ -2434,7 +2434,7 @@ Add to `bins/agent/src/lib.rs`'s module doc:
 
 - [ ] **Step 7: Run the tests**
 
-Run: `cargo test -p rustic-git-agent-bin -p rustic-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`, and a test count **higher** than before by the tests added in Steps 4 and 5.
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 

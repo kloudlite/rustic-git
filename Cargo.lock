@@ -3457,6 +3457,368 @@ dependencies = [
 ]
 
 [[package]]
+name = "kloudlite-git-agent-bin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "futures",
+ "json-patch",
+ "k8s-openapi",
+ "kloudlite-git-core",
+ "kloudlite-git-storage",
+ "kloudlite-git-workspaces",
+ "kube",
+ "kube-runtime",
+ "libc",
+ "metrics",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ssh-key",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "form_urlencoded",
+ "futures",
+ "kloudlite-git-core",
+ "kloudlite-git-pulls",
+ "kloudlite-git-storage",
+ "kloudlite-git-workspaces",
+ "mongodb",
+ "pgp",
+ "rand 0.8.7",
+ "rand_core 0.10.1",
+ "reqwest",
+ "russh",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "slatedb",
+ "tokio",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-api-bin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "kloudlite-git-api",
+ "kloudlite-git-core",
+ "kloudlite-git-pulls",
+ "kloudlite-git-storage",
+ "kloudlite-git-workspaces",
+ "kube",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-app"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "kloudlite-git-core",
+ "kloudlite-git-pulls",
+ "kloudlite-git-storage",
+ "metrics",
+ "rand 0.8.7",
+ "reqwest",
+ "slatedb",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-core"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "base64",
+ "hex",
+ "jsonwebtoken",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "rand 0.8.7",
+ "reqwest",
+ "russh",
+ "rustls",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kloudlite-git-gateway-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-server",
+ "futures",
+ "jsonwebtoken",
+ "k8s-openapi",
+ "kloudlite-git-core",
+ "kloudlite-git-storage",
+ "kloudlite-git-workspaces",
+ "kube",
+ "metrics",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-git"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "gix-features",
+ "gix-hash",
+ "gix-object",
+ "gix-odb",
+ "gix-pack",
+ "gix-traverse",
+ "imara-diff",
+ "kloudlite-git-app",
+ "kloudlite-git-core",
+ "kloudlite-git-gitbase",
+ "kloudlite-git-storage",
+ "russh",
+ "serde",
+ "slatedb",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-gitbase"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "gix-actor",
+ "gix-features",
+ "gix-hash",
+ "gix-object",
+ "gix-odb",
+ "gix-pack",
+ "gix-traverse",
+ "kloudlite-git-core",
+ "kloudlite-git-storage",
+ "tokio",
+]
+
+[[package]]
+name = "kloudlite-git-pulls"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "gix-hash",
+ "kloudlite-git-core",
+ "kloudlite-git-gitbase",
+ "kloudlite-git-storage",
+ "libc",
+ "mongodb",
+ "serde",
+ "serde_json",
+ "slatedb",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-registry"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "form_urlencoded",
+ "futures",
+ "kloudlite-git-app",
+ "kloudlite-git-core",
+ "kloudlite-git-storage",
+ "metrics",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "slatedb",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "flate2",
+ "futures",
+ "gix-hash",
+ "gix-object",
+ "gix-odb",
+ "kloudlite-git-app",
+ "kloudlite-git-core",
+ "kloudlite-git-git",
+ "kloudlite-git-gitbase",
+ "kloudlite-git-pulls",
+ "kloudlite-git-registry",
+ "kloudlite-git-storage",
+ "kloudlite-git-workspaces",
+ "metrics",
+ "rand 0.8.7",
+ "reqwest",
+ "russh",
+ "serde",
+ "serde_json",
+ "slatedb",
+ "ssh-key",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "gix-hash",
+ "gix-odb",
+ "kloudlite-git-core",
+ "rand 0.8.7",
+ "redis",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "slatedb",
+ "slatedb-common",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-tests"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "futures",
+ "gix-hash",
+ "gix-object",
+ "gix-odb",
+ "gix-traverse",
+ "kloudlite-git-api",
+ "kloudlite-git-app",
+ "kloudlite-git-core",
+ "kloudlite-git-git",
+ "kloudlite-git-gitbase",
+ "kloudlite-git-pulls",
+ "kloudlite-git-registry",
+ "kloudlite-git-server",
+ "kloudlite-git-storage",
+ "kloudlite-git-workspaces",
+ "mongodb",
+ "reqwest",
+ "russh",
+ "serde_json",
+ "slatedb",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "kloudlite-git-worker-bin"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "kloudlite-git-core",
+ "kloudlite-git-pulls",
+ "kloudlite-git-registry",
+ "kloudlite-git-storage",
+ "metrics",
+ "rand 0.8.7",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "slatedb",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-git-workspaces"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "futures",
+ "hex",
+ "http",
+ "http-body-util",
+ "k8s-openapi",
+ "kloudlite-git-core",
+ "kloudlite-git-server",
+ "kloudlite-git-storage",
+ "kloudlite-git-workspaces",
+ "kube",
+ "libc",
+ "object_store",
+ "rand 0.8.7",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "slatedb",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "kube"
 version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5432,368 +5794,6 @@ checksum = "2dd18cd2bae1820af0b6ad5e54f4a51d0f3fcc53b05f845675074efcc7af071d"
 dependencies = [
  "rustc_version",
  "semver",
-]
-
-[[package]]
-name = "rustic-git-agent-bin"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "futures",
- "json-patch",
- "k8s-openapi",
- "kube",
- "kube-runtime",
- "libc",
- "metrics",
- "reqwest",
- "rustic-git-core",
- "rustic-git-storage",
- "rustic-git-workspaces",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "ssh-key",
- "tempfile",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-api"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64",
- "chrono",
- "form_urlencoded",
- "futures",
- "mongodb",
- "pgp",
- "rand 0.8.7",
- "rand_core 0.10.1",
- "reqwest",
- "russh",
- "rustic-git-core",
- "rustic-git-pulls",
- "rustic-git-storage",
- "rustic-git-workspaces",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "slatedb",
- "tokio",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-api-bin"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "kube",
- "rustic-git-api",
- "rustic-git-core",
- "rustic-git-pulls",
- "rustic-git-storage",
- "rustic-git-workspaces",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-app"
-version = "0.1.0"
-dependencies = [
- "futures",
- "metrics",
- "rand 0.8.7",
- "reqwest",
- "rustic-git-core",
- "rustic-git-pulls",
- "rustic-git-storage",
- "slatedb",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-core"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "axum",
- "base64",
- "hex",
- "jsonwebtoken",
- "metrics",
- "metrics-exporter-prometheus",
- "rand 0.8.7",
- "reqwest",
- "russh",
- "rustls",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "rustic-git-gateway-bin"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-server",
- "futures",
- "jsonwebtoken",
- "k8s-openapi",
- "kube",
- "metrics",
- "rustic-git-core",
- "rustic-git-storage",
- "rustic-git-workspaces",
- "rustls",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-git"
-version = "0.1.0"
-dependencies = [
- "base64",
- "gix-features",
- "gix-hash",
- "gix-object",
- "gix-odb",
- "gix-pack",
- "gix-traverse",
- "imara-diff",
- "russh",
- "rustic-git-app",
- "rustic-git-core",
- "rustic-git-gitbase",
- "rustic-git-storage",
- "serde",
- "slatedb",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-gitbase"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "gix-actor",
- "gix-features",
- "gix-hash",
- "gix-object",
- "gix-odb",
- "gix-pack",
- "gix-traverse",
- "rustic-git-core",
- "rustic-git-storage",
- "tokio",
-]
-
-[[package]]
-name = "rustic-git-pulls"
-version = "0.1.0"
-dependencies = [
- "futures",
- "gix-hash",
- "libc",
- "mongodb",
- "rustic-git-core",
- "rustic-git-gitbase",
- "rustic-git-storage",
- "serde",
- "serde_json",
- "slatedb",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-registry"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "form_urlencoded",
- "futures",
- "metrics",
- "rand 0.8.7",
- "rustic-git-app",
- "rustic-git-core",
- "rustic-git-storage",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "slatedb",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-server"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64",
- "flate2",
- "futures",
- "gix-hash",
- "gix-object",
- "gix-odb",
- "metrics",
- "rand 0.8.7",
- "reqwest",
- "russh",
- "rustic-git-app",
- "rustic-git-core",
- "rustic-git-git",
- "rustic-git-gitbase",
- "rustic-git-pulls",
- "rustic-git-registry",
- "rustic-git-storage",
- "rustic-git-workspaces",
- "serde",
- "serde_json",
- "slatedb",
- "ssh-key",
- "tempfile",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "futures",
- "gix-hash",
- "gix-odb",
- "rand 0.8.7",
- "redis",
- "rustic-git-core",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "slatedb",
- "slatedb-common",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-tests"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "futures",
- "gix-hash",
- "gix-object",
- "gix-odb",
- "gix-traverse",
- "mongodb",
- "reqwest",
- "russh",
- "rustic-git-api",
- "rustic-git-app",
- "rustic-git-core",
- "rustic-git-git",
- "rustic-git-gitbase",
- "rustic-git-pulls",
- "rustic-git-registry",
- "rustic-git-server",
- "rustic-git-storage",
- "rustic-git-workspaces",
- "serde_json",
- "slatedb",
- "tempfile",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "rustic-git-worker-bin"
-version = "0.1.0"
-dependencies = [
- "futures",
- "metrics",
- "rand 0.8.7",
- "reqwest",
- "rustic-git-core",
- "rustic-git-pulls",
- "rustic-git-registry",
- "rustic-git-storage",
- "serde",
- "serde_json",
- "slatedb",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rustic-git-workspaces"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "chrono",
- "futures",
- "hex",
- "http",
- "http-body-util",
- "k8s-openapi",
- "kube",
- "libc",
- "object_store",
- "rand 0.8.7",
- "reqwest",
- "rustic-git-core",
- "rustic-git-server",
- "rustic-git-storage",
- "rustic-git-workspaces",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "slatedb",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
 ]
 
 [[package]]

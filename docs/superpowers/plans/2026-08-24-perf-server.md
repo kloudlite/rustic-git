@@ -37,8 +37,8 @@
 - [ ] **Step 1: Rewrite `spawn_lease_tasks`.** Replace the single spawned loop (the block from `let a = app.clone();` through the checkpoint match) with:
 
 ```rust
-fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
-    use rustic_git::ownership::{LEASE_TTL, RENEW_EVERY};
+fn spawn_lease_tasks(app: Arc<kloudlite_git::App>) {
+    use kloudlite_git::ownership::{LEASE_TTL, RENEW_EVERY};
     /// How often the leader moves the ownership map's flush pointer. Matched to the collector's
     /// `min_age` so the WAL settles at about two of these rather than growing without bound.
     const CHECKPOINT_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
@@ -122,7 +122,7 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
 
   Move the drift-ceiling prose from the old per-beat comments onto the three spawns in one short comment each (e.g. "30s + 200ms/repo drift ceiling — see `reconcile_owned_markers`"), and delete the now-false "counting beats drifted" paragraph. `beat` and the `is_multiple_of` arms go away entirely.
 - [ ] **Step 2: Testing note.** No new test: `spawn_lease_tasks` is main-binary wiring with no handle to assert on, and the lanes themselves are already exercised directly (`tests/browse_http.rs:451` drives `reconcile_owned_markers`; `tests/routing.rs:1148` drives `renew_once`). The test clock (`App::advance_clock`) skews lease *timestamps*, not tokio's timers, so it cannot drive these sleeps — an assertion-free spawn test would prove nothing. Relying on the existing suite is the plan.
-- [ ] Run `cargo clippy --lib -- -D warnings && cargo clippy --bin rustic-git -- -D warnings` (main.rs is the bin) and `cargo test`.
+- [ ] Run `cargo clippy --lib -- -D warnings && cargo clippy --bin kloudlite-git -- -D warnings` (main.rs is the bin) and `cargo test`.
 - [ ] Commit: `git commit -am "Give lease renewal its own task so lanes cannot starve it"`
 
 ### Task 2: `index::read` fetches both visibility paths concurrently

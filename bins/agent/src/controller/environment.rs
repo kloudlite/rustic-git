@@ -12,9 +12,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd::{self, DesiredState};
-use rustic_git_workspaces::k8s;
-use rustic_git_workspaces::model;
+use kloudlite_git_workspaces::crd::{self, DesiredState};
+use kloudlite_git_workspaces::k8s;
+use kloudlite_git_workspaces::model;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -361,7 +361,7 @@ async fn run_environment(
             false
         }
     };
-    let q = rustic_git_workspaces::quota::effective(&ctx.client, &e.spec.owner, team).await?;
+    let q = kloudlite_git_workspaces::quota::effective(&ctx.client, &e.spec.owner, team).await?;
     ensure(
         &Api::<ResourceQuota>::namespaced(ctx.client.clone(), ns),
         &k8s::resource_quota(ns, &e.spec.owner, "environment", &q),

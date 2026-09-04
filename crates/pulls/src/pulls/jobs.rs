@@ -12,8 +12,8 @@
 
 use super::model::{get, put, with_merge_jobs, PullRequest, PullState};
 use crate::directory::MergeState;
-use rustic_git_core::Result;
-use rustic_git_storage::store::Store;
+use kloudlite_git_core::Result;
+use kloudlite_git_storage::store::Store;
 
 /// Read-modify-write of one change, under the repo's own pull lock.
 ///
@@ -63,7 +63,7 @@ pub async fn claim_merge_number(
     lease: std::time::Duration,
     me: &str,
 ) -> Result<Option<PullRequest>> {
-    let now = rustic_git_storage::ownership::now_ms() as i64;
+    let now = kloudlite_git_storage::ownership::now_ms() as i64;
     let lease_ms = lease.as_millis() as i64;
     modify(store, owner, name, number, |pr| {
         if pr.state != PullState::Open || !takeable(pr, now, lease_ms) {
@@ -101,7 +101,7 @@ pub async fn stranded_merges(
     lease: std::time::Duration,
 ) -> Result<Vec<PullRequest>> {
     let db = store.db_for(owner, name).await?;
-    let now = rustic_git_storage::ownership::now_ms() as i64;
+    let now = kloudlite_git_storage::ownership::now_ms() as i64;
     let lease_ms = lease.as_millis() as i64;
     let quiet_ms = ANNOUNCE_EVERY.as_millis() as i64;
     Ok(with_merge_jobs(&db)
@@ -122,7 +122,7 @@ pub async fn stranded_merges(
 pub async fn mark_announced(store: &Store, owner: &str, name: &str, number: i64) -> Result<()> {
     modify(store, owner, name, number, |pr| match pr.merge.as_mut() {
         Some(job) => {
-            job.announced_at_ms = Some(rustic_git_storage::ownership::now_ms() as i64);
+            job.announced_at_ms = Some(kloudlite_git_storage::ownership::now_ms() as i64);
             true
         }
         None => false,

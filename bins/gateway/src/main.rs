@@ -1,4 +1,4 @@
-//! `rustic-git-gateway`: the region's front door for SSH into a workspace.
+//! `kloudlite-git-gateway`: the region's front door for SSH into a workspace.
 //!
 //! Two listeners on purpose. 443 is the real one — TLS with a Cloudflare Origin CA certificate,
 //! bound to the node's public interface by `hostPort`, and the node firewall admits it from
@@ -7,25 +7,25 @@
 //! set with no readable certificate is FATAL — falling back to plaintext there is a pod that
 //! passes its probe and is unreachable from the edge. Unset is the laptop shape: HTTP only.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_gateway::tunnel::{app, Gateway};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_gateway::tunnel::{app, Gateway};
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    rustic_git_core::log::init();
-    rustic_git_core::metrics::init();
+    kloudlite_git_core::log::init();
+    kloudlite_git_core::metrics::init();
     // Its own listener: 8080 and 443 are both internet-facing here.
-    rustic_git_core::metrics::serve_if_configured().await;
+    kloudlite_git_core::metrics::serve_if_configured().await;
     // Exactly one rustls CryptoProvider, installed before the first handshake — which for this
     // binary is the kube client, not the listener. Its absence is a panic inside rustls that names
     // nothing about startup order.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let secret = std::env::var("RUSTIC_GIT_JWT_SECRET").unwrap_or_default();
+    let secret = std::env::var("KLOUDLITE_GIT_JWT_SECRET").unwrap_or_default();
     let jwt = match Jwt::new(&secret) {
         Ok(j) => j,
-        Err(e) => fatal(format!("RUSTIC_GIT_JWT_SECRET: {e}")),
+        Err(e) => fatal(format!("KLOUDLITE_GIT_JWT_SECRET: {e}")),
     };
     // No default region: a gateway that guessed one would accept tokens minted for somewhere else.
     let region = match std::env::var("WS_REGION") {
@@ -41,23 +41,23 @@ async fn main() {
     // The one object-store touch this binary makes: a minimal, read-only client for one key.
     // `object_store_views` (not `open_store`) so this stays free of the SlateDB pool machinery
     // every other tier needs and this one does not.
-    match rustic_git_storage::config::object_store_views() {
+    match kloudlite_git_storage::config::object_store_views() {
         Ok((os, _mp)) => {
-            if let Some(bytes) = rustic_git_storage::config::get_central(&os).await {
+            if let Some(bytes) = kloudlite_git_storage::config::get_central(&os).await {
                 match serde_json::from_slice(&bytes) {
                     Ok(doc) => gw.central.store(
-                        rustic_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+                        kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
                     ),
                     Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
                 }
             }
-            tokio::spawn(rustic_git_core::settings::refresh_central_beat(
-                rustic_git_storage::config::central_fetch(os),
+            tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
+                kloudlite_git_storage::config::central_fetch(os),
                 gw.central.clone(),
             ));
         }
         // Not fatal: the gateway's own job (SSH tunnels) needs no object store at all, so an
-        // unset/unreachable RUSTIC_GIT_S3_URL here means "central settings stay env-only",
+        // unset/unreachable KLOUDLITE_GIT_S3_URL here means "central settings stay env-only",
         // never "the gateway cannot serve".
         Err(e) => tracing::warn!(error = %e, "cluster/settings unavailable; central settings stay env-only"),
     }

@@ -5,14 +5,14 @@
 //! Snapshots became the only mechanism. The cluster is also what says whether a parent still exists — a display
 //! detail for the listing, and a refusal for the deletes.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState};
-use rustic_git_workspaces::kube_test::{get as kget, mock_client, Recorder, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{router, ApiState};
+use kloudlite_git_workspaces::kube_test::{get as kget, mock_client, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/rustic-git.io/v1alpha1";
-const SNAPS: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
+const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const SNAPS: &str = "/apis/kloudlite-git.io/v1alpha1/snapshots";
 const NODE: &str = "node-a";
 
 struct Server {
@@ -23,8 +23,8 @@ struct Server {
 
 fn ws_obj(name: &str, owner: &str, display: &str) -> Value {
     json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {
             "owner": owner, "name": display, "region": "centralindia", "image": "nginx:alpine",
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -34,22 +34,22 @@ fn ws_obj(name: &str, owner: &str, display: &str) -> Value {
 }
 
 fn ws_list(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": items})
 }
 
 fn env_list(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": items})
 }
 
 fn snap_list(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": items})
 }
 
 /// A push: `transient` unset is what makes it a snapshot rather than a sync point.
 fn push(id: &str, volume: &str, owner: &str, at: &str) -> Value {
     json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": id, "creationTimestamp": at, "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": id, "creationTimestamp": at, "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {"volume": volume, "owner": owner, "worktree": volume, "parent": ""},
         "status": {"phase": "ready", "readyAt": at},
     })
@@ -592,7 +592,7 @@ async fn a_foreign_snapshot_keeps_the_volume_after_my_last_snapshot_goes() {
 #[tokio::test]
 async fn list_volumes_drops_a_mislabelled_snapshot() {
     let mut foreign = push("ws-2-a", "ws-2", "alice", "2026-08-27T09:00:00Z");
-    foreign["metadata"]["labels"]["rustic-git.io/owner"] = json!("karthik");
+    foreign["metadata"]["labels"]["kloudlite-git.io/owner"] = json!("karthik");
     let s = server(vec![
         kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z"), foreign])),
         kget(format!("{API}/workspaces"), ws_list(vec![])),

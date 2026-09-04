@@ -1,4 +1,4 @@
-# rustic-git Implementation Plan
+# kloudlite-git Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,10 +8,10 @@
 
 **Tech Stack:** Rust 2021, tokio, slatedb 0.15 (re-exports object_store 0.14), gix-odb 0.83 / gix-pack 0.73 / gix-object 0.63 / gix-hash 0.26 / gix-traverse 0.60, axum 0.8, russh 0.62 (ssh-key 0.7 rc), flate2, tokio-util, tempfile (dev), sha2 (fingerprint via ssh-key), hex.
 
-**Spec:** `docs/superpowers/specs/2026-08-16-rustic-git-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-16-kloudlite-git-design.md`
 
 ## Global Constraints
-- Single crate `rustic-git`: `src/lib.rs` (modules) + `src/main.rs` (config, admin CLI, serve).
+- Single crate `kloudlite-git`: `src/lib.rs` (modules) + `src/main.rs` (config, admin CLI, serve).
 - Commit messages: no Claude/AI reference.
 - Only packs in S3, never loose objects. S3 keys: `objects/{owner}/{name}/pack/{packid}.pack|.idx`. SlateDB path prefix: `slatedb`.
 - SlateDB keys: `repo/{owner}/{name}`, `ref/{owner}/{name}/{refname}`, `auth/token/{token}`, `auth/sshkey/{fingerprint}`.
@@ -53,22 +53,22 @@ tests/ssh_e2e.rs     real git clone/push over SSH
 - Create: `Cargo.toml`, `src/lib.rs`, `src/main.rs`, `.gitignore`
 
 **Interfaces:**
-- Produces: `rustic_git::{Error, Result, App}`; module tree.
+- Produces: `kloudlite_git::{Error, Result, App}`; module tree.
 
 - [ ] **Step 1: Cargo.toml**
 
 ```toml
 [package]
-name = "rustic-git"
+name = "kloudlite-git"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "rustic_git"
+name = "kloudlite_git"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustic-git"
+name = "kloudlite-git"
 path = "src/main.rs"
 
 [dependencies]
@@ -119,7 +119,7 @@ Create empty files `src/auth.rs src/http.rs src/pktline.rs src/protocol/mod.rs s
 
 ```rust
 fn main() {
-    println!("rustic-git");
+    println!("kloudlite-git");
 }
 ```
 
@@ -130,7 +130,7 @@ fn main() {
 Run: `cargo build`
 Expected: compiles (warnings ok). Fix feature-flag errors per notes above.
 
-- [ ] **Step 6: Commit** — `git add -A && git commit -m "Scaffold rustic-git crate"`
+- [ ] **Step 6: Commit** — `git add -A && git commit -m "Scaffold kloudlite-git crate"`
 
 ---
 
@@ -291,7 +291,7 @@ pub fn read_lines_until_flush(r: &mut dyn BufRead) -> io::Result<Vec<Vec<u8>>> {
 
 ```rust
 #![allow(dead_code)]
-use rustic_git::store::Store;
+use kloudlite_git::store::Store;
 use slatedb::object_store::memory::InMemory;
 use std::sync::Arc;
 
@@ -321,7 +321,7 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
 
 ```rust
 mod common;
-use rustic_git::refs::RefUpdate;
+use kloudlite_git::refs::RefUpdate;
 use gix_hash::ObjectId;
 
 #[tokio::test]
@@ -527,7 +527,7 @@ Notes: `txn.get` signature — check `db_transaction.rs` (it is `pub async fn ge
   pub fn serve(store:&Store, repo:&Repo, input:&mut dyn BufRead, out:&mut dyn Write) -> Result<()>;
   // src/protocol/mod.rs
   pub fn block_on<F: std::future::Future>(f: F) -> F::Output  // tokio::runtime::Handle::current().block_on wrapped in block_in_place
-  pub const AGENT: &str = "agent=rustic-git/0.1";
+  pub const AGENT: &str = "agent=kloudlite-git/0.1";
   ```
   Callers must invoke `advertise`/`serve` inside `tokio::task::spawn_blocking` on a multi-thread runtime.
 
@@ -535,8 +535,8 @@ Notes: `txn.get` signature — check `db_transaction.rs` (it is `pub async fn ge
 
 ```rust
 mod common;
-use rustic_git::protocol::{receive, upload};
-use rustic_git::pktline;
+use kloudlite_git::protocol::{receive, upload};
+use kloudlite_git::pktline;
 use std::io::{Cursor, Write};
 
 /// Build a local repo with one commit; return (dir, head oid).
@@ -625,7 +625,7 @@ async fn receive_then_fetch() {
 pub mod receive;
 pub mod upload;
 
-pub const AGENT: &str = "agent=rustic-git/0.1";
+pub const AGENT: &str = "agent=kloudlite-git/0.1";
 
 /// Run a future to completion from sync code inside spawn_blocking.
 pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -967,7 +967,7 @@ Wants beyond `haves` that are trees/blobs: `Simple::new` returns an error on non
   // http.rs
   pub fn router(app: Arc<App>) -> axum::Router
   ```
-  Routes: `GET /{owner}/{name}.git/info/refs?service=git-upload-pack|git-receive-pack`, `POST /{owner}/{name}.git/git-upload-pack`, `POST /{owner}/{name}.git/git-receive-pack`. Basic auth `x:<token>`; missing/invalid → 401 with `WWW-Authenticate: Basic realm="rustic-git"`; owner mismatch → 403; unknown repo → 404.
+  Routes: `GET /{owner}/{name}.git/info/refs?service=git-upload-pack|git-receive-pack`, `POST /{owner}/{name}.git/git-upload-pack`, `POST /{owner}/{name}.git/git-receive-pack`. Basic auth `x:<token>`; missing/invalid → 401 with `WWW-Authenticate: Basic realm="kloudlite-git"`; owner mismatch → 403; unknown repo → 404.
 
 - [ ] **Step 1: tests/http_e2e.rs**
 
@@ -975,10 +975,10 @@ Wants beyond `haves` that are trees/blobs: `Simple::new` returns an error on non
 mod common;
 use std::sync::Arc;
 
-async fn serve(app: Arc<rustic_git::App>) -> u16 {
+async fn serve(app: Arc<kloudlite_git::App>) -> u16 {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(l, rustic_git::http::router(app)).await.unwrap(); });
+    tokio::spawn(async move { axum::serve(l, kloudlite_git::http::router(app)).await.unwrap(); });
     port
 }
 
@@ -989,7 +989,7 @@ async fn clone_push_fetch() {
     let s = e.store.clone();
     s.create_repo("alice", "proj").await.unwrap();
     let token = s.create_token("alice").await.unwrap();
-    let port = serve(Arc::new(rustic_git::App { store: s.clone() })).await;
+    let port = serve(Arc::new(kloudlite_git::App { store: s.clone() })).await;
     let url = format!("http://x:{token}@127.0.0.1:{port}/alice/proj.git");
 
     // clone empty
@@ -1102,7 +1102,7 @@ pub fn router(app: Arc<App>) -> Router {
 fn strip_git(name: &str) -> &str { name.strip_suffix(".git").unwrap_or(name) }
 
 fn unauthorized() -> Response {
-    (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Basic realm=\"rustic-git\"")], "auth required").into_response()
+    (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Basic realm=\"kloudlite-git\"")], "auth required").into_response()
 }
 
 async fn open(app: &App, headers: &HeaderMap, owner: &str, name: &str) -> Result<Repo, Response> {
@@ -1216,8 +1216,8 @@ async fn ssh_clone_push() {
     let host_key = russh::keys::PrivateKey::random(&mut rand::thread_rng(), russh::keys::Algorithm::Ed25519).unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
-    let app = Arc::new(rustic_git::App { store: s.clone() });
-    tokio::spawn(async move { rustic_git::ssh::serve(app, l, host_key).await.unwrap(); });
+    let app = Arc::new(kloudlite_git::App { store: s.clone() });
+    tokio::spawn(async move { kloudlite_git::ssh::serve(app, l, host_key).await.unwrap(); });
 
     let ssh_cmd = format!("ssh -i {} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes", key.display());
     let w = tempfile::tempdir().unwrap();
@@ -1372,23 +1372,23 @@ Implementer notes: exact russh 0.62 signatures — check `russh-0.62.6/src/serve
 
 **Interfaces:**
 - CLI:
-  - `rustic-git serve` — env: `RUSTIC_GIT_S3_URL` (e.g. `s3://bucket`; `object_store` picks up `AWS_*` env vars; use `mem://` for testing), `RUSTIC_GIT_CACHE_DIR` (default `./cache`), `RUSTIC_GIT_HTTP_ADDR` (default `0.0.0.0:8080`), `RUSTIC_GIT_SSH_ADDR` (default `0.0.0.0:2222`), `RUSTIC_GIT_HOST_KEY` (path to OpenSSH private key; generated at that path if missing).
-  - `rustic-git admin create-repo <owner>/<name>`
-  - `rustic-git admin add-token <owner>` → prints token
-  - `rustic-git admin add-key <owner> <pubkey-file>`
+  - `kloudlite-git serve` — env: `KLOUDLITE_GIT_S3_URL` (e.g. `s3://bucket`; `object_store` picks up `AWS_*` env vars; use `mem://` for testing), `KLOUDLITE_GIT_CACHE_DIR` (default `./cache`), `KLOUDLITE_GIT_HTTP_ADDR` (default `0.0.0.0:8080`), `KLOUDLITE_GIT_SSH_ADDR` (default `0.0.0.0:2222`), `KLOUDLITE_GIT_HOST_KEY` (path to OpenSSH private key; generated at that path if missing).
+  - `kloudlite-git admin create-repo <owner>/<name>`
+  - `kloudlite-git admin add-token <owner>` → prints token
+  - `kloudlite-git admin add-key <owner> <pubkey-file>`
 
 - [ ] **Step 1: src/main.rs**
 
 ```rust
-use rustic_git::{store::Store, App, Result};
+use kloudlite_git::{store::Store, App, Result};
 use std::sync::Arc;
 
 fn env(k: &str, d: &str) -> String { std::env::var(k).unwrap_or_else(|_| d.to_string()) }
 
 async fn open_store() -> Result<Arc<Store>> {
-    let url = env("RUSTIC_GIT_S3_URL", "mem://");
+    let url = env("KLOUDLITE_GIT_S3_URL", "mem://");
     let os: Arc<dyn slatedb::object_store::ObjectStore> = if url == "mem://" { Arc::new(slatedb::object_store::memory::InMemory::new()) } else { slatedb::Db::resolve_object_store(&url)? };
-    Ok(Arc::new(Store::open(os, env("RUSTIC_GIT_CACHE_DIR", "./cache").into()).await?))
+    Ok(Arc::new(Store::open(os, env("KLOUDLITE_GIT_CACHE_DIR", "./cache").into()).await?))
 }
 
 fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
@@ -1407,20 +1407,20 @@ async fn main() -> Result<()> {
     match a.as_slice() {
         ["serve"] => {
             let app = Arc::new(App { store });
-            let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
-            let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
-            let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;
+            let http = tokio::net::TcpListener::bind(env("KLOUDLITE_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
+            let ssh = tokio::net::TcpListener::bind(env("KLOUDLITE_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
+            let key = host_key(&env("KLOUDLITE_GIT_HOST_KEY", "./host_key"))?;
             eprintln!("http on {} ssh on {}", http.local_addr()?, ssh.local_addr()?);
             let a2 = app.clone();
             tokio::select! {
-                r = axum::serve(http, rustic_git::http::router(a2)) => { r?; }
-                r = rustic_git::ssh::serve(app, ssh, key) => { r?; }
+                r = axum::serve(http, kloudlite_git::http::router(a2)) => { r?; }
+                r = kloudlite_git::ssh::serve(app, ssh, key) => { r?; }
             }
         }
         ["admin", "create-repo", path] => { let (o, n) = path.split_once('/').ok_or("owner/name")?; store.create_repo(o, n).await?; }
         ["admin", "add-token", owner] => { println!("{}", store.create_token(owner).await?); }
         ["admin", "add-key", owner, file] => { store.add_ssh_key(owner, &std::fs::read_to_string(file)?).await?; }
-        _ => { eprintln!("usage: rustic-git serve | admin create-repo <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file>"); std::process::exit(2); }
+        _ => { eprintln!("usage: kloudlite-git serve | admin create-repo <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file>"); std::process::exit(2); }
     }
     store.db.close().await?;
     Ok(())
@@ -1428,7 +1428,7 @@ async fn main() -> Result<()> {
 ```
 Note: `slatedb::Db::resolve_object_store` exists (`db.rs:1883`); it needs slatedb's S3 feature enabled (Task 1). `PrivateKey::write_openssh_file` signature: check `ssh-key/src/private.rs:438` for the `LineEnding` arg.
 
-- [ ] **Step 2: Build & smoke** — `cargo build`; `RUSTIC_GIT_S3_URL=mem:// cargo run -- admin add-token alice` prints a token (in mem mode the DB is discarded, that's fine for smoke).
+- [ ] **Step 2: Build & smoke** — `cargo build`; `KLOUDLITE_GIT_S3_URL=mem:// cargo run -- admin add-token alice` prints a token (in mem mode the DB is discarded, that's fine for smoke).
 
 - [ ] **Step 3: README.md** — 20 lines: what it is, env vars, the three admin commands, and `git clone http://x:<token>@host:8080/owner/name.git` / `ssh://git@host:2222/owner/name.git`.
 

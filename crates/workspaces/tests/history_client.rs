@@ -4,7 +4,7 @@
 //! the console quietly lie.
 
 use axum::{routing::post, Router};
-use rustic_git_workspaces::history::{schema, History, HistoryError};
+use kloudlite_git_workspaces::history::{schema, History, HistoryError};
 use std::sync::{Arc, Mutex};
 
 type Seen = Arc<Mutex<Vec<String>>>;
@@ -45,7 +45,7 @@ async fn insert_qualifies_the_table_and_sends_one_line_per_row() {
     let body = seen.lock().unwrap()[0].clone();
     // Qualified: `default` belongs to the OTel collector, and an unqualified INSERT would write
     // into whatever database the connection happened to default to.
-    assert!(body.starts_with("INSERT INTO rustic.events FORMAT JSONEachRow\n"), "{body}");
+    assert!(body.starts_with("INSERT INTO kloudlite.events FORMAT JSONEachRow\n"), "{body}");
     assert_eq!(body.lines().filter(|l| l.starts_with('{')).count(), 2);
     assert!(body.contains(r#""kind":"workspace.created""#));
 }
@@ -91,7 +91,7 @@ async fn a_server_error_is_an_error_not_an_empty_result() {
 
 #[tokio::test]
 async fn from_env_is_none_without_a_url() {
-    std::env::remove_var("RUSTIC_GIT_CLICKHOUSE_URL");
+    std::env::remove_var("KLOUDLITE_GIT_CLICKHOUSE_URL");
     assert!(History::from_env().is_none());
 }
 
@@ -102,21 +102,21 @@ async fn migrate_applies_every_statement_once() {
     let applied = schema::migrate(&h).await.unwrap();
     assert_eq!(applied as usize, schema::MIGRATIONS.len());
     let bodies = seen.lock().unwrap().clone();
-    assert!(bodies.iter().any(|b| b.contains("CREATE DATABASE IF NOT EXISTS rustic")));
-    assert!(bodies.iter().any(|b| b.contains("CREATE TABLE IF NOT EXISTS rustic.schema_migrations")));
+    assert!(bodies.iter().any(|b| b.contains("CREATE DATABASE IF NOT EXISTS kloudlite")));
+    assert!(bodies.iter().any(|b| b.contains("CREATE TABLE IF NOT EXISTS kloudlite.schema_migrations")));
     for (_, sql) in schema::MIGRATIONS {
         let head = sql.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
         assert!(bodies.iter().any(|b| b.contains(&head)), "migration not sent: {head}");
     }
-    assert!(bodies.iter().any(|b| b.contains("INSERT INTO rustic.schema_migrations")));
+    assert!(bodies.iter().any(|b| b.contains("INSERT INTO kloudlite.schema_migrations")));
 }
 
 /// Every statement must name our database. One unqualified CREATE would put a table of ours in
 /// the collector's database, where its own migrations may later collide with it.
 #[test]
-fn every_migration_targets_the_rustic_database() {
+fn every_migration_targets_the_kloudlite_database() {
     for (v, sql) in schema::MIGRATIONS {
-        assert!(sql.contains("rustic."), "migration {v} names no rustic. object: {sql}");
+        assert!(sql.contains("kloudlite."), "migration {v} names no kloudlite. object: {sql}");
     }
 }
 
@@ -131,7 +131,7 @@ fn every_migration_version_is_unique_and_ordered() {
 
 /// The one test that talks to a real ClickHouse. Run it against a local ClickStack or a plain
 /// `docker run -p 8123:8123 clickhouse/clickhouse-server`:
-/// `RUSTIC_GIT_CLICKHOUSE_URL=http://localhost:8123 cargo test -p rustic-git-workspaces \
+/// `KLOUDLITE_GIT_CLICKHOUSE_URL=http://localhost:8123 cargo test -p kloudlite-git-workspaces \
 ///   --test history_client -- --ignored`
 ///
 /// The two materialized views over `otel_metrics_*` are skipped when those tables do not exist —
@@ -141,7 +141,7 @@ fn every_migration_version_is_unique_and_ordered() {
 #[ignore]
 async fn migrations_apply_against_a_real_clickhouse() {
     let Some(h) = History::from_env() else {
-        panic!("RUSTIC_GIT_CLICKHOUSE_URL must be set to run this test");
+        panic!("KLOUDLITE_GIT_CLICKHOUSE_URL must be set to run this test");
     };
     assert!(h.healthy().await, "ClickHouse did not answer");
     schema::migrate(&h).await.expect("first migrate");
@@ -157,7 +157,7 @@ async fn migrations_apply_against_a_real_clickhouse() {
     .await
     .expect("insert");
     let rows = h
-        .query("SELECT count() FROM rustic.events FINAL WHERE id = 'test:1:created'")
+        .query("SELECT count() FROM kloudlite.events FINAL WHERE id = 'test:1:created'")
         .await
         .unwrap();
     assert_eq!(rows[0][0], serde_json::json!(1));
@@ -169,7 +169,7 @@ async fn migrations_apply_against_a_real_clickhouse() {
 async fn an_empty_body_is_zero_rows_and_healthy() {
     let (url, _) = canned(200, "").await;
     let h = History::new(&url, "default", "");
-    assert!(h.query("CREATE DATABASE IF NOT EXISTS rustic").await.unwrap().is_empty());
+    assert!(h.query("CREATE DATABASE IF NOT EXISTS kloudlite").await.unwrap().is_empty());
     assert!(h.healthy().await);
 }
 
@@ -187,7 +187,7 @@ async fn an_unsafe_table_name_is_refused_before_any_request() {
     let (url, seen) = canned(200, "").await;
     let h = History::new(&url, "default", "");
     assert!(h
-        .insert("rustic.events; DROP", &[serde_json::json!({})])
+        .insert("kloudlite.events; DROP", &[serde_json::json!({})])
         .await
         .is_err());
     assert!(seen.lock().unwrap().is_empty(), "a refused name must not reach the server");
@@ -202,14 +202,14 @@ fn the_hourly_tables_end_as_replacing_merge_trees() {
     for table in ["usage_hourly", "fleet_hourly"] {
         let create = schema::MIGRATIONS
             .iter()
-            .rfind(|(_, sql)| sql.contains(&format!("rustic.{table}_v2 (")))
+            .rfind(|(_, sql)| sql.contains(&format!("kloudlite.{table}_v2 (")))
             .unwrap_or_else(|| panic!("{table} is never rebuilt"))
             .1;
         assert!(create.contains("ENGINE = ReplacingMergeTree"), "{table}: {create}");
         assert!(
             schema::MIGRATIONS
                 .iter()
-                .any(|(_, sql)| sql.contains(&format!("EXCHANGE TABLES rustic.{table} AND"))),
+                .any(|(_, sql)| sql.contains(&format!("EXCHANGE TABLES kloudlite.{table} AND"))),
             "{table} is rebuilt but never swapped in"
         );
     }

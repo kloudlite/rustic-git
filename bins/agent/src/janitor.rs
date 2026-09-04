@@ -1,4 +1,4 @@
-//! Local storage janitor for `rustic-git-agent`: the ten-minute beat that reclaims attach
+//! Local storage janitor for `kloudlite-git-agent`: the ten-minute beat that reclaims attach
 //! directories and stale nix profile index entries, plus the full local reclaim a deleted volume
 //! triggers. Split out of `lib.rs`, which is process setup and nothing else.
 //!
@@ -8,7 +8,7 @@
 //! reconcile, not this beat.
 
 use crate::nix;
-use rustic_git_workspaces::engine::{is_subvolume, Engine};
+use kloudlite_git_workspaces::engine::{is_subvolume, Engine};
 use std::sync::Arc;
 
 /// Local storage janitor: every ten minutes, reclaims `{pool}/attach/*` orphans and stale nix
@@ -70,7 +70,7 @@ fn janitor_beat(pool: &str) -> (usize, usize) {
 
 /// Reclaims `by-inputs/{hash}` index entries (Task 2) that no `{id}/current` link points at.
 ///
-/// Each index entry is a GC root — `PROFILES_DIR` is covered by `gcroots/rustic-profiles`, so a
+/// Each index entry is a GC root — `PROFILES_DIR` is covered by `gcroots/kloudlite-profiles`, so a
 /// store path it names is kept alive forever, even after every workspace that built it is long
 /// gone. This bounds that set; it does not try to reclaim quickly (`SWEEP_MIN_AGE`, same floor as
 /// every other sweep here, since a reconcile can `record_index` an entry moments before
@@ -338,8 +338,8 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
 #[cfg(test)]
 mod janitor_tests {
     use super::*;
-    use rustic_git_workspaces::engine::have_btrfs;
-    use rustic_git_workspaces::engine::Pool;
+    use kloudlite_git_workspaces::engine::have_btrfs;
+    use kloudlite_git_workspaces::engine::Pool;
 
     /// Mirrors `crates/workspaces/tests/engine_pool.rs`'s `LoopbackPool`: a truncated sparse
     /// btrfs image, mounted for the test and unmounted on drop.

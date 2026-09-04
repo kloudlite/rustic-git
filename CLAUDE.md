@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```sh
 cargo test                                   # workspace: every crate's unit tests plus tests/*.rs
-                                             # integration suite (the root package, `rustic-git-tests`,
+                                             # integration suite (the root package, `kloudlite-git-tests`,
                                              # is a near-empty lib that only hosts tests/)
 cargo test --test registry_blobs             # one integration test file — still runs from the root
 cargo test --test registry_http some_name    # one test by name
@@ -20,7 +20,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ./tests/ws_e2e.sh                            # real server+api+agent+Azure+btrfs workspaces
                                              # round trip against a k3s cluster (still three
                                              # binaries — the agent is a controller now, not a
-                                             # poller — and rustic-git-api serves /v1/*);
+                                             # poller — and kloudlite-git-api serves /v1/*);
                                              # exit 77 = a prerequisite (root-capable btrfs, a
                                              # reachable cluster with the CRDs installed,
                                              # AZURE_* env) was missing — needs a Linux VM
@@ -31,13 +31,13 @@ bun run dev / lint / typecheck / build / test # turborepo; app in web/apps/web; 
                                              # (*.test.ts are excluded from tsc — no bun-types)
 ```
 
-Run a server locally without S3: `RUSTIC_GIT_S3_URL=file://./x` (or `mem://`, lost on exit).
+Run a server locally without S3: `KLOUDLITE_GIT_S3_URL=file://./x` (or `mem://`, lost on exit).
 Local scratch (host key, cache) defaults under `./.local/`, which is git-ignored.
 
 Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api,workspaces}` are the
-library crates; `bins/{server,api,worker,agent,gateway,kl}` build the six binaries (`rustic-git`,
-`rustic-git-api`, `rustic-git-worker`, `rustic-git-agent` — the agent is root-only and runs as a
-DaemonSet, one per btrfs-capable node, see "Workspaces and environments" — `rustic-git-gateway`,
+library crates; `bins/{server,api,worker,agent,gateway,kl}` build the six binaries (`kloudlite-git`,
+`kloudlite-git-api`, `kloudlite-git-worker`, `kloudlite-git-agent` — the agent is root-only and runs as a
+DaemonSet, one per btrfs-capable node, see "Workspaces and environments" — `kloudlite-git-gateway`,
 the workspace SSH tunnel, and `kl`, the user CLI, which is built by `kl.yml` and never deployed);
 the root package is `tests/`'s host only, not a facade.
 
@@ -47,12 +47,12 @@ One SlateDB database per repo, and **exactly one node may have it open**. The ro
 in `bins/server/src/router/route.rs` (`repo_of` → `route_inner`) derives an ownership key from the URL **before
 authentication** and refuses anything it cannot route, because opening a database on the wrong
 node fences the legitimate owner (a `Closed error: detected newer DB client` in logs means this
-happened). The ownership map has one writer, **elected**: every `rustic-git-srv` pod runs `App::election_tick`
+happened). The ownership map has one writer, **elected**: every `kloudlite-git-srv` pod runs `App::election_tick`
 every 3 s, and the pod holding the lease at `cluster/leader` (`crates/storage/src/ownership/lease.rs`
 — conditional puts only, TTL 10 s) opens the map as WRITER (`OwnershipStore::promote`). The lease
 epoch is checked under `leader_lock` on every map write, a fenced write demotes, and SlateDB's own
 writer fence is the backstop; followers re-read the lease when the node they asked answers 421 or is
-unreachable. There is no leader pod, no `RUSTIC_GIT_LEADER`, and no preferred ordinal; a dead leader
+unreachable. There is no leader pod, no `KLOUDLITE_GIT_LEADER`, and no preferred ordinal; a dead leader
 is replaced in ~15 s. A multi-node `file://` store is refused at boot (`LocalFileSystem` has no
 conditional update). When adding any
 route that touches a per-repo/per-image database, it must route —
@@ -92,7 +92,7 @@ atomic tag updates).
   Credentials live as plain object-store keys (any node authenticates), not in SlateDB.
 - **Markers under `index/` are views for listings, never authorization.** Owning nodes write them
   and reconcile their visibility; the GC worker reconciles their structure.
-- **The same rule governs the CRDs' `rustic-git.io/owner` and `/kind` labels.** `spec.owner` is the
+- **The same rule governs the CRDs' `kloudlite-git.io/owner` and `/kind` labels.** `spec.owner` is the
   truth; the labels are a view of it, and exist only because label selectors are indexed by the API
   server while an arbitrary spec field is not (adding a `selectableFields` entry per query axis is
   how a CRD becomes a database). `/v1` stamps them at create and the node controller RE-STAMPS them
@@ -110,7 +110,7 @@ atomic tag updates).
 
 The owning node only RECORDS merge state (claim/outcome/mergeability — three peer-only routed
 endpoints in `bins/server/src/browse_api/pulls.rs`) and re-announces stranded jobs on a 15s beat
-(`announce_stranded_merges` in `bins/server/src/lanes.rs`). The actual merge runs in `rustic-git-worker` using the real
+(`announce_stranded_merges` in `bins/server/src/lanes.rs`). The actual merge runs in `kloudlite-git-worker` using the real
 `git` binary (`crates/pulls/src/merge_worker.rs`): bare cache under the worker's cache dir, fetch/push over
 the peer listener with `-c http.extraHeader` peer auth, `merge-tree --write-tree` for
 merge/squash, a throwaway worktree for rebase, `push --force-with-lease` against the oid the
@@ -127,7 +127,7 @@ merge commits — gix-pack drops all-but-last-parent additions on a merge
 
 ## Workspaces and environments
 
-`crates/workspaces` + `bins/agent` (`rustic-git-agent`) + `bins/api` (`rustic-git-api`) add a
+`crates/workspaces` + `bins/agent` (`kloudlite-git-agent`) + `bins/api` (`kloudlite-git-api`) add a
 second, unrelated control plane: btrfs-backed dev workspaces and multi-service environments,
 separate from git storage, and separate from the registry too: a workspace/environment's pushed
 state is a `Snapshot` CR plus a read-only btrfs subvolume on each node that holds it. Nothing about
@@ -135,7 +135,7 @@ it goes through the server tier, and nothing about it goes to an object store.
 
 **Kubernetes is the reconcile substrate, and the CRDs are the source of truth.**
 `crates/workspaces/src/crd.rs` defines `Volume`/`Workspace`/`Environment` in
-`rustic-git.io/v1alpha1`, all cluster-scoped: `/v1` on `bins/api` writes **spec** (desired), each
+`kloudlite-git.io/v1alpha1`, all cluster-scoped: `/v1` on `bins/api` writes **spec** (desired), each
 node's controller writes **status** (observed) through the `/status` subresource, and RBAC plus
 the ValidatingAdmissionPolicy in `deploy/k3s/agent-admission.yaml` — not convention — is what
 stops a controller editing desired state: the agent's ClusterRole (`deploy/k3s/agent-rbac.yaml`,
@@ -166,18 +166,18 @@ predecessor: still readable, unioned into `GET /admin/requests`, copied over onc
 `POST /admin/requests/migrate`, and deleted as a CRD in a later release.
 
 **Superadmin is a claim, not an owner.** `superadmin: true` in the session JWT, minted at sign-in
-from a `superadmins` collection in the directory that `RUSTIC_GIT_WORKSPACES_ADMINS` merely
+from a `superadmins` collection in the directory that `KLOUDLITE_GIT_WORKSPACES_ADMINS` merely
 bootstraps at boot (additive only — dropping an address from the env revokes nobody; the list is
 managed from then on through `/api/admin/superadmins`). The admin surfaces run as a SEPARATE
-process, `bins/api` started with `RUSTIC_GIT_API_ROLE=admin` instead of the default `user`, which
+process, `bins/api` started with `KLOUDLITE_GIT_API_ROLE=admin` instead of the default `user`, which
 mounts `api::admin::router()` in place of `api::router()` — the user router has no admin handler
 at all, so there is no code path in the ordinary process that could leak one. `refuse_without_claim`
 (`crates/workspaces/src/api/admin.rs`) 403s a token without the `superadmin` claim before any route
 runs, and region creation, quota decisions and `/api/admin/superadmins` all live only behind it.
-RBAC mirrors the split: `api-rbac.yaml` gives the `rustic-git-admin` ServiceAccount write on
-`Quota`/`QuotaRequest`/`Region` and keeps the ordinary `rustic-git-api` ServiceAccount to reads,
+RBAC mirrors the split: `api-rbac.yaml` gives the `kloudlite-git-admin` ServiceAccount write on
+`Quota`/`QuotaRequest`/`Region` and keeps the ordinary `kloudlite-git-api` ServiceAccount to reads,
 so a bug that mounted the wrong router would still 403 at the Kubernetes layer. The web's
-`/superadmin` area calls this second process at `RUSTIC_GIT_ADMIN_API_URL`, never the ordinary API
+`/superadmin` area calls this second process at `KLOUDLITE_GIT_ADMIN_API_URL`, never the ordinary API
 base — mixing them up would silently point an admin page at `/v1` instead.
 
 The eight web areas each map to one admin router file: Requests (`admin/quota-requests*` →
@@ -194,8 +194,8 @@ distinct actions, not stages of one: drain only sets the label the agent already
 (`crd::DECOMMISSION_LABEL`) — the node keeps running whatever is on it, and the agent's own beat
 does the draining; decommission is a cordon (`spec.unschedulable`) refused with 409 until the
 agent has stamped `drained …`, and stops there — deleting the VM is a human's separate step, never
-something this console does. `nodes: patch` on the `rustic-git-admin` ClusterRole
-(`deploy/k3s/api-rbac.yaml`) and `pods: get`/`list` on the admin Role (`deploy/rustic-git.yaml`,
+something this console does. `nodes: patch` on the `kloudlite-git-admin` ClusterRole
+(`deploy/k3s/api-rbac.yaml`) and `pods: get`/`list` on the admin Role (`deploy/kloudlite-git.yaml`,
 for Monitoring's scrape) are both additions this plan needed on top of the quotas-and-superadmin
 RBAC above.
 
@@ -204,7 +204,7 @@ no agent registration and no long poll: `/v1` writes ONE unplaced object and est
 about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, admitted for the owner
 node always and for any other node only while it is up to date for that worktree), so two nodes can never contend for the same subvolume and the API never
 places anything. When a node is unplaceable — dead for `WS_NODE_DEAD_SECS`, or labelled
-`rustic-git.io/decommission=true` (`peer::unplaceable`, one predicate for both) — the sweep decides
+`kloudlite-git.io/decommission=true` (`peer::unplaceable`, one predicate for both) — the sweep decides
 PER VOLUME, never per parent (`peer::volume_decision`): any Running parent on it pins the whole
 volume (`Unavailable`, `Degraded=True/NodeDead` on every parent, nothing moves); otherwise any
 stopped parent that is not yet `Replicated` pins it too; otherwise the pin is cleared and every
@@ -216,7 +216,7 @@ interrupted environment is a 409). A decommission is the planned version of the 
 difference — whatever runs there keeps running: the node's own agent beats every
 `WS_DECOMMISSION_SECS` (30), tells its running parents (`Decommissioning=True/NodeLeaving`),
 releases each volume as it becomes releasable (reason `Decommissioned`, and never marks a running
-one `Unavailable`), and stamps `rustic-git.io/decommission-status: draining running=N owned=N
+one `Unavailable`), and stamps `kloudlite-git.io/decommission-status: draining running=N owned=N
 copies=N thin=N` (`thin` = volumes whose bytes are still here and which other nodes hold fewer than
 `spec.replicas - 1` Synced copies of) until it can stamp a sticky `drained <RFC 3339>`, the gate on
 deleting the VM. Independently of any of that, every replica the dead
@@ -313,7 +313,7 @@ one Ready per worktree — a push is never pruned), and a node re-hosting a work
 newest one it holds locally before falling back to `status.head`. The migration baseline is a sync
 point too, and one written by an older build is recognised by its shape
 (`crd::Snapshot::is_snapshot`), so nothing had to be migrated. The agent
-(`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
+(`kloudlite-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
 it watches its own node's objects and converges them (`bins/agent/src/controller/`), and its
 identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It talks
 to the k3s API and to OTHER AGENTS' peer listeners (`WS_PEER_SECRET`, btrfs send over HTTP), and to
@@ -370,7 +370,7 @@ it used to, which is what stopped two identical package sets sharing one store p
 ## Live settings
 
 Two scopes, two stores: per-region agent tunables live in `ClusterSettings/default`
-(`crates/workspaces/src/crd/mod.rs`), a cluster-scoped CR every `rustic-git-agent` watches through
+(`crates/workspaces/src/crd/mod.rs`), a cluster-scoped CR every `kloudlite-git-agent` watches through
 a reflector; central tunables (server/worker/gateway/api) live in the `cluster/settings`
 object-store document, refreshed on a 30s beat. Every knob resolves `stored ?? env ?? default` —
 env is the bootstrap value a fresh cluster boots with, never the last word — and an unparsable
@@ -382,12 +382,12 @@ document or CR spec changes nothing (last good wins, logged once per refresh). N
 send` or nix build finishes under the value it started with). A `Mark::Boot` field (an image tag,
 a runtime class) only takes effect at process start, so a save that changes one rolls exactly the
 readers `CLUSTER_SETTING_META`/`admin::workloads::KNOWN` name for it — a merge patch of
-`rustic-git.io/restarted-at` on the pod template, never a pod delete — and only after prechecking
+`kloudlite-git.io/restarted-at` on the pod template, never a pod delete — and only after prechecking
 that every affected reader is already `ready == desired`; a reader still mid-rollout answers the
 save with 409 and nothing is written, so the settings document never runs ahead of the pods that
 read it. Every write validates each field's range (422 naming the field), keeps the last ten
 versions (an annotation on `ClusterSettings`, an inline array on the central document) and can
-revert to any of them. The admin API (`bins/api` with `RUSTIC_GIT_API_ROLE=admin`) exposes
+revert to any of them. The admin API (`bins/api` with `KLOUDLITE_GIT_API_ROLE=admin`) exposes
 `GET/PUT /admin/settings/central`, `GET/PUT /admin/settings/clusters/{region}`, `GET
 /admin/settings/schema` (the `Mark`/range/reader table the UI renders from) and the read-only
 `GET /admin/workloads` (same roll-target list, for the infrastructure tab); RBAC mirrors this —
@@ -398,7 +398,7 @@ the agent gets `get/list/watch` on `ClusterSettings` and nothing to write it wit
 
 Telemetry is **ClickStack's**, not ours: the official charts run ClickHouse, a gateway OTel
 collector and HyperDX on AKS (`deploy/clickstack/`), and an `opentelemetry-collector-contrib`
-pair in every cluster (`deploy/k3s/otel-agent.yaml`, copied into `deploy/rustic-git.yaml` for AKS
+pair in every cluster (`deploy/k3s/otel-agent.yaml`, copied into `deploy/kloudlite-git.yaml` for AKS
 with three changes and no others) — a DaemonSet for everything only readable ON a node (this
 node's `prometheus.io/scrape` pods, the kubelet's resource usage, pod logs, and the
 `k8s.node.name` stamp the per-node alert rules group by) and a one-replica Deployment for
@@ -407,8 +407,8 @@ Both stamp `region` and export OTLP to the gateway — which writes the exporter
 `default.otel_*` tables. **We write no metrics pipeline**; if a number is missing the fix is
 collector config.
 
-What IS ours is the `rustic` database, and **the admin process is its only writer** (`bins/api`
-with `RUSTIC_GIT_API_ROLE=admin`, `crates/workspaces/src/history/`): `events` (the record, no TTL),
+What IS ours is the `kloudlite` database, and **the admin process is its only writer** (`bins/api`
+with `KLOUDLITE_GIT_API_ROLE=admin`, `crates/workspaces/src/history/`): `events` (the record, no TTL),
 `usage_hourly` and `fleet_hourly` (2 y), `alerts` (400 d) and the `metrics_5m` rollup over the
 collector's tables (400 d, because the exporter drops raw metrics at 30). It migrates the schema at
 boot (numbered `CREATE … IF NOT EXISTS`, never edit one that shipped), consumes the Redis `events`
@@ -424,16 +424,16 @@ queries `FINAL`.
 
 `deploy/alerts.md` is evaluated **twice from one catalogue**: HyperDX pages a human, and
 `history::alerts` evaluates the same rules as SQL every 30 s in 30 s buckets with the catalogue's
-real `for` windows, writing only state TRANSITIONS to `rustic.alerts`. A window the samples do not
+real `for` windows, writing only state TRANSITIONS to `kloudlite.alerts`. A window the samples do not
 cover is `unknown`, never `ok` — that rule is why the old on-request scrape was retired, since a
 point-in-time scrape could not compute a `for 5m` and left nine of ten rules permanently unknown.
 `GET /admin/monitoring/signals` now only reads that table. The console's charts are
 `GET /admin/history/{series}` — a fixed catalogue of twelve names plus `usage`, one SQL each, with
 every caller-shaped value (range, step, region, owner, dimension) through an allow-list or
 `series::ident` because that path has no bound parameters; an unknown name is a 404.
-`RUSTIC_GIT_CLICKHOUSE_URL` is optional everywhere: without it every process runs exactly as today
+`KLOUDLITE_GIT_CLICKHOUSE_URL` is optional everywhere: without it every process runs exactly as today
 and `/admin/history/*` answers `503 history unavailable`, which the web renders as a flat
-placeholder. `RUSTIC_GIT_HYPERDX_URL` is optional the same way — unset means no "Open in HyperDX"
+placeholder. `KLOUDLITE_GIT_HYPERDX_URL` is optional the same way — unset means no "Open in HyperDX"
 link rather than a dead one.
 
 ## Web app
@@ -453,7 +453,7 @@ screens is a `superadmin/ui/section.tsx` `Section` — eyebrow, title, count chi
 and the tables, capacity bars, pills and KPI tiles beside it in `superadmin/ui/`; nothing there
 draws its own card border. Numbers come from `/admin/*` plus `adminSeries`/`adminHistoryEvents`,
 and a history read that 503s renders a flat placeholder rather than failing the page, so the
-console works with no ClickHouse deployed. `RUSTIC_GIT_ADMIN_FIXTURES=1` answers admin GETs from
+console works with no ClickHouse deployed. `KLOUDLITE_GIT_ADMIN_FIXTURES=1` answers admin GETs from
 `lib/fixtures/superadmin.ts` (one guard in `adminCall`) so every screen renders offline —
 `scripts/superadmin-screens.mjs` screenshots all ten at 1440 into `.local/screens/`.
 
@@ -472,7 +472,7 @@ can 500 once (known fenced-handle gap). The registry hostname (Cloudflare-proxie
 hostname are different ingresses with different TLS assumptions — read the comments on both
 Ingress objects before touching them. The worker liveness probe counts per-lane heartbeat files
 and the web probes hit `/api/health`, so a yaml roll must never outrun its image repin. The
-`rustic-git-jwt` Secret is required (pods fail closed without it), and Rust pods run as uid 1001
+`kloudlite-git-jwt` Secret is required (pods fail closed without it), and Rust pods run as uid 1001
 with a read-only root — anything new that writes to disk needs a mount.
 
 ## House style

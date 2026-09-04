@@ -1,8 +1,8 @@
-//! Its own binary: `RUSTIC_GIT_MAX_BODY` is process-global and every other push test would
+//! Its own binary: `KLOUDLITE_GIT_MAX_BODY` is process-global and every other push test would
 //! trip over a 1 KiB cap.
 mod common;
-use rustic_git_core::pktline;
-use rustic_git_git::protocol::receive;
+use kloudlite_git_core::pktline;
+use kloudlite_git_git::protocol::receive;
 use std::io::Cursor;
 
 use common::pack_of;
@@ -14,7 +14,7 @@ async fn an_oversized_pack_is_refused_before_it_is_indexed() {
         eprintln!("skip: no git");
         return;
     }
-    std::env::set_var("RUSTIC_GIT_MAX_BODY", "1024");
+    std::env::set_var("KLOUDLITE_GIT_MAX_BODY", "1024");
     let e = common::env().await;
     let s = e.store.clone();
     s.create_repo("a", "r").await.unwrap();

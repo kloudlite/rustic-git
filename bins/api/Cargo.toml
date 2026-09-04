@@ -1,20 +1,20 @@
 [package]
-name = "rustic-git-api-bin"
+name = "kloudlite-git-api-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [[bin]]
-name = "rustic-git-api"
+name = "kloudlite-git-api"
 path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
-rustic-git-core = { path = "../../crates/core" }
-rustic-git-storage = { path = "../../crates/storage" }
-rustic-git-pulls = { path = "../../crates/pulls" }     # directory; no check feature
-rustic-git-api = { path = "../../crates/api" }
-rustic-git-workspaces = { path = "../../crates/workspaces" }
+kloudlite-git-core = { path = "../../crates/core" }
+kloudlite-git-storage = { path = "../../crates/storage" }
+kloudlite-git-pulls = { path = "../../crates/pulls" }     # directory; no check feature
+kloudlite-git-api = { path = "../../crates/api" }
+kloudlite-git-workspaces = { path = "../../crates/workspaces" }
 kube = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

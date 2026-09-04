@@ -1,13 +1,13 @@
 //! `GET /admin/clusters`, `GET /admin/clusters/{region}` and the three node verbs — against a
 //! mocked kube API, same harness shape `api_admin_owners.rs` uses.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{admin::router, ApiState};
-use rustic_git_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{admin::router, ApiState};
+use kloudlite_git_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/rustic-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite-git.io/v1alpha1";
 const NODES: &str = "/api/v1/nodes";
 
 struct Server {
@@ -32,11 +32,11 @@ fn token(jwt: &Jwt) -> String {
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 fn region_obj() -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
            "metadata": {"name": "r1"}, "spec": {"name": "Region one", "status": "active"}})
 }
 
@@ -49,7 +49,7 @@ fn node_obj(name: &str, annotations: Value) -> Value {
 }
 
 fn ws_obj() -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
            "metadata": {"name": "w1"},
            "spec": {"owner": "ann", "team": "", "name": "w1", "region": "r1", "image": "img:1",
                     "desiredState": "running", "packages": [],
@@ -60,7 +60,7 @@ fn ws_obj() -> Value {
 
 fn agent_ds() -> Value {
     json!({"apiVersion": "apps/v1", "kind": "DaemonSet",
-           "metadata": {"name": "rustic-git-agent", "namespace": "kube-system"},
+           "metadata": {"name": "kloudlite-git-agent", "namespace": "kube-system"},
            "spec": {"selector": {}, "template": {"metadata": {}, "spec": {"containers": [{"name": "agent", "image": "agent:1"}]}}},
            "status": {"numberReady": 1, "desiredNumberScheduled": 1, "currentNumberScheduled": 1,
                       "numberMisscheduled": 0, "numberUnavailable": 0}})
@@ -76,8 +76,8 @@ async fn clusters_list_composes_agents_nodes_and_hosted_counts() {
         get(NODES, json!({"apiVersion": "v1", "kind": "NodeList", "metadata": {}, "items": [node_obj("n1", json!({}))]})),
         get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj()])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
-        get("/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent", agent_ds()),
-        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default", "generation": 4}, "spec": {}, "status": {"observedGeneration": 3}})),
+        get("/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-git-agent", agent_ds()),
+        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default", "generation": 4}, "spec": {}, "status": {"observedGeneration": 3}})),
     ])
     .await;
     let body = reqwest::Client::new()
@@ -126,20 +126,20 @@ async fn drain_sets_the_label_and_undrain_clears_label_and_status() {
     let r = post(&s, "/admin/clusters/r1/nodes/n1/drain", json!({"reason": "retiring the VM"})).await;
     assert_eq!(r.status(), 200);
     let sent = s.rec.sent("PATCH", &format!("{NODES}/n1"));
-    assert_eq!(sent[0]["metadata"]["labels"]["rustic-git.io/decommission"], "true", "{:?}", sent);
+    assert_eq!(sent[0]["metadata"]["labels"]["kloudlite-git.io/decommission"], "true", "{:?}", sent);
 
     let r = post(&s, "/admin/clusters/r1/nodes/n1/undrain", json!({"reason": "changed my mind"})).await;
     assert_eq!(r.status(), 200);
     let sent = s.rec.sent("PATCH", &format!("{NODES}/n1"));
     let undrain = &sent[1];
-    assert!(undrain["metadata"]["labels"]["rustic-git.io/decommission"].is_null(), "{undrain}");
-    assert!(undrain["metadata"]["annotations"]["rustic-git.io/decommission-status"].is_null(), "{undrain}");
+    assert!(undrain["metadata"]["labels"]["kloudlite-git.io/decommission"].is_null(), "{undrain}");
+    assert!(undrain["metadata"]["annotations"]["kloudlite-git.io/decommission-status"].is_null(), "{undrain}");
 }
 
 /// Decommission refuses a node that has not reached `drained` yet.
 #[tokio::test]
 async fn decommission_refuses_before_drained() {
-    let s = admin_server(node_routes(json!({"rustic-git.io/decommission-status": "draining running=1 owned=2 copies=0 thin=0"}))).await;
+    let s = admin_server(node_routes(json!({"kloudlite-git.io/decommission-status": "draining running=1 owned=2 copies=0 thin=0"}))).await;
     let r = post(&s, "/admin/clusters/r1/nodes/n1/decommission", json!({"reason": "vm going away"})).await;
     assert_eq!(r.status(), 409);
     assert!(s.rec.sent("PATCH", &format!("{NODES}/n1")).is_empty(), "nothing may be written before drained");
@@ -148,7 +148,7 @@ async fn decommission_refuses_before_drained() {
 /// Decommission on a drained node cordons it and never deletes anything.
 #[tokio::test]
 async fn decommission_cordons_a_drained_node_and_deletes_nothing() {
-    let s = admin_server(node_routes(json!({"rustic-git.io/decommission-status": "drained 2026-09-04T00:00:00Z"}))).await;
+    let s = admin_server(node_routes(json!({"kloudlite-git.io/decommission-status": "drained 2026-09-04T00:00:00Z"}))).await;
     let r = post(&s, "/admin/clusters/r1/nodes/n1/decommission", json!({"reason": "vm going away"})).await;
     assert_eq!(r.status(), 200);
     let sent = s.rec.sent("PATCH", &format!("{NODES}/n1"));
@@ -171,9 +171,9 @@ async fn drain_without_a_reason_is_422() {
 /// rows that node holds — the two numbers that say what a drain of it is waiting for.
 #[tokio::test]
 async fn cluster_detail_counts_hosted_copies_per_node() {
-    let vol = json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "v1"},
+    let vol = json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "v1"},
                      "spec": {"owner": "ann", "team": "", "nodeName": "n1", "region": "r1", "quotaGb": 20, "replicas": 2}});
-    let rep = json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica", "metadata": {"name": "v1-n1"},
+    let rep = json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica", "metadata": {"name": "v1-n1"},
                      "spec": {"volume": "v1", "node": "n1"}, "status": {"phase": "Synced"}});
     let s = admin_server(vec![
         get(format!("{API}/regions/r1"), region_obj()),
@@ -182,8 +182,8 @@ async fn cluster_detail_counts_hosted_copies_per_node() {
         get(format!("{API}/environments"), list_of("Environment", vec![])),
         get(format!("{API}/volumes"), list_of("Volume", vec![vol])),
         get(format!("{API}/volumereplicas"), list_of("VolumeReplica", vec![rep])),
-        get("/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent", agent_ds()),
-        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default", "generation": 4}, "spec": {}, "status": {"observedGeneration": 3}})),
+        get("/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-git-agent", agent_ds()),
+        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default", "generation": 4}, "spec": {}, "status": {"observedGeneration": 3}})),
     ])
     .await;
     let txt = reqwest::Client::new()
@@ -220,7 +220,7 @@ async fn deactivating_a_region_without_a_note_is_422() {
 /// retirement sequence.
 #[tokio::test]
 async fn drain_works_on_an_inactive_region() {
-    let inactive = json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+    let inactive = json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
                           "metadata": {"name": "r1"}, "spec": {"name": "Region one", "status": "inactive"}});
     let s = admin_server(vec![
         get(format!("{API}/regions/r1"), inactive),
@@ -230,5 +230,5 @@ async fn drain_works_on_an_inactive_region() {
     .await;
     let r = post(&s, "/admin/clusters/r1/nodes/n1/drain", json!({"reason": "retiring the region"})).await;
     assert_eq!(r.status(), 200);
-    assert_eq!(s.rec.sent("PATCH", &format!("{NODES}/n1"))[0]["metadata"]["labels"]["rustic-git.io/decommission"], "true");
+    assert_eq!(s.rec.sent("PATCH", &format!("{NODES}/n1"))[0]["metadata"]["labels"]["kloudlite-git.io/decommission"], "true");
 }

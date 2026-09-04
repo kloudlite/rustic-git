@@ -14,8 +14,8 @@ pub struct Listeners {
 }
 
 pub async fn bind(peer_addr: &str) -> Result<Listeners> {
-    let http = TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
-    let ssh = TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
+    let http = TcpListener::bind(env("KLOUDLITE_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
+    let ssh = TcpListener::bind(env("KLOUDLITE_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
     let peer_http = TcpListener::bind(peer_addr).await?;
     let peer_stream = TcpListener::bind(crate::proxy::stream_addr(peer_addr)).await?;
     Ok(Listeners { http, ssh, peer_http, peer_stream })

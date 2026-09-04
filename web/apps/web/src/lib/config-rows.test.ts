@@ -10,16 +10,16 @@ const row = (p: Partial<SettingsSchemaRow>): SettingsSchemaRow => ({
   default: 300,
   env: null,
   mark: "live",
-  readers: ["rustic-git-agent"],
+  readers: ["kloudlite-git-agent"],
   ...p,
 });
 
 test("a live field says live; a boot field names the reader it rolls", () => {
   expect(takesEffect(row({}))).toBe("live");
-  expect(takesEffect(row({ mark: "boot", readers: ["rustic-git-agent"] }))).toBe("boot: rolls rustic-git-agent");
+  expect(takesEffect(row({ mark: "boot", readers: ["kloudlite-git-agent"] }))).toBe("boot: rolls kloudlite-git-agent");
   // More than one reader: name them all, because a save rolls all of them.
-  expect(takesEffect(row({ mark: "boot", readers: ["rustic-git-srv", "rustic-git-worker"] }))).toBe(
-    "boot: rolls rustic-git-srv, rustic-git-worker",
+  expect(takesEffect(row({ mark: "boot", readers: ["kloudlite-git-srv", "kloudlite-git-worker"] }))).toBe(
+    "boot: rolls kloudlite-git-srv, kloudlite-git-worker",
   );
   // A boot field with no reader still must not read as live.
   expect(takesEffect(row({ mark: "boot", readers: [] }))).toBe("boot");

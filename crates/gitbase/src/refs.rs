@@ -8,7 +8,7 @@
 //! computes verdicts (the gix-touching step) and hands them to `Store::update_refs_txn` (the
 //! transactional compare-and-swap, gix-free, in `storage`). See task-3-report.md.
 
-pub use rustic_git_storage::refmeta::{Protection, RefUpdate, RepoMeta};
+pub use kloudlite_git_storage::refmeta::{Protection, RefUpdate, RepoMeta};
 
 use crate::store::{Repo, Store};
 use crate::Result;

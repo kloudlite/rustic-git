@@ -1,20 +1,20 @@
 # Alerts
 
 Every pod is annotated `prometheus.io/scrape` (no Operator assumed); every binary, the server tier
-included, serves `/metrics` on `RUSTIC_GIT_METRICS_ADDR` (9464). The region's OTel collector
+included, serves `/metrics` on `KLOUDLITE_GIT_METRICS_ADDR` (9464). The region's OTel collector
 (`deploy/k3s/otel-agent.yaml`) is what reads that annotation now, and it exports to ClickStack.
-Structured logs: every pod runs with `RUSTIC_GIT_LOG_FORMAT=json`; the collectors parse it, so HyperDX has `severity`, `code.namespace` (the Rust module) and each call-site field as columns, and every row carries `service.name` (the workload), `service.instance.id` (the pod), `region` and `tier`.
+Structured logs: every pod runs with `KLOUDLITE_GIT_LOG_FORMAT=json`; the collectors parse it, so HyperDX has `severity`, `code.namespace` (the Rust module) and each call-site field as columns, and every row carries `service.name` (the workload), `service.instance.id` (the pod), `region` and `tier`.
 
 Every rule below is evaluated TWICE, from this one table: HyperDX pages a human, and the admin
 process evaluates the same rule as SQL over the collector's `otel_metrics_*` tables every 30 s and
-writes state transitions to `rustic.alerts`, which is what the console's Signals table reads
+writes state transitions to `kloudlite.alerts`, which is what the console's Signals table reads
 (`crates/workspaces/src/history/alerts.rs`). Adding a rule here means adding it in both places —
 `the_catalogue_matches_deploy_alerts_md` fails the build if the Rust half is missed, and the
 HyperDX half is the "HyperDX alert" column. Node and disk signals come from the collector's
 `kubeletstats` receiver and the agent's own `node_pool_bytes_*` gauges; node-exporter is not
 deployed and is no longer needed.
 
-Metric names below are the ones the binaries emit; `deploy/rustic-git.yaml` sets no `job` labels,
+Metric names below are the ones the binaries emit; `deploy/kloudlite-git.yaml` sets no `job` labels,
 so select by `pod`/`container` from the kubernetes-pods scrape config. In HyperDX the same labels
 are `ResourceAttributes['k8s.pod.name']` and `['k8s.container.name']`, and every rule is scoped by
 `ResourceAttributes['region']` — the value the collector's `resource` processor stamps. Create each

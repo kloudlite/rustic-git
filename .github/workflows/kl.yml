@@ -68,7 +68,7 @@ jobs:
       # One sha256sums file next to the assets: install.sh verifies against it.
       - run: cd dist && cat *.sha256 > sha256sums && rm -f *.sha256
       # `sha256sums` proves a download is intact; this proves it came from THIS workflow on THIS
-      # commit (`gh attestation verify kl-<target> -R kloudlite/rustic-git`). Free for a public
+      # commit (`gh attestation verify kl-<target> -R kloudlite/kloudlite-git`). Free for a public
       # repo, and the only origin signal `install.sh`'s same-origin checksum cannot give.
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:

@@ -12,4 +12,4 @@ handler: runsc
 # on a node that cannot run it.
 scheduling:
   nodeSelector:
-    rustic-git.io/gvisor: "true"
+    kloudlite-git.io/gvisor: "true"

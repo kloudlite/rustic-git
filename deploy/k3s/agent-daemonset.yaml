@@ -42,18 +42,18 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: rustic-git-agent
+  name: kloudlite-git-agent
   namespace: kube-system
   labels:
-    app: rustic-git-agent
+    app: kloudlite-git-agent
 spec:
   selector:
     matchLabels:
-      app: rustic-git-agent
+      app: kloudlite-git-agent
   template:
     metadata:
       labels:
-        app: rustic-git-agent
+        app: kloudlite-git-agent
       # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
       # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
       annotations:
@@ -67,12 +67,12 @@ spec:
       # `agent-peer` NetworkPolicy — the only thing restricting the peer listener on 8444 to other
       # agents — stops applying to it. hostPID buys the first without giving up the second.
       hostPID: true
-      serviceAccountName: rustic-git-agent
+      serviceAccountName: kloudlite-git-agent
       # Only nodes that carry a btrfs pool. The control plane has none and must not run this.
       nodeSelector:
-        rustic-git.io/pool: "true"
+        kloudlite-git.io/pool: "true"
       tolerations:
-        - key: rustic-git.io/role
+        - key: kloudlite-git.io/role
           operator: Exists
           effect: NoSchedule
       # A restart must not orphan a btrfs send mid-stream; give it room to finish or be killed
@@ -99,7 +99,7 @@ spec:
         # the image already runs as.
         - name: seed-store
           image: nixos/nix:2.24.10@sha256:9a708cad473e5bdb278b9386c010684c63bfc99ac865d3ae00484ebfc05ad71a
-          command: ["/bin/sh", "-c", "if [ ! -e /host-nix/store ]; then cp -a /nix/. /host-nix/; fi; mkdir -p /host-nix/var/rustic/profiles"]
+          command: ["/bin/sh", "-c", "if [ ! -e /host-nix/store ]; then cp -a /nix/. /host-nix/; fi; mkdir -p /host-nix/var/kloudlite/profiles"]
           volumeMounts:
             - name: nix
               mountPath: /host-nix
@@ -111,7 +111,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/rustic-git-agent:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:8bada7c56ca02095588ca64b3ddfe11a61750e28dff52f676034ff3d10f9a0cc
+          image: ghcr.io/kloudlite/kloudlite-git-agent:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:8bada7c56ca02095588ca64b3ddfe11a61750e28dff52f676034ff3d10f9a0cc
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -128,9 +128,9 @@ spec:
               memory: 512Mi
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
-            - name: RUSTIC_GIT_LOG_FORMAT
+            - name: KLOUDLITE_GIT_LOG_FORMAT
               value: json
-            - name: RUSTIC_GIT_METRICS_ADDR
+            - name: KLOUDLITE_GIT_METRICS_ADDR
               value: 0.0.0.0:9464
             # The shard key. The controller refuses to start without it rather than watching every
             # node's objects — see lib.rs's check.
@@ -144,13 +144,13 @@ spec:
             # `run()` mounts it at `{pool}/homes` once at agent startup, before the controller
             # starts. Unset means this node serves no shared home (fail closed, see lib.rs).
             - name: WS_HOMES_EXPORT
-              value: zerofs.rustic-git-system.svc:/
+              value: zerofs.kloudlite-git-system.svc:/
             # `WS_RUNTIME_CLASS=gvisor` is deliberately NOT set here. Unset, tenant pods run under
             # runc and share the host kernel (audit S-29); set, every tenant pod names the
             # `gvisor` RuntimeClass and stays Pending on any node that cannot serve it. So it is
-            # per-cluster, and goes in the `rustic-git-agent` Secret next to WS_REGION (an inline
+            # per-cluster, and goes in the `kloudlite-git-agent` Secret next to WS_REGION (an inline
             # env would override envFrom, same as WS_REGION) only once EVERY pool node has had
-            # install-gvisor.sh run, carries `rustic-git.io/gvisor=true` (runtimeclass.yaml's
+            # install-gvisor.sh run, carries `kloudlite-git.io/gvisor=true` (runtimeclass.yaml's
             # nodeSelector) and runtimeclass.yaml is applied. Verify after the agent restarts:
             #   kubectl get pod -n ws-<owner> -o jsonpath='{.items[*].spec.runtimeClassName}'
             # prints `gvisor`, and `dmesg` inside a workspace prints gVisor's banner.
@@ -165,7 +165,7 @@ spec:
             # Pinned, so seeding works whatever image the workspace itself runs.
             - name: WS_GIT_INIT_IMAGE
               value: alpine/git:2.45.2@sha256:16ad8e788e1d3b0c30f18da8dde5c0ace3b187445a62d8af893b003ca1e70592
-            # `WS_REGION` comes from the `rustic-git-agent` Secret: it names the region whose blob
+            # `WS_REGION` comes from the `kloudlite-git-agent` Secret: it names the region whose blob
             # container this node reads and writes, and is half of an `OwnerBinding`'s identity
             # (controller/mod.rs). A node pointed at the wrong region cannot see snapshots pushed
             # by its neighbours. Never set it inline here — an explicit env silently overrides
@@ -183,7 +183,7 @@ spec:
             # re-evaluates nixpkgs — measured at 28 s, against 0.3 s warm. `/nix` is a hostPath
             # this container already mounts, so the cache outlives the pod. ~400 MB.
             - name: XDG_CACHE_HOME
-              value: /nix/var/rustic/cache
+              value: /nix/var/kloudlite/cache
             # What every workspace gets before its own list. Explicit here rather than the
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.
@@ -191,7 +191,7 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/rustic-git-workspace:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:c20fbea72e932490ae2e970b57e9784603fc15569a8d0b0d373a60ab33e8047c
+              value: ghcr.io/kloudlite/kloudlite-git-workspace:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:c20fbea72e932490ae2e970b57e9784603fc15569a8d0b0d373a60ab33e8047c
             - name: WS_BASE_PACKAGES
               value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
             - name: WS_REPLICA_SECS
@@ -211,10 +211,10 @@ spec:
             # WS_NODE_DEAD_SECS (peer/placement.rs) defaults to 180 s — how long another node must be
             # observed NotReady before this one reaps its VolumeReplica rows and takes over.
             # No override here: the code default is the value the cluster runs.
-            # How often a node labelled `rustic-git.io/decommission=true` runs the drain beat
+            # How often a node labelled `kloudlite-git.io/decommission=true` runs the drain beat
             # (decommission.rs): tell its running worktrees the next start lands elsewhere, release
             # each volume as it becomes stopped-and-replicated, and rewrite its own
-            # `rustic-git.io/decommission-status` annotation. Every other node pays one node LIST
+            # `kloudlite-git.io/decommission-status` annotation. Every other node pays one node LIST
             # per interval and nothing else, which is why it can be this hot.
             - name: WS_DECOMMISSION_SECS
               value: "30"
@@ -242,7 +242,7 @@ spec:
             # region's container and nothing else. Restoring elsewhere means pushing again from a
             # node in the destination region. See README "Two things that bite".
             - secretRef:
-                name: rustic-git-agent
+                name: kloudlite-git-agent
                 optional: true
           ports:
             - name: peer
@@ -324,4 +324,4 @@ spec:
             type: DirectoryOrCreate
         - name: nix-conf
           configMap:
-            name: rustic-git-nix
+            name: kloudlite-git-nix

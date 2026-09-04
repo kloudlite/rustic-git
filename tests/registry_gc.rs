@@ -1,5 +1,5 @@
 mod common;
-use rustic_git_registry::{gc, store::blob_path, store::ImageExt, uploads::UploadsExt, Digest};
+use kloudlite_git_registry::{gc, store::blob_path, store::ImageExt, uploads::UploadsExt, Digest};
 use slatedb::object_store::{ObjectStoreExt, PutPayload};
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ async fn an_unreferenced_blob_is_swept_and_a_referenced_one_is_not() {
     }).to_string().into_bytes();
     let md = Digest::of(&manifest);
     e.store.os
-        .put(&rustic_git_registry::store::manifest_path("acme", "nginx", &md), PutPayload::from(manifest))
+        .put(&kloudlite_git_registry::store::manifest_path("acme", "nginx", &md), PutPayload::from(manifest))
         .await.unwrap();
     e.store.put_tag("acme", "nginx", "latest", &md).await.unwrap();
 
@@ -56,7 +56,7 @@ async fn a_layer_two_images_share_survives_one_of_them_being_emptied() {
         }).to_string().into_bytes();
         let md = Digest::of(&m);
         e.store.os
-            .put(&rustic_git_registry::store::manifest_path("acme", image, &md), PutPayload::from(m))
+            .put(&kloudlite_git_registry::store::manifest_path("acme", image, &md), PutPayload::from(m))
             .await.unwrap();
         e.store.put_tag("acme", image, "latest", &md).await.unwrap();
     }
@@ -91,7 +91,7 @@ async fn a_blob_referenced_only_via_an_index_entry_or_subject_survives() {
     }).to_string().into_bytes();
     let ixd = Digest::of(&index);
     e.store.os
-        .put(&rustic_git_registry::store::manifest_path("acme", "multi", &ixd), PutPayload::from(index))
+        .put(&kloudlite_git_registry::store::manifest_path("acme", "multi", &ixd), PutPayload::from(index))
         .await.unwrap();
     e.store.put_tag("acme", "multi", "latest", &ixd).await.unwrap();
 
@@ -105,7 +105,7 @@ async fn a_blob_referenced_only_via_an_index_entry_or_subject_survives() {
     }).to_string().into_bytes();
     let atd = Digest::of(&attached);
     e.store.os
-        .put(&rustic_git_registry::store::manifest_path("acme", "artifact", &atd), PutPayload::from(attached))
+        .put(&kloudlite_git_registry::store::manifest_path("acme", "artifact", &atd), PutPayload::from(attached))
         .await.unwrap();
     e.store.put_tag("acme", "artifact", "latest", &atd).await.unwrap();
 
@@ -129,7 +129,7 @@ async fn a_manifest_that_is_not_valid_json_aborts_the_sweep_and_deletes_nothing(
     let garbage = b"not json at all".to_vec();
     let gd = Digest::of(&garbage);
     e.store.os
-        .put(&rustic_git_registry::store::manifest_path("acme", "broken", &gd), PutPayload::from(garbage))
+        .put(&kloudlite_git_registry::store::manifest_path("acme", "broken", &gd), PutPayload::from(garbage))
         .await.unwrap();
 
     let result = gc::sweep_owner(&e.store, "acme", Duration::ZERO).await;
@@ -156,7 +156,7 @@ async fn a_manifest_referencing_a_sha512_blob_protects_it_from_the_sweep() {
     }).to_string().into_bytes();
     let md = Digest::of(&manifest);
     e.store.os
-        .put(&rustic_git_registry::store::manifest_path("acme", "nginx", &md), PutPayload::from(manifest))
+        .put(&kloudlite_git_registry::store::manifest_path("acme", "nginx", &md), PutPayload::from(manifest))
         .await.unwrap();
     e.store.put_tag("acme", "nginx", "latest", &md).await.unwrap();
 
@@ -194,7 +194,7 @@ async fn a_blob_referenced_between_the_two_manifest_reads_survives_the_mount_rac
     }).to_string().into_bytes();
     let md = Digest::of(&m);
     e.store.os
-        .put(&rustic_git_registry::store::manifest_path("acme", "mounted", &md), PutPayload::from(m))
+        .put(&kloudlite_git_registry::store::manifest_path("acme", "mounted", &md), PutPayload::from(m))
         .await.unwrap();
     e.store.put_tag("acme", "mounted", "latest", &md).await.unwrap();
 
@@ -215,7 +215,7 @@ async fn a_blob_referenced_between_the_two_manifest_reads_survives_the_mount_rac
 /// listens on; `Cache::connect` gives up on it in 250ms.
 #[tokio::test]
 async fn worker_lanes_are_inert_and_gc_still_sweeps_with_redis_down() {
-    let cache = rustic_git_storage::cache::Cache::connect(Some("redis://127.0.0.1:1")).await;
+    let cache = kloudlite_git_storage::cache::Cache::connect(Some("redis://127.0.0.1:1")).await;
     assert!(!cache.connected());
     cache.xgroup_create_mkstream("events", "merge-worker").await;
     assert!(cache.xreadgroup("events", "merge-worker", "t/0", 16).await.is_empty());
@@ -241,7 +241,7 @@ async fn a_sweep_with_nothing_old_enough_reads_no_manifests() {
     e.store.os.put(&blob_path("acme", &Digest::of(&fresh)), PutPayload::from(fresh)).await.unwrap();
     let garbage = b"not json at all".to_vec();
     e.store.os
-        .put(&rustic_git_registry::store::manifest_path("acme", "broken", &Digest::of(&garbage)), PutPayload::from(garbage))
+        .put(&kloudlite_git_registry::store::manifest_path("acme", "broken", &Digest::of(&garbage)), PutPayload::from(garbage))
         .await.unwrap();
 
     let n = gc::sweep_owner(&e.store, "acme", Duration::from_secs(3600)).await.unwrap();
@@ -317,10 +317,10 @@ async fn reconciling_an_unchanged_marker_writes_nothing() {
         .basic_auth("acme", Some(&token)).body(m).send().await.unwrap();
     assert_eq!(r.status(), axum::http::StatusCode::CREATED);
 
-    let before = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx").await.unwrap();
+    let before = kloudlite_git_storage::index::read(&e.store.os, kloudlite_git_storage::index::Kind::Img, "acme", "nginx").await.unwrap();
     assert_eq!(gc::reconcile_owner(&e.store, "acme").await.unwrap(), 0);
     assert_eq!(gc::reconcile_owner(&e.store, "acme").await.unwrap(), 0);
-    let after = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx").await.unwrap();
+    let after = kloudlite_git_storage::index::read(&e.store.os, kloudlite_git_storage::index::Kind::Img, "acme", "nginx").await.unwrap();
     assert_eq!(before.updated_ms, after.updated_ms, "the owner's stamp is left alone");
 }
 
@@ -412,7 +412,7 @@ async fn reconciling_an_owner_lists_at_most_sixteen_images_at_once() {
     let (in_flight, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let os = Arc::new(Listing { inner: Default::default(), in_flight, peak: peak.clone() });
     let tmp = tempfile::tempdir().unwrap();
-    let store = rustic_git_storage::store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap();
+    let store = kloudlite_git_storage::store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap();
     // Forty images with a manifest each and no marker: every one needs a stat.
     for i in 0..40 {
         let d = Digest::of(format!("m{i}").as_bytes());

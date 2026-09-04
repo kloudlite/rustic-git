@@ -35,7 +35,7 @@ default and rule below is copied from it) and the knob list in
 `docs/superpowers/reviews/2026-09-03-tunables-inventory.md`'s "Candidates for live settings"
 section plus every "cached once"/"needs-restart" row the spec's §2 names by var name. Runs AFTER
 `docs/superpowers/plans/2026-09-03-quotas-and-superadmin.md`: this plan consumes `api::admin`,
-the `rustic-git-admin` Deployment/Service/Ingress/ServiceAccount, `RUSTIC_GIT_API_ROLE`,
+the `kloudlite-git-admin` Deployment/Service/Ingress/ServiceAccount, `KLOUDLITE_GIT_API_ROLE`,
 `Claims.superadmin`/`Caller { name, superadmin }`, `require_admin`, and the admin-only ClusterRole
 split (`deploy/k3s/agent-rbac.yaml`'s header table, `deploy/k3s/api-rbac.yaml`) by name; it does
 not recreate any of them.
@@ -56,8 +56,8 @@ Copied verbatim from the spec's "Rules":
   admin write path; a value outside it is a 422 naming the field and the range. Unbounded knobs
   (`WS_NIXPKGS`'s pin string, `WS_GIT_SSH_HOST`) stay env-only and are NOT in either struct.
 - **Secrets and process identity are never settings.** Nothing here touches
-  `RUSTIC_GIT_PEER_SECRET`, `RUSTIC_GIT_JWT_SECRET`, any `AWS_*`/`AZURE_*`/`RUSTIC_GIT_S3_URL`,
-  `RUSTIC_GIT_CACHE_DIR`, `RUSTIC_GIT_PEER_ADDR`/`_SVC`/`RUSTIC_GIT_SELF`,
+  `KLOUDLITE_GIT_PEER_SECRET`, `KLOUDLITE_GIT_JWT_SECRET`, any `AWS_*`/`AZURE_*`/`KLOUDLITE_GIT_S3_URL`,
+  `KLOUDLITE_GIT_CACHE_DIR`, `KLOUDLITE_GIT_PEER_ADDR`/`_SVC`/`KLOUDLITE_GIT_SELF`,
   `WS_POOL`/`WS_REGION`/`NODE_NAME`/`WS_HOMES_EXPORT`/`WS_PEER_ADDR`, or any of the web's
   `AUTH_*`/`RESEND_*` vars — corrected from the plan's earlier draft, which also listed
   `WS_DEFAULT_IMAGE`/`WS_RUNTIME_CLASS`/`WS_GIT_INIT_IMAGE` here: the spec's §2 explicitly puts
@@ -109,12 +109,12 @@ pub const CENTRAL_SETTING_META: &[(&str, Mark, &[&str])] = &[
     ("announceStrandedSecs", Mark::Live, &[]),
     ("feedRetentionSecs", Mark::Live, &[]),
     ("cloneHost", Mark::Live, &[]),
-    ("sshHost", Mark::Boot, &["rustic-git-gateway"]),
-    ("sshPort", Mark::Boot, &["rustic-git-gateway"]),
+    ("sshHost", Mark::Boot, &["kloudlite-git-gateway"]),
+    ("sshPort", Mark::Boot, &["kloudlite-git-gateway"]),
     ("registryHost", Mark::Live, &[]),
     ("signupOpen", Mark::Live, &[]),
-    ("logFormat", Mark::Boot, &["rustic-git-srv", "rustic-git-api", "rustic-git-worker", "rustic-git-gateway", "rustic-git-admin"]),
-    ("workerLanes", Mark::Boot, &["rustic-git-worker"]),
+    ("logFormat", Mark::Boot, &["kloudlite-git-srv", "kloudlite-git-api", "kloudlite-git-worker", "kloudlite-git-gateway", "kloudlite-git-admin"]),
+    ("workerLanes", Mark::Boot, &["kloudlite-git-worker"]),
 ];
 ```
 
@@ -147,29 +147,29 @@ re-read every one of these each cycle, so none of them needs a roll.**
 | `max_per_owner` | `WS_MAX_PER_OWNER` | 20 | 1..=1000 | live | `crates/workspaces/src/model.rs:34` — **api tier, not agent**, but the spec's table places it under cluster scope because it is per-region policy; see Task 2 note |
 | `home_cache_gb` | *(new field — no current env var; the homecache subvolume has no quota today)* | 10 | 1..=500 | live | n/a |
 | `quota_gb_ceiling` | *(the `clamp_quota` 500 constant)* | 500 | 10..=5000 | live | grep `clamp_quota` at Task 2 Step 3 (lands in `crates/workspaces`, quotas plan) |
-| `default_image` | `WS_DEFAULT_IMAGE` | *(required today — no built-in default; ships with `""` = "keep the env value")* | none (image ref string) | **boot** — `rustic-git-agent` | `bins/agent/src/controller/mod.rs:232` |
-| `git_init_image` | `WS_GIT_INIT_IMAGE` | `alpine/git:2.45.2` | none (image ref string) | **boot** — `rustic-git-agent` | `bins/agent/src/controller/mod.rs:263` |
-| `runtime_class` | `WS_RUNTIME_CLASS` | `""` (empty = host kernel) | none (k8s runtimeClass name) | **boot** — `rustic-git-agent` | `bins/agent/src/controller/mod.rs:234` |
+| `default_image` | `WS_DEFAULT_IMAGE` | *(required today — no built-in default; ships with `""` = "keep the env value")* | none (image ref string) | **boot** — `kloudlite-git-agent` | `bins/agent/src/controller/mod.rs:232` |
+| `git_init_image` | `WS_GIT_INIT_IMAGE` | `alpine/git:2.45.2` | none (image ref string) | **boot** — `kloudlite-git-agent` | `bins/agent/src/controller/mod.rs:263` |
+| `runtime_class` | `WS_RUNTIME_CLASS` | `""` (empty = host kernel) | none (k8s runtimeClass name) | **boot** — `kloudlite-git-agent` | `bins/agent/src/controller/mod.rs:234` |
 
 **`CentralSettings` (server/worker/gateway/api tunables), object-store document:**
 
 | field | env var | default | range | mark | readers (if boot) |
 |---|---|---|---|---|---|
-| `max_body` | `RUSTIC_GIT_MAX_BODY` | 2147483648 | 1048576..=8589934592 | live | — |
-| `max_layer` | `RUSTIC_GIT_MAX_LAYER` | 5368709120 | 1048576..=21474836480 | live | — |
+| `max_body` | `KLOUDLITE_GIT_MAX_BODY` | 2147483648 | 1048576..=8589934592 | live | — |
+| `max_layer` | `KLOUDLITE_GIT_MAX_LAYER` | 5368709120 | 1048576..=21474836480 | live | — |
 | `max_manifest` | *(new — no current env var found for a manifest size cap; spec §2 names a third body limit)* | 4194304 | 65536..=67108864 | live | — |
-| `upload_grace_secs` | `RUSTIC_GIT_UPLOAD_GRACE_SECS` | 86400 | 3600..=604800 | live | — |
+| `upload_grace_secs` | `KLOUDLITE_GIT_UPLOAD_GRACE_SECS` | 86400 | 3600..=604800 | live | — |
 | `gc_interval_secs` | *(new — GC's own interval was not found as an env var in the inventory; grep `crates/registry/src/gc.rs` for its scheduling at Task 4 Step 2)* | 3600 | 300..=86400 | live | — |
 | `merge_lease_secs` | *(new — the merge-worker lease TTL; grep `crates/pulls/src/merge_worker.rs`)* | 300 | 30..=3600 | live | — |
 | `announce_stranded_secs` | *(new — `announce_stranded_merges`'s 15s beat in `bins/server/src/lanes.rs`)* | 15 | 5..=300 | live | — |
 | `feed_retention_secs` | *(new — `crates/storage/src/events.rs`'s feed retention, if any is enforced; else document as "not currently enforced, field is a no-op until a caller reads it")* | 604800 | 3600..=2592000 | live | — |
-| `clone_host` | `RUSTIC_GIT_CLONE_HOST` | `""` (prod requires) | none | live | — (web reads it live via Task 4 Step 5's route, no restart needed) |
-| `ssh_host` | `RUSTIC_GIT_SSH_HOST` | `""` | none | **boot** | `rustic-git-gateway` — the init container that clones over SSH reads this at pod start via the gateway's own connection info, not per-request |
-| `ssh_port` | `RUSTIC_GIT_SSH_PORT` | 22 | 1..=65535 | **boot** | `rustic-git-gateway` |
-| `registry_host` | `RUSTIC_GIT_REGISTRY_HOST` | `""` | none | live | — |
+| `clone_host` | `KLOUDLITE_GIT_CLONE_HOST` | `""` (prod requires) | none | live | — (web reads it live via Task 4 Step 5's route, no restart needed) |
+| `ssh_host` | `KLOUDLITE_GIT_SSH_HOST` | `""` | none | **boot** | `kloudlite-git-gateway` — the init container that clones over SSH reads this at pod start via the gateway's own connection info, not per-request |
+| `ssh_port` | `KLOUDLITE_GIT_SSH_PORT` | 22 | 1..=65535 | **boot** | `kloudlite-git-gateway` |
+| `registry_host` | `KLOUDLITE_GIT_REGISTRY_HOST` | `""` | none | live | — |
 | `signup_open` | *(new — no such flag exists today; ships `true` and is a no-op until a caller reads it, OR is dropped from scope if brainstorming with the owner finds no signup gate exists — flagged as an ambiguity below)* | true | bool, no range | live | — |
-| `log_format` | `RUSTIC_GIT_LOG_FORMAT` | `""` (text; `json` switches) | none (enum-shaped string, validated against `["", "json"]`) | **boot** | `rustic-git-srv`, `rustic-git-api`, `rustic-git-worker`, `rustic-git-gateway`, `rustic-git-admin` — `crates/core/src/log.rs:30` reads it once at `tracing_subscriber::init()`, before any settings handle exists |
-| `worker_lanes` | `RUSTIC_GIT_WORKER_CONCURRENCY` | 4 | 1..=64 | **boot** | `rustic-git-worker` — `bins/worker/src/main.rs:76` spawns exactly `lanes` tasks at startup; changing the count needs a fresh process |
+| `log_format` | `KLOUDLITE_GIT_LOG_FORMAT` | `""` (text; `json` switches) | none (enum-shaped string, validated against `["", "json"]`) | **boot** | `kloudlite-git-srv`, `kloudlite-git-api`, `kloudlite-git-worker`, `kloudlite-git-gateway`, `kloudlite-git-admin` — `crates/core/src/log.rs:30` reads it once at `tracing_subscriber::init()`, before any settings handle exists |
+| `worker_lanes` | `KLOUDLITE_GIT_WORKER_CONCURRENCY` | 4 | 1..=64 | **boot** | `kloudlite-git-worker` — `bins/worker/src/main.rs:76` spawns exactly `lanes` tasks at startup; changing the count needs a fresh process |
 
 Fields marked "new" have no reader today: they are added to the struct and the admin UI per the
 spec's instruction to un-cache "every non-secret, non-bootstrap tunable... including the 'cached
@@ -200,7 +200,7 @@ diffing against the spec's verbatim Rules section understands why the two lists 
   - Modify: `crates/workspaces/tests/crd_yaml.rs` — regenerate the golden YAML
   - Modify: `deploy/k3s/agent-rbac.yaml` — agent `get/list/watch` on `clustersettings`
   - Modify: `deploy/k3s/api-rbac.yaml` — admin ServiceAccount `create/patch` on `clustersettings`
-    (the quotas plan's `rustic-git-admin` ClusterRole; the user-role ServiceAccount gets nothing)
+    (the quotas plan's `kloudlite-git-admin` ClusterRole; the user-role ServiceAccount gets nothing)
   - Modify: `deploy/k3s/crds.yaml` — the generated CRD manifest (via `CRD_REGEN=1 cargo test`)
 - **Interfaces:** `crd::ClusterSettings`, `crd::ClusterSettingsSpec`, `crd::ClusterSettingsStatus`
 
@@ -217,7 +217,7 @@ Steps:
   /// object per region's k3s, not per namespace.
   #[derive(CustomResource, Clone, Debug, Serialize, Deserialize, JsonSchema)]
   #[kube(
-      group = "rustic-git.io",
+      group = "kloudlite-git.io",
       version = "v1alpha1",
       kind = "ClusterSettings",
       status = "ClusterSettingsStatus",
@@ -276,7 +276,7 @@ Steps:
       #[serde(default = "defaults::quota_gb_ceiling")]
       pub quota_gb_ceiling: u32,
       /// Tenant workspace pod image. **Boot** — the agent reads this at pod-template render
-      /// time, not per reconcile; a change rolls `rustic-git-agent` (Task 5). Empty means "keep
+      /// time, not per reconcile; a change rolls `kloudlite-git-agent` (Task 5). Empty means "keep
       /// today's env value" so an admin who never opens this row cannot blank a required image.
       #[serde(default)]
       pub default_image: String,
@@ -323,22 +323,22 @@ Steps:
       ("maxPerOwner", Mark::Live, &[]),
       ("homeCacheGb", Mark::Live, &[]),
       ("quotaGbCeiling", Mark::Live, &[]),
-      ("defaultImage", Mark::Boot, &["rustic-git-agent"]),
-      ("gitInitImage", Mark::Boot, &["rustic-git-agent"]),
-      ("runtimeClass", Mark::Boot, &["rustic-git-agent"]),
+      ("defaultImage", Mark::Boot, &["kloudlite-git-agent"]),
+      ("gitInitImage", Mark::Boot, &["kloudlite-git-agent"]),
+      ("runtimeClass", Mark::Boot, &["kloudlite-git-agent"]),
   ];
   ```
 
   `Mark` itself lives in `crates/core/src/settings.rs` (Task 2 Step 1, since both tiers' meta
   tables need the same two-variant enum) and `crates/workspaces` depends on `crates/core` already
   (every crate here does), so `crate::settings_meta` above is really
-  `rustic_git_core::settings::Mark` re-exported — name it however the existing `crates/workspaces`
-  import conventions do (check a sibling `use rustic_git_core::...` line before inventing a path).
+  `kloudlite_git_core::settings::Mark` re-exported — name it however the existing `crates/workspaces`
+  import conventions do (check a sibling `use kloudlite_git_core::...` line before inventing a path).
   A test, `cluster_setting_meta_is_exhaustive` (mirrors Task 2's central one), asserts the table's
   field names equal `ClusterSettingsSpec`'s schemars property names.
 
 - [ ] **Step 2: `crd_yaml` test.** Run `CRD_REGEN=1 cargo test --test crd_yaml -p
-  rustic-git-workspaces` to regenerate the golden file the test compares against, then `cargo
+  kloudlite-git-workspaces` to regenerate the golden file the test compares against, then `cargo
   test --test crd_yaml` to confirm it now passes without the env var. Diff the generated YAML by
   hand for the two load-bearing attributes `crd/mod.rs`'s doc comment calls out: `status = "…"`
   (status subresource) and NO `selectable` entry (this kind has no per-node watch — every agent
@@ -372,8 +372,8 @@ Steps:
   - Modify: `crates/core/Cargo.toml` — add `arc-swap = "1"` (already pinned in `Cargo.lock` via a
     transitive dependency; this promotes it to direct)
   - Modify: `Cargo.toml` (workspace) — nothing, `Cargo.lock` already resolves the version
-- **Interfaces:** `rustic_git_core::settings::LiveSettings<T>::{new, load, store}`,
-  `rustic_git_workspaces::settings::AgentSettings`, `rustic_git_core::settings::CentralSettings`
+- **Interfaces:** `kloudlite_git_core::settings::LiveSettings<T>::{new, load, store}`,
+  `kloudlite_git_workspaces::settings::AgentSettings`, `kloudlite_git_core::settings::CentralSettings`
 
 Steps:
 
@@ -567,7 +567,7 @@ Steps:
     loaded settings VERSION (a monotonic counter or the `updatedAt` string) alongside the
     existing `ok` body, since the spec says "central binaries expose the loaded version on their
     `/api/health`" but the codebase's actual health path is `/healthz` (`bins/gateway/src/tunnel.rs:142`,
-    `deploy/rustic-git.yaml:169/470/475` — no `/api/health` route exists anywhere in the Rust
+    `deploy/kloudlite-git.yaml:169/470/475` — no `/api/health` route exists anywhere in the Rust
     tiers; that string in the spec is describing the same concept the code calls `/healthz`, not
     a route to invent from scratch — see Ambiguities below)
 - **Interfaces:** `PUT /api/admin/settings` (peer listener, superadmin JWT + peer secret, body =
@@ -601,7 +601,7 @@ Steps:
   A `revert` is the same handler called with the body set to `history[n]`'s full snapshot — no
   separate route; Task 7's admin UI constructs that body.
 
-- [ ] **Step 3: Refresh beat, all four binaries.** One function, `rustic_git_core::settings::
+- [ ] **Step 3: Refresh beat, all four binaries.** One function, `kloudlite_git_core::settings::
   refresh_central_beat(store: Store, live: LiveSettings<CentralSettings>)`, spawned identically
   in `bins/server/src/main.rs`, `bins/worker/src/main.rs`, `bins/gateway/src/main.rs`,
   `bins/api/src/main.rs` right after their existing boot sequences: every
@@ -616,9 +616,9 @@ Steps:
   `Mark::Boot` (see the updated knob list) — each binary does the SAME synchronous one-shot GET
   of `cluster/settings` Task 3 Step 1 added for the agent, merges it with `from_env()`, and reads
   `.log_format`/`.worker_lanes` off that merged value exactly once: `crates/core/src/log.rs`'s
-  `tracing_subscriber::init()` call (today reading `RUSTIC_GIT_LOG_FORMAT` directly) takes the
+  `tracing_subscriber::init()` call (today reading `KLOUDLITE_GIT_LOG_FORMAT` directly) takes the
   resolved string instead, and `bins/worker/src/main.rs:76`'s `lanes` local takes the resolved
-  count instead of `env("RUSTIC_GIT_WORKER_CONCURRENCY", "4")`. The refresh beat (Step 3) still
+  count instead of `env("KLOUDLITE_GIT_WORKER_CONCURRENCY", "4")`. The refresh beat (Step 3) still
   stores the merged value into `LiveSettings<CentralSettings>` afterwards, same as every other
   field — a live handle exists for every field regardless of mark, since Task 7's admin UI reads
   the CURRENT value from it either way; only the *readers* differ (a beat vs. a fresh process).
@@ -639,7 +639,7 @@ Steps:
   `registry_host` are consumed by the WEB tier, not a Rust binary — Task 6 wires those; the central
   document still carries them because the web has no settings-refresh beat of its own and instead
   reads them from `/api/health`'s exposed version... no: re-checking the spec, web reads
-  `RUSTIC_GIT_CLONE_HOST` etc. directly from ITS OWN env today (`web/apps/web/src/lib/clone.ts`),
+  `KLOUDLITE_GIT_CLONE_HOST` etc. directly from ITS OWN env today (`web/apps/web/src/lib/clone.ts`),
   which is a separate Next.js process the central `cluster/settings` document cannot refresh live
   without web polling it — flagged as an ambiguity below; this plan ships those four fields as
   admin-editable in `cluster/settings` (so the value is visible/auditable in one place) and has
@@ -685,23 +685,23 @@ then wires its two `PUT` handlers to call `roll_readers` after a successful writ
   - Modify: `crates/workspaces/src/api/admin.rs` — mount `GET /admin/workloads`, `POST
     /admin/workloads/{scope}/{name}/roll`
   - Modify: `bins/api/src/main.rs` — construct the AKS in-cluster `kube::Client` the admin binary
-    needs for Task 5/6's central-scope calls (see Step 1 — today `rustic-git-admin` only holds a
+    needs for Task 5/6's central-scope calls (see Step 1 — today `kloudlite-git-admin` only holds a
     k3s kubeconfig per region; it holds nothing for its OWN cluster)
-  - Modify: `deploy/rustic-git.yaml` — `rustic-git-admin` ServiceAccount (new — today the
+  - Modify: `deploy/kloudlite-git.yaml` — `kloudlite-git-admin` ServiceAccount (new — today the
     Deployment sets `automountServiceAccountToken: false` and authenticates to k3s only via a
     mounted kubeconfig Secret; it has never needed to talk to its OWN cluster before), a `Role` +
-    `RoleBinding` in the `rustic-git` namespace scoped to exactly `get/list/patch` on
-    `deployments`/`statefulsets` named `rustic-git-srv`/`rustic-git-api`/`rustic-git-worker`/
-    `rustic-git-admin` (NOT `rustic-git-web`, which lives in a namespace `rustic-git-web.yaml`
+    `RoleBinding` in the `kloudlite-git` namespace scoped to exactly `get/list/patch` on
+    `deployments`/`statefulsets` named `kloudlite-git-srv`/`kloudlite-git-api`/`kloudlite-git-worker`/
+    `kloudlite-git-admin` (NOT `kloudlite-git-web`, which lives in a namespace `kloudlite-git-web.yaml`
     controls — confirm its namespace at Task 5 Step 1 and either widen the Role's namespace or
     add a second Role there), flip `automountServiceAccountToken: true` on the admin Deployment
     only (server/api/worker/gateway keep it false — they have no business talking to their own
     cluster's API, only the admin process does)
   - Modify: `deploy/k3s/agent-rbac.yaml` — nothing (the agent is rolled BY the admin server's
     region kube client, which already has `patch` on `daemonsets` per Task 5 Step 1's grep — if
-    not, add it there, scoped to `rustic-git-agent` in `kube-system`)
+    not, add it there, scoped to `kloudlite-git-agent` in `kube-system`)
   - Create/modify a per-region gateway RBAC file if `deploy/k3s/gateway.yaml`'s namespace
-    (`rustic-git-system`) has no admin-writable Role yet — grep before assuming one exists
+    (`kloudlite-git-system`) has no admin-writable Role yet — grep before assuming one exists
 - **Interfaces:** `admin::workloads::KNOWN: &[WorkloadRef]`, `roll_readers(readers: &[&str],
   reason: RollReason) -> Result<(), RollConflict>` (`RollReason::Setting(&str)` or
   `RollReason::Manual(String)`), `GET /admin/workloads`, `POST
@@ -709,22 +709,22 @@ then wires its two `PUT` handlers to call `roll_readers` after a successful writ
 
 Steps:
 
-- [ ] **Step 1: Who's on AKS, who's per-region — confirm before coding.** `rustic-git-srv`
-  (StatefulSet), `rustic-git-api`, `rustic-git-worker`, `rustic-git-admin` all live in namespace
-  `rustic-git` on the AKS cluster (`deploy/rustic-git.yaml`, confirmed above). `rustic-git-web` is
-  a separate Deployment in `deploy/rustic-git-web.yaml` — grep its `metadata.namespace`; if it is
-  also `rustic-git` on AKS it needs the same Role's `resourceNames` list extended, if it is a
-  DIFFERENT namespace or cluster it needs its own Role. **`rustic-git-gateway` is NOT a central
+- [ ] **Step 1: Who's on AKS, who's per-region — confirm before coding.** `kloudlite-git-srv`
+  (StatefulSet), `kloudlite-git-api`, `kloudlite-git-worker`, `kloudlite-git-admin` all live in namespace
+  `kloudlite-git` on the AKS cluster (`deploy/kloudlite-git.yaml`, confirmed above). `kloudlite-git-web` is
+  a separate Deployment in `deploy/kloudlite-git-web.yaml` — grep its `metadata.namespace`; if it is
+  also `kloudlite-git` on AKS it needs the same Role's `resourceNames` list extended, if it is a
+  DIFFERENT namespace or cluster it needs its own Role. **`kloudlite-git-gateway` is NOT a central
   AKS workload** — `deploy/k3s/gateway.yaml` deploys one per region, in that region's k3s, in
-  namespace `rustic-git-system` (its own header comment: "One replica per pool node... the
+  namespace `kloudlite-git-system` (its own header comment: "One replica per pool node... the
   Cloudflare A records for `ws-<region>.khost.dev`"). The spec's §7 workload list (echoed
-  verbatim into this plan's own task list) names `rustic-git-gateway` under "central" and then
+  verbatim into this plan's own task list) names `kloudlite-git-gateway` under "central" and then
   separately lists "the region gateway" under "per region" — this plan corrects that: there is
-  only ONE gateway kind (`rustic-git-gateway`) and it is exclusively a per-region k3s Deployment;
-  `admin::workloads::KNOWN`'s central half does NOT include a `rustic-git-gateway` entry, and its
-  per-region half's "region gateway" row IS `rustic-git-gateway` in `rustic-git-system`, rolled
+  only ONE gateway kind (`kloudlite-git-gateway`) and it is exclusively a per-region k3s Deployment;
+  `admin::workloads::KNOWN`'s central half does NOT include a `kloudlite-git-gateway` entry, and its
+  per-region half's "region gateway" row IS `kloudlite-git-gateway` in `kloudlite-git-system`, rolled
   through the same region `kube::Client` Task 6 already resolves for `ClusterSettings`. This also
-  means the earlier "boot, readers: rustic-git-gateway" rows in this update's knob list
+  means the earlier "boot, readers: kloudlite-git-gateway" rows in this update's knob list
   (`ssh_host`, `ssh_port` under `CentralSettings`) name a PER-REGION reader from a CENTRAL
   document — `roll_readers` for those two fields must fan out to every region's gateway, not one
   AKS deployment; note this explicitly in Task 6 Step 2's roll call rather than assuming one
@@ -739,25 +739,25 @@ Steps:
   /// The fixed list `admin::workloads::KNOWN` names in this plan — never a free string. A roll
   /// target not in this list is a 404, both from the settings save path and the manual route.
   pub const KNOWN_CENTRAL: &[(&str, Kind)] = &[
-      ("rustic-git-srv", Kind::StatefulSet),
-      ("rustic-git-api", Kind::Deployment),
-      ("rustic-git-worker", Kind::Deployment),
-      ("rustic-git-web", Kind::Deployment),
-      ("rustic-git-admin", Kind::Deployment),
+      ("kloudlite-git-srv", Kind::StatefulSet),
+      ("kloudlite-git-api", Kind::Deployment),
+      ("kloudlite-git-worker", Kind::Deployment),
+      ("kloudlite-git-web", Kind::Deployment),
+      ("kloudlite-git-admin", Kind::Deployment),
   ];
   /// Per region: resolved against that region's `kube::Client`, same as `ClusterSettings`.
   pub const KNOWN_PER_REGION: &[(&str, Kind)] = &[
-      ("rustic-git-agent", Kind::DaemonSet), // namespace kube-system
-      ("rustic-git-gateway", Kind::Deployment), // namespace rustic-git-system
+      ("kloudlite-git-agent", Kind::DaemonSet), // namespace kube-system
+      ("kloudlite-git-gateway", Kind::Deployment), // namespace kloudlite-git-system
   ];
   ```
 
-- [ ] **Step 2: The AKS in-cluster client.** `rustic-git-admin` runs ON AKS (it is one of the
-  Deployments in `deploy/rustic-git.yaml`), so unlike its region calls — which go out over a
+- [ ] **Step 2: The AKS in-cluster client.** `kloudlite-git-admin` runs ON AKS (it is one of the
+  Deployments in `deploy/kloudlite-git.yaml`), so unlike its region calls — which go out over a
   mounted kubeconfig Secret to a DIFFERENT cluster — talking to its OWN cluster is the standard
   `kube::Client::try_default()` in-cluster config: a projected ServiceAccount token plus the
   cluster's own CA, both provided automatically once `automountServiceAccountToken: true` is set
-  on the pod (Task 5's `deploy/rustic-git.yaml` change) — no kubeconfig, no Secret, nothing to
+  on the pod (Task 5's `deploy/kloudlite-git.yaml` change) — no kubeconfig, no Secret, nothing to
   rotate. `bins/api/src/main.rs`'s admin startup path constructs this client once at boot,
   alongside (not instead of) the existing per-region kubeconfig-based clients, and threads it into
   `ApiState` as `aks_client: kube::Client` (or whatever the quotas plan's existing state struct
@@ -770,9 +770,9 @@ Steps:
   flight), return `RollConflict { name, ready, desired }` and DO NOTHING — this is what makes the
   settings write path's "409, nothing written" promise (spec §7) atomic: Task 6 checks
   `roll_readers`' result BEFORE persisting the settings document/CR, not after. If clear: patch
-  `spec.template.metadata.annotations["rustic-git.io/restarted-at"]` to `Utc::now().to_rfc3339()`
+  `spec.template.metadata.annotations["kloudlite-git.io/restarted-at"]` to `Utc::now().to_rfc3339()`
   via `Patch::Merge` (exactly what `kubectl rollout restart` sends — never a pod `delete`), and
-  the audit annotations `rustic-git.io/rolled-by` (the caller's name), `/rolled-at` (same
+  the audit annotations `kloudlite-git.io/rolled-by` (the caller's name), `/rolled-at` (same
   timestamp), `/roll-reason` (`RollReason::Setting(field)` → `"setting:{field}"`,
   `RollReason::Manual(reason)` → the free-text reason) on the SAME patch. Also append one line to
   the admin audit log (wherever the quotas plan's admin actions already log — reuse that
@@ -796,15 +796,15 @@ Steps:
   if `name` is not in `KNOWN` for that `scope`, `409` with `{ready, desired}` if it's still
   rolling, `200` with the patched object otherwise.
 
-- [ ] **Step 6: RBAC.** `deploy/rustic-git.yaml`'s new `Role`/`RoleBinding` (Step 1's file list) —
+- [ ] **Step 6: RBAC.** `deploy/kloudlite-git.yaml`'s new `Role`/`RoleBinding` (Step 1's file list) —
   `get`/`list`/`patch` on `deployments.apps`/`statefulsets.apps`, `resourceNames` restricted to
-  the four/five names in `KNOWN_CENTRAL`, namespace `rustic-git` (extended to `rustic-git-web`'s
+  the four/five names in `KNOWN_CENTRAL`, namespace `kloudlite-git` (extended to `kloudlite-git-web`'s
   namespace per Step 1's grep). Per region: `deploy/k3s/agent-rbac.yaml`'s existing table already
   documents every verb the AGENT's own ClusterRole holds — this is a DIFFERENT ClusterRole
-  (`rustic-git-admin`'s, defined in `deploy/k3s/api-rbac.yaml` per the quotas plan), which needs a
-  new row: `get/list/patch` on `daemonsets` (`apps`, `resourceNames: ["rustic-git-agent"]`,
-  namespace `kube-system`) and on `deployments` (`resourceNames: ["rustic-git-gateway"]`,
-  namespace `rustic-git-system`). No `delete`, no `create` — a roll only ever patches an existing
+  (`kloudlite-git-admin`'s, defined in `deploy/k3s/api-rbac.yaml` per the quotas plan), which needs a
+  new row: `get/list/patch` on `daemonsets` (`apps`, `resourceNames: ["kloudlite-git-agent"]`,
+  namespace `kube-system`) and on `deployments` (`resourceNames: ["kloudlite-git-gateway"]`,
+  namespace `kloudlite-git-system`). No `delete`, no `create` — a roll only ever patches an existing
   object.
 
 - [ ] **Step 7: Recorder tests.** `kube_test.rs`'s mock client: `roll_readers` on a workload with
@@ -843,7 +843,7 @@ Steps:
   `PUT`, before forwarding anything:
   1. Diff the incoming partial body against the current document to find which CHANGED fields are
      `Mark::Boot` (`CENTRAL_SETTING_META`, Task 2). `ssh_host`/`ssh_port` changed → readers are
-     "every region's `rustic-git-gateway`" (Task 5 Step 1's note), resolved from `crd::Region`;
+     "every region's `kloudlite-git-gateway`" (Task 5 Step 1's note), resolved from `crd::Region`;
      `log_format`/`worker_lanes` changed → readers are the fixed central list from `KNOWN_CENTRAL`.
      No boot field changed → skip to step 3.
   2. Call `roll_readers`' pre-check (ready == desired for every affected reader) with NO patch
@@ -869,10 +869,10 @@ Steps:
   `crates/core/src/settings.rs` so both write paths call the identical validator instead of two
   copies that could drift); diffs the incoming patch against the current spec using
   `CLUSTER_SETTING_META` (Task 1) for which changed fields are `Mark::Boot`
-  (`default_image`/`git_init_image`/`runtime_class` → reader `rustic-git-agent` in THIS region);
+  (`default_image`/`git_init_image`/`runtime_class` → reader `kloudlite-git-agent` in THIS region);
   pre-checks `roll_readers` for that region's `kube::Client` the same way Step 1 does — a reader
   mid-rollout is `409` with `{ready, desired}` and the CR is not touched; only then stamps
-  `rustic-git.io/updated-by`/`updated-at` annotations (per the spec's §4), server-side-applies the
+  `kloudlite-git.io/updated-by`/`updated-at` annotations (per the spec's §4), server-side-applies the
   merged spec with the admin's field manager, and on success calls `roll_readers` for real
   (`RollReason::Setting(field)`). Returns the new spec plus `status.observedGeneration` (likely
   stale immediately after the write — that staleness IS the pending marker Task 3 Step 5/Task 7
@@ -911,7 +911,7 @@ Steps:
   ```
 
 - [ ] **Step 3: Ten-version history + revert for the cluster scope.** An annotation,
-  `rustic-git.io/settings-history`, carrying the previous spec as JSON, list-capped at 10 —
+  `kloudlite-git.io/settings-history`, carrying the previous spec as JSON, list-capped at 10 —
   parallel to the central document's inline `history` array. `PUT
   /admin/settings/clusters/{region}/revert/{n}` (or a `revert: true` field on the same PUT body
   naming an index) writes that historical spec back as the new current one, itself pushed onto
@@ -939,10 +939,10 @@ Steps:
     write ONE table component, not two, since the row shape — name/description/default/env/
     stored/range/last-change/pending — is identical across scopes)
   - Modify: `web/apps/web/src/lib/api.ts` (or wherever the admin API base lives per the quotas
-    plan's `RUSTIC_GIT_ADMIN_API_URL`/`adminCall`) — add `getCentralSettings`,
+    plan's `KLOUDLITE_GIT_ADMIN_API_URL`/`adminCall`) — add `getCentralSettings`,
     `putCentralSettings`, `getClusterSettings(region)`, `putClusterSettings(region, patch)`
   - Modify: `web/apps/web/src/lib/clone.ts` — the three `host()` functions call `GET
-  /v1/settings/central` (Task 4 Step 5) instead of `process.env.RUSTIC_GIT_CLONE_HOST` etc.
+  /v1/settings/central` (Task 4 Step 5) instead of `process.env.KLOUDLITE_GIT_CLONE_HOST` etc.
 - **Interfaces:** `SettingsTable` (props: `rows: SettingRow[]`, `onSave: (changed: Partial<T>) =>
   Promise<void>`), `SettingRow = { key, description, unit, value, envValue, defaultValue, range,
   mark: "live" | "boot", readers: string[], lastChangedBy, lastChangedAt, pending: boolean }`
@@ -964,12 +964,12 @@ Steps:
 - [ ] **Step 2: Save confirmation.** Before the diff is posted, if any changed row's `mark` is
   `"boot"`: a confirmation dialog listing exactly what Task 5/6's write path is about to do —
   "Save and roll: {reader list, deduped across every changed boot field}" (spec §7's own wording).
-  If `rustic-git-srv` is among the readers (only reachable from a central `PUT`, since no cluster
+  If `kloudlite-git-srv` is among the readers (only reachable from a central `PUT`, since no cluster
   boot field's reader is ever the StatefulSet), a SECOND confirmation naming the DB-ownership-move
   risk in one sentence, pointing at CLAUDE.md's "Deploying" section language ("moves database
   ownership between nodes") rather than re-explaining the mechanism. Only live-marked changes:
   save with no dialog. A `409` from the save (a reader still rolling) surfaces the `{ready,
-  desired}` body as a plain error — "rustic-git-worker is still rolling out (2/3 ready); try
+  desired}` body as a plain error — "kloudlite-git-worker is still rolling out (2/3 ready); try
   again shortly" — no retry loop, the operator retries by hand.
 
 - [ ] **Step 3: Central tab.** Fetches `GET /admin/settings/central`, renders one `SettingsTable`,
@@ -979,7 +979,7 @@ Steps:
 - [ ] **Step 4: Clusters tab.** One region selector (reusing whatever region-list component the
   quotas plan's admin area already has for its own per-region panels) plus one `SettingsTable` per
   selected region, same fetch/diff/confirm/save shape against `/admin/settings/clusters/{region}`
-  (no second-confirmation case here — no cluster-scope boot field's reader is `rustic-git-srv`).
+  (no second-confirmation case here — no cluster-scope boot field's reader is `kloudlite-git-srv`).
 
 - [ ] **Step 5: Roll progress.** After a boot save, poll `GET /admin/workloads` (Task 5 Step 4,
   filtered client-side to the readers just rolled) every few seconds and render each as
@@ -987,14 +987,14 @@ Steps:
   "roll progress from rollout status" the task asked for, and it is the SAME poll `SettingRow`'s
   `pending` dot already needs (Step 1), so one polling hook drives both rather than two.
 
-- [ ] **Step 6: `lib/clone.ts` migration.** Replace the three `process.env.RUSTIC_GIT_*` reads
+- [ ] **Step 6: `lib/clone.ts` migration.** Replace the three `process.env.KLOUDLITE_GIT_*` reads
   with a server-side fetch to `/v1/settings/central` (Next.js server components can call this at
   render time; a short in-memory cache, a plain module-level `let cached: {value, at}`, TTL a few
   seconds, avoids hammering the api tier on every page render — NOT `LiveSettings`, that type is
   Rust-only; the lazy version here is a closure with a timestamp check, not a new dependency).
 
 - [ ] **Step 7: `bun test`.** `SettingsTable`'s diff-computation (only changed rows are sent), the
-  confirmation dialog's boot-vs-live branch and the second-confirmation-on-`rustic-git-srv` case,
+  confirmation dialog's boot-vs-live branch and the second-confirmation-on-`kloudlite-git-srv` case,
   the pending/roll-progress poll-and-clear logic with a fake timer.
 
 - [ ] **Step 8: Commit.**
@@ -1012,7 +1012,7 @@ Steps:
     matching whichever the spec's §6 implies — it says "the same area", so a third tab beside
     Central/Clusters reads more naturally than a separate URL)
 - **Interfaces:** `GET /admin/infra` → `{ tier: string, image: string, replicas: u32 }[]` plus
-  ingress hosts and each node's decommission status (`rustic-git.io/decommission-status`
+  ingress hosts and each node's decommission status (`kloudlite-git.io/decommission-status`
   annotation, per CLAUDE.md's workspaces section) — read via the k3s API (Deployments, Nodes),
   NOT stored anywhere new.
 
@@ -1058,7 +1058,7 @@ Steps:
   `LiveSettings` instead, matching how the CLAUDE.md already tells contributors to route through
   `App::election_tick`/`OwnershipStore` rather than reinvent leader election), and the live/boot
   split — a boot field's reader is one of `admin::workloads::KNOWN`, a save rolls it by patching
-  `rustic-git.io/restarted-at` (never a pod delete), and a reader still mid-rollout blocks the
+  `kloudlite-git.io/restarted-at` (never a pod delete), and a reader still mid-rollout blocks the
   save with a 409 rather than letting the document run ahead of the pods.
 
 - [ ] **Step 2: e2e.** In `tests/ws_e2e.sh` (already asserting a real agent+k3s round trip per
@@ -1074,8 +1074,8 @@ Steps:
 - [ ] **Step 3: e2e for a boot roll.** `kubectl patch clustersettings default --type merge -p
   '{"spec":{"gitInitImage":"alpine/git:2.45.3"}}'` (a harmless tag bump on an already-pinned
   image, not a functional change — the point is proving the roll, not the new image), then
-  `kubectl rollout status daemonset/rustic-git-agent -n kube-system` and assert it completes and
-  the pod template's `rustic-git.io/restarted-at` annotation is fresh; assert the same patch sent
+  `kubectl rollout status daemonset/kloudlite-git-agent -n kube-system` and assert it completes and
+  the pod template's `kloudlite-git.io/restarted-at` annotation is fresh; assert the same patch sent
   TWICE in quick succession (before the first roll finishes) yields the documented 409 on the
   second — the concrete "nothing written" proof for the boot path, distinct from Step 2's live
   path. Exit 77 on the same missing-prerequisite conditions.
@@ -1101,7 +1101,7 @@ ten-version history, revert, "last good wins" in Task 3 Step 1 / Task 4 Step 3).
 Task 7. §6 Read-only infrastructure view → Task 8 (reusing Task 5's workload lister). **§7 A boot
 setting change rolls its readers → Task 5 (the roll mechanism, `KNOWN`, RBAC, manual route) and
 Task 6 Steps 1–2 (the settings write paths' precheck-then-write-then-roll sequencing); the UI side
-(confirmation, second confirmation on `rustic-git-srv`, roll progress) → Task 7 Steps 2/5.** Rules
+(confirmation, second confirmation on `kloudlite-git-srv`, roll progress) → Task 7 Steps 2/5.** Rules
 → the Global Constraints block, enforced concretely by: env-then-stored-then-store order (Task 2
 Step 2/3's `merged_with`), next-beat-never-mid-operation (Task 3 Step 3's per-beat reads, never a
 running operation's parameter), last-good-wins (Task 3 Step 1, Task 4 Step 3), range validation
@@ -1117,18 +1117,18 @@ write-path and roll-mechanism recorder), Task 9 Step 2 (live).
 ## Ambiguities resolved while planning
 
 - The spec's §7 workload list (and this update's own task instructions, which echo it) names
-  `rustic-git-gateway` under "central" and separately lists "the region gateway" per region — read
-  against `deploy/k3s/gateway.yaml` (one Deployment per region, namespace `rustic-git-system`,
-  hostPort 80 per pool node) and `deploy/rustic-git.yaml` (which has no gateway Deployment at
-  all), there is only ONE `rustic-git-gateway` kind and it is exclusively per-region. Task 5 Step 1
+  `kloudlite-git-gateway` under "central" and separately lists "the region gateway" per region — read
+  against `deploy/k3s/gateway.yaml` (one Deployment per region, namespace `kloudlite-git-system`,
+  hostPort 80 per pool node) and `deploy/kloudlite-git.yaml` (which has no gateway Deployment at
+  all), there is only ONE `kloudlite-git-gateway` kind and it is exclusively per-region. Task 5 Step 1
   resolves this: `admin::workloads::KNOWN_CENTRAL` has no gateway row; the per-region row IS
-  `rustic-git-gateway`, and it is what `ssh_host`/`ssh_port`'s boot-reader entries in the central
+  `kloudlite-git-gateway`, and it is what `ssh_host`/`ssh_port`'s boot-reader entries in the central
   knob table actually name (a central document with a per-region reader — Task 6 Step 1 fans the
   roll out to every region rather than assuming one client covers it).
 - The spec's §5 says central binaries expose "the loaded version on their `/api/health`", but no
   `/api/health` route exists anywhere in the Rust tiers — the actual route, everywhere, is
   `/healthz` (`crates/core/src/metrics.rs`, `bins/gateway/src/tunnel.rs:142`,
-  `deploy/rustic-git.yaml`). Read this as describing the health-check concept, not a literal new
+  `deploy/kloudlite-git.yaml`). Read this as describing the health-check concept, not a literal new
   path; Task 4 Step 6 extends the existing `/healthz` body instead of adding a second route.
 - `WS_MAX_PER_OWNER` is read by the API tier (`crates/workspaces/src/model.rs:34`), not the
   agent, but the spec's cluster-scope table lists it under `ClusterSettings` — kept as written
@@ -1142,7 +1142,7 @@ write-path and roll-mechanism recorder), Task 9 Step 2 (live).
   instruction to un-cache "every... tunable, including the 'cached once' ones," but are marked
   `// ponytail: unread until a caller needs it` rather than wired to invented behavior; wiring
   them is a follow-up once the feature they'd gate actually exists.
-- `RUSTIC_GIT_CLONE_HOST`/`SSH_HOST`/`SSH_PORT`/`REGISTRY_HOST` are consumed by the Next.js web
+- `KLOUDLITE_GIT_CLONE_HOST`/`SSH_HOST`/`SSH_PORT`/`REGISTRY_HOST` are consumed by the Next.js web
   process, which has no beat and no `LiveSettings` handle of its own (that type is Rust-only) —
   resolved by having web read them through a new `GET /v1/settings/central` route (Task 4 Step 5)
   at render time with a short in-memory cache, rather than inventing a JS port of `ArcSwap`.

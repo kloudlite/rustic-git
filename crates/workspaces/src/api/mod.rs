@@ -9,13 +9,13 @@
 //!
 //! Auth mirrors `crates/api`'s `caller()`: a Bearer JWT identifies the owner. Nothing superadmin-
 //! only lives on this router: region creation, quota decisions and every cross-owner surface are
-//! in `admin` (`/admin/*`, its own process under `RUSTIC_GIT_API_ROLE=admin`), which refuses a
+//! in `admin` (`/admin/*`, its own process under `KLOUDLITE_GIT_API_ROLE=admin`), which refuses a
 //! token without the `superadmin` claim before routing. Here the claim is read only by
 //! `may_act_on`'s third arm, and only for list/stop/delete/get — every ALLOCATING path (create,
 //! clone, restore, push) decides its new object's owner through `scope::may_allocate_for`
 //! instead, which never reads it: a superadmin is a claim, never an owner, and must not be able
 //! to spend a team's quota without being a member. The static email allowlist this used to carry
-//! is gone; `RUSTIC_GIT_WORKSPACES_ADMINS` is a bootstrap for the directory's list and nothing
+//! is gone; `KLOUDLITE_GIT_WORKSPACES_ADMINS` is a bootstrap for the directory's list and nothing
 //! reads it here.
 //!
 //! Split across `scope` (who the caller is, what they may act on), `workspaces`, `environments`,
@@ -37,9 +37,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use rustic_git_core::httpx::bearer_token;
-use rustic_git_core::jwt::Jwt;
-use rustic_git_core::settings::LiveSettings;
+use kloudlite_git_core::httpx::bearer_token;
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_core::settings::LiveSettings;
 use crate::settings::AgentSettings;
 use std::sync::Arc;
 
@@ -107,7 +107,7 @@ pub struct OwnerMaterial {
 
 /// A person's standing in a team, as the platform directory records it.
 ///
-/// A local enum rather than `rustic_git_pulls::directory::Role` for the same reason the whole
+/// A local enum rather than `kloudlite_git_pulls::directory::Role` for the same reason the whole
 /// `Directory` trait is local: this crate must not depend on the mongo-backed one just for a
 /// lookup. `Ord` is declared by the variant ORDER — `Member < Admin < Owner` — so `>= Admin` is
 /// the rank rule, and there is no second rank table to fall out of step with the first.
@@ -119,7 +119,7 @@ pub enum TeamRole {
 }
 
 /// The four lookups this api makes against the platform directory, kept behind a trait rather
-/// than a direct dependency on `rustic_git_pulls::directory::Directory` (mongo-backed, heavy to
+/// than a direct dependency on `kloudlite_git_pulls::directory::Directory` (mongo-backed, heavy to
 /// construct) so unit tests can supply a stub instead. Production wires `Directory` in via an
 /// adapter in `bins/api`.
 ///
@@ -195,7 +195,7 @@ pub struct ApiState {
     /// `None` when no kubeconfig/in-cluster config is available: every workspace, environment and
     /// volume route answers 503 rather than not existing.
     pub kube: Option<kube::Client>,
-    /// The AKS in-cluster client — `rustic-git-admin`'s OWN cluster, distinct from `kube` above
+    /// The AKS in-cluster client — `kloudlite-git-admin`'s OWN cluster, distinct from `kube` above
     /// (a region's k3s, reached over a mounted kubeconfig). Only `admin::workloads`' central-scope
     /// calls use this; every CRD (workspaces, environments, regions, quotas) still lives in a
     /// region cluster and keeps reading `kube`. `None` off-AKS (dev, tests): central rolls answer
@@ -206,7 +206,7 @@ pub struct ApiState {
     /// `.os` object-store handle directly (this tier can read the object store anywhere, matching
     /// `_catalog`/`/api/{owner}/images` — only the write is peer-only). `None` in dev and in
     /// tests: workspaces still create without a key, and the central settings route answers 503.
-    pub keys: Option<Arc<rustic_git_storage::store::Store>>,
+    pub keys: Option<Arc<kloudlite_git_storage::store::Store>>,
     /// This tier's own region's `default_replicas`/`quota_gb_ceiling` — Task 3 gives the agent
     /// its own handle from a `ClusterSettings` reflector; this one seeds from env only, since
     /// `/v1` has no per-region watch of its own yet. Read-mostly today (no refresh beat wired
@@ -218,17 +218,17 @@ pub struct ApiState {
     /// /api/admin/settings`, Task 4). `None` in dev/tests: `GET /admin/settings/central` still
     /// answers from `keys`' object store directly, only the `PUT` needs this.
     pub peer: Option<admin::PeerClient>,
-    /// ClickHouse (ClickStack's), holding the collector's `default` telemetry and our own `rustic`
-    /// database. `None` when `RUSTIC_GIT_CLICKHOUSE_URL` is unset — a supported configuration, not
+    /// ClickHouse (ClickStack's), holding the collector's `default` telemetry and our own `kloudlite`
+    /// database. `None` when `KLOUDLITE_GIT_CLICKHOUSE_URL` is unset — a supported configuration, not
     /// a degraded one: history routes answer `503 history unavailable` and the console renders a
     /// flat placeholder. Only the ADMIN process ever sets this; the user role never constructs one,
-    /// which is what makes "the admin process is the only writer of `rustic`" a fact about the
+    /// which is what makes "the admin process is the only writer of `kloudlite`" a fact about the
     /// binary rather than a convention.
     pub history: Option<Arc<crate::history::History>>,
     /// Redis, for the `history` consumer group only — no request path reads it. `None` in dev and
     /// wherever the cache is disabled; the consumer then never spawns, which costs the activity
     /// feed its PR half and nothing else (CLAUDE.md: the stream is a nudge, never the record).
-    pub cache: Option<Arc<rustic_git_storage::cache::Cache>>,
+    pub cache: Option<Arc<kloudlite_git_storage::cache::Cache>>,
 }
 
 impl ApiState {
@@ -266,7 +266,7 @@ impl ApiState {
         self
     }
 
-    pub fn with_keys(mut self, keys: Arc<rustic_git_storage::store::Store>) -> Self {
+    pub fn with_keys(mut self, keys: Arc<kloudlite_git_storage::store::Store>) -> Self {
         self.keys = Some(keys);
         self
     }
@@ -276,7 +276,7 @@ impl ApiState {
         self
     }
 
-    pub fn with_cache(mut self, cache: Arc<rustic_git_storage::cache::Cache>) -> Self {
+    pub fn with_cache(mut self, cache: Arc<kloudlite_git_storage::cache::Cache>) -> Self {
         self.cache = Some(cache);
         self
     }
@@ -738,7 +738,7 @@ pub(crate) fn rid(prefix: &str) -> String {
     use rand::RngCore;
     let mut b = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut b);
-    format!("{prefix}-{}", rustic_git_core::hex(&b))
+    format!("{prefix}-{}", kloudlite_git_core::hex(&b))
 }
 
 /// The owner identity for everything workspace/environment/volume-shaped is the USERNAME,
@@ -884,7 +884,7 @@ pub(crate) fn not_ready() -> Response {
 /// `..` or an encoded slash would re-route the request to any browse route under the caller's
 /// own owner. The same rule the create path applies to the names it mints.
 pub(crate) fn check_path_segment(s: &str) -> Result<(), Response> {
-    match rustic_git_storage::store::valid_segment(s) {
+    match kloudlite_git_storage::store::valid_segment(s) {
         true => Ok(()),
         false => Err((StatusCode::BAD_REQUEST, "invalid name").into_response()),
     }
@@ -914,7 +914,7 @@ mod tests {
     /// through to collect the environment-side policy.
     #[test]
     fn a_404_from_the_workspace_delete_is_not_an_error() {
-        let missing = kube::Error::Api(Box::new(kube::core::Status::failure("workspaces.rustic-git.io \"ws-1\" not found", "NotFound").with_code(404)));
+        let missing = kube::Error::Api(Box::new(kube::core::Status::failure("workspaces.kloudlite-git.io \"ws-1\" not found", "NotFound").with_code(404)));
         assert!(super::is_missing(&missing));
         let other = kube::Error::Api(Box::new(kube::core::Status::failure("conflict", "Conflict").with_code(409)));
         assert!(!super::is_missing(&other));

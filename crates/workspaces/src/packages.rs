@@ -88,7 +88,7 @@ pub fn hash(pin: &str, packages: &[String]) -> String {
 pub fn expression(pin: &str, packages: &[String]) -> String {
     let paths: Vec<String> = packages.iter().map(|p| format!("pkgs.{p}")).collect();
     format!(
-        "let pkgs = import (builtins.getFlake \"{pin}\") {{ }}; in pkgs.buildEnv {{ name = \"rustic-workspace-env\"; paths = [ {} ]; }}",
+        "let pkgs = import (builtins.getFlake \"{pin}\") {{ }}; in pkgs.buildEnv {{ name = \"kloudlite-workspace-env\"; paths = [ {} ]; }}",
         paths.join(" ")
     )
 }
@@ -138,7 +138,7 @@ mod tests {
         let e = expression("github:NixOS/nixpkgs/aaaa", &["go".into(), "python3Packages.requests".into()]);
         assert_eq!(
             e,
-            "let pkgs = import (builtins.getFlake \"github:NixOS/nixpkgs/aaaa\") { }; in pkgs.buildEnv { name = \"rustic-workspace-env\"; paths = [ pkgs.go pkgs.python3Packages.requests ]; }"
+            "let pkgs = import (builtins.getFlake \"github:NixOS/nixpkgs/aaaa\") { }; in pkgs.buildEnv { name = \"kloudlite-workspace-env\"; paths = [ pkgs.go pkgs.python3Packages.requests ]; }"
         );
         let empty = expression("github:NixOS/nixpkgs/aaaa", &[]);
         assert!(empty.contains("paths = [  ];"));

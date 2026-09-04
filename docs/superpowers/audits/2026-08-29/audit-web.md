@@ -1,7 +1,7 @@
 # Web app audit — `web/apps/web` (Next.js 16.3.1, React 19.2, app router)
 
 Scope: every file under `src/` plus `public/install.sh`, `next.config.ts`, `tsconfig.json`, `eslint.config.mjs`,
-`deploy/rustic-git-web.yaml`, and the Rust handlers the web calls where a claim needed checking
+`deploy/kloudlite-git-web.yaml`, and the Rust handlers the web calls where a claim needed checking
 (`bins/server/src/browse_api/repo.rs`, `crates/api/src/teams.rs`). Toolchain state at audit time:
 `bun run lint` clean, `bun test` 35/35 pass (7 files), `tsc --noEmit` fails on two stale `.next/**/types` entries (see W-25).
 

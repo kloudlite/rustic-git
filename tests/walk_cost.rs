@@ -1,14 +1,14 @@
 mod common;
-use rustic_git_core::pktline;
-use rustic_git_git::protocol::{receive, upload};
+use kloudlite_git_core::pktline;
+use kloudlite_git_git::protocol::{receive, upload};
 use std::io::Cursor;
 use std::sync::atomic::Ordering;
 
 use common::pack_of;
 
 fn push(
-    s: &std::sync::Arc<rustic_git_storage::store::Store>,
-    repo: &rustic_git_storage::store::Repo,
+    s: &std::sync::Arc<kloudlite_git_storage::store::Store>,
+    repo: &kloudlite_git_storage::store::Repo,
     old: &str,
     new: &str,
     pack: Vec<u8>,
@@ -24,8 +24,8 @@ fn push(
 }
 
 fn fetch(
-    s: &std::sync::Arc<rustic_git_storage::store::Store>,
-    repo: &rustic_git_storage::store::Repo,
+    s: &std::sync::Arc<kloudlite_git_storage::store::Store>,
+    repo: &kloudlite_git_storage::store::Repo,
     lines: &[String],
 ) -> String {
     let mut req = Vec::new();

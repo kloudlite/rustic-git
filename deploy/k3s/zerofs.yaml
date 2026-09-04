@@ -2,7 +2,7 @@
 # every pool node's agent mounts it at `{pool}/homes` (bins/agent/src/lib.rs, mount_homes). This
 # replaces the old per-node btrfs home volume with one region-shared store.
 #
-# Namespace `rustic-git-system` already exists (created by gateway.yaml) — not redeclared here.
+# Namespace `kloudlite-git-system` already exists (created by gateway.yaml) — not redeclared here.
 #
 # SINGLE REPLICA ON PURPOSE. ZeroFS's metadata tree is SlateDB underneath (LSM tree on the object
 # store), and SlateDB is single-writer with epoch fencing — the exact invariant the repo databases
@@ -38,7 +38,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: zerofs-config
-  namespace: rustic-git-system
+  namespace: kloudlite-git-system
 data:
   zerofs.toml: |
     [cache]
@@ -48,7 +48,7 @@ data:
 
     [storage]
     # Azure Blob, not S3: this platform's object storage IS the blob account every other tier
-    # already writes to (`RUSTIC_GIT_S3_URL=az://rustic-git`), so ZeroFS points at the same
+    # already writes to (`KLOUDLITE_GIT_S3_URL=az://kloudlite-git`), so ZeroFS points at the same
     # account. `azure://{container}/{prefix}` — the prefix keeps the homes LSM tree in its own
     # keyspace inside a container the rest of the platform also uses, so no container has to be
     # created by hand and nothing here can collide with registry blobs or repo databases.
@@ -69,7 +69,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: zerofs
-  namespace: rustic-git-system
+  namespace: kloudlite-git-system
   labels:
     app: zerofs
 spec:
@@ -163,7 +163,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: zerofs
-  namespace: rustic-git-system
+  namespace: kloudlite-git-system
 spec:
   selector:
     app: zerofs

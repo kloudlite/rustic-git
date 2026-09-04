@@ -493,7 +493,7 @@ fn write_pack(
     // handle to the server's settings and the SSH path reaches here without one. Thread
     // `CentralSettings.max_body` down from both callers when a live change here matters.
     let mut capped =
-        Capped { inner: input, left: rustic_git_core::httpx::max_body() as u64, hit_cap: false };
+        Capped { inner: input, left: kloudlite_git_core::httpx::max_body() as u64, hit_cap: false };
     let outcome = match gix_pack::Bundle::write_to_directory(
         &mut capped,
         Some(&repo.pack_dir),

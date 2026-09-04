@@ -21,7 +21,7 @@ UI, pinned to one nixpkgs revision per agent. Each node runs a **Nix store and d
 host** (`/nix`, installed and run by the agent DaemonSet — a second container, not a host
 provisioning step). On every pass — and therefore at every startup, restore, clone and move —
 the Workspace reconciler hashes the spec's list, realises anything missing through the daemon,
-and builds **one profile per workspace** — a `buildEnv` published as `/nix/var/rustic/profiles/{id}/current`, under one indirect GC root — *before* the pod is (re)started, the same way the subvolume
+and builds **one profile per workspace** — a `buildEnv` published as `/nix/var/kloudlite/profiles/{id}/current`, under one indirect GC root — *before* the pod is (re)started, the same way the subvolume
 must exist before the pod. The pod mounts `/nix/store` and its own profile **read-only** through
 a local PersistentVolume (never a hostPath — PSA `baseline` stays), and the profile's `bin` is on
 `PATH`. Changing the list rebuilds the profile and swaps that link atomically; the running pod
@@ -42,7 +42,7 @@ live outside the spec). Either can be added later without changing anything belo
 
 | Component | Where | What it does |
 |---|---|---|
-| `nix-daemon` container | `rustic-git-agent` DaemonSet, kube-system, one per node | Runs `nix-daemon` from the `nixos/nix` image with the host's `/nix` mounted. The store, the SQLite db, the daemon socket and every profile live on the host disk under `/nix`; the container is stateless. |
+| `nix-daemon` container | `kloudlite-git-agent` DaemonSet, kube-system, one per node | Runs `nix-daemon` from the `nixos/nix` image with the host's `/nix` mounted. The store, the SQLite db, the daemon socket and every profile live on the host disk under `/nix`; the container is stateless. |
 | Nix client in the agent image | `bins/agent` image | `nix` CLI, talking to the daemon over `/nix/var/nix/daemon-socket/socket` (both containers mount host `/nix`). The agent never runs a build itself: the daemon does, as `nixbld` users, sandboxed. |
 | `packages` module | `crates/workspaces/src/packages.rs` | Pure: validates attribute names, renders the `buildEnv` expression, derives the profile hash. Testable without Nix. |
 | Profile step in the Workspace reconciler | `bins/agent/src/controller.rs` | Between "volume materialized" and "pod applied": ping the daemon, realise, then link. Writes `status.packages`. |
@@ -61,7 +61,7 @@ status:
   packages:
     observed: ["nodejs_20", "go"]            # the list the profile on disk was built from
     observedHash: "sha256:…"                 # of (nixpkgs, sorted packages) — what the profile IS
-    profile: "/nix/var/rustic/profiles/ws-…"
+    profile: "/nix/var/kloudlite/profiles/ws-…"
     nixpkgs: "github:NixOS/nixpkgs/<rev>"    # the pin the profile was built with
   conditions:
     - type: PackagesReady   # True/Built | False/Building | False/BuildFailed | False/NoNix
@@ -86,10 +86,10 @@ status:
 ```
 /nix/store/…                                        the store
 /nix/var/nix/db, daemon-socket/socket               Nix's own
-/nix/var/nix/gcroots/rustic-profiles                → /nix/var/rustic/profiles  (the one GC root)
-/nix/var/rustic/profiles/{ws-id}/                   the DIRECTORY the pod mounts
-/nix/var/rustic/profiles/{ws-id}/current            → /nix/store/…-ws-{id}-env
-/nix/var/rustic/profiles/{ws-id}/current.building   the in-flight build, renamed over `current`
+/nix/var/nix/gcroots/kloudlite-profiles                → /nix/var/kloudlite/profiles  (the one GC root)
+/nix/var/kloudlite/profiles/{ws-id}/                   the DIRECTORY the pod mounts
+/nix/var/kloudlite/profiles/{ws-id}/current            → /nix/store/…-ws-{id}-env
+/nix/var/kloudlite/profiles/{ws-id}/current.building   the in-flight build, renamed over `current`
 ```
 
 The profile is a directory, not a bare link, because the kubelet resolves a `subPath` **once** at
@@ -99,7 +99,7 @@ the directory and the swap happens one level below it, inside what is already mo
 The build runs `--no-link --print-out-paths` and the agent makes the `current.building` symlink
 itself: `nix build -o` registers an auto-root pointing at the `.building` *path*, which the
 publish rename orphans — the live profile would be collectable. Rooting is instead one indirect
-root, `/nix/var/nix/gcroots/rustic-profiles → /nix/var/rustic/profiles`, created at agent boot, so
+root, `/nix/var/nix/gcroots/kloudlite-profiles → /nix/var/kloudlite/profiles`, created at agent boot, so
 every profile under it is a root for as long as it exists. Deleting the workspace removes the
 whole profile directory (the Volume finalizer already runs on the owning node); the next GC frees
 whatever nothing else references.
@@ -161,7 +161,7 @@ Two additional mounts on the workspace container, both `readOnly: true`, from on
 | subPath (under host `/nix`) | mountPath | why |
 |---|---|---|
 | `store` | `/nix/store` | profile symlinks are absolute into the store |
-| `var/rustic/profiles/{id}` | `/nix/profile` | the workspace's own profile DIRECTORY only — not other workspaces', not the daemon socket |
+| `var/kloudlite/profiles/{id}` | `/nix/profile` | the workspace's own profile DIRECTORY only — not other workspaces', not the daemon socket |
 
 Environment: `PATH=/nix/profile/current/bin:$PATH` (prepended via the container's `env`; the
 image's own `PATH` is unknown, so the entrypoint's `PATH` is extended by `sh -c` only when the

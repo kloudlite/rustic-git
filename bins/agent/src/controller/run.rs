@@ -6,12 +6,12 @@ use super::{reconcile_environment, reconcile_volume, reconcile_workspace, Ctx, D
 use crate::{binding, claim, snapshot};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{Node, Pod};
-use rustic_git_workspaces::k8s;
+use kloudlite_git_workspaces::k8s;
 use futures::StreamExt;
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::watcher;
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd;
+use kloudlite_git_workspaces::crd;
 use std::sync::Arc;
 
 /// Map a namespaced child back to its CLUSTER-SCOPED owner.
@@ -496,8 +496,8 @@ mod tests {
     use super::*;
     use crate::testsupport::test_ctx;
     use kube::runtime::reflector::{store, ObjectRef};
-    use rustic_git_workspaces::kube_test::Route;
-    use rustic_git_workspaces::settings::AgentSettings;
+    use kloudlite_git_workspaces::kube_test::Route;
+    use kloudlite_git_workspaces::settings::AgentSettings;
 
     /// I3/Task 3 Step 6: an interval read fresh each loop turn — never a `tokio::time::interval`
     /// captured at spawn — takes effect on the NEXT sleep, and never cuts a sleep already in
@@ -506,10 +506,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn spawn_sync_picks_up_a_changed_interval_on_the_next_tick_not_mid_sleep() {
         let tmp = tempfile::tempdir().unwrap();
-        let empty_workspaces = serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "items": []});
+        let empty_workspaces = serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "items": []});
         let routes = vec![Route {
             method: "GET",
-            path: "/apis/rustic-git.io/v1alpha1/workspaces".into(),
+            path: "/apis/kloudlite-git.io/v1alpha1/workspaces".into(),
             status: 200,
             body: empty_workspaces,
         }];
@@ -542,7 +542,7 @@ mod tests {
 
     fn ws(name: &str) -> crd::Workspace {
         serde_json::from_value(serde_json::json!({
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": name, "uid": format!("{name}-uid")},
             "spec": {"owner": "alice", "team": "", "name": name, "region": "r1",
                      "image": "nginx:alpine", "desiredState": "running", "packages": []},

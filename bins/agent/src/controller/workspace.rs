@@ -12,9 +12,9 @@ use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd::{self, DesiredState};
-use rustic_git_workspaces::k8s;
-use rustic_git_workspaces::model;
+use kloudlite_git_workspaces::crd::{self, DesiredState};
+use kloudlite_git_workspaces::k8s;
+use kloudlite_git_workspaces::model;
 use std::sync::Arc;
 
 /// `ATTACHED_ENV_LABEL` is `spec.attachedEnvironment`'s listing view, same rule as `heal_labels`
@@ -72,7 +72,7 @@ async fn ensure_profile(
     prev: &mut crd::WorkspaceStatus,
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
-    use rustic_git_workspaces::packages;
+    use kloudlite_git_workspaces::packages;
     // An empty list still builds: the pod mounts `{profiles_dir}/{id}` as a subPath of the
     // READ-ONLY `nix` hostPath, so a missing directory is an unmountable pod, not a pod without
     // extras. An empty
@@ -1033,7 +1033,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // Before the pod, never after: a container started on a stale profile is a workspace whose
     // tools silently disagree with its spec.
     if w.spec.desired_state == DesiredState::Running {
-        // Per-WORKSPACE, matching the pod's `var/rustic/profiles/{workspace}` subPath: packages are
+        // Per-WORKSPACE, matching the pod's `var/kloudlite/profiles/{workspace}` subPath: packages are
         // `spec.packages` of THIS workspace, and two clones of one volume may ask for different
         // ones. Keyed by the shared volume, a clone mounts a profile that was never built for it.
         if let Some(action) = ensure_profile(w, &w.name_any(), gen, &mut prev, ctx).await? {

@@ -1,11 +1,11 @@
 [package]
-name = "rustic-git-core"
+name = "kloudlite-git-core"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "rustic_git_core"
+name = "kloudlite_git_core"
 
 [dependencies]
 tracing = { workspace = true }

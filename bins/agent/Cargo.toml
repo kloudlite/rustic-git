@@ -1,15 +1,15 @@
 [package]
-name = "rustic-git-agent-bin"
+name = "kloudlite-git-agent-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "rustic_git_agent"
+name = "kloudlite_git_agent"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustic-git-agent"
+name = "kloudlite-git-agent"
 path = "src/main.rs"
 
 [dependencies]
@@ -18,10 +18,10 @@ chrono = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
-rustic-git-core = { path = "../../crates/core" }
+kloudlite-git-core = { path = "../../crates/core" }
 # For `install_crypto_provider` only: this binary opens TLS to the API server through kube.
-rustic-git-storage = { path = "../../crates/storage" }
-rustic-git-workspaces = { path = "../../crates/workspaces" }
+kloudlite-git-storage = { path = "../../crates/storage" }
+kloudlite-git-workspaces = { path = "../../crates/workspaces" }
 kube = { workspace = true }
 # The guarded pin-clear patch in peer.rs's `release_dead_volumes` (test-then-replace, so a
 # survivor's takeover landing between list and patch is refused rather than clobbered) — already
@@ -52,7 +52,7 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
 # The mocked `kube::Client` reconcile.rs drives the controller against — no cluster in `cargo test`.
-rustic-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
+kloudlite-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
 base64 = { workspace = true }
 # In the tree already via axum; peer.rs's router is driven directly with `oneshot`.
 tower = { workspace = true }

@@ -25,7 +25,7 @@ mod settings;
 /// not a gate, so a `put` failure is logged and swallowed rather than turned into a 5xx for a
 /// write that already landed. `s.keys` unset (dev without an object store configured) means
 /// there is nowhere to log to and nothing to block either, so this is a silent no-op then too —
-/// every deployed admin process has `RUSTIC_GIT_S3_URL` wired (`deploy/rustic-git.yaml`).
+/// every deployed admin process has `KLOUDLITE_GIT_S3_URL` wired (`deploy/kloudlite-git.yaml`).
 pub(crate) async fn audit(
     s: &ApiState,
     actor: &str,
@@ -233,7 +233,7 @@ async fn create_region(
         action,
         &body.id,
         Some(note.clone()),
-        api.patch(&body.id, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&r)).await.map_err(kube_err),
+        api.patch(&body.id, &PatchParams::apply("kloudlite-git-api").force(), &Patch::Apply(&r)).await.map_err(kube_err),
     )
     .await?;
     audit(&s, &c.name, action, &body.id, Some(note), "ok").await;

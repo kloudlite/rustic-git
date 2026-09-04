@@ -1,6 +1,6 @@
 # Peer replication listener policy.
 #
-# Every `rustic-git-agent` pod carries `app: rustic-git-agent` (agent-daemonset.yaml's own pod
+# Every `kloudlite-git-agent` pod carries `app: kloudlite-git-agent` (agent-daemonset.yaml's own pod
 # label) and a real routable pod IP — that IP is reachable from every pod in the cluster,
 # workspace pods included, until this policy is applied. `WS_PEER_SECRET` (see the daemonset)
 # is what authenticates a request that does arrive; this NetworkPolicy is what stops the request
@@ -26,14 +26,14 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: rustic-git-agent
+      app: kloudlite-git-agent
   policyTypes:
     - Ingress
   ingress:
     - from:
         - podSelector:
             matchLabels:
-              app: rustic-git-agent
+              app: kloudlite-git-agent
       ports:
         - protocol: TCP
           port: 8444
@@ -48,7 +48,7 @@ spec:
               kubernetes.io/metadata.name: kube-system
           podSelector:
             matchLabels:
-              app: rustic-git-otel-agent
+              app: kloudlite-git-otel-agent
       ports:
         - protocol: TCP
           port: 9464

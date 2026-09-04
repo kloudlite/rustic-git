@@ -86,7 +86,7 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
             // Working copies RUNNING on this node, from this node's own objects — the same
             // `status.nodeName` the controller converges on, so the gauge and the placement can
             // never disagree.
-            let api = kube::Api::<rustic_git_workspaces::crd::Workspace>::all(client.clone());
+            let api = kube::Api::<kloudlite_git_workspaces::crd::Workspace>::all(client.clone());
             let params = kube::api::ListParams::default().fields(&format!("status.nodeName={node}"));
             match api.list(&params).await {
                 Ok(list) => {
@@ -96,8 +96,8 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
                         .filter(|w| {
                             matches!(
                                 w.status.as_ref().map(|s| s.phase),
-                                Some(rustic_git_workspaces::crd::Phase::Ready)
-                                    | Some(rustic_git_workspaces::crd::Phase::Running)
+                                Some(kloudlite_git_workspaces::crd::Phase::Ready)
+                                    | Some(kloudlite_git_workspaces::crd::Phase::Running)
                             )
                         })
                         .count();

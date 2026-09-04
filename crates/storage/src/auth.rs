@@ -224,10 +224,10 @@ pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) 
     public_read || auth_owner == Some(repo_owner)
 }
 
-/// Header credential parsing lives in `rustic-git-core`, next to the `axum::http::HeaderMap`
+/// Header credential parsing lives in `kloudlite-git-core`, next to the `axum::http::HeaderMap`
 /// decoders that share its rules; `storage` re-exports rather than keeping a twin that could
 /// drift.
-pub use rustic_git_core::httpx::{scheme, user_names};
+pub use kloudlite_git_core::httpx::{scheme, user_names};
 
 #[cfg(test)]
 mod tests {

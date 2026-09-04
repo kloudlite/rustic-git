@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
-pub const PROFILES_DIR: &str = "/nix/var/rustic/profiles";
+pub const PROFILES_DIR: &str = "/nix/var/kloudlite/profiles";
 
 // The root is always passed in (`Ctx::profiles_dir`) rather than read from a global: a process-wide
 // override is a test that can reach the node's real /nix, and one that races every other test.
@@ -34,7 +34,7 @@ pub fn ensure_gcroot() {
         tracing::warn!("no /nix/var/nix/gcroots: profiles are not rooted and a GC may collect them");
         return;
     }
-    let link = gcroots.join("rustic-profiles");
+    let link = gcroots.join("kloudlite-profiles");
     if std::fs::read_link(&link).is_ok() {
         return;
     }

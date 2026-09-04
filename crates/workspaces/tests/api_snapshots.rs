@@ -1,12 +1,12 @@
 //! `/v1` push/history/refs served from the snapshot model — the only model there is.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState};
-use rustic_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{router, ApiState};
+use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/rustic-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite-git.io/v1alpha1";
 const NODE: &str = "node-a";
 
 struct Server {
@@ -17,8 +17,8 @@ struct Server {
 
 fn placed_ws(name: &str, owner: &str) -> Value {
     json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {
             "owner": owner, "team": "", "name": name, "region": "centralindia", "image": "nginx:alpine",
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -34,19 +34,19 @@ fn placed_ws_with_head(name: &str, owner: &str, head: &str) -> Value {
 }
 
 fn no_workspaces() -> Route {
-    get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
+    get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
 }
 
 /// Same, so a workspace-only test's environment listing (`quota::usage` reads both kinds) doesn't
 /// 404.
 fn no_environments() -> Route {
-    get(format!("{API}/environments"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
+    get(format!("{API}/environments"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
 }
 
 fn placed_env(name: &str, owner: &str) -> Value {
     json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
-        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Environment",
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "services": [],
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -63,7 +63,7 @@ fn snapshot(name: &str, volume: &str, owner: &str, worktree: &str, parent: &str,
 /// a legacy row with no state recorded, which the history rows must still show as `null`.
 fn snapshot_with_state(name: &str, volume: &str, owner: &str, worktree: &str, parent: &str, phase: &str, state: Option<Value>) -> Value {
     let mut v = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name},
         "spec": {"volume": volume, "owner": owner, "worktree": worktree, "parent": parent},
         "status": {"phase": phase},
@@ -96,7 +96,7 @@ fn quota_gate_routes() -> Vec<Route> {
     vec![
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/volumes"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": []})),
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
     ]
@@ -121,8 +121,8 @@ async fn server(routes: Vec<Route>) -> Server {
 async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -144,10 +144,10 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     assert_eq!(req["spec"]["message"], "checkpoint");
     assert_eq!(req["spec"]["owner"], "karthik");
     assert_eq!(req["status"]["phase"], "working");
-    // H2: the label is a VIEW of `spec.volume`/`spec.owner` — the e2e's `-l rustic-git.io/volume=`
+    // H2: the label is a VIEW of `spec.volume`/`spec.owner` — the e2e's `-l kloudlite-git.io/volume=`
     // selects on exactly this, and nothing else stamps it.
-    assert_eq!(req["metadata"]["labels"]["rustic-git.io/volume"], "ws-1");
-    assert_eq!(req["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
+    assert_eq!(req["metadata"]["labels"]["kloudlite-git.io/volume"], "ws-1");
+    assert_eq!(req["metadata"]["labels"]["kloudlite-git.io/owner"], "karthik");
     // Owned by the Volume: the record is garbage-collected with it instead of outliving a deleted workspace.
     assert_eq!(req["metadata"]["ownerReferences"][0]["kind"], "Volume");
     assert_eq!(req["metadata"]["ownerReferences"][0]["name"], "ws-1");
@@ -163,8 +163,8 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
 async fn a_push_snapshot_is_owned_by_the_volume_not_the_workspace() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -193,7 +193,7 @@ async fn a_push_snapshot_is_owned_by_the_volume_not_the_workspace() {
 async fn push_404s_with_a_sentence_when_the_volume_is_missing() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         not_found(format!("{API}/volumes/ws-1")),
     ];
     let s = server(routes).await;
@@ -216,8 +216,8 @@ async fn push_404s_with_a_sentence_when_the_volume_is_missing() {
 async fn first_push_of_a_workspace_has_no_parent() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -243,7 +243,7 @@ async fn history_lists_snapshot_crs_in_parent_order() {
     tip["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [tip, root]}),
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [tip, root]}),
     )];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -272,7 +272,7 @@ async fn history_rows_carry_the_frozen_state_or_null() {
     without_state["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [with_state, without_state]}),
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [with_state, without_state]}),
     )];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -300,7 +300,7 @@ async fn refs_names_the_newest_snapshot_as_main() {
     tip["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [root, tip]}),
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [root, tip]}),
     )];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -321,7 +321,7 @@ async fn refs_names_the_newest_snapshot_as_main() {
 async fn history_of_an_unknown_volume_is_not_found() {
     let routes = vec![get(
         format!("{API}/snapshots"),
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
     )];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -436,7 +436,7 @@ async fn a_racing_push_while_one_is_still_working_is_refused() {
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(
             format!("{API}/snapshots"),
-            json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [racing]}),
+            json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [racing]}),
         ),
     ];
     let s = server(routes).await;
@@ -463,7 +463,7 @@ async fn history_stays_newest_first_across_a_three_snapshot_chain() {
     tip["metadata"]["creationTimestamp"] = json!("2026-01-03T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [mid, root, tip]}),
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [mid, root, tip]}),
     )];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -487,7 +487,7 @@ async fn history_created_at_is_rfc3339() {
     root["metadata"]["creationTimestamp"] = json!("2026-01-01T12:34:56Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [root]}),
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [root]}),
     )];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -509,7 +509,7 @@ async fn history_created_at_is_rfc3339() {
 async fn refs_of_a_zero_snapshot_volume_is_null_not_not_found() {
     let routes = vec![get(
         format!("{API}/snapshots"),
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
+        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
     )];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -642,10 +642,10 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
         get(format!("{API}/workspaces/ws-1"), placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa")),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
@@ -691,8 +691,8 @@ async fn a_never_snapshotted_source_is_cloneable_and_the_cut_is_its_root() {
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
@@ -716,7 +716,7 @@ async fn a_never_snapshotted_source_is_cloneable_and_the_cut_is_its_root() {
 /// One node's replica row, saying which transient of each worktree it HOLDS.
 fn replica_holding(node: &str, volume: &str, worktree: &str, held: &str) -> Value {
     json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": format!("{volume}.{node}")},
         "spec": {"volume": volume, "node": node},
         "status": {"phase": "Synced", "branches": {worktree: held}},
@@ -724,7 +724,7 @@ fn replica_holding(node: &str, volume: &str, worktree: &str, held: &str) -> Valu
 }
 
 fn replicas(items: Vec<Value>) -> Route {
-    get(format!("{API}/volumereplicas"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplicaList", "metadata": {}, "items": items}))
+    get(format!("{API}/volumereplicas"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplicaList", "metadata": {}, "items": items}))
 }
 
 /// Cloning an INTERRUPTED source is allowed — it is the one way forward — and the response says
@@ -737,11 +737,11 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
         get(format!("{API}/workspaces/ws-1"), src),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
         replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-bbbb")]),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
@@ -783,7 +783,7 @@ async fn cloning_an_interrupted_source_with_no_sync_point_is_a_409() {
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         replicas(vec![]),
     ];
     let s = server(routes).await;
@@ -808,13 +808,13 @@ async fn an_interrupted_clone_skips_a_transient_no_live_node_holds() {
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-old", "ws-1", "karthik", "ws-1"),
             // Newest cluster-wide, and held by nobody but the corpse.
             transient("sync-ws-1-last", "ws-1", "karthik", "ws-1")
         ]})),
         replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-old")]),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
@@ -844,12 +844,12 @@ async fn an_interrupted_clone_ignores_a_working_cut_the_dead_node_left_behind() 
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1"),
             stuck
         ]})),
         replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-bbbb")]),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
@@ -876,7 +876,7 @@ async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
         get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
         replicas(vec![replica_holding("node-b", "ws-1", "ws-other", "sync-ws-other-zzzz")]),
@@ -900,10 +900,10 @@ async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
 async fn cloning_an_environment_cuts_nothing_and_reports_no_base() {
     let routes = vec![
         get(format!("{API}/environments/env-1"), placed_env("env-1", "karthik")),
-        get(format!("{API}/volumes/env-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/env-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "env-1", "uid": "vol-uid-2"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
         Route { method: "POST", path: format!("{API}/environments"), status: 201, body: placed_env("env-2", "karthik") },
     ];
     let s = server(routes).await;
@@ -961,8 +961,8 @@ async fn a_push_records_the_workspace_definition_on_the_snapshot() {
     w["spec"]["packages"] = json!(["jq"]);
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), w),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -993,8 +993,8 @@ async fn a_push_records_the_environment_services_on_the_snapshot() {
     ]);
     let routes = vec![
         get(format!("{API}/environments/env-1"), e),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/env-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "env-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/volumes/env-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "env-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("env-1-cccccccc", "env-1", "karthik", "env-1", "", "working") },
     ];
     let s = server(routes).await;
@@ -1024,10 +1024,10 @@ async fn a_clone_cut_records_the_source_definition() {
         get(format!("{API}/workspaces/ws-1"), w),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
             transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
         ]})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201,

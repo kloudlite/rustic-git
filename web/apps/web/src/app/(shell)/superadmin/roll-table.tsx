@@ -17,7 +17,7 @@ import { Section } from "./ui/section";
 import { DataTable, EmptyState, RowActions, Td, Th, Tr } from "./ui/data-table";
 
 /** Image tag + digest, ready/desired, rollout state, last roll who/when/reason, and the one
- *  manual write — a required reason, with a second confirmation for `rustic-git-srv` since
+ *  manual write — a required reason, with a second confirmation for `kloudlite-git-srv` since
  *  rolling the StatefulSet moves database ownership between nodes (CLAUDE.md, "Deploying"). Used
  *  by both Monitoring (central workloads) and each Clusters region panel (that region's agent
  *  DaemonSet and gateway). */
@@ -51,7 +51,7 @@ export function RollTable({
 
   function submit() {
     if (!target || reason.trim() === "") return;
-    const needsSecond = target.name === "rustic-git-srv";
+    const needsSecond = target.name === "kloudlite-git-srv";
     if (needsSecond && !confirmedFirst) {
       setConfirmedFirst(true);
       return;
@@ -129,10 +129,10 @@ export function RollTable({
       <Dialog open={target !== null} onOpenChange={(open) => !open && setTarget(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{confirmedFirst ? "This rolls rustic-git-srv" : `Roll ${target?.name}`}</DialogTitle>
+            <DialogTitle>{confirmedFirst ? "This rolls kloudlite-git-srv" : `Roll ${target?.name}`}</DialogTitle>
             <DialogDescription>
               {confirmedFirst
-                ? "Rolling rustic-git-srv moves database ownership between nodes (CLAUDE.md, “Deploying”) — a brief window where the first registry request to a moved image can fail once."
+                ? "Rolling kloudlite-git-srv moves database ownership between nodes (CLAUDE.md, “Deploying”) — a brief window where the first registry request to a moved image can fail once."
                 : "A reason is required — it's recorded on the workload alongside who and when."}
             </DialogDescription>
           </DialogHeader>

@@ -4,9 +4,9 @@
 //! a 404 for anything not in the catalogue, and 503 — never 500 — when there is no ClickHouse at
 //! all, which is a supported deployment rather than an outage.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{admin::router, ApiState};
-use rustic_git_workspaces::history::History;
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{admin::router, ApiState};
+use kloudlite_git_workspaces::history::History;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -126,7 +126,7 @@ async fn an_unknown_series_or_a_malformed_parameter_is_a_404() {
 async fn a_quoted_filter_is_refused() {
     let (base, jwt, seen) = with_history(json!([])).await;
     for path in [
-        "/admin/history/pool_used?region=eu%27%3B%20DROP%20TABLE%20rustic.events%3B%20--",
+        "/admin/history/pool_used?region=eu%27%3B%20DROP%20TABLE%20kloudlite.events%3B%20--",
         "/admin/history/events?owner=a%27%20OR%20%271%27%3D%271",
         "/admin/history/events?cursor=%27%29%3B%20DROP",
         "/admin/history/events?cursor=no-separator",
@@ -169,7 +169,7 @@ async fn events_page_newest_first_with_a_cursor_only_on_a_full_page() {
     // A full page offers a cursor; the timeline pages by position, never by offset.
     assert_eq!(v["cursor"], json!("2026-09-03T12:00:00Z|id-1"));
     let sql = seen.lock().unwrap().join("\n");
-    assert!(sql.contains("rustic.events FINAL"), "{sql}");
+    assert!(sql.contains("kloudlite.events FINAL"), "{sql}");
     assert!(sql.contains("kind = 'admin.drain'"), "{sql}");
     assert!(sql.contains("ORDER BY ts DESC, id DESC LIMIT 1"), "{sql}");
 }

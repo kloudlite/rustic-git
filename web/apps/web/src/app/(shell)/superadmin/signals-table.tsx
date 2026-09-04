@@ -9,7 +9,7 @@ import { Pill } from "./ui/pill";
  *  could not).
  *
  *  ponytail: the mockup's "Last change" column is not rendered — the wire `SignalRow` carries no
- *  such field (spec §A3's `rustic.alerts` table is not deployed), and a column of "—" invents
+ *  such field (spec §A3's `kloudlite.alerts` table is not deployed), and a column of "—" invents
  *  nothing but reads as a broken one. Upgrade path: add `lastChange` to the Rust `SignalRow` and
  *  a cell below. Rows sort by region (fleet-wide rules, `region: null`, last) so the table reads
  *  as grouped without a second fetch or a sub-header component. */

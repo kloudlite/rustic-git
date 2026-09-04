@@ -152,8 +152,8 @@ mod tests {
 
     #[test]
     fn a_bad_env_value_keeps_the_default() {
-        std::env::set_var("RUSTIC_GIT_TEST_LIMIT", "lots");
-        let l = Limiter::from_env("RUSTIC_GIT_TEST_LIMIT", "2/60");
+        std::env::set_var("KLOUDLITE_GIT_TEST_LIMIT", "lots");
+        let l = Limiter::from_env("KLOUDLITE_GIT_TEST_LIMIT", "2/60");
         assert_eq!(l.capacity, 2.0);
     }
 

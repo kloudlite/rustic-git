@@ -3,7 +3,7 @@ use super::*;
 /// `read_bounded`, as the text a handler relays. An oversized reply is an empty string, which the
 /// relaying status code already explains better than a truncated body would.
 pub(crate) async fn text_bounded(r: reqwest::Response) -> String {
-    rustic_git_core::httpx::read_bounded(r)
+    kloudlite_git_core::httpx::read_bounded(r)
         .await
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
@@ -22,9 +22,9 @@ pub(crate) async fn to_owner(
     req: reqwest::RequestBuilder,
     owner: Option<&str>,
 ) -> std::result::Result<reqwest::Response, Response> {
-    let req = req.header(rustic_git_core::peer::PEER_HEADER, &api.secret);
+    let req = req.header(kloudlite_git_core::peer::PEER_HEADER, &api.secret);
     let req = match owner {
-        Some(o) => req.header(rustic_git_core::peer::OWNER_HEADER, o),
+        Some(o) => req.header(kloudlite_git_core::peer::OWNER_HEADER, o),
         None => req,
     };
     req.send().await.map_err(|e| {

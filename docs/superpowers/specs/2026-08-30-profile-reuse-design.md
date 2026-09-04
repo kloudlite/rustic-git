@@ -53,7 +53,7 @@ skip the cache, and a change to any of them changes the key.
 Alongside `{profiles_dir}/{id}/current`, the agent maintains
 
 ```
-/nix/var/rustic/profiles/by-inputs/{hash} -> /nix/store/…-env
+/nix/var/kloudlite/profiles/by-inputs/{hash} -> /nix/store/…-env
 ```
 
 `ensure_profile` gains one step before it decides to build: if that link resolves and its target
@@ -65,7 +65,7 @@ The per-workspace `{id}/current` link stays exactly as it is. The pod mounts `{p
 as a subPath and the live swap happens one level below it; nothing about that changes.
 
 `{profiles_dir}` is on the host under `/nix` (the `seed-store` init container creates it) and is
-already GC-rooted through `gcroots/rustic-profiles`, so an index entry is durable across agent
+already GC-rooted through `gcroots/kloudlite-profiles`, so an index entry is durable across agent
 restarts and its store path cannot be collected while the link exists.
 
 ### 2. Drop the workspace id from the derivation name
@@ -86,7 +86,7 @@ paths stay rooted by their own `{id}/current`, and forcing a rebuild would be ch
 
 ### 3. Move the eval cache off the overlay
 
-Set `XDG_CACHE_HOME=/nix/var/rustic/cache` on the agent container, so nix's evaluation cache lives
+Set `XDG_CACHE_HOME=/nix/var/kloudlite/cache` on the agent container, so nix's evaluation cache lives
 on the host `/nix` the agent already mounts rather than in the pod's writable layer. The 28 s then
 becomes once per node rather than once per agent restart, and is skipped entirely whenever the
 index hits.

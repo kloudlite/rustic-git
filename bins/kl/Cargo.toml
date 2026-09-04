@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 description = "kloudlite CLI: log in, list workspaces, ssh into one"
-repository = "https://github.com/kloudlite/rustic-git"
+repository = "https://github.com/kloudlite/kloudlite-git"
 
 [[bin]]
 name = "kl"

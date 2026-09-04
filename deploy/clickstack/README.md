@@ -2,7 +2,7 @@
 
 ClickHouse + an OpenTelemetry gateway collector + HyperDX, from the official charts
 (<https://clickhouse.github.io/ClickStack-helm-charts>). This is the history layer's substrate: the
-collectors write `default.otel_*`, and the admin process owns a second database, `rustic`, which it
+collectors write `default.otel_*`, and the admin process owns a second database, `kloudlite`, which it
 migrates at boot.
 
 Applied by hand, like the k3s side — not by `deploy/roll.sh`, which only rolls our own images.
@@ -27,11 +27,11 @@ helm upgrade --install clickstack-operators clickstack/clickstack-operators \
   -f deploy/clickstack/operators-values.yaml
 
 # 2. HyperDX's database: a `hyperdx` database on the platform's Cosmos DB for MongoDB account
-#    (kolomi-rg/kloudlite-rustic-git, MongoDB API 7.0, serverless). HyperDX creates it on first
+#    (kolomi-rg/kloudlite-kloudlite-git, MongoDB API 7.0, serverless). HyperDX creates it on first
 #    connect; the Secret carries the account's connection string with `/hyperdx` as the path.
 #    Runs on YOUR shell — it handles a credential.
 SUB=$(az account show --query id -o tsv)
-CS=$(az rest --method post --url "https://management.azure.com/subscriptions/$SUB/resourceGroups/kolomi-rg/providers/Microsoft.DocumentDB/databaseAccounts/kloudlite-rustic-git/listConnectionStrings?api-version=2024-05-15" --query 'connectionStrings[0].connectionString' -o tsv)
+CS=$(az rest --method post --url "https://management.azure.com/subscriptions/$SUB/resourceGroups/kolomi-rg/providers/Microsoft.DocumentDB/databaseAccounts/kloudlite-kloudlite-git/listConnectionStrings?api-version=2024-05-15" --query 'connectionStrings[0].connectionString' -o tsv)
 URI=$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); print(u.urlunsplit((p.scheme,p.netloc,"/hyperdx",p.query,"")))' "$CS")
 kubectl -n clickstack create secret generic hyperdx-mongo --from-literal=MONGO_URI="$URI"
 unset CS URI
@@ -58,9 +58,9 @@ HyperDX mints the key the collectors authenticate with; nothing in a values file
 3. Put it where the agent collectors read it, in **every** cluster:
 
 ```sh
-kubectl -n kube-system create secret generic rustic-git-otel \
+kubectl -n kube-system create secret generic kloudlite-git-otel \
   --from-literal=key='<ingestion key>'          # each k3s region
-kubectl -n rustic-git create secret generic rustic-git-otel \
+kubectl -n kloudlite-git create secret generic kloudlite-git-otel \
   --from-literal=key='<ingestion key>'          # AKS
 ```
 
@@ -73,7 +73,7 @@ Retrying the form works; enabling the account's `DisableRateLimitingResponses` c
 
 The chart mints two ClickHouse users of its own in `clickstack-secret`: `app`
 (`CLICKHOUSE_APP_PASSWORD`, `SELECT` on `default` only) and `otelcollector`
-(`CLICKHOUSE_PASSWORD`, the exporter's writer). Neither can create `rustic`, so the admin process
+(`CLICKHOUSE_PASSWORD`, the exporter's writer). Neither can create `kloudlite`, so the admin process
 gets a third user:
 
 ```sh
@@ -82,26 +82,26 @@ kubectl -n clickstack get svc   # ClickHouse is `clickstack-clickhouse-clickhous
 ```
 
 ```sql
-CREATE USER IF NOT EXISTS rustic IDENTIFIED BY '<password>';
-GRANT SELECT ON default.* TO rustic;
-GRANT CREATE, INSERT, SELECT, ALTER, DROP TABLE ON rustic.* TO rustic;   -- DROP: an engine change rebuilds a table beside itself and swaps (migrations 8-15)
+CREATE USER IF NOT EXISTS kloudlite IDENTIFIED BY '<password>';
+GRANT SELECT ON default.* TO kloudlite;
+GRANT CREATE, INSERT, SELECT, ALTER, DROP TABLE ON kloudlite.* TO kloudlite;   -- DROP: an engine change rebuilds a table beside itself and swaps (migrations 8-15)
 ```
 
 Then, in the AKS namespace the admin process runs in:
 
 ```sh
-kubectl -n rustic-git create secret generic rustic-git-clickhouse \
-  --from-literal=user=rustic --from-literal=password='<password>'
+kubectl -n kloudlite-git create secret generic kloudlite-git-clickhouse \
+  --from-literal=user=kloudlite --from-literal=password='<password>'
 ```
 
-`deploy/rustic-git.yaml` reads exactly that Secret for `RUSTIC_GIT_CLICKHOUSE_USER` /
-`RUSTIC_GIT_CLICKHOUSE_PASSWORD`, both `optional: true`, and hard-codes
-`RUSTIC_GIT_CLICKHOUSE_URL` as `http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123`
+`deploy/kloudlite-git.yaml` reads exactly that Secret for `KLOUDLITE_GIT_CLICKHOUSE_USER` /
+`KLOUDLITE_GIT_CLICKHOUSE_PASSWORD`, both `optional: true`, and hard-codes
+`KLOUDLITE_GIT_CLICKHOUSE_URL` as `http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123`
 — the operator's name for the Service, not the chart's fullname (`helm template` cannot show it;
 `kubectl -n clickstack get svc` did, on the first install). Re-check it after a chart or operator
 bump: a wrong host is a silent 503 on every /admin/history route.
 
-The admin process migrates `rustic` itself on its next start; `kubectl logs` shows
+The admin process migrates `kloudlite` itself on its next start; `kubectl logs` shows
 `clickhouse migrations applied` once and `clickhouse schema up to date` on every restart after.
 
 ## Alerts

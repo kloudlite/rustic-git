@@ -4,7 +4,7 @@
 > subagent, in order, each finishing with its stated verification output pasted back.
 
 **Goal:** stand up a three-node k3s cluster (one tainted control plane, one session worker, one env
-worker) that runs `rustic-git-agent` as a privileged DaemonSet against a host btrfs pool at
+worker) that runs `kloudlite-git-agent` as a privileged DaemonSet against a host btrfs pool at
 `/wspool-prod`, replacing the single Azure VM (20.219.39.174) where the agent runs as a plain
 process — without touching that VM until rollback has been proven.
 
@@ -13,17 +13,17 @@ process — without touching that VM until rollback has been proven.
 ```
 control-plane node  (2 OCPU / 8 GB)   k3s server, SQLite datastore, taint node-role.kubernetes.io/control-plane=true:NoSchedule
         |  6443 (API)  8472/udp (flannel VXLAN)  10250 (kubelet)
-        +-- session node (32 OCPU / 128 GB)  label rustic-git.io/role=session  taint rustic-git.io/role=session:NoSchedule
+        +-- session node (32 OCPU / 128 GB)  label kloudlite-git.io/role=session  taint kloudlite-git.io/role=session:NoSchedule
         |     /wspool-prod  (dedicated data disk, btrfs)  -> agent DaemonSet pod (privileged, hostPath)
-        +-- env node     (16 OCPU / 128 GB)  label rustic-git.io/role=env      taint rustic-git.io/role=env:NoSchedule
+        +-- env node     (16 OCPU / 128 GB)  label kloudlite-git.io/role=env      taint kloudlite-git.io/role=env:NoSchedule
               /wspool-prod  (dedicated data disk, btrfs)  -> agent DaemonSet pod (privileged, hostPath)
 ```
 
-The agent is a **node-level Kubernetes controller**: it watches rustic-git CRDs filtered to its own
+The agent is a **node-level Kubernetes controller**: it watches kloudlite-git CRDs filtered to its own
 node (`spec.nodeName`) and reconciles them against the local btrfs pool, instead of long-polling
 `GET /vol-agent/work`. The Kubernetes API is the work queue. It still holds registry/Azure/Cosmos
 credentials, because push/pull of snapshot bytes and commit history do not go through the API
-server. This cluster holds no rustic-git server pods, no SlateDB, and no
+server. This cluster holds no kloudlite-git server pods, no SlateDB, and no
 part of the git/registry namespaces — only workspaces/environments compute. Nothing here is a
 member of the app cluster; they are two clusters that talk over HTTPS with the peer/agent token.
 
@@ -41,7 +41,7 @@ NetworkPolicy + CoreDNS), btrfs on a dedicated data disk, `az` CLI (Azure primar
   -o yaml` without `-o jsonpath` into a file. If a secret does reach a transcript, rotate it before
   continuing (`k3s token rotate` for the node token; re-issue the agent token from the server tier).
 - Every manifest is committed under `deploy/` in this repo's existing style: one file per concern,
-  comments explain WHY only, matching the density of `deploy/rustic-git.yaml`.
+  comments explain WHY only, matching the density of `deploy/kloudlite-git.yaml`.
 - Commit subjects imperative sentence case, no tool attribution.
 - **Nothing destructive to the existing docker-based agent on 20.219.39.174 until Task 9's rollback
   is proven.** The old agent keeps running and keeps its pool the entire time; the k3s agents
@@ -61,7 +61,7 @@ NetworkPolicy + CoreDNS), btrfs on a dedicated data disk, `az` CLI (Azure primar
 | `deploy/k3s/install-agent.sh` | k3s agent (worker) install with `--node-label`/`--node-taint` for its role. |
 | `deploy/k3s/verify-cluster.sh` | The four cluster checks: nodes Ready, cross-node pod ping, CoreDNS Service resolution from the other node, NetworkPolicy actually denying. Exit 0 = cluster trustworthy. |
 | `deploy/k3s/crds.yaml` | The CustomResourceDefinitions the agent controller watches (schemas come from the Rust-side plan; this file is the install artifact). |
-| `deploy/k3s/agent-rbac.yaml` | Namespace `rustic-git-ws`, ServiceAccount `rustic-git-agent`, ClusterRole/Role + bindings: watch/list/get on the CRDs, update on their `/status`, and the pods/namespaces it manages. |
+| `deploy/k3s/agent-rbac.yaml` | Namespace `kloudlite-git-ws`, ServiceAccount `kloudlite-git-agent`, ClusterRole/Role + bindings: watch/list/get on the CRDs, update on their `/status`, and the pods/namespaces it manages. |
 | `deploy/k3s/agent-daemonset.yaml` | The privileged agent DaemonSet (one per role, two specs in one file), hostPath mounts, env/secretRefs, liveness probe. |
 | `deploy/k3s/netpol-env-namespace.yaml` | Default-deny ingress+egress template for an environment namespace, plus the DNS and registry-egress allowances. |
 | `deploy/k3s/ROLLBACK.md` | The proven path back to the docker-based agent on the VM. |
@@ -78,11 +78,11 @@ replication is ours to do.
 **Files:** `deploy/k3s/backup-controlplane.sh`
 
 - [ ] **Step 1:** State the verification first — show there is no backup yet.
-  `az storage blob list --account-name rusticgitkolomi -c k3s-backup -o tsv`
+  `az storage blob list --account-name kloudlitegitkolomi -c k3s-backup -o tsv`
   Expected: the container does not exist, or lists nothing.
 - [ ] **Step 2:** Create the container and a write-only SAS scoped to it (permissions `cwr`, no
   list, no delete — a compromised node must not be able to erase its own backups). Install it on the
-  control plane at `/etc/rustic-git/k3s-backup.sas`, mode 600, root-owned. Never `cat` it.
+  control plane at `/etc/kloudlite-git/k3s-backup.sas`, mode 600, root-owned. Never `cat` it.
 - [ ] **Step 3:** Install `sqlite3` and `deploy/k3s/backup-controlplane.sh` as
   `/usr/local/bin/k3s-backup` (mode 750). The script uses `VACUUM INTO`, not `cp`: SQLite is in WAL
   mode and being written while the backup runs, so a plain copy can capture a torn page or miss
@@ -93,8 +93,8 @@ replication is ours to do.
 - [ ] **Step 4:** Run it once and verify the artifact is genuinely restorable, not merely uploaded:
   download the blob, unpack it, and read the database back.
   ```sh
-  az storage blob download --account-name rusticgitkolomi -c k3s-backup -n daily-$(date -u +%a).tgz -f /tmp/r.tgz
-  tar -xzf /tmp/r.tgz -C /tmp && sqlite3 /tmp/state.db "select count(*) from kine where name like '%rustic-git.io%';"
+  az storage blob download --account-name kloudlitegitkolomi -c k3s-backup -n daily-$(date -u +%a).tgz -f /tmp/r.tgz
+  tar -xzf /tmp/r.tgz -C /tmp && sqlite3 /tmp/state.db "select count(*) from kine where name like '%kloudlite-git.io%';"
   ```
   Expected: a non-zero count. A backup that uploads but does not restore is worse than none, because
   it stops anyone looking for the problem.
@@ -120,14 +120,14 @@ length of a restore stops being acceptable.`
 **Files:** `deploy/k3s/env.example.sh`, `deploy/k3s/provision-azure.sh`
 
 - [ ] **Step 1:** State the verification first — show the target does not exist yet.
-  `az group show -n rustic-git-k3s -o tsv --query name`
+  `az group show -n kloudlite-git-k3s -o tsv --query name`
   Expected: `ResourceGroupNotFound` on stderr, exit 3. Anything else means a previous run exists —
   stop and reconcile before creating.
 - [ ] **Step 2:** Write `deploy/k3s/env.example.sh` with exactly these variables and defaults:
   ```sh
   # Copy to deploy/k3s/env.sh (git-ignored) and edit. NO SECRETS HERE — tokens go via scp/kubectl.
   CLOUD=azure                     # azure | oci  — only this file differs between them
-  RG=rustic-git-k3s
+  RG=kloudlite-git-k3s
   LOC=centralindia
   IMAGE=Canonical:ubuntu-24_04-lts:server:latest
   ADMIN=azureuser
@@ -242,12 +242,12 @@ length of a restore stops being acceptable.`
   `scp cp:~/node-token ./node-token` and `chmod 600 ./node-token`. **Do not cat it.**
 - [ ] **Step 6:** Retrieve the kubeconfig the same way, rewriting the server address on the fly:
   ```sh
-  ssh cp 'sudo cat /var/lib/rancher/k3s/server/k3s.yaml' > ~/.kube/rustic-k3s.yaml
-  chmod 600 ~/.kube/rustic-k3s.yaml
-  sed -i '' "s#127.0.0.1#$CP_PUBLIC_IP#" ~/.kube/rustic-k3s.yaml
+  ssh cp 'sudo cat /var/lib/rancher/k3s/server/k3s.yaml' > ~/.kube/kloudlite-k3s.yaml
+  chmod 600 ~/.kube/kloudlite-k3s.yaml
+  sed -i '' "s#127.0.0.1#$CP_PUBLIC_IP#" ~/.kube/kloudlite-k3s.yaml
   ```
   That `sudo cat` goes straight into a redirect, never onto a terminal. Verify without exposing it:
-  `KUBECONFIG=~/.kube/rustic-k3s.yaml kubectl get --raw /version | head -c 60`
+  `KUBECONFIG=~/.kube/kloudlite-k3s.yaml kubectl get --raw /version | head -c 60`
   Expected: a JSON `{"major":"1","minor":"33"...` fragment.
 - [ ] **Step 7:** Confirm the API port is closed to the internet:
   `nc -z -w3 "$CP_PUBLIC_IP" 6443; echo $?` from a machine outside the VNet.
@@ -269,15 +269,15 @@ length of a restore stops being acceptable.`
   ```sh
   curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.33.5+k3s1 \
     K3S_URL="https://$CP_PRIVATE_IP:6443" K3S_TOKEN_FILE=$HOME/node-token sh -s - agent \
-    --node-label rustic-git.io/role=session \
-    --node-taint rustic-git.io/role=session:NoSchedule
+    --node-label kloudlite-git.io/role=session \
+    --node-taint kloudlite-git.io/role=session:NoSchedule
   ```
-- [ ] **Step 4:** Same for the env node with `rustic-git.io/role=env` in both flags.
+- [ ] **Step 4:** Same for the env node with `kloudlite-git.io/role=env` in both flags.
 - [ ] **Step 5:** Verify labels and taints landed (a label without its taint is the dangerous half —
   workloads would spread onto the wrong node):
-  `kubectl get nodes -L rustic-git.io/role -o custom-columns=N:.metadata.name,ROLE:.metadata.labels.rustic-git\\.io/role,TAINTS:.spec.taints[*].key`
+  `kubectl get nodes -L kloudlite-git.io/role -o custom-columns=N:.metadata.name,ROLE:.metadata.labels.kloudlite-git\\.io/role,TAINTS:.spec.taints[*].key`
   Expected: three rows; `k3s-cp <none> node-role.kubernetes.io/control-plane`,
-  `k3s-session session rustic-git.io/role`, `k3s-env env rustic-git.io/role`.
+  `k3s-session session kloudlite-git.io/role`, `k3s-env env kloudlite-git.io/role`.
 - [ ] **Step 6:** Shred the local token copies: `shred -u ./node-token && ssh session 'shred -u ~/node-token' && ssh env 'shred -u ~/node-token'`
   Verify: `ls ./node-token` → `No such file or directory`.
 
@@ -336,7 +336,7 @@ ordering is why this task precedes the DaemonSet. The CRD *schemas* (group, vers
 `status` shape) are defined by the Rust-side plan — this task installs whatever that plan produces
 and verifies the API actually serves it.
 
-- [ ] **Step 1:** Show absence: `kubectl get crd -o name | grep rustic-git.io || echo NONE`
+- [ ] **Step 1:** Show absence: `kubectl get crd -o name | grep kloudlite-git.io || echo NONE`
   Expected: `NONE`.
 - [ ] **Step 2:** Take `crds.yaml` from the Rust-side plan's generated output. Every CRD must have
   `subresources: { status: {} }` (the controller writes only status — without the subresource,
@@ -350,9 +350,9 @@ and verifies the API actually serves it.
   `kubectl apply -f deploy/k3s/crds.yaml && kubectl wait --for=condition=Established crd --all --timeout=60s`
   Expected: `condition met` per CRD.
 - [ ] **Step 4:** Verify the API really serves them, not just that the CRD object exists:
-  `kubectl api-resources --api-group=rustic-git.io`
+  `kubectl api-resources --api-group=kloudlite-git.io`
   Expected: a row per kind with its short name and `NAMESPACED` value; and
-  `kubectl get --raw /apis/rustic-git.io/v1alpha1 | head -c 200` returns an `APIResourceList`
+  `kubectl get --raw /apis/kloudlite-git.io/v1alpha1 | head -c 200` returns an `APIResourceList`
   including the `<kind>/status` resources.
 - [ ] **Step 5:** Prove the per-node field selector works, because that is what scopes each
   controller. Create two throwaway objects, one with `nodeName: k3s-session`, one with
@@ -369,18 +369,18 @@ and verifies the API actually serves it.
 
 **Files:** `deploy/k3s/agent-rbac.yaml`
 
-- [ ] **Step 1:** Show absence: `kubectl -n rustic-git-ws get sa rustic-git-agent`
+- [ ] **Step 1:** Show absence: `kubectl -n kloudlite-git-ws get sa kloudlite-git-agent`
   Expected: `Error from server (NotFound)`.
-- [ ] **Step 2:** Write `agent-rbac.yaml`: `Namespace rustic-git-ws`, `ServiceAccount
-  rustic-git-agent`, and:
-  - a **ClusterRole `rustic-git-agent-crd`** — `apiGroups: [rustic-git.io]`, `resources: [<kinds>]`,
+- [ ] **Step 2:** Write `agent-rbac.yaml`: `Namespace kloudlite-git-ws`, `ServiceAccount
+  kloudlite-git-agent`, and:
+  - a **ClusterRole `kloudlite-git-agent-crd`** — `apiGroups: [kloudlite-git.io]`, `resources: [<kinds>]`,
     `verbs: [get, list, watch]`, plus a second rule `resources: [<kinds>/status]`,
     `verbs: [get, update, patch]`. Cluster-scoped and no `create`/`delete`: a watch cannot be
     namespace-restricted below the namespaces the objects live in, and the controller's only write
     is status. The **per-node narrowing is the field selector in the informer, not RBAC** —
     Kubernetes RBAC cannot filter by field, so state that in a comment rather than pretending the
     Role scopes it. A ClusterRole with only get/list/watch/status-update is the narrowest that works.
-  - a **Role in `rustic-git-ws`** granting `pods`, `pods/log`, `pods/exec`, `services`,
+  - a **Role in `kloudlite-git-ws`** granting `pods`, `pods/log`, `pods/exec`, `services`,
     `configmaps`, `secrets`, `networkpolicies` (`get,list,watch,create,delete`) — the workspace
     containers it runs.
   - a small **ClusterRole** with `namespaces: get,list,create,delete` and `networkpolicies:
@@ -392,19 +392,19 @@ and verifies the API actually serves it.
   ```sh
   umask 077
   printf %s "$AGENT_TOKEN" > /tmp/tok    # typed from a password manager, not echoed
-  kubectl -n rustic-git-ws create secret generic rustic-git-agent \
+  kubectl -n kloudlite-git-ws create secret generic kloudlite-git-agent \
     --from-file=token=/tmp/tok --from-file=azure-key=/tmp/azkey --from-file=cosmos-key=/tmp/ckey
   shred -u /tmp/tok /tmp/azkey /tmp/ckey
   ```
-  Verify without revealing: `kubectl -n rustic-git-ws get secret rustic-git-agent -o jsonpath='{range $.data.*}{@}{"\n"}{end}' | wc -l`
+  Verify without revealing: `kubectl -n kloudlite-git-ws get secret kloudlite-git-agent -o jsonpath='{range $.data.*}{@}{"\n"}{end}' | wc -l`
   Expected: `3`.
 - [ ] **Step 4:** Apply and verify the roles permit exactly what is intended, negatives included:
   ```sh
-  SA=system:serviceaccount:rustic-git-ws:rustic-git-agent
-  kubectl auth can-i watch <kind>.rustic-git.io --as=$SA -A          # yes
-  kubectl auth can-i update <kind>.rustic-git.io/status --as=$SA -A  # yes
-  kubectl auth can-i delete <kind>.rustic-git.io --as=$SA -A         # no
-  kubectl auth can-i create pods --as=$SA -n rustic-git-ws           # yes
+  SA=system:serviceaccount:kloudlite-git-ws:kloudlite-git-agent
+  kubectl auth can-i watch <kind>.kloudlite-git.io --as=$SA -A          # yes
+  kubectl auth can-i update <kind>.kloudlite-git.io/status --as=$SA -A  # yes
+  kubectl auth can-i delete <kind>.kloudlite-git.io --as=$SA -A         # no
+  kubectl auth can-i create pods --as=$SA -n kloudlite-git-ws           # yes
   kubectl auth can-i delete nodes --as=$SA                           # no
   ```
   Expected: `yes yes no yes no`, in that order. A `yes` on the two negatives means a wildcard crept
@@ -414,12 +414,12 @@ and verifies the API actually serves it.
 
 **Files:** `deploy/k3s/agent-daemonset.yaml`, `deploy/k3s/netpol-env-namespace.yaml`
 
-- [ ] **Step 1:** Show absence: `kubectl -n rustic-git-ws get ds`
+- [ ] **Step 1:** Show absence: `kubectl -n kloudlite-git-ws get ds`
   Expected: `No resources found`.
-- [ ] **Step 2:** Write the DaemonSet — two DaemonSets in one file (`rustic-git-agent-session`,
-  `rustic-git-agent-env`) rather than one with a broad selector, because the two roles get
+- [ ] **Step 2:** Write the DaemonSet — two DaemonSets in one file (`kloudlite-git-agent-session`,
+  `kloudlite-git-agent-env`) rather than one with a broad selector, because the two roles get
   different `WS_CPU`/`WS_MEM_MB` and different tolerations. Each carries:
-  - `nodeSelector: { rustic-git.io/role: session }` (resp. `env`) **and** a matching
+  - `nodeSelector: { kloudlite-git.io/role: session }` (resp. `env`) **and** a matching
     `tolerations` entry for that role's `NoSchedule` taint — the selector alone schedules nothing on
     a tainted node.
   - `hostPID: true`, `securityContext: { privileged: true }` on the container. btrfs
@@ -431,7 +431,7 @@ and verifies the API actually serves it.
   - volumes: `/wspool-prod` → `/wspool-prod` (hostPath `Directory`, Bidirectional), `/dev` → `/dev`,
     `/var/run/docker.sock` → same (the agent still shells `docker`/`docker compose` —
     `docker_stop_name`, `compose` in `lib.rs`; the containerd migration is Phase 2B's problem).
-  - `serviceAccountName: rustic-git-agent` — without it the pod gets `default`, whose token can
+  - `serviceAccountName: kloudlite-git-agent` — without it the pod gets `default`, whose token can
     list nothing, and the controller's watch fails closed at startup (Step 5 below catches that).
   - env: **the final list comes from the Rust-side plan** — the agent no longer takes its work from
     `WS_REGISTRY_URL` long-polling (it watches the CRDs of Task 6 instead), but it still needs the
@@ -455,10 +455,10 @@ and verifies the API actually serves it.
     `# ponytail: no heartbeat file until Phase 2B; a wedged poll loop is not detected — uncomment
     once bins/agent writes it` marker, rather than a probe that would CrashLoop every pod.
 - [ ] **Step 3:** Apply and verify placement — exactly one pod per worker, none on the control plane:
-  `kubectl -n rustic-git-ws get pod -o custom-columns=N:.metadata.name,NODE:.spec.nodeName,S:.status.phase`
+  `kubectl -n kloudlite-git-ws get pod -o custom-columns=N:.metadata.name,NODE:.spec.nodeName,S:.status.phase`
   Expected: two rows, `Running`, on `k3s-session` and `k3s-env` — never `k3s-cp`.
 - [ ] **Step 4:** Verify the pool is genuinely the host's, not an empty ephemeral dir:
-  `kubectl -n rustic-git-ws exec ds/rustic-git-agent-session -- btrfs subvolume list /wspool-prod`
+  `kubectl -n kloudlite-git-ws exec ds/kloudlite-git-agent-session -- btrfs subvolume list /wspool-prod`
   and compare with `ssh session 'sudo btrfs subvolume list /wspool-prod'`.
   Expected: identical listings. Differing (especially an empty pod-side list) means the hostPath
   mounted over a fresh directory — check the `type: Directory` and that Task 2's mount is up.
@@ -467,11 +467,11 @@ and verifies the API actually serves it.
   the same silent-success failure as an unenforced NetworkPolicy, so prove it positively:
   ```sh
   # a) the SA token works from inside the pod at all
-  kubectl -n rustic-git-ws exec ds/rustic-git-agent-session -- \
+  kubectl -n kloudlite-git-ws exec ds/kloudlite-git-agent-session -- \
     sh -c 'wget -qO- --no-check-certificate --header="Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
-      https://kubernetes.default.svc/apis/rustic-git.io/v1alpha1 | head -c 120'
+      https://kubernetes.default.svc/apis/kloudlite-git.io/v1alpha1 | head -c 120'
   # b) the controller says so itself
-  kubectl -n rustic-git-ws logs ds/rustic-git-agent-session --tail=30
+  kubectl -n kloudlite-git-ws logs ds/kloudlite-git-agent-session --tail=30
   ```
   Expected: (a) an `APIResourceList` fragment naming the CRD kinds — a `401`/`403` body means the
   ServiceAccount or Task 7's ClusterRole is wrong, an empty body means NetworkPolicy or DNS; (b) a
@@ -480,7 +480,7 @@ and verifies the API actually serves it.
   Rust-side plan before this reaches production.
 - [ ] **Step 5b:** Prove the watch is **scoped to its own node** — otherwise two agents race the
   same subvolume. Create one CRD object with `nodeName: k3s-session`, watch both pods' logs:
-  `kubectl -n rustic-git-ws logs ds/rustic-git-agent-env --tail=10`
+  `kubectl -n kloudlite-git-ws logs ds/kloudlite-git-agent-env --tail=10`
   Expected: the session pod logs a reconcile for the object; the env pod logs **nothing** about it.
   The env pod reacting is Task 6 Step 5's `selectableFields` missing, or the informer built without
   the field selector. Delete the object afterwards.
@@ -490,7 +490,7 @@ and verifies the API actually serves it.
   running idle. Re-apply `crds.yaml`, delete the pod again, confirm the watch re-establishes per
   Step 5. **CRDs before DaemonSet, always** — record it in `ROLLBACK.md`.
 - [ ] **Step 6:** Namespace convention + default deny. Environments get one namespace each,
-  `env-{id}`; workspaces stay in `rustic-git-ws`. Write `netpol-env-namespace.yaml` as a template
+  `env-{id}`; workspaces stay in `kloudlite-git-ws`. Write `netpol-env-namespace.yaml` as a template
   with `namespace: env-PLACEHOLDER`: a `default-deny` policy (`podSelector: {}`,
   `policyTypes: [Ingress, Egress]`), an `allow-dns` egress to `kube-system`'s CoreDNS on 53/UDP+TCP,
   an `allow-same-namespace` ingress+egress from `podSelector: {}` (services within one environment
@@ -498,7 +498,7 @@ and verifies the API actually serves it.
   namespaces at all — an environment reaching another tenant's environment is the failure this
   prevents.
 - [ ] **Step 7:** Prove the template denies, in a throwaway namespace, the same before/after shape
-  as Task 5 Step 4: create `env-probe`, run a pod, `wget` a pod in `rustic-git-ws` (succeeds),
+  as Task 5 Step 4: create `env-probe`, run a pod, `wget` a pod in `kloudlite-git-ws` (succeeds),
   apply the rendered template, re-run.
   Expected: `download timed out`, rc=1 — and DNS still resolving
   (`nslookup kubernetes.default` succeeds), which is what proves `allow-dns` is scoped right and
@@ -512,14 +512,14 @@ The old VM's agent has been running untouched this whole time; rollback is there
 *proving* that, not restoring it.
 
 - [ ] **Step 1:** Confirm the old agent is still healthy and still serving its own region:
-  `ssh 20.219.39.174 'systemctl is-active rustic-git-agent && journalctl -u rustic-git-agent --since -5m --no-pager | tail -5'`
+  `ssh 20.219.39.174 'systemctl is-active kloudlite-git-agent && journalctl -u kloudlite-git-agent --since -5m --no-pager | tail -5'`
   Expected: `active`, recent long-poll lines. If this is not true, the Global Constraint was
   violated somewhere — stop and restore before continuing.
 - [ ] **Step 2:** Rehearse the rollback for real: scale both DaemonSets to zero by adding a
   `nodeSelector` that matches nothing (DaemonSets have no `replicas`):
-  `kubectl -n rustic-git-ws patch ds rustic-git-agent-session -p '{"spec":{"template":{"spec":{"nodeSelector":{"rustic-git.io/role":"disabled"}}}}}'`
+  `kubectl -n kloudlite-git-ws patch ds kloudlite-git-agent-session -p '{"spec":{"template":{"spec":{"nodeSelector":{"kloudlite-git.io/role":"disabled"}}}}}'`
   (and the same for `-env`).
-  Expected: `kubectl -n rustic-git-ws get pod` → `No resources found` within ~30s.
+  Expected: `kubectl -n kloudlite-git-ws get pod` → `No resources found` within ~30s.
 - [ ] **Step 3:** With k3s agents gone, create a workspace against the OLD region and prove it still
   works end to end — the actual rollback assertion:
   `WS_REGION=<vm-region> ./tests/ws_e2e.sh` on the VM (or the equivalent create+push+clone via

@@ -202,7 +202,7 @@ pub(crate) async fn events(
     let limit = q.limit.unwrap_or(PAGE).clamp(1, MAX_PAGE);
     let sql = format!(
         "SELECT id, toString(ts, 'UTC'), kind, actor, owner, target, region, attrs \
-         FROM rustic.events FINAL {filter} ORDER BY ts DESC, id DESC LIMIT {limit}"
+         FROM kloudlite.events FINAL {filter} ORDER BY ts DESC, id DESC LIMIT {limit}"
     );
     let rows = h.query(&sql).await.map_err(bad_gateway)?;
     let out: Vec<EventOut> = rows

@@ -40,9 +40,9 @@ only to pass its own id when reporting.
 
 ## Tech Stack
 
-Rust 2021 workspace (axum 0.8, tokio, serde, reqwest, chrono), `rustic_git_storage::store::valid_segment`
-for the segment rule, `rustic_git_workspaces::store::MemStore` for tests, integration tests in
-`tests/vol_agent.rs` (root package `rustic-git-tests`), unit tests in the crate modules.
+Rust 2021 workspace (axum 0.8, tokio, serde, reqwest, chrono), `kloudlite_git_storage::store::valid_segment`
+for the segment rule, `kloudlite_git_workspaces::store::MemStore` for tests, integration tests in
+`tests/vol_agent.rs` (root package `kloudlite-git-tests`), unit tests in the crate modules.
 
 ## Audit findings covered
 
@@ -94,7 +94,7 @@ lineage tmp+rename, H7 sweep-exhausted marks Error, P1–P5.
 - Test: `crates/workspaces/src/model.rs` `#[cfg(test)] mod tests` (new)
 
 **Interfaces:**
-- Consumes: `rustic_git_storage::store::valid_segment` (already a dependency —
+- Consumes: `kloudlite_git_storage::store::valid_segment` (already a dependency —
   `crates/workspaces/Cargo.toml:12`)
 - Produces: `pub fn validate_mount(m: &Mount) -> Result<(), String>`
 
@@ -133,7 +133,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: See it fail.** `cargo test -p rustic-git-workspaces model::tests` — expected:
+- [ ] **Step 2: See it fail.** `cargo test -p kloudlite-git-workspaces model::tests` — expected:
       `error[E0432]: unresolved import ... validate_mount` (compile failure, the function does not
       exist yet).
 
@@ -149,7 +149,7 @@ mod tests {
 /// the bind string. Kept here rather than in `engine::compose` so the runtime that replaces
 /// compose can call the same rule.
 pub fn validate_mount(m: &Mount) -> Result<(), String> {
-    if !rustic_git_storage::store::valid_segment(&m.folder) {
+    if !kloudlite_git_storage::store::valid_segment(&m.folder) {
         return Err(format!("mount folder {:?} must be a single name of [A-Za-z0-9._-]", m.folder));
     }
     if !m.path.starts_with('/') || m.path.contains(':') || m.path.contains('\0') {
@@ -159,7 +159,7 @@ pub fn validate_mount(m: &Mount) -> Result<(), String> {
 }
 ```
 
-- [ ] **Step 4: See it pass.** `cargo test -p rustic-git-workspaces model::tests` — 2 passed.
+- [ ] **Step 4: See it pass.** `cargo test -p kloudlite-git-workspaces model::tests` — 2 passed.
       Then `cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
@@ -220,7 +220,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: See it fail.** `cargo test -p rustic-git-workspaces api::tests` — expected:
+- [ ] **Step 2: See it fail.** `cargo test -p kloudlite-git-workspaces api::tests` — expected:
       `error[E0432]: unresolved import ... check_mounts`.
 
 - [ ] **Step 3: Minimal implementation.** Replace the emptiness check in `create_env`
@@ -246,7 +246,7 @@ fn check_mounts(services: &[Service]) -> Result<(), String> {
 Delete the now-dead "mount folder name must not be empty" comment block above it and the old
 `any(... m.folder.is_empty())` line — `validate_mount` subsumes emptiness.
 
-- [ ] **Step 4: See it pass.** `cargo test -p rustic-git-workspaces api::tests` — 1 passed.
+- [ ] **Step 4: See it pass.** `cargo test -p kloudlite-git-workspaces api::tests` — 1 passed.
       Then `cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
@@ -315,7 +315,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: See it fail.** `cargo test -p rustic-git-workspaces compose::tests` — expected:
+- [ ] **Step 2: See it fail.** `cargo test -p kloudlite-git-workspaces compose::tests` — expected:
       `assertion failed: render(&env_with("/", "/host"), live).is_err()` (render currently
       succeeds and emits `/:/host`).
 
@@ -335,7 +335,7 @@ Then the same guard in `bins/agent/src/lib.rs::mkdir_env_mounts` (line 568):
             if seen.insert(m.folder.clone()) {
                 // `create_dir_all` on an unvalidated folder is itself the escape — it would
                 // happily mkdir -p outside the subvolume before compose ever ran.
-                rustic_git_workspaces::model::validate_mount(m)?;
+                kloudlite_git_workspaces::model::validate_mount(m)?;
                 std::fs::create_dir_all(live.join("volumes").join(&m.folder)).map_err(|e| e.to_string())?;
             }
 ```
@@ -343,8 +343,8 @@ Then the same guard in `bins/agent/src/lib.rs::mkdir_env_mounts` (line 568):
 (`mkdir_env_mounts` already returns `Result<(), String>` and `validate_mount` returns
 `Result<(), String>`, so `?` needs no mapping.)
 
-- [ ] **Step 4: See it pass.** `cargo test -p rustic-git-workspaces compose::tests` — 1 passed.
-      Then `cargo build -p rustic-git-agent && cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 4: See it pass.** `cargo test -p kloudlite-git-workspaces compose::tests` — 1 passed.
+      Then `cargo build -p kloudlite-git-agent && cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
 
@@ -619,7 +619,7 @@ async fn report(client: &reqwest::Client, api: &str, token: &str, agent: &str, j
   then `report(&client, &cfg_api, &cfg_tok, &cfg_agent, &job_id, outcome).await;`
 
 - [ ] **Step 4: See it pass.** `cargo test --test vol_agent` (all green, including the three
-      amended tests) and `cargo build -p rustic-git-agent`. Then
+      amended tests) and `cargo build -p kloudlite-git-agent`. Then
       `cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 5: Commit.**
@@ -645,7 +645,7 @@ git commit -m "Accept a job report only from the agent holding the lease"
 Steps:
 
 - [ ] **Step 1: Write the failing test.** Add to the jobs module in `tests/vol_agent.rs` (needs
-      `use rustic_git_workspaces::model::{Workspace, WsState};` added to the module's imports —
+      `use kloudlite_git_workspaces::model::{Workspace, WsState};` added to the module's imports —
       check the exact `Workspace` field list in `crates/workspaces/src/model.rs` and fill every
       field; `region: "centralindia"`, `owner: "alice"`, `id: "ws-1"` to match `job()`'s payload):
 
@@ -744,7 +744,7 @@ and the spawn site:
   In `main.rs:132`:
 
 ```rust
-    let jobs = rustic_git_server::boot::build_jobs_state(app.is_leader()).await?;
+    let jobs = kloudlite_git_server::boot::build_jobs_state(app.is_leader()).await?;
 ```
 
   (`app` is constructed just above, so the ordering already works.)
@@ -791,7 +791,7 @@ with:
         }
 ```
 
-- [ ] **Step 2: Verify.** `cargo build -p rustic-git-agent && cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 2: Verify.** `cargo build -p kloudlite-git-agent && cargo clippy --workspace -- -D warnings`.
 
 - [ ] **Step 3: Commit.**
 

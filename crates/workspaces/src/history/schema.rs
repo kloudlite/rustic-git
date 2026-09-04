@@ -1,4 +1,4 @@
-//! The `rustic` database, as numbered migrations the admin process applies at boot.
+//! The `kloudlite` database, as numbered migrations the admin process applies at boot.
 //!
 //! `CREATE … IF NOT EXISTS` plus a recorded version, not a migration framework: a fresh ClickStack
 //! becomes usable with no manual step, and an existing one skips what it already has. Never edit a
@@ -13,10 +13,10 @@
 
 use super::{History, HistoryError};
 
-const DATABASE: &str = "CREATE DATABASE IF NOT EXISTS rustic";
+const DATABASE: &str = "CREATE DATABASE IF NOT EXISTS kloudlite";
 
 /// The bookkeeping table. Applied before anything else and never numbered — it IS the numbering.
-const BOOKKEEPING: &str = "CREATE TABLE IF NOT EXISTS rustic.schema_migrations \
+const BOOKKEEPING: &str = "CREATE TABLE IF NOT EXISTS kloudlite.schema_migrations \
     (version UInt32, applied_at DateTime DEFAULT now()) \
     ENGINE = ReplacingMergeTree ORDER BY version";
 
@@ -29,7 +29,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // `now()` at insert time — a re-stamped retry is a second row that FINAL cannot merge away.
     (
         1,
-        "CREATE TABLE IF NOT EXISTS rustic.events (\
+        "CREATE TABLE IF NOT EXISTS kloudlite.events (\
             ts DateTime64(3), \
             id String, \
             kind LowCardinality(String), \
@@ -46,7 +46,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // MergeTree is right: two beats in one hour are two honest observations, not a conflict.
     (
         2,
-        "CREATE TABLE IF NOT EXISTS rustic.usage_hourly (\
+        "CREATE TABLE IF NOT EXISTS kloudlite.usage_hourly (\
             ts DateTime, \
             owner String, \
             is_team UInt8, \
@@ -60,7 +60,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     ),
     (
         3,
-        "CREATE TABLE IF NOT EXISTS rustic.fleet_hourly (\
+        "CREATE TABLE IF NOT EXISTS kloudlite.fleet_hourly (\
             ts DateTime, \
             region LowCardinality(String), \
             nodes_total UInt32, \
@@ -84,7 +84,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // ReplacingMergeTree on `id` for the same at-least-once reason as `events`.
     (
         4,
-        "CREATE TABLE IF NOT EXISTS rustic.alerts (\
+        "CREATE TABLE IF NOT EXISTS kloudlite.alerts (\
             ts DateTime, \
             id String, \
             region LowCardinality(String), \
@@ -103,7 +103,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // chart and a timeout.
     (
         5,
-        "CREATE TABLE IF NOT EXISTS rustic.metrics_5m (\
+        "CREATE TABLE IF NOT EXISTS kloudlite.metrics_5m (\
             ts DateTime, \
             region LowCardinality(String), \
             node String, \
@@ -127,7 +127,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // `query` posts one statement.
     (
         6,
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS rustic.metrics_5m_gauge_mv TO rustic.metrics_5m AS \
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS kloudlite.metrics_5m_gauge_mv TO kloudlite.metrics_5m AS \
          SELECT toStartOfFiveMinute(TimeUnix) AS ts, \
                 ResourceAttributes['region'] AS region, \
                 ResourceAttributes['k8s.node.name'] AS node, \
@@ -141,7 +141,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     ),
     (
         7,
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS rustic.metrics_5m_sum_mv TO rustic.metrics_5m AS \
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS kloudlite.metrics_5m_sum_mv TO kloudlite.metrics_5m AS \
          SELECT toStartOfFiveMinute(TimeUnix) AS ts, \
                 ResourceAttributes['region'] AS region, \
                 ResourceAttributes['k8s.node.name'] AS node, \
@@ -168,7 +168,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // `system.tables` after a boot that logged a migration error at 10 or 14.
     (
         8,
-        "CREATE TABLE IF NOT EXISTS rustic.usage_hourly_v2 (\
+        "CREATE TABLE IF NOT EXISTS kloudlite.usage_hourly_v2 (\
             ts DateTime, \
             owner String, \
             is_team UInt8, \
@@ -180,12 +180,12 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
            ORDER BY (owner, dimension, ts) \
            TTL ts + INTERVAL 730 DAY",
     ),
-    (9, "INSERT INTO rustic.usage_hourly_v2 SELECT * FROM rustic.usage_hourly"),
-    (10, "EXCHANGE TABLES rustic.usage_hourly AND rustic.usage_hourly_v2"),
-    (11, "DROP TABLE IF EXISTS rustic.usage_hourly_v2"),
+    (9, "INSERT INTO kloudlite.usage_hourly_v2 SELECT * FROM kloudlite.usage_hourly"),
+    (10, "EXCHANGE TABLES kloudlite.usage_hourly AND kloudlite.usage_hourly_v2"),
+    (11, "DROP TABLE IF EXISTS kloudlite.usage_hourly_v2"),
     (
         12,
-        "CREATE TABLE IF NOT EXISTS rustic.fleet_hourly_v2 (\
+        "CREATE TABLE IF NOT EXISTS kloudlite.fleet_hourly_v2 (\
             ts DateTime, \
             region LowCardinality(String), \
             nodes_total UInt32, \
@@ -204,9 +204,9 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
            ORDER BY (region, ts) \
            TTL ts + INTERVAL 730 DAY",
     ),
-    (13, "INSERT INTO rustic.fleet_hourly_v2 SELECT * FROM rustic.fleet_hourly"),
-    (14, "EXCHANGE TABLES rustic.fleet_hourly AND rustic.fleet_hourly_v2"),
-    (15, "DROP TABLE IF EXISTS rustic.fleet_hourly_v2"),
+    (13, "INSERT INTO kloudlite.fleet_hourly_v2 SELECT * FROM kloudlite.fleet_hourly"),
+    (14, "EXCHANGE TABLES kloudlite.fleet_hourly AND kloudlite.fleet_hourly_v2"),
+    (15, "DROP TABLE IF EXISTS kloudlite.fleet_hourly_v2"),
 ];
 
 /// Applies every migration this server has not recorded yet. Returns how many ran, so boot logs
@@ -215,7 +215,7 @@ pub async fn migrate(h: &History) -> Result<u32, HistoryError> {
     h.query(DATABASE).await?;
     h.query(BOOKKEEPING).await?;
     let done: Vec<u32> = h
-        .query("SELECT version FROM rustic.schema_migrations FINAL")
+        .query("SELECT version FROM kloudlite.schema_migrations FINAL")
         .await?
         .iter()
         .filter_map(|r| r.first().and_then(|v| v.as_u64()).map(|v| v as u32))

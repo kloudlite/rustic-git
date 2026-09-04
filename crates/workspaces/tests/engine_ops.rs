@@ -3,7 +3,7 @@
 //! review VM. Fixture copied from `engine_snapshot.rs`'s `LoopbackPool`: integration test files
 //! cannot share code across `tests/*.rs`.
 
-use rustic_git_workspaces::engine::{Engine, Pool, have_btrfs};
+use kloudlite_git_workspaces::engine::{Engine, Pool, have_btrfs};
 
 struct LoopbackPool {
     pool: Pool,
@@ -55,7 +55,7 @@ fn ensure_homecache_creates_a_subvolume_with_the_four_dirs_owned_by_the_uid() {
     let (engine, _tmp) = engine(); // the file's existing btrfs-pool fixture
     engine.ensure_homecache("alice", 1000).unwrap();
     let root = engine.pool.root.join("homecache/alice");
-    assert!(rustic_git_workspaces::engine::ops::is_subvolume(&root));
+    assert!(kloudlite_git_workspaces::engine::ops::is_subvolume(&root));
     for d in ["cache", "vscode-server", "cursor-server", "state"] {
         let m = std::fs::metadata(root.join(d)).unwrap();
         use std::os::unix::fs::MetadataExt;

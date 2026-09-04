@@ -63,7 +63,7 @@ refactor: `heal_labels` is cosmetic) and the traversal is live. The pod fence ca
 `hostPath` half but not the agent's own `mkdir`/`chown`.
 
 **Fix:** one guard at the top of `apply_workspace`/`apply_environment` —
-`rustic_git_storage::store::valid_owner(&spec.owner)`, settled `Permanent`. A `pattern` on the
+`kloudlite_git_storage::store::valid_owner(&spec.owner)`, settled `Permanent`. A `pattern` on the
 CRD schema for `owner` would be the belt to that brace.
 
 ### 3. Medium — `delete_env` lists every Workspace in the cluster and swallows the error

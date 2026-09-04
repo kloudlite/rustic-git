@@ -5,8 +5,8 @@
 
 use k8s_openapi::api::core::v1::{Node, NodeCondition, NodeSpec, NodeStatus};
 use kube::api::ObjectMeta;
-use rustic_git_workspaces::crd::{self, DesiredState, Phase, RequestState};
-use rustic_git_workspaces::history::watch::{
+use kloudlite_git_workspaces::crd::{self, DesiredState, Phase, RequestState};
+use kloudlite_git_workspaces::history::watch::{
     environment_deleted, environment_events, event_id, node_events, quota_request_events,
     request_events,
     region_events, snapshot_deleted, snapshot_events, volume_events, workspace_deleted,

@@ -12,12 +12,12 @@
 
 ## Global Constraints
 
-- **`spec.owner` is truth; labels are a view, never authorization.** `rustic-git.io/owner` is stamped only so a list can be selector-narrowed, and every list re-filters on `spec.owner`.
+- **`spec.owner` is truth; labels are a view, never authorization.** `kloudlite-git.io/owner` is stamped only so a list can be selector-narrowed, and every list re-filters on `spec.owner`.
 - **`/v1` writes spec; controllers write status.** `Request` is the documented exception `QuotaRequest` already is: no controller reconciles a request, so the API tier writes its status too. Nothing else changes about the split.
 - **Only a superadmin decides.** Decision routes live only in `api::admin::router()`, behind `refuse_without_claim`; the user router has no decision handler compiled into it at all.
 - **One pending request per owner PER KIND** — a second is `409 "a request is already pending"`.
-- **RBAC mirrors the split:** `rustic-git-api` gets `get, list, create` on `requests`; `rustic-git-admin` gets `get, list, create, patch, delete` on `requests` and `patch, update` on `requests/status`.
-- **`deploy/k3s/crds.yaml` is GENERATED** — never hand-edit; regenerate with `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`.
+- **RBAC mirrors the split:** `kloudlite-git-api` gets `get, list, create` on `requests`; `kloudlite-git-admin` gets `get, list, create, patch, delete` on `requests` and `patch, update` on `requests/status`.
+- **`deploy/k3s/crds.yaml` is GENERATED** — never hand-edit; regenerate with `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`.
 - **Audit immediately after the consequential write**, never after a second fallible call; refusals of 409 and up go through `audited`.
 - Audit action words for decisions: `request.approved` / `request.denied`.
 - Comments explain WHY, never what. Commit subjects are imperative sentence case, no tool attribution.
@@ -134,7 +134,7 @@ mod request_tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-workspaces --lib request_tests`
+Run: `cargo test -p kloudlite-git-workspaces --lib request_tests`
 Expected: FAIL — `cannot find type RequestSpec in this scope` / `RequestKind` not found.
 
 - [ ] **Step 3: Add the types**
@@ -189,7 +189,7 @@ impl RequestKind {
 
 /// Join a team, or move to a different role in one. `role` is the directory's own word
 /// (`member` / `admin` / `owner`) rather than an enum, because the directory's `Role` lives in
-/// `rustic-git-pulls` and this crate deliberately does not depend on it; `validate` is what stops
+/// `kloudlite-git-pulls` and this crate deliberately does not depend on it; `validate` is what stops
 /// a typo reaching the grant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -221,7 +221,7 @@ pub struct OtherAsk {
 /// nowhere else to live.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "rustic-git.io",
+    group = "kloudlite-git.io",
     version = "v1alpha1",
     kind = "Request",
     plural = "requests",
@@ -308,40 +308,40 @@ Add `Request::crd(),` to `all_crds()`, after `QuotaRequest::crd()`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-workspaces --lib request_tests`
+Run: `cargo test -p kloudlite-git-workspaces --lib request_tests`
 Expected: PASS (4 tests)
 
 - [ ] **Step 5: Regenerate the CRD manifest and confirm the drift check holds**
 
 ```bash
-CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml
-cargo test -p rustic-git-workspaces --test crd_yaml
+CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml
+cargo test -p kloudlite-git-workspaces --test crd_yaml
 ```
 Expected: the second run PASSES, and `git diff --stat deploy/k3s/crds.yaml` is non-empty.
 
 - [ ] **Step 6: Grant the two ServiceAccounts their authority**
 
-In `deploy/k3s/api-rbac.yaml`, in the `rustic-git-api` ClusterRole, directly after the `quotarequests` rule:
+In `deploy/k3s/api-rbac.yaml`, in the `kloudlite-git-api` ClusterRole, directly after the `quotarequests` rule:
 
 ```yaml
   # The generic request queue. Same reach as `quotarequests` and for the same reason: a person or
   # a team admin may OPEN one for themselves, and deciding it is not a /v1 verb — no `patch`, and
   # no `requests/status` at all, so this role cannot mark its own request approved.
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["requests"]
     verbs: ["get", "list", "create"]
 ```
 
-And in the `rustic-git-admin` ClusterRole, directly after the `quotarequests/status` rule:
+And in the `kloudlite-git-admin` ClusterRole, directly after the `quotarequests/status` rule:
 
 ```yaml
   # Deciding a request: `patch` on the object for the migration's label repair, `patch`/`update` on
   # the status subresource for the decision itself. `create` is here because the one-shot migration
   # (`POST /admin/requests/migrate`) authors a Request per legacy QuotaRequest.
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["requests"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: ["rustic-git.io"]
+  - apiGroups: ["kloudlite-git.io"]
     resources: ["requests/status"]
     verbs: ["patch", "update"]
 ```
@@ -375,13 +375,13 @@ Create `crates/workspaces/tests/api_requests.rs`:
 //! `/v1/requests` against a mocked API server. The stub `Directory` is the one `api_quota.rs`
 //! uses: `karthik` is an admin of team `acme`, `bob` a plain member.
 
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState, Directory, TeamRole};
-use rustic_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
+use kloudlite_git_core::jwt::Jwt;
+use kloudlite_git_workspaces::api::{router, ApiState, Directory, TeamRole};
+use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/rustic-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite-git.io/v1alpha1";
 
 struct StubMembership;
 
@@ -400,7 +400,7 @@ impl Directory for StubMembership {
     async fn is_live(&self, _jti: &str) -> bool {
         false
     }
-    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
         None
     }
     async fn is_team(&self, slug: &str) -> bool {
@@ -435,8 +435,8 @@ fn list_of(items: Vec<Value>) -> Value {
 
 fn stored(id: &str, owner: &str, kind: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Request",
-        "metadata": {"name": id, "labels": {"rustic-git.io/owner": owner}},
+        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Request",
+        "metadata": {"name": id, "labels": {"kloudlite-git.io/owner": owner}},
         "spec": {"owner": owner, "kind": kind, "requestedBy": owner, "reason": "r",
                  "other": {"title": "t", "body": "b"}},
     });
@@ -465,7 +465,7 @@ async fn a_create_takes_its_author_from_the_claims() {
     let sent = s.rec.body("POST", &format!("{API}/requests")).unwrap();
     assert_eq!(sent["spec"]["requestedBy"], "karthik");
     assert_eq!(sent["spec"]["owner"], "karthik");
-    assert_eq!(sent["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
+    assert_eq!(sent["metadata"]["labels"]["kloudlite-git.io/owner"], "karthik");
 }
 
 /// One pending per owner PER KIND: a pending `other` must not block a `quota`.
@@ -544,7 +544,7 @@ Check the helper signatures in `crates/workspaces/src/kube_test.rs` first (`Rout
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-workspaces --test api_requests`
+Run: `cargo test -p kloudlite-git-workspaces --test api_requests`
 Expected: FAIL — every case 404s, the routes do not exist.
 
 - [ ] **Step 3: Add the routes**
@@ -776,7 +776,7 @@ async fn create_quota_request(
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-workspaces --test api_requests --test api_quota`
+Run: `cargo test -p kloudlite-git-workspaces --test api_requests --test api_quota`
 Expected: PASS. If `api_quota.rs` has a case asserting `POST /v1/quota-requests` hits `.../quotarequests`, update that route expectation to `.../requests` and its assertion comment — the wrapper is the point.
 
 - [ ] **Step 6: Commit**
@@ -868,7 +868,7 @@ async fn the_kind_filter_narrows_both_sources() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-workspaces --test api_admin_requests`
+Run: `cargo test -p kloudlite-git-workspaces --test api_admin_requests`
 Expected: FAIL — 404, `/admin/requests` is not mounted.
 
 - [ ] **Step 3: Implement the union**
@@ -959,7 +959,7 @@ async fn list_requests(State(s): State<Arc<ApiState>>, Query(f): Query<RequestFi
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p rustic-git-workspaces --test api_admin_requests --test api_admin_overview`
+Run: `cargo test -p kloudlite-git-workspaces --test api_admin_requests --test api_admin_overview`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -980,7 +980,7 @@ git commit -m "Serve one admin request queue over both request CRDs"
 
 **Interfaces:**
 - Produces: `pub enum GrantAccess { Done, NoSuchUser, NoSuchTeam, Refused(String), Unsupported }` and `Directory::grant_access(&self, team: &str, user: &str, role: TeamRole) -> GrantAccess` with a default body returning `Unsupported`.
-- Consumes (in `bins/api`): `rustic_git_pulls::directory::Directory::{add_member, set_role}`, `AddMember`, `Membership`, `Role`.
+- Consumes (in `bins/api`): `kloudlite_git_pulls::directory::Directory::{add_member, set_role}`, `AddMember`, `Membership`, `Role`.
 
 > **Resolution (stated in the plan header, repeated here because this task is where it bites):** the spec asks for "a peer route on the server tier". There is none to reuse, and none is needed: `bins/api` — the very process that decides requests — already holds the mongo `Directory` and wears the workspaces `Directory` trait (`bins/api/src/main.rs`'s `Dir`). A peer HTTP hop would be this process calling itself. One trait method is the whole grant. `crates/api`'s `set_role` handler stays exactly as it is for the interactive team page.
 
@@ -1021,7 +1021,7 @@ Add to the existing `#[cfg(test)] mod tests` at the bottom of `crates/workspaces
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-workspaces --lib a_directory_without_granting`
+Run: `cargo test -p kloudlite-git-workspaces --lib a_directory_without_granting`
 Expected: FAIL — `no method named grant_access`.
 
 - [ ] **Step 3: Add the trait method**
@@ -1056,17 +1056,17 @@ and inside `pub trait Directory`:
 
 - [ ] **Step 4: Wire the mongo directory**
 
-In `bins/api/src/main.rs`, inside `impl rustic_git_workspaces::api::Directory for Dir`:
+In `bins/api/src/main.rs`, inside `impl kloudlite_git_workspaces::api::Directory for Dir`:
 
 ```rust
     async fn grant_access(
         &self,
         team: &str,
         user: &str,
-        role: rustic_git_workspaces::api::TeamRole,
-    ) -> rustic_git_workspaces::api::GrantAccess {
-        use rustic_git_pulls::directory::{AddMember, Membership, Role};
-        use rustic_git_workspaces::api::{GrantAccess, TeamRole};
+        role: kloudlite_git_workspaces::api::TeamRole,
+    ) -> kloudlite_git_workspaces::api::GrantAccess {
+        use kloudlite_git_pulls::directory::{AddMember, Membership, Role};
+        use kloudlite_git_workspaces::api::{GrantAccess, TeamRole};
         let role = match role {
             TeamRole::Owner => Role::Owner,
             TeamRole::Admin => Role::Admin,
@@ -1102,7 +1102,7 @@ In `bins/api/src/main.rs`, inside `impl rustic_git_workspaces::api::Directory fo
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `cargo test -p rustic-git-workspaces --lib a_directory_without_granting && cargo build -p rustic-git-api`
+Run: `cargo test -p kloudlite-git-workspaces --lib a_directory_without_granting && cargo build -p kloudlite-git-api`
 Expected: PASS, and the binary builds.
 
 - [ ] **Step 6: Commit**
@@ -1241,7 +1241,7 @@ fn active_region() -> Value {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-workspaces --test api_admin_requests`
+Run: `cargo test -p kloudlite-git-workspaces --test api_admin_requests`
 Expected: FAIL — 404 on every decision path.
 
 - [ ] **Step 3: Implement the decision routes**
@@ -1468,12 +1468,12 @@ Mount both, next to `/admin/requests`:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-workspaces --test api_admin_requests`
+Run: `cargo test -p kloudlite-git-workspaces --test api_admin_requests`
 Expected: PASS (7 tests, including Task 3's two)
 
 - [ ] **Step 5: Check the whole crate and the lint gate**
 
-Run: `cargo test -p rustic-git-workspaces && cargo clippy --workspace -- -D warnings`
+Run: `cargo test -p kloudlite-git-workspaces && cargo clippy --workspace -- -D warnings`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -1531,7 +1531,7 @@ If `Route::conflict` does not exist in `kube_test.rs`, use whatever the harness 
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-workspaces --test api_admin_requests the_migration_is_idempotent`
+Run: `cargo test -p kloudlite-git-workspaces --test api_admin_requests the_migration_is_idempotent`
 Expected: FAIL — 404, the route does not exist.
 
 - [ ] **Step 3: Implement it**
@@ -1597,7 +1597,7 @@ Mount it: `.route("/admin/requests/migrate", post(migrate_requests))` — **befo
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-workspaces --test api_admin_requests`
+Run: `cargo test -p kloudlite-git-workspaces --test api_admin_requests`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1971,6 +1971,6 @@ git commit -m "Document generic requests and assert an access grant end to end"
 
 ## Resolved ambiguities
 
-1. **Region grants do not go on `OwnerBinding.status.regions`.** An `OwnerBinding` is one object per `{owner, region}` and is authored by the claiming agent, so a per-owner list of granted regions has no coherent home on it, and an agent-written status would race the admin's write. The grant is recorded as `Quota.spec.regions` — the one per-owner, cluster-scoped, admin-written object — which needs no new RBAC (`rustic-git-admin` already patches `quotas`) and is exactly where per-owner region gating will read it.
+1. **Region grants do not go on `OwnerBinding.status.regions`.** An `OwnerBinding` is one object per `{owner, region}` and is authored by the claiming agent, so a per-owner list of granted regions has no coherent home on it, and an agent-written status would race the admin's write. The grant is recorded as `Quota.spec.regions` — the one per-owner, cluster-scoped, admin-written object — which needs no new RBAC (`kloudlite-git-admin` already patches `quotas`) and is exactly where per-owner region gating will read it.
 2. **No new peer route on the server tier for access grants.** `bins/api` already holds the mongo directory behind the workspaces `Directory` trait, so a peer hop would be the admin process calling itself. One trait method (`grant_access`, default `Unsupported`) plus its implementation in `bins/api/src/main.rs` is the whole grant; `crates/api`'s `set_role` handler is untouched.
 3. **An access request's `spec.owner` is the ASKER, not the team.** The team is what they do not have yet, so it cannot also be the owner that authorizes the ask (`may_request_for` would refuse a non-member outright). `access.team` names the team, `requestedBy` is who gets the role, and the per-kind pending rule counts against the asker's own slug.

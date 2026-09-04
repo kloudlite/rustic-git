@@ -1,20 +1,20 @@
 [package]
-name = "rustic-git-worker-bin"
+name = "kloudlite-git-worker-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [[bin]]
-name = "rustic-git-worker"
+name = "kloudlite-git-worker"
 path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
 metrics = { workspace = true }
-rustic-git-core = { path = "../../crates/core" }
-rustic-git-storage = { path = "../../crates/storage" }
-rustic-git-pulls = { path = "../../crates/pulls" }     # model + jobs + merge_worker; NO check
-rustic-git-registry = { path = "../../crates/registry" }
+kloudlite-git-core = { path = "../../crates/core" }
+kloudlite-git-storage = { path = "../../crates/storage" }
+kloudlite-git-pulls = { path = "../../crates/pulls" }     # model + jobs + merge_worker; NO check
+kloudlite-git-registry = { path = "../../crates/registry" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }

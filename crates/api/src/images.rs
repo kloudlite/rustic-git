@@ -9,7 +9,7 @@ pub(crate) async fn images_proxy(
     axum::extract::Path(owner): axum::extract::Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !rustic_git_storage::store::valid_segment(&owner) {
+    if !kloudlite_git_storage::store::valid_segment(&owner) {
         return not_found();
     }
     let caller = match browse_caller(&api, &headers, &owner).await {
@@ -26,8 +26,8 @@ pub(crate) async fn images_proxy(
     let r = match api
         .client
         .get(url)
-        .header(rustic_git_core::peer::PEER_HEADER, &api.secret)
-        .header(rustic_git_core::peer::OWNER_HEADER, &who)
+        .header(kloudlite_git_core::peer::PEER_HEADER, &api.secret)
+        .header(kloudlite_git_core::peer::OWNER_HEADER, &who)
         .send()
         .await
     {
@@ -97,7 +97,7 @@ pub(crate) async fn image_write_proxy(
     // becomes a second parser. `None` for the tails that take no query.
     query: Option<&str>,
 ) -> Response {
-    if !rustic_git_storage::store::valid_segment(owner) || !rustic_git_storage::store::valid_segment(image) {
+    if !kloudlite_git_storage::store::valid_segment(owner) || !kloudlite_git_storage::store::valid_segment(image) {
         return not_found();
     }
     let caller = match browse_caller(api, headers, owner).await {
@@ -115,8 +115,8 @@ pub(crate) async fn image_write_proxy(
     let mut up = api
         .client
         .post(url)
-        .header(rustic_git_core::peer::PEER_HEADER, &api.secret)
-        .header(rustic_git_core::peer::OWNER_HEADER, &who);
+        .header(kloudlite_git_core::peer::PEER_HEADER, &api.secret)
+        .header(kloudlite_git_core::peer::OWNER_HEADER, &who);
     if let Some(b) = body {
         up = up.body(b);
     }

@@ -1,15 +1,15 @@
 [package]
-name = "rustic-git-storage"
+name = "kloudlite-git-storage"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "rustic_git_storage"
+name = "kloudlite_git_storage"
 
 [dependencies]
 tracing = { workspace = true }
-rustic-git-core = { path = "../core" }
+kloudlite-git-core = { path = "../core" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 slatedb = { workspace = true }

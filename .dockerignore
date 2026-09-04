@@ -1,13 +1,13 @@
 # The Dockerfile only COPYs compiled binaries out of target/<profile>/, so nothing else is context —
 # not the source, and not the rest of target/ (gigabytes of rlibs and .d files).
 *
-!target/release/rustic-git
-!target/release/rustic-git-api
-!target/release/rustic-git-worker
-!target/release/rustic-git-agent
-!target/release/rustic-git-gateway
-!target/dev-image/rustic-git
-!target/dev-image/rustic-git-api
-!target/dev-image/rustic-git-worker
-!target/dev-image/rustic-git-agent
-!target/dev-image/rustic-git-gateway
+!target/release/kloudlite-git
+!target/release/kloudlite-git-api
+!target/release/kloudlite-git-worker
+!target/release/kloudlite-git-agent
+!target/release/kloudlite-git-gateway
+!target/dev-image/kloudlite-git
+!target/dev-image/kloudlite-git-api
+!target/dev-image/kloudlite-git-worker
+!target/dev-image/kloudlite-git-agent
+!target/dev-image/kloudlite-git-gateway

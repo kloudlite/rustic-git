@@ -1,5 +1,5 @@
 mod common;
-use rustic_git_registry::{store as rstore, store::ImageExt, Digest};
+use kloudlite_git_registry::{store as rstore, store::ImageExt, Digest};
 
 #[test]
 fn digests_parse_strictly() {
@@ -71,7 +71,7 @@ async fn images_are_private_until_told_otherwise() {
 /// once `set_image_visibility` returns.
 #[tokio::test]
 async fn flip_to_private_removes_the_public_marker() {
-    use rustic_git_storage::index::{self, Kind};
+    use kloudlite_git_storage::index::{self, Kind};
     use slatedb::object_store::ObjectStoreExt;
     let e = common::env().await;
     e.store.put_tag("acme", "nginx", "latest", &Digest::of(b"m")).await.unwrap();
@@ -200,7 +200,7 @@ async fn an_unreadable_manifest_reads_as_not_held_not_as_a_fault() {
     .to_string()
     .into_bytes();
     let md = Digest::of(&manifest);
-    let loc = rustic_git_registry::store::manifest_path("acme", "nginx", &md);
+    let loc = kloudlite_git_registry::store::manifest_path("acme", "nginx", &md);
 
     let inner = std::sync::Arc::new(slatedb::object_store::memory::InMemory::new());
     inner.put(&loc, PutPayload::from(manifest)).await.unwrap();
@@ -211,10 +211,10 @@ async fn an_unreadable_manifest_reads_as_not_held_not_as_a_fault() {
     });
     let tmp = tempfile::tempdir().unwrap();
     let store = std::sync::Arc::new(
-        rustic_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
+        kloudlite_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
     );
 
-    let held = rustic_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await;
+    let held = kloudlite_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await;
     assert!(!held.unwrap(), "an unreadable manifest names nothing; it is not a 500");
 }
 
@@ -232,15 +232,15 @@ async fn the_backfill_marks_itself_done_and_does_not_walk_twice() {
     .to_string()
     .into_bytes();
     let md = Digest::of(&manifest);
-    let loc = rustic_git_registry::store::manifest_path("acme", "nginx", &md);
+    let loc = kloudlite_git_registry::store::manifest_path("acme", "nginx", &md);
     e.store.os.put(&loc, PutPayload::from(manifest)).await.unwrap();
 
-    assert!(rustic_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
+    assert!(kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
         .await
         .unwrap());
     e.store.os.delete(&loc).await.unwrap();
     assert!(
-        rustic_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
+        kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
             .await
             .unwrap(),
         "the row survives the manifest; the walk must not run a second time"
@@ -262,7 +262,7 @@ async fn a_blip_during_the_walk_does_not_mark_the_image_backfilled() {
     .to_string()
     .into_bytes();
     let md = Digest::of(&manifest);
-    let loc = rustic_git_registry::store::manifest_path("acme", "nginx", &md);
+    let loc = kloudlite_git_registry::store::manifest_path("acme", "nginx", &md);
 
     let inner = std::sync::Arc::new(slatedb::object_store::memory::InMemory::new());
     inner.put(&loc, PutPayload::from(manifest)).await.unwrap();
@@ -273,15 +273,15 @@ async fn a_blip_during_the_walk_does_not_mark_the_image_backfilled() {
     });
     let tmp = tempfile::tempdir().unwrap();
     let store = std::sync::Arc::new(
-        rustic_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
+        kloudlite_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
     );
 
     assert!(
-        !rustic_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await.unwrap(),
+        !kloudlite_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await.unwrap(),
         "the blip skips the only manifest, so nothing is held yet"
     );
     assert!(
-        rustic_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await.unwrap(),
+        kloudlite_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await.unwrap(),
         "the walk was never marked done, so the next pull retries it and finds the layer"
     );
 }

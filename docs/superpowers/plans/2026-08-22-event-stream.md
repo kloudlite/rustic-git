@@ -6,7 +6,7 @@
 
 **Architecture:** Owning nodes and the api tier `XADD` an event after each PR write. The worker consumes via a consumer group (`XREADGROUP`/`XACK`, `XAUTOCLAIM` for crashed consumers) instead of `find_one_and_update`-with-sort. The feed reads recent stream entries instead of querying pulls across repos. Pulls stay in Mongo for this whole sub-project — only *how work is discovered* changes, which keeps every step revertible.
 
-**Tech Stack:** Rust, existing `redis` crate (already a dependency, already wired via `RUSTIC_GIT_REDIS_URL`), Azure Managed Redis (already deployed).
+**Tech Stack:** Rust, existing `redis` crate (already a dependency, already wired via `KLOUDLITE_GIT_REDIS_URL`), Azure Managed Redis (already deployed).
 
 **Spec:** `docs/superpowers/specs/2026-08-22-repo-local-data-design.md` §4 (Events), §6 (Consistency), §9 step 2. Read it before implementing.
 
@@ -113,12 +113,12 @@ fn unknown_kind_is_ignored_not_fatal() {
 ### Task 5: Durability prerequisite and docs
 
 **Files:**
-- Modify: `deploy/rustic-git.yaml` (worker Deployment comment), `CLAUDE.md` (one load-bearing line)
+- Modify: `deploy/kloudlite-git.yaml` (worker Deployment comment), `CLAUDE.md` (one load-bearing line)
 - Verify: the Redis instance's eviction policy
 
 - [ ] **Step 1: Check the live policy** — `redis-cli CONFIG GET maxmemory-policy` against the configured instance (or the Azure portal/CLI equivalent; Azure Managed Redis may not expose CONFIG — if so, record how it was verified). `noeviction` is required: an eviction policy that can drop stream entries silently drops queued merge work. If it is NOT `noeviction`, do not change it silently — record the finding in the report and state the risk; the periodic fallback sweep (Task 3) is what keeps that from losing work.
 - [ ] **Step 2: Document** — worker Deployment comment: events are a nudge, the periodic sweep is the floor, and the eviction-policy requirement. `CLAUDE.md`: one line under load-bearing rules — the `events` stream is a nudge for the worker and a view for the feed, never the record; every consumer keeps a fallback.
-- [ ] **Step 3:** `kubectl apply --dry-run=client -f deploy/rustic-git.yaml` OK; `cargo test` green.
+- [ ] **Step 3:** `kubectl apply --dry-run=client -f deploy/kloudlite-git.yaml` OK; `cargo test` green.
 - [ ] **Step 4: Commit** — `Document the event stream and its durability requirement`
 
 ---
@@ -127,5 +127,5 @@ fn unknown_kind_is_ignored_not_fatal() {
 
 - [ ] `cargo test` — full suite green
 - [ ] `cargo clippy --lib` — no new warnings in touched files
-- [ ] Redis-down drill: with `RUSTIC_GIT_REDIS_URL` unset, PR writes still succeed, the worker still finds work via the fallback sweep, the feed still renders via `pulls_across`
+- [ ] Redis-down drill: with `KLOUDLITE_GIT_REDIS_URL` unset, PR writes still succeed, the worker still finds work via the fallback sweep, the feed still renders via `pulls_across`
 - [ ] Re-read spec §4/§6: every claim maps to a landed task

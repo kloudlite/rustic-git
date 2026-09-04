@@ -9,7 +9,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::crd;
+use kloudlite_git_workspaces::crd;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -206,7 +206,7 @@ const APPLY_RESYNC: Duration = Duration::from_secs(600);
 /// with the NEW path 422s against the still-running pod's OLD one — until something deletes the
 /// pod so a fresh Apply can create it with the new hostPath. Not auto-deleted here on purpose: see
 /// `deploy/k3s/README.md`'s snapshot-model cutover section for the explicit
-/// `kubectl delete pods -l rustic-git.io/kind=...` step that closes this window operator-side.
+/// `kubectl delete pods -l kloudlite-git.io/kind=...` step that closes this window operator-side.
 pub(crate) async fn ensure<K>(api: &Api<K>, obj: &K, ctx: &Ctx) -> Result<(), ReconcileErr>
 where
     K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,

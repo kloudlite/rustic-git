@@ -5,9 +5,9 @@
 # and a peer holds the writer inside LEADER_TTL plus one tick. The rollout waits say when it is done.
 set -euo pipefail
 cd "$(dirname "$0")"
-kubectl apply -f rustic-git.yaml -f rustic-git-web.yaml
-kubectl -n rustic-git rollout status statefulset/rustic-git-srv --timeout=900s
-for d in rustic-git-api rustic-git-worker rustic-git-web; do
-  kubectl -n rustic-git rollout status "deployment/$d" --timeout=300s
+kubectl apply -f kloudlite-git.yaml -f kloudlite-git-web.yaml
+kubectl -n kloudlite-git rollout status statefulset/kloudlite-git-srv --timeout=900s
+for d in kloudlite-git-api kloudlite-git-worker kloudlite-git-web; do
+  kubectl -n kloudlite-git rollout status "deployment/$d" --timeout=300s
 done
 echo "AKS rolled. The k3s side is separate: kubectl apply -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/gateway.yaml with that cluster's kubeconfig."

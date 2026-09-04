@@ -9,12 +9,12 @@
 // allocation per refusal for no measurable gain.
 #![allow(clippy::result_large_err)]
 
-pub(crate) use rustic_git_core::{err, hex, jwt, httpx::Trusted};
-pub(crate) use rustic_git_core::httpx as httpauth;
-pub(crate) use rustic_git_storage::store as dbstore;
-pub(crate) use rustic_git_storage::{index, ownership, pool};
-pub(crate) use rustic_git_app::App;
-pub(crate) use rustic_git_core::{Error, Result};
+pub(crate) use kloudlite_git_core::{err, hex, jwt, httpx::Trusted};
+pub(crate) use kloudlite_git_core::httpx as httpauth;
+pub(crate) use kloudlite_git_storage::store as dbstore;
+pub(crate) use kloudlite_git_storage::{index, ownership, pool};
+pub(crate) use kloudlite_git_app::App;
+pub(crate) use kloudlite_git_core::{Error, Result};
 
 /// The tails that make a `/v2/{owner}/{name}/...` path an IMAGE path (one that must be routed to
 /// the node holding that image's database). A path whose tail is missing here is not a registry

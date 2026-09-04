@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Any `rustic-git-srv` pod may write the ownership map: the writer is whoever holds a lease at `cluster/leader`, taken and renewed with conditional puts, so a dead leader is replaced in ~15 s with no operator and no dedicated pod.
+**Goal:** Any `kloudlite-git-srv` pod may write the ownership map: the writer is whoever holds a lease at `cluster/leader`, taken and renewed with conditional puts, so a dead leader is replaced in ~15 s with no operator and no dedicated pod.
 
-**Architecture:** One new module, `ownership::lease` (`take`/`renew`/`read` over `Arc<dyn ObjectStore>` with `PutMode::Create`/`Update(version)`), and one election loop on `App` (`election_tick`, every `LEADER_RENEW`) that promotes the pod to the map's writer (`OwnershipStore::promote`) when it wins and demotes it (`OwnershipStore::demote`) when it loses, is refused a renewal, or hits a SlateDB fence on a map write. `is_leader()` becomes "I hold an epoch", every map write checks that epoch under `leader_lock`, followers re-read the lease when the node they asked answers 421 or is unreachable, and `/healthz` gates on "a live leader exists". The name-based leader (`leader_of`, `servers()`, `with_topology`, `RUSTIC_GIT_LEADER`, the `rustic-git-leader` StatefulSet and its PDB) is deleted.
+**Architecture:** One new module, `ownership::lease` (`take`/`renew`/`read` over `Arc<dyn ObjectStore>` with `PutMode::Create`/`Update(version)`), and one election loop on `App` (`election_tick`, every `LEADER_RENEW`) that promotes the pod to the map's writer (`OwnershipStore::promote`) when it wins and demotes it (`OwnershipStore::demote`) when it loses, is refused a renewal, or hits a SlateDB fence on a map write. `is_leader()` becomes "I hold an epoch", every map write checks that epoch under `leader_lock`, followers re-read the lease when the node they asked answers 421 or is unreachable, and `/healthz` gates on "a live leader exists". The name-based leader (`leader_of`, `servers()`, `with_topology`, `KLOUDLITE_GIT_LEADER`, the `kloudlite-git-leader` StatefulSet and its PDB) is deleted.
 
 **Tech Stack:** Rust; `object_store` 0.14.1 (via `slatedb::object_store`) conditional puts; SlateDB 0.15 writer fencing; tokio; the existing fleet harness in `tests/routing.rs`; kubectl manifests in `deploy/`.
 
@@ -16,7 +16,7 @@
 - **`App::route`'s invariant is untouched:** a node never serves on a failed claim unless it already held the repo and the repo is warm. No line of `route()` changes except one comment.
 - **Followers keep `DbReader::open(FollowLatest)`**, opened lazily as today (`open_reader`); a change of writer is only a newer manifest to follow.
 - **The checkpoint beat runs on whoever writes.** `OwnershipStore::checkpoint` stays a no-op on a reader; the beat in `lanes.rs` keeps running everywhere. The prune beat is gated per beat on `is_leader()`.
-- **`file://` cannot host a fleet.** `LocalFileSystem` has `PutMode::Create` but returns `NotImplemented` for `PutMode::Update` (object_store 0.14.1 `src/local.rs:399`), so `config::fleet_store_ok` refuses `RUSTIC_GIT_S3_URL=file://…` when `RUSTIC_GIT_PEER_SVC` is set. Solo mode (no peer Service) never touches the lease.
+- **`file://` cannot host a fleet.** `LocalFileSystem` has `PutMode::Create` but returns `NotImplemented` for `PutMode::Update` (object_store 0.14.1 `src/local.rs:399`), so `config::fleet_store_ok` refuses `KLOUDLITE_GIT_S3_URL=file://…` when `KLOUDLITE_GIT_PEER_SVC` is set. Solo mode (no peer Service) never touches the lease.
 - **No new crates.** `object_store` 0.14.1 has everything: `PutMode`, `PutOptions`, `UpdateVersion`, `Error::{AlreadyExists, Precondition, NotFound}`. Conditional-put support per backend, read from the vendored source: `InMemory` Create + Update (e_tag); `LocalFileSystem` Create only; `AmazonS3` Create + Update when `conditional_put != Disabled` (default `ETagMatch`); `MicrosoftAzure` Create (`If-None-Match: *`) + Update (`If-Match`). Production is `az://`; tests are `mem://`.
 - **Lease constants fixed by the spec:** object `cluster/leader`, body `{node}\n{epoch}\n{expires_ms}`, `LEADER_TTL = 10 s`, `LEADER_RENEW = 3 s`. Ties are broken by the store, never by ordinal.
 - **`claim_gate`, `recovery_asked`, `Patience`, `CLAIM_ATTEMPTS`/`CLAIM_BACKOFF`, `FORCE_MIN_AGE` unchanged.**
@@ -24,7 +24,7 @@
 - **Comments explain WHY, never what**; match the density of `bins/server/src/router/route.rs`. Keep every `// ponytail:` marker you edit near.
 - **Commit subjects are imperative sentence case with no tool attribution.** No `Co-Authored-By`, no "Generated with".
 - **Every deploy manifest parses** (`ruby -ryaml -e 'YAML.load_stream(File.read(ARGV[0])) {}' <file>`), `bash -n` on every script.
-- **Migration order** — roll `rustic-git-srv` to the new build BEFORE deleting the leader StatefulSet — is written into `deploy/RECOVERY.md` in Task 8 (the last task) and in that task's commit body.
+- **Migration order** — roll `kloudlite-git-srv` to the new build BEFORE deleting the leader StatefulSet — is written into `deploy/RECOVERY.md` in Task 8 (the last task) and in that task's commit body.
 - **Two things deliberately NOT done** (each is a one-commit follow-up, named so nobody hunts for them): the leader does not resign its lease at SIGTERM (a graceful roll therefore waits out `LEADER_TTL` like a crash does — add `Update(version)` with `expires_ms = now` in the SIGTERM path when roll timing matters); and the `draining` announcement (`own_draining`, `set_draining`) keeps being written though nothing reads it once `least_loaded` is gone — delete the protocol in its own commit.
 
 ---
@@ -40,9 +40,9 @@
 | `crates/app/src/lib.rs` | `election_tick`, `promote`, `demote`, `refresh_leader`, `leader_live`, `leader_epoch`, `set_leader`; `grant_*` epoch check and fence→demote; `ask_leader_with` re-reads on 421/connect failure; `with_topology`, `leader_name`, `server_prefix`, `replicas`, `LEADER_SILENCE`, `mark_leader_seen`, `leader_reachable` deleted. |
 | `bins/server/src/router/route.rs` | `/healthz` on `leader_live`; `/own/*` answer 421 when the grant left the node demoted. |
 | `bins/server/src/lanes.rs` | Election beat; prune gated on `is_leader()`. |
-| `bins/server/src/main.rs` | `OwnershipStore::open(os)`, `fleet_store_ok`, first tick at boot; `RUSTIC_GIT_LEADER`/`SERVER_PREFIX`/`REPLICAS` gone. |
+| `bins/server/src/main.rs` | `OwnershipStore::open(os)`, `fleet_store_ok`, first tick at boot; `KLOUDLITE_GIT_LEADER`/`SERVER_PREFIX`/`REPLICAS` gone. |
 | `tests/routing.rs`, `tests/common/mod.rs`, `tests/ownership.rs`, `crates/workspaces/tests/engine_ops.rs` | Harness elects; three new fleet tests. |
-| `deploy/rustic-git.yaml`, `deploy/rustic-git-leader.yaml` (deleted), `deploy/roll.sh`, `deploy/pin.sh`, `deploy/RECOVERY.md`, `deploy/alerts.md`, `deploy/BACKUPS.md`, `deploy/k3s/README.md`, `CLAUDE.md`, `README.md` | Deploy and docs. |
+| `deploy/kloudlite-git.yaml`, `deploy/kloudlite-git-leader.yaml` (deleted), `deploy/roll.sh`, `deploy/pin.sh`, `deploy/RECOVERY.md`, `deploy/alerts.md`, `deploy/BACKUPS.md`, `deploy/k3s/README.md`, `CLAUDE.md`, `README.md` | Deploy and docs. |
 
 ---
 
@@ -84,31 +84,31 @@ mod tests {
     #[tokio::test]
     async fn create_wins_once() {
         let os = mem();
-        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().expect("first take wins");
-        assert_eq!(a.lease, Lease { node: "rustic-git-srv-0".into(), epoch: 1, expires_ms: 1_000 + TTL });
+        let a = take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().expect("first take wins");
+        assert_eq!(a.lease, Lease { node: "kloudlite-git-srv-0".into(), epoch: 1, expires_ms: 1_000 + TTL });
         // A second candidate that read nothing (it raced the first) is refused by the store, not by us.
-        assert!(take(os.as_ref(), "rustic-git-srv-1", 1_000, None).await.unwrap().is_none());
-        assert_eq!(read(os.as_ref()).await.unwrap().unwrap().lease.node, "rustic-git-srv-0");
+        assert!(take(os.as_ref(), "kloudlite-git-srv-1", 1_000, None).await.unwrap().is_none());
+        assert_eq!(read(os.as_ref()).await.unwrap().unwrap().lease.node, "kloudlite-git-srv-0");
     }
 
     #[tokio::test]
     async fn a_live_lease_held_by_another_is_never_taken() {
         let os = mem();
-        take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        assert!(take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL - 1, cur.as_ref()).await.unwrap().is_none());
+        assert!(take(os.as_ref(), "kloudlite-git-srv-1", 1_000 + TTL - 1, cur.as_ref()).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn an_expired_lease_is_taken_with_the_next_epoch() {
         let os = mem();
-        take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        let b = take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL, cur.as_ref())
+        let b = take(os.as_ref(), "kloudlite-git-srv-1", 1_000 + TTL, cur.as_ref())
             .await
             .unwrap()
             .expect("expired: up for grabs");
-        assert_eq!((b.lease.node.as_str(), b.lease.epoch), ("rustic-git-srv-1", 2));
+        assert_eq!((b.lease.node.as_str(), b.lease.epoch), ("kloudlite-git-srv-1", 2));
     }
 
     /// The holder that missed its own beats finds the lease expired and naming itself. It may take
@@ -116,18 +116,18 @@ mod tests {
     #[tokio::test]
     async fn the_holder_retakes_its_own_expired_lease() {
         let os = mem();
-        take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        let again = take(os.as_ref(), "rustic-git-srv-0", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
+        let again = take(os.as_ref(), "kloudlite-git-srv-0", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
         assert_eq!(again.lease.epoch, 2);
     }
 
     #[tokio::test]
     async fn renew_with_a_stale_version_fails() {
         let os = mem();
-        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        let a = take(os.as_ref(), "kloudlite-git-srv-0", 1_000, None).await.unwrap().unwrap();
         let cur = read(os.as_ref()).await.unwrap();
-        let b = take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
+        let b = take(os.as_ref(), "kloudlite-git-srv-1", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
         assert!(renew(os.as_ref(), &a, 1_000 + TTL + 1).await.unwrap().is_none(), "the old holder's version is stale");
         let b2 = renew(os.as_ref(), &b, 1_000 + TTL + 1).await.unwrap().expect("the holder renews");
         assert_eq!(b2.lease.epoch, 2);
@@ -142,7 +142,7 @@ mod tests {
         let os = mem();
         let takers = (0..8).map(|i| {
             let os = os.clone();
-            async move { take(os.as_ref(), &format!("rustic-git-srv-{i}"), 1_000, None).await.unwrap() }
+            async move { take(os.as_ref(), &format!("kloudlite-git-srv-{i}"), 1_000, None).await.unwrap() }
         });
         let won: Vec<Held> = futures::future::join_all(takers).await.into_iter().flatten().collect();
         assert_eq!(won.len(), 1, "exactly one Create may land");
@@ -175,10 +175,10 @@ Append to the `tests` module in `crates/storage/src/config.rs`:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-storage lease 2>&1 | tail -20`
+Run: `cargo test -p kloudlite-git-storage lease 2>&1 | tail -20`
 Expected: compile error — `cannot find function `take``, `cannot find type `Lease``.
 
-Run: `cargo test -p rustic-git-storage a_file_store_cannot_host_a_fleet 2>&1 | tail -5`
+Run: `cargo test -p kloudlite-git-storage a_file_store_cannot_host_a_fleet 2>&1 | tail -5`
 Expected: compile error — `cannot find function `fleet_store_ok``.
 
 - [ ] **Step 3: Write the lease module**
@@ -315,7 +315,7 @@ Add to `crates/storage/src/config.rs`, above `pub async fn open_store`:
 pub fn fleet_store_ok(url: &str) -> Result<()> {
     if url.starts_with("file://") {
         return Err(crate::err(
-            "RUSTIC_GIT_S3_URL=file:// cannot host a fleet: the leader lease needs conditional \
+            "KLOUDLITE_GIT_S3_URL=file:// cannot host a fleet: the leader lease needs conditional \
              updates, which LocalFileSystem lacks; use mem:// for a local fleet, or s3:// / az://",
         ));
     }
@@ -325,13 +325,13 @@ pub fn fleet_store_ok(url: &str) -> Result<()> {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-storage lease 2>&1 | tail -15`
+Run: `cargo test -p kloudlite-git-storage lease 2>&1 | tail -15`
 Expected: `test result: ok. 7 passed` (the seven tests in `ownership::lease::tests`).
 
-Run: `cargo test -p rustic-git-storage a_file_store_cannot_host_a_fleet`
+Run: `cargo test -p kloudlite-git-storage a_file_store_cannot_host_a_fleet`
 Expected: `1 passed`.
 
-Run: `cargo clippy -p rustic-git-storage --all-targets -- -D warnings`
+Run: `cargo clippy -p kloudlite-git-storage --all-targets -- -D warnings`
 Expected: clean.
 
 - [ ] **Step 5: Commit**
@@ -420,7 +420,7 @@ async fn a_second_writer_fences_the_first() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-storage promote_then_demote 2>&1 | tail -5`
+Run: `cargo test -p kloudlite-git-storage promote_then_demote 2>&1 | tail -5`
 Expected: compile error — `no function or associated item named `open` ... takes 2 arguments` / `no method named `promote``.
 
 - [ ] **Step 3: Rewrite `OwnershipStore`**
@@ -650,7 +650,7 @@ Do the mechanical change for `put_many`, `delete`, `close`, `set_draining`, `dra
 - `tests/ownership.rs`: every `OwnershipStore::open(os, true).await.unwrap()` → `{ let s = OwnershipStore::open(os); s.promote().await.unwrap(); s }`; every `OwnershipStore::open(os, false).await.unwrap()` → `OwnershipStore::open(os)`. Update the file's header comment: "a writer (the lease holder) writes `cluster/ownership`".
 - `tests/common/mod.rs` `app()`: 
   ```rust
-  let ownership = rustic_git_storage::ownership::OwnershipStore::open(store.os.clone());
+  let ownership = kloudlite_git_storage::ownership::OwnershipStore::open(store.os.clone());
   ownership.promote().await.unwrap();
   ```
 - `tests/routing.rs:40`: 
@@ -663,9 +663,9 @@ Do the mechanical change for `put_many`, `delete`, `close`, `set_draining`, `dra
   (temporary — Task 6 replaces this with the election).
 - `crates/app/src/lib.rs:679` (`test_app`): `let ownership = OwnershipStore::open(os); ownership.promote().await.unwrap();`.
 - `crates/workspaces/tests/engine_ops.rs:43`: same two lines.
-- `bins/server/src/main.rs`: `rustic_git_server::ownership::OwnershipStore::Solo` → `rustic_git_server::ownership::OwnershipStore::solo()`; and lines 69–70 become
+- `bins/server/src/main.rs`: `kloudlite_git_server::ownership::OwnershipStore::Solo` → `kloudlite_git_server::ownership::OwnershipStore::solo()`; and lines 69–70 become
   ```rust
-  let store = rustic_git_server::ownership::OwnershipStore::open(store.os.clone());
+  let store = kloudlite_git_server::ownership::OwnershipStore::open(store.os.clone());
   if me == leader {
       store.promote().await?;
   }
@@ -751,12 +751,12 @@ mod tests {
     #[tokio::test]
     async fn a_lone_node_takes_the_lease_and_leads() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
         assert!(!a.is_leader() && a.leader().is_none() && !a.leader_live());
         a.election_tick().await.unwrap();
         assert!(a.is_leader());
         assert_eq!(a.leader_epoch(), 1);
-        assert_eq!(a.leader().as_deref(), Some("rustic-git-srv-0"));
+        assert_eq!(a.leader().as_deref(), Some("kloudlite-git-srv-0"));
         assert!(a.leader_live());
         assert!(a.ownership.is_writer().await);
         // A second tick renews rather than re-takes: same epoch, still the writer.
@@ -767,12 +767,12 @@ mod tests {
     #[tokio::test]
     async fn a_second_node_follows_the_holder() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
         a.election_tick().await.unwrap();
-        let b = fleet_app(&os, "rustic-git-srv-1").await;
+        let b = fleet_app(&os, "kloudlite-git-srv-1").await;
         b.election_tick().await.unwrap();
         assert!(!b.is_leader());
-        assert_eq!(b.leader().as_deref(), Some("rustic-git-srv-0"));
+        assert_eq!(b.leader().as_deref(), Some("kloudlite-git-srv-0"));
         assert!(b.leader_live());
         assert!(!b.ownership.is_writer().await);
     }
@@ -780,22 +780,22 @@ mod tests {
     #[tokio::test]
     async fn a_lease_taken_by_another_node_demotes() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
         a.election_tick().await.unwrap();
-        plant(&os, "rustic-git-srv-1", 2, a.now_ms() + 5_000).await;
+        plant(&os, "kloudlite-git-srv-1", 2, a.now_ms() + 5_000).await;
         a.election_tick().await.unwrap();
         assert!(!a.is_leader(), "somebody else holds a live lease at a newer epoch");
-        assert_eq!(a.leader().as_deref(), Some("rustic-git-srv-1"));
+        assert_eq!(a.leader().as_deref(), Some("kloudlite-git-srv-1"));
         assert!(!a.ownership.is_writer().await);
-        let e = a.grant_claim("alice/web", "rustic-git-srv-2", false).await.expect_err("demoted: must not grant");
+        let e = a.grant_claim("alice/web", "kloudlite-git-srv-2", false).await.expect_err("demoted: must not grant");
         assert!(e.to_string().contains("not the leader"), "{e}");
     }
 
     #[tokio::test]
     async fn an_expired_lease_is_taken_with_the_next_epoch() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
-        plant(&os, "rustic-git-srv-9", 5, a.now_ms() - 1).await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        plant(&os, "kloudlite-git-srv-9", 5, a.now_ms() - 1).await;
         a.election_tick().await.unwrap();
         assert!(a.is_leader());
         assert_eq!(a.leader_epoch(), 6);
@@ -807,8 +807,8 @@ mod tests {
     #[tokio::test]
     async fn a_restarted_holder_resumes_its_own_live_lease() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
-        plant(&os, "rustic-git-srv-0", 3, a.now_ms() + 5_000).await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        plant(&os, "kloudlite-git-srv-0", 3, a.now_ms() + 5_000).await;
         a.election_tick().await.unwrap();
         assert!(a.is_leader());
         assert_eq!(a.leader_epoch(), 3);
@@ -821,11 +821,11 @@ mod tests {
     #[tokio::test]
     async fn a_fenced_map_write_demotes() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
         a.election_tick().await.unwrap();
         let stray = OwnershipStore::open(os.clone());
         stray.promote().await.unwrap();
-        assert!(a.grant_claim("alice/web", "rustic-git-srv-1", false).await.is_err());
+        assert!(a.grant_claim("alice/web", "kloudlite-git-srv-1", false).await.is_err());
         assert!(!a.is_leader(), "a fenced writer is not the leader");
         assert!(!a.ownership.is_writer().await);
     }
@@ -833,11 +833,11 @@ mod tests {
     #[tokio::test]
     async fn grants_refuse_without_the_lease() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
         for r in [
-            a.grant_claim("alice/web", "rustic-git-srv-1", false).await.map(|_| ()),
-            a.grant_renew("rustic-git-srv-1", &["alice/web".into()]).await.map(|_| ()),
-            a.grant_release("alice/web", "rustic-git-srv-1").await,
+            a.grant_claim("alice/web", "kloudlite-git-srv-1", false).await.map(|_| ()),
+            a.grant_renew("kloudlite-git-srv-1", &["alice/web".into()]).await.map(|_| ()),
+            a.grant_release("alice/web", "kloudlite-git-srv-1").await,
             a.prune_once().await,
         ] {
             let e = r.expect_err("no lease, no writes");
@@ -850,9 +850,9 @@ mod tests {
     #[tokio::test]
     async fn leader_live_follows_the_lease() {
         let os = mem();
-        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
         a.election_tick().await.unwrap();
-        let b = fleet_app(&os, "rustic-git-srv-1").await;
+        let b = fleet_app(&os, "kloudlite-git-srv-1").await;
         assert!(!b.leader_live(), "no lease read yet: a rolled pod must not take traffic");
         b.election_tick().await.unwrap();
         assert!(b.leader_live());
@@ -869,7 +869,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
         std::mem::forget(tmp);
-        let a = App::new(store, Arc::new(OwnershipStore::solo()), "rustic-git-0".into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "s".into());
+        let a = App::new(store, Arc::new(OwnershipStore::solo()), "kloudlite-git-0".into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "s".into());
         assert!(a.is_leader() && a.leader_live());
         a.election_tick().await.unwrap();
         assert!(lease::read(os.as_ref()).await.unwrap().is_none(), "solo never writes a lease");
@@ -880,7 +880,7 @@ mod tests {
     #[tokio::test]
     async fn a_claim_past_the_gate_fails_fast() {
         let os = mem();
-        let follower = fleet_app(&os, "rustic-git-srv-1").await; // nobody leads; the addr is a refused port
+        let follower = fleet_app(&os, "kloudlite-git-srv-1").await; // nobody leads; the addr is a refused port
         let _held = follower.claim_gate.acquire_many(MAX_WAITING_CLAIMS as u32).await.unwrap();
         let t = std::time::Instant::now();
         let err = follower.claim("alice/cold").await.expect_err("must not be granted");
@@ -892,7 +892,7 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rustic-git-app 2>&1 | grep -E '^error' | head -5`
+Run: `cargo test -p kloudlite-git-app 2>&1 | grep -E '^error' | head -5`
 Expected: `no method named `election_tick``, `this function takes 6 arguments but 5 were supplied`.
 
 - [ ] **Step 3: Rewrite the `App` struct and constructor**
@@ -935,7 +935,7 @@ Replace `new` with:
         addr_of: AddrOf,
         peer_secret: String,
     ) -> Self {
-        let jwt_secret = std::env::var("RUSTIC_GIT_JWT_SECRET").unwrap_or_else(|_| {
+        let jwt_secret = std::env::var("KLOUDLITE_GIT_JWT_SECRET").unwrap_or_else(|_| {
             use rand::Rng;
             rand::thread_rng()
                 .sample_iter(rand::distributions::Alphanumeric)
@@ -1199,7 +1199,7 @@ In `ask_leader_with`, for now only: `let leader = self.leader();` → `let leade
 
 - `tests/common/mod.rs` `app()`: drop the trailing `1,` argument and its comment; replace the `ownership.promote().await.unwrap();` line from Task 2 with nothing, and after `App::new(...)` do
   ```rust
-      let app = rustic_git_app::App::new(store, Arc::new(ownership), "rustic-git-0".into(), Arc::new(|_| "127.0.0.1:1".to_string()), "test-peer-secret".into());
+      let app = kloudlite_git_app::App::new(store, Arc::new(ownership), "kloudlite-git-0".into(), Arc::new(|_| "127.0.0.1:1".to_string()), "test-peer-secret".into());
       // One beat: with nobody else on this store the node takes the lease and every claim is local.
       app.election_tick().await.unwrap();
       assert!(app.is_leader());
@@ -1219,11 +1219,11 @@ In `ask_leader_with`, for now only: `let leader = self.leader();` → `let leade
           }
       }
   ```
-  and delete the `if me == leader { store.promote() }` from Task 2 along with `leader`/`leader_for_app` and the `RUSTIC_GIT_LEADER` comment block (lines 58–68). The tuple becomes `(me, peer_secret, ownership)`.
+  and delete the `if me == leader { store.promote() }` from Task 2 along with `leader`/`leader_for_app` and the `KLOUDLITE_GIT_LEADER` comment block (lines 58–68). The tuple becomes `(me, peer_secret, ownership)`.
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-app 2>&1 | tail -15`
+Run: `cargo test -p kloudlite-git-app 2>&1 | tail -15`
 Expected: `test result: ok. 10 passed`.
 
 Run: `cargo test --workspace --locked 2>&1 | grep -E '^test result|FAILED|panicked' | sort | uniq -c`
@@ -1262,21 +1262,21 @@ Add to `crates/app/src/lib.rs` `mod tests`:
     #[tokio::test]
     async fn a_failed_ask_re_reads_the_lease() {
         let os = mem();
-        let b = fleet_app(&os, "rustic-git-srv-1").await;
+        let b = fleet_app(&os, "kloudlite-git-srv-1").await;
         b.set_leader(Some("ghost"));
         assert!(b.claim_to_recover("alice/web").await.is_err()); // two quick tries, 250 ms apart
         assert_eq!(b.leader(), None, "the lease is absent: nobody leads, and 'ghost' is forgotten");
 
-        plant(&os, "rustic-git-srv-0", 4, b.now_ms() + 5_000).await;
+        plant(&os, "kloudlite-git-srv-0", 4, b.now_ms() + 5_000).await;
         assert!(b.claim_to_recover("alice/web").await.is_err());
-        assert_eq!(b.leader().as_deref(), Some("rustic-git-srv-0"), "re-read on the failed connect");
+        assert_eq!(b.leader().as_deref(), Some("kloudlite-git-srv-0"), "re-read on the failed connect");
         assert!(b.leader_live());
     }
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p rustic-git-app a_failed_ask_re_reads_the_lease 2>&1 | tail -5`
+Run: `cargo test -p kloudlite-git-app a_failed_ask_re_reads_the_lease 2>&1 | tail -5`
 Expected: FAIL — the first `claim_to_recover` returns `Err("no live leader known")`? No: `leader` is `Some("ghost")`, so it tries and fails, and afterwards `b.leader()` is still `Some("ghost")` — assertion `assert_eq!(b.leader(), None)` fails.
 
 - [ ] **Step 3: Rewrite `ask_leader_with` and add `refresh_leader`**
@@ -1380,7 +1380,7 @@ Replace `ask_leader_with` in `crates/app/src/lib.rs` (keep the long comment bloc
     }
 ```
 
-`reqwest` is already a dependency of `rustic-git-app`. Delete the `leader_reachable` shim from Task 3.
+`reqwest` is already a dependency of `kloudlite-git-app`. Delete the `leader_reachable` shim from Task 3.
 
 - [ ] **Step 4: `/healthz` and the `/own/*` handlers**
 
@@ -1425,7 +1425,7 @@ Add below `two_lines`:
 /// A grant's failure, on the wire. A grant that FENCED this node (`App::fenced_check`) has left it
 /// demoted, and the honest answer is then 421 — "not the leader" — so the asker re-reads the
 /// lease at once instead of reporting one bad grant and waiting a beat.
-fn own_err(app: &App, e: rustic_git_core::Error) -> Response {
+fn own_err(app: &App, e: kloudlite_git_core::Error) -> Response {
     if !app.is_leader() {
         return leader_only(app).expect("a demoted node is not the leader");
     }
@@ -1437,7 +1437,7 @@ and in `own_claim`, `own_renew`, `own_release`, `own_draining` replace `Err(e) =
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p rustic-git-app 2>&1 | tail -5`
+Run: `cargo test -p kloudlite-git-app 2>&1 | tail -5`
 Expected: `11 passed`.
 
 Run: `cargo test --test routing a_follower_refuses_to_decide_ownership the_peer_listener_serves_healthz an_unhealthy_node 2>&1 | tail -5`
@@ -1462,7 +1462,7 @@ git commit -m "Re-read the leader lease on a misdirected or failed ask and gate 
 - Modify: `tests/routing.rs` (delete `the_leader_does_not_grant_to_a_node_that_is_shutting_down`, lines 1352–1397)
 - Modify: `bins/server/src/lanes.rs:7-83`
 - Modify: `bins/server/src/main.rs` (fleet branch: `fleet_store_ok`)
-- Modify: `tests/ws_e2e.sh:207`, `crates/core/src/err.rs:15` (comments naming `RUSTIC_GIT_LEADER`/`RUSTIC_GIT_REPLICAS`)
+- Modify: `tests/ws_e2e.sh:207`, `crates/core/src/err.rs:15` (comments naming `KLOUDLITE_GIT_LEADER`/`KLOUDLITE_GIT_REPLICAS`)
 
 **Interfaces:**
 - Consumes: `App::{election_tick, is_leader, prune_once, renew_once}`, `ownership::lease::LEADER_RENEW`, `config::fleet_store_ok`.
@@ -1472,7 +1472,7 @@ git commit -m "Re-read the leader lease on a misdirected or failed ask and gate 
 
 There is no unit under test here beyond deletion; the check is the grep. Run it now and expect hits:
 
-Run: `grep -rn -e 'leader_of' -e 'fn servers' -e 'least_loaded' -e 'with_topology' -e 'RUSTIC_GIT_LEADER' -e 'RUSTIC_GIT_SERVER_PREFIX' -e 'RUSTIC_GIT_REPLICAS' crates bins tests --include='*.rs' --include='*.sh' | wc -l`
+Run: `grep -rn -e 'leader_of' -e 'fn servers' -e 'least_loaded' -e 'with_topology' -e 'KLOUDLITE_GIT_LEADER' -e 'KLOUDLITE_GIT_SERVER_PREFIX' -e 'KLOUDLITE_GIT_REPLICAS' crates bins tests --include='*.rs' --include='*.sh' | wc -l`
 Expected: a number greater than 0.
 
 - [ ] **Step 2: Delete the functions and their tests**
@@ -1535,19 +1535,19 @@ Delete the old `if !app.is_leader() { return; }` guard and the prune task it gua
 
 - [ ] **Step 4: The boot check and stray comments**
 
-In `bins/server/src/main.rs` fleet branch, before `let me = need("RUSTIC_GIT_SELF")?;`:
+In `bins/server/src/main.rs` fleet branch, before `let me = need("KLOUDLITE_GIT_SELF")?;`:
 
 ```rust
         // The lease that elects the map's writer is a conditional put; a backend without them
         // cannot fence a stale leader, so it is refused here rather than found out in a failover.
-        rustic_git_server::config::fleet_store_ok(&env("RUSTIC_GIT_S3_URL", ""))?;
+        kloudlite_git_server::config::fleet_store_ok(&env("KLOUDLITE_GIT_S3_URL", ""))?;
 ```
 
-Update the `serve()` doc comment ("Nothing is elected here" is false now): "Which node serves a repo is the ownership map's decision; which node WRITES the map is elected by lease (`App::election_tick`)." In `tests/ws_e2e.sh:207` change `(no RUSTIC_GIT_PEER_SVC/RUSTIC_GIT_LEADER)` to `(no RUSTIC_GIT_PEER_SVC)`. In `crates/core/src/err.rs:15` change the example `RUSTIC_GIT_REPLICAS` check to `the RUSTIC_GIT_S3_URL=file:// fleet check`.
+Update the `serve()` doc comment ("Nothing is elected here" is false now): "Which node serves a repo is the ownership map's decision; which node WRITES the map is elected by lease (`App::election_tick`)." In `tests/ws_e2e.sh:207` change `(no KLOUDLITE_GIT_PEER_SVC/KLOUDLITE_GIT_LEADER)` to `(no KLOUDLITE_GIT_PEER_SVC)`. In `crates/core/src/err.rs:15` change the example `KLOUDLITE_GIT_REPLICAS` check to `the KLOUDLITE_GIT_S3_URL=file:// fleet check`.
 
 - [ ] **Step 5: Verify**
 
-Run: `grep -rn -e 'leader_of' -e 'fn servers' -e 'least_loaded' -e 'with_topology' -e 'RUSTIC_GIT_LEADER' -e 'RUSTIC_GIT_SERVER_PREFIX' -e 'RUSTIC_GIT_REPLICAS' -e 'LEADER_SILENCE' -e 'leader_reachable' crates bins tests --include='*.rs' --include='*.sh' | wc -l`
+Run: `grep -rn -e 'leader_of' -e 'fn servers' -e 'least_loaded' -e 'with_topology' -e 'KLOUDLITE_GIT_LEADER' -e 'KLOUDLITE_GIT_SERVER_PREFIX' -e 'KLOUDLITE_GIT_REPLICAS' -e 'LEADER_SILENCE' -e 'leader_reachable' crates bins tests --include='*.rs' --include='*.sh' | wc -l`
 Expected: `0`.
 
 Run: `cargo test --workspace --locked 2>&1 | grep -E '^test result|FAILED' | sort | uniq -c` — all `ok`.
@@ -1578,7 +1578,7 @@ Replace the `LEADER` doc comment and the constant:
 ```rust
 /// The node every fleet starts FIRST, which is why it holds the lease: `node()` runs one election
 /// beat before serving, and the first beat on an empty store wins. Nothing else is special about it.
-const LEADER: &str = "rustic-git-0";
+const LEADER: &str = "kloudlite-git-0";
 ```
 
 In `node()` the doc becomes "**Start `LEADER` first** — the first node to tick takes the lease, and every later one reads who holds it." Confirm the body has (from Task 3) exactly:
@@ -1593,7 +1593,7 @@ In `node()` the doc becomes "**Start `LEADER` first** — the first node to tick
     app.election_tick().await.unwrap();
 ```
 
-Update `fleet()`'s doc: "A fleet of `n` nodes, `rustic-git-0` first — start it first, and it leads."
+Update `fleet()`'s doc: "A fleet of `n` nodes, `kloudlite-git-0` first — start it first, and it leads."
 
 - [ ] **Step 2: Write the tests (they fail against nothing new — they document the harness — but write them before touching anything else and run them)**
 
@@ -1606,8 +1606,8 @@ async fn a_fleet_elects_exactly_one_leader() {
     let e = common::env().await;
     let f = fleet(3);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
-    let c = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let c = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
     let leaders: Vec<String> =
         [&a, &b, &c].iter().filter(|n| n.app.is_leader()).map(|n| n.app.self_name.clone()).collect();
     assert_eq!(leaders, vec![LEADER.to_string()], "started first, took the lease first");
@@ -1631,13 +1631,13 @@ async fn a_fleet_elects_exactly_one_leader() {
 /// successor opened the map, the fence demoted it, and its `/own/*` answers 421 from then on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dead_leader_is_replaced_and_its_late_write_is_refused() {
-    use rustic_git_storage::ownership::lease::LEADER_TTL;
-    use rustic_git_storage::ownership::Grant;
+    use kloudlite_git_storage::ownership::lease::LEADER_TTL;
+    use kloudlite_git_storage::ownership::Grant;
     let e = common::env().await;
     let f = fleet(3);
     let zero = node(e.store.os.clone(), LEADER, &f).await;
-    let one = node(e.store.os.clone(), "rustic-git-1", &f).await;
-    let two = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    let one = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let two = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
     e.store.create_repo("alice", "web").await.unwrap();
     assert!(zero.app.is_leader() && !one.app.is_leader() && !two.app.is_leader());
 
@@ -1651,16 +1651,16 @@ async fn a_dead_leader_is_replaced_and_its_late_write_is_refused() {
     // grant hits the fence, it demotes, and it answers 421; TWO re-reads the lease and lands on ONE.
     assert_eq!(two.app.leader().as_deref(), Some(LEADER));
     match two.app.claim("alice/web").await.unwrap() {
-        Grant::Granted(en) => assert_eq!(en.node, "rustic-git-2"),
+        Grant::Granted(en) => assert_eq!(en.node, "kloudlite-git-2"),
         g => panic!("expected a grant, got {g:?}"),
     }
-    assert_eq!(two.app.leader().as_deref(), Some("rustic-git-1"), "the stale name was replaced by the lease");
-    assert_eq!(one.app.owner("alice/web").await.unwrap().unwrap().node, "rustic-git-2");
+    assert_eq!(two.app.leader().as_deref(), Some("kloudlite-git-1"), "the stale name was replaced by the lease");
+    assert_eq!(one.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-git-2");
     assert!(!zero.app.is_leader(), "the fenced grant demoted it");
     assert!(!zero.app.ownership.is_writer().await);
 
     // And a write from the old leader after that is refused in-process, before any storage.
-    let late = zero.app.grant_claim("alice/late", "rustic-git-2", false).await;
+    let late = zero.app.grant_claim("alice/late", "kloudlite-git-2", false).await;
     assert!(late.as_ref().is_err_and(|e| e.to_string().contains("not the leader")), "{late:?}");
 }
 
@@ -1668,16 +1668,16 @@ async fn a_dead_leader_is_replaced_and_its_late_write_is_refused() {
 /// live lease, ready again once somebody does — and "somebody" may be this node.
 #[tokio::test(flavor = "multi_thread")]
 async fn healthz_is_unready_only_while_no_leader_lives() {
-    use rustic_git_storage::ownership::lease::LEADER_TTL;
+    use kloudlite_git_storage::ownership::lease::LEADER_TTL;
     let e = common::env().await;
     let f = fleet(2);
     let _zero = node(e.store.os.clone(), LEADER, &f).await;
-    let one = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let one = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
     let c = client().await;
     let healthz = |n: &Node| {
         let url = format!("http://{}/healthz", n.peer);
         let c = c.clone();
-        async move { c.get(url).header(rustic_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status() }
+        async move { c.get(url).header(kloudlite_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status() }
     };
     assert_eq!(healthz(&one).await, 200, "a live leader exists");
 
@@ -1719,18 +1719,18 @@ git commit -m "Prove a fleet elects one leader and replaces a dead one within th
 Diagram: replace
 
 ```
-    LEAD[rustic-git-leader-0<br/>StatefulSet, ownership map writer]
-    SRV[rustic-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs]
+    LEAD[kloudlite-git-leader-0<br/>StatefulSet, ownership map writer]
+    SRV[kloudlite-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs]
     SRV <--> LEAD
 ```
 
 with
 
 ```
-    SRV[rustic-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs;<br/>one of them holds the leader lease and writes the ownership map]
+    SRV[kloudlite-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs;<br/>one of them holds the leader lease and writes the ownership map]
 ```
 
-Components table: in the "Server tier" row change `AKS, StatefulSets `rustic-git-leader` (1) and `rustic-git-srv` (3);` to `AKS, StatefulSet `rustic-git-srv` (3);` and append to its "Owns" cell `; the ownership map, on whichever pod holds the lease at `cluster/leader``. Delete the "Leader" row.
+Components table: in the "Server tier" row change `AKS, StatefulSets `kloudlite-git-leader` (1) and `kloudlite-git-srv` (3);` to `AKS, StatefulSet `kloudlite-git-srv` (3);` and append to its "Owns" cell `; the ownership map, on whichever pod holds the lease at `cluster/leader``. Delete the "Leader" row.
 
 Source-of-truth rule: replace the two-line bullet beginning `- **The leader is the only writer of the ownership map**` with
 
@@ -1738,13 +1738,13 @@ Source-of-truth rule: replace the two-line bullet beginning `- **The leader is t
 - **The ownership map has one writer, elected.** The pod holding the lease at `cluster/leader`
   (conditional puts in the object store — `crates/storage/src/ownership/lease.rs`, TTL 10 s,
   renewed every 3 s) opens `cluster/ownership` as the writer; the lease epoch is checked on every
-  map write and SlateDB's writer fence is the backstop. Any `rustic-git-srv` pod may lead; a dead
+  map write and SlateDB's writer fence is the backstop. Any `kloudlite-git-srv` pod may lead; a dead
   leader is replaced within about 15 s with no operator.
 ```
 
 - [ ] **Step 2: Verify**
 
-Run: `grep -n 'rustic-git-leader\|RUSTIC_GIT_LEADER' README.md | wc -l` — expect `0`.
+Run: `grep -n 'kloudlite-git-leader\|KLOUDLITE_GIT_LEADER' README.md | wc -l` — expect `0`.
 
 - [ ] **Step 3: Commit**
 
@@ -1758,14 +1758,14 @@ git commit -m "Describe the elected ownership-map writer in the README"
 ### Task 8: Deploy — one StatefulSet, one apply; RECOVERY, CLAUDE.md, alerts; the migration
 
 **Files:**
-- Delete: `deploy/rustic-git-leader.yaml`
-- Modify: `deploy/rustic-git.yaml` (header, Namespace, StatefulSet comment, env, probe comments, Service comments), `deploy/roll.sh`, `deploy/pin.sh`, `deploy/RECOVERY.md`, `deploy/alerts.md:13`, `deploy/BACKUPS.md` (consumer columns), `deploy/k3s/README.md:131`, `CLAUDE.md` ("The one invariant" and "Deploying" paragraphs)
+- Delete: `deploy/kloudlite-git-leader.yaml`
+- Modify: `deploy/kloudlite-git.yaml` (header, Namespace, StatefulSet comment, env, probe comments, Service comments), `deploy/roll.sh`, `deploy/pin.sh`, `deploy/RECOVERY.md`, `deploy/alerts.md:13`, `deploy/BACKUPS.md` (consumer columns), `deploy/k3s/README.md:131`, `CLAUDE.md` ("The one invariant" and "Deploying" paragraphs)
 
 **Interfaces:** none (manifests and docs). Every manifest must parse; both scripts must pass `bash -n`.
 
 - [ ] **Step 1: Move the Namespace and delete the leader file**
 
-`git rm deploy/rustic-git-leader.yaml`. Replace the first two comment lines of `deploy/rustic-git.yaml` with
+`git rm deploy/kloudlite-git-leader.yaml`. Replace the first two comment lines of `deploy/kloudlite-git.yaml` with
 
 ```yaml
 # Everything on AKS. The ownership map's writer is elected by lease (`ownership::lease`), so there
@@ -1773,7 +1773,7 @@ git commit -m "Describe the elected ownership-map writer in the README"
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: rustic-git
+  name: kloudlite-git
 ---
 ```
 
@@ -1789,7 +1789,7 @@ Replace the `# THE SERVERS. ...` comment block (through `# both StatefulSets wit
   # read-only. There is no preferred ordinal — the object store's conditional put decides.
 ```
 
-In `env:` delete the comment block `# WHO WRITES THE MAP. ... whichever one was legitimately serving.`, the `RUSTIC_GIT_LEADER` and `RUSTIC_GIT_SERVER_PREFIX` entries, the comment block `# How many serving pods the leader may hand a repo to ... holds no repositories.` and the `RUSTIC_GIT_REPLICAS` entry; change the `RUSTIC_GIT_SELF` trailing comment to `# the stable pod name, which the lease records as the holder`. In the startup-probe comment, change "the leader replays the ownership map's WAL before it binds :8080" to "a pod that wins the lease replays the ownership map's WAL before it can grant" and "a healthy leader now starts in about 30 seconds" to "a healthy pod now takes the writer in about 30 seconds". On the headless Service, change "left the leader unreachable for ~20s after a restart" to "left a restarted pod unreachable to its peers for ~20s"; on `rustic-git-http` and `rustic-git-lb`, replace the "Servers only: the leader holds no repositories … depend on that." comments with `# Every pod serves; the role selector is kept so a future non-serving role can opt out.`.
+In `env:` delete the comment block `# WHO WRITES THE MAP. ... whichever one was legitimately serving.`, the `KLOUDLITE_GIT_LEADER` and `KLOUDLITE_GIT_SERVER_PREFIX` entries, the comment block `# How many serving pods the leader may hand a repo to ... holds no repositories.` and the `KLOUDLITE_GIT_REPLICAS` entry; change the `KLOUDLITE_GIT_SELF` trailing comment to `# the stable pod name, which the lease records as the holder`. In the startup-probe comment, change "the leader replays the ownership map's WAL before it binds :8080" to "a pod that wins the lease replays the ownership map's WAL before it can grant" and "a healthy leader now starts in about 30 seconds" to "a healthy pod now takes the writer in about 30 seconds". On the headless Service, change "left the leader unreachable for ~20s after a restart" to "left a restarted pod unreachable to its peers for ~20s"; on `kloudlite-git-http` and `kloudlite-git-lb`, replace the "Servers only: the leader holds no repositories … depend on that." comments with `# Every pod serves; the role selector is kept so a future non-serving role can opt out.`.
 
 - [ ] **Step 3: Scripts**
 
@@ -1803,47 +1803,47 @@ In `env:` delete the comment block `# WHO WRITES THE MAP. ... whichever one was 
 # and a peer holds the writer inside LEADER_TTL plus one tick. The rollout waits say when it is done.
 set -euo pipefail
 cd "$(dirname "$0")"
-kubectl apply -f rustic-git.yaml -f rustic-git-web.yaml
-kubectl -n rustic-git rollout status statefulset/rustic-git-srv --timeout=900s
-for d in rustic-git-api rustic-git-worker rustic-git-web; do
-  kubectl -n rustic-git rollout status "deployment/$d" --timeout=300s
+kubectl apply -f kloudlite-git.yaml -f kloudlite-git-web.yaml
+kubectl -n kloudlite-git rollout status statefulset/kloudlite-git-srv --timeout=900s
+for d in kloudlite-git-api kloudlite-git-worker kloudlite-git-web; do
+  kubectl -n kloudlite-git rollout status "deployment/$d" --timeout=300s
 done
 echo "AKS rolled. The k3s side is separate: kubectl apply -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/gateway.yaml with that cluster's kubeconfig."
 ```
 
-`deploy/pin.sh`: in the contract comment change `That is <sha>: rustic-git-leader.yaml, rustic-git.yaml (srv, api, worker), k3s/agent-daemonset.yaml, k3s/gateway.yaml.` to `That is <sha>: rustic-git.yaml (srv, api, worker), k3s/agent-daemonset.yaml, k3s/gateway.yaml.`; in the `perl -pi -e` line drop `rustic-git-leader.yaml`; in the final heredoc change `# AKS: leader, wait, then the rest` to `# AKS: one apply, then the rollout waits`.
+`deploy/pin.sh`: in the contract comment change `That is <sha>: kloudlite-git-leader.yaml, kloudlite-git.yaml (srv, api, worker), k3s/agent-daemonset.yaml, k3s/gateway.yaml.` to `That is <sha>: kloudlite-git.yaml (srv, api, worker), k3s/agent-daemonset.yaml, k3s/gateway.yaml.`; in the `perl -pi -e` line drop `kloudlite-git-leader.yaml`; in the final heredoc change `# AKS: leader, wait, then the rest` to `# AKS: one apply, then the rollout waits`.
 
 - [ ] **Step 4: RECOVERY.md, alerts, backups, k3s README**
 
 `deploy/RECOVERY.md`: in the Secrets table replace every `leader, srv` with `srv`. In A.3 replace the `deploy/roll.sh` line with `deploy/roll.sh          # one apply; the srv StatefulSet elects its own map writer` and the three verify lines about the leader with:
 
 ```sh
-kubectl -n rustic-git logs -l role=server --tail=500 | grep -E 'lease: leading|newer DB client'
+kubectl -n kloudlite-git logs -l role=server --tail=500 | grep -E 'lease: leading|newer DB client'
 #   want exactly ONE pod logging "lease: leading" (and "opened as WRITER" beside it), and NO
 #   "newer DB client" on a settled fleet — that line means a demoted leader wrote after it lost
 #   the lease, which the epoch check is supposed to stop first
-kubectl -n rustic-git get endpoints rustic-git-lb -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\n"}{end}'
+kubectl -n kloudlite-git get endpoints kloudlite-git-lb -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\n"}{end}'
 #   every srv pod
 ```
 
-In A.5 change `kubectl -n rustic-git logs rustic-git-leader-0 | grep -iE 'checkpoint|timed out'` to `kubectl -n rustic-git logs -l role=server | grep -iE 'checkpoint|timed out'` (only the lease holder logs it). Add a new section before "## What is still manual after all of this":
+In A.5 change `kubectl -n kloudlite-git logs kloudlite-git-leader-0 | grep -iE 'checkpoint|timed out'` to `kubectl -n kloudlite-git logs -l role=server | grep -iE 'checkpoint|timed out'` (only the lease holder logs it). Add a new section before "## What is still manual after all of this":
 
 ```markdown
 ## Migrating from the named leader (one-time)
 
-Before the election build, `rustic-git-leader-0` held the map's writer by name. The election build
+Before the election build, `kloudlite-git-leader-0` held the map's writer by name. The election build
 takes it by lease, and the two overlap safely in exactly one order:
 
-1. `kubectl apply -f deploy/rustic-git.yaml` with the new pins, and wait:
-   `kubectl -n rustic-git rollout status statefulset/rustic-git-srv`. The old leader keeps running.
+1. `kubectl apply -f deploy/kloudlite-git.yaml` with the new pins, and wait:
+   `kubectl -n kloudlite-git rollout status statefulset/kloudlite-git-srv`. The old leader keeps running.
    The first new srv pod takes `cluster/leader` and opens the writer, which FENCES the old leader;
    from then on its `/own/*` handlers fail, so the old-build srv pods still waiting to roll cannot
    claim or renew until their turn — the same window a leader roll used to cost, once.
-2. Only then: `kubectl -n rustic-git delete statefulset/rustic-git-leader pdb/rustic-git-leader`.
+2. Only then: `kubectl -n kloudlite-git delete statefulset/kloudlite-git-leader pdb/kloudlite-git-leader`.
    Deleting it first would leave every old-build pod with nobody to ask for the whole roll.
 3. Verify as in A.3: exactly one `lease: leading`, no `newer DB client` afterwards.
 
-The Namespace object moved from the deleted `rustic-git-leader.yaml` into `rustic-git.yaml`;
+The Namespace object moved from the deleted `kloudlite-git-leader.yaml` into `kloudlite-git.yaml`;
 `kubectl apply` never prunes, so nothing about the namespace changes.
 ```
 
@@ -1859,15 +1859,15 @@ The Namespace object moved from the deleted `rustic-git-leader.yaml` into `rusti
 
 - [ ] **Step 5: CLAUDE.md**
 
-In "## The one invariant everything hangs off" replace the sentences from `Pod `rustic-git-leader-0` is the leader by *name*` through `those live on `rustic-git-srv-{0..N}`.` with:
+In "## The one invariant everything hangs off" replace the sentences from `Pod `kloudlite-git-leader-0` is the leader by *name*` through `those live on `kloudlite-git-srv-{0..N}`.` with:
 
 ```
-The ownership map has one writer, **elected**: every `rustic-git-srv` pod runs `App::election_tick`
+The ownership map has one writer, **elected**: every `kloudlite-git-srv` pod runs `App::election_tick`
 every 3 s, and the pod holding the lease at `cluster/leader` (`crates/storage/src/ownership/lease.rs`
 — conditional puts only, TTL 10 s) opens the map as WRITER (`OwnershipStore::promote`). The lease
 epoch is checked under `leader_lock` on every map write, a fenced write demotes, and SlateDB's own
 writer fence is the backstop; followers re-read the lease when the node they asked answers 421 or is
-unreachable. There is no leader pod, no `RUSTIC_GIT_LEADER`, and no preferred ordinal; a dead leader
+unreachable. There is no leader pod, no `KLOUDLITE_GIT_LEADER`, and no preferred ordinal; a dead leader
 is replaced in ~15 s. A multi-node `file://` store is refused at boot (`LocalFileSystem` has no
 conditional update).
 ```
@@ -1876,25 +1876,25 @@ In "## Deploying" replace `→ commit → `deploy/roll.sh` (leader first, wait, 
 
 - [ ] **Step 6: Verify**
 
-Run: `for f in deploy/rustic-git.yaml deploy/rustic-git-web.yaml; do ruby -ryaml -e 'YAML.load_stream(File.read(ARGV[0])) { |d| puts d["kind"] }' "$f" | sort | uniq -c; done`
-Expected: every kind listed, `Namespace` once, no `rustic-git-leader` anywhere; no parse error.
+Run: `for f in deploy/kloudlite-git.yaml deploy/kloudlite-git-web.yaml; do ruby -ryaml -e 'YAML.load_stream(File.read(ARGV[0])) { |d| puts d["kind"] }' "$f" | sort | uniq -c; done`
+Expected: every kind listed, `Namespace` once, no `kloudlite-git-leader` anywhere; no parse error.
 Run: `bash -n deploy/roll.sh deploy/pin.sh && echo ok` — `ok`.
-Run: `grep -rn 'rustic-git-leader\|RUSTIC_GIT_LEADER\|RUSTIC_GIT_REPLICAS\|RUSTIC_GIT_SERVER_PREFIX' deploy CLAUDE.md README.md | grep -v 'RECOVERY.md'` — expect `0` lines (RECOVERY.md keeps the name in the migration section on purpose).
-Run: `ls deploy/rustic-git-leader.yaml 2>&1` — `No such file`.
+Run: `grep -rn 'kloudlite-git-leader\|KLOUDLITE_GIT_LEADER\|KLOUDLITE_GIT_REPLICAS\|KLOUDLITE_GIT_SERVER_PREFIX' deploy CLAUDE.md README.md | grep -v 'RECOVERY.md'` — expect `0` lines (RECOVERY.md keeps the name in the migration section on purpose).
+Run: `ls deploy/kloudlite-git-leader.yaml 2>&1` — `No such file`.
 Run: `cargo test --workspace --locked 2>&1 | grep -E '^test result|FAILED' | sort | uniq -c` — all `ok` (nothing in `crates/` changed; this is the final gate).
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add -A deploy CLAUDE.md
-git commit -m "Deploy one StatefulSet with an elected map writer and delete the leader pod" -m "Migration order for the running fleet, as written into deploy/RECOVERY.md: roll rustic-git-srv to this build FIRST (the first new pod takes the lease and fences the old leader), wait for the rollout, and only then delete statefulset/rustic-git-leader and pdb/rustic-git-leader."
+git commit -m "Deploy one StatefulSet with an elected map writer and delete the leader pod" -m "Migration order for the running fleet, as written into deploy/RECOVERY.md: roll kloudlite-git-srv to this build FIRST (the first new pod takes the lease and fences the old leader), wait for the rollout, and only then delete statefulset/kloudlite-git-leader and pdb/kloudlite-git-leader."
 ```
 
 ---
 
 ## Self-review
 
-**Spec coverage.** The lease (object, body, conditional puts, constants, helper) — Task 1. Election loop steps 1–3, ties by the store — Task 3 `election_tick`. `RUSTIC_GIT_LEADER`/`leader_of` deleted, `App::leader()` from the lease, `set_leader` — Tasks 3 and 5. Promotion opens the writer and fences, demotion closes and reopens as reader, both beats on the writer — Tasks 2, 3, 5. Two demotion triggers plus the fence path through one function (`demote_locked`) — Task 3. Epoch on every map write, in-process check, entries unchanged — Task 3 (`writing_epoch`, `fenced_check`). Followers: 421 / connect failure re-read, the holder never forwards to itself (`claim_inner`'s `is_leader()` branch is untouched) — Task 4. `/healthz` on a live leader — Task 4. Leader serves like every other node; `servers()`, `leader_of`, `with_topology`, prefix split deleted — Tasks 3 and 5. Deploy: leader yaml and PDB deleted, srv PDB kept, `roll.sh` one apply, headless Service keeps `publishNotReadyAddresses`, env and `pin.sh` — Task 8. Migration order in RECOVERY.md and the last commit — Task 8. Failure modes: leader dies (Task 6 test), lost store access (refused renewal → demote, Task 3), two believe they lead (Task 2 fence test + Task 3 `a_fenced_map_write_demotes` + Task 6), `file://` refused (Task 1), clock skew (bounded by TTL; `advance_clock` in Task 6 exercises exactly the "reader takes early, fenced by SlateDB" case). Tests listed in the spec: lease unit tests incl. concurrent takers (Task 1), promote/demote/fence/stale-epoch in `crates/app` (Task 3 — the "fake lease" is the in-memory object store driven through the real helper, which is stronger than a fake), the three `tests/routing.rs` cases (Task 6), manifests parse and `bash -n` (Task 8). One deviation, stated in Global Constraints: no lease resignation at SIGTERM.
+**Spec coverage.** The lease (object, body, conditional puts, constants, helper) — Task 1. Election loop steps 1–3, ties by the store — Task 3 `election_tick`. `KLOUDLITE_GIT_LEADER`/`leader_of` deleted, `App::leader()` from the lease, `set_leader` — Tasks 3 and 5. Promotion opens the writer and fences, demotion closes and reopens as reader, both beats on the writer — Tasks 2, 3, 5. Two demotion triggers plus the fence path through one function (`demote_locked`) — Task 3. Epoch on every map write, in-process check, entries unchanged — Task 3 (`writing_epoch`, `fenced_check`). Followers: 421 / connect failure re-read, the holder never forwards to itself (`claim_inner`'s `is_leader()` branch is untouched) — Task 4. `/healthz` on a live leader — Task 4. Leader serves like every other node; `servers()`, `leader_of`, `with_topology`, prefix split deleted — Tasks 3 and 5. Deploy: leader yaml and PDB deleted, srv PDB kept, `roll.sh` one apply, headless Service keeps `publishNotReadyAddresses`, env and `pin.sh` — Task 8. Migration order in RECOVERY.md and the last commit — Task 8. Failure modes: leader dies (Task 6 test), lost store access (refused renewal → demote, Task 3), two believe they lead (Task 2 fence test + Task 3 `a_fenced_map_write_demotes` + Task 6), `file://` refused (Task 1), clock skew (bounded by TTL; `advance_clock` in Task 6 exercises exactly the "reader takes early, fenced by SlateDB" case). Tests listed in the spec: lease unit tests incl. concurrent takers (Task 1), promote/demote/fence/stale-epoch in `crates/app` (Task 3 — the "fake lease" is the in-memory object store driven through the real helper, which is stronger than a fake), the three `tests/routing.rs` cases (Task 6), manifests parse and `bash -n` (Task 8). One deviation, stated in Global Constraints: no lease resignation at SIGTERM.
 
 **Placeholder scan.** No "TBD", "similar to", or "add error handling". Two places say "unchanged"/"mechanical change" for bodies that are copied verbatim from the current file (`put_many`/`delete`/`close`/`set_draining`/`draining`/`all`/`checkpoint` in Task 2; the renew task and the five `lane()` calls in Task 5) — each names the exact edit and the line to keep.
 
