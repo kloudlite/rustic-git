@@ -36,7 +36,9 @@ URI=$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); print
 kubectl -n clickstack create secret generic hyperdx-mongo --from-literal=MONGO_URI="$URI"
 unset CS URI
 
-# 3. The stack.
+# 3. The stack. HyperDX reads `hyperdx.config` through envFrom at start and the chart stamps no
+#    checksum, so a values change under `config` needs `kubectl -n clickstack rollout restart
+#    deploy/clickstack-app` after the upgrade.
 helm upgrade --install clickstack clickstack/clickstack \
   --version 3.2.0 --namespace clickstack \
   -f deploy/clickstack/clickstack-values.yaml
