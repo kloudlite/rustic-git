@@ -289,7 +289,19 @@ async fn run() -> Result<()> {
                             Ok(n) => tracing::info!(applied = n, "clickhouse migrations applied"),
                             Err(e) => tracing::error!(error = %e, "clickhouse migrations failed; history will be incomplete until the next restart"),
                         }
-                        state = state.with_history(Arc::new(h));
+                        let h = Arc::new(h);
+                        // The second consumer group on the one `events` stream. Spawned only in
+                        // the admin role, because it is the only writer of `rustic.events`.
+                        let consumer_cache = cache.clone();
+                        let consumer_history = h.clone();
+                        tokio::spawn(async move {
+                            rustic_git_workspaces::history::events::consume_forever(
+                                consumer_cache,
+                                consumer_history,
+                            )
+                            .await
+                        });
+                        state = state.with_cache(cache.clone()).with_history(h);
                     }
                     None => tracing::warn!(
                         "RUSTIC_GIT_CLICKHOUSE_URL unset: /admin/history answers 503 and nothing is recorded"

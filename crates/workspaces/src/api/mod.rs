@@ -225,6 +225,10 @@ pub struct ApiState {
     /// which is what makes "the admin process is the only writer of `rustic`" a fact about the
     /// binary rather than a convention.
     pub history: Option<Arc<crate::history::History>>,
+    /// Redis, for the `history` consumer group only — no request path reads it. `None` in dev and
+    /// wherever the cache is disabled; the consumer then never spawns, which costs the activity
+    /// feed its PR half and nothing else (CLAUDE.md: the stream is a nudge, never the record).
+    pub cache: Option<Arc<rustic_git_storage::cache::Cache>>,
     /// The previous `/metrics` sweep, so the Monitoring page's rate rules have a second point to
     /// compare against without scraping twice on every request. ponytail: in-memory and
     /// single-process — a restart or the other replica just means the next request pays the 5 s
@@ -243,6 +247,7 @@ impl ApiState {
             settings: LiveSettings::new(AgentSettings::from_env()),
             peer: None,
             history: None,
+            cache: None,
             metrics_sample: Default::default(),
         }
     }
@@ -277,6 +282,10 @@ impl ApiState {
         self
     }
 
+    pub fn with_cache(mut self, cache: Arc<rustic_git_storage::cache::Cache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
 }
 
 pub fn router(state: Arc<ApiState>) -> Router {
