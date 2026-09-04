@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { settled } from "@/lib/settings";
 import { settingsStatusTone } from "@/lib/clusters";
-import type { WorkloadDoc, AdminNode } from "@/lib/api";
+import type { WorkloadDoc, AdminNode, SignalRow } from "@/lib/api";
 
 /** Quiet rollout state — "rolling" only while ready trails desired, "settled" once it hasn't. */
 export function RolloutBadge({ w }: { w: Pick<WorkloadDoc, "rolloutState" | "ready" | "desired"> }) {
@@ -24,6 +24,13 @@ export function NodeBadge({ n }: { n: Pick<AdminNode, "ready" | "decommission" |
  *  a plain string on the wire. */
 export function RegionStatusBadge({ status }: { status: string }) {
   return status === "active" ? <Badge variant="outline">active</Badge> : <Badge variant="secondary">{status}</Badge>;
+}
+
+/** A catalogue rule's evaluated state — firing is the only one that should draw the eye. */
+export function SignalBadge({ state }: { state: SignalRow["state"] }) {
+  if (state === "firing") return <Badge variant="destructive">firing</Badge>;
+  if (state === "ok") return <Badge variant="outline">ok</Badge>;
+  return <Badge variant="secondary">unknown</Badge>;
 }
 
 /** `present`/`absent`/`stale (lag N)` — anything else reads as neutral rather than

@@ -1316,6 +1316,37 @@ export function rollWorkload(scope: string, name: string, reason: string, token:
   });
 }
 
+/** `crates/workspaces/src/api/admin/monitoring.rs::SignalRow` — one catalogue rule
+ *  (`deploy/alerts.md`), evaluated by scraping every pod's `/metrics` on the request path rather
+ *  than through Prometheus. `detail` is the observed numbers behind `state`, or why a rule that
+ *  needs a window this process cannot see stayed `unknown` — never guessed as `ok`. */
+export type SignalRow = {
+  alert: string;
+  state: "firing" | "ok" | "unknown";
+  why: string;
+  detail: string | null;
+};
+
+/** `Restarts` in the same handler — container restart count since each pod started (Kubernetes
+ *  exposes no 1 h window), summed per KNOWN central workload. */
+export type SignalRestarts = { workload: string; restarts: number };
+
+export type SignalsResponse = {
+  signals: SignalRow[];
+  restarts: SignalRestarts[];
+  // Field names are the wire ones verbatim — `SignalsResponse` has no `rename_all`, unlike
+  // most admin responses.
+  scrape_failures: [string, string][];
+  pods_scraped: number;
+  /** Absent (not null — `skip_serializing_if`) unless `RUSTIC_GIT_GRAFANA_URL` is configured, so
+   *  a monitoring page never renders a dead link. */
+  grafana_url?: string;
+};
+
+export function adminMonitoringSignals(token: string) {
+  return adminCall<SignalsResponse>("/admin/monitoring/signals", { method: "GET", token });
+}
+
 /** Display-only slice of the central document — `crates/api/src/lib.rs::settings_central`, the
  *  UNAUTHENTICATED route on the ordinary api host (not `/admin`), so `lib/clone.ts` can call it
  *  without a signed-in caller's token. Blank fields mean "never set", the same fallback-to-env
