@@ -3,9 +3,24 @@
 import { useState, useTransition } from "react";
 import { auditQueryString, type AuditFilter, type AuditPage } from "@/lib/audit";
 import { when } from "@/lib/time";
+import { initials } from "@/lib/console";
+import { resultPill } from "@/lib/audit-result";
 import { loadMoreAudit } from "../actions";
+import { Section } from "../ui/section";
+import { DataTable, EmptyState, Td, Th, Tr } from "../ui/data-table";
+import { Pill } from "../ui/pill";
 
-export function AuditTable({ initialPage, filter }: { initialPage: AuditPage; filter: AuditFilter }) {
+/** `filters` is the server-rendered filter form, handed in as a slot so the section header holds
+ *  both it and Export CSV while the row count stays client state (Load more grows it). */
+export function AuditTable({
+  initialPage,
+  filter,
+  filters,
+}: {
+  initialPage: AuditPage;
+  filter: AuditFilter;
+  filters: React.ReactNode;
+}) {
   const [rows, setRows] = useState(initialPage.rows);
   const [cursor, setCursor] = useState(initialPage.next_cursor ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -25,68 +40,78 @@ export function AuditTable({ initialPage, filter }: { initialPage: AuditPage; fi
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <span className="text-caption text-muted-foreground">{rows.length} row{rows.length === 1 ? "" : "s"}</span>
-        {/* Same-origin route handler, not the admin service directly — it holds the bearer token
-         *  server-side and answers with a Content-Disposition download. */}
-        <a
-          href={`/superadmin/audit/export${auditQueryString(filter)}`}
-          className="h-8 border border-border px-3 text-sm2 leading-8 hover:bg-muted"
-        >
-          Export CSV
-        </a>
-      </div>
-
-      {error && (
-        <p className="border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm2 text-destructive">{error}</p>
-      )}
+    <Section
+      eyebrow="History"
+      title="Audit log"
+      count={rows.length}
+      bare
+      toolbar={
+        <>
+          {filters}
+          {/* Same-origin route handler, not the admin service directly — it holds the bearer
+              token server-side and answers with a Content-Disposition download. */}
+          <a
+            href={`/superadmin/audit/export${auditQueryString(filter)}`}
+            className="inline-flex h-8 items-center border border-border px-3 text-sm2 hover:bg-muted"
+          >
+            Export CSV
+          </a>
+        </>
+      }
+    >
+      {error && <p className="px-4 py-2 text-caption text-destructive">{error}</p>}
 
       {rows.length === 0 ? (
-        <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
-          Nothing matches that.
-        </p>
+        <EmptyState>Nothing matches that. Clear the filters to see every action again.</EmptyState>
       ) : (
-        <div className="overflow-x-auto border border-border bg-card">
-          <table className="w-full text-sm2">
-            <thead>
-              <tr className="border-b border-border text-left text-caption text-muted-foreground">
-                <th className="px-3 py-2 font-normal">When</th>
-                <th className="px-3 py-2 font-normal">Actor</th>
-                <th className="px-3 py-2 font-normal">Action</th>
-                <th className="px-3 py-2 font-normal">Target</th>
-                <th className="px-3 py-2 font-normal">Reason</th>
-                <th className="px-3 py-2 font-normal">Result</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {rows.map((r, i) => (
-                <tr key={`${r.ts}-${i}`}>
-                  <td className="tabular-nums px-3 py-2 text-muted-foreground">{when(new Date(r.ts).getTime())}</td>
-                  <td className="px-3 py-2">{r.actor}</td>
-                  <td className="px-3 py-2">{r.action}</td>
-                  <td className="px-3 py-2">{r.target}</td>
-                  <td className="px-3 py-2 text-muted-foreground">{r.reason ?? ""}</td>
-                  <td className={`px-3 py-2 ${r.result.startsWith("error") ? "text-destructive" : "text-muted-foreground"}`}>
-                    {r.result}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable>
+          <thead>
+            <tr>
+              <Th numeric>When</Th>
+              <Th>Actor</Th>
+              <Th>Action</Th>
+              <Th>Target</Th>
+              <Th>Note</Th>
+              <Th>Result</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const result = resultPill(r);
+              return (
+                <Tr key={`${r.ts}-${i}`}>
+                  <Td numeric className="text-muted-foreground">{when(new Date(r.ts).getTime())}</Td>
+                  <Td>
+                    <span className="flex items-center gap-2">
+                      <span className="flex size-5 shrink-0 items-center justify-center bg-muted text-micro font-medium text-muted-foreground">
+                        {initials(r.actor)}
+                      </span>
+                      {r.actor}
+                    </span>
+                  </Td>
+                  <Td><Pill>{r.action}</Pill></Td>
+                  <Td className="font-mono text-caption">{r.target}</Td>
+                  <Td className="text-muted-foreground">{r.reason ?? ""}</Td>
+                  <Td><Pill tone={result.tone}>{result.label}</Pill></Td>
+                </Tr>
+              );
+            })}
+          </tbody>
+        </DataTable>
       )}
 
       {cursor && (
-        <button
-          type="button"
-          onClick={loadMore}
-          disabled={pending}
-          className="h-8 self-start border border-border px-3 text-sm2 hover:bg-muted disabled:opacity-50"
-        >
-          {pending ? "Loading…" : "Load more"}
-        </button>
+        <div className="border-t border-border px-4 py-2">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={pending}
+            className="h-8 border border-border px-3 text-sm2 hover:bg-muted disabled:opacity-50"
+          >
+            {pending ? "Loading…" : "Load more"}
+          </button>
+        </div>
       )}
-    </div>
+    </Section>
   );
 }
