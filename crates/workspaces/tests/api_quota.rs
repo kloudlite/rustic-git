@@ -254,11 +254,14 @@ async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
     assert!(!s.rec.calls().iter().any(|c| c == &format!("POST {API}/snapshots")), "{:?}", s.rec.calls());
 }
 
+// `/v1/quota-requests` writes a kind-quota `Request` now (Task 2); the object on the wire has the
+// generic `Request` shape, not the old `QuotaRequest` one.
 fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "QuotaRequest",
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Request",
         "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
-        "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}
+        "spec": {"owner": owner, "kind": "quota", "requestedBy": owner,
+                 "quota": {"workspaces": 10}, "reason": "more room"}
     });
     if let Some(st) = state {
         o["status"] = json!({"state": st});
@@ -271,8 +274,8 @@ fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
 #[tokio::test]
 async fn a_team_admin_may_open_a_request_for_the_team() {
     let routes = vec![
-        get(format!("{API}/quotarequests"), list_of("QuotaRequest", vec![])),
-        post(format!("{API}/quotarequests"), req_obj("qr-1", "acme", None)),
+        get(format!("{API}/requests"), list_of("QuotaRequest", vec![])),
+        post(format!("{API}/requests"), req_obj("qr-1", "acme", None)),
     ];
     let s = server(true, routes).await;
     let resp = reqwest::Client::new()
@@ -281,9 +284,9 @@ async fn a_team_admin_may_open_a_request_for_the_team() {
         .json(&json!({"owner": "acme", "requested": {"workspaces": 40}, "reason": "onboarding"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
-    let sent = s.rec.sent("POST", &format!("{API}/quotarequests")).remove(0);
+    let sent = s.rec.sent("POST", &format!("{API}/requests")).remove(0);
     assert_eq!(sent["spec"]["owner"], "acme");
-    assert_eq!(sent["spec"]["requested"]["workspaces"], 40);
+    assert_eq!(sent["spec"]["quota"]["workspaces"], 40);
     assert_eq!(sent["metadata"]["labels"]["rustic-git.io/owner"], "acme");
 }
 
@@ -318,7 +321,7 @@ async fn a_non_member_cannot_tell_the_team_exists() {
 #[tokio::test]
 async fn a_second_pending_request_is_refused() {
     let routes = vec![get(
-        format!("{API}/quotarequests"),
+        format!("{API}/requests"),
         list_of("QuotaRequest", vec![req_obj("qr-1", "karthik", Some("pending"))]),
     )];
     let s = server(true, routes).await;
@@ -335,8 +338,8 @@ async fn a_second_pending_request_is_refused() {
 #[tokio::test]
 async fn a_denied_request_does_not_block_the_next_one() {
     let routes = vec![
-        get(format!("{API}/quotarequests"), list_of("QuotaRequest", vec![req_obj("qr-1", "karthik", Some("denied"))])),
-        post(format!("{API}/quotarequests"), req_obj("qr-2", "karthik", None)),
+        get(format!("{API}/requests"), list_of("QuotaRequest", vec![req_obj("qr-1", "karthik", Some("denied"))])),
+        post(format!("{API}/requests"), req_obj("qr-2", "karthik", None)),
     ];
     let s = server(true, routes).await;
     let code = reqwest::Client::new()

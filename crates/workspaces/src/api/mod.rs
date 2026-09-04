@@ -31,7 +31,7 @@ use crate::crd;
 use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::ResourceExt;
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -246,6 +246,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/quota", get(get_quota))
         .route("/v1/quota-requests", post(create_quota_request).get(list_quota_requests))
+        .route("/v1/requests", post(create_request).get(list_requests))
+        .route("/v1/requests/{id}", get(get_request))
         .route("/v1/regions", get(list_regions))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
@@ -357,30 +359,27 @@ fn is_pending(r: &crd::QuotaRequest) -> bool {
     r.status.as_ref().map(|s| s.state).unwrap_or_default() == crd::RequestState::Pending
 }
 
+/// The pre-`Request` route, kept because the web's 409 dialog and `kl` both post here. It writes a
+/// kind-quota `Request` now: one queue, one pending rule, one decision path — the old CRD is only
+/// ever READ from here on.
 async fn create_quota_request(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<NewQuotaRequest>,
 ) -> Result<Response, Response> {
-    let caller = caller(&s, &headers).await?;
-    let owner = body.owner.unwrap_or_else(|| caller.name.clone());
-    may_request_for(&s, &caller, &owner).await?;
-    let client = kube(&s)?;
-    // One at a time, so the queue is a list of decisions rather than a list of the same ask.
-    if requests_of(client, &owner).await?.iter().any(is_pending) {
-        return Err((StatusCode::CONFLICT, "a request is already pending").into_response());
-    }
-    let id = rid("qr");
-    let mut r = crd::QuotaRequest::new(
-        &id,
-        crd::QuotaRequestSpec { owner: owner.clone(), requested: body.requested, reason: body.reason },
-    );
-    // A view of `spec.owner`, so the queue and the owner's own list are indexed selectors — same
-    // rule as every other label in this codebase.
-    r.metadata.labels = Some(std::collections::BTreeMap::from([(OWNER_LABEL.to_string(), owner)]));
-    let api: Api<crd::QuotaRequest> = Api::all(client.clone());
-    let made = api.create(&kube::api::PostParams::default(), &r).await.map_err(kube_err)?;
-    Ok((StatusCode::CREATED, Json(request_doc(&made))).into_response())
+    let c = caller(&s, &headers).await?;
+    let spec = crd::RequestSpec {
+        owner: body.owner.unwrap_or_else(|| c.name.clone()),
+        kind: crd::RequestKind::Quota,
+        requested_by: c.name.clone(),
+        reason: body.reason,
+        quota: Some(body.requested),
+        access: None,
+        region: None,
+        other: None,
+    };
+    let made = create_request_inner(&s, &c, spec).await?;
+    Ok((StatusCode::CREATED, Json(generic_doc(&made))).into_response())
 }
 
 #[derive(serde::Serialize)]
@@ -443,6 +442,191 @@ async fn list_quota_requests(
     }
     rows.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
     Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
+}
+
+// ── generic requests ───────────────────────────────────────────────────
+
+/// The generic queue's own doc. One shape for all four kinds — the block that is `None` is simply
+/// absent, so a console renders "the facts for this kind" by reading the one field that is set.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RequestDoc {
+    pub(crate) id: String,
+    pub(crate) owner: String,
+    pub(crate) kind: crd::RequestKind,
+    pub(crate) requested_by: String,
+    pub(crate) reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quota: Option<crd::RequestedQuota>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) access: Option<crd::AccessAsk>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) region: Option<crd::RegionAsk>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) other: Option<crd::OtherAsk>,
+    pub(crate) state: crd::RequestState,
+    pub(crate) decided_by: Option<String>,
+    pub(crate) decided_at: Option<String>,
+    pub(crate) note: Option<String>,
+    pub(crate) resolution: Option<String>,
+    pub(crate) created_at: Option<String>,
+}
+
+pub(crate) fn generic_doc(r: &crd::Request) -> RequestDoc {
+    let st = r.status.clone().unwrap_or_default();
+    RequestDoc {
+        id: r.name_any(),
+        owner: r.spec.owner.clone(),
+        kind: r.spec.kind,
+        requested_by: r.spec.requested_by.clone(),
+        reason: r.spec.reason.clone(),
+        quota: r.spec.quota.clone(),
+        access: r.spec.access.clone(),
+        region: r.spec.region.clone(),
+        other: r.spec.other.clone(),
+        state: st.state,
+        decided_by: st.decided_by,
+        decided_at: st.decided_at,
+        note: st.note,
+        resolution: st.resolution,
+        created_at: r.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string()),
+    }
+}
+
+/// Every request of `owner`, label-selected — and re-checked against `spec.owner`, because the
+/// label is a view.
+pub(crate) async fn requests_of_generic(c: &kube::Client, owner: &str) -> Result<Vec<crd::Request>, Response> {
+    let api: Api<crd::Request> = Api::all(c.clone());
+    Ok(api
+        .list(&scope::owned_by(owner))
+        .await
+        .map_err(kube_err)?
+        .items
+        .into_iter()
+        .filter(|r| r.spec.owner == owner)
+        .collect())
+}
+
+/// No status yet is PENDING — `/v1` writes the object and stamps status in a second call, and
+/// reading that window as "decided" would let two requests of one kind stand at once.
+pub(crate) fn is_pending_generic(r: &crd::Request) -> bool {
+    r.status.as_ref().map(|s| s.state).unwrap_or_default() == crd::RequestState::Pending
+}
+
+#[derive(serde::Deserialize)]
+struct NewRequest {
+    /// Absent means the caller's own.
+    #[serde(default)]
+    owner: Option<String>,
+    kind: crd::RequestKind,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    quota: Option<crd::RequestedQuota>,
+    #[serde(default)]
+    access: Option<crd::AccessAsk>,
+    #[serde(default)]
+    region: Option<crd::RegionAsk>,
+    #[serde(default)]
+    other: Option<crd::OtherAsk>,
+}
+
+/// The one place a `Request` is authored. Shared with the `/v1/quota-requests` wrapper so the
+/// per-kind pending rule, the label and the author cannot be spelled twice.
+pub(crate) async fn create_request_inner(
+    s: &ApiState,
+    caller: &Caller,
+    spec: crd::RequestSpec,
+) -> Result<crd::Request, Response> {
+    spec.validate().map_err(|m| (StatusCode::UNPROCESSABLE_ENTITY, m).into_response())?;
+    may_request_for(s, &caller.name, &spec.owner).await?;
+    // A region has to be one an admin registered and left active — approving a grant for a region
+    // that does not exist would record a decision nothing can ever honour.
+    if let Some(r) = &spec.region {
+        check_region(s, &r.region).await?;
+    }
+    let client = kube(s)?;
+    // One at a time PER KIND, so each queue is a list of decisions rather than a list of the
+    // same ask — and a pending access request never blocks an unrelated quota one.
+    if requests_of_generic(client, &spec.owner)
+        .await?
+        .iter()
+        .any(|r| is_pending_generic(r) && r.spec.kind == spec.kind)
+    {
+        return Err((StatusCode::CONFLICT, "a request is already pending").into_response());
+    }
+    let owner = spec.owner.clone();
+    let mut r = crd::Request::new(&rid("req"), spec);
+    // A view of `spec.owner`, so the queue and the owner's own list are indexed selectors — same
+    // rule as every other label in this codebase.
+    r.metadata.labels = Some(std::collections::BTreeMap::from([(OWNER_LABEL.to_string(), owner)]));
+    let api: Api<crd::Request> = Api::all(client.clone());
+    api.create(&kube::api::PostParams::default(), &r).await.map_err(kube_err)
+}
+
+async fn create_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<NewRequest>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let spec = crd::RequestSpec {
+        owner: body.owner.unwrap_or_else(|| c.name.clone()),
+        kind: body.kind,
+        // From the claims, never the body: an author a request could name for itself is not
+        // evidence of who asked.
+        requested_by: c.name.clone(),
+        reason: body.reason,
+        quota: body.quota,
+        access: body.access,
+        region: body.region,
+        other: body.other,
+    };
+    let made = create_request_inner(&s, &c, spec).await?;
+    Ok((StatusCode::CREATED, Json(generic_doc(&made))).into_response())
+}
+
+/// The caller's own requests and their teams'. `owner` narrows to one, and must be something the
+/// caller may act on — same rule as every other owner-scoped read.
+async fn list_requests(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<RequestQuery>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let client = kube(&s)?;
+    let mut rows = Vec::new();
+    match q.owner {
+        Some(owner) => {
+            if !scope::may_act_on(&s, &c, &owner).await {
+                return Err(not_found());
+            }
+            rows.extend(requests_of_generic(client, &owner).await?);
+        }
+        None => {
+            for owner in scope::caller_owners(&s, &c).await {
+                rows.extend(requests_of_generic(client, &owner).await?);
+            }
+        }
+    }
+    rows.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
+    Ok(Json(rows.iter().map(generic_doc).collect::<Vec<_>>()).into_response())
+}
+
+async fn get_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    check_path_segment(&id)?;
+    let api: Api<crd::Request> = Api::all(kube(&s)?.clone());
+    let r = api.get_opt(&id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    // 404, never 403: a refusal that distinguishes "not yours" from "no such id" confirms the id.
+    if !scope::may_act_on(&s, &c, &r.spec.owner).await {
+        return Err(not_found());
+    }
+    Ok(Json(generic_doc(&r)).into_response())
 }
 
 #[derive(serde::Deserialize, Default)]
