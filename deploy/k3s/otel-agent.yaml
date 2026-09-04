@@ -304,6 +304,11 @@ data:
         auth_type: serviceAccount
 
     processors:
+      # Events are rows about pods, not from them: named as their own service so the picker
+      # shows `k8s-events` rather than a blank.
+      resource/events:
+        attributes:
+          - { key: service.name, value: k8s-events, action: upsert }
       # `region` only. NO `k8s.node.name` here: these metrics describe every node in the cluster
       # and already carry the right one per datapoint — stamping this pod's would be a lie.
       resource:
@@ -329,7 +334,7 @@ data:
           exporters: [otlphttp]
         logs:
           receivers: [k8s_events]
-          processors: [resource, batch]
+          processors: [resource, resource/events, batch]
           exporters: [otlphttp]
 ---
 apiVersion: apps/v1

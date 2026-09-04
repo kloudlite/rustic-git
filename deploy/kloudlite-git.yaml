@@ -1363,6 +1363,11 @@ data:
           enabled: false
 
     processors:
+      # Events are rows about pods, not from them: named as their own service so the picker
+      # shows `k8s-events` rather than a blank.
+      resource/events:
+        attributes:
+          - { key: service.name, value: k8s-events, action: upsert }
       resource:
         attributes:
           - { key: region, value: "${env:KLOUDLITE_GIT_REGION}", action: upsert }
@@ -1386,7 +1391,7 @@ data:
           exporters: [otlphttp]
         logs:
           receivers: [k8s_events]
-          processors: [resource, batch]
+          processors: [resource, resource/events, batch]
           exporters: [otlphttp]
 ---
 apiVersion: apps/v1
