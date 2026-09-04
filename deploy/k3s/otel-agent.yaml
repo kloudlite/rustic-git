@@ -120,7 +120,7 @@ data:
                 # ingress) is somebody else's telemetry.
                 - source_labels: [__meta_kubernetes_namespace]
                   action: keep
-                  regex: kube-system
+                  regex: kube-system|kloudlite-git-system
                 - source_labels: [__meta_kubernetes_pod_name]
                   action: keep
                   regex: kloudlite-git-.*
@@ -145,12 +145,12 @@ data:
         endpoint: https://${env:K8S_NODE_IP}:10250
         insecure_skip_verify: true
         metric_groups: [node, pod, container]
-      # OUR pods' logs only (the agent, the gateway and these collectors — all in kube-system), so HyperDX has logs beside metrics
+      # OUR pods' logs only (the agent and these collectors in kube-system, the gateway and ZeroFS in kloudlite-git-system), so HyperDX has logs beside metrics
       # without ingesting every workspace container on the node. Our binaries keep plain
       # tracing output; `KLOUDLITE_GIT_LOG_FORMAT=json` makes them structured here without
       # changing the code.
       filelog:
-        include: [/var/log/pods/kube-system_kloudlite-git-*/*/*.log]
+        include: [/var/log/pods/kube-system_kloudlite-git-*/*/*.log, /var/log/pods/kloudlite-git-system_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
         exclude: [/var/log/pods/*_kloudlite-git-otel-*/*/*.log]
         include_file_path: true
