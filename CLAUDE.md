@@ -10,10 +10,11 @@ cargo test                                   # workspace: every crate's unit tes
                                              # is a near-empty lib that only hosts tests/)
 cargo test --test registry_blobs             # one integration test file — still runs from the root
 cargo test --test registry_http some_name    # one test by name
-cargo clippy --workspace -- -D warnings      # CI gates on this (image.yml test job): every lib and
-                                             # bin, test targets excluded; --all-targets still has
-                                             # pre-existing lints in test targets — the bar there is
-                                             # no NEW warnings in files you touch.
+cargo clippy --workspace --all-targets -- -D warnings
+                                             # CI gates on exactly this (image.yml test job), test
+                                             # targets included — a lint in a tests/*.rs file is a
+                                             # red commit with no image, so run it with
+                                             # --all-targets locally before pushing.
 ./tests/registry_e2e.sh                      # real docker push/pull round trip; exit 77 = the
                                              # docker half was skipped (no daemon) — not a pass
 ./tests/ws_e2e.sh                            # real server+api+agent+Azure+btrfs workspaces
