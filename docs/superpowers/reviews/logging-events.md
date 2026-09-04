@@ -98,7 +98,7 @@ you add an event.
 | `claim.completed` / `claim.refused` | info / debug | `kind`, `name`, `node`, `reason` |
 | `volume.moved` / `volume.released` / `volume.taken` | info | `volume`, `node`, `reason` |
 | `snapshot.cut` / `snapshot.pruned` | debug | `workspace`/`environment`, `snapshot` |
-| `sync.cut` | debug | `workspace`, `snapshot` |
+| `sync.cut` | debug | `name` (the worktree, like every `sync.*` event), `snapshot`, `generation` |
 | `home.mounted` / `home.remounting` / `home.mount.failed` | info / warn / error | `export`, `error` |
 | `node.roles` | info | `node`, `roles` |
 | `node.draining` / `node.drained` | info | `node`, counts |
@@ -110,7 +110,7 @@ you add an event.
 | `alerts.write.failed` | warn | `count`, `error` |
 | `process.shutdown.stalled` | warn | `step`, `timeout_s` |
 | `store.multipart.unavailable` | info (boot, by design) | `url`, `mode` |
-| `cache.unavailable` / `cache.script.failed` | warn | `host` |
+| `cache.unavailable` / `cache.script.failed` | warn | `host`, or `reason` when there is no host to name |
 | `cache.stream.failed` | warn | `stream`, `group`, `op`, `count`, `error` |
 | `ownership.map.opened` | info | `path`, `role` |
 | `ownership.open.failed` / `ownership.close.failed` | warn | `role`, `error` |
@@ -229,3 +229,4 @@ you add an event.
 | `history.beats.skipped` | warn once, then debug | `table`, `reason` |
 | `history.consumer.disabled` | info (boot, by design) | `mode` |
 | `alerts.skipped` | warn | `region`, `reason` |
+| `pool.usage.failed` | warn | `pool`, `reason`, `error` |
