@@ -1347,6 +1347,35 @@ export function adminMonitoringSignals(token: string) {
   return adminCall<SignalsResponse>("/admin/monitoring/signals", { method: "GET", token });
 }
 
+/** `crates/workspaces/src/api/admin/overview.rs::AttentionItem` — no `rename_all`, so its three
+ *  fields are already the wire shape verbatim. */
+export type AttentionItem = { kind: string; detail: string; href: string };
+
+/** `RegionFleet`/`FleetNumbers`, both `rename_all = "camelCase"`. */
+export type RegionFleet = { owners: number; workspaces: number; environments: number; snapshots: number; diskGb: number };
+export type FleetNumbers = {
+  owners: number;
+  workspaces: number;
+  environments: number;
+  snapshots: number;
+  diskGbTotal: number;
+  perRegion: Record<string, RegionFleet>;
+};
+
+/** `Overview`, `rename_all = "camelCase"`. `errors` is `skip_serializing_if = "Vec::is_empty"`,
+ *  so it is absent rather than `[]` when every sub-source read cleanly. */
+export type Overview = {
+  pendingRequests: QuotaRequestDoc[];
+  attention: AttentionItem[];
+  recentAudit: AuditEntry[];
+  fleet: FleetNumbers;
+  errors?: string[];
+};
+
+export function adminOverview(token: string) {
+  return adminCall<Overview>("/admin/overview", { method: "GET", token });
+}
+
 /** Display-only slice of the central document — `crates/api/src/lib.rs::settings_central`, the
  *  UNAUTHENTICATED route on the ordinary api host (not `/admin`), so `lib/clone.ts` can call it
  *  without a signed-in caller's token. Blank fields mean "never set", the same fallback-to-env
