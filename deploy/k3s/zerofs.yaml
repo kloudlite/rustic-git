@@ -111,6 +111,11 @@ spec:
           # front of every owner's home directory.
           image: ghcr.io/barre/zerofs:2.3.2@sha256:3e55849c76a9243253660c3479ac2c96c7e69843dc3432512212650004a821ae
           command: ["zerofs", "run", "-c", "/etc/zerofs/zerofs.toml"]
+          env:
+            # ZeroFS logs through `tracing` too: no colour codes in the collector's body, and the
+            # per-connection accept line (one per NFS client reconnect) is not a signal.
+            - { name: NO_COLOR, value: "1" }
+            - { name: RUST_LOG, value: "info,zerofs_nfsserve::tcp=warn" }
           envFrom:
             - secretRef:
                 name: zerofs-store
