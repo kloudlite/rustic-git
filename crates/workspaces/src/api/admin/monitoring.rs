@@ -54,7 +54,12 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
     // empty table would read as "nothing is wrong". The fill is per (region, rule) over the regions
     // that exist: a row with no region names nothing an operator could act on.
     let mut signals = recorded;
-    for region in region_names(&s).await.unwrap_or_default() {
+    // A failed Region list must not quietly become "no regions, no rows": that renders an empty
+    // table, the one reading this fill exists to prevent — so it is a 502 like a history failure.
+    let regions = region_names(&s).await.ok_or_else(|| {
+        (axum::http::StatusCode::BAD_GATEWAY, "regions: the region list could not be read").into_response()
+    })?;
+    for region in regions {
         for rule in CATALOGUE {
             if !signals
                 .iter()
