@@ -98,6 +98,41 @@ async fn owners_list_includes_an_owner_with_only_live_objects_and_no_quota_or_re
     assert_eq!(carol["pending"], false);
 }
 
+/// Sort is tightest-first: an owner sitting exactly at her own `Quota`'s limit (dana) must sort
+/// ahead of one with headroom to spare on every dimension (carol, riding the untouched default) —
+/// and dana's own `Quota` object must report `source: "own"`, not `"default"`.
+#[tokio::test]
+async fn owners_list_sorts_tightest_first_and_reports_source_own() {
+    let dana_quota = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+        "metadata": {"name": "dana"},
+        "spec": {"workspaces": 1, "environments": 5, "snapshots": 5, "diskGb": 100, "cpu": 4, "memoryGb": 8}
+    });
+    let routes = vec![
+        get(format!("{API}/quotas"), list_of("Quota", vec![dana_quota])),
+        get(format!("{API}/quotarequests"), list_of("QuotaRequest", vec![])),
+        get(
+            format!("{API}/workspaces"),
+            list_of("Workspace", vec![ws_obj("ws-dana", "dana"), ws_obj("ws-carol", "carol")]),
+        ),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![])),
+        get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
+    ];
+    let s = admin_server(routes).await;
+    let body: Value = reqwest::Client::new()
+        .get(format!("{}/admin/owners", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let rows = body.as_array().expect("a list");
+    let dana_idx = rows.iter().position(|r| r["owner"] == "dana").expect("dana listed");
+    let carol_idx = rows.iter().position(|r| r["owner"] == "carol").expect("carol listed");
+    assert!(dana_idx < carol_idx, "dana (at her limit) must sort ahead of carol (headroom to spare): {body}");
+    assert_eq!(rows[dana_idx]["source"], "own");
+    assert_eq!(rows[carol_idx]["source"], "default");
+}
+
 /// The detail composes usage/limit, the owner's own workspaces/environments/volumes, its last
 /// requests and its audit rows — each scoped to that owner only, a second owner's rows never
 /// leaking in.

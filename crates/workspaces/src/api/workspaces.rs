@@ -390,25 +390,30 @@ pub(crate) async fn list_for_owner(
     if !may_act_on(s, &caller_id, owner).await {
         return Err(not_found());
     }
-    Ok(Json(ws_for_owner(s, owner).await?).into_response())
-}
-
-/// The read half of `list_for_owner`, owner already authorized — the admin Owner detail page
-/// reuses this directly since the claim already stands in for `may_act_on` there.
-pub(crate) async fn ws_for_owner(s: &ApiState, owner: &str) -> Result<Vec<Workspace>, Response> {
-    let c = kube(s)?;
-    let api: Api<crd::Workspace> = Api::all(c.clone());
-    let items = mine(api.list(&owned_in(owner, "")).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
-    let pushed = pushed_volumes(s, c, owner).await?;
-    let list: Vec<_> = items.iter().map(|w| ws_doc(w, &pushed)).collect();
-    if !items.is_empty() && s.keys.is_some() {
+    let list = ws_for_owner(s, owner).await?;
+    // The key-minting side effect belongs to this `/v1` wrapper, never to `ws_for_owner` itself —
+    // the admin Owner detail page calls `ws_for_owner` directly to render a read-only page, and a
+    // GET there must not have the side effect of writing a namespace Secret.
+    if !list.is_empty() && s.keys.is_some() {
+        let c = kube(s)?;
         let secrets: Api<k8s_openapi::api::core::v1::Secret> =
             Api::namespaced(c.clone(), &crd::ws_namespace(owner, ""));
         if matches!(secrets.get_opt(crate::k8s::USER_KEY_SECRET).await, Ok(None)) {
             write_user_key(s, c, &crd::ws_namespace(owner, ""), owner).await;
         }
     }
-    Ok(list)
+    Ok(Json(list).into_response())
+}
+
+/// The read half of `list_for_owner`, owner already authorized — the admin Owner detail page
+/// reuses this directly since the claim already stands in for `may_act_on` there. Read-only: no
+/// Secret is written here, see `list_for_owner`'s own key-minting step.
+pub(crate) async fn ws_for_owner(s: &ApiState, owner: &str) -> Result<Vec<Workspace>, Response> {
+    let c = kube(s)?;
+    let api: Api<crd::Workspace> = Api::all(c.clone());
+    let items = mine(api.list(&owned_in(owner, "")).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
+    let pushed = pushed_volumes(s, c, owner).await?;
+    Ok(items.iter().map(|w| ws_doc(w, &pushed)).collect())
 }
 
 pub(crate) async fn get_ws(
