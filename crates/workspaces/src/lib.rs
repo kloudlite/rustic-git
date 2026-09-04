@@ -1,4 +1,5 @@
 #[cfg(feature = "testkit")]
+pub mod audit;
 pub mod kube_test;
 pub mod k8s;
 pub mod packages;

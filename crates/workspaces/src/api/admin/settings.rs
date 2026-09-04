@@ -176,6 +176,7 @@ pub(crate) async fn put_central(
     for (field, scope, reader) in roll_targets {
         let _ = workloads::roll_readers(&s, &scope, &[reader], RollReason::Setting(field), &c.name).await;
     }
+    super::audit(&s, &c.name, "put-central-settings", "central", None, "ok").await;
     Ok(Json(body).into_response())
 }
 
@@ -224,6 +225,7 @@ pub(crate) async fn revert_central(State(s): State<Arc<ApiState>>, headers: axum
     for (field, scope, reader) in roll_targets {
         let _ = workloads::roll_readers(&s, &scope, &[reader], RollReason::Setting(field), &c.name).await;
     }
+    super::audit(&s, &c.name, "revert-central-settings", "central", None, "ok").await;
     Ok(Json(body).into_response())
 }
 
@@ -359,6 +361,7 @@ pub(crate) async fn get_cluster(State(s): State<Arc<ApiState>>, Path(region): Pa
 async fn apply_cluster_patch(
     s: &ApiState,
     caller_name: &str,
+    action: &'static str,
     region: &str,
     client: kube::Client,
     current: crd::ClusterSettings,
@@ -393,6 +396,7 @@ async fn apply_cluster_patch(
             workloads::roll_readers(s, &Scope::Region(region.to_string()), readers, RollReason::Setting(field), caller_name)
                 .await;
     }
+    super::audit(s, caller_name, action, region, None, "ok").await;
     Ok(Json(patched).into_response())
 }
 
@@ -409,7 +413,7 @@ pub(crate) async fn put_cluster(
     let client = super::client_for_region(&s, &region).await?.clone();
     let api: Api<crd::ClusterSettings> = Api::all(client.clone());
     let current = api.get_opt("default").await.map_err(kube_err)?.unwrap_or_else(default_cluster_settings);
-    apply_cluster_patch(&s, &c.name, &region, client, current, patch).await
+    apply_cluster_patch(&s, &c.name, "put-cluster-settings", &region, client, current, patch).await
 }
 
 pub(crate) async fn revert_cluster(
@@ -424,5 +428,5 @@ pub(crate) async fn revert_cluster(
     let ann = current.metadata.annotations.clone().unwrap_or_default();
     let hist = history_from_annotations(&ann);
     let target = hist.get(n).cloned().ok_or_else(not_found)?;
-    apply_cluster_patch(&s, &c.name, &region, client, current, target).await
+    apply_cluster_patch(&s, &c.name, "revert-cluster-settings", &region, client, current, target).await
 }

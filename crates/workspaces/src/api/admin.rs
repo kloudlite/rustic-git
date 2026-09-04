@@ -11,8 +11,37 @@
 use super::*;
 use axum::extract::Path;
 
+mod audit;
 mod schema;
 mod settings;
+
+/// One row per successful write, called from the handler's own success path (see the module
+/// doc on `crate::audit` for why this isn't a middleware). Fire-and-forget: audit is evidence,
+/// not a gate, so a `put` failure is logged and swallowed rather than turned into a 5xx for a
+/// write that already landed. `s.keys` unset (dev without an object store configured) means
+/// there is nowhere to log to and nothing to block either, so this is a silent no-op then too —
+/// every deployed admin process has `RUSTIC_GIT_S3_URL` wired (`deploy/rustic-git.yaml`).
+pub(crate) async fn audit(
+    s: &ApiState,
+    actor: &str,
+    action: &str,
+    target: &str,
+    reason: Option<String>,
+    result: &'static str,
+) {
+    let Some(store) = s.keys.as_ref() else { return };
+    let entry = crate::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        actor: actor.to_string(),
+        action: action.to_string(),
+        target: target.to_string(),
+        reason,
+        result: result.into(),
+    };
+    if let Err(e) = crate::audit::record(&store.os, &entry).await {
+        tracing::error!(error = %e, actor, action, target, "audit row not written");
+    }
+}
 pub use settings::PeerClient;
 
 /// Runs before ANY handler on this router. A token that fails to verify is 401; one that verifies
@@ -60,6 +89,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/admin/settings/clusters/{region}/revert/{n}", post(settings::revert_cluster))
         .route("/admin/settings/schema", get(schema::get_schema))
+        .route("/admin/audit", get(audit::list_audit))
+        .route("/admin/audit.csv", get(audit::audit_csv))
         // The claim check runs BEFORE every route above, not per-handler: `route_layer` wraps only
         // the routes already added, so a route added after this line would run unguarded — there
         // are none, and `every_admin_path_refuses_without_the_claim` is the tripwire if one is
@@ -87,10 +118,12 @@ fn active_status() -> String {
 
 async fn create_region(
     State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<NewRegion>,
 ) -> Result<Response, Response> {
     // The claim already gated this request in `refuse_without_claim`; no second check here — the
     // one place that decides is the layer every route on this router shares.
+    let c = caller(&s, &headers).await?;
     check_path_segment(&body.id)?;
     let status = if body.status == "inactive" { "inactive" } else { "active" };
     let r = crd::Region::new(&body.id, crd::RegionSpec { name: body.name, status: status.into() });
@@ -101,6 +134,8 @@ async fn create_region(
         .patch(&body.id, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&r))
         .await
         .map_err(kube_err)?;
+    let action = if status == "inactive" { "deactivate-region" } else { "add-region" };
+    audit(&s, &c.name, action, &body.id, None, "ok").await;
     Ok((StatusCode::CREATED, Json(region_doc(&saved))).into_response())
 }
 
@@ -121,10 +156,13 @@ async fn write_quota(s: &ApiState, owner: &str, spec: crd::QuotaSpec) -> Result<
 
 async fn write_quota_route(
     State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(owner): Path<String>,
     Json(spec): Json<crd::QuotaSpec>,
 ) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
     let q = write_quota(&s, &owner, spec).await?;
+    audit(&s, &c.name, "set-quota", &owner, None, "ok").await;
     Ok(Json(q.spec).into_response())
 }
 
@@ -186,7 +224,9 @@ async fn approve_quota_request(
         None => crate::quota::effective(client, &owner, team).await.map_err(kube_err)?,
     };
     write_quota(&s, &owner, overlay(base, &r.spec.requested)).await?;
-    decide(&s, &id, crd::RequestState::Approved, &c.name, note.note).await
+    let out = decide(&s, &id, crd::RequestState::Approved, &c.name, note.note.clone()).await?;
+    audit(&s, &c.name, "approve", &owner, note.note, "ok").await;
+    Ok(out)
 }
 
 /// Deny: mark the request only, no `Quota` write.
@@ -200,8 +240,10 @@ async fn deny_quota_request(
     let note: Decision = if body.is_empty() { Default::default() } else {
         serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
     };
-    pending_request(&s, &id).await?;
-    decide(&s, &id, crd::RequestState::Denied, &c.name, note.note).await
+    let r = pending_request(&s, &id).await?;
+    let out = decide(&s, &id, crd::RequestState::Denied, &c.name, note.note.clone()).await?;
+    audit(&s, &c.name, "deny", &r.spec.owner, note.note, "ok").await;
+    Ok(out)
 }
 
 /// The whole queue, every owner — the admin list has no `owner` filter, unlike `/v1`'s.
@@ -370,8 +412,10 @@ async fn roll_workload_route(
     if reason.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "reason is required").into_response());
     }
+    let target = format!("{scope}/{name}");
     let scope = parse_scope(&scope);
-    super::workloads::roll_readers(&s, &scope, &[name.as_str()], super::workloads::RollReason::Manual(reason), &c.name).await?;
+    super::workloads::roll_readers(&s, &scope, &[name.as_str()], super::workloads::RollReason::Manual(reason.clone()), &c.name).await?;
     let row = super::workloads::workload_doc(&s, &scope, &name).await?;
+    audit(&s, &c.name, "roll", &target, Some(reason), "ok").await;
     Ok(Json(row).into_response())
 }
