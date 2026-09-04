@@ -1,7 +1,7 @@
 # Superadmin console: product requirements
 
 **Date:** 2026-09-04
-**Status:** draft for the owner's review. Supersedes the admin-area paragraphs of
+**Status:** approved by the owner 2026-09-04 (drain and decommission from the console in phase 1; audit retention deferred, keep everything for now; approve-with-edits assumed). Supersedes the admin-area paragraphs of
 `2026-09-03-quotas-and-superadmin-design.md` §4 and `2026-09-03-live-settings-design.md` §5–§7 as
 far as the web is concerned; every backend route those specs added stays and is reused here.
 
@@ -203,8 +203,12 @@ editor the owner ruled out.
 Editing tunables in the UI; a general Kubernetes object browser; impersonation; per-user
 notifications; anything users can see.
 
-## Open questions for the owner
+## Decisions (owner, 2026-09-04)
 
-1. Approve with edits (grant less/more than asked) — wanted, or approve-as-asked only?
-2. Node drain from the console — wanted in phase 1, or keep it a kubectl operation for now?
-3. Audit retention: keep forever in the object store (cheap) or prune after a year?
+1. Approve with edits: the decision panel's editable copy lets the operator grant less or more
+   than asked (assumed; "approve exactly as asked" is the fallback if the owner objects).
+2. Node drain AND decommission from the console, phase 1: Drain sets the decommission label and
+   shows the draining counters until the sticky `drained` timestamp; Decommission is the step
+   after `drained` — a second confirmation, then the node is cordoned and the operator is told
+   the VM may be deleted (the console never deletes the VM); Undrain removes the label.
+3. Audit retention: keep everything; pruning is a later decision.
