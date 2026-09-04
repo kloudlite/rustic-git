@@ -14,9 +14,7 @@ Files, in the order a cluster is built:
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins every namespaced object it writes — pods, statefulsets, services, networkpolicies, limitranges, Secrets, RoleBindings — to the `ws-`/`wt-`/`env-` namespaces it makes. Apply with `agent-rbac.yaml`, always. |
 | `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
-| `system-netpol.yaml` | The one NetworkPolicy admitting 2049 to ZeroFS. The mount runs in the node's netns via `nsenter`, so its client is the node, never an agent pod: the `from` list is the node subnet (`10.60.1.0/24`, for a mount on ZeroFS's own node) **plus one `/32` per node's `flannel.1` address** (every other node, masqueraded over VXLAN). Hand-maintained — a new node's `/32` goes in before its agent mounts. The export authenticates nothing, so reachability is the authorization. `app: zerofs` is the sole selector. Apply with `zerofs.yaml`. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
-| `zerofs.yaml` | The region's shared-home NFS export (ZeroFS, single replica — see its header). Apply before rolling agents with `WS_HOMES_EXPORT` set; see "Shared home" below. |
 | `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods, and metrics (9464) only from the OTel collector's pod in `kube-system` (`otel-agent.yaml`). It used to name a namespace called `monitoring` that never existed, so 9464 was unreachable and the agent's gauges went nowhere. No Service — discovery is by pod IP from the API. See "Replication" below. |
 | `otel-agent.yaml` | The region's OpenTelemetry collectors: ServiceAccount + ClusterRole (the header table is the role), a DaemonSet for the per-node receivers (kubelet stats, pod logs, and this node's `prometheus.io/scrape` pods) and a one-replica Deployment for `k8s_cluster`. Exports to the ClickStack gateway on AKS. Needs the `kloudlite-git-otel` Secret first (`../clickstack/README.md`) and `KLOUDLITE_GIT_REGION` edited to this region's id. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
@@ -105,7 +103,6 @@ one node to be both.
 #    NFS (2049) by node and flannel address; a missing entry is not an error anyone sees — the
 #    mount times out and every workspace on that node parks in `HomeNotReady`.
 ssh <node> ip -4 -o addr show flannel.1     # e.g. 10.42.6.0 — add `- ipBlock: {cidr: 10.42.6.0/32}`
-# Add that /32 to the `zerofs-nfs-from-agents` ingress in system-netpol.yaml, commit, then:
 kubectl apply -f system-netpol.yaml
 ```
 
@@ -361,142 +358,31 @@ mv {pool}/vol/{id}/live-migrating {pool}/vol/{id}/live
 There is no bulk "undo everything" command, deliberately — the same one-volume-at-a-time shape as
 the forward migration.
 
-## Release: shared home on ZeroFS
+## Shared homes: Azure Files Premium (NFS 4.1)
 
-The 2026-09-01 change after the commit model: `/home/kl` stops being ONE btrfs subvolume per
-owner per node (`home-{owner}`, migrated lazily like a workspace, pushed on a timer and on every
-stop) and becomes ONE region-shared NFS export, served by ZeroFS (`deploy/k3s/zerofs.yaml`,
-SlateDB-backed, single replica on purpose — see its header) and mounted once per node by the
-agent at `{pool}/homes` (`WS_HOMES_EXPORT`, `bins/agent/src/lib.rs`'s `run`). A pod hostPaths
-`{pool}/homes/{owner}` straight onto `/home/kl`; caches/editor-servers/shell-state stay node-local
-(`{pool}/homecache/{owner}`, subPaths `cache`/`vscode-server`/`cursor-server`/`state`, listed in
-`crates/workspaces/src/k8s.rs`'s `workspace_pod`). There is no home Volume any more, so the
-owner→node pin that came from it is also gone: an owner's workspaces can be claimed by any node
-whose `VolumeReplica` is Synced, not just the one that happened to hold their btrfs home.
+Every owner's `/home/kl` in a region is `{pool}/homes/{owner}` on ONE managed NFS 4.1 share —
+Azure Files Premium, account `kloudlitegithomes` (Premium_ZRS, `rustic-git-k3s`), share `homes`,
+reachable only from the `nodes` subnet through its `Microsoft.Storage` service endpoint. Nothing
+of ours runs in the path: the agent mounts it at boot (`WS_HOMES_EXPORT` in
+`agent-daemonset.yaml`, `vers=4,minorversion=1,sec=sys`), and the provider's SLA is the
+availability story. ZeroFS (a single pod serving NFSv3 over a blob-backed LSM tree) was retired
+on 2026-09-04 after its segment GC started leaking; this replaced it.
 
-Order:
+Per region: a new region gets its own account and share in its own VNet (homes are region-local
+by design), the same three commands:
 
 ```sh
-# 1. Real credentials before anything else. ZeroFS speaks Azure Blob NATIVELY (`azure://`) — there
-#    is no S3 gateway and no AWS_* anywhere — so it points at the SAME account and container every
-#    other tier already writes to. Reuse the region's existing storage credential rather than
-#    minting a second one; only the encryption password is new, and losing it loses every home in
-#    the region (extents are encrypted with a key derived from it). Back the password up wherever
-#    the region's other secrets are backed up — the cluster itself is not such a place.
-ACC=$(kubectl -n kloudlite-git get secret kloudlite-git-storage -o jsonpath='{.data.account}' | base64 -d)
-KEY=$(kubectl -n kloudlite-git get secret kloudlite-git-storage -o jsonpath='{.data.key}' | base64 -d)
-kubectl -n kloudlite-git-system create secret generic zerofs-store \
-  --from-literal=AZURE_STORAGE_ACCOUNT_NAME="$ACC" \
-  --from-literal=AZURE_STORAGE_ACCOUNT_KEY="$KEY" \
-  --from-literal=ZEROFS_CONTAINER=kloudlite-git \
-  --from-literal=ZEROFS_PREFIX=homes \
-  --from-literal=ZEROFS_PASSWORD="$(openssl rand -base64 32)"   # RECORD THIS SOMEWHERE DURABLE
-# The Secret is NOT in zerofs.yaml on purpose: a manifest re-applied on every rollout must not
-# carry secret material, or `kubectl apply -f zerofs.yaml` overwrites the real credentials with
-# placeholders and ZeroFS crash-loops on `Invalid Access Key` with nothing in the diff to explain
-# it. Create it here, once, and let the apply below touch only the ConfigMap/Deployment/Service.
-kubectl apply -f deploy/k3s/zerofs.yaml
-kubectl rollout status deploy/zerofs -n kloudlite-git-system
-
-# 2. Add WS_HOMES_EXPORT to the agent DaemonSet (deploy/k3s/agent-daemonset.yaml already carries
-#    it, pointed at the Service above) and roll the agents. Each one mounts {pool}/homes at
-#    startup, before the controller starts — a failed mount fails agent startup on purpose (the
-#    DaemonSet restart-loops rather than a node silently serving an empty home).
-kubectl apply -f deploy/k3s/agent-daemonset.yaml
-kubectl rollout status ds/kloudlite-git-agent -n kube-system
+az network vnet subnet update --ids <nodes subnet id> --service-endpoints Microsoft.Storage
+az storage account create -n <account> -g <rg> -l <location> --kind FileStorage --sku Premium_ZRS \
+  --https-only false --default-action Deny
+az storage account network-rule add -g <rg> -n <account> --subnet <nodes subnet id>
+az storage share-rm create -g <rg> --storage-account <account> -n homes \
+  --enabled-protocols NFS --root-squash NoRootSquash --quota 100
 ```
 
-Note the agents roll BEFORE step 3 copies anything, so a workspace pod recreated in this window
-mounts the new, still-empty export: a person may briefly see an empty home. Nothing is lost —
-step 3's `rsync -a` merges the old content in afterwards — but it is worth doing outside a busy
-hour, and worth knowing before the first "my home is gone" message arrives.
-
-**3. Migrate, per owner that has a `home-{owner}` Volume — one owner at a time, same shape as
-every other migration in this file. The two paths below are NEVER typed by hand: the source
-directory name is lowercased and can be truncated (`home_volume_name` → `dns_label`, `crd.rs`),
-the destination is the owner's handle verbatim — original case, never truncated
-(`ensure_shared_home`/`homes_root` in `controller/workspace.rs`, called straight off `spec.owner`). For any
-owner whose handle has uppercase, or is long enough to truncate, these are DIFFERENT strings.
-Typing one `<owner>` value consistently (lowercase, since that's the one that makes the source
-directory exist) rsyncs into a sibling directory the pods never mount — the person logs into an
-empty home, silently, and step 5 later deletes the real data. Read both off the cluster instead:**
-
-```sh
-# Source: the Volume's own name IS the directory name — read it, never reconstruct it. (A
-# truncated long-handle home — dns_label kicks in past 63 chars — still matches this grep, since
-# the "home-" prefix always survives truncation; see step 5's note on the same blind spot.)
-for HOME_VOL in $(kubectl get volumes --no-headers | awk '{print $1}' | grep '^home-'); do
-
-  # Destination: spec.owner, straight off the Volume — original case, exactly what
-  # ensure_shared_home mounts pods onto. Never re-lowercase or re-derive this from $HOME_VOL.
-  OWNER=$(kubectl get volume "$HOME_VOL" -o jsonpath='{.spec.owner}')
-  # $OWNER goes into the jsonpath filter unescaped: a handle containing a double quote would
-  # break the expression into one that silently matches nothing rather than erroring, and the
-  # loop would then "migrate" an owner with zero workspaces stopped. Sanity-check WS_IDS below.
-  WS_IDS=$(kubectl get workspaces -o jsonpath="{.items[?(@.spec.owner==\"$OWNER\")].metadata.name}")
-
-  # Stop every workspace of the owner's — jsonpath, not `-o name` (which prints
-  # `workspace.kloudlite-git.io/<id>`, and a curl built from THAT 404s under `-f`):
-  for id in $WS_IDS; do
-    curl -fsS -X POST "$API_BASE/v1/workspaces/$id/stop" -H "Authorization: Bearer $ADMIN_TOKEN"
-  done
-
-  # On the node the OwnerBinding pinned (`kubectl get volume $HOME_VOL -o
-  # jsonpath='{.status.nodeName}'`), copy the old home's content into the new export, EXCLUDING
-  # the six node-local cache dirs listed on the rsync below (they are NOT what the pod mounts —
-  # the running layout redirects caches by env var, `login_env` -> HOME_CACHE_DIR, onto four
-  # hardcoded homecache subPaths; cross-check `workspace_pod` for that) — they were nested
-  # btrfs subvolumes the old design never pushed, and copying them across is dead weight the new node-local
-  # {pool}/homecache/{owner} rebuilds for free on first use anyway. The old worktree is
-  # {pool}/vol/{HOME_VOL}/live/{HOME_VOL} — NOT {pool}/vol/{HOME_VOL}/live, which is the directory
-  # the worktree sits inside, not the worktree itself (same trap the commit-model migration above
-  # calls out). TRAILING SLASHES MATTER: both paths below end in `/`, which means "copy the
-  # CONTENTS of the left directory into the right one" — drop either trailing slash and rsync
-  # nests the whole tree one level deeper instead of landing it at the mount root.
-  sudo rsync -a \
-    --exclude='.cache' --exclude='.npm' --exclude='.cargo/registry' \
-    --exclude='.local/share/pnpm' --exclude='.vscode-server' --exclude='.cursor-server' \
-    "/wspool-prod/vol/$HOME_VOL/live/$HOME_VOL/" "/wspool-prod/homes/$OWNER/"
-
-  # Restart the owner's workspaces; their pods now hostPath the NFS export instead of the old
-  # subvolume.
-  for id in $WS_IDS; do
-    curl -fsS -X POST "$API_BASE/v1/workspaces/$id/start" -H "Authorization: Bearer $ADMIN_TOKEN"
-  done
-done
-```
-
-```sh
-# 4. The narrowed admission policy — the agent no longer writes Volume.spec.quotaGb (there is no
-#    home Volume, no qgroup, left for it to write it onto), so the ONE spec field it may still
-#    touch is Volume.spec.restoreTo. Apply once every owner that needs to keep running through the
-#    migration has been moved (an agent running the old policy alongside a rolled-forward agent
-#    binary is harmless either order, but the policy is what makes the RBAC table true, so don't
-#    leave it stale for long):
-kubectl apply -f deploy/k3s/agent-admission.yaml
-```
-
-**5. Days later, irreversible — delete each `home-{owner}` Volume CR, same warning shape as the
-old-model artifact cleanup above:**
-
-Only after EVERY migrated owner has been running on the shared export for a few days with no
-regressions reported (this is the point of no return — the Volume's finalizer reclaims its btrfs
-subvolume on delete, and once that subvolume is gone the pre-migration home content is
-UNRECOVERABLE, there is no second copy anywhere):
-
-```sh
-# Same `grep '^home-'` step 3 uses to find these — the "home-" prefix survives `dns_label`
-# truncation for any realistic owner handle, but if a home Volume for a very long or unusual
-# handle is ever unaccounted for here, list every Volume and check its ownerReference kind
-# (OwnerBinding) rather than trusting the name pattern alone.
-kubectl get volumes -l kloudlite-git.io/owner --no-headers | awk '{print $1}' | grep '^home-' \
-  | xargs -r -n1 kubectl delete volume
-```
-
-The home-Volume-specific code (`is_home_volume`, `home_volume_name`, the OwnerBinding's
-`ensure_home`) is already gone from the binary that ships this migration — nothing after step 2
-above ever creates a `home-*` Volume again, which is why this step is cleanup of what earlier
-owners accumulate, not a code change.
+`--https-only false` is required (NFS is not TLS) and `--default-action Deny` plus the subnet rule
+is what keeps the share off the internet. The quota is provisioned capacity (billed) — 100 GiB is
+the minimum and holds years of dotfiles; raise it only when `df` on a node says so.
 
 ## Gateway
 
@@ -666,36 +552,6 @@ To abort, remove the label: the beat stops immediately, parents already stopped 
 them — they run here again if the volume was not released, elsewhere if it was), copies already
 re-homed stay re-homed, and the node becomes a rendezvous candidate again.
 
-### ZeroFS failover (manual, by design)
-
-ZeroFS runs `replicas: 1` with `strategy: Recreate` because it has one SlateDB behind it and
-SlateDB has one writer — a rolling update that let a second pod start before the first stopped
-would be exactly the fenced-handle bug the ownership map exists to prevent elsewhere. It is also
-pinned to the `k3s-cp` control-plane node by `nodeSelector`/toleration. Put together: if that
-node is lost, every home in the region is unavailable until it comes back — there is no
-automatic failover for this pod.
-
-Recovery is one of:
-
-- Bring `k3s-cp` back. The pod reschedules there and homes resume.
-- Move ZeroFS to another node: edit its `nodeSelector`/toleration in `zerofs.yaml` and apply —
-  the moved pod still needs the `zerofs-store` Secret to exist in `kloudlite-git-system` on the new
-  node's namespace scope (it already does; Secrets aren't node-scoped, this is just a reminder
-  the pod won't come up without it). **Before applying, confirm the old pod is actually gone** —
-  `kubectl -n kloudlite-git-system get pod -l app=zerofs` must return empty. If it's stuck
-  `Terminating` instead, first confirm the node is genuinely down —
-  `kubectl get node k3s-cp` — and only if it shows `NotReady`/unreachable, force-delete the
-  stuck pod: `kubectl -n kloudlite-git-system delete pod -l app=zerofs --force --grace-period=0`.
-  That force-delete is the fencing decision: it tells Kubernetes to forget a pod it can no
-  longer confirm is dead, so it must never be done to a node that is merely unreachable from
-  here but still running — that node's kubelet could still have the old pod's SlateDB handle
-  open, and starting a second pod against the same prefix is exactly the fencing this repo's
-  one-writer rule forbids.
-
-Either way, once the (new) ZeroFS pod is `Ready`, restart the agents so their NFS mounts
-re-resolve to it: `kubectl -n kube-system rollout restart ds/kloudlite-git-agent`. Skipping this
-leaves agents on stale NFS file handles, which answer `EIO` rather than re-mounting on their own.
-
 ## Rollout: 2026-09-02 hardening
 
 The order below is not a preference. Steps 5 and 6 both touch the NFS home path, step 8 depends
@@ -743,28 +599,7 @@ check and its own rollback — if a check fails, roll that step back before star
    `secrets: create`; an existing owner's key is an update and would pass either way.
    *Rollback:* re-apply the previous revision of the file from git.
 
-5. **`zerofs.yaml` — maintenance window.** `strategy: Recreate` with one replica means the export
-   goes DOWN for the restart, and every home with it; `hard` mounts block rather than fail, so
-   running workspaces hang until it returns. Announce it. Before applying, confirm the image
-   digest in the file really is ZeroFS 2.3.2 (`grep image: zerofs.yaml`, then
-   `docker buildx imagetools inspect <ref>` or the upstream release page) — a digest bump is the
-   whole change and pinning the wrong one is a silent downgrade. Apply, wait for
-   `kubectl -n kloudlite-git-system rollout status deploy/zerofs`, then IMMEDIATELY
-   `kubectl -n kube-system rollout restart ds/kloudlite-git-agent` — agents hold stale NFS file
-   handles across a ZeroFS restart and answer `EIO` instead of remounting.
-   *Rollback:* re-apply the previous revision (the old digest) and restart the agents again.
 
-6. **`system-netpol.yaml` — NOT in the same minute as step 5.** Give step 5's agents time to
-   remount and prove healthy first, or a hung home is ambiguous between the two changes.
-   `kubectl apply -f system-netpol.yaml`. *Check:* restart ONE agent
-   (`kubectl -n kube-system delete pod <agent pod>`), wait for it to be `2/2 Running`, then
-   `kubectl -n kube-system exec <that pod> -c agent -- ls /wspool-prod/homes` — it must list the
-   owners' directories, promptly. Pick an agent on a node OTHER than `k3s-cp`: the ZeroFS node's
-   own mount is admitted by the node-subnet rule and would pass even if every `flannel.1` /32 were
-   wrong. A hang here means the policy is not matching that node's masqueraded source address —
-   check it against `ip -4 -o addr show flannel.1` on that node. *Rollback:* `kubectl -n kloudlite-git-system delete networkpolicy zerofs-nfs-from-agents`
-   **and then restart that agent pod** — a `hard` NFS mount that is already wedged does not
-   recover when the policy is removed; only a fresh mount does.
 
 7. **`agent-peer.yaml`.** `kubectl apply -f agent-peer.yaml`, any time — it only narrows who may
    reach 8444/9464. *Check:* a `kl ws push` on a workspace with replicas still reports its
@@ -1031,8 +866,7 @@ telemetry and events land under different region names and neither side looks wr
 `kloudlite-git.io` and its labels, images `ghcr.io/kloudlite/kloudlite-git{,-web}`, namespaces
 `kloudlite-git` (AKS) and `kloudlite-git-system` (k3s), every Secret and ServiceAccount. Two things
 deliberately kept their old name because they are data locations, not labels: the blob container
-`rustic-git` (`KLOUDLITE_GIT_S3_URL=az://rustic-git`, every repo lives there) and the ZeroFS
-prefix inside it. The ClickHouse database and user were renamed in place (`RENAME DATABASE`).
+`rustic-git` (`KLOUDLITE_GIT_S3_URL=az://rustic-git`, every repo lives there) (the retired ZeroFS prefix inside it can be deleted). The ClickHouse database and user were renamed in place (`RENAME DATABASE`).
 
 The cutover ran old and new side by side only for the stateless tiers. The server tier and the
 agent are single-writer (the ownership lease, the btrfs pool), so the old StatefulSet and

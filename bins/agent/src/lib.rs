@@ -42,7 +42,7 @@ pub struct Config {
     /// This node's name, from the downward-API `NODE_NAME`. It is the shard key: the controller
     /// watches only objects whose `spec.nodeName` equals it.
     pub node: String,
-    /// `WS_HOMES_EXPORT`, e.g. `zerofs.kloudlite-git-system.svc:/` — the region's shared-home NFS
+    /// `WS_HOMES_EXPORT`, e.g. `<account>.file.core.windows.net:/<account>/homes` — the region's shared-home NFS
     /// export. Unset means no shared home on this node: workspace reconciles that need it park on
     /// HomeNotReady (fail closed, same shape as WS_PEER_SECRET gating the peer listener).
     pub homes_export: Option<String>,
@@ -88,7 +88,7 @@ fn already_mounted(mounts: &str, target: &str) -> bool {
 fn mount_answers(target: &str) -> bool {
     // A READDIR, not `stat -f`: statfs is answered off the mount's superblock and kept succeeding
     // on a mount whose every real operation returned EIO after the NFS server moved to another
-    // node (new ZeroFS process, new file handles). Listing the root walks a handle the server
+    // node (a server-side restart, new file handles). Listing the root walks a handle the server
     // must actually recognise.
     std::process::Command::new("timeout")
         .args(["-s", "KILL", "5", "ls", target])
@@ -122,7 +122,7 @@ fn resolve_export(export: &str) -> Result<String, String> {
     })
 }
 
-/// Idempotent and re-entrant from the reconcile path, not only from boot: a ZeroFS pod that moves
+/// Idempotent and re-entrant from the reconcile path, not only from boot: an export that moves
 /// nodes leaves every client's mount stale, and the fix (detach, remount) is the same one boot
 /// runs. Serialised so two reconciles cannot race an unmount against a mount.
 pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
@@ -161,20 +161,15 @@ pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     // Safe only now: either nothing was mounted here, or the corpse above has been detached, so
     // the path is a plain directory the kernel can answer for.
     std::fs::create_dir_all(&target).map_err(|e| format!("creating {}: {e}", target.display()))?;
-    // `port=2049,mountport=2049` are NOT optional and NOT tuning: NFSv3 normally finds mountd by
-    // asking rpcbind on port 111, and ZeroFS runs no rpcbind — without both, `mount.nfs` blocks
-    // forever on a portmapper that will never answer, and because this runs before the controller
-    // starts the agent then sits at 2/2 Running doing nothing at all. Upstream's README documents
-    // exactly this option set.
-    //
-    // hard: a flapping ZeroFS must block, not corrupt (spec ruling). vers=3: ZeroFS serves NFSv3.
-    // nolock: no NLM sideband — append-mode files are node-local by design. r/wsize 1 MiB: the
-    // default 128 KiB triples the round trips on the config reads that dominate this mount.
+    // Azure Files Premium serves NFS 4.1 only (no rpcbind, no mountd, no NLM sideband), so the
+    // option set is the one Microsoft documents for it: `vers=4,minorversion=1,sec=sys`. hard: a
+    // flapping export must block, not corrupt (spec ruling). r/wsize 1 MiB: the default 128 KiB
+    // triples the round trips on the config reads that dominate this mount.
     //
     // `retry=0` plus the outer `timeout` are belt and braces: retry=0 stops mount.nfs re-trying a
     // dead server for two minutes, and the timeout means even a wedge that survives that surfaces
     // as a failed startup — which the DaemonSet restarts and an operator can see.
-    let opts = "vers=3,tcp,port=2049,mountport=2049,nolock,hard,async,rsize=1048576,wsize=1048576,retry=0";
+    let opts = "vers=4,minorversion=1,sec=sys,tcp,hard,rsize=1048576,wsize=1048576,retry=0";
     // `nsenter -t 1 -n` — pid 1's NETWORK namespace only, deliberately not `-m`. The transport is
     // the part that has to outlive this pod: created in the node's netns it survives every agent
     // restart, whereas one created in the pod's netns dies with the pod and leaves a mount that

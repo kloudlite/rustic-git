@@ -145,7 +145,7 @@ data:
         endpoint: https://${env:K8S_NODE_IP}:10250
         insecure_skip_verify: true
         metric_groups: [node, pod, container]
-      # OUR pods' logs only (the agent and these collectors in kube-system, the gateway and ZeroFS in kloudlite-git-system), so HyperDX has logs beside metrics
+      # OUR pods' logs only (the agent and these collectors in kube-system, the gateway in kloudlite-git-system), so HyperDX has logs beside metrics
       # without ingesting every workspace container on the node. Our binaries keep plain
       # tracing output; `KLOUDLITE_GIT_LOG_FORMAT=json` makes them structured here without
       # changing the code.
@@ -316,7 +316,7 @@ spec:
       labels: { app: kloudlite-git-otel-agent }
     spec:
       serviceAccountName: kloudlite-git-otel-agent
-      # Control-plane nodes run pods too (the gateway, ZeroFS), and their logs and kubelet stats
+      # Control-plane nodes run pods too (the gateway), and their logs and kubelet stats
       # are as interesting as any worker's — a collector that skipped them would leave a hole
       # nothing else fills.
       tolerations:

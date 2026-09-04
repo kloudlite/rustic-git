@@ -342,7 +342,7 @@ nodes}`, keyed by the volume id, and hands the volume over (release CAS + un-pla
 `Placed=False/Moving` — a routine move, never `Degraded`) when that is not itself.
 
 **Every person has one persistent home per region, not per node** — `/home/kl` in every workspace
-pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS export served by ZeroFS, mounted by
+pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS 4.1 export (Azure Files Premium, one share per region), mounted by
 every node at `{pool}/homes` (`mount_homes` in `bins/agent/src/lib.rs`, `WS_HOMES_EXPORT`). There
 is no home `Volume` CR, no owner→node pin, no push beat, no history and no quota — all deliberately
 dropped: an NFS directory has no qgroup to enforce one and no per-commit history to keep. Making

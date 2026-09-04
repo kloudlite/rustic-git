@@ -140,11 +140,14 @@ spec:
                   fieldPath: spec.nodeName
             - name: WS_POOL
               value: /wspool-prod
-            # The region's shared-home NFS export, served by ZeroFS (deploy/k3s/zerofs.yaml) —
+            # The region's shared-home NFS export —
             # `run()` mounts it at `{pool}/homes` once at agent startup, before the controller
             # starts. Unset means this node serves no shared home (fail closed, see lib.rs).
+            # Azure Files Premium (NFS 4.1), account kloudlite-git-homes in rustic-git-k3s, reachable
+            # only from the `nodes` subnet through its service endpoint. Per region: the homes are
+            # region-local by design, so each region gets its own share.
             - name: WS_HOMES_EXPORT
-              value: zerofs.kloudlite-git-system.svc:/
+              value: kloudlitegithomes.file.core.windows.net:/kloudlitegithomes/homes
             # `WS_RUNTIME_CLASS=gvisor` is deliberately NOT set here. Unset, tenant pods run under
             # runc and share the host kernel (audit S-29); set, every tenant pod names the
             # `gvisor` RuntimeClass and stays Pending on any node that cannot serve it. So it is
