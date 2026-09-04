@@ -1,0 +1,77 @@
+{
+ "artboards": [
+  {
+   "file": "Main.dc.html",
+   "title": "Overview",
+   "x": 0,
+   "y": 0,
+   "w": 1440,
+   "h": 900
+  },
+  {
+   "file": "Requests.dc.html",
+   "x": 1560,
+   "y": 0,
+   "w": 1440,
+   "h": 900
+  },
+  {
+   "file": "Owners.dc.html",
+   "title": "Owners list",
+   "x": 0,
+   "y": 1060,
+   "w": 1440,
+   "h": 900
+  },
+  {
+   "file": "Owner.dc.html",
+   "title": "Owner detail",
+   "x": 1560,
+   "y": 1060,
+   "w": 1440,
+   "h": 900
+  },
+  {
+   "file": "Clusters.dc.html",
+   "title": "Clusters list",
+   "x": 0,
+   "y": 2120,
+   "w": 1440,
+   "h": 900
+  },
+  {
+   "file": "Cluster.dc.html",
+   "title": "Cluster detail",
+   "x": 1560,
+   "y": 2120,
+   "w": 1440,
+   "h": 900
+  },
+  {
+   "file": "Monitoring.dc.html",
+   "x": 0,
+   "y": 3180,
+   "w": 1440,
+   "h": 900
+  }
+ ],
+ "annotations": [
+  {
+   "id": "brief",
+   "x": 0,
+   "y": -130,
+   "w": 520,
+   "text": "Superadmin console, matched to the app: Mona Sans / Hubot Sans, zinc tokens, brand blue, sharp corners, 56 px header, 32 px controls. Left rail replaces the second tab row. Static mockups; numbers are examples."
+  },
+  {
+   "id": "nav",
+   "x": 1560,
+   "y": -130,
+   "w": 520,
+   "text": "Navigation: rail \u2192 area list \u2192 detail. Owners list is the way into any person or team; its detail has \"Open as <owner>\" which opens their normal product pages. Header search is scoped to owners, nodes and requests inside superadmin. Back to the product: the kloudlite logo."
+  }
+ ],
+ "launch": {
+  "view": "canvas"
+ }
+}

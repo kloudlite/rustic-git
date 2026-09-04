@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600&family=Hubot+Sans:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; background: #FAFAFA; color: #09090B; font-family: "Mona Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.45; }
+    a { color: #1E6FE8; text-decoration: none; } a:hover { color: #0B4FB8; }
+    table { border-collapse: collapse; width: 100%; }
+    th { text-align: left; font-weight: 500; font-size: 12px; color: #71717A; padding: 0 12px 8px 0; border-bottom: 1px solid #E4E4E7; }
+    td { padding: 10px 12px 10px 0; border-bottom: 1px solid #E4E4E7; font-size: 13px; vertical-align: middle; font-variant-numeric: tabular-nums; }
+    .mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; font-size: 12px; }
+    .h { font-family: "Hubot Sans", "Mona Sans", sans-serif; }
+  </style>
+</helmet>
+
+<div style="width:1440px; height:900px; display:flex; flex-direction:column; background:#FAFAFA;">
+  <div style="height:56px; display:flex; align-items:center; gap:12px; padding:0 24px; background:#FFFFFF; border-bottom:1px solid #E4E4E7;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 2 18 10 10 18 2 10Z" stroke="#1E6FE8" stroke-width="2"/><path d="M6 10h8" stroke="#1E6FE8" stroke-width="2"/></svg>
+      <span class="h" style="font-weight:600; font-size:16px;">kloudlite</span>
+    </div>
+    <span style="color:#A1A1AA;">/</span>
+    <span style="font-weight:500; font-size:13px;">Superadmin</span>
+    <div style="flex-grow:1;"></div>
+    <div style="display:flex; align-items:center; gap:8px; height:36px; width:360px; padding:0 12px; border:1px solid #E4E4E7; background:#FAFAFA; color:#71717A; font-size:13px;">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="#71717A" stroke-width="1.5"/><path d="M11 11l3 3" stroke="#71717A" stroke-width="1.5"/></svg>
+      <span>Search owners, nodes, requests</span><div style="flex-grow:1;"></div><span class="mono" style="font-size:11px;">⌘K</span>
+    </div>
+    <div style="width:36px; height:36px; background:#1E6FE8; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:600; font-size:12px;">KT</div>
+  </div>
+  <div style="display:flex; flex-grow:1; min-height:0;">
+    <div style="width:208px; padding:20px 12px; display:flex; flex-direction:column; gap:2px; border-right:1px solid #E4E4E7; background:#FFFFFF;">
+      <div style="font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:#71717A; padding:0 10px 8px;">Operations</div>
+      <a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Overview</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Requests</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Owners</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:600; color:#09090B; background:#F4F4F5; border-left:2px solid #1E6FE8;">Clusters</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Monitoring</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Audit</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Access</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Configuration</a>
+    </div>
+    <div style="flex-grow:1; padding:28px 32px; overflow:hidden; display:flex; flex-direction:column; gap:20px;">
+      <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:16px;">
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <div class="h" style="font-size:20px; font-weight:600;">centralindia-k3s <span style="font-size:12px; font-weight:500; color:#1D7A4A; background:#E8F5EE; padding:1px 7px; vertical-align:middle;">active</span></div>
+          <div style="font-size:13px; color:#71717A;">Central India · 4 nodes · ZeroFS homes on k3s-cp</div>
+        </div>
+        <div style="display:flex; gap:8px;"><button style="height:32px; padding:0 12px; font-size:13px; font-weight:500; background:#FFFFFF; color:#09090B; border:1px solid #E4E4E7; font-family:inherit;">Deactivate</button><button style="height:32px; padding:0 12px; font-size:13px; font-weight:500; background:#1E6FE8; color:#fff; border:1px solid transparent; font-family:inherit;">Add region</button></div>
+      </div>
+      
+<div style="display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:16px;">
+  <div style="background:#fff; border:1px solid #E4E4E7; padding:14px 16px;"><div style="font-size:12px; color:#71717A;">Agents</div><div class="h" style="font-size:22px; font-weight:600;">3 / 3</div></div>
+  <div style="background:#fff; border:1px solid #E4E4E7; padding:14px 16px;"><div style="font-size:12px; color:#71717A;">Nodes</div><div class="h" style="font-size:22px; font-weight:600;">3 ready</div><div style="font-size:12px; color:#B5631A;">1 draining</div></div>
+  <div style="background:#fff; border:1px solid #E4E4E7; padding:14px 16px;"><div style="font-size:12px; color:#71717A;">Live working copies</div><div class="h" style="font-size:22px; font-weight:600;">36</div></div>
+  <div style="background:#fff; border:1px solid #E4E4E7; padding:14px 16px;"><div style="font-size:12px; color:#71717A;">Cluster settings</div><div style="font-size:13px; font-weight:500;"><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#F4F4F5; color:#52525B;">from env</span> no object</div></div>
+</div>
+<div style="background:#FFFFFF; border:1px solid #E4E4E7; padding:16px 18px; display:flex; flex-direction:column; gap:12px;"><div style="display:flex; align-items:center; justify-content:space-between;"><div style="font-size:13px; font-weight:600;">Nodes</div></div><table><tr><th>Node</th><th>Ready</th><th>Agent</th><th>Hosted</th><th>Replicas</th><th>Decommission</th><th></th></tr>
+  <tr><td class="mono">session-0</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">ready</span></td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">ready</span></td><td>14</td><td>21</td><td style="color:#71717A;">—</td><td style="text-align:right;"><a href="#">Drain</a></td></tr>
+  <tr><td class="mono">session-1</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">ready</span></td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">ready</span></td><td>2 running</td><td>17</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#FDF3E7; color:#B5631A;">draining</span> <span style="font-size:12px; color:#52525B;">running 2 · owned 5 · copies 4 · thin 1</span></td><td style="text-align:right;"><a href="#">Undrain</a></td></tr>
+  <tr><td class="mono">env-0</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">ready</span></td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">ready</span></td><td>20</td><td>12</td><td style="color:#71717A;">—</td><td style="text-align:right;"><a href="#">Drain</a></td></tr>
+  <tr><td class="mono">k3s-cp</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">ready</span></td><td style="color:#71717A;">control plane</td><td>—</td><td>—</td><td style="color:#71717A;">—</td><td></td></tr>
+</table></div>
+<div style="background:#FFFFFF; border:1px solid #E4E4E7; padding:16px 18px; display:flex; flex-direction:column; gap:12px;"><div style="display:flex; align-items:center; justify-content:space-between;"><div style="font-size:13px; font-weight:600;">Workloads</div></div><table><tr><th>Workload</th><th>Image</th><th>Ready</th><th>Rollout</th><th>Last roll</th><th></th></tr>
+  <tr><td class="mono">rustic-git-agent</td><td class="mono">d50da6dc <span style="color:#71717A;">@sha256:7350…</span></td><td>3 / 3</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">settled</span></td><td style="color:#52525B;">2 h ago · karthik · pin</td><td style="text-align:right;"><a href="#">Roll</a></td></tr>
+  <tr><td class="mono">rustic-git-gateway</td><td class="mono">d50da6dc <span style="color:#71717A;">@sha256:9a12…</span></td><td>2 / 2</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">settled</span></td><td style="color:#52525B;">2 h ago · karthik · pin</td><td style="text-align:right;"><a href="#">Roll</a></td></tr>
+</table></div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

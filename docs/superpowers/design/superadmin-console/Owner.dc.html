@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600&family=Hubot+Sans:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; background: #FAFAFA; color: #09090B; font-family: "Mona Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.45; }
+    a { color: #1E6FE8; text-decoration: none; } a:hover { color: #0B4FB8; }
+    table { border-collapse: collapse; width: 100%; }
+    th { text-align: left; font-weight: 500; font-size: 12px; color: #71717A; padding: 0 12px 8px 0; border-bottom: 1px solid #E4E4E7; }
+    td { padding: 10px 12px 10px 0; border-bottom: 1px solid #E4E4E7; font-size: 13px; vertical-align: middle; font-variant-numeric: tabular-nums; }
+    .mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; font-size: 12px; }
+    .h { font-family: "Hubot Sans", "Mona Sans", sans-serif; }
+  </style>
+</helmet>
+
+<div style="width:1440px; height:900px; display:flex; flex-direction:column; background:#FAFAFA;">
+  <div style="height:56px; display:flex; align-items:center; gap:12px; padding:0 24px; background:#FFFFFF; border-bottom:1px solid #E4E4E7;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 2 18 10 10 18 2 10Z" stroke="#1E6FE8" stroke-width="2"/><path d="M6 10h8" stroke="#1E6FE8" stroke-width="2"/></svg>
+      <span class="h" style="font-weight:600; font-size:16px;">kloudlite</span>
+    </div>
+    <span style="color:#A1A1AA;">/</span>
+    <span style="font-weight:500; font-size:13px;">Superadmin</span>
+    <div style="flex-grow:1;"></div>
+    <div style="display:flex; align-items:center; gap:8px; height:36px; width:360px; padding:0 12px; border:1px solid #E4E4E7; background:#FAFAFA; color:#71717A; font-size:13px;">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="#71717A" stroke-width="1.5"/><path d="M11 11l3 3" stroke="#71717A" stroke-width="1.5"/></svg>
+      <span>Search owners, nodes, requests</span><div style="flex-grow:1;"></div><span class="mono" style="font-size:11px;">⌘K</span>
+    </div>
+    <div style="width:36px; height:36px; background:#1E6FE8; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:600; font-size:12px;">KT</div>
+  </div>
+  <div style="display:flex; flex-grow:1; min-height:0;">
+    <div style="width:208px; padding:20px 12px; display:flex; flex-direction:column; gap:2px; border-right:1px solid #E4E4E7; background:#FFFFFF;">
+      <div style="font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:#71717A; padding:0 10px 8px;">Operations</div>
+      <a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Overview</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Requests</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:600; color:#09090B; background:#F4F4F5; border-left:2px solid #1E6FE8;">Owners</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Clusters</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Monitoring</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Audit</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Access</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Configuration</a>
+    </div>
+    <div style="flex-grow:1; padding:28px 32px; overflow:hidden; display:flex; flex-direction:column; gap:20px;">
+      <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:16px;">
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <div class="h" style="font-size:20px; font-weight:600;">acme <span style="font-size:12px; font-weight:500; color:#0B4FB8; background:#EAF2FF; padding:1px 7px; vertical-align:middle;">team</span></div>
+          <div style="font-size:13px; color:#71717A;">12 members · 3 admins · created 4 months ago</div>
+        </div>
+        <div style="display:flex; gap:8px;"><button style="height:32px; padding:0 12px; font-size:13px; font-weight:500; background:#FFFFFF; color:#09090B; border:1px solid #E4E4E7; font-family:inherit;">Set quota</button><button style="height:32px; padding:0 12px; font-size:13px; font-weight:500; background:#FFFFFF; color:#09090B; border:1px solid #E4E4E7; font-family:inherit;">Open as acme</button></div>
+      </div>
+      
+<div style="display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:16px 24px; background:#FFFFFF; border:1px solid #E4E4E7; padding:18px;">
+  <div style="display:flex; flex-direction:column; gap:6px;"><div style="display:flex; justify-content:space-between; font-size:12px;"><span style="font-weight:500;">Workspaces</span><span style="color:#71717A;">own quota</span></div><div style="height:8px; background:#F4F4F5;"><div style="height:8px; width:95%; background:#B42318;"></div></div><div style="font-size:12px; color:#52525B;">19 of 20 </div></div><div style="display:flex; flex-direction:column; gap:6px;"><div style="display:flex; justify-content:space-between; font-size:12px;"><span style="font-weight:500;">Environments</span><span style="color:#71717A;">own quota</span></div><div style="height:8px; background:#F4F4F5;"><div style="height:8px; width:75%; background:#1E6FE8;"></div></div><div style="font-size:12px; color:#52525B;">6 of 8 </div></div><div style="display:flex; flex-direction:column; gap:6px;"><div style="display:flex; justify-content:space-between; font-size:12px;"><span style="font-weight:500;">Snapshots</span><span style="color:#71717A;">team default</span></div><div style="height:8px; background:#F4F4F5;"><div style="height:8px; width:80%; background:#B5631A;"></div></div><div style="font-size:12px; color:#52525B;">64 of 80 </div></div>
+  <div style="display:flex; flex-direction:column; gap:6px;"><div style="display:flex; justify-content:space-between; font-size:12px;"><span style="font-weight:500;">Disk</span><span style="color:#71717A;">team default</span></div><div style="height:8px; background:#F4F4F5;"><div style="height:8px; width:77%; background:#1E6FE8;"></div></div><div style="font-size:12px; color:#52525B;">310 of 400 GB</div></div><div style="display:flex; flex-direction:column; gap:6px;"><div style="display:flex; justify-content:space-between; font-size:12px;"><span style="font-weight:500;">CPU</span><span style="color:#71717A;">team default</span></div><div style="height:8px; background:#F4F4F5;"><div style="height:8px; width:68%; background:#1E6FE8;"></div></div><div style="font-size:12px; color:#52525B;">22 of 32 cores</div></div><div style="display:flex; flex-direction:column; gap:6px;"><div style="display:flex; justify-content:space-between; font-size:12px;"><span style="font-weight:500;">Memory</span><span style="color:#71717A;">team default</span></div><div style="height:8px; background:#F4F4F5;"><div style="height:8px; width:75%; background:#1E6FE8;"></div></div><div style="font-size:12px; color:#52525B;">96 of 128 GB</div></div>
+</div>
+<div style="display:grid; grid-template-columns:3fr 2fr; gap:16px; min-height:0;">
+  <div style="background:#FFFFFF; border:1px solid #E4E4E7; padding:16px 18px; display:flex; flex-direction:column; gap:12px;"><div style="display:flex; align-items:center; justify-content:space-between;"><div style="font-size:13px; font-weight:600;">Live working copies · 25</div><a href="#" style="font-size:12px;">All 25</a></div><table><tr><th>Name</th><th>Kind</th><th>State</th><th>Node</th><th>Age</th><th></th></tr>
+    <tr><td class="mono">api-refactor</td><td>workspace</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">running</span></td><td class="mono">session-0</td><td>3 d</td><td style="text-align:right;"><a href="#">Stop</a></td></tr>
+    <tr><td class="mono">ranking-eval</td><td>environment</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">running</span></td><td class="mono">env-0</td><td>9 d</td><td style="text-align:right;"><a href="#">Stop</a></td></tr>
+    <tr><td class="mono">billing-v2</td><td>workspace</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#F4F4F5; color:#52525B;">stopped</span></td><td class="mono">session-1</td><td>21 d</td><td style="text-align:right;"><a href="#">Delete</a></td></tr>
+    <tr><td class="mono">docs-site</td><td>workspace</td><td><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">running</span></td><td class="mono">session-0</td><td>2 h</td><td style="text-align:right;"><a href="#">Stop</a></td></tr>
+    </table></div>
+  <div style="display:flex; flex-direction:column; gap:16px;">
+    <div style="background:#FFFFFF; border:1px solid #E4E4E7; padding:16px 18px; display:flex; flex-direction:column; gap:12px;"><div style="display:flex; align-items:center; justify-content:space-between;"><div style="font-size:13px; font-weight:600;">Requests</div></div><div style="display:flex; flex-direction:column; gap:8px; font-size:12px;"><div><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#FDF3E7; color:#B5631A;">pending</span> workspaces 20 → 40 · 2 d</div><div><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#E8F5EE; color:#1D7A4A;">approved</span> snapshots 80 → 120 · 3 w</div><div><span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#FDECEC; color:#B42318;">denied</span> disk 400 → 800 GB · 2 mo</div></div></div>
+    <div style="background:#FFFFFF; border:1px solid #E4E4E7; padding:16px 18px; display:flex; flex-direction:column; gap:12px;"><div style="display:flex; align-items:center; justify-content:space-between;"><div style="font-size:13px; font-weight:600;">Detached volumes · 3</div><a href="#" style="font-size:12px;">Show</a></div><div style="font-size:12px; color:#52525B;">41 GB kept by snapshots after their workspace was deleted.</div></div>
+  </div>
+</div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600&family=Hubot+Sans:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; background: #FAFAFA; color: #09090B; font-family: "Mona Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.45; }
+    a { color: #1E6FE8; text-decoration: none; } a:hover { color: #0B4FB8; }
+    table { border-collapse: collapse; width: 100%; }
+    th { text-align: left; font-weight: 500; font-size: 12px; color: #71717A; padding: 0 12px 8px 0; border-bottom: 1px solid #E4E4E7; }
+    td { padding: 10px 12px 10px 0; border-bottom: 1px solid #E4E4E7; font-size: 13px; vertical-align: middle; font-variant-numeric: tabular-nums; }
+    .mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; font-size: 12px; }
+    .h { font-family: "Hubot Sans", "Mona Sans", sans-serif; }
+  </style>
+</helmet>
+
+<div style="width:1440px; height:900px; display:flex; flex-direction:column; background:#FAFAFA;">
+  <div style="height:56px; display:flex; align-items:center; gap:12px; padding:0 24px; background:#FFFFFF; border-bottom:1px solid #E4E4E7;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 2 18 10 10 18 2 10Z" stroke="#1E6FE8" stroke-width="2"/><path d="M6 10h8" stroke="#1E6FE8" stroke-width="2"/></svg>
+      <span class="h" style="font-weight:600; font-size:16px;">kloudlite</span>
+    </div>
+    <span style="color:#A1A1AA;">/</span>
+    <span style="font-weight:500; font-size:13px;">Superadmin</span>
+    <div style="flex-grow:1;"></div>
+    <div style="display:flex; align-items:center; gap:8px; height:36px; width:360px; padding:0 12px; border:1px solid #E4E4E7; background:#FAFAFA; color:#71717A; font-size:13px;">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="#71717A" stroke-width="1.5"/><path d="M11 11l3 3" stroke="#71717A" stroke-width="1.5"/></svg>
+      <span>Search owners, nodes, requests</span><div style="flex-grow:1;"></div><span class="mono" style="font-size:11px;">⌘K</span>
+    </div>
+    <div style="width:36px; height:36px; background:#1E6FE8; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:600; font-size:12px;">KT</div>
+  </div>
+  <div style="display:flex; flex-grow:1; min-height:0;">
+    <div style="width:208px; padding:20px 12px; display:flex; flex-direction:column; gap:2px; border-right:1px solid #E4E4E7; background:#FFFFFF;">
+      <div style="font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:#71717A; padding:0 10px 8px;">Operations</div>
+      <a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Overview</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Requests</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:600; color:#09090B; background:#F4F4F5; border-left:2px solid #1E6FE8;">Owners</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Clusters</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Monitoring</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Audit</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Access</a><a href="#" style="display:flex; align-items:center; height:32px; padding:0 10px; font-size:13px; font-weight:500; color:#52525B; background:transparent; border-left:2px solid transparent;">Configuration</a>
+    </div>
+    <div style="flex-grow:1; padding:28px 32px; overflow:hidden; display:flex; flex-direction:column; gap:20px;">
+      <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:16px;">
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <div class="h" style="font-size:20px; font-weight:600;">Owners</div>
+          <div style="font-size:13px; color:#71717A;">Every person and team, with what they use against their limits. Open one to see its objects and set its quota.</div>
+        </div>
+        
+      </div>
+      
+<div style="background:#FFFFFF; border:1px solid #E4E4E7; padding:16px 18px; display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:24px;">
+  <div style="display:flex; flex-direction:column; gap:8px;"><div style="display:flex; justify-content:space-between;"><span style="font-size:13px; font-weight:600;">Person default</span><button style="height:32px; padding:0 12px; font-size:13px; font-weight:500; background:#FFFFFF; color:#09090B; border:1px solid #E4E4E7; font-family:inherit;">Edit</button></div><div style="display:flex; gap:18px; font-size:12px; color:#52525B;"><span>5 workspaces</span><span>2 environments</span><span>20 snapshots</span><span>100 GB</span><span>8 CPU</span><span>32 GB</span></div><div style="font-size:12px; color:#B5631A;">priya already uses 98 GB of disk against this default.</div></div>
+  <div style="display:flex; flex-direction:column; gap:8px;"><div style="display:flex; justify-content:space-between;"><span style="font-size:13px; font-weight:600;">Team default</span><button style="height:32px; padding:0 12px; font-size:13px; font-weight:500; background:#FFFFFF; color:#09090B; border:1px solid #E4E4E7; font-family:inherit;">Edit</button></div><div style="display:flex; gap:18px; font-size:12px; color:#52525B;"><span>20 workspaces</span><span>8 environments</span><span>80 snapshots</span><span>400 GB</span><span>32 CPU</span><span>128 GB</span></div></div>
+</div>
+<div style="display:flex; gap:8px; align-items:center;">
+  <div style="display:flex; align-items:center; gap:8px; height:32px; width:280px; padding:0 10px; border:1px solid #E4E4E7; background:#fff; color:#71717A; font-size:13px;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="#71717A" stroke-width="1.5"/><path d="M11 11l3 3" stroke="#71717A" stroke-width="1.5"/></svg>Find an owner</div>
+  <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#F4F4F5; color:#52525B;">people and teams</span> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#F4F4F5; color:#52525B;">sort: tightest first</span>
+  <div style="flex-grow:1;"></div><span style="font-size:12px; color:#71717A;">14 owners · 3 with a pending request</span>
+</div>
+<div style="background:#FFFFFF; border:1px solid #E4E4E7; padding:0 18px;">
+  <table><tr><th>Owner</th><th>Workspaces</th><th>Environments</th><th>Snapshots</th><th>Disk</th><th>CPU</th><th>Memory</th><th>Limits from</th></tr><tr><td><a href="#" style="color:#09090B; font-weight:500;">acme</a> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#EAF2FF; color:#0B4FB8;">team</span> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#FDF3E7; color:#B5631A;">request</span></td><td><span style="color:#B42318; font-weight:600;">19</span><span style="color:#A1A1AA;"> / 20</span></td><td><span style="color:#71717A; font-weight:400;">6</span><span style="color:#A1A1AA;"> / 8</span></td><td><span style="color:#B5631A; font-weight:600;">64</span><span style="color:#A1A1AA;"> / 80</span></td><td><span style="color:#71717A; font-weight:400;">310</span><span style="color:#A1A1AA;"> / 400 GB</span></td><td><span style="color:#71717A; font-weight:400;">22</span><span style="color:#A1A1AA;"> / 32</span></td><td><span style="color:#71717A; font-weight:400;">96</span><span style="color:#A1A1AA;"> / 128 GB</span></td><td style="color:#71717A;">own quota</td></tr><tr><td><a href="#" style="color:#09090B; font-weight:500;">priya</a> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#F4F4F5; color:#52525B;">person</span> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#FDF3E7; color:#B5631A;">request</span></td><td><span style="color:#B5631A; font-weight:600;">4</span><span style="color:#A1A1AA;"> / 5</span></td><td><span style="color:#B42318; font-weight:600;">2</span><span style="color:#A1A1AA;"> / 2</span></td><td><span style="color:#71717A; font-weight:400;">12</span><span style="color:#A1A1AA;"> / 20</span></td><td><span style="color:#B42318; font-weight:600;">98</span><span style="color:#A1A1AA;"> / 100 GB</span></td><td><span style="color:#71717A; font-weight:400;">6</span><span style="color:#A1A1AA;"> / 8</span></td><td><span style="color:#71717A; font-weight:400;">24</span><span style="color:#A1A1AA;"> / 32 GB</span></td><td style="color:#71717A;">own quota</td></tr><tr><td><a href="#" style="color:#09090B; font-weight:500;">ops-lab</a> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#EAF2FF; color:#0B4FB8;">team</span> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#FDF3E7; color:#B5631A;">request</span></td><td><span style="color:#71717A; font-weight:400;">8</span><span style="color:#A1A1AA;"> / 20</span></td><td><span style="color:#71717A; font-weight:400;">5</span><span style="color:#A1A1AA;"> / 8</span></td><td><span style="color:#71717A; font-weight:400;">30</span><span style="color:#A1A1AA;"> / 80</span></td><td><span style="color:#71717A; font-weight:400;">120</span><span style="color:#A1A1AA;"> / 400 GB</span></td><td><span style="color:#B42318; font-weight:600;">31</span><span style="color:#A1A1AA;"> / 32</span></td><td><span style="color:#71717A; font-weight:400;">64</span><span style="color:#A1A1AA;"> / 128 GB</span></td><td style="color:#71717A;">team default</td></tr><tr><td><a href="#" style="color:#09090B; font-weight:500;">karthik</a> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#F4F4F5; color:#52525B;">person</span> </td><td><span style="color:#71717A; font-weight:400;">3</span><span style="color:#A1A1AA;"> / 5</span></td><td><span style="color:#71717A; font-weight:400;">1</span><span style="color:#A1A1AA;"> / 2</span></td><td><span style="color:#71717A; font-weight:400;">9</span><span style="color:#A1A1AA;"> / 20</span></td><td><span style="color:#71717A; font-weight:400;">41</span><span style="color:#A1A1AA;"> / 100 GB</span></td><td><span style="color:#71717A; font-weight:400;">4</span><span style="color:#A1A1AA;"> / 8</span></td><td><span style="color:#71717A; font-weight:400;">16</span><span style="color:#A1A1AA;"> / 32 GB</span></td><td style="color:#71717A;">person default</td></tr><tr><td><a href="#" style="color:#09090B; font-weight:500;">dev-team</a> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#EAF2FF; color:#0B4FB8;">team</span> </td><td><span style="color:#71717A; font-weight:400;">12</span><span style="color:#A1A1AA;"> / 20</span></td><td><span style="color:#71717A; font-weight:400;">3</span><span style="color:#A1A1AA;"> / 8</span></td><td><span style="color:#B42318; font-weight:600;">118</span><span style="color:#A1A1AA;"> / 120</span></td><td><span style="color:#71717A; font-weight:400;">260</span><span style="color:#A1A1AA;"> / 400 GB</span></td><td><span style="color:#71717A; font-weight:400;">18</span><span style="color:#A1A1AA;"> / 32</span></td><td><span style="color:#71717A; font-weight:400;">80</span><span style="color:#A1A1AA;"> / 128 GB</span></td><td style="color:#71717A;">team default</td></tr><tr><td><a href="#" style="color:#09090B; font-weight:500;">rahul</a> <span style="display:inline-block; padding:1px 7px; font-size:11px; font-weight:500; background:#F4F4F5; color:#52525B;">person</span> </td><td><span style="color:#71717A; font-weight:400;">1</span><span style="color:#A1A1AA;"> / 5</span></td><td><span style="color:#71717A; font-weight:400;">0</span><span style="color:#A1A1AA;"> / 2</span></td><td><span style="color:#71717A; font-weight:400;">2</span><span style="color:#A1A1AA;"> / 20</span></td><td><span style="color:#71717A; font-weight:400;">8</span><span style="color:#A1A1AA;"> / 100 GB</span></td><td><span style="color:#71717A; font-weight:400;">2</span><span style="color:#A1A1AA;"> / 8</span></td><td><span style="color:#71717A; font-weight:400;">8</span><span style="color:#A1A1AA;"> / 32 GB</span></td><td style="color:#71717A;">person default</td></tr></table>
+</div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>
