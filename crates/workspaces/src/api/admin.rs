@@ -49,6 +49,22 @@ pub(crate) async fn audit(
     if let Err(e) = crate::audit::record(&store.os, &entry).await {
         tracing::error!(error = %e, actor, action, target, "audit row not written");
     }
+
+    // The queryable copy. The object-store row above is the append-only legal record and has
+    // already been written; this is best-effort on purpose — a ClickHouse outage must not cost an
+    // audit row — and the id is deterministic, so a retried write of the same entry collapses.
+    if let Some(h) = s.history.as_deref() {
+        let row = crate::history::events::audit_event(
+            &entry.ts,
+            &entry.actor,
+            &entry.action,
+            &entry.target,
+            &entry.result,
+        );
+        if let Err(e) = crate::history::events::write_events(h, &[row]).await {
+            tracing::warn!(error = %e, action, target, "audit event not copied to history");
+        }
+    }
 }
 
 /// A refusal is evidence too: "we tried to drain that node and the API server said no" is exactly
