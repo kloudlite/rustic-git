@@ -1297,7 +1297,9 @@ data:
         # receiver never discovers them. Transactions carry ResponseType (ServerBusyError is the
         # throttle); per-share utilisation is not available here — `df` on the nodes is.
         services: [Microsoft.Storage/storageAccounts]
-        collection_interval: 60s
+        # Storage metrics reach Azure Monitor two to four minutes late; a one-minute window
+        # therefore reads empty every time. Five minutes catches them.
+        collection_interval: 300s
         initial_delay: 3s
         metrics:
           Microsoft.Storage/storageAccounts:
