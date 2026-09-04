@@ -1280,7 +1280,9 @@ data:
           enabled: true
           overrides:
             Microsoft.DocumentDB/databaseAccounts:
-              MongoRequests: [StatusCode]
+              # The dimension names Azure accepts for this metric (StatusCode is not one of them and
+              # answers 400): ErrorCode carries the 16500 throttle, CommandName the operation.
+              MongoRequests: [ErrorCode, CommandName, DatabaseName]
               ServerSideLatency: []
               DataUsageV2: []
               DocumentCountV2: []
