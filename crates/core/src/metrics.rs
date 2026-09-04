@@ -58,6 +58,40 @@ pub async fn serve_if_configured() {
     });
 }
 
+/// One entry for `register`: the metric's name, what it is, and the label set to touch.
+pub type Series = (&'static str, Kind, &'static [(&'static str, &'static str)]);
+
+/// What `register` does to a name to bring its series into existence.
+pub enum Kind {
+    Counter,
+    Gauge,
+    /// Listed for completeness and NOT touched: a histogram's zero observation is a real
+    /// observation, and it would skew every quantile the series is read for. A histogram with no
+    /// samples is legitimately absent from `/metrics`, so a rule over one must read an empty
+    /// result as "nothing happened", never as a broken exporter.
+    Histogram,
+}
+
+/// Touch every series a binary can emit, so it exists on `/metrics` from boot.
+///
+/// `metrics-rs` creates a series on its first increment, so an idle worker exports nothing and
+/// every rule over it reads "no samples in the window" forever — `unknown` on the Signals page
+/// rather than the `ok` the silence actually means. Labels are part of a series' identity, so a
+/// rule that filters on one (`status="5xx"`, `state="error"`) needs THAT combination registered,
+/// in the same label order the emitting call site uses — a different order is a different key and
+/// would export the same label set twice.
+pub fn register(series: &[Series]) {
+    for (name, kind, labels) in series {
+        let labels: Vec<metrics::Label> =
+            labels.iter().map(|(k, v)| metrics::Label::from_static_parts(k, v)).collect();
+        match kind {
+            Kind::Counter => metrics::counter!(*name, labels).absolute(0),
+            Kind::Gauge => metrics::gauge!(*name, labels).set(0.0),
+            Kind::Histogram => {}
+        }
+    }
+}
+
 /// Per-request count and latency, labelled by listener, route class and status. Mount it
 /// OUTERMOST so it sees the status every inner layer (auth, routing) settles on.
 /// `axum::middleware::from_fn_with_state("peer", http_metrics)`.
@@ -125,5 +159,23 @@ mod tests {
         assert_eq!(super::route_class("/whatever"), "other");
         assert_eq!(super::status_class(421), "421");
         assert_eq!(super::status_class(502), "5xx");
+    }
+
+    /// The whole point of `register`: a series a nothing-has-happened-yet process can be scraped
+    /// for, so a quiet rule reads `ok` instead of `unknown`. The histogram is the deliberate
+    /// exception — it stays absent until something is actually observed.
+    #[test]
+    fn registered_series_exist_before_anything_touches_them() {
+        use super::Kind::*;
+        super::init();
+        super::register(&[
+            ("test_counter_total", Counter, &[("state", "error")]),
+            ("test_gauge", Gauge, &[]),
+            ("test_duration_seconds", Histogram, &[]),
+        ]);
+        let text = super::render();
+        assert!(text.contains("test_counter_total{state=\"error\"} 0"), "{text}");
+        assert!(text.contains("test_gauge 0"), "{text}");
+        assert!(!text.contains("test_duration_seconds"), "{text}");
     }
 }

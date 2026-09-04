@@ -256,6 +256,42 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
+/// Every series this tier can emit, so a quiet node still exports them. The labelled entries are
+/// exactly the combinations `deploy/alerts.md`'s rules filter on — `status="5xx"` and `"421"` per
+/// listener for `Http5xxRate`/`MisdirectedWrites` — plus the two `op` values the git counters have,
+/// since a counter with a label has no unlabelled series to fall back on.
+fn register_metrics() {
+    use kloudlite_git_core::metrics::Kind::*;
+    let mut series: Vec<kloudlite_git_core::metrics::Series> = vec![
+        ("http_request_duration_seconds", Histogram, &[]),
+        ("ownership_is_leader", Gauge, &[]),
+        ("ownership_map_size", Gauge, &[]),
+        ("ownership_election_failures_total", Counter, &[]),
+        ("ownership_renew_failures_total", Counter, &[]),
+        ("ownership_demotions_total", Counter, &[]),
+        ("ownership_claims_total", Counter, &[("result", "moved")]),
+        ("db_fence_detected_total", Counter, &[]),
+        ("git_pack_requests_total", Counter, &[("op", "upload")]),
+        ("git_pack_requests_total", Counter, &[("op", "receive")]),
+        ("git_pack_bytes_in_total", Counter, &[("op", "upload")]),
+        ("git_pack_bytes_in_total", Counter, &[("op", "receive")]),
+        ("registry_blob_bytes_in_total", Counter, &[]),
+        ("registry_blob_bytes_out_total", Counter, &[]),
+    ];
+    // The label ORDER is the middleware's, because a key with the same labels in another order is
+    // a different series and would export the set twice. `probe` is the class every listener is
+    // guaranteed to serve, so the registered series is one the middleware itself will also use.
+    for l in [
+        &[("listener", "public"), ("class", "probe"), ("status", "5xx")] as &'static [(&str, &str)],
+        &[("listener", "public"), ("class", "probe"), ("status", "421")],
+        &[("listener", "peer"), ("class", "probe"), ("status", "5xx")],
+        &[("listener", "peer"), ("class", "probe"), ("status", "421")],
+    ] {
+        series.push(("http_requests_total", Counter, l));
+    }
+    kloudlite_git_core::metrics::register(&series);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     kloudlite_git_core::log::init();
@@ -263,6 +299,7 @@ async fn main() -> Result<()> {
     // Its own listener, like every other binary's: the peer port is secret-gated, and metrics
     // text names every repository key this node has touched.
     kloudlite_git_core::metrics::serve_if_configured().await;
+    register_metrics();
     // See config::install_crypto_provider — it must happen before any TLS, and
     // `admin` subcommands reach object storage without going through open_store.
     kloudlite_git_server::config::install_crypto_provider();

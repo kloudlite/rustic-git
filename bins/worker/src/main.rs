@@ -36,6 +36,13 @@ async fn main() {
     kloudlite_git_core::log::init();
     kloudlite_git_core::metrics::init();
     kloudlite_git_core::metrics::serve_if_configured().await;
+    // An idle worker touches none of these, and `WorkerHeartbeatStale`'s softer signal reads
+    // `merge_outcomes_total` — with no series at all it can only answer `unknown`.
+    use kloudlite_git_core::metrics::Kind::*;
+    kloudlite_git_core::metrics::register(&[
+        ("merge_outcomes_total", Counter, &[("state", "error")]),
+        ("merge_duration_seconds", Histogram, &[]),
+    ]);
     if let Err(e) = run().await {
         tracing::error!(error = %e, "process.exiting");
         std::process::exit(2);

@@ -150,6 +150,12 @@ async fn main() {
     kloudlite_git_core::metrics::init();
     // Its own listener: 8090 is what the ingress forwards `/v1` to.
     kloudlite_git_core::metrics::serve_if_configured().await;
+    use kloudlite_git_core::metrics::Kind::*;
+    kloudlite_git_core::metrics::register(&[
+        ("http_request_duration_seconds", Histogram, &[]),
+        ("http_requests_total", Counter, &[("listener", "api"), ("class", "probe"), ("status", "5xx")]),
+        ("http_requests_total", Counter, &[("listener", "api"), ("class", "probe"), ("status", "421")]),
+    ]);
     if let Err(e) = run().await {
         tracing::error!(error = %e, "process.exiting");
         std::process::exit(2);

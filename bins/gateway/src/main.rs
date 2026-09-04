@@ -19,8 +19,14 @@ async fn main() {
     kloudlite_git_core::metrics::serve_if_configured().await;
     // A gauge that is only ever incremented and decremented has no series until the first
     // tunnel opens, and an idle gateway then reads as "no samples" on the Signals page rather
-    // than as zero. Set it once so the series exists from boot.
-    metrics::gauge!("gateway_open_tunnels").set(0.0);
+    // than as zero. Register them so every series exists from boot.
+    use kloudlite_git_core::metrics::Kind::*;
+    kloudlite_git_core::metrics::register(&[
+        ("gateway_open_tunnels", Gauge, &[]),
+        ("http_request_duration_seconds", Histogram, &[]),
+        ("http_requests_total", Counter, &[("listener", "gateway"), ("class", "probe"), ("status", "5xx")]),
+        ("http_requests_total", Counter, &[("listener", "gateway"), ("class", "probe"), ("status", "421")]),
+    ]);
     // Exactly one rustls CryptoProvider, installed before the first handshake — which for this
     // binary is the kube client, not the listener. Its absence is a panic inside rustls that names
     // nothing about startup order.
