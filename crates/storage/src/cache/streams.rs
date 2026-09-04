@@ -35,7 +35,7 @@ impl Cache {
             // Same fire-and-forget discipline as `drop_refs`; a lost nudge self-heals via each
             // consumer's fallback scan (see `crate::events` module doc).
             if let Err(e) = run::<()>(&mut cmd, &mut c).await {
-                tracing::debug!(stream = %stream, error = %e, "cache xadd failed");
+                tracing::warn!(stream = %stream, error = %e, "cache xadd failed");
             }
         }
     }

@@ -77,8 +77,9 @@ pub(super) async fn odb_json<T: Serialize + Send + 'static>(
         // The browse call itself failed: the object or path is not there, as far as a client is
         // allowed to know.
         Ok(Ok(Err(e))) => {
-            tracing::debug!(error = %e, "browse");
             if crate::browse::is_not_found(&e) {
+                // The one place the not-found reason is visible; `internal` logs the other arm.
+                tracing::debug!(error = %e, "browse: not found");
                 hidden()
             } else {
                 internal(e)

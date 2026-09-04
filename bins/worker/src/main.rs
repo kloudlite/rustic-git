@@ -396,12 +396,12 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
         // rather than recording a failure this worker cannot stand behind.
         Ok(Err(e)) => {
             metrics::counter!("merge_outcomes_total", "state" => "error").increment(1);
-            tracing::error!(%owner, %name, number, error = %e, "merging change");
+            tracing::warn!(%owner, %name, number, error = %e, "merging change");
             return;
         }
         Err(e) => {
             metrics::counter!("merge_outcomes_total", "state" => "error").increment(1);
-            tracing::error!(%owner, %name, number, error = %e, "merging change");
+            tracing::warn!(%owner, %name, number, error = %e, "merging change");
             return;
         }
     };

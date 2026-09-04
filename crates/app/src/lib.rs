@@ -416,7 +416,7 @@ impl App {
             Ok(c) => c,
             // The map is unreadable from here. We know nothing, so we may not serve.
             Err(e) => {
-                tracing::error!(repo = %repo, error = %e, "ownership read failed; refusing to serve");
+                tracing::warn!(repo = %repo, error = %e, "ownership read failed; refusing to serve");
                 return Route::Unavailable;
             }
         };

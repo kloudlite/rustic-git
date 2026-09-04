@@ -184,7 +184,7 @@ async fn tunnel(
     let target = match resolve(&gw.kube, &ws, gw.ssh_port).await {
         Ok(t) => t,
         Err((status, why)) => {
-            tracing::info!(ws = %ws, why, "refused");
+            tracing::debug!(ws = %ws, why, "refused");
             return status.into_response();
         }
     };

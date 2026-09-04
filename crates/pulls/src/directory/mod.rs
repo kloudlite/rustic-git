@@ -412,7 +412,7 @@ impl Directory {
                 tick.tick().await;
                 match sweeper.sweep_expired().await {
                     Ok(0) => {}
-                    Ok(n) => tracing::info!(rows = n, "directory: swept expired rows"),
+                    Ok(n) => tracing::debug!(rows = n, "directory: swept expired rows"),
                     Err(e) => tracing::warn!(error = %e, "directory: sweep skipped"),
                 }
             }

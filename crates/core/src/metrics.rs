@@ -53,7 +53,7 @@ pub async fn serve_if_configured() {
     let app = routes().route("/healthz", get(|| async { "ok" }));
     tokio::spawn(async move {
         if let Err(e) = axum::serve(l, app).await {
-            tracing::error!(error = %e, "metrics listener");
+            tracing::error!(%addr, error = %e, "metrics listener");
         }
     });
 }

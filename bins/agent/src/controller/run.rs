@@ -113,8 +113,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .shutdown_on_signal()
         .run(|v, c| timed("volume", reconcile_volume(v, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
+            // `error_policy` already logged a reconciler failure with its kind and name; what is
+            // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                tracing::warn!(error = %e, "volume reconcile")
+                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    tracing::warn!(error = %e, "volume reconcile")
+                }
             }
         });
     // Placement is a status fact now, so the node's own Workspaces and Environments are selected
@@ -158,8 +162,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .shutdown_on_signal()
         .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
+            // `error_policy` already logged a reconciler failure with its kind and name; what is
+            // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                tracing::warn!(error = %e, "workspace reconcile")
+                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    tracing::warn!(error = %e, "workspace reconcile")
+                }
             }
         });
     // Label-selected like the pods: every StatefulSet in the cluster is not this controller's.
@@ -202,8 +210,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .shutdown_on_signal()
         .run(|e, c| timed("environment", async move { reconcile_environment(e, c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
+            // `error_policy` already logged a reconciler failure with its kind and name; what is
+            // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                tracing::warn!(error = %e, "environment reconcile")
+                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    tracing::warn!(error = %e, "environment reconcile")
+                }
             }
         });
     // Unplaced objects, one watch per ROLE this node carries. `status.nodeName=` (empty) is a
@@ -220,8 +232,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             .shutdown_on_signal()
             .run(|w, c| timed("claim", async move { claim::claim_workspace(&w, &c).await }), error_policy, ctx.clone())
             .for_each(|r| async move {
+                // `error_policy` already logged a reconciler failure with its kind and name; what is
+                // left here is the queue and watch side, which it never sees.
                 if let Err(e) = r {
-                    tracing::warn!(error = %e, "workspace claim")
+                    if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                        tracing::warn!(error = %e, "workspace claim")
+                    }
                 }
             })
     });
@@ -260,8 +276,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .shutdown_on_signal()
         .run(|b, c| timed("binding", async move { binding::apply_binding(&b, &c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
+            // `error_policy` already logged a reconciler failure with its kind and name; what is
+            // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                tracing::warn!(error = %e, "ownerbinding reconcile")
+                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    tracing::warn!(error = %e, "ownerbinding reconcile")
+                }
             }
         });
     // The `Snapshot` kind: no finalizer (see `snapshot::reconcile_snapshot`'s module doc), so a
@@ -273,8 +293,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .shutdown_on_signal()
         .run(|s, c| timed("snapshot", async move { snapshot::reconcile_snapshot(s, c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
+            // `error_policy` already logged a reconciler failure with its kind and name; what is
+            // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                tracing::warn!(error = %e, "snapshot reconcile")
+                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    tracing::warn!(error = %e, "snapshot reconcile")
+                }
             }
         });
     let claim_env = ctx.roles.iter().any(|r| r == "env").then(|| {
@@ -282,8 +306,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             .shutdown_on_signal()
             .run(|e, c| async move { claim::claim_environment(&e, &c).await }, error_policy, ctx.clone())
             .for_each(|r| async move {
+                // `error_policy` already logged a reconciler failure with its kind and name; what is
+                // left here is the queue and watch side, which it never sees.
                 if let Err(e) = r {
-                    tracing::warn!(error = %e, "environment claim")
+                    if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                        tracing::warn!(error = %e, "environment claim")
+                    }
                 }
             })
     });

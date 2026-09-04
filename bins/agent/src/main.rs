@@ -17,7 +17,7 @@ async fn main() {
     rustic_git_core::metrics::init();
     rustic_git_core::metrics::serve_if_configured().await;
     if let Err(e) = run(Config::from_env()).await {
-        tracing::error!("{e}");
+        tracing::error!(error = %e, "agent exiting");
         std::process::exit(1);
     }
 }
