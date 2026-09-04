@@ -202,8 +202,7 @@ fn the_hourly_tables_end_as_replacing_merge_trees() {
     for table in ["usage_hourly", "fleet_hourly"] {
         let create = schema::MIGRATIONS
             .iter()
-            .filter(|(_, sql)| sql.contains(&format!("rustic.{table}_v2 (")))
-            .next_back()
+            .rfind(|(_, sql)| sql.contains(&format!("rustic.{table}_v2 (")))
             .unwrap_or_else(|| panic!("{table} is never rebuilt"))
             .1;
         assert!(create.contains("ENGINE = ReplacingMergeTree"), "{table}: {create}");
