@@ -25,6 +25,8 @@ struct StubMembership {
     handles: std::collections::HashMap<String, String>,
     /// `acme`'s members, keyed the way the directory keys them: by email, never by handle.
     team: Vec<(String, TeamRole)>,
+    /// The directory cannot be read at all — the arm that must NOT read as "no such user".
+    unreadable: bool,
     granted: std::sync::Mutex<Vec<(String, String, TeamRole)>>,
 }
 
@@ -34,6 +36,7 @@ impl StubMembership {
             grant: Some(grant),
             handles: [("meera".to_string(), "meera@example.com".to_string())].into(),
             team: vec![("meera@example.com".to_string(), TeamRole::Member)],
+            unreadable: false,
             granted: Default::default(),
         }
     }
@@ -69,6 +72,9 @@ impl Directory for StubMembership {
     }
 
     async fn grant_access(&self, team: &str, user: &str, role: TeamRole) -> GrantAccess {
+        if self.unreadable {
+            return GrantAccess::Refused("the directory could not be read".into());
+        }
         let Some(email) = self.handles.get(user) else { return GrantAccess::NoSuchUser };
         self.granted.lock().unwrap().push((team.into(), email.clone(), role));
         // `GrantAccess` is deliberately not `Clone` (the refusal string is the directory's own
@@ -510,4 +516,16 @@ async fn a_handle_resolves_to_the_membership_held_under_its_email() {
     // The email is not an identity any caller holds; passing one through must not match either.
     assert!(dir.teams_for("meera@example.com").await.is_empty());
     assert!(dir.team_role("meera@example.com", "acme").await.is_none());
+}
+
+/// A directory that cannot be read is not a verdict on the asker: it is a retryable 409, never
+/// the 422 that tells a superadmin to go looking for a person who exists.
+#[tokio::test]
+async fn an_unreadable_directory_is_a_conflict_not_no_such_user() {
+    let dir = StubMembership { unreadable: true, ..StubMembership::answering(GrantAccess::Done) };
+    let s =
+        admin_server_with(vec![route_get(format!("{API}/requests/req-6"), pending_access_request())], dir).await;
+    let r = post(&format!("{}/admin/requests/req-6/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+    assert_eq!(r.status(), 409);
+    assert!(s.rec.sent("PATCH", &format!("{API}/requests/req-6/status")).is_empty());
 }

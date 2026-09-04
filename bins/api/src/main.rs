@@ -27,21 +27,29 @@ impl Dir {
     /// and every place the directory compares one — `members.user`, `role_of`, `add_member` — holds
     /// the EMAIL that is the user row's `_id`. One identity, the directory's, everywhere; a handle
     /// nobody answers to resolves to `None` rather than being compared as if it were an address.
-    async fn email_of(&self, handle: &str) -> Option<String> {
-        match self.0.user_by_handle(handle).await {
-            Ok(u) => u.map(|u| u.email),
-            Err(e) => {
-                tracing::error!(error = %e, %handle, "resolving handle");
-                None
-            }
-        }
+    ///
+    /// The error stays an error rather than folding into `None`: "the directory is unreadable" and
+    /// "no such person" are different answers, and only the caller knows which of the two its own
+    /// surface can afford to conflate.
+    async fn email_of(&self, handle: &str) -> Result<Option<String>> {
+        Ok(self.0.user_by_handle(handle).await?.map(|u| u.email))
+    }
+
+    /// The read-side spelling: both membership lookups already failed closed on a query error, so
+    /// an unreadable directory is no membership here — logged, never guessed at.
+    async fn email_or_closed(&self, handle: &str) -> Option<String> {
+        self.email_of(handle)
+            .await
+            .inspect_err(|e| tracing::error!(error = %e, %handle, "resolving handle"))
+            .ok()
+            .flatten()
     }
 }
 
 #[async_trait::async_trait]
 impl rustic_git_workspaces::api::Directory for Dir {
     async fn teams_for(&self, user: &str) -> Vec<String> {
-        let Some(email) = self.email_of(user).await else { return vec![] };
+        let Some(email) = self.email_or_closed(user).await else { return vec![] };
         self.0.slugs_for(&email).await.unwrap_or_default()
     }
 
@@ -70,7 +78,7 @@ impl rustic_git_workspaces::api::Directory for Dir {
         let t = self.0.get(team).await.ok().flatten()?;
         // The same value `slugs_for` matches on, through the same members array — one identity,
         // so membership and role can never disagree.
-        let email = self.email_of(user).await?;
+        let email = self.email_or_closed(user).await?;
         match rustic_git_pulls::directory::Directory::role_of(&t, &email)? {
             Role::Owner => Some(TeamRole::Owner),
             Role::Admin => Some(TeamRole::Admin),
@@ -98,7 +106,16 @@ impl rustic_git_workspaces::api::Directory for Dir {
         // `user` is the handle the request was opened under; `add_member` keys on the email. An
         // unresolved handle would reach it as an address nobody has, and every approve would
         // answer "no such user" without ever having looked the asker up.
-        let Some(email) = self.email_of(user).await else { return GrantAccess::NoSuchUser };
+        let email = match self.email_of(user).await {
+            Ok(Some(email)) => email,
+            Ok(None) => return GrantAccess::NoSuchUser,
+            Err(e) => {
+                // An unreadable directory is not a verdict on the asker: a decider retries this,
+                // where "no such user" would have them chasing a person who exists.
+                tracing::error!(error = %e, %team, "resolving handle for team access");
+                return GrantAccess::Refused("the directory could not be read".into());
+            }
+        };
         // Add first, then fall through to a role change: a grant is "be in this team at this
         // role", and whether they were already in it is not the decider's problem. `add_member`'s
         // filter carries its own duplicate check, so this is safe to retry.
