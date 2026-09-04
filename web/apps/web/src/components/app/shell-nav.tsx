@@ -22,6 +22,18 @@ export type RepoTabSpec = { suffix: string; label: string; icon: React.ReactNode
 // `new-repo` and `new-team` are not
 const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite", "superadmin"];
 
+/** The superadmin area's own tab row — not an owner's `sections()`, since superadmin acts on
+ *  owners rather than being one. Same hrefs as the old in-layout `NavTabs`; living here lets the
+ *  shell draw them as the primary row instead of a second one underneath. */
+const SUPERADMIN_TABS = [
+  { href: "/superadmin", label: "Queue", exact: true },
+  { href: "/superadmin/usage", label: "Usage" },
+  { href: "/superadmin/defaults", label: "Defaults" },
+  { href: "/superadmin/regions", label: "Regions" },
+  { href: "/superadmin/nodes", label: "Nodes" },
+  { href: "/superadmin/settings", label: "Settings" },
+];
+
 /** Where the URL is, in the terms the chrome cares about.
  *
  *  `/{owner}/{x}` is unambiguous because the names the namespace has spent —
@@ -43,9 +55,14 @@ const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite", "superadmin"];
  *  heading (`workspaces/[id]/snapshots/page.tsx`). Three segments there stay `org` on purpose. */
 export function place(pathname: string, me: string) {
   const parts = pathname.split("/").filter(Boolean);
+  // Superadmin is not an org: it has no owner switcher and its own tab row, so it gets its own
+  // place kind rather than falling into the person's own namespace like the other root pages.
+  if (parts[0] === "superadmin") {
+    return { kind: "superadmin" as const };
+  }
   if (parts[0] && ROOT_PAGES.includes(parts[0])) {
-    // A root page owns no namespace at ANY depth — `/superadmin/usage` is not a repo named "usage"
-    // in nobody's namespace, it's a subpage of the superadmin area itself, so nothing past parts[0]
+    // A root page owns no namespace at ANY depth — `/settings` is not a repo named "usage"
+    // in nobody's namespace, it's a subpage of the root area itself, so nothing past parts[0]
     // is read.
     return { kind: "org" as const, owner: me };
   }
@@ -66,7 +83,10 @@ export function place(pathname: string, me: string) {
 }
 
 export function useOwner(me: string) {
-  return place(usePathname(), me).owner;
+  const at = place(usePathname(), me);
+  // Superadmin has no owner of its own; search there falls back to the person's, same as any
+  // other root page.
+  return at.kind === "superadmin" ? me : at.owner;
 }
 
 export function ShellTabs({
@@ -84,6 +104,9 @@ export function ShellTabs({
   className?: string;
 }) {
   const at = place(usePathname(), me);
+  if (at.kind === "superadmin") {
+    return <NavTabs tabs={SUPERADMIN_TABS} className={className} aria-label="Admin" />;
+  }
   if (at.kind === "org") {
     // A person's own namespace is not a team: it has no members, no roles and nothing to
     // rename, so it gets no Settings tab. Their settings are at /settings, off the avatar.
@@ -168,6 +191,10 @@ function OwnerLink({ owner }: { owner: string }) {
 export function ShellCrumb({ me, owners }: { me: string; owners: SwitcherOwner[] }) {
   const at = place(usePathname(), me);
   const meta = useRepoMeta();
+  if (at.kind === "superadmin") {
+    // No owner switcher: superadmin isn't anyone's namespace, so there's nothing to switch.
+    return <span className="flex h-8 items-center px-2 text-sm2 font-medium">Superadmin</span>;
+  }
   if (at.kind === "org") return <TeamSwitcher current={at.owner} owners={owners} />;
 
   const sep = <span className="text-muted-foreground/40" aria-hidden>/</span>;
