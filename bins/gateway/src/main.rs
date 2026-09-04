@@ -17,6 +17,10 @@ async fn main() {
     kloudlite_git_core::metrics::init();
     // Its own listener: 8080 and 443 are both internet-facing here.
     kloudlite_git_core::metrics::serve_if_configured().await;
+    // A gauge that is only ever incremented and decremented has no series until the first
+    // tunnel opens, and an idle gateway then reads as "no samples" on the Signals page rather
+    // than as zero. Set it once so the series exists from boot.
+    metrics::gauge!("gateway_open_tunnels").set(0.0);
     // Exactly one rustls CryptoProvider, installed before the first handshake — which for this
     // binary is the kube client, not the listener. Its absence is a panic inside rustls that names
     // nothing about startup order.
