@@ -5,6 +5,7 @@ import type { SnapshotState } from "@/lib/snapshot-state";
 import type { QuotaDim, QuotaReport } from "@/lib/quota";
 import { auditQueryString, type AuditEntry, type AuditFilter, type AuditPage } from "@/lib/audit";
 import { FLAT, type HistoryEvent, type HistorySeries } from "@/lib/history";
+import { fixtureFor } from "@/lib/fixtures/superadmin";
 
 /**
  * The api server, from the web app's server side only.
@@ -53,6 +54,21 @@ async function callAgainst<T>(
   path: string,
   init: RequestInit & { token?: string; asUser?: string },
 ): Promise<ApiResult<T>> {
+  // `RUSTIC_GIT_ADMIN_FIXTURES=1` answers READS from a seeded module instead of the network, so
+  // every superadmin screen renders with realistic data on a laptop with no cluster (spec §C: the
+  // screens are verified by screenshot before merge). It sits in `callAgainst` rather than in
+  // `adminCall` because three of the console's reads — the superadmin list, the regions list and
+  // the default quotas — go to the ordinary host, and a guard that covered only the admin one
+  // would leave three sections blank. Unseeded paths answer `undefined` and fall through, so the
+  // rest of the app is untouched; the flag is unset in every deployment.
+  //
+  // Only GET is faked: a decision, a roll or a drain must still reach the real api, because a
+  // write that "succeeds" against nothing is a screenshot that lies.
+  if (process.env.RUSTIC_GIT_ADMIN_FIXTURES === "1" && (init.method ?? "GET") === "GET") {
+    const seeded = fixtureFor(path);
+    if (seeded !== undefined) return { ok: true, value: seeded as T };
+  }
+
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
   if (init.token) {
