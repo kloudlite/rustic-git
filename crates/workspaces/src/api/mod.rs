@@ -194,6 +194,11 @@ pub struct ApiState {
     /// /api/admin/settings`, Task 4). `None` in dev/tests: `GET /admin/settings/central` still
     /// answers from `keys`' object store directly, only the `PUT` needs this.
     pub peer: Option<admin::PeerClient>,
+    /// The previous `/metrics` sweep, so the Monitoring page's rate rules have a second point to
+    /// compare against without scraping twice on every request. ponytail: in-memory and
+    /// single-process — a restart or the other replica just means the next request pays the 5 s
+    /// window itself. Upgrade path: a real Prometheus, at which point this whole cache goes.
+    pub metrics_sample: Arc<std::sync::Mutex<Option<(std::time::Instant, admin::monitoring::Sample)>>>,
 }
 
 impl ApiState {
@@ -206,6 +211,7 @@ impl ApiState {
             keys: None,
             settings: LiveSettings::new(AgentSettings::from_env()),
             peer: None,
+            metrics_sample: Default::default(),
         }
     }
 

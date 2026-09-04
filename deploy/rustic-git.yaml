@@ -699,6 +699,14 @@ rules:
     resources: ["deployments"]
     resourceNames: ["rustic-git-api", "rustic-git-worker", "rustic-git-web", "rustic-git-admin"]
     verbs: ["get", "list", "patch"]
+  # The Monitoring page scrapes each pod's own /metrics (deploy/alerts.md) instead of assuming a
+  # Prometheus, so it needs the pod list to find the IPs and the annotations — and the same list
+  # carries `restartCount`, which is the restarts column. Read-only, no `resourceNames` (a list
+  # cannot be name-restricted), and namespaced to `rustic-git`: pod metadata here names no Secret,
+  # and nothing on this page ever writes.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
