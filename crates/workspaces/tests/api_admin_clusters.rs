@@ -77,7 +77,7 @@ async fn clusters_list_composes_agents_nodes_and_hosted_counts() {
         get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj()])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
         get("/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent", agent_ds()),
-        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default"}, "spec": {}})),
+        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default", "generation": 4}, "spec": {}, "status": {"observedGeneration": 3}})),
     ])
     .await;
     let body = reqwest::Client::new()
@@ -97,7 +97,7 @@ async fn clusters_list_composes_agents_nodes_and_hosted_counts() {
     assert_eq!(row["nodesTotal"], 1, "{body}");
     assert_eq!(row["draining"], 0, "{body}");
     assert_eq!(row["workingCopies"], 1, "{body}");
-    assert_eq!(row["settingsStatus"], "present", "{body}");
+    assert_eq!(row["settingsStatus"], "stale (lag 1)", "{body}");
 }
 
 fn node_routes(annotations: Value) -> Vec<Route> {
@@ -183,7 +183,7 @@ async fn cluster_detail_counts_hosted_copies_per_node() {
         get(format!("{API}/volumes"), list_of("Volume", vec![vol])),
         get(format!("{API}/volumereplicas"), list_of("VolumeReplica", vec![rep])),
         get("/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent", agent_ds()),
-        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default"}, "spec": {}})),
+        get(format!("{API}/clustersettings/default"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default", "generation": 4}, "spec": {}, "status": {"observedGeneration": 3}})),
     ])
     .await;
     let txt = reqwest::Client::new()
@@ -199,4 +199,36 @@ async fn cluster_detail_counts_hosted_copies_per_node() {
     assert_eq!(body["nodes"][0]["name"], "n1", "{body}");
     assert_eq!(body["nodes"][0]["workingCopies"], 1, "{body}");
     assert_eq!(body["nodes"][0]["replicasHeld"], 1, "{body}");
+}
+
+/// Deactivating a region is one of the loud writes: no note, no write.
+#[tokio::test]
+async fn deactivating_a_region_without_a_note_is_422() {
+    let s = admin_server(vec![get(format!("{API}/regions/r1"), region_obj())]).await;
+    let r = reqwest::Client::new()
+        .put(format!("{}/admin/clusters/r1/status", s.base))
+        .bearer_auth(token(&s.jwt))
+        .json(&json!({"status": "inactive"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 422);
+    assert!(s.rec.sent("PATCH", &format!("{API}/regions/r1")).is_empty(), "{:?}", s.rec.calls());
+}
+
+/// A node of a DEACTIVATED region must still drain — deactivate first, drain after, is the
+/// retirement sequence.
+#[tokio::test]
+async fn drain_works_on_an_inactive_region() {
+    let inactive = json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+                          "metadata": {"name": "r1"}, "spec": {"name": "Region one", "status": "inactive"}});
+    let s = admin_server(vec![
+        get(format!("{API}/regions/r1"), inactive),
+        get(format!("{NODES}/n1"), node_obj("n1", json!({}))),
+        patch(format!("{NODES}/n1"), node_obj("n1", json!({}))),
+    ])
+    .await;
+    let r = post(&s, "/admin/clusters/r1/nodes/n1/drain", json!({"reason": "retiring the region"})).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(s.rec.sent("PATCH", &format!("{NODES}/n1"))[0]["metadata"]["labels"]["rustic-git.io/decommission"], "true");
 }

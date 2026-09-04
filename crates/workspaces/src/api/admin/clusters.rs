@@ -37,7 +37,7 @@ pub(crate) struct ClusterRow {
     // ponytail: `parse-error` is in the spec's vocabulary but unreachable today — a typed decode
     // of the CR fails closed as a 5xx rather than handing back a partial object. Add it here if
     // the read ever becomes untyped.
-    settings_status: &'static str,
+    settings_status: String,
 }
 
 /// The per-region facts every row and the detail both need, read once. `Workspace`/`Environment`
@@ -46,6 +46,24 @@ struct RegionFacts {
     nodes: Vec<Node>,
     workspaces: Vec<crd::Workspace>,
     environments: Vec<crd::Environment>,
+}
+
+/// The client that answers for a region — `client_for_region` for an active one, which is the
+/// single upgrade point a region -> client map will land on. An INACTIVE region still has to
+/// render (and still has to be drainable: deactivate-then-drain is the retirement sequence), and
+/// `client_for_region` refuses one on purpose, so it falls back to the same handle here.
+async fn region_client<'a>(s: &'a ApiState, r: &crd::Region) -> Result<&'a kube::Client, Response> {
+    match r.spec.status == "active" {
+        true => super::client_for_region(s, &r.name_any()).await,
+        false => kube(s),
+    }
+}
+
+/// A region that EXISTS, active or not, plus its client. `not_found` for one that does not.
+async fn region_of<'a>(s: &'a ApiState, region: &str) -> Result<(crd::Region, &'a kube::Client), Response> {
+    let r = Api::<crd::Region>::all(kube(s)?.clone()).get_opt(region).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    let client = region_client(s, &r).await?;
+    Ok((r, client))
 }
 
 async fn facts(client: &kube::Client, region: &str) -> Result<RegionFacts, Response> {
@@ -75,21 +93,36 @@ async fn agent_counts(s: &ApiState, region: &str) -> (i64, i64) {
     }
 }
 
-async fn settings_status(client: &kube::Client) -> Result<&'static str, Response> {
+/// `absent` while the region rides env-and-default values, `present` once every agent has applied
+/// the CR, and `stale (lag N)` in between — `status.observedGeneration` is the generation an agent
+/// last applied, so the gap against `metadata.generation` is exactly the number of saves that have
+/// not reached the readers yet.
+async fn settings_status(client: &kube::Client) -> Result<String, Response> {
     let api: Api<crd::ClusterSettings> = Api::all(client.clone());
-    Ok(match api.get_opt("default").await.map_err(kube_err)? {
-        Some(_) => "present",
-        None => "absent",
-    })
+    let Some(cs) = api.get_opt("default").await.map_err(kube_err)? else {
+        return Ok("absent".into());
+    };
+    Ok(settings_lag(cs.metadata.generation, cs.status.as_ref().and_then(|st| st.observed_generation)))
+}
+
+fn settings_lag(generation: Option<i64>, observed: Option<i64>) -> String {
+    match generation.unwrap_or(0) - observed.unwrap_or(0) {
+        lag if lag > 0 => format!("stale (lag {lag})"),
+        _ => "present".into(),
+    }
 }
 
 pub(crate) async fn list_clusters(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
-    let client = kube(&s)?;
     let regions: Vec<crd::Region> =
-        Api::<crd::Region>::all(client.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+        Api::<crd::Region>::all(kube(&s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+    // ponytail: ONE settings read for the whole list, because every region resolves to the same
+    // client today (`workloads`' own note). Move it inside the loop, keyed on that region's
+    // client, the moment a region -> client map exists.
+    let settings_status = settings_status(kube(&s)?).await?;
     let mut rows = Vec::with_capacity(regions.len());
     for r in &regions {
         let region = r.name_any();
+        let client = region_client(&s, r).await?;
         let f = facts(client, &region).await?;
         let (agents_ready, agents_desired) = agent_counts(&s, &region).await;
         let docs: Vec<super::NodeDoc> = f.nodes.iter().map(super::node_doc).collect();
@@ -102,7 +135,7 @@ pub(crate) async fn list_clusters(State(s): State<Arc<ApiState>>) -> Result<Resp
             nodes_total: docs.len() as i64,
             draining: docs.iter().filter(|n| n.decommission).count() as i64,
             working_copies: working_copies(&f),
-            settings_status: settings_status(client).await?,
+            settings_status: settings_status.clone(),
         });
     }
     Ok(Json(rows).into_response())
@@ -131,8 +164,7 @@ pub(crate) struct ClusterDetail {
 
 pub(crate) async fn cluster_detail(State(s): State<Arc<ApiState>>, Path(region): Path<String>) -> Result<Response, Response> {
     check_path_segment(&region)?;
-    let client = kube(&s)?;
-    let r = Api::<crd::Region>::all(client.clone()).get_opt(&region).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    let (r, client) = region_of(&s, &region).await?;
     let f = facts(client, &region).await?;
     let volumes: Vec<crd::Volume> =
         Api::<crd::Volume>::all(client.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
@@ -243,7 +275,9 @@ async fn target<'a>(
     if reason.is_empty() {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "reason is required").into_response());
     }
-    let client = super::client_for_region(s, region).await?;
+    // Inactive is admitted here and nowhere else: a region is deactivated FIRST and its nodes
+    // drained after, so refusing one would leave the retirement sequence with no way to finish.
+    let (_, client) = region_of(s, region).await?;
     let obj = Api::<Node>::all(client.clone()).get_opt(node).await.map_err(kube_err)?.ok_or_else(not_found)?;
     Ok((c, client, reason, obj))
 }
@@ -308,4 +342,17 @@ pub(crate) async fn decommission(
     let out = patch_node(client, &node, serde_json::json!({"spec": {"unschedulable": true}})).await?;
     audit(&s, &c.name, "decommission", &format!("{region}/{node}"), Some(reason), "ok").await;
     Ok(Json(super::node_doc(&out)).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The lag is what an operator acts on: a save that has not reached the agents yet must not
+    /// read as `present`, and a CR nobody has bumped since must not read as stale.
+    #[test]
+    fn settings_lag_reports_unapplied_generations() {
+        assert_eq!(super::settings_lag(Some(3), Some(2)), "stale (lag 1)");
+        assert_eq!(super::settings_lag(Some(3), Some(3)), "present");
+        assert_eq!(super::settings_lag(Some(1), None), "stale (lag 1)");
+        assert_eq!(super::settings_lag(None, None), "present");
+    }
 }
