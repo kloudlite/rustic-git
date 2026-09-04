@@ -23,11 +23,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// A pod that does not answer in this long is a failed scrape, not a slow page: the whole handler
-/// is on a superadmin's request path and already spends 5 s on the rate window in the worst case.
+/// is on a superadmin's request path and already spends the rate window on top of it in the worst case.
 const SCRAPE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How far apart the two points of a rate window are when there is no usable cached sample.
-const RATE_WINDOW: Duration = Duration::from_secs(5);
+/// How far apart the two points of a rate window are when there is no usable cached sample. Kept
+/// short deliberately: this handler is behind a 10 s page poll, and window + per-pod timeout must
+/// fit inside it.
+const RATE_WINDOW: Duration = Duration::from_secs(2);
 
 /// A cached sample older than this is not a window, it is history — a counter delta across an
 /// unknown number of restarts and rolls says nothing, so we take a fresh second point instead.
@@ -71,7 +73,15 @@ pub fn sum_of(metric: &str, label: Option<(&str, &str)>, text: &str) -> Option<f
         }
         // A sample line may carry a trailing timestamp; the value is always the first token after
         // the series. Untrusted text: an unparsable value is skipped, never a panic.
-        let Some(value) = rest.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()) else {
+        // A non-finite sample (`NaN`, `+Inf` — both legal in the exposition format) poisons every
+        // sum and ratio it reaches: `NaN > 0.05` is false, so an unusable series would read `ok`.
+        // Skipped, which leaves the series absent and its rules `unknown`.
+        let Some(value) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+        else {
             continue;
         };
         *total.get_or_insert(0.0) += value;
@@ -110,7 +120,9 @@ pub struct ScrapeSample {
     pub max_tunnels: Option<f64>,
     /// `pod: error` for every pod we could not read — its rules go `unknown`, the page still 200s.
     pub failures: Vec<(String, String)>,
-    pub pods_scraped: usize,
+    /// How many pods the list returned — the denominator every failure count is quoted against,
+    /// which is why it is the LISTED count and not the subset we managed to ask.
+    pub pods_listed: usize,
 }
 
 impl ScrapeSample {
@@ -202,7 +214,7 @@ const NEEDS_NODE_EXPORTER: &str = "needs node-exporter, not deployed";
 pub fn signal_rows(now: &ScrapeSample, before: Option<&Sample>) -> Vec<SignalRow> {
     let unreadable = || {
         (!now.failures.is_empty()).then(|| {
-            format!("{} of {} pods did not answer", now.failures.len(), now.pods_scraped)
+            format!("{} of {} pods could not be read", now.failures.len(), now.pods_listed)
         })
     };
     let pair = |key: &str| match (before.and_then(|b| b.counters.get(key)), now.sample.counters.get(key)) {
@@ -343,7 +355,7 @@ struct SignalsResponse {
     /// `pod: error` for every pod that did not answer — the page shows which, since the rules that
     /// went `unknown` are only explicable with it.
     scrape_failures: Vec<(String, String)>,
-    pods_scraped: usize,
+    pods_listed: usize,
     /// Only when `RUSTIC_GIT_GRAFANA_URL` is set: there is no Grafana in this deployment by
     /// default, and a dead link on a monitoring page is worse than no link.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,7 +387,7 @@ async fn scrape(client: &reqwest::Client, pods: &[(String, String)]) -> ScrapeSa
     }))
     .await;
 
-    let mut out = ScrapeSample { pods_scraped: bodies.len(), ..Default::default() };
+    let mut out = ScrapeSample { pods_listed: bodies.len(), ..Default::default() };
     for (name, body) in bodies {
         match body {
             Ok(text) => out.absorb(&text),
@@ -392,23 +404,23 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
         .await
         .map_err(kube_err)?;
 
-    let targets: Vec<(String, String)> =
-        pods.iter().filter_map(|p| Some((p.name_any(), metrics_url(p)?))) .collect();
-
-    // Pods that ARE ours but have no IP yet (or opted out) still belong in the failure list: their
-    // metrics are missing from every sum below, and silently dropping them would make a partial
-    // scrape look complete.
-    let mut skipped: Vec<(String, String)> = pods
-        .iter()
-        .filter(|p| metrics_url(p).is_none())
-        .map(|p| (p.name_any(), "no pod IP or not annotated for scraping".to_string()))
-        .collect();
+    // One pass, one `metrics_url` per pod: a pod that has no URL still belongs in the failure
+    // list, since its metrics are missing from every sum below and silently dropping it would make
+    // a partial scrape look complete.
+    let (mut targets, mut skipped) = (Vec::new(), Vec::new());
+    for p in pods.iter() {
+        let name = p.name_any();
+        match metrics_url(p) {
+            Some(url) => targets.push((name, url)),
+            None => skipped.push((name, "no pod IP or not annotated for scraping".to_string())),
+        }
+    }
 
     let http = reqwest::Client::new();
     let now = scrape(&http, &targets).await;
 
-    // The rate window: reuse a cached sample when it is recent enough, otherwise pay 5 s for a
-    // second point. ponytail: single-process, in-memory cache — a restart just means the first
+    // The rate window: reuse a cached sample when it is recent enough, otherwise pay one
+    // RATE_WINDOW for a second point. ponytail: single-process, in-memory cache — a restart just means the first
     // request after boot reports the rate rules `unknown` until a second sample exists.
     let cached = {
         let g = s.metrics_sample.lock().unwrap_or_else(|p| p.into_inner());
@@ -416,7 +428,7 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
     };
     let (before, now) = match cached {
         Some(b) => (Some(b), now),
-        // Nothing answered, so a second point would compare two empty sums: skip the 5 s wait.
+        // Nothing answered, so a second point would compare two empty sums: skip the wait.
         None if targets.is_empty() => (None, now),
         None => {
             tokio::time::sleep(RATE_WINDOW).await;
@@ -428,7 +440,7 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
 
     let mut all = now;
     all.failures.append(&mut skipped);
-    all.pods_scraped = pods.items.len();
+    all.pods_listed = pods.items.len();
 
     let restarts = crate::api::workloads::KNOWN_CENTRAL
         .iter()
@@ -452,7 +464,7 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
         signals,
         restarts,
         scrape_failures: all.failures,
-        pods_scraped: all.pods_scraped,
+        pods_listed: all.pods_listed,
         grafana_url: std::env::var("RUSTIC_GIT_GRAFANA_URL").ok().filter(|u| !u.is_empty()),
     })
     .into_response())

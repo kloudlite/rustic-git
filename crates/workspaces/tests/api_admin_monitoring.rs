@@ -35,6 +35,10 @@ fn parses_a_named_gauge_out_of_prometheus_text() {
 fn a_malformed_scrape_yields_nothing_rather_than_panicking() {
     let junk = "ownership_is_leader\nownership_is_leader NaNnn\n{}}{\n\u{0}\nownership_is_leader ";
     assert_eq!(sum_of("ownership_is_leader", None, junk), None);
+    // NaN and +Inf are legal exposition values and would make every comparison downstream read
+    // false — i.e. `ok`. An unusable series must stay absent instead.
+    assert_eq!(sum_of("x", None, "x NaN\nx +Inf\n"), None);
+    assert_eq!(sum_of("x", None, "x NaN\nx 3\n"), Some(3.0));
 }
 
 #[test]
@@ -154,6 +158,7 @@ async fn a_pod_that_cannot_be_scraped_is_unknown_not_an_error() {
     assert_eq!(body["signals"].as_array().unwrap().len(), 10);
     assert!(body["signals"].as_array().unwrap().iter().all(|r| r["state"] == "unknown"));
     assert_eq!(body["scrape_failures"][0][0], "rustic-git-srv-0");
+    assert_eq!(body["pods_listed"], 1);
     let srv = body["restarts"].as_array().unwrap().iter().find(|r| r["workload"] == "rustic-git-srv").unwrap();
     assert_eq!(srv["restarts"], 4);
     // No RUSTIC_GIT_GRAFANA_URL in the test environment: no dead link on the page.
