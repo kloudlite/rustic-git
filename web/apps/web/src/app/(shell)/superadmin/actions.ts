@@ -73,6 +73,58 @@ export async function createRegionAction(formData: FormData) {
   revalidatePath("/superadmin/clusters");
 }
 
+/** Activate needs no reason (restoring what was already registered); deactivate does — the api
+ *  422s a missing one, and that message surfaces to the card rather than being swallowed. */
+export async function activateRegionAction(region: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminSetRegionStatus(region, "active", "", token);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
+  revalidatePath("/superadmin/clusters");
+  return { ok: true };
+}
+
+export async function deactivateRegionAction(region: string, note: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminSetRegionStatus(region, "inactive", note, token);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
+  revalidatePath("/superadmin/clusters");
+  return { ok: true };
+}
+
+/** The three node verbs a region's detail page offers — each just a required-reason PATCH the
+ *  node's own agent beat then acts on (CLAUDE.md), so the action itself never waits on a drain. */
+export async function drainNodeAction(region: string, node: string, reason: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminDrainNode(region, node, reason, token);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
+  revalidatePath(`/superadmin/clusters/${encodeURIComponent(region)}`);
+  return { ok: true };
+}
+
+export async function undrainNodeAction(region: string, node: string, reason: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminUndrainNode(region, node, reason, token);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
+  revalidatePath(`/superadmin/clusters/${encodeURIComponent(region)}`);
+  return { ok: true };
+}
+
+/** 409 "not drained yet" is the api's own gate on `decommissionStatus` — surfaced verbatim rather
+ *  than re-derived, since `lib/clusters.ts::isDrained` is what the button's `disabled` already
+ *  checked before offering this at all. */
+export async function decommissionNodeAction(region: string, node: string, reason: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminDecommissionNode(region, node, reason, token);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
+  revalidatePath(`/superadmin/clusters/${encodeURIComponent(region)}`);
+  return { ok: true };
+}
+
 export type SaveResult = { ok: true } | { ok: false; message: string };
 
 /** The one write the Clusters and Monitoring tabs offer: a manual restart with a required

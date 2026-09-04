@@ -1206,6 +1206,85 @@ export function createRegion(body: { id: string; name: string }, token: string) 
   });
 }
 
+// ── clusters (admin host — crates/workspaces/src/api/admin/clusters.rs) ──
+
+/** `GET /admin/clusters` — one row per region, everything the Clusters list card needs without a
+ *  second click. `settingsStatus` is an open string (`"stale"` is a pending backend addition) —
+ *  render via `lib/clusters.ts::settingsStatusTone` rather than matching it here. */
+export type AdminClusterRow = {
+  region: string;
+  status: string;
+  agentsReady: number;
+  agentsDesired: number;
+  nodesReady: number;
+  nodesTotal: number;
+  draining: number;
+  workingCopies: number;
+  settingsStatus: string;
+};
+
+export function adminClusters(token: string) {
+  return adminCall<AdminClusterRow[]>("/admin/clusters", { method: "GET", token });
+}
+
+/** `GET /admin/clusters/{region}` node row — `NodeDoc`'s four fields flattened, plus what a drain
+ *  is waiting for: live working copies and replicas held on this node. */
+export type AdminClusterNode = {
+  name: string;
+  ready: boolean;
+  decommission: boolean;
+  decommissionStatus: string | null;
+  workingCopies: number;
+  replicasHeld: number;
+};
+
+export type AdminClusterDetail = {
+  region: string;
+  status: string;
+  nodes: AdminClusterNode[];
+  workloads: WorkloadDoc[];
+  settings: Record<string, unknown>;
+};
+
+export function adminClusterDetail(region: string, token: string) {
+  return adminCall<AdminClusterDetail>(`/admin/clusters/${encodeURIComponent(region)}`, { method: "GET", token });
+}
+
+/** Activate/deactivate — server-side apply of the same shape `createRegion` writes. `note` is
+ *  required only for `"inactive"` (a required reason on the loud half, per the Global Constraint);
+ *  the api 422s a missing one itself. */
+export function adminSetRegionStatus(region: string, status: "active" | "inactive", note: string, token: string) {
+  return adminCall<{ id: string; name: string; status: string }>(
+    `/admin/clusters/${encodeURIComponent(region)}/status`,
+    { method: "PUT", token, body: JSON.stringify({ status, note }) },
+  );
+}
+
+function nodeVerb(verb: "drain" | "undrain" | "decommission", region: string, node: string, reason: string, token: string) {
+  return adminCall<AdminNode>(
+    `/admin/clusters/${encodeURIComponent(region)}/nodes/${encodeURIComponent(node)}/${verb}`,
+    { method: "POST", token, body: JSON.stringify({ reason }) },
+  );
+}
+
+/** Sets the label the agent already watches — the drain itself runs on the node's own beat
+ *  (CLAUDE.md, "Workspaces and environments"). `reason` is required; the api 422s an empty one. */
+export function adminDrainNode(region: string, node: string, reason: string, token: string) {
+  return nodeVerb("drain", region, node, reason, token);
+}
+
+/** A real abort — clears both the label and any `decommission-status` stamp, so a drain that
+ *  never finished cannot leave a stale gate open for decommission. */
+export function adminUndrainNode(region: string, node: string, reason: string, token: string) {
+  return nodeVerb("undrain", region, node, reason, token);
+}
+
+/** Cordons the node (`spec.unschedulable`) and nothing else — the console never deletes the VM.
+ *  409 "not drained yet" when `decommissionStatus` hasn't reached `"drained …"`. */
+export function adminDecommissionNode(region: string, node: string, reason: string, token: string) {
+  return nodeVerb("decommission", region, node, reason, token);
+}
+
 // ── workloads (admin host — crates/workspaces/src/api/admin/settings.rs) ─
 
 /** `crates/workspaces/src/api/workloads.rs::WorkloadDoc`. `scope` serializes as a plain string
