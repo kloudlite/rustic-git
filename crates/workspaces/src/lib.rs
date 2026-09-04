@@ -8,6 +8,7 @@ pub mod api;
 pub mod quota;
 pub mod engine;
 pub mod model;
+pub mod history;
 pub mod registry;
 pub mod replicate;
 pub mod settings;
