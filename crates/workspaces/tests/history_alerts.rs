@@ -111,6 +111,27 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         // as a 100% miss rate.
         ("RedisMissRateHigh", "otel_metrics_gauge", "azure_cachemisses_total",
             &["azure_cachehits_total", "azuremonitor.resource_id", "INTERVAL 600 SECOND", "misses + hits >= 100", "> 0.5"]),
+        // Both storage accounts publish the same metric names under one region, so the resource
+        // filter is the only thing that keeps a blob rule off the homes account and vice versa.
+        ("BlobUnavailable", "otel_metrics_gauge", "azure_availability_average",
+            &["%/storageAccounts/rusticgitkolomi", "INTERVAL 60 SECOND", "INTERVAL 600 SECOND", "v < 99.9", "max(n) >= 3"]),
+        ("BlobLatencyHigh", "otel_metrics_gauge", "azure_successe2elatency_average",
+            &["%/storageAccounts/rusticgitkolomi", "INTERVAL 600 SECOND", "v > 500", "max(n) >= 5"]),
+        ("BlobThrottled", "otel_metrics_gauge", "azure_transactions_count",
+            &["%/storageAccounts/rusticgitkolomi", "sumIf(Value, Attributes['metadata_responsetype'] IN ('ServerBusyError', 'ServerTimeoutError'))", "v >= 10", "max(n) >= 1"]),
+        ("HomesUnavailable", "otel_metrics_gauge", "azure_availability_average",
+            &["%/storageAccounts/kloudlitegithomes", "v < 99.9", "max(n) >= 3"]),
+        ("HomesLatencyHigh", "otel_metrics_gauge", "azure_successe2elatency_average",
+            &["%/storageAccounts/kloudlitegithomes", "v > 200", "max(n) >= 5"]),
+        // A 4xx is the endpoint answering, so it counts as up; grouping by url is what makes the
+        // worst url decide instead of a fleet-wide count of probe points.
+        ("ProbeDown", "otel_metrics_gauge", "httpcheck.status",
+            &["http.url", "'2xx', '4xx'", "INTERVAL 120 SECOND", "countIf(good = 0) > 0"]),
+        ("DependencyErrorRate", "otel_metrics_sum", "dependency_errors_total",
+            &["dependency_request_duration_seconds_count", "Attributes['dep']", "INTERVAL 300 SECOND", "total >= 20", "> 0.05"]),
+        // The web tier reports NUMERIC statuses, not the `class` label the Rust services emit.
+        ("WebErrorRate", "otel_metrics_sum", "http_requests_total",
+            &["kloudlite-git-web", "toUInt16OrZero(Attributes['status']) >= 500", "route", "total >= 20", "> 0.05"]),
     ];
     assert_eq!(want.len(), CATALOGUE.len(), "every rule must be covered here");
     for (name, table, metric, fragments) in want {
@@ -137,6 +158,7 @@ fn the_azure_rules_are_single_bucket_and_absent_data_stays_unknown() {
     for name in [
         "CosmosThrottled", "CosmosUnavailable", "CosmosLatencyHigh",
         "RedisMemoryHigh", "RedisLoadHigh", "RedisReplicationUnhealthy", "RedisMissRateHigh",
+        "BlobUnavailable", "BlobLatencyHigh", "BlobThrottled", "HomesUnavailable", "HomesLatencyHigh",
     ] {
         let rule = CATALOGUE.iter().find(|r| r.name == name).expect(name);
         let sql = rule.sql_for("central").expect("central is an identifier");
@@ -161,6 +183,9 @@ fn a_rule_is_evaluated_only_in_its_own_tier() {
     for name in [
         "CosmosThrottled", "CosmosUnavailable", "CosmosLatencyHigh",
         "RedisMemoryHigh", "RedisLoadHigh", "RedisReplicationUnhealthy", "RedisMissRateHigh",
+        "BlobUnavailable", "BlobLatencyHigh", "BlobThrottled", "HomesUnavailable", "HomesLatencyHigh",
+        // The httpcheck receiver and our own dependency/web series are scraped centrally too.
+        "ProbeDown", "DependencyErrorRate", "WebErrorRate",
     ] {
         assert!(by(name).applies_to("central"), "{name} is central");
         assert!(!by(name).applies_to("westeurope-k3s"), "{name} must not run in a region");

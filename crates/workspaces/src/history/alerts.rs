@@ -178,6 +178,7 @@ fn worst_node_ratio(
 /// 1 min for Redis — a 30 s bucket would be mostly empty), counted per resource, and the WORST
 /// resource decides. `count` is the catalogue's "N of M": the whole window is one verdict, so
 /// `for_secs` stays `STEP_SECS` and `state_of` reads the single row it returns.
+#[allow(clippy::too_many_arguments)]
 fn azure_rule(
     metric: &str,
     agg: &str,
@@ -185,9 +186,19 @@ fn azure_rule(
     window_secs: u64,
     bad: &str,
     count: u64,
+    resource_like: &str,
     region: &str,
 ) -> String {
-    azure_rule_expr(metric, &format!("{agg}(Value)"), bucket_secs, window_secs, bad, count, region)
+    azure_rule_expr(
+        metric,
+        &format!("{agg}(Value)"),
+        bucket_secs,
+        window_secs,
+        bad,
+        count,
+        resource_like,
+        region,
+    )
 }
 
 /// `azure_rule` with the bucket value as a full expression, for a metric Azure splits by
@@ -203,8 +214,18 @@ fn azure_rule_expr(
     window_secs: u64,
     bad: &str,
     count: u64,
+    // Two storage ACCOUNTS report the same metric names under one `region` (repo blobs and the
+    // homes Files account), so the blob and homes rules differ ONLY by which resource id they
+    // read — a parameter rather than a second copy of this query. Empty means every resource,
+    // which is what the Cosmos and Redis rules want.
+    resource_like: &str,
     region: &str,
 ) -> String {
+    let resource_filter = if resource_like.is_empty() {
+        String::new()
+    } else {
+        format!(" AND ResourceAttributes['azuremonitor.resource_id'] LIKE '{resource_like}'")
+    };
     whole_window(
         &format!(
             "SELECT countIf({bad}) AS n FROM (\
@@ -212,13 +233,51 @@ fn azure_rule_expr(
                        ResourceAttributes['azuremonitor.resource_id'] AS resource, \
                        {value_expr} AS v \
                 FROM default.otel_metrics_gauge \
-                WHERE MetricName = '{metric}' \
+                WHERE MetricName = '{metric}'{resource_filter} \
                   AND ResourceAttributes['region'] = '{region}' \
                   AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
                 GROUP BY b, resource) \
              GROUP BY resource"
         ),
         &format!("max(n) >= {count}"),
+    )
+}
+
+/// The blob account (every repo's SlateDB and every registry layer) and the Files account behind
+/// `{pool}/homes`. Azure Monitor does not discover the blobServices/fileServices sub-resources, so
+/// both report ACCOUNT-level metrics under the same names and the resource id is the only thing
+/// that tells them apart.
+const BLOB_ACCOUNT: &str = "%/storageAccounts/rusticgitkolomi";
+const HOMES_ACCOUNT: &str = "%/storageAccounts/kloudlitegithomes";
+
+/// A ratio of two DIFFERENT counter series (errors over requests), per group, over the whole
+/// window — `ratio_rule`'s shape needs one metric split by a label, and here the numerator and the
+/// denominator are separate metrics. The request floor is load-bearing for the same reason it is
+/// in `RedisMissRateHigh`: one failed request out of three is not a 33% error rate worth waking
+/// anyone for.
+fn two_metric_ratio(
+    bad_metric: &str,
+    total_metric: &str,
+    group: &str,
+    threshold: f64,
+    floor: u64,
+    region: &str,
+    window_secs: u64,
+) -> String {
+    whole_window(
+        &format!(
+            "SELECT sumIf(d, m = '{bad_metric}') AS bad, sumIf(d, m = '{total_metric}') AS total \
+             FROM (\
+                SELECT Attributes['{group}'] AS g, MetricName AS m, \
+                       greatest(max(Value) - min(Value), 0) AS d \
+                FROM default.otel_metrics_sum \
+                WHERE MetricName IN ('{bad_metric}', '{total_metric}') \
+                  AND ResourceAttributes['region'] = '{region}' \
+                  AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
+                GROUP BY g, m, {SERIES}) \
+             GROUP BY g"
+        ),
+        &format!("max(if(total >= {floor}, bad / total, 0)) > {threshold}"),
     )
 }
 
@@ -382,42 +441,42 @@ pub const CATALOGUE: &[Rule] = &[
         tier: &[Tier::Central],
         why: "A serverless Mongo account publishes no RU consumption; Azure answers a request over the account's RU ceiling with error code 16500 (429), which the directory client retries and the sign-in path turns into an error. Ten in five minutes is a real ceiling, not a retry.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule_expr("azure_mongorequests_count", "sumIf(Value, Attributes['metadata_errorcode'] = '16500')", 300, 1800, "v >= 10", 1, region),
+        sql: |region| azure_rule_expr("azure_mongorequests_count", "sumIf(Value, Attributes['metadata_errorcode'] = '16500')", 300, 1800, "v >= 10", 1, "", region),
     },
     Rule {
         name: "CosmosUnavailable",
         tier: &[Tier::Central],
         why: "Every repo's SlateDB manifest and the ownership map live here; below the SLA the fleet is losing writes, not slowing down. Azure publishes availability at an hourly grain only, so this reads the last three hours.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_serviceavailability_average", "avg", 3600, 10800, "v < 99.9", 1, region),
+        sql: |region| azure_rule("azure_serviceavailability_average", "avg", 3600, 10800, "v < 99.9", 1, "", region),
     },
     Rule {
         name: "CosmosLatencyHigh",
         tier: &[Tier::Central],
         why: "Server-side latency is what Azure spent on the request, network excluded. A serverless Mongo account idles around 100 ms; 250 ms sustained means the account is being throttled short of a 429 or a partition is hot.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_serversidelatency_average", "avg", 300, 1800, "v > 250", 3, region),
+        sql: |region| azure_rule("azure_serversidelatency_average", "avg", 300, 1800, "v > 250", 3, "", region),
     },
     Rule {
         name: "RedisMemoryHigh",
         tier: &[Tier::Central],
         why: "Past the maxmemory policy Redis starts evicting, and the events stream is what gets evicted — the fallbacks hold, but every consumer degrades to its beat.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_usedmemorypercentage_maximum", "max", 60, 600, "v >= 80", 5, region),
+        sql: |region| azure_rule("azure_usedmemorypercentage_maximum", "max", 60, 600, "v >= 80", 5, "", region),
     },
     Rule {
         name: "RedisLoadHigh",
         tier: &[Tier::Central],
         why: "Server load is the fraction of the cycle spent busy; near 100 the instance stops accepting work rather than slowing down gracefully.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_serverload_maximum", "max", 60, 600, "v >= 80", 5, region),
+        sql: |region| azure_rule("azure_serverload_maximum", "max", 60, 600, "v >= 80", 5, "", region),
     },
     Rule {
         name: "RedisReplicationUnhealthy",
         tier: &[Tier::Central],
         why: "Geo replication is the only copy of the stream outside one region; unhealthy is a silent state, and one minute of it is the whole signal.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_georeplicationhealthy_minimum", "min", 60, 300, "v < 1", 1, region),
+        sql: |region| azure_rule("azure_georeplicationhealthy_minimum", "min", 60, 300, "v < 1", 1, "", region),
     },
     Rule {
         name: "RedisMissRateHigh",
@@ -438,6 +497,115 @@ pub const CATALOGUE: &[Rule] = &[
                  GROUP BY ResourceAttributes['azuremonitor.resource_id']"
             ),
             "max(if(misses + hits >= 100, misses / (misses + hits), 0)) > 0.5",
+        ),
+    },
+    Rule {
+        name: "BlobUnavailable",
+        tier: &[Tier::Central],
+        why: "Every repo's SlateDB and every registry layer live in this account; below 99.9% availability the fleet is failing writes, not slowing down. Three of the last ten one-minute points, so a single blip does not page.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_availability_average", "avg", 60, 600, "v < 99.9", 3, BLOB_ACCOUNT, region),
+    },
+    Rule {
+        name: "BlobLatencyHigh",
+        tier: &[Tier::Central],
+        why: "End-to-end latency includes the network and the client's own time, which is what a git request actually waits for. 500 ms sustained over five of the last ten minutes is well past the ~50 ms this account idles at.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_successe2elatency_average", "avg", 60, 600, "v > 500", 5, BLOB_ACCOUNT, region),
+    },
+    Rule {
+        name: "BlobThrottled",
+        tier: &[Tier::Central],
+        why: "ServerBusy and ServerTimeout are the account's own IOPS ceiling answering 503; ten in one minute is a ceiling rather than the retry a client absorbs silently.",
+        for_secs: STEP_SECS,
+        // A `sumIf` over the unfiltered points, never a `WHERE` on the response type: a healthy
+        // account emits no throttled point at all, and a filtered query would then return nothing
+        // and read as `unknown` instead of `ok`.
+        sql: |region| azure_rule_expr(
+            "azure_transactions_count",
+            "sumIf(Value, Attributes['metadata_responsetype'] IN ('ServerBusyError', 'ServerTimeoutError'))",
+            60,
+            600,
+            "v >= 10",
+            1,
+            BLOB_ACCOUNT,
+            region,
+        ),
+    },
+    Rule {
+        name: "HomesUnavailable",
+        tier: &[Tier::Central],
+        why: "The Files account behind every person's /home/kl. Below the SLA a workspace pod's home reads as an I/O error, not as slowness. Three of the last ten one-minute points.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_availability_average", "avg", 60, 600, "v < 99.9", 3, HOMES_ACCOUNT, region),
+    },
+    Rule {
+        name: "HomesLatencyHigh",
+        tier: &[Tier::Central],
+        why: "Homes are on the NFS path of every shell prompt and every editor save, so the threshold is tighter than the blob account's: 200 ms for five of the last ten minutes is a home that feels broken.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_successe2elatency_average", "avg", 60, 600, "v > 200", 5, HOMES_ACCOUNT, region),
+    },
+    Rule {
+        name: "ProbeDown",
+        tier: &[Tier::Central],
+        // The httpcheck receiver writes one point per class per run, value 1 for the class that
+        // matched, so "no 2xx or 4xx point" is the only honest reading of down — a 4xx is the
+        // endpoint answering, which is up. A url that stopped emitting entirely leaves the window
+        // uncovered and `HAVING count() > 0` keeps that `unknown`, never `ok`.
+        why: "No 2xx or 4xx response from a probed url in two minutes (four probe runs) while it is still emitting — the endpoint is answering 5xx or not answering at all. The worst url decides; `httpcheck.error` by `error.message` says which and why.",
+        for_secs: STEP_SECS,
+        sql: |region| whole_window(
+            &format!(
+                "SELECT countIf(Attributes['http.status_class'] IN ('2xx', '4xx')) AS good \
+                 FROM default.otel_metrics_gauge \
+                 WHERE MetricName = 'httpcheck.status' \
+                   AND Value = 1 \
+                   AND ResourceAttributes['region'] = '{region}' \
+                   AND TimeUnix > now() - INTERVAL 120 SECOND \
+                 GROUP BY Attributes['http.url']"
+            ),
+            "countIf(good = 0) > 0",
+        ),
+    },
+    Rule {
+        name: "DependencyErrorRate",
+        tier: &[Tier::Central],
+        why: "Per dependency, so Cosmos failing is not averaged away by a healthy Redis. Over 5% of calls failing across five minutes, with at least 20 calls so a quiet dependency's single failure is not a 100% error rate.",
+        for_secs: STEP_SECS,
+        sql: |region| two_metric_ratio(
+            "dependency_errors_total",
+            "dependency_request_duration_seconds_count",
+            "dep",
+            0.05,
+            20,
+            region,
+            300,
+        ),
+    },
+    Rule {
+        name: "WebErrorRate",
+        tier: &[Tier::Central],
+        why: "The web tier is the only thing a signed-in person actually talks to, and it reports NUMERIC statuses rather than the classes the Rust services emit. Over 5% 5xx per route across five minutes, with a 20-request floor.",
+        for_secs: STEP_SECS,
+        // Numeric status, hence `toUInt16OrZero` rather than the `class` label `Http5xxRate` uses;
+        // an unparsable status reads as 0, which is not a 5xx — a bad label must not invent an
+        // outage.
+        sql: |region| whole_window(
+            &format!(
+                "SELECT sumIf(d, bad) AS bad, sum(d) AS total FROM (\
+                    SELECT Attributes['route'] AS route, \
+                           toUInt16OrZero(Attributes['status']) >= 500 AS bad, \
+                           greatest(max(Value) - min(Value), 0) AS d \
+                    FROM default.otel_metrics_sum \
+                    WHERE MetricName = 'http_requests_total' \
+                      AND ResourceAttributes['service.name'] = 'kloudlite-git-web' \
+                      AND ResourceAttributes['region'] = '{region}' \
+                      AND TimeUnix > now() - INTERVAL 300 SECOND \
+                    GROUP BY route, bad, {SERIES}) \
+                 GROUP BY route"
+            ),
+            "max(if(total >= 20, bad / total, 0)) > 0.05",
         ),
     },
 ];
