@@ -1245,17 +1245,38 @@ data:
         services: [Microsoft.DocumentDB/databaseAccounts]
         collection_interval: 300s
         initial_delay: 5s
+        # What Azure actually serves for a MONGO-API account at five minutes: TotalRequests answers
+        # 501 (a SQL-API metric), ThrottledRequestPercentage 500, and ServiceAvailability exists
+        # only at hourly grains — hence the second instance below. Requests and throttling both
+        # come from MongoRequests split by StatusCode (429 = throttled).
         metrics:
           Microsoft.DocumentDB/databaseAccounts:
-            TotalRequests: [count]
-            TotalRequestUnits: [total]
-            # Serverless accounts publish no NormalizedRUConsumption; throttling is the RU signal there.
-            ThrottledRequestPercentage: [maximum]
-            ServerSideLatency: [average]
-            ServiceAvailability: [average]
             MongoRequests: [count]
+            ServerSideLatency: [average]
             DataUsageV2: [total]
             DocumentCountV2: [total]
+        dimensions:
+          enabled: true
+          overrides:
+            Microsoft.DocumentDB/databaseAccounts:
+              MongoRequests: [StatusCode]
+              ServerSideLatency: []
+              DataUsageV2: []
+              DocumentCountV2: []
+      azuremonitor/cosmos-hourly:
+        subscription_ids: ["9941afe7-e220-492f-bfab-63f539dc0b69"]
+        tenant_id: ${env:AZURE_TENANT_ID}
+        client_id: ${env:AZURE_CLIENT_ID}
+        client_secret: ${env:AZURE_CLIENT_SECRET}
+        resource_groups: [kolomi-rg]
+        services: [Microsoft.DocumentDB/databaseAccounts]
+        collection_interval: 3600s
+        initial_delay: 10s
+        metrics:
+          Microsoft.DocumentDB/databaseAccounts:
+            ServiceAvailability: [average]
+        dimensions:
+          enabled: false
 
     processors:
       resource:
@@ -1276,7 +1297,7 @@ data:
     service:
       pipelines:
         metrics:
-          receivers: [k8s_cluster, azuremonitor/redis, azuremonitor/cosmos]
+          receivers: [k8s_cluster, azuremonitor/redis, azuremonitor/cosmos, azuremonitor/cosmos-hourly]
           processors: [resource, batch]
           exporters: [otlphttp]
 ---

@@ -187,6 +187,22 @@ fn azure_rule(
     count: u64,
     region: &str,
 ) -> String {
+    azure_rule_where(metric, "", agg, bucket_secs, window_secs, bad, count, region)
+}
+
+/// `azure_rule` with an extra `AND …` on the points, for a metric Azure splits by dimension
+/// (`MongoRequests` by `metadata_errorcode`) where only one slice is the signal.
+#[allow(clippy::too_many_arguments)]
+fn azure_rule_where(
+    metric: &str,
+    filter: &str,
+    agg: &str,
+    bucket_secs: u64,
+    window_secs: u64,
+    bad: &str,
+    count: u64,
+    region: &str,
+) -> String {
     whole_window(
         &format!(
             "SELECT countIf({bad}) AS n FROM (\
@@ -194,7 +210,7 @@ fn azure_rule(
                        ResourceAttributes['azuremonitor.resource_id'] AS resource, \
                        {agg}(Value) AS v \
                 FROM default.otel_metrics_gauge \
-                WHERE MetricName = '{metric}' \
+                WHERE MetricName = '{metric}' {filter} \
                   AND ResourceAttributes['region'] = '{region}' \
                   AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
                 GROUP BY b, resource) \
@@ -362,16 +378,16 @@ pub const CATALOGUE: &[Rule] = &[
     Rule {
         name: "CosmosThrottled",
         tier: &[Tier::Central],
-        why: "A serverless account publishes no RU consumption; the throttle percentage is the only signal that requests are being refused with 429s, which the directory client retries and the sign-in path turns into an error.",
+        why: "A serverless Mongo account publishes no RU consumption; Azure answers a request over the account's RU ceiling with error code 16500 (429), which the directory client retries and the sign-in path turns into an error. Ten in five minutes is a real ceiling, not a retry.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_throttledrequestpercentage_maximum", "max", 300, 1800, "v >= 1", 2, region),
+        sql: |region| azure_rule_where("azure_mongorequests_count", "AND Attributes['metadata_errorcode'] = '16500'", "sum", 300, 1800, "v >= 10", 1, region),
     },
     Rule {
         name: "CosmosUnavailable",
         tier: &[Tier::Central],
-        why: "Every repo's SlateDB manifest and the ownership map live here; below the SLA the fleet is losing writes, not slowing down.",
+        why: "Every repo's SlateDB manifest and the ownership map live here; below the SLA the fleet is losing writes, not slowing down. Azure publishes availability at an hourly grain only, so this reads the last three hours.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_serviceavailability_average", "avg", 300, 900, "v < 99.9", 1, region),
+        sql: |region| azure_rule("azure_serviceavailability_average", "avg", 3600, 10800, "v < 99.9", 1, region),
     },
     Rule {
         name: "CosmosLatencyHigh",

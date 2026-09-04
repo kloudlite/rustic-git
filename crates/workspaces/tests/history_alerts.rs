@@ -95,10 +95,10 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         ("NodeDiskAlmostFull", "otel_metrics_gauge", "k8s.node.filesystem.usage", &["k8s.node.name", "0.85"]),
         // Azure Monitor's own metrics: one series per Azure resource, bucketed at Azure's publish
         // interval, and the "N of M" counted inside the query rather than as a `for` window.
-        ("CosmosThrottled", "otel_metrics_gauge", "azure_throttledrequestpercentage_maximum",
-            &["azuremonitor.resource_id", "INTERVAL 300 SECOND", "INTERVAL 1800 SECOND", "v >= 1", "max(n) >= 2"]),
+        ("CosmosThrottled", "otel_metrics_gauge", "azure_mongorequests_count",
+            &["azuremonitor.resource_id", "metadata_errorcode", "16500", "INTERVAL 300 SECOND", "INTERVAL 1800 SECOND", "v >= 10", "max(n) >= 1"]),
         ("CosmosUnavailable", "otel_metrics_gauge", "azure_serviceavailability_average",
-            &["azuremonitor.resource_id", "INTERVAL 900 SECOND", "v < 99.9", "max(n) >= 1"]),
+            &["azuremonitor.resource_id", "INTERVAL 3600 SECOND", "INTERVAL 10800 SECOND", "v < 99.9", "max(n) >= 1"]),
         ("CosmosLatencyHigh", "otel_metrics_gauge", "azure_serversidelatency_average",
             &["azuremonitor.resource_id", "INTERVAL 1800 SECOND", "v > 100", "max(n) >= 3"]),
         ("RedisMemoryHigh", "otel_metrics_gauge", "azure_usedmemorypercentage_maximum",
