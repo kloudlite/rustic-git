@@ -10,9 +10,11 @@
 //! wire protocol on the ssh path, `docker compose` output on the agent), and interleaving
 //! log lines into it corrupts the payload.
 //!
-//! `RUSTIC_GIT_LOG_FORMAT=json` switches every binary to one JSON object per line, so a log
-//! aggregator gets fields instead of a string. Not set by any manifest by default —
-//! `deploy/alerts.md` documents setting it on a pod when someone is debugging one.
+//! `RUSTIC_GIT_LOG_FORMAT=json` switches every binary to one JSON object per line, and every
+//! deployed pod sets it: the collectors (`deploy/k3s/otel-agent.yaml`, the AKS twin in
+//! `deploy/rustic-git.yaml`) parse that object so level, module (`target`) and the call-site
+//! fields become columns in HyperDX rather than text inside a coloured string. Unset — a
+//! laptop, a test — gives the human-readable form.
 
 use tracing::Subscriber;
 use tracing_subscriber::fmt::MakeWriter;

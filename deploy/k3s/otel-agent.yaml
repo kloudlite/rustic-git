@@ -151,10 +151,41 @@ data:
       # changing the code.
       filelog:
         include: [/var/log/pods/kube-system_rustic-git-*/*/*.log]
+        # Not the collectors themselves: "Started watching file" is nobody's signal.
+        exclude: [/var/log/pods/*_rustic-git-otel-*/*/*.log]
         include_file_path: true
         operators:
           - type: container
             id: container-parser
+          # Our binaries run with RUSTIC_GIT_LOG_FORMAT=json (one object per event, fields
+          # flattened next to `level`/`target`/`message`), so level, module and call-site fields
+          # become real columns instead of text inside a coloured string. A line that is not
+          # JSON (a panic backtrace, a child process) passes through as plain body.
+          - type: json_parser
+            id: event
+            if: 'body matches "^\\{"'
+            parse_from: body
+            parse_to: attributes
+            severity:
+              parse_from: attributes.level
+            timestamp:
+              parse_from: attributes.timestamp
+              layout_type: gotime
+              layout: '2006-01-02T15:04:05.999999999Z07:00'
+          - type: move
+            if: 'attributes.message != nil'
+            from: attributes.message
+            to: body
+          - type: move
+            if: 'attributes.target != nil'
+            from: attributes.target
+            to: attributes["code.namespace"]
+          - type: remove
+            if: 'attributes.level != nil'
+            field: attributes.level
+          - type: remove
+            if: 'attributes.timestamp != nil'
+            field: attributes.timestamp
 
     processors:
       k8sattributes:
@@ -178,11 +209,37 @@ data:
         attributes:
           - { key: region, value: "${env:RUSTIC_GIT_REGION}", action: upsert }
           - { key: k8s.node.name, value: "${env:K8S_NODE_NAME}", action: insert }
-      # HyperDX's service picker reads `service.name`; the container name is the one our pods
-      # already carry (rustic-git-agent, rustic-git-api, …). Logs only — metrics keep their own.
-      resource/service:
-        attributes:
-          - { key: service.name, from_attribute: k8s.container.name, action: insert }
+      # One identity on every log row and metric point, the same four keys everywhere:
+      # `service.name` is the WORKLOAD (rustic-git-srv, -api, -admin, -worker, -gateway, -agent),
+      # never the container name (the server's container is called `rustic-git`) and never the
+      # scrape job; `service.instance.id` is the pod; `tier` says central or region so a query
+      # can pick a control plane without listing regions. Resource-level, so it lands beside
+      # `region` and the k8s.* keys k8sattributes resolved just before.
+      # kubeletstats reports every pod on the node; only ours are wanted (node-level points carry
+      # no pod and pass). The same "our services only" line the log tail draws.
+      filter/ours:
+        error_mode: ignore
+        metrics:
+          metric:
+            - 'resource.attributes["k8s.pod.name"] != nil and not IsMatch(resource.attributes["k8s.pod.name"], "^rustic-git-")'
+      transform/identity:
+        error_mode: ignore
+        log_statements:
+          - context: resource
+            statements: &identity
+              # The workload name is the pod name minus its generated suffix: `-0` on a
+              # StatefulSet pod, `-<5>` on a DaemonSet's, `-<hash>-<5>` on a Deployment's.
+              # Derived here rather than read from k8s.*.name because k8sattributes fills
+              # k8s.daemonset.name only for some pods and the picker must never be blank.
+              - set(attributes["service.name"], attributes["k8s.pod.name"]) where attributes["k8s.pod.name"] != nil
+              - replace_pattern(attributes["service.name"], "-[0-9]+$", "")
+              - replace_pattern(attributes["service.name"], "(-[a-f0-9]{8,10})?-[a-z0-9]{5}$", "")
+              - set(attributes["service.instance.id"], attributes["k8s.pod.name"]) where attributes["k8s.pod.name"] != nil
+              - set(attributes["tier"], "central") where attributes["region"] == "central"
+              - set(attributes["tier"], "region") where attributes["region"] != "central"
+        metric_statements:
+          - context: resource
+            statements: *identity
       batch:
         timeout: 10s
         send_batch_size: 1024
@@ -202,11 +259,11 @@ data:
       pipelines:
         metrics:
           receivers: [prometheus, kubeletstats]
-          processors: [k8sattributes, resource, batch]
+          processors: [k8sattributes, resource, filter/ours, transform/identity, batch]
           exporters: [otlphttp]
         logs:
           receivers: [filelog]
-          processors: [k8sattributes, resource, resource/service, batch]
+          processors: [k8sattributes, resource, transform/identity, batch]
           exporters: [otlphttp]
 ---
 # The cluster-wide half. Same image, same ServiceAccount, one receiver.

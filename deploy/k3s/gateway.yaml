@@ -136,6 +136,9 @@ spec:
               # The whole point: the edge connects to the NODE, not through a Service.
               hostPort: 80
           env:
+            # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
+            - name: RUSTIC_GIT_LOG_FORMAT
+              value: json
             # A separate listener: 8080 and 443 are the internet-facing ones. NOT a hostPort.
             - name: RUSTIC_GIT_METRICS_ADDR
               value: 0.0.0.0:9464

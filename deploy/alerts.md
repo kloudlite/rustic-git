@@ -3,7 +3,7 @@
 Every pod is annotated `prometheus.io/scrape` (no Operator assumed); every binary, the server tier
 included, serves `/metrics` on `RUSTIC_GIT_METRICS_ADDR` (9464). The region's OTel collector
 (`deploy/k3s/otel-agent.yaml`) is what reads that annotation now, and it exports to ClickStack.
-Structured logs: `RUSTIC_GIT_LOG_FORMAT=json` on any pod.
+Structured logs: every pod runs with `RUSTIC_GIT_LOG_FORMAT=json`; the collectors parse it, so HyperDX has `severity`, `code.namespace` (the Rust module) and each call-site field as columns, and every row carries `service.name` (the workload), `service.instance.id` (the pod), `region` and `tier`.
 
 Every rule below is evaluated TWICE, from this one table: HyperDX pages a human, and the admin
 process evaluates the same rule as SQL over the collector's `otel_metrics_*` tables every 30 s and

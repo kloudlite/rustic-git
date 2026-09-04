@@ -127,6 +127,9 @@ spec:
               cpu: 250m
               memory: 512Mi
           env:
+            # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
+            - name: RUSTIC_GIT_LOG_FORMAT
+              value: json
             - name: RUSTIC_GIT_METRICS_ADDR
               value: 0.0.0.0:9464
             # The shard key. The controller refuses to start without it rather than watching every
