@@ -11,6 +11,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import type { SuperAdmin } from "@/lib/api";
+import { removeDisabledReason } from "@/lib/access";
 import { addSuperadminAction, removeSuperadminAction } from "../actions";
 
 // The bootstrap path (`Directory::bootstrap_superadmins`, `crates/pulls/src/directory/mod.rs`)
@@ -155,13 +156,7 @@ export function AccessTable({ rows, selfEmail }: { rows: SuperAdmin[]; selfEmail
           </thead>
           <tbody className="divide-y divide-border">
             {rows.map((row) => {
-              const isSelf = row._id.trim().toLowerCase() === selfEmail.trim().toLowerCase();
-              const isLast = rows.length === 1;
-              const disabledReason = isSelf
-                ? "You cannot remove your own administrator claim"
-                : isLast
-                  ? "The last administrator cannot be removed"
-                  : null;
+              const disabledReason = removeDisabledReason(row, rows, selfEmail);
               return (
                 <tr key={row._id}>
                   <td className="px-3 py-2">{row._id}</td>
