@@ -121,6 +121,10 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // (columns TimeUnix, MetricName, Value, Attributes, ResourceAttributes — verified against the
     // clickhouseexporter README); histograms are deliberately NOT rolled up, since averaging a
     // bucket count is meaningless and no console series asks for one.
+    // `TimeUnix` is `DateTime` in the seed ClickStack 3.2 ships (its docs say DateTime64(9)),
+    // and an AggregateFunction column does not convert its argument types on insert — hence the
+    // explicit cast to what migration 5 declared. Two migrations, one per source table, because
+    // `query` posts one statement.
     (
         6,
         "CREATE MATERIALIZED VIEW IF NOT EXISTS rustic.metrics_5m_gauge_mv TO rustic.metrics_5m AS \
@@ -131,7 +135,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
                 toJSONString(Attributes) AS attributes, \
                 avgState(Value) AS avg_value, \
                 maxState(Value) AS max_value, \
-                argMaxState(Value, TimeUnix) AS last_value \
+                argMaxState(Value, toDateTime64(TimeUnix, 9)) AS last_value \
          FROM default.otel_metrics_gauge \
          GROUP BY ts, region, node, metric, attributes",
     ),
@@ -145,7 +149,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
                 toJSONString(Attributes) AS attributes, \
                 avgState(Value) AS avg_value, \
                 maxState(Value) AS max_value, \
-                argMaxState(Value, TimeUnix) AS last_value \
+                argMaxState(Value, toDateTime64(TimeUnix, 9)) AS last_value \
          FROM default.otel_metrics_sum \
          GROUP BY ts, region, node, metric, attributes",
     ),

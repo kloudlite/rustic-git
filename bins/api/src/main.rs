@@ -326,12 +326,12 @@ async fn run() -> Result<()> {
                                 "RUSTIC_GIT_REGION unset: region history watches not started"
                             ),
                         }
+                        // `watch_central`, not `watch_region`: this cluster holds `Region` and
+                        // nothing else of ours, and a workspace watch against it 404s forever.
                         if let Some(k) = state.aks.clone() {
                             let h = h.clone();
-                            tokio::spawn(rustic_git_workspaces::history::watch::watch_region(
-                                k,
-                                "central".into(),
-                                h,
+                            tokio::spawn(rustic_git_workspaces::history::watch::watch_central(
+                                k, h,
                             ));
                         }
                         state = state.with_cache(cache.clone()).with_history(h);
