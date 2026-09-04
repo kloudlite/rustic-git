@@ -4,7 +4,7 @@ import { Logo } from "@/components/brand/logo";
 import { UserMenu } from "@/components/app/user-menu";
 import { GlobalSearch } from "@/components/app/global-search";
 import { ShellState } from "@/components/app/shell-context";
-import { ShellCrumb, ShellTabs, type RepoTabSpec } from "@/components/app/shell-nav";
+import { ShellCrumb, ShellHeaderRow, ShellTabs, type RepoTabSpec } from "@/components/app/shell-nav";
 import { ownersFor } from "@/lib/owners";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Session } from "@/lib/session";
@@ -68,7 +68,7 @@ export async function AppShell({
         {/* Chrome is a flex sibling of the scroll region, not sticky inside it: the
             header never scrolls, and the scrollbar belongs to the content alone. */}
         <header className="shrink-0 border-b border-border bg-card">
-          <div className="mx-auto flex h-14 max-w-page items-center gap-3 px-6">
+          <ShellHeaderRow me={me}>
             <Link href="/" aria-label="kloudlite home" className="inline-flex">
               <Logo className="h-5" />
             </Link>
@@ -80,7 +80,7 @@ export async function AppShell({
 
             <GlobalSearch me={me} owners={owners} />
             <UserMenu name={session.user.name} email={session.user.email} superadmin={session.user.superadmin} />
-          </div>
+          </ShellHeaderRow>
 
           <ShellTabs
             repoTabs={REPO_TABS}

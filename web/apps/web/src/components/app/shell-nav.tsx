@@ -8,6 +8,7 @@ import { sections, settingsSection } from "@/components/app/sections";
 import { TeamSwitcher, type SwitcherOwner } from "@/components/app/team-switcher";
 import { RESERVED } from "@/lib/reserved";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 /** A repo tab, as the shell is given it: the icon is already rendered, because a
  *  component cannot cross from the server into here, and the href is a suffix
@@ -68,6 +69,20 @@ export function place(pathname: string, me: string) {
     return { kind: "repo" as const, owner, repo: parts[1] };
   }
   return { kind: "org" as const, owner };
+}
+
+/** The header's own container class. The superadmin console is the one place laid out full width
+ *  (owner: "widescreen layout instead of container"), and a header still pinned to the 1120 px
+ *  column above a full-width body reads as two different pages stacked. Every other place is
+ *  unchanged, which is why this is a lookup on the place rather than a prop each page passes. */
+export function shellWidthClass(pathname: string, me: string) {
+  return place(pathname, me).kind === "superadmin" ? "w-full px-7" : "mx-auto max-w-page px-6";
+}
+
+/** The header's top row. Client-side only because the width follows the URL, and the shell is a
+ *  layout that stays mounted across navigations — a server component could not re-decide. */
+export function ShellHeaderRow({ me, children }: { me: string; children: React.ReactNode }) {
+  return <div className={cn("flex h-14 items-center gap-3", shellWidthClass(usePathname(), me))}>{children}</div>;
 }
 
 export function useOwner(me: string) {

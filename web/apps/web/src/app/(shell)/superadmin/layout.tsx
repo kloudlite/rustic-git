@@ -12,8 +12,11 @@ export const metadata: Metadata = { title: "Admin" };
 export default async function AdminLayout({ children }: { children: ReactNode }) {
   await requireSuperadmin("/superadmin");
   return (
-    <main className="mx-auto max-w-page px-6 pt-8 pb-16">
-      <div className="flex flex-col gap-6 lg:flex-row lg:gap-10">
+    // Full width, 28 px gutter (spec §C): this place is a console over the whole fleet — a
+    // 1120 px column would put the nodes table and the decision panel in a letterbox. The shell's
+    // header stretches with it (`shellWidthClass`); every other place keeps the centred container.
+    <main className="w-full px-7 pt-8 pb-16">
+      <div className="flex flex-col gap-6 lg:flex-row lg:gap-8">
         <SuperadminRail />
         <div className="min-w-0 flex-1">{children}</div>
       </div>

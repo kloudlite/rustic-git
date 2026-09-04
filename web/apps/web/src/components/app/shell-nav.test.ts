@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { place } from "./shell-nav";
+import { place, shellWidthClass } from "./shell-nav";
 
 /** The chrome decides what it is looking at from the URL alone. These are the six
  *  shapes that decision has to get right; the owner is the half that regressed. */
@@ -45,4 +45,13 @@ test("the superadmin area is its own place, not an org", () => {
   expect(place("/superadmin", "karthik")).toEqual({ kind: "superadmin" });
   expect(place("/superadmin/owners", "karthik")).toEqual({ kind: "superadmin" });
   expect(place("/superadmin/clusters", "karthik")).toEqual({ kind: "superadmin" });
+});
+
+test("only the superadmin console drops the centred container", () => {
+  expect(shellWidthClass("/superadmin", me)).toBe("w-full px-7");
+  expect(shellWidthClass("/superadmin/owners/acme", me)).toBe("w-full px-7");
+  // Every other place keeps the 1120 px column the rest of the app is laid out in.
+  expect(shellWidthClass("/", me)).toBe("mx-auto max-w-page px-6");
+  expect(shellWidthClass("/team/repo", me)).toBe("mx-auto max-w-page px-6");
+  expect(shellWidthClass("/settings", me)).toBe("mx-auto max-w-page px-6");
 });

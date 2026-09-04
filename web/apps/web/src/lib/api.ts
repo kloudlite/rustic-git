@@ -4,6 +4,7 @@ import type { Commit } from "@/lib/browse";
 import type { SnapshotState } from "@/lib/snapshot-state";
 import type { QuotaDim, QuotaReport } from "@/lib/quota";
 import { auditQueryString, type AuditEntry, type AuditFilter, type AuditPage } from "@/lib/audit";
+import { FLAT, type HistoryEvent, type HistorySeries } from "@/lib/history";
 
 /**
  * The api server, from the web app's server side only.
@@ -1415,6 +1416,43 @@ export type Overview = {
 
 export function adminOverview(token: string) {
   return adminCall<Overview>("/admin/overview", { method: "GET", token });
+}
+
+// ── history (admin host — crates/workspaces/src/api/admin/history.rs, spec §A5) ─
+
+/** `GET /admin/history/{series}`. Deliberately NOT an `ApiResult`: history is optional
+ *  infrastructure (a `503 history unavailable` when the admin process has no ClickHouse URL), and
+ *  a page that reads five series must not have five failure branches. Every non-ok answer is the
+ *  same flat placeholder, which every tile already knows how to render. */
+export async function adminSeries(
+  name: string,
+  opts: { range?: string; step?: string; region?: string; owner?: string },
+  token: string,
+): Promise<HistorySeries> {
+  const qs = new URLSearchParams();
+  qs.set("range", opts.range ?? "7d");
+  qs.set("step", opts.step ?? "1d");
+  if (opts.region) qs.set("region", opts.region);
+  if (opts.owner) qs.set("owner", opts.owner);
+  const r = await adminCall<Omit<HistorySeries, "available">>(
+    `/admin/history/${encodeURIComponent(name)}?${qs}`,
+    { method: "GET", token },
+  );
+  return r.ok ? { ...r.value, available: true } : FLAT;
+}
+
+/** `GET /admin/history/events` — the timeline and the activity feed. This one keeps its
+ *  `ApiResult`: a section whose whole content is events says so in its own empty state. */
+export function adminHistoryEvents(
+  q: { kind?: string; owner?: string; region?: string; from?: string; to?: string; cursor?: string; limit?: number },
+  token: string,
+) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") qs.set(k, String(v));
+  return adminCall<{ events: HistoryEvent[]; cursor: string | null }>(
+    `/admin/history/events${qs.toString() ? `?${qs}` : ""}`,
+    { method: "GET", token },
+  );
 }
 
 /** Display-only slice of the central document — `crates/api/src/lib.rs::settings_central`, the
