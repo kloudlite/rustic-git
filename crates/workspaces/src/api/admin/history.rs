@@ -31,6 +31,20 @@ fn bad_gateway(e: crate::history::HistoryError) -> Response {
     (StatusCode::BAD_GATEWAY, format!("history: {e}")).into_response()
 }
 
+/// ClickHouse's JSONCompact quotes 64-bit integers by default, so a `count()` arrives as `"7"`
+/// rather than `7`. Reading it as a number only would silently draw every count as zero.
+fn num(v: Option<&serde_json::Value>) -> f64 {
+    match v {
+        Some(v) => v
+            .as_f64()
+            .or_else(|| v.as_str()?.parse().ok())
+            // A null bucket (a division by zero guarded with nullIf) is a hole in the series, and
+            // 0.0 draws it as a dip — but a chart with a dip beats a 500.
+            .unwrap_or(0.0),
+        None => 0.0,
+    }
+}
+
 /// ClickHouse hands back `2026-09-04 10:00:00`, which `new Date()` parses inconsistently across
 /// browsers. Every timestamp we return is normalised here rather than in twelve statements.
 fn rfc3339(ts: &str) -> String {
@@ -54,9 +68,7 @@ pub(crate) async fn series(
         .map(|r| {
             (
                 rfc3339(r.first().and_then(|v| v.as_str()).unwrap_or_default()),
-                // A null bucket (a division by zero guarded with nullIf) is a hole in the series,
-                // and 0.0 draws it as a dip — but a chart with a dip beats a 500.
-                r.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                num(r.get(1)),
             )
         })
         .collect();
@@ -78,8 +90,10 @@ pub(crate) struct EventsQuery {
     region: Option<String>,
     from: Option<String>,
     to: Option<String>,
-    /// The `ts` of the last row of the previous page, RFC 3339. A timestamp cursor, not an offset:
-    /// a page boundary that shifts as rows arrive is how a timeline silently skips an event.
+    /// `{ts}|{id}` from the last row of the previous page. A position cursor, not an offset: a page
+    /// boundary that shifts as rows arrive is how a timeline silently skips an event. The id is in
+    /// it because several events can share a timestamp to the millisecond — a bare `ts <` boundary
+    /// would drop every sibling of the row the page ended on.
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -90,9 +104,11 @@ struct EventOut {
     ts: String,
     kind: String,
     actor: String,
-    owner: String,
-    target: String,
-    region: String,
+    /// `null`, not `""`, when the event names nobody: the console renders these with `??` and an
+    /// empty string is a value that falls through it.
+    owner: Option<String>,
+    target: Option<String>,
+    region: Option<String>,
     attrs: serde_json::Value,
 }
 
@@ -152,9 +168,15 @@ pub(crate) async fn events(
         }
     }
     if let Some(c) = q.cursor.as_deref() {
+        let (ts, id) = c
+            .split_once('|')
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "unusable cursor").into_response())?;
+        // The same (ts DESC, id DESC) order the statement below sorts by, as a tuple comparison so
+        // the boundary is exactly one row rather than a whole millisecond.
         wheres.push(format!(
-            "ts < parseDateTimeBestEffort('{}')",
-            literal(c, true)?
+            "(ts, id) < (parseDateTimeBestEffort('{}'), '{}')",
+            literal(ts, true)?,
+            literal(id, true)?
         ));
     }
     let filter = if wheres.is_empty() {
@@ -165,21 +187,22 @@ pub(crate) async fn events(
     let limit = q.limit.unwrap_or(PAGE).clamp(1, MAX_PAGE);
     let sql = format!(
         "SELECT id, toString(ts), kind, actor, owner, target, region, attrs \
-         FROM rustic.events FINAL {filter} ORDER BY ts DESC LIMIT {limit}"
+         FROM rustic.events FINAL {filter} ORDER BY ts DESC, id DESC LIMIT {limit}"
     );
     let rows = h.query(&sql).await.map_err(bad_gateway)?;
     let out: Vec<EventOut> = rows
         .iter()
         .map(|r| {
             let s = |i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let opt = |v: String| (!v.is_empty()).then_some(v);
             EventOut {
                 id: s(0),
                 ts: rfc3339(&s(1)),
                 kind: s(2),
                 actor: s(3),
-                owner: s(4),
-                target: s(5),
-                region: s(6),
+                owner: opt(s(4)),
+                target: opt(s(5)),
+                region: opt(s(6)),
                 // Stored as text; handed back parsed so the web does not have to parse it twice.
                 // An unparsable or non-object value becomes `{}` rather than null, because the
                 // console reads fields off it directly.
@@ -191,7 +214,7 @@ pub(crate) async fn events(
         })
         .collect();
     let cursor = (out.len() == limit)
-        .then(|| out.last().map(|r| r.ts.clone()))
+        .then(|| out.last().map(|r| format!("{}|{}", r.ts, r.id)))
         .flatten();
     Ok(Json(EventsPage {
         events: out,

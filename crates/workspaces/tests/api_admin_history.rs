@@ -66,9 +66,11 @@ async fn with_history(data: Value) -> (String, Arc<Jwt>, Arc<std::sync::Mutex<Ve
 
 #[tokio::test]
 async fn a_series_answers_points_and_a_summary() {
+    // The middle bucket arrives QUOTED: ClickHouse's JSONCompact quotes 64-bit integers, so a
+    // `count()` is a string on the wire and reading it as a number only draws every count as zero.
     let (base, jwt, seen) = with_history(json!([
         ["2026-09-01 00:00:00", 3.0],
-        ["2026-09-02 00:00:00", 9.0],
+        ["2026-09-02 00:00:00", "9"],
         ["2026-09-03 00:00:00", 5.0],
     ]))
     .await;
@@ -127,6 +129,7 @@ async fn a_quoted_filter_is_refused() {
         "/admin/history/pool_used?region=eu%27%3B%20DROP%20TABLE%20rustic.events%3B%20--",
         "/admin/history/events?owner=a%27%20OR%20%271%27%3D%271",
         "/admin/history/events?cursor=%27%29%3B%20DROP",
+        "/admin/history/events?cursor=no-separator",
     ] {
         let (status, body) = get(&base, path, &jwt).await;
         assert_eq!(status, 404, "{path}: {body}");
@@ -163,12 +166,38 @@ async fn events_page_newest_first_with_a_cursor_only_on_a_full_page() {
             "attrs": {"detail": "planned"},
         })
     );
-    // A full page offers a cursor; the timeline pages by timestamp, never by offset.
-    assert_eq!(v["cursor"], json!("2026-09-03T12:00:00Z"));
+    // A full page offers a cursor; the timeline pages by position, never by offset.
+    assert_eq!(v["cursor"], json!("2026-09-03T12:00:00Z|id-1"));
     let sql = seen.lock().unwrap().join("\n");
     assert!(sql.contains("rustic.events FINAL"), "{sql}");
     assert!(sql.contains("kind = 'admin.drain'"), "{sql}");
-    assert!(sql.contains("ORDER BY ts DESC LIMIT 1"), "{sql}");
+    assert!(sql.contains("ORDER BY ts DESC, id DESC LIMIT 1"), "{sql}");
+}
+
+/// Several admin writes can share a millisecond, so a bare `ts <` boundary would drop every
+/// sibling of the row the previous page ended on. The cursor carries the id and the comparison is
+/// on the pair.
+#[tokio::test]
+async fn the_cursor_boundary_is_the_pair_not_the_timestamp() {
+    let (base, jwt, seen) = with_history(json!([[
+        "id-a", "2026-09-03 12:00:00", "k", "a", "", "", "", "{}"
+    ]]))
+    .await;
+    let (status, body) = get(
+        &base,
+        "/admin/history/events?cursor=2026-09-03T12%3A00%3A00Z%7Cid-b",
+        &jwt,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let sql = seen.lock().unwrap().join("\n");
+    assert!(
+        sql.contains("(ts, id) < (parseDateTimeBestEffort('2026-09-03T12:00:00Z'), 'id-b')"),
+        "{sql}"
+    );
+    // Two rows sharing a timestamp: paging from the first must be able to reach the second.
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["events"][0]["id"], json!("id-a"));
 }
 
 /// A short page is the last page — a cursor there costs every client one empty round trip.
@@ -181,6 +210,11 @@ async fn a_short_events_page_offers_no_cursor() {
     assert_eq!(v["cursor"], Value::Null);
     // Unparsable attrs become an object, because the console reads fields off it directly.
     assert_eq!(v["events"][0]["attrs"], json!({}));
+    // An event that names nobody carries `null`, not `""` — the console's `??` falls through an
+    // empty string.
+    assert_eq!(v["events"][0]["owner"], Value::Null);
+    assert_eq!(v["events"][0]["target"], Value::Null);
+    assert_eq!(v["events"][0]["region"], Value::Null);
 }
 
 #[tokio::test]

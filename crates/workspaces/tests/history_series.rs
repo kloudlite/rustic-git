@@ -75,6 +75,32 @@ fn every_series_reads_a_known_table_and_buckets_by_the_step() {
     }
 }
 
+/// `k8s.container.restarts` is a cumulative counter, so a bucket's value is the RISE across it —
+/// per (node, container), or a running total is drawn as if it were an incident count.
+#[test]
+fn restarts_is_the_rise_per_bucket_not_a_running_total() {
+    let sql = sql_for("restarts", &q()).unwrap();
+    assert!(sql.contains("max(v) - min(v)"), "{sql}");
+    assert!(sql.contains("GROUP BY b, node, attributes"), "{sql}");
+}
+
+/// A region filter that silently applies to some series and not others makes a per-region page
+/// read as fleet-wide on exactly the charts nobody double-checks.
+#[test]
+fn every_series_that_can_filter_by_region_does() {
+    let eu = SeriesQuery { region: Some("eu-west".into()), ..q() };
+    for name in NAMES {
+        // `owners_over_80` reads `usage_hourly`, which has no region column.
+        if *name == "owners_over_80" {
+            continue;
+        }
+        assert!(
+            sql_for(name, &eu).unwrap().contains("region = 'eu-west'"),
+            "{name} ignores region"
+        );
+    }
+}
+
 /// The three `*_used` series share one percentage axis in the console, so each must be a ratio —
 /// `pool_used` by dividing, the two node metrics by being clamped to [0,1].
 #[test]

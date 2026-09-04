@@ -139,6 +139,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
                        toInt64(countIf(kind IN ('request.approved', 'request.denied'))) AS v \
                 FROM rustic.events FINAL \
                 WHERE kind LIKE 'request.%' AND ts > now() - INTERVAL {days} DAY \
+                      {region_filter} \
                 GROUP BY b) ORDER BY b"
         ),
         "decided_requests" => event_count("'request.approved', 'request.denied'"),
@@ -181,17 +182,28 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
                            maxIf(ts, kind IN ('request.approved', 'request.denied')) AS decided \
                     FROM rustic.events FINAL \
                     WHERE kind LIKE 'request.%' AND ts > now() - INTERVAL {days} DAY \
+                          {region_filter} \
                     GROUP BY target \
                     HAVING decided > opened)) \
              GROUP BY b ORDER BY b"
         ),
         "cpu_used" => ratio_series("k8s.node.cpu.utilization"),
         "memory_used" => ratio_series("k8s.node.memory.utilization"),
-        // A count, not a ratio: the fleet's restarts summed rather than averaged, because one node
-        // crash-looping is the whole signal and an average over healthy nodes hides it.
+        // `k8s.container.restarts` is CUMULATIVE per container, so the value in a bucket is a
+        // running total, not the bucket's restarts. Per (node, container) the rise across the
+        // bucket is max - min; summed, that is "restarts that happened in this bucket" — which is
+        // what a bar on the chart claims to be. Grouped by `attributes` too, or two containers on
+        // one node collapse into whichever reported last.
         "restarts" => format!(
-            "SELECT b, sum(v) AS v FROM ({}) GROUP BY b ORDER BY b",
-            per_node("k8s.container.restarts")
+            "SELECT b, sum(rise) AS v FROM (\
+                SELECT b, node, attributes, greatest(max(v) - min(v), 0) AS rise FROM (\
+                    SELECT {bucket}(ts) AS b, ts, node, attributes, \
+                           maxMerge(max_value) AS v \
+                    FROM rustic.metrics_5m \
+                    WHERE metric = 'k8s.container.restarts' \
+                      AND ts > now() - INTERVAL {days} DAY {region_filter} \
+                    GROUP BY b, ts, node, attributes) \
+                GROUP BY b, node, attributes) GROUP BY b ORDER BY b"
         ),
         "usage" => {
             let owner = ident(q.owner.as_deref()?)?;
