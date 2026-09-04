@@ -5,96 +5,20 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { QuotaReport } from "@/lib/quota";
-import { DIMS, dimLabel, type QuotaDim } from "@/lib/quota";
+import { DIMS, dimLabel, dimUnit, type QuotaDim } from "@/lib/quota";
 import { writeDefault } from "../actions";
 
-const LABEL: Record<"default-user" | "default-team", string> = {
-  "default-user": "Person default",
-  "default-team": "Team default",
-};
+type DefaultOwner = "default-user" | "default-team";
 
-/** One default's row: the display view, or its edit form when `editing`. `fleetMax` is the
- *  current-fleet-max hint per dimension — computed by the page from the owners it already
- *  fetched, not a second round trip. */
-function DefaultRow({
-  owner,
-  quota,
-  fleetMax,
-}: {
-  owner: "default-user" | "default-team";
-  quota: QuotaReport | null;
-  fleetMax: Record<QuotaDim, number>;
-}) {
-  const router = useRouter();
-  const [editing, setEditing] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+const COLUMNS: { owner: DefaultOwner; label: string; hint: string }[] = [
+  { owner: "default-user", label: "Person", hint: "an owner with no quota of their own" },
+  { owner: "default-team", label: "Team", hint: "a team with no quota of its own" },
+];
 
-  async function save(formData: FormData) {
-    setPending(true);
-    setError(null);
-    const r = await writeDefault(owner, formData);
-    setPending(false);
-    if (!r.ok) {
-      setError(r.message);
-      return;
-    }
-    setEditing(false);
-    router.refresh();
-  }
-
-  const limit = quota?.limit;
-
-  if (!editing) {
-    return (
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <span className="text-sm2 font-medium">{LABEL[owner]}</span>
-          <Button type="button" size="sm" variant="outline" onClick={() => setEditing(true)}>
-            Edit
-          </Button>
-        </div>
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-caption text-muted-foreground">
-          {limit
-            ? DIMS.map((d) => (
-                <span key={d} className="tabular-nums">
-                  {limit[d]} {dimLabel(d).toLowerCase()}
-                </span>
-              ))
-            : "unavailable"}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <form action={save} className="flex flex-col gap-2">
-      <span className="text-sm2 font-medium">{LABEL[owner]}</span>
-      <div className="grid grid-cols-2 gap-2">
-        {DIMS.map((d) => (
-          <label key={d} className="flex flex-col gap-0.5 text-caption text-muted-foreground">
-            {dimLabel(d)}
-            <Input type="number" min={0} name={d} defaultValue={limit?.[d] ?? 0} className="h-8 text-sm2" />
-            {/* The upgrade path the brief calls for: an operator lowering this dimension sees, in
-                the same breath, the owner already pushing it hardest under the current default. */}
-            <span>fleet max {fleetMax[d]}</span>
-          </label>
-        ))}
-      </div>
-      <Input name="note" placeholder="Why (required)" required className="h-8 text-sm2" />
-      {error && <p role="alert" className="text-sm2 font-medium text-destructive">{error}</p>}
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={pending}>
-          Save
-        </Button>
-        <Button type="button" size="sm" variant="outline" onClick={() => setEditing(false)}>
-          Cancel
-        </Button>
-      </div>
-    </form>
-  );
-}
-
+/** The two defaults as one table — dimensions down, person and team across — so the two
+ *  columns read against each other, which is the only question this card answers ("is the
+ *  team default really 4× the person one?"). Editing turns one column into inputs in place;
+ *  the other column stays readable so the operator keeps the comparison while typing. */
 export function DefaultsCard({
   personDefault,
   teamDefault,
@@ -104,10 +28,139 @@ export function DefaultsCard({
   teamDefault: QuotaReport | null;
   fleetMax: Record<QuotaDim, number>;
 }) {
+  const router = useRouter();
+  const [editing, setEditing] = useState<DefaultOwner | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const limits: Record<DefaultOwner, Record<QuotaDim, number> | undefined> = {
+    "default-user": personDefault?.limit,
+    "default-team": teamDefault?.limit,
+  };
+
+  async function save(formData: FormData) {
+    if (!editing) return;
+    setPending(true);
+    setError(null);
+    const r = await writeDefault(editing, formData);
+    setPending(false);
+    if (!r.ok) {
+      setError(r.message);
+      return;
+    }
+    setEditing(null);
+    router.refresh();
+  }
+
+  function cancel() {
+    setEditing(null);
+    setError(null);
+  }
+
   return (
-    <div className="grid grid-cols-2 gap-6 border border-border bg-card p-4">
-      <DefaultRow owner="default-user" quota={personDefault} fleetMax={fleetMax} />
-      <DefaultRow owner="default-team" quota={teamDefault} fleetMax={fleetMax} />
-    </div>
+    <form action={save} className="border border-border bg-card">
+      <div className="flex items-baseline justify-between border-b border-border px-4 py-3">
+        <div>
+          <h2 className="text-sm2 font-medium">Defaults</h2>
+          <p className="text-caption text-muted-foreground">
+            What an owner gets until they have a quota of their own. Changing a default changes it
+            for everyone still on it.
+          </p>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm2">
+          <thead>
+            <tr className="border-b border-border text-caption uppercase tracking-eyebrow text-muted-foreground">
+              <th className="px-4 py-2 text-left font-medium">Dimension</th>
+              {COLUMNS.map((c) => (
+                <th key={c.owner} className="px-4 py-2 text-right font-medium">
+                  <span className="inline-flex items-center gap-3">
+                    <span title={c.hint}>{c.label}</span>
+                    {editing === c.owner ? null : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-6 px-2 normal-case tracking-normal"
+                        disabled={editing !== null || !limits[c.owner]}
+                        onClick={() => setEditing(c.owner)}
+                      >
+                        Edit
+                      </Button>
+                    )}
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {DIMS.map((d) => (
+              <tr key={d} className="border-b border-border last:border-b-0">
+                <td className="px-4 py-2 text-muted-foreground">
+                  {dimLabel(d)}
+                  {dimUnit(d) && <span className="ml-1 text-caption">({dimUnit(d)})</span>}
+                </td>
+                {COLUMNS.map((c) => {
+                  const limit = limits[c.owner];
+                  if (editing === c.owner) {
+                    return (
+                      <td key={c.owner} className="px-4 py-1.5 text-right">
+                        <div className="ml-auto flex w-40 flex-col items-end gap-0.5">
+                          <Input
+                            type="number"
+                            min={0}
+                            name={d}
+                            defaultValue={limit?.[d] ?? 0}
+                            className="h-8 w-full text-right text-sm2 tabular-nums"
+                          />
+                          {/* An operator lowering a default sees, in the same cell, the owner
+                              already pushing it hardest — a default below that number strands
+                              someone's live objects over quota. */}
+                          <span
+                            className={
+                              "text-caption " +
+                              ((limit?.[d] ?? 0) < fleetMax[d] ? "text-destructive" : "text-muted-foreground")
+                            }
+                          >
+                            fleet max {fleetMax[d]}
+                          </span>
+                        </div>
+                      </td>
+                    );
+                  }
+                  return (
+                    <td key={c.owner} className="px-4 py-2 text-right tabular-nums">
+                      {limit ? limit[d] : <span className="text-muted-foreground">—</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {editing && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border px-4 py-3">
+          <Input
+            name="note"
+            placeholder="Why this change (required)"
+            required
+            autoFocus
+            className="h-8 min-w-64 flex-1 text-sm2"
+          />
+          <Button type="submit" size="sm" disabled={pending}>
+            Save {COLUMNS.find((c) => c.owner === editing)?.label.toLowerCase()} default
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={cancel}>
+            Cancel
+          </Button>
+          {error && (
+            <p role="alert" className="basis-full text-sm2 font-medium text-destructive">
+              {error}
+            </p>
+          )}
+        </div>
+      )}
+    </form>
   );
 }

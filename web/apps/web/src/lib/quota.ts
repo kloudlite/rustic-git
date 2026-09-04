@@ -20,6 +20,12 @@ export function dimLabel(d: QuotaDim): string {
   }[d];
 }
 
+/** The unit a limit is counted in, shown beside the number so "100" never has to be guessed at:
+ *  the api's field names carry it (`diskGb`) but the label does not. */
+export function dimUnit(d: QuotaDim): string {
+  return { workspaces: "", environments: "", snapshots: "", diskGb: "GB", cpu: "cores", memoryGb: "GB" }[d];
+}
+
 /** A whole percentage for the bar's width. A zero limit reads FULL rather than NaN — it is a
  *  dimension nobody may use — and over-quota clamps, because /v1 is read-then-write and a limit
  *  can be lowered under existing use. */
