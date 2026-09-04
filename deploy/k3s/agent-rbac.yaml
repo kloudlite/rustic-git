@@ -49,7 +49,7 @@
 #                                                                       a quota is desired state and
 #                                                                       the agent never writes one
 #   clustersettings (rustic-git.io)        get,list,watch               refresh beat reads the single
-#                                                                       `default` object every tunable
+#   clustersettings/status                 patch                        `default` object every tunable; the ack (observedGeneration) is the one write
 #                                                                       (sync/replica/decommission
 #                                                                       intervals, timeouts, images)
 #                                                                       comes from. READ ONLY — an
@@ -180,11 +180,16 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["quotas"]
     verbs: ["get", "list", "watch"]
-  # Same read-only reasoning as `quotas`: `ClusterSettings` is admin-written desired state, and
-  # the agent's refresh beat only ever reads the single `default` object.
+  # Same read-only reasoning as `quotas` for the SPEC: `ClusterSettings` is admin-written desired
+  # state, and the agent's refresh beat only ever reads the single `default` object. The STATUS
+  # subresource is the one thing the agent writes back — `observedGeneration`, the ack the admin
+  # UI's "pending" marker waits for — and the admission policy fences spec, not status.
   - apiGroups: ["rustic-git.io"]
     resources: ["clustersettings"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["clustersettings/status"]
+    verbs: ["patch"]
   # `snapshots`: mostly created by `/v1` (Task 6's `/push`), CR-first per the brief — the agent
   # only cuts the btrfs snapshot and reports status, and `pull_beat` diffs the Ready set against
   # `local_commits` to decide what to fetch. `create` is also `stop_push`'s fixed-name `stop-{env}`
