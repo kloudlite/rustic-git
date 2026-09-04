@@ -31,7 +31,7 @@ export function NewRequestDialog({ owner, regions }: { owner: string; regions: A
         <form action={action} className="grid gap-4">
           <DialogHeader>
             <DialogTitle>New request</DialogTitle>
-            <DialogDescription>A team admin reviews it; nothing changes until it is approved.</DialogDescription>
+            <DialogDescription>A superadmin reviews it; nothing changes until it is approved.</DialogDescription>
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
           <div className="grid gap-1">
