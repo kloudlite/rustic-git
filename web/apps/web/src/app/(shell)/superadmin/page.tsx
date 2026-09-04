@@ -5,7 +5,6 @@ import * as api from "@/lib/api";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { when } from "@/lib/time";
 import { deltaLabel, eventSummary } from "@/lib/history";
-import { kindLabel } from "@/lib/requests";
 import { summaryLine } from "@/lib/request-queue";
 import { PageHeader } from "./page-header";
 import { regionCapacity } from "./overview";
@@ -187,7 +186,7 @@ export default async function OverviewPage() {
                 {queue.slice(0, 5).map((r) => (
                   <Tr key={r.id}>
                     <Td>
-                      <Pill tone="info">{kindLabel(r.kind)}</Pill>
+                      <Pill tone="info">{r.kind}</Pill>
                     </Td>
                     <Td>{r.owner}</Td>
                     <Td className="max-w-0 truncate">{summaryLine(r)}</Td>

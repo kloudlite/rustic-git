@@ -26,7 +26,9 @@ export default async function Page({
   const sp = await searchParams;
   const opts = { range: "7d", step: "1d" };
   const [reqs, owners, decidedS, p50S] = await Promise.all([
-    api.adminListRequests(token, { owner: sp.owner, kind: sp.kind }),
+    // Fleet-wide on purpose: the KPI strip counts the whole queue, and `filterQueue` narrows by
+    // kind client-side. Only `owner` narrows server-side, so an owner-detail link lands scoped.
+    api.adminListRequests(token, { owner: sp.owner }),
     api.adminOwners(token),
     api.adminSeries("decided_requests", opts, token),
     api.adminSeries("time_to_decide_p50", opts, token),
@@ -67,7 +69,9 @@ export default async function Page({
           value={p50S.available ? `${p50S.summary.last} h` : "—"}
           sub={
             p50S.available
-              ? `${p50S.summary.delta > 0 ? "up" : "down"} from ${p50S.summary.last - p50S.summary.delta} h last week`
+              ? p50S.summary.delta === 0
+                ? `unchanged from ${p50S.summary.last} h last week`
+                : `${p50S.summary.delta > 0 ? "up" : "down"} from ${p50S.summary.last - p50S.summary.delta} h last week`
               : "history unavailable"
           }
           series={p50S}

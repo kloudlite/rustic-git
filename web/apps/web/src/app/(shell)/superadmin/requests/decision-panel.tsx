@@ -6,14 +6,21 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import type { OwnerRow, RequestDoc } from "@/lib/api";
 import { DIMS, dimLabel, type QuotaDim } from "@/lib/quota";
-import { summaryLine } from "@/lib/request-queue";
-import { kindLabel } from "@/lib/requests";
+import { grantValue, summaryLine } from "@/lib/request-queue";
 import { when } from "@/lib/time";
 import { decideRequestAction, type DecidePayload } from "../actions";
 import { Section } from "../ui/section";
 import { Pill } from "../ui/pill";
 import { EmptyState } from "../ui/data-table";
 import { Facts } from "./facts";
+
+/** What Approve actually does, said before the button rather than discovered after it. */
+function consequence(r: RequestDoc): string {
+  if (r.kind === "quota") return `Writes Quota/${r.owner}, then marks the request approved. The owner is notified.`;
+  if (r.kind === "access") return `Grants ${r.access?.role ?? "the role"} on ${r.access?.team ?? "the team"}, then marks the request approved.`;
+  if (r.kind === "region") return `Enables ${r.region?.region ?? "the region"} for ${r.owner}, then marks the request approved.`;
+  return "Records the resolution and marks the request approved. Nothing else is written.";
+}
 
 /** One panel, four kinds. Approve carries the kind's own input — the edited grant for quota, a
  *  confirmation for access and region (the api's decide body carries neither a role nor a region,
@@ -24,11 +31,15 @@ export function DecisionPanel({
   request,
   usage,
   history,
+  denyIntent,
   onDone,
 }: {
   request: RequestDoc | null;
   usage: OwnerRow | undefined;
   history: RequestDoc[];
+  /** The row's Deny was clicked rather than its Open: the note is what stands between here and a
+   *  denial, so the panel opens with the cursor already in it. */
+  denyIntent: boolean;
   onDone: () => void;
 }) {
   const [grant, setGrant] = useState<Record<string, string>>({});
@@ -58,12 +69,7 @@ export function DecisionPanel({
   function payload(): DecidePayload {
     if (req.kind === "quota") {
       const quota: Partial<Record<QuotaDim, number>> = {};
-      for (const d of dims) {
-        const n = Number(grant[d] ?? req.quota?.[d]);
-        // A non-number in the box is not a silent zero: it falls back to what was asked, which is
-        // the only value the operator ever saw beside it.
-        quota[d] = Number.isFinite(n) ? n : req.quota?.[d];
-      }
+      for (const d of dims) quota[d] = grantValue(grant[d], req.quota?.[d]);
       return { quota };
     }
     if (req.kind === "other") return { resolution: resolution.trim() };
@@ -90,7 +96,7 @@ export function DecisionPanel({
     <Section
       eyebrow="Decision"
       title={`${req.owner} · ${summaryLine(req)}`}
-      toolbar={<Pill tone="info">{kindLabel(req.kind)}</Pill>}
+      toolbar={<Pill tone="info">{req.kind}</Pill>}
     >
       <div className="flex flex-col gap-4">
         <Facts request={req} usage={usage} />
@@ -159,12 +165,14 @@ export function DecisionPanel({
               <span className="text-muted-foreground">Note</span>
               <Textarea
                 rows={3}
+                autoFocus={denyIntent}
                 placeholder="Required to deny — the owner sees this"
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 className="text-sm2"
               />
             </label>
+            <p className="text-caption text-muted-foreground">{consequence(req)}</p>
             {error && <p className="text-caption text-destructive">{error}</p>}
             <div className="flex gap-2">
               <Button size="sm" disabled={!canApprove} onClick={() => decide("approve")}>

@@ -53,6 +53,16 @@ export function contextLine(r: RequestDoc, usage: OwnerRow | undefined): string 
     return `${usage.used[d]} / ${usage.limit[d]}${unit ? ` ${unit}` : ""} in use`;
   }
   if (r.kind === "access") return r.access?.team ? `on team ${r.access.team}` : "no team named";
-  if (r.kind === "region") return "current regions unavailable";
+  if (r.kind === "region") return `enable ${r.region?.region ?? "a region"} for ${r.owner}`;
   return (r.other?.body ?? "").split("\n")[0];
+}
+
+/** An edited grant box. An empty box is not zero and not a refusal — it means "grant what was
+ *  asked", which is the number the operator was looking at when they cleared it. Only a finite
+ *  positive number overrides; anything else (a stray letter, 0, a negative) falls back the same
+ *  way, since none of them is a raise anyone asked for. */
+export function grantValue(raw: string | undefined, asked: number | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return asked;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : asked;
 }

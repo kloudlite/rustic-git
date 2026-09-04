@@ -49,7 +49,7 @@ export function RequestQueue({
     () => new Set(usage.filter((u) => u.isTeam).map((u) => u.owner)),
     [usage],
   );
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<{ id: string; deny: boolean } | null>(null);
   // Read once: the render has to stay pure, and a cutoff ticking under an open page would
   // silently drop rows out of the "older than 1 day" filter while somebody is reading them.
   const [now] = useState(() => Date.now());
@@ -78,7 +78,7 @@ export function RequestQueue({
     now,
     usage.length > 0 ? teams : undefined,
   );
-  const active = rows.find((r) => r.id === selected) ?? null;
+  const active = rows.find((r) => r.id === selected?.id) ?? null;
 
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -191,10 +191,10 @@ export function RequestQueue({
               {shown.map((r) => (
                 <Tr
                   key={r.id}
-                  className={selected === r.id ? "bg-muted" : undefined}
+                  className={selected?.id === r.id ? "bg-muted" : undefined}
                 >
                   <Td className="h-14">
-                    <Pill tone="info">{kindLabel(r.kind)}</Pill>
+                    <Pill tone="info">{r.kind}</Pill>
                   </Td>
                   <Td className="h-14">
                     <span className="flex items-center gap-1.5">
@@ -226,7 +226,7 @@ export function RequestQueue({
                       <button
                         type="button"
                         className="text-caption text-muted-foreground hover:text-primary"
-                        onClick={() => setSelected(r.id)}
+                        onClick={() => setSelected({ id: r.id, deny: false })}
                       >
                         Open
                       </button>
@@ -234,7 +234,7 @@ export function RequestQueue({
                         <button
                           type="button"
                           className="text-caption text-muted-foreground hover:text-destructive"
-                          onClick={() => setSelected(r.id)}
+                          onClick={() => setSelected({ id: r.id, deny: true })}
                         >
                           Deny
                         </button>
@@ -246,11 +246,18 @@ export function RequestQueue({
             </tbody>
           </DataTable>
         )}
+        {shown.length > 0 && (
+          <p className="border-t border-border px-3 py-2 text-caption text-muted-foreground">
+            Showing {shown.length === base.length ? `all ${shown.length}` : `${shown.length} of ${base.length}`} {tab}{" "}
+            {shown.length === 1 ? "request" : "requests"}. One request per owner and kind may be pending at a time.
+          </p>
+        )}
       </Section>
       <DecisionPanel
         request={active}
         usage={active ? usageByOwner.get(active.owner) : undefined}
         // The owner's own recent decisions, out of the page's one fetch rather than a second read.
+        denyIntent={selected?.deny ?? false}
         history={
           active
             ? rows

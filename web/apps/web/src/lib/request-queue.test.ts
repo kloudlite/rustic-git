@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { filterQueue, summaryLine, contextLine } from "./request-queue";
+import { filterQueue, summaryLine, contextLine, grantValue } from "./request-queue";
 import type { RequestDoc } from "./api";
 import type { OwnerRow } from "./api";
 import type { QuotaDim } from "./quota";
@@ -52,4 +52,13 @@ test("the muted second line carries the kind's own context", () => {
   // No usage read (the owners call degraded) must not print "undefined / undefined".
   expect(contextLine(base, undefined)).toBe("current usage unavailable");
   expect(contextLine({ ...base, kind: "other", quota: undefined, other: { title: "t", body: "line one\nline two" } }, undefined)).toBe("line one");
+});
+
+test("an empty or unusable grant box falls back to what was asked, never to zero", () => {
+  expect(grantValue("", 40)).toBe(40);
+  expect(grantValue(undefined, 40)).toBe(40);
+  expect(grantValue("0", 40)).toBe(40);
+  expect(grantValue("-5", 40)).toBe(40);
+  expect(grantValue("abc", 40)).toBe(40);
+  expect(grantValue("60", 40)).toBe(60);
 });
