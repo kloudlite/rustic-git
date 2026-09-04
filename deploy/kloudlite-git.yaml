@@ -1293,43 +1293,32 @@ data:
         client_id: ${env:AZURE_CLIENT_ID}
         client_secret: ${env:AZURE_CLIENT_SECRET}
         resource_groups: [kolomi-rg, rustic-git-k3s]
-        services: [Microsoft.Storage/storageAccounts/blobServices, Microsoft.Storage/storageAccounts/fileServices]
+        # Account level: the blobServices/fileServices sub-resources are not ARM resources and the
+        # receiver never discovers them. Transactions carry ResponseType (ServerBusyError is the
+        # throttle); per-share utilisation is not available here — `df` on the nodes is.
+        services: [Microsoft.Storage/storageAccounts]
         collection_interval: 60s
         initial_delay: 3s
         metrics:
-          Microsoft.Storage/storageAccounts/blobServices:
+          Microsoft.Storage/storageAccounts:
             Transactions: [count]
             Availability: [average]
             SuccessE2ELatency: [average]
             SuccessServerLatency: [average]
             Ingress: [total]
             Egress: [total]
-            BlobCapacity: [average]
-          Microsoft.Storage/storageAccounts/fileServices:
-            Transactions: [count]
-            Availability: [average]
-            SuccessE2ELatency: [average]
-            PercentFileShareUtilization: [maximum]
-            PercentFileShareIOPSUtilization: [maximum]
-            FileCapacity: [average]
+            UsedCapacity: [average]
         dimensions:
           enabled: true
           overrides:
-            Microsoft.Storage/storageAccounts/blobServices:
+            Microsoft.Storage/storageAccounts:
               Transactions: [ResponseType]
               Availability: []
               SuccessE2ELatency: []
               SuccessServerLatency: []
               Ingress: []
               Egress: []
-              BlobCapacity: []
-            Microsoft.Storage/storageAccounts/fileServices:
-              Transactions: [ResponseType]
-              Availability: []
-              SuccessE2ELatency: []
-              PercentFileShareUtilization: []
-              PercentFileShareIOPSUtilization: []
-              FileCapacity: []
+              UsedCapacity: []
       # Synthetic probes from inside the cluster through the public edge — the only check that
       # sees DNS, Cloudflare, TLS and the ingress the way a user does. 401 from the registry is
       # the healthy answer (anonymous /v2/ must challenge, never 200).
