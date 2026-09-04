@@ -162,3 +162,33 @@ async fn migrations_apply_against_a_real_clickhouse() {
         .unwrap();
     assert_eq!(rows[0][0], serde_json::json!(1));
 }
+
+/// DDL answers 200 with an empty body, and `migrate` runs every CREATE through `query` — an empty
+/// body is "no rows", never a parse failure.
+#[tokio::test]
+async fn an_empty_body_is_zero_rows_and_healthy() {
+    let (url, _) = canned(200, "").await;
+    let h = History::new(&url, "default", "");
+    assert!(h.query("CREATE DATABASE IF NOT EXISTS rustic").await.unwrap().is_empty());
+    assert!(h.healthy().await);
+}
+
+/// `healthy` is what the history routes' 503 decision reads, so a refusing server must be unhealthy
+/// rather than "answered, so fine".
+#[tokio::test]
+async fn healthy_is_false_when_the_server_refuses() {
+    let (url, _) = canned(500, "Code: 516. DB::Exception: Authentication failed").await;
+    assert!(!History::new(&url, "default", "").healthy().await);
+}
+
+/// The table name is interpolated into SQL. It is refused on an allow-list, never escaped.
+#[tokio::test]
+async fn an_unsafe_table_name_is_refused_before_any_request() {
+    let (url, seen) = canned(200, "").await;
+    let h = History::new(&url, "default", "");
+    assert!(h
+        .insert("rustic.events; DROP", &[serde_json::json!({})])
+        .await
+        .is_err());
+    assert!(seen.lock().unwrap().is_empty(), "a refused name must not reach the server");
+}

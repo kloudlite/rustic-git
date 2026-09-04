@@ -22,9 +22,11 @@ const BOOKKEEPING: &str = "CREATE TABLE IF NOT EXISTS rustic.schema_migrations \
 
 /// `(version, statement)`, ascending.
 pub const MIGRATIONS: &[(u32, &str)] = &[
-    // `events` is the record, so no TTL at all. ReplacingMergeTree on `id` is what makes
-    // at-least-once safe: a replayed watch, a redelivered Redis entry and a retried insert all
-    // collapse to one row, and every reader queries FINAL.
+    // `events` is the record, so no TTL at all. The dedup key is the WHOLE sort key
+    // `(kind, ts, id)`, not `id` alone: a replayed watch, a redelivered Redis entry and a retried
+    // insert collapse to one row only if they agree on `ts` too, so a writer must DERIVE `ts` from
+    // the transition it is recording (the resourceVersion's own timestamp) and never stamp
+    // `now()` at insert time — a re-stamped retry is a second row that FINAL cannot merge away.
     (
         1,
         "CREATE TABLE IF NOT EXISTS rustic.events (\
@@ -109,7 +111,7 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
             attributes String, \
             avg_value AggregateFunction(avg, Float64), \
             max_value AggregateFunction(max, Float64), \
-            last_value AggregateFunction(argMax, Float64, DateTime)\
+            last_value AggregateFunction(argMax, Float64, DateTime64(9))\
          ) ENGINE = AggregatingMergeTree \
            PARTITION BY toYYYYMM(ts) \
            ORDER BY (region, metric, node, attributes, ts) \

@@ -66,12 +66,12 @@ impl History {
             url: url.trim_end_matches('/').to_string(),
             user: user.to_string(),
             password: password.to_string(),
-            // A builder that cannot produce a client would fail identically for the default one;
-            // falling back keeps this constructor infallible for every caller.
+            // A default client would silently have NO timeout, which is the one property this
+            // client exists to guarantee; a TLS backend that cannot initialise is a boot failure.
             client: reqwest::Client::builder()
                 .timeout(TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .expect("reqwest client"),
         }
     }
 
@@ -118,9 +118,8 @@ impl History {
         table: &str,
         rows: &[serde_json::Value],
     ) -> Result<(), HistoryError> {
-        if rows.is_empty() {
-            return Ok(());
-        }
+        // Checked before the empty-batch shortcut: a bad table name is a bug in the caller, and
+        // an empty batch must not be the reason it goes unnoticed until the first non-empty one.
         if table.is_empty()
             || !table
                 .chars()
@@ -130,6 +129,9 @@ impl History {
                 status: 400,
                 body: format!("refusing to insert into an unsafe table name: {table:?}"),
             });
+        }
+        if rows.is_empty() {
+            return Ok(());
         }
         let mut body = format!("INSERT INTO {DB}.{table} FORMAT JSONEachRow\n");
         for r in rows {
