@@ -3461,11 +3461,11 @@ otel-collector:
       nginx.ingress.kubernetes.io/backend-protocol: GRPC
       cert-manager.io/cluster-issuer: letsencrypt
     hosts:
-      - host: otel.dev.kloudlite.io
+      - host: otel-dev.kloudlite.io
         paths: [{ path: /, pathType: Prefix }]
     tls:
       - secretName: otel-tls
-        hosts: [otel.dev.kloudlite.io]
+        hosts: [otel-dev.kloudlite.io]
 
 hyperdx:
   enabled: true
@@ -3479,11 +3479,11 @@ hyperdx:
       nginx.ingress.kubernetes.io/auth-type: basic
       nginx.ingress.kubernetes.io/auth-secret: hyperdx-basic-auth
     hosts:
-      - host: hyperdx.dev.kloudlite.io
+      - host: hyperdx-dev.kloudlite.io
         paths: [{ path: /, pathType: Prefix }]
     tls:
       - secretName: hyperdx-tls
-        hosts: [hyperdx.dev.kloudlite.io]
+        hosts: [hyperdx-dev.kloudlite.io]
 
 mongodb:
   # HyperDX's own state (saved searches, dashboards, alert definitions). Small, and unrelated to
@@ -3529,7 +3529,7 @@ helm upgrade --install clickstack clickstack/clickstack \
 
 HyperDX mints the key the collectors authenticate with; nothing in a values file can create it.
 
-1. Open `https://hyperdx.dev.kloudlite.io`, create the first account (do this immediately after
+1. Open `https://hyperdx-dev.kloudlite.io`, create the first account (do this immediately after
    the install — the first account is unauthenticated by design).
 2. Team Settings → API Keys → copy the **ingestion** key.
 3. Put it where the agent collectors read it, in **every** cluster:
@@ -3709,7 +3709,7 @@ data:
 
     exporters:
       otlphttp:
-        endpoint: https://otel.dev.kloudlite.io
+        endpoint: https://otel-dev.kloudlite.io
         headers:
           authorization: "${env:OTEL_INGESTION_KEY}"
         # The collector's own queue is the buffer. Nothing of ours buffers telemetry — a dropped
@@ -3806,7 +3806,7 @@ In `deploy/rustic-git.yaml`, on the `rustic-git-admin` Deployment's `env` list:
               valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: password, optional: true } }
             # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
             - name: RUSTIC_GIT_HYPERDX_URL
-              value: https://hyperdx.dev.kloudlite.io
+              value: https://hyperdx-dev.kloudlite.io
             # The region label the per-region watches stamp on their event rows.
             - name: RUSTIC_GIT_REGION
               value: westeurope-k3s
@@ -3975,7 +3975,7 @@ git commit -m "Deploy ClickStack and the region collectors for the history layer
 | A1: `rustic` tables `events` / `usage_hourly` / `fleet_hourly` / `alerts` with their TTLs | 1 |
 | A1: `rustic.metrics_5m` rollup, 400 d | 1 (migrations 5–7) |
 | A1: `RUSTIC_GIT_CLICKHOUSE_URL` optional everywhere; reqwest, JSONEachRow/JSONCompact, no new crate | 1, 2 |
-| A2: gateway collector, ingestion key in Secret `rustic-git-otel`, `otel.dev.kloudlite.io` | 10 |
+| A2: gateway collector, ingestion key in Secret `rustic-git-otel`, `otel-dev.kloudlite.io` | 10 |
 | A2: agent collectors per cluster — prometheus, k8s_cluster, kubeletstats, k8sattributes, resource(`region`), batch, otlphttp; RBAC header table | 10 |
 | A2: logs via `filelog` | 10 |
 | A2: agent node gauges (pool bytes, running copies) | 7 |

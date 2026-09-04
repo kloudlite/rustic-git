@@ -49,7 +49,7 @@ The operators chart still installs the MongoDB operator (it has no off switch in
 
 HyperDX mints the key the collectors authenticate with; nothing in a values file can create it.
 
-1. Open `https://hyperdx.dev.kloudlite.io` and create the first account. Do this **immediately**
+1. Open `https://hyperdx-dev.kloudlite.io` and create the first account. Do this **immediately**
    after the install — the first account is unauthenticated by design, which is also why the
    ingress carries basic auth (next section) before anyone can reach that form.
 2. Team Settings → API Keys → copy the **ingestion** key.

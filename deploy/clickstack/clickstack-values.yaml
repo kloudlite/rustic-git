@@ -68,14 +68,14 @@ otel-collector:
       # OTLP/HTTP on 4318 — the protocol every agent collector in this repo exports with
       # (`otlphttp`). nginx already serves HTTP/2 to clients on a TLS listener, so an agent's
       # exports are multiplexed over one connection without any annotation.
-      - host: otel.dev.kloudlite.io
+      - host: otel-dev.kloudlite.io
         paths:
           - path: /
             pathType: Prefix
             port: 4318
     tls:
       - secretName: otel-tls
-        hosts: [otel.dev.kloudlite.io]
+        hosts: [otel-dev.kloudlite.io]
     # OTLP/gRPC gets its OWN hostname rather than a path on the one above: nginx's
     # `backend-protocol` annotation applies to the whole server block, so a GRPC rule and an HTTP
     # rule on one host would break whichever came second. Nothing of ours uses this door yet — it
@@ -94,14 +94,14 @@ otel-collector:
           # error that reads like a TLS problem.
           nginx.ingress.kubernetes.io/backend-protocol: GRPC
         hosts:
-          - host: otel-grpc.dev.kloudlite.io
+          - host: otel-grpc-dev.kloudlite.io
             paths:
               - path: /
                 pathType: Prefix
                 port: 4317
         tls:
           - secretName: otel-grpc-tls
-            hosts: [otel-grpc.dev.kloudlite.io]
+            hosts: [otel-grpc-dev.kloudlite.io]
 
 hyperdx:
   deployment:
@@ -131,7 +131,7 @@ hyperdx:
     spec:
       ingressClassName: nginx
       rules:
-        - host: hyperdx.dev.kloudlite.io
+        - host: hyperdx-dev.kloudlite.io
           http:
             paths:
               - path: /
@@ -146,7 +146,7 @@ hyperdx:
                       number: 3000
       tls:
         - secretName: hyperdx-tls
-          hosts: [hyperdx.dev.kloudlite.io]
+          hosts: [hyperdx-dev.kloudlite.io]
 
 mongodb:
   # HyperDX's own state (saved searches, dashboards, alert definitions) lives in a `hyperdx`

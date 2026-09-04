@@ -174,7 +174,7 @@ data:
 
     exporters:
       otlphttp:
-        endpoint: https://otel.dev.kloudlite.io
+        endpoint: https://otel-dev.kloudlite.io
         headers:
           authorization: "${env:OTEL_INGESTION_KEY}"
         # The collector's own queue is the buffer. Nothing of ours buffers telemetry — a dropped
@@ -218,7 +218,7 @@ data:
 
     exporters:
       otlphttp:
-        endpoint: https://otel.dev.kloudlite.io
+        endpoint: https://otel-dev.kloudlite.io
         headers:
           authorization: "${env:OTEL_INGESTION_KEY}"
         retry_on_failure: { enabled: true }

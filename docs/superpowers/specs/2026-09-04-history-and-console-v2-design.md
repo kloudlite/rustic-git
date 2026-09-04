@@ -57,7 +57,7 @@ Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in
 - **Gateway collector** — the chart's OTel collector in `clickstack` (OTLP gRPC 4317 / HTTP
   4318, `authorization: <ingestion API key>` from HyperDX Team Settings; the key lives in
   Secret `rustic-git-otel` and is what every sender uses). Exposed to the regions through an
-  Ingress path `otel.dev.kloudlite.io` (TLS, HTTP/2 for gRPC) — the k3s clusters cannot reach
+  Ingress path `otel-dev.kloudlite.io` (TLS, HTTP/2 for gRPC) — the k3s clusters cannot reach
   a ClusterIP on AKS.
 - **Agent collectors** — the official `opentelemetry-collector-contrib` as a Deployment in
   every cluster (`deploy/k3s/otel-agent.yaml` per region; the same manifest in `rustic-git`
@@ -110,7 +110,7 @@ A "Open in HyperDX" link on Monitoring uses `RUSTIC_GIT_HYPERDX_URL` when set.
 ### A6. Deploy
 
 `deploy/clickstack/` — the two Helm value files (operators, clickstack: one ClickHouse
-replica with the PVC, HyperDX behind `hyperdx.dev.kloudlite.io` gated to superadmin emails at
+replica with the PVC, HyperDX behind `hyperdx-dev.kloudlite.io` gated to superadmin emails at
 the Ingress, the gateway collector with its Ingress), a README with the exact `helm` commands
 and the one manual step (create the ingestion API key, store it in `rustic-git-otel`).
 `deploy/rustic-git.yaml`: `RUSTIC_GIT_CLICKHOUSE_URL` and `RUSTIC_GIT_HYPERDX_URL` on the admin
@@ -174,7 +174,7 @@ multi-node ClickHouse; retention below the TTLs above.
 ## Decisions to confirm (defaults applied if unchanged)
 
 1. ClickStack via the official Helm charts on AKS, one ClickHouse replica, 100 Gi PVC (vs Managed ClickStack in ClickHouse Cloud).
-2. Regions ship telemetry to the ClickStack gateway collector at `otel.dev.kloudlite.io`
+2. Regions ship telemetry to the ClickStack gateway collector at `otel-dev.kloudlite.io`
    with the HyperDX ingestion key (vs a per-region ClickHouse or a VPN).
 3. Retention: samples 30 d raw / 400 d at 5-minute rollup; usage and fleet 2 y; events forever.
 4. `Request` replaces `QuotaRequest` (old objects readable, migrated once, retired later).

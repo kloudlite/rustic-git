@@ -819,7 +819,7 @@ spec:
               valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: password, optional: true } }
             # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
             - name: RUSTIC_GIT_HYPERDX_URL
-              value: https://hyperdx.dev.kloudlite.io
+              value: https://hyperdx-dev.kloudlite.io
             # The region the MOUNTED KUBECONFIG points at, and the label that cluster's watch
             # stamps on its event rows — this process's own cluster is always `central`, hard-coded
             # in bins/api/src/main.rs, so this is never that. It must equal the `RUSTIC_GIT_REGION`
@@ -940,7 +940,7 @@ spec:
 #   1. namespace `rustic-git` instead of `kube-system` (this cluster has no pooled nodes, so the
 #      agent's DaemonSet namespace is meaningless here and the workloads it scrapes live here).
 #   2. `RUSTIC_GIT_REGION: central` — the label bins/api hard-codes for this, its own, cluster.
-#   3. the exporters point at the gateway's ClusterIP, not `otel.dev.kloudlite.io`: the gateway
+#   3. the exporters point at the gateway's ClusterIP, not `otel-dev.kloudlite.io`: the gateway
 #      runs in this same cluster, so leaving through the ingress would cost a TLS handshake and a
 #      round trip through nginx to arrive back three namespaces away.
 #
