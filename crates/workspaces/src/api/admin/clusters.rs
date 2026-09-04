@@ -24,9 +24,9 @@ fn live_environment(e: &crd::Environment) -> bool {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClusterRow {
-    region: String,
-    status: String,
-    agents_ready: i64,
+    pub(crate) region: String,
+    pub(crate) status: String,
+    pub(crate) agents_ready: i64,
     agents_desired: i64,
     nodes_ready: i64,
     nodes_total: i64,
@@ -37,7 +37,7 @@ pub(crate) struct ClusterRow {
     // ponytail: `parse-error` is in the spec's vocabulary but unreachable today — a typed decode
     // of the CR fails closed as a 5xx rather than handing back a partial object. Add it here if
     // the read ever becomes untyped.
-    settings_status: String,
+    pub(crate) settings_status: String,
 }
 
 /// The per-region facts every row and the detail both need, read once. `Workspace`/`Environment`
@@ -112,19 +112,21 @@ fn settings_lag(generation: Option<i64>, observed: Option<i64>) -> String {
     }
 }
 
-pub(crate) async fn list_clusters(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+/// One row per region — factored out of the route so Overview can compose from it directly
+/// instead of a second walk of `Region`/nodes/workloads.
+pub(crate) async fn cluster_rows(s: &ApiState) -> Result<Vec<ClusterRow>, Response> {
     let regions: Vec<crd::Region> =
-        Api::<crd::Region>::all(kube(&s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+        Api::<crd::Region>::all(kube(s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
     // ponytail: ONE settings read for the whole list, because every region resolves to the same
     // client today (`workloads`' own note). Move it inside the loop, keyed on that region's
     // client, the moment a region -> client map exists.
-    let settings_status = settings_status(kube(&s)?).await?;
+    let settings_status = settings_status(kube(s)?).await?;
     let mut rows = Vec::with_capacity(regions.len());
     for r in &regions {
         let region = r.name_any();
-        let client = region_client(&s, r).await?;
+        let client = region_client(s, r).await?;
         let f = facts(client, &region).await?;
-        let (agents_ready, agents_desired) = agent_counts(&s, &region).await;
+        let (agents_ready, agents_desired) = agent_counts(s, &region).await;
         let docs: Vec<super::NodeDoc> = f.nodes.iter().map(super::node_doc).collect();
         rows.push(ClusterRow {
             region: region.clone(),
@@ -138,7 +140,11 @@ pub(crate) async fn list_clusters(State(s): State<Arc<ApiState>>) -> Result<Resp
             settings_status: settings_status.clone(),
         });
     }
-    Ok(Json(rows).into_response())
+    Ok(rows)
+}
+
+pub(crate) async fn list_clusters(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    Ok(Json(cluster_rows(&s).await?).into_response())
 }
 
 #[derive(serde::Serialize)]

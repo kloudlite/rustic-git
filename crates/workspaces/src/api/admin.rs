@@ -15,6 +15,7 @@ mod audit;
 mod clusters;
 pub mod monitoring;
 mod owners;
+mod overview;
 mod schema;
 mod settings;
 
@@ -74,6 +75,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/admin/regions", post(create_region))
         .route("/admin/quota/{owner}", axum::routing::put(write_quota_route))
+        .route("/admin/overview", get(overview::overview_handler))
         .route("/admin/quota-requests", get(list_all_quota_requests))
         .route("/admin/quota-requests/{id}/approve", post(approve_quota_request))
         .route("/admin/quota-requests/{id}/deny", post(deny_quota_request))
@@ -278,7 +280,7 @@ async fn deny_quota_request(
 }
 
 #[derive(serde::Deserialize, Default)]
-struct RequestFilter {
+pub(crate) struct RequestFilter {
     owner: Option<String>,
     state: Option<crd::RequestState>,
 }
@@ -286,17 +288,27 @@ struct RequestFilter {
 /// The whole queue, every owner, narrowable by `?owner=` and `?state=` — `QuotaRequest` carries
 /// no label to select on and the fleet-wide row count is small, so filtering here (server-side of
 /// this process, client-side of the k3s API) is the honest lazy answer over a new list-selector.
-async fn list_all_quota_requests(
-    State(s): State<Arc<ApiState>>,
-    Query(f): Query<RequestFilter>,
-) -> Result<Response, Response> {
-    let api: Api<crd::QuotaRequest> = Api::all(kube(&s)?.clone());
+/// Newest first, filtered — the route's own shape, pulled out so Overview can ask for just the
+/// pending ones without a second HTTP round trip.
+pub(crate) async fn list_all_quota_requests_inner(
+    s: &ApiState,
+    f: &RequestFilter,
+) -> Result<Vec<crd::QuotaRequest>, Response> {
+    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
     let mut rows = api.list(&ListParams::default()).await.map_err(kube_err)?.items;
     rows.retain(|r| {
         f.owner.as_deref().is_none_or(|o| r.spec.owner == o)
             && f.state.is_none_or(|st| r.status.as_ref().map(|s| s.state).unwrap_or_default() == st)
     });
     rows.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
+    Ok(rows)
+}
+
+async fn list_all_quota_requests(
+    State(s): State<Arc<ApiState>>,
+    Query(f): Query<RequestFilter>,
+) -> Result<Response, Response> {
+    let rows = list_all_quota_requests_inner(&s, &f).await?;
     Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
 }
 

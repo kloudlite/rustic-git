@@ -11,17 +11,17 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OwnerRow {
-    owner: String,
-    is_team: bool,
-    limit: crd::QuotaSpec,
-    used: crate::quota::Usage,
+    pub(crate) owner: String,
+    pub(crate) is_team: bool,
+    pub(crate) limit: crd::QuotaSpec,
+    pub(crate) used: crate::quota::Usage,
     /// `"own"` when the owner has an explicit `Quota` object, `"default"` when they are riding the
     /// `default-user`/`default-team` fallback — the web needs this to know whether "Edit" starts
     /// from a real object or from the compiled-in table.
-    source: &'static str,
+    pub(crate) source: &'static str,
     /// A `QuotaRequest` still `Pending` for this owner — the list's badge, so an operator does not
     /// have to open every row to find who is waiting.
-    pending: bool,
+    pub(crate) pending: bool,
 }
 
 /// `owner` is really a team once it names one of the two reserved default objects, no matter what
@@ -50,14 +50,21 @@ fn fallback_quota(quota_by_name: &HashMap<String, crd::QuotaSpec>, team: bool) -
 /// request, and the raw `Workspace`/`Environment`/`Volume`/`Snapshot` rows usage is folded from.
 /// One call per kind regardless of how many owners exist — the N+1 the per-owner version made
 /// (`quota::usage` and `Quota::get_opt` called once per owner) is what this replaces.
-struct Fleet {
-    quota_by_name: HashMap<String, crd::QuotaSpec>,
-    pending_owners: HashSet<String>,
-    usage_by_owner: HashMap<String, crate::quota::Usage>,
-    owners: BTreeSet<String>,
+pub(crate) struct Fleet {
+    pub(crate) quota_by_name: HashMap<String, crd::QuotaSpec>,
+    pub(crate) pending_owners: HashSet<String>,
+    pub(crate) usage_by_owner: HashMap<String, crate::quota::Usage>,
+    pub(crate) owners: BTreeSet<String>,
+    // Raw rows, kept alongside the folded `usage_by_owner` so a caller that needs a dimension
+    // `Fleet` does not fold (Overview's per-region split — `crate::quota::Usage` has no region)
+    // reads the same six list calls instead of re-listing them.
+    pub(crate) ws: Vec<crd::Workspace>,
+    pub(crate) envs: Vec<crd::Environment>,
+    pub(crate) vols: Vec<crd::Volume>,
+    pub(crate) snaps: Vec<crd::Snapshot>,
 }
 
-async fn fleet(client: &kube::Client) -> Result<Fleet, Response> {
+pub(crate) async fn fleet(client: &kube::Client) -> Result<Fleet, Response> {
     let quotas: Api<crd::Quota> = Api::all(client.clone());
     let reqs: Api<crd::QuotaRequest> = Api::all(client.clone());
     let ws: Api<crd::Workspace> = Api::all(client.clone());
@@ -86,7 +93,7 @@ async fn fleet(client: &kube::Client) -> Result<Fleet, Response> {
     let quota_by_name = quotas.into_iter().map(|q| (q.name_any(), q.spec)).collect();
     let usage_by_owner = fold_usage(&ws, &envs, &vols, &snaps);
 
-    Ok(Fleet { quota_by_name, pending_owners, usage_by_owner, owners })
+    Ok(Fleet { quota_by_name, pending_owners, usage_by_owner, owners, ws, envs, vols, snaps })
 }
 
 /// `quota::usage`'s per-item accounting, done once over every owner's objects instead of once per
@@ -136,13 +143,15 @@ fn fold_usage(
     out
 }
 
-pub(crate) async fn owners_list(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
-    let client = kube(&s)?;
+/// The list's rows, tightest-first — factored out of the route so Overview can compose fleet
+/// totals from the same six list calls instead of re-listing.
+pub(crate) async fn owner_rows(s: &ApiState) -> Result<Vec<OwnerRow>, Response> {
+    let client = kube(s)?;
     let f = fleet(client).await?;
 
     let mut rows = Vec::with_capacity(f.owners.len());
     for owner in f.owners {
-        let directory_says = scope::is_team(&s, &owner).await;
+        let directory_says = scope::is_team(s, &owner).await;
         let is_team = team_of(&owner, directory_says);
         let own = f.quota_by_name.get(&owner).cloned();
         let source = if own.is_some() { "own" } else { "default" };
@@ -155,7 +164,11 @@ pub(crate) async fn owners_list(State(s): State<Arc<ApiState>>) -> Result<Respon
     // the least headroom on ANY dimension sorts to the top — ascending by that row's own smallest
     // ratio puts the tightest row (smallest ratio) at index 0.
     rows.sort_by(|a, b| tightest_ratio(a).total_cmp(&tightest_ratio(b)));
-    Ok(Json(rows).into_response())
+    Ok(rows)
+}
+
+pub(crate) async fn owners_list(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    Ok(Json(owner_rows(&s).await?).into_response())
 }
 
 /// The smallest (limit - used)/limit across the six dimensions, i.e. the dimension closest to
