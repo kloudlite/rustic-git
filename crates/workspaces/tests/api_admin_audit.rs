@@ -33,16 +33,51 @@ struct Server {
 }
 
 async fn admin_server(routes: Vec<Route>, keys: Arc<rustic_git_storage::store::Store>) -> Server {
+    admin_server_with_history(routes, keys, None).await
+}
+
+/// Same harness, with an optional `History` wired in — the dual-write tests need a canned
+/// ClickHouse behind it to observe (or fail) the copy without touching a real server.
+async fn admin_server_with_history(
+    routes: Vec<Route>,
+    keys: Arc<rustic_git_storage::store::Store>,
+    history: Option<Arc<rustic_git_workspaces::history::History>>,
+) -> Server {
     let jwt = jwt();
     let mut state = ApiState::new(jwt.clone());
     let (client, _rec) = mock_client(routes);
     state = state.with_kube(client);
     state = state.with_keys(keys);
+    if let Some(h) = history {
+        state = state.with_history(h);
+    }
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     Server { base: format!("http://{addr}"), jwt }
+}
+
+/// A canned ClickHouse: records each request body, answers `reply` with `status`. Copied from
+/// `history_client.rs` — this file needs it too and a shared helper module would be one more file
+/// for one function.
+async fn canned(status: u16, reply: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let s = seen.clone();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |body: String| {
+            let s = s.clone();
+            async move {
+                s.lock().unwrap().push(body);
+                (axum::http::StatusCode::from_u16(status).unwrap(), reply)
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (format!("http://{addr}"), seen)
 }
 
 fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
@@ -132,4 +167,73 @@ async fn audit_list_filters_by_actor_action_and_target() {
     assert_eq!(get_rows("action=approve".into(), &s).await, 1);
     assert_eq!(get_rows("target=central/worker".into(), &s).await, 1);
     assert_eq!(get_rows("actor=b@x.com".into(), &s).await, 2);
+}
+
+/// The dual write: a successful admin write copies the audit row into `rustic.events` too, with
+/// `kind = "admin.<action>"` — the shape `crate::history::events::audit_event` promises.
+#[tokio::test]
+async fn admin_write_dual_writes_an_events_row() {
+    let routes = vec![
+        get(format!("{API}/quotarequests/qr-1"), req_obj("qr-1", "karthik", Some("pending"))),
+        patch(
+            format!("{API}/quotarequests/qr-1/status"),
+            req_obj("qr-1", "karthik", Some("denied")),
+        ),
+    ];
+    let keys = keys_store().await;
+    let (ch_url, seen) = canned(200, "").await;
+    let history = Arc::new(rustic_git_workspaces::history::History::new(&ch_url, "default", ""));
+    let s = admin_server_with_history(routes, keys, Some(history)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/quota-requests/qr-1/deny", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "over budget"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let bodies = seen.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    assert!(bodies[0].starts_with("INSERT INTO rustic.events FORMAT JSONEachRow\n"), "{}", bodies[0]);
+    assert!(bodies[0].contains(r#""kind":"admin.deny""#), "{}", bodies[0]);
+}
+
+/// ClickHouse being down must never cost the admin write, or the audit row it already made: the
+/// object-store copy is the record, and the events copy is best-effort on top of it.
+#[tokio::test]
+async fn admin_write_survives_a_dead_clickhouse() {
+    let routes = vec![
+        get(format!("{API}/quotarequests/qr-1"), req_obj("qr-1", "karthik", Some("pending"))),
+        patch(
+            format!("{API}/quotarequests/qr-1/status"),
+            req_obj("qr-1", "karthik", Some("denied")),
+        ),
+    ];
+    let keys = keys_store().await;
+    let (ch_url, _seen) = canned(500, "DB::Exception: down").await;
+    let history = Arc::new(rustic_git_workspaces::history::History::new(&ch_url, "default", ""));
+    let s = admin_server_with_history(routes, keys, Some(history)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/quota-requests/qr-1/deny", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "over budget"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/admin/audit", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["action"], "deny");
 }
