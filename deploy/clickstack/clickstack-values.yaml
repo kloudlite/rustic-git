@@ -128,8 +128,22 @@ hyperdx:
           hosts: [hyperdx.dev.kloudlite.io]
 
 mongodb:
-  # HyperDX's own state (saved searches, dashboards, alert definitions). Small, and unrelated to
-  # the platform's Mongo — do NOT point it at `rustic-git-mongo`.
+  # HyperDX's own state (saved searches, dashboards, alert definitions) — including the alert
+  # definitions `deploy/alerts.md` says to create by hand, which is exactly why this gets a real
+  # volume rather than the operator's default: losing it means recreating every rule from the
+  # catalogue. Small, and unrelated to the platform's Mongo — do NOT point it at
+  # `rustic-git-mongo`.
   enabled: true
   spec:
     members: 1
+    statefulSet:
+      spec:
+        volumeClaimTemplates:
+          - metadata:
+              name: data-volume
+            spec:
+              accessModes: [ReadWriteOnce]
+              storageClassName: managed-csi
+              resources:
+                requests:
+                  storage: 10Gi

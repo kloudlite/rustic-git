@@ -1,25 +1,32 @@
-# The region's OpenTelemetry agent collector: it scrapes what this cluster exposes and exports it
-# to the ClickStack gateway on AKS. One replica — this is a scraper, not a sidecar, and two would
-# double every sample.
+# The region's OpenTelemetry collectors: a DaemonSet that reads what is only readable ON a node,
+# and a single Deployment for the one receiver that must not run per node.
 #
-# ponytail: one Deployment, so `kubeletstats` and `filelog` see only the node this pod lands on —
-# node/pod resource usage and pod logs are complete for that node and absent for the others, while
-# `prometheus` and `k8s_cluster` cover the whole cluster from anywhere. That is enough for the
-# console's fleet charts (the agent's own `node_pool_bytes_*` gauges come through the prometheus
-# scrape, cluster-wide). Upgrade path when per-node logs matter: make this a DaemonSet and split
-# the cluster-wide receivers into a second, single-replica Deployment, because `k8s_cluster` on
-# every node would multiply every cluster metric by the node count.
+# The split is forced by the receivers, not by taste. `kubeletstats` and `filelog` see only the
+# node they run on, so they must be everywhere; `k8s_cluster` reports the whole cluster from the
+# API server, so running it on every node would multiply every cluster metric by the node count.
+# The `prometheus` receiver could run either way, and it rides the DaemonSet with a relabel that
+# keeps only this node's pods — one scraper per node, each covering its own, so no target is
+# scraped twice and no pod is missed.
 #
-# What `rustic-git-otel-agent` may do in this cluster (the header table IS the role):
+# What `rustic-git-otel-agent` may do in this cluster (the header table IS the role — both
+# workloads share one ServiceAccount, because neither reads anything the other may not):
 #
-# | Resource                | Verbs            | Why                                                  |
-# |-------------------------|------------------|------------------------------------------------------|
-# | pods                    | get,list,watch   | the prometheus receiver's service discovery, and     |
-# |                         |                  | k8sattributes' pod -> owner/namespace enrichment     |
-# | nodes, nodes/proxy      | get,list,watch   | kubeletstats reads each node's /stats/summary        |
-# | nodes/metrics           | get              | the same, on clusters that gate it separately        |
-# | namespaces, replicasets | get,list,watch   | k8sattributes resolves a pod's workload through them |
-# | services, endpoints     | get,list,watch   | prometheus service discovery's other half            |
+# | Resource                          | Verbs            | Why                                    |
+# |-----------------------------------|------------------|----------------------------------------|
+# | pods                              | get,list,watch   | the prometheus receiver's service      |
+# |                                   |                  | discovery, and k8sattributes' pod ->   |
+# |                                   |                  | owner/namespace enrichment             |
+# | nodes, nodes/proxy, nodes/stats   | get,list,watch   | kubeletstats reads each node's         |
+# |                                   |                  | /stats/summary through the kubelet     |
+# | nodes/metrics                     | get              | the same, on clusters that gate it     |
+# |                                   |                  | separately                             |
+# | namespaces, replicasets           | get,list,watch   | k8sattributes resolves a pod's         |
+# |                                   |                  | workload through them                  |
+# | services, endpoints               | get,list,watch   | prometheus service discovery's other   |
+# |                                   |                  | half                                   |
+# | daemonsets, deployments,          | get,list,watch   | k8s_cluster's object counts and phases |
+# | statefulsets, events,             |                  | — the Deployment below, not the        |
+# | resourcequotas                    |                  | DaemonSet                              |
 #
 # NOT granted, deliberately: anything in `rustic-git.io` (the CRDs are the API's and the agent's,
 # and telemetry has no business reading a workspace's spec), any write verb at all, and secrets.
@@ -38,21 +45,16 @@ rules:
     resources: ["pods", "nodes", "namespaces", "services", "endpoints"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["nodes/proxy"]
+    resources: ["nodes/proxy", "nodes/stats"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["nodes/metrics"]
     verbs: ["get"]
   - apiGroups: ["apps"]
-    resources: ["replicasets"]
-    verbs: ["get", "list", "watch"]
-  # k8s_cluster's own reads: it reports the cluster's object counts and phases, which is where
-  # `nodes_ready` and the pod-phase gauges come from. Read-only, like everything above.
-  - apiGroups: ["apps"]
-    resources: ["daemonsets", "deployments", "statefulsets"]
+    resources: ["replicasets", "daemonsets", "deployments", "statefulsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["nodes/stats", "events", "resourcequotas"]
+    resources: ["events", "resourcequotas"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -68,6 +70,7 @@ subjects:
     name: rustic-git-otel-agent
     namespace: kube-system
 ---
+# The per-node half.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -88,6 +91,12 @@ data:
                 - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
                   action: keep
                   regex: "true"
+                # This pod's node only. Discovery is cluster-wide on every node, so without this
+                # each of N collectors would scrape all N nodes' pods and every counter would
+                # arrive N times.
+                - source_labels: [__meta_kubernetes_pod_node_name]
+                  action: keep
+                  regex: ${env:K8S_NODE_NAME}
                 # The annotation names the metrics port; without this rewrite discovery would
                 # scrape the pod's first declared port, which for most of ours is not 9464.
                 - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
@@ -101,16 +110,14 @@ data:
                   target_label: k8s_namespace_name
                 - source_labels: [__meta_kubernetes_pod_node_name]
                   target_label: k8s_node_name
-      # Node and pod CPU/memory/filesystem, straight from each kubelet. This is why the agent
-      # exports only the two gauges the kubelet cannot know (btrfs pool, running worktrees).
+      # Node and pod CPU/memory/filesystem, straight from THIS node's kubelet. This is why the
+      # agent exports only the two gauges the kubelet cannot know (btrfs pool, running worktrees).
       kubeletstats:
         collection_interval: 15s
         auth_type: serviceAccount
         endpoint: https://${env:K8S_NODE_NAME}:10250
         insecure_skip_verify: true
         metric_groups: [node, pod, container]
-      k8s_cluster:
-        collection_interval: 30s
       # Pod logs, so HyperDX has logs beside metrics. Our binaries keep plain tracing output;
       # `RUSTIC_GIT_LOG_FORMAT=json` makes them structured here without changing the code.
       filelog:
@@ -126,11 +133,18 @@ data:
         passthrough: false
         extract:
           metadata: [k8s.namespace.name, k8s.pod.name, k8s.node.name, k8s.deployment.name, k8s.container.name]
-      # The one label every query in `history/series.rs` and `history/alerts.rs` filters on. Set
-      # here, per cluster, because nothing in the telemetry itself knows which region it is in.
-      # `k8s.node.name` is upserted alongside it for the same reason the alert rules group by node:
-      # the prometheus receiver's relabelled `k8s_node_name` is a metric label, not a resource
-      # attribute, and the per-node rules read the resource.
+      # `region` is the one label every query in `history/series.rs` and `history/alerts.rs`
+      # filters on, and nothing in the telemetry itself knows which region it is in — so it is
+      # stamped here, per cluster.
+      #
+      # `k8s.node.name` is INSERTED (never upserted) from the downward API, and it is correct only
+      # because this is a DaemonSet whose receivers all read the local node: every datapoint that
+      # reaches this processor without the attribute came from this node, so naming it is a fact,
+      # not a guess. The per-node alert rules — `PoolAlmostFull` and `NodeDiskAlmostFull`, which
+      # group by `ResourceAttributes['k8s.node.name']` and take the worst node — read exactly this,
+      # and `insert` leaves alone the datapoints kubeletstats and k8sattributes already labelled.
+      # If this ever becomes a Deployment again, DELETE this line: it would relabel the whole
+      # fleet as one node and both rules would silently report one node's disk as everyone's.
       resource:
         attributes:
           - { key: region, value: "${env:RUSTIC_GIT_REGION}", action: upsert }
@@ -153,7 +167,7 @@ data:
     service:
       pipelines:
         metrics:
-          receivers: [prometheus, kubeletstats, k8s_cluster]
+          receivers: [prometheus, kubeletstats]
           processors: [k8sattributes, resource, batch]
           exporters: [otlphttp]
         logs:
@@ -161,13 +175,49 @@ data:
           processors: [k8sattributes, resource, batch]
           exporters: [otlphttp]
 ---
+# The cluster-wide half. Same image, same ServiceAccount, one receiver.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rustic-git-otel-cluster
+  namespace: kube-system
+data:
+  config.yaml: |
+    receivers:
+      k8s_cluster:
+        collection_interval: 30s
+
+    processors:
+      # `region` only. NO `k8s.node.name` here: these metrics describe every node in the cluster
+      # and already carry the right one per datapoint — stamping this pod's would be a lie.
+      resource:
+        attributes:
+          - { key: region, value: "${env:RUSTIC_GIT_REGION}", action: upsert }
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+
+    exporters:
+      otlphttp:
+        endpoint: https://otel.dev.kloudlite.io
+        headers:
+          authorization: "${env:OTEL_INGESTION_KEY}"
+        retry_on_failure: { enabled: true }
+        sending_queue: { enabled: true, queue_size: 5000 }
+
+    service:
+      pipelines:
+        metrics:
+          receivers: [k8s_cluster]
+          processors: [resource, batch]
+          exporters: [otlphttp]
+---
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: rustic-git-otel-agent
   namespace: kube-system
 spec:
-  replicas: 1
   selector:
     matchLabels: { app: rustic-git-otel-agent }
   template:
@@ -175,17 +225,27 @@ spec:
       labels: { app: rustic-git-otel-agent }
     spec:
       serviceAccountName: rustic-git-otel-agent
+      # Control-plane nodes run pods too (the gateway, ZeroFS), and their logs and kubelet stats
+      # are as interesting as any worker's — a collector that skipped them would leave a hole
+      # nothing else fills.
+      tolerations:
+        - operator: Exists
       containers:
         - name: collector
-          image: otel/opentelemetry-collector-contrib:0.109.0
+          # Pinned by index digest, like every other image in deploy/. Load-bearing beyond the
+          # usual reproducibility argument: `k8s.node.cpu.utilization` and
+          # `k8s.node.memory.utilization` — the two metrics the console's `cpu_used` and
+          # `memory_used` series are built on — were removed from kubeletstats in a later release.
+          # Bumping this tag without rewriting `history::series` empties both charts.
+          image: otel/opentelemetry-collector-contrib:0.109.0@sha256:af0f72b2d2493fc17f06cf3bc136548240cd7ebb2c8b1c8a7be6f3eb03068389
           args: ["--config=/conf/config.yaml"]
           env:
             - name: K8S_NODE_NAME
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
             - name: RUSTIC_GIT_REGION
-              # Edit per region before applying — this is the value every console query filters on,
-              # and it must equal the region's `Region` CR id or its charts stay empty.
-              value: westeurope-k3s
+              # Edit per region before applying — this is the value every console query filters
+              # on, and it must equal the region's `Region` CR id or its charts stay empty.
+              value: centralindia-k3s
             - name: OTEL_INGESTION_KEY
               # No `optional: true`: a collector that started without the key would export nothing
               # and look healthy, which is strictly worse than the CrashLoopBackOff a missing
@@ -202,3 +262,37 @@ spec:
           configMap: { name: rustic-git-otel-agent }
         - name: varlogpods
           hostPath: { path: /var/log/pods }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-otel-cluster
+  namespace: kube-system
+spec:
+  # ONE, and it must stay one: `k8s_cluster` reports the whole cluster, so a second replica is a
+  # second copy of every cluster metric, not redundancy.
+  replicas: 1
+  selector:
+    matchLabels: { app: rustic-git-otel-cluster }
+  template:
+    metadata:
+      labels: { app: rustic-git-otel-cluster }
+    spec:
+      serviceAccountName: rustic-git-otel-agent
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.109.0@sha256:af0f72b2d2493fc17f06cf3bc136548240cd7ebb2c8b1c8a7be6f3eb03068389
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - name: RUSTIC_GIT_REGION
+              value: centralindia-k3s
+            - name: OTEL_INGESTION_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-otel, key: key } }
+          volumeMounts:
+            - { name: conf, mountPath: /conf }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: conf
+          configMap: { name: rustic-git-otel-cluster }

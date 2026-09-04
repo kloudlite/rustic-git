@@ -397,11 +397,14 @@ the agent gets `get/list/watch` on `ClusterSettings` and nothing to write it wit
 
 Telemetry is **ClickStack's**, not ours: the official charts run ClickHouse, a gateway OTel
 collector and HyperDX on AKS (`deploy/clickstack/`), and an `opentelemetry-collector-contrib`
-agent in every cluster (`deploy/k3s/otel-agent.yaml`, copied into `deploy/rustic-git.yaml` for AKS
-with three changes and no others) scrapes the pods already annotated `prometheus.io/scrape`, reads
-the kubelet for node and pod resource usage, ships pod logs, stamps `region`, and exports OTLP to
-the gateway — which writes the exporter's own `default.otel_*` tables. **We write no metrics
-pipeline**; if a number is missing the fix is collector config.
+pair in every cluster (`deploy/k3s/otel-agent.yaml`, copied into `deploy/rustic-git.yaml` for AKS
+with three changes and no others) — a DaemonSet for everything only readable ON a node (this
+node's `prometheus.io/scrape` pods, the kubelet's resource usage, pod logs, and the
+`k8s.node.name` stamp the per-node alert rules group by) and a one-replica Deployment for
+`k8s_cluster`, which reports the whole cluster and would multiply by the node count anywhere else.
+Both stamp `region` and export OTLP to the gateway — which writes the exporter's own
+`default.otel_*` tables. **We write no metrics pipeline**; if a number is missing the fix is
+collector config.
 
 What IS ours is the `rustic` database, and **the admin process is its only writer** (`bins/api`
 with `RUSTIC_GIT_API_ROLE=admin`, `crates/workspaces/src/history/`): `events` (the record, no TTL),

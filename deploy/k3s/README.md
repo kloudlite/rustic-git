@@ -18,7 +18,7 @@ Files, in the order a cluster is built:
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `zerofs.yaml` | The region's shared-home NFS export (ZeroFS, single replica — see its header). Apply before rolling agents with `WS_HOMES_EXPORT` set; see "Shared home" below. |
 | `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods, and metrics (9464) only from the OTel collector's pod in `kube-system` (`otel-agent.yaml`). It used to name a namespace called `monitoring` that never existed, so 9464 was unreachable and the agent's gauges went nowhere. No Service — discovery is by pod IP from the API. See "Replication" below. |
-| `otel-agent.yaml` | The region's OpenTelemetry collector: ServiceAccount + ClusterRole (the header table is the role), the scrape/kubelet/log config, and one Deployment. Exports to the ClickStack gateway on AKS. Needs the `rustic-git-otel` Secret first (`../clickstack/README.md`) and `RUSTIC_GIT_REGION` edited to this region's id. |
+| `otel-agent.yaml` | The region's OpenTelemetry collectors: ServiceAccount + ClusterRole (the header table is the role), a DaemonSet for the per-node receivers (kubelet stats, pod logs, and this node's `prometheus.io/scrape` pods) and a one-replica Deployment for `k8s_cluster`. Exports to the ClickStack gateway on AKS. Needs the `rustic-git-otel` Secret first (`../clickstack/README.md`) and `RUSTIC_GIT_REGION` edited to this region's id. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `rustic-git-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
@@ -1016,7 +1016,10 @@ admin process runs one reflector per kind per region and turns the transitions i
 charts stay empty while every other admin surface works. It grants no new authority — a `watch` is
 a streamed `list`.
 
-`deploy/rustic-git.yaml` gains the AKS copy of the collector (namespace `rustic-git`, region
-`central`, exporting to the gateway's ClusterIP) and four env vars on `rustic-git-admin`:
-`RUSTIC_GIT_CLICKHOUSE_URL`/`_USER`/`_PASSWORD` and `RUSTIC_GIT_HYPERDX_URL`. All optional —
-unset, the admin process behaves exactly as it did and `/admin/history/*` answers 503.
+`deploy/rustic-git.yaml` gains the AKS copy of the collectors (namespace `rustic-git`, region
+`central`, exporting to the gateway's ClusterIP) and five env vars on `rustic-git-admin`:
+`RUSTIC_GIT_CLICKHOUSE_URL`/`_USER`/`_PASSWORD`, `RUSTIC_GIT_HYPERDX_URL` and
+`RUSTIC_GIT_REGION`. The first four are optional — unset, the admin process behaves exactly as it
+did and `/admin/history/*` answers 503. `RUSTIC_GIT_REGION` labels the watch against the mounted
+kubeconfig's cluster and must equal that region's collector value (`centralindia-k3s`), or
+telemetry and events land under different region names and neither side looks wrong.
