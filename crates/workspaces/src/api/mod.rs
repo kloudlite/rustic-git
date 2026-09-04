@@ -229,11 +229,6 @@ pub struct ApiState {
     /// wherever the cache is disabled; the consumer then never spawns, which costs the activity
     /// feed its PR half and nothing else (CLAUDE.md: the stream is a nudge, never the record).
     pub cache: Option<Arc<rustic_git_storage::cache::Cache>>,
-    /// The previous `/metrics` sweep, so the Monitoring page's rate rules have a second point to
-    /// compare against without scraping twice on every request. ponytail: in-memory and
-    /// single-process — a restart or the other replica just means the next request pays the 5 s
-    /// window itself. Upgrade path: a real Prometheus, at which point this whole cache goes.
-    pub metrics_sample: Arc<std::sync::Mutex<Option<(std::time::Instant, admin::monitoring::Sample)>>>,
 }
 
 impl ApiState {
@@ -248,7 +243,6 @@ impl ApiState {
             peer: None,
             history: None,
             cache: None,
-            metrics_sample: Default::default(),
         }
     }
 

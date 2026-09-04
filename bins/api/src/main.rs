@@ -349,12 +349,13 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as rustic_git_api::KeysChanged
     });
-    // The hourly folds. Spawned from the admin role only, and only with ClickHouse configured —
-    // the fold itself is a cluster-wide list, and running it hourly for nowhere to write it would
-    // be pure load on the API server.
+    // The hourly folds and the alert evaluator. Spawned from the admin role only, and only with
+    // ClickHouse configured — the fold itself is a cluster-wide list, and running either for
+    // nowhere to write it would be pure load on the API server.
     if role == "admin" {
         if let Some(ws) = workspaces.clone() {
             if ws.history.is_some() {
+                tokio::spawn(rustic_git_workspaces::history::alerts::evaluate_forever(ws.clone()));
                 tokio::spawn(rustic_git_workspaces::history::beats::run_beats(ws));
             }
         }

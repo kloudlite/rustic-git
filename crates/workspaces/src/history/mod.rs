@@ -17,6 +17,7 @@
 //! every caller treats that as "history unavailable" rather than an error, so a deployment without
 //! ClickStack behaves exactly as it did before this module existed.
 
+pub mod alerts;
 pub mod beats;
 pub mod events;
 pub mod schema;
