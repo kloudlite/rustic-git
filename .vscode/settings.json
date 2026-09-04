@@ -1,0 +1,11 @@
+{
+  // `.worktrees/` holds throwaway checkouts that agents create and delete while executing plans.
+  // Their web/ trees have no node_modules until the plan installs them, so the TypeScript server
+  // would report every import as unresolved and keep reporting on files after the worktree is
+  // gone. Excluding the directory from the file tree, the watcher and search keeps the editor on
+  // the real checkout; `bunx tsc --noEmit` in each worktree remains the gate that matters.
+  "files.exclude": { ".worktrees": true },
+  "files.watcherExclude": { "**/.worktrees/**": true, "**/target/**": true },
+  "search.exclude": { ".worktrees": true, "target": true },
+  "typescript.tsserver.watchOptions": { "excludeDirectories": ["**/.worktrees", "**/target"] }
+}

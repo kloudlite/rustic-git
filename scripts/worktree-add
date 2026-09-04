@@ -1,0 +1,11 @@
+#!/bin/sh
+# Create a plan worktree that is complete before any tool opens a file in it: the git checkout
+# AND the web dependencies. Without the second half, an editor watching the tree reports every
+# import in web/ as unresolved until someone runs `bun install` there.
+#   scripts/worktree-add <name> [base]
+set -eu
+name=$1; base=${2:-master}
+root=$(git rev-parse --show-toplevel)
+git -C "$root" worktree add -q ".worktrees/$name" -b "$name" "$base"
+( cd "$root/.worktrees/$name/web" && bun install --frozen-lockfile >/dev/null 2>&1 ) || echo "bun install failed in .worktrees/$name/web" >&2
+echo "$root/.worktrees/$name"
