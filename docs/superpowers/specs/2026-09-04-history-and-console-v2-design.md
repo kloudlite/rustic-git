@@ -126,7 +126,7 @@ one-shot migration copies them, then the old CRD is retired in a later release).
 
 ```yaml
 spec:
-  owner: acme            # person or team slug — truth, never a label
+  owner: acme            # person or team slug — truth, never a label; for kind=access the ASKER's slug (access.team names the team)
   kind: quota | access | region | other
   requestedBy: meera@…   # the signed-in user; a team member with role ≥ admin for a team
   reason: "…"            # required, shown to the decider
@@ -142,8 +142,7 @@ status:
 
 Rules: one pending request per owner **per kind**; the API refuses a second with 409.
 Approve semantics: quota → write the `Quota` then mark (as today, editable values allowed);
-access → the admin process asks the server tier (peer route) to set the membership/role, then
-marks; region → records the grant on the `OwnerBinding` (`status.regions`), then marks —
+access → the admin process grants through its own directory handle (`Directory::grant_access`, add member + set role; no peer hop — the deciding process already holds the directory), then marks; region → records the grant on the owner's `Quota` (`spec.regions`, the one per-owner admin-written object; an `OwnerBinding` is per {owner, region} and controller-authored), then marks —
 `/v1` placement honours it once per-owner region gating exists, and until then it is a
 recorded decision only (said plainly in the decision panel); other → a required free-text
 resolution, then marks. Every decision audits and emits `request.approved/denied`.
