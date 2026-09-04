@@ -1,7 +1,6 @@
 import type {
   AdminClusterDetail,
   AdminClusterRow,
-  AdminNode,
   ApiEnvironment,
   ApiRegion,
   ApiVolumeSummary,
@@ -211,13 +210,6 @@ const EVENTS: HistoryEvent[] = [
   { id: "e5", ts: ago(32), kind: "quota.set", actor: "karthik", owner: "ops-lab", target: "Quota/ops-lab", region: null, attrs: { detail: "cpu 24 → 32" } },
 ];
 
-const NODES: AdminNode[] = [
-  { name: "session-1", ready: true, decommission: false, decommissionStatus: null },
-  { name: "session-2", ready: true, decommission: false, decommissionStatus: null },
-  // A drain in flight and a drain that finished: the two states the node actions branch on.
-  { name: "session-3", ready: true, decommission: true, decommissionStatus: "draining running=2 owned=6 copies=4 thin=2" },
-];
-
 const WORKLOADS: WorkloadDoc[] = [
   { scope: "central", name: "rustic-git-srv", kind: "statefulset", image: "ghcr.io/kloudlite/rustic-git:f87fddb1", ready: 3, desired: 3, rolloutState: "Stable", lastRoll: null },
   { scope: "central", name: "rustic-git-api", kind: "deployment", image: "ghcr.io/kloudlite/rustic-git-api:f87fddb1", ready: 1, desired: 2, rolloutState: "RollingOut", lastRoll: { by: "karthik", at: ago(4), reason: "Rotate the peer secret before the drain." } },
@@ -267,16 +259,16 @@ const SIGNALS: SignalsResponse = {
   // The catalogue is `deploy/alerts.md`'s, verbatim, including the two this process cannot
   // evaluate without a window — `unknown` is a first-class answer there, never guessed as ok.
   signals: [
-    { alert: "NoLeader", state: "ok", why: "Exactly one pod holds the lease.", detail: "ownership_is_leader = 1" },
-    { alert: "LeaseRenewFailing", state: "ok", why: "No renew failures in the last scrape.", detail: "0 failures across 3 pods" },
-    { alert: "DbFenceDetected", state: "ok", why: "No node has opened a database another holds.", detail: "db_fence_detected_total = 0" },
-    { alert: "Http5xxRate", state: "ok", why: "Below the 5% threshold on both listeners.", detail: "public 0.4%, peer 0.1%" },
-    { alert: "MisdirectedWrites", state: "firing", why: "421s have not settled since the api roll.", detail: "0.34/s over 10m, threshold 0.1/s" },
-    { alert: "ReconcileErrors", state: "ok", why: "Under the 20% error ratio for every kind.", detail: "workspace 0%, volume 2%, environment 0%" },
-    { alert: "TunnelSaturation", state: "ok", why: "Well under MAX_TUNNELS.", detail: "max 214 of 1000 per pod" },
-    { alert: "WorkerHeartbeatStale", state: "unknown", why: "Needs a 1 h restart window this process cannot see.", detail: null },
-    { alert: "PoolAlmostFull", state: "firing", why: "btrfs starts failing allocations past 80%.", detail: "session-3 at 84% of /wspool-prod" },
-    { alert: "NodeDiskAlmostFull", state: "unknown", why: "node-exporter was not scrapeable on eu-2.", detail: null },
+    { alert: "NoLeader", state: "ok", why: "Exactly one pod holds the lease.", detail: "ownership_is_leader = 1", region: null },
+    { alert: "LeaseRenewFailing", state: "ok", why: "No renew failures in the last scrape.", detail: "0 failures across 3 pods", region: null },
+    { alert: "DbFenceDetected", state: "ok", why: "No node has opened a database another holds.", detail: "db_fence_detected_total = 0", region: null },
+    { alert: "Http5xxRate", state: "ok", why: "Below the 5% threshold on both listeners.", detail: "public 0.4%, peer 0.1%", region: null },
+    { alert: "MisdirectedWrites", state: "firing", why: "421s have not settled since the api roll.", detail: "0.34/s over 10m, threshold 0.1/s", region: null },
+    { alert: "ReconcileErrors", state: "ok", why: "Under the 20% error ratio for every kind.", detail: "workspace 0%, volume 2%, environment 0%", region: "centralindia-k3s" },
+    { alert: "TunnelSaturation", state: "ok", why: "Well under MAX_TUNNELS.", detail: "max 214 of 1000 per pod", region: "centralindia-k3s" },
+    { alert: "WorkerHeartbeatStale", state: "unknown", why: "Needs a 1 h restart window this process cannot see.", detail: null, region: "centralindia-k3s" },
+    { alert: "PoolAlmostFull", state: "firing", why: "btrfs starts failing allocations past 80%.", detail: "session-3 at 84% of /wspool-prod", region: "centralindia-k3s" },
+    { alert: "NodeDiskAlmostFull", state: "unknown", why: "node-exporter was not scrapeable on eu-2.", detail: null, region: "westeurope-k3s" },
   ],
   restarts: [
     { workload: "rustic-git-srv", restarts: 0 },
@@ -286,7 +278,7 @@ const SIGNALS: SignalsResponse = {
   ],
   scrape_failures: [["eu-2", "connect timed out after 2s"]],
   pods_listed: 17,
-  grafana_url: "https://grafana.kloudlite.io/d/rustic-git",
+  hyperdx_url: "https://hyperdx.kloudlite.io/search",
 };
 
 const OVERVIEW: Overview = {
@@ -411,7 +403,6 @@ const REGION_SCALE: Record<string, number> = { "westeurope-k3s": 0.55 };
 const EXACT: Record<string, unknown> = {
   "/admin/overview": OVERVIEW,
   "/admin/owners": OWNERS,
-  "/admin/nodes": NODES,
   "/admin/clusters": CLUSTERS,
   "/admin/workloads": WORKLOADS,
   "/admin/monitoring/signals": SIGNALS,

@@ -63,10 +63,11 @@ summary as a key/value grid with source chips linking to Configuration. Fixes v1
 names and nothing operable.
 
 **Monitoring.dc.html** (1440×1180) — KPI strip, the alert rules from `deploy/alerts.md` as a
-signals table (rule, state pill including `unknown`, why it fires, the current detail, last change),
-central workloads with restarts and last roll, and an "Active silences" section that is an honest
-empty state — one sentence plus one action — rather than an empty box. Grafana sits in the page
-header.
+signals table (rule, region, state pill including `unknown`, why it fires, the current detail),
+sorted by region so fleet-wide and per-region rules read as two groups without a sub-header
+component; central workloads with restarts and last roll, and an "Active silences" section that is
+an honest empty state — one sentence plus one action — rather than an empty box. An "Open in
+HyperDX" link sits in the page header.
 
 **Audit.dc.html** (1440×980) — new in v2. KPI strip (events today, actors, refusals, exports), a
 filter toolbar (actor, free-text action, date range, Export CSV) and the log itself: when, actor with
@@ -85,3 +86,21 @@ and each cluster) as a table of Field, current value, source chip (`stored` / `e
 range, and takes-effect (`live`, or `boot: rolls <reader>`). A search box filters fields. Nothing is
 editable here, which is the point: the page exists so nobody has to guess whether a value came from
 the manifest, the environment or the admin API.
+
+## Built as
+
+| Artboard | Route | Page | Components |
+|---|---|---|---|
+| Main.dc.html | `/superadmin` | `app/(shell)/superadmin/page.tsx` | `ui/kpi`, `ui/section`, `ui/capacity-bar`, `ui/timeline`, `ui/data-table`; `lib/history.ts` |
+| Requests.dc.html | `/superadmin/requests` | `requests/page.tsx` | `requests/request-queue.tsx`, `requests/decision-panel.tsx`, `requests/facts.tsx`; `lib/request-queue.ts` |
+| Owners.dc.html | `/superadmin/owners` | `owners/page.tsx` | `owners/defaults-table.tsx`, `owners/owners-table.tsx`; `lib/owners-sort.ts` |
+| Owner.dc.html | `/superadmin/owners/{slug}` | `owners/[slug]/page.tsx` | `owners/[slug]/live-objects.tsx`, `owners/[slug]/set-quota-form.tsx` |
+| Clusters.dc.html | `/superadmin/clusters` | `clusters/page.tsx` | `clusters/region-card.tsx`, `clusters/add-region-form.tsx` |
+| Cluster.dc.html | `/superadmin/clusters/{region}` | `clusters/[region]/page.tsx` | `clusters/node-actions.tsx`, `roll-table.tsx`; `lib/nodes.ts` |
+| Monitoring.dc.html | `/superadmin/monitoring` | `monitoring/page.tsx` | `signals-table.tsx`, `roll-table.tsx` |
+| Audit.dc.html | `/superadmin/audit` | `audit/page.tsx` | `audit/audit-table.tsx`, `audit/audit-filters.tsx`; `lib/audit-result.ts` |
+| Access.dc.html | `/superadmin/access` | `access/page.tsx` | `access/access-table.tsx` |
+| Configuration.dc.html | `/superadmin/configuration` | `configuration/page.tsx` | `configuration/scope-table.tsx`; `lib/config-rows.ts` |
+
+Screenshots: `cd web && RUSTIC_GIT_ADMIN_FIXTURES=1 bun run dev`, then
+`node scripts/superadmin-screens.mjs` writes each route at 1440 into `.local/screens/`.

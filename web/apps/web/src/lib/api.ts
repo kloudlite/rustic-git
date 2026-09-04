@@ -1049,20 +1049,6 @@ export type QuotaRequestDoc = {
   createdAt?: string | null;
 };
 
-export function createQuotaRequest(
-  body: { owner?: string; requested: Partial<Record<QuotaDim, number>>; reason: string },
-  token: string,
-) {
-  return call<QuotaRequestDoc>("/v1/quota-requests", { method: "POST", token, body: JSON.stringify(body) });
-}
-
-/** No `owner` and the superadmin claim is the whole queue; otherwise the caller's own and their
- *  teams'. */
-export function listQuotaRequests(owner: string | undefined, token: string) {
-  const q = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-  return call<QuotaRequestDoc[]>(`/v1/quota-requests${q}`, { method: "GET", token });
-}
-
 export type { RequestDoc, RequestKind } from "@/lib/requests";
 import type { RequestDoc } from "@/lib/requests";
 
@@ -1110,30 +1096,15 @@ export function adminDecideRequest(
 
 // ── /admin (a separate host — crates/workspaces/src/api/admin.rs) ──────────
 
-/** The whole queue, every owner — unlike `listQuotaRequests`, there is no default `owner` filter.
- *  `filter.owner`/`filter.state` are server-side narrowing (Task 2's `?owner=&state=`); anything
- *  finer (free text, dimension, age) stays client-side over the fetched page, per the ladder. */
+/** The whole queue, every owner — there is no default `owner` filter. `filter.owner`/`filter.state`
+ *  are server-side narrowing (Task 2's `?owner=&state=`); anything finer (free text, dimension,
+ *  age) stays client-side over the fetched page, per the ladder. */
 export function adminListQuotaRequests(token: string, filter?: { owner?: string; state?: string }) {
   const q = new URLSearchParams();
   if (filter?.owner) q.set("owner", filter.owner);
   if (filter?.state) q.set("state", filter.state);
   const qs = q.toString();
   return adminCall<QuotaRequestDoc[]>(`/admin/quota-requests${qs ? `?${qs}` : ""}`, { method: "GET", token });
-}
-
-/** `requested` is the operator's edited grant — omitted, approve grants exactly what was asked. */
-export function adminDecideQuotaRequest(
-  id: string,
-  decision: "approve" | "deny",
-  note: string,
-  token: string,
-  requested?: Partial<Record<QuotaDim, number>>,
-) {
-  return adminCall<QuotaRequestDoc>(`/admin/quota-requests/${encodeURIComponent(id)}/${decision}`, {
-    method: "POST",
-    token,
-    body: JSON.stringify({ note: note || undefined, requested }),
-  });
 }
 
 /** `note` required and non-empty (422 otherwise) — a quota write is dangerous per the Global
@@ -1201,10 +1172,6 @@ export function adminDeleteEnvironment(id: string, token: string, note: string) 
 }
 
 export type AdminNode = { name: string; ready: boolean; decommission: boolean; decommissionStatus: string | null };
-
-export function adminListNodes(token: string) {
-  return adminCall<AdminNode[]>("/admin/nodes", { method: "GET", token });
-}
 
 export function adminAudit(token: string, filter: AuditFilter) {
   return adminCall<AuditPage>(`/admin/audit${auditQueryString(filter)}`, { method: "GET", token });
@@ -1383,6 +1350,9 @@ export type SignalRow = {
   state: "firing" | "ok" | "unknown";
   why: string;
   detail: string | null;
+  /** Which region this evaluation scraped, or `null` for a fleet-wide (central) rule — lets the
+   *  toolbar group a per-region catalogue without a second fetch. */
+  region: string | null;
 };
 
 /** `Restarts` in the same handler — container restart count since each pod started (Kubernetes
@@ -1396,9 +1366,9 @@ export type SignalsResponse = {
   // most admin responses.
   scrape_failures: [string, string][];
   pods_listed: number;
-  /** Absent (not null — `skip_serializing_if`) unless `RUSTIC_GIT_GRAFANA_URL` is configured, so
+  /** Absent (not null — `skip_serializing_if`) unless `RUSTIC_GIT_HYPERDX_URL` is configured, so
    *  a monitoring page never renders a dead link. */
-  grafana_url?: string;
+  hyperdx_url?: string;
 };
 
 export function adminMonitoringSignals(token: string) {

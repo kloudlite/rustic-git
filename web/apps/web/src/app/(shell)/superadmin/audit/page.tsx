@@ -44,7 +44,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
       <AutoRefresh intervalMs={10_000} />
       <PageHeader title="Audit" purpose="Every superadmin action and every refusal, with the note that justified it." />
       <KpiStrip>
-        <KpiTile label="Events" value={eventsS.summary.last} sub={deltaLabel(eventsS, "events")} series={eventsS} />
+        <KpiTile label="Events today" value={eventsS.summary.last} sub={deltaLabel(eventsS, "events")} series={eventsS} />
         <KpiTile label="Actors" value={actors.size} sub={[...actors].slice(0, 4).join(", ") || "nobody yet"} />
         <KpiTile
           label="Refusals"

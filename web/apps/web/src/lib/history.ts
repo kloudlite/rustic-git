@@ -33,7 +33,6 @@ export const SERIES = [
   "restarts",
   "audit_events",
 ] as const;
-export type SeriesName = (typeof SERIES)[number];
 
 /** The sub-line under a KPI's big number. Never "0" for missing history: a flat placeholder that
  *  reads as "nothing changed" is worse than one that says the source is down. `unit` names the

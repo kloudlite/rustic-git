@@ -10,7 +10,6 @@ test("every route the eight rebuilt pages read has a seeded answer", () => {
     "/admin/owners/acme",
     "/admin/clusters",
     "/admin/clusters/centralindia-k3s",
-    "/admin/nodes",
     "/admin/workloads",
     "/admin/monitoring/signals",
     "/admin/audit?limit=50",

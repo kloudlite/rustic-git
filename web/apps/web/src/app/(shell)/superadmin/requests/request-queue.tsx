@@ -254,6 +254,10 @@ export function RequestQueue({
         )}
       </Section>
       <DecisionPanel
+        // A fresh key per selected request resets the panel's own state (Deny focus, the typed
+        // grant/resolution, "decided" confirmation) — without it, React reuses the mounted
+        // instance and the second request opens holding the first one's half-finished decision.
+        key={active?.id ?? "none"}
         request={active}
         usage={active ? usageByOwner.get(active.owner) : undefined}
         // The owner's own recent decisions, out of the page's one fetch rather than a second read.

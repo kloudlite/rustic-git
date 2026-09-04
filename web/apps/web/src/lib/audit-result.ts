@@ -8,7 +8,7 @@ import type { AuditEntry } from "@/lib/audit";
  *  The wire carries the outcome as `result`, one open string (`"ok"`, `"error: 409"`), not a
  *  numeric status, so the code is read back out of it rather than invented beside it. */
 export function resultPill(entry: AuditEntry): { tone: Tone; label: string } {
-  const label = entry.result?.trim() || "ok";
+  const label = entry.result.trim() || "ok";
   if (!label.startsWith("error")) return { tone: "ok", label };
   const status = Number(label.match(/\d{3}/)?.[0]);
   return { tone: status === 409 ? "warn" : "critical", label };

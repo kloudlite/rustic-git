@@ -446,6 +446,16 @@ filterable lists, repo `settings/` for destructive actions, `lib/time.ts` for si
 formatting. Tokens over raw Tailwind colors; `--radius: 0` — sharp corners everywhere.
 Editor TS diagnostics here are frequently stale; trust `bunx tsc --noEmit -p apps/web/tsconfig.json`.
 
+The `/superadmin` place is the one FULL-WIDTH place (28 px gutter, no `max-w-page`): it is a
+console over the whole fleet, and its tables do not fit a 1120 px column. Every block on those ten
+screens is a `superadmin/ui/section.tsx` `Section` — eyebrow, title, count chip, right toolbar —
+and the tables, capacity bars, pills and KPI tiles beside it in `superadmin/ui/`; nothing there
+draws its own card border. Numbers come from `/admin/*` plus `adminSeries`/`adminHistoryEvents`,
+and a history read that 503s renders a flat placeholder rather than failing the page, so the
+console works with no ClickHouse deployed. `RUSTIC_GIT_ADMIN_FIXTURES=1` answers admin GETs from
+`lib/fixtures/superadmin.ts` (one guard in `adminCall`) so every screen renders offline —
+`scripts/superadmin-screens.mjs` screenshots all ten at 1440 into `.local/screens/`.
+
 ## Deploying
 
 CI builds images tagged with the commit SHA on push to master — **only if that commit's test job
