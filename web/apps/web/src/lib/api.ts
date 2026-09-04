@@ -1127,6 +1127,22 @@ export function adminSettingsSchema(token: string) {
   return adminCall<SettingsSchema>("/admin/settings/schema", { method: "GET", token });
 }
 
+/** `crates/core/settings::StoredCentralSettings` — every field `Option`, `null`/absent meaning
+ *  "never set" (falls back to env, then the built-in default). Read-only here: keyed dynamically
+ *  against `SettingsSchemaRow.name` rather than re-typing every field, same as `adminClusterSettings`. */
+export function adminCentralSettings(token: string) {
+  return adminCall<Record<string, unknown>>("/admin/settings/central", { method: "GET", token });
+}
+
+/** `GET /admin/settings/clusters/{region}` returns the whole `ClusterSettings` CR; only `.spec`
+ *  (same `stored ?? env ?? default` fields as the central document) matters for display. */
+export function adminClusterSettings(region: string, token: string) {
+  return adminCall<{ spec: Record<string, unknown> }>(`/admin/settings/clusters/${encodeURIComponent(region)}`, {
+    method: "GET",
+    token,
+  });
+}
+
 export function createRegion(body: { id: string; name: string }, token: string) {
   return adminCall<{ id: string; name: string; status: string }>("/admin/regions", {
     method: "POST",

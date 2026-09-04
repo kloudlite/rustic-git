@@ -32,3 +32,24 @@ export function rolloutStateLabel(rolloutState: "RollingOut" | "Stable", ready: 
 export function settled(w: { ready: number; desired: number }): boolean {
   return w.ready >= w.desired;
 }
+
+/** A schema row's value, for display: `null`/`undefined` reads as "not set" rather than "null"
+ *  or an empty cell, and a bool prints its word rather than JS's `Boolean.toString` coincidence. */
+export function fmt(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  return String(v);
+}
+
+/** The Configuration page's whole point: `stored ?? env ?? default`, restated in the web tier
+ *  the same order the reader itself resolves a knob (per `CLAUDE.md`'s "Live settings"), so the
+ *  page can label which of the three actually won without asking the backend to say so. */
+export function effectiveValue(
+  stored: unknown,
+  env: string | null,
+  builtinDefault: unknown,
+): { value: unknown; source: "stored" | "env" | "default" } {
+  if (stored !== null && stored !== undefined) return { value: stored, source: "stored" };
+  if (env !== null && env !== undefined) return { value: env, source: "env" };
+  return { value: builtinDefault, source: "default" };
+}
