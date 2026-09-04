@@ -53,8 +53,9 @@ export default async function Page() {
         <KpiTile label="Teams" value={teams} sub="of every owner that can allocate" />
         <KpiTile
           label="Over 80% of a limit"
-          value={over80.summary.last}
-          sub={over80.available ? `${atLimit} of them at the limit` : "history unavailable"}
+          // A hard 0 would read as "nobody is under pressure" when the truth is "nobody counted".
+          value={over80.available ? over80.summary.last : "—"}
+          sub={`${atLimit} of them at the limit`}
           series={over80}
         />
         <KpiTile

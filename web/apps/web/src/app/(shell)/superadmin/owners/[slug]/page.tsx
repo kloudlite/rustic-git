@@ -84,7 +84,8 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
         <KpiTile
           label="Requests pending"
           value={pending.length}
-          sub={pending.length === 0 ? "nothing waiting on a decision" : `oldest ${when(new Date(pending[pending.length - 1].createdAt ?? 0).getTime())}`}
+          // Oldest by timestamp: the queue's order is the api's, not "createdAt descending".
+          sub={pending.length === 0 ? "nothing waiting on a decision" : `oldest ${when(Math.min(...pending.map((q) => new Date(q.createdAt ?? 0).getTime())))}`}
         />
       </KpiStrip>
 

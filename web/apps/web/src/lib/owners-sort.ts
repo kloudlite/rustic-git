@@ -24,6 +24,10 @@ export function byTightest(rows: OwnerRow[]): OwnerRow[] {
 /** The `own` / `default` chip on the owner detail's 3×2 grid — "where did this limit come from"
  *  was the question v1's flat six bars never answered.
  *
+ *  ponytail: one source for all six dimensions, because `OwnerDetail` has one `source` field.
+ *  Upgrade path: add a per-dimension `own: Partial<Record<QuotaDim, number>>` to the Rust
+ *  `OwnerDetail` (`crates/workspaces/src/api/admin.rs`) and key off that instead.
+ *
  *  `dim` is in the signature because the answer is per-dimension the moment the api can say so;
  *  today `OwnerDetail` carries ONE `source` for the whole owner (a `Quota` object replaces all
  *  six limits at once, `adminWriteQuota`), so every dimension reports the same word rather than
