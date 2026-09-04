@@ -6,72 +6,99 @@
    "x": 0,
    "y": 0,
    "w": 1440,
-   "h": 900
+   "h": 1320
   },
   {
    "file": "Requests.dc.html",
-   "x": 1560,
+   "title": "Requests",
+   "x": 1540,
    "y": 0,
    "w": 1440,
-   "h": 900
+   "h": 1240
   },
   {
    "file": "Owners.dc.html",
    "title": "Owners list",
-   "x": 0,
-   "y": 1060,
+   "x": 3080,
+   "y": 0,
    "w": 1440,
-   "h": 900
+   "h": 1260
   },
   {
    "file": "Owner.dc.html",
    "title": "Owner detail",
-   "x": 1560,
-   "y": 1060,
+   "x": 4620,
+   "y": 0,
    "w": 1440,
-   "h": 900
+   "h": 1620
   },
   {
    "file": "Clusters.dc.html",
    "title": "Clusters list",
-   "x": 0,
-   "y": 2120,
+   "x": 6160,
+   "y": 0,
    "w": 1440,
-   "h": 900
+   "h": 980
   },
   {
    "file": "Cluster.dc.html",
    "title": "Cluster detail",
-   "x": 1560,
-   "y": 2120,
+   "x": 0,
+   "y": 1780,
    "w": 1440,
-   "h": 900
+   "h": 1180
   },
   {
    "file": "Monitoring.dc.html",
-   "x": 0,
-   "y": 3180,
+   "title": "Monitoring",
+   "x": 1540,
+   "y": 1780,
    "w": 1440,
-   "h": 900
+   "h": 1180
+  },
+  {
+   "file": "Audit.dc.html",
+   "title": "Audit log",
+   "x": 3080,
+   "y": 1780,
+   "w": 1440,
+   "h": 980
+  },
+  {
+   "file": "Access.dc.html",
+   "title": "Access",
+   "x": 4620,
+   "y": 1780,
+   "w": 1440,
+   "h": 960
+  },
+  {
+   "file": "Configuration.dc.html",
+   "title": "Configuration",
+   "x": 6160,
+   "y": 1780,
+   "w": 1440,
+   "h": 1620
   }
  ],
  "annotations": [
   {
    "id": "brief",
    "x": 0,
-   "y": -130,
-   "w": 520,
-   "text": "Superadmin console, matched to the app: Mona Sans / Hubot Sans, zinc tokens, brand blue, sharp corners, 56 px header, 32 px controls. Left rail replaces the second tab row. Static mockups; numbers are examples."
+   "y": -140,
+   "w": 620,
+   "text": "Superadmin console v2. Same chrome and tokens as the shipped app: Mona Sans / Hubot Sans / JetBrains Mono, #FAFAFA ground, #E4E4E7 borders, #1E6FE8 brand, sharp corners, 56 px header, 208 px rail. v2 adds the section anatomy every block now shares: eyebrow, title, count chip, right toolbar."
   },
   {
-   "id": "nav",
-   "x": 1560,
-   "y": -130,
-   "w": 520,
-   "text": "Navigation: rail \u2192 area list \u2192 detail. Owners list is the way into any person or team; its detail has \"Open as <owner>\" which opens their normal product pages. Header search is scoped to owners, nodes and requests inside superadmin. Back to the product: the kloudlite logo."
+   "id": "row2",
+   "x": 0,
+   "y": 1640,
+   "w": 620,
+   "text": "Row two: the detail and system pages. Requests are generic \u2014 quota, access, region and other all flow through the same queue and the same 420 px decision panel, with a kind-specific facts block. Numbers are realistic samples, not placeholders."
   }
  ],
  "launch": {
-  "view": "canvas"
+  "view": "focused",
+  "file": "Main.dc.html"
  }
 }
