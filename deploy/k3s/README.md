@@ -957,3 +957,8 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 ```
 
 Apply it BEFORE rolling the api image: without it a drain answers 403 from the k3s API server.
+
+On the AKS side, `deploy/rustic-git.yaml`'s `rustic-git-admin-workloads` Role gains `get`/`list`
+on `pods` (namespaced to `rustic-git`) — the Monitoring page's Signals scrape reads each pod's
+`/metrics` and `restartCount` this way instead of assuming a Prometheus. Re-apply it before
+rolling the admin image: without it Signals answers 403.

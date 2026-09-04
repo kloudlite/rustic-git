@@ -173,6 +173,25 @@ so a bug that mounted the wrong router would still 403 at the Kubernetes layer. 
 `/superadmin` area calls this second process at `RUSTIC_GIT_ADMIN_API_URL`, never the ordinary API
 base — mixing them up would silently point an admin page at `/v1` instead.
 
+The eight web areas each map to one admin router file: Requests (`admin/quota-requests*` →
+`admin.rs`'s inline handlers), Owners (`admin/owners.rs`), Clusters (`admin/clusters.rs`, plus
+`admin/settings.rs`/`admin/schema.rs` for the per-region settings tab), Monitoring
+(`admin/monitoring.rs`, `deploy/alerts.md`'s catalogue scraped and evaluated in-process — no
+Prometheus), Audit (`admin/audit.rs`), Access (`crates/api/src/teams.rs`'s superadmin add/remove/list,
+a different binary — the directory, not workspaces), Configuration (`admin/schema.rs`, read-only),
+and Overview (`admin/overview.rs`, composed from every other module's own reader, never a second
+CRD walk). Every write goes through `crate::audit::record`, an append-only row per admin write at
+`audit/{yyyy-mm}/{ts}-{rand}.json` in the object store — kept forever, no pruning route in this
+plan, because an audit log that can be shortened is not one. Drain and decommission are two
+distinct actions, not stages of one: drain only sets the label the agent already watches
+(`crd::DECOMMISSION_LABEL`) — the node keeps running whatever is on it, and the agent's own beat
+does the draining; decommission is a cordon (`spec.unschedulable`) refused with 409 until the
+agent has stamped `drained …`, and stops there — deleting the VM is a human's separate step, never
+something this console does. `nodes: patch` on the `rustic-git-admin` ClusterRole
+(`deploy/k3s/api-rbac.yaml`) and `pods: get`/`list` on the admin Role (`deploy/rustic-git.yaml`,
+for Monitoring's scrape) are both additions this plan needed on top of the quotas-and-superadmin
+RBAC above.
+
 There is no job queue, no lease,
 no agent registration and no long poll: `/v1` writes ONE unplaced object and establishes no facts
 about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, admitted for the owner

@@ -1468,5 +1468,29 @@ else
   [ "$SETTLED" = "Synced" ] || fail "after restoring $STANDBY's pool label, its VolumeReplica for $TAKEOVER_WS_ID never came back Synced"
   log "volume takeover: node JOIN passed (standby moved $STANDBY -> $NEW_STANDBY, old row and subvolume gone, then settled back to $STANDBY)"
 fi
+
+# ---------------------------------------------------------------------------
+# Superadmin console: node drain via the admin host. Drain only sets the
+# label the agent watches (`rustic-git.io/decommission`) — it never touches
+# workload placement itself, so this just asserts the label round-trips and
+# lands an audit row, the same guard as every other $ADMIN_BASE check above.
+# ---------------------------------------------------------------------------
+log "superadmin console: draining $E2E_NODE via $ADMIN_BASE"
+curl -fsS -X POST "$ADMIN_BASE/admin/clusters/$REGION_ID/nodes/$E2E_NODE/drain" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"reason":"e2e drain check"}' >/dev/null
+DRAIN_LABEL=$(kubectl get node "$E2E_NODE" -o jsonpath='{.metadata.labels.rustic-git\.io/decommission}')
+[ "$DRAIN_LABEL" = "true" ] || fail "drain did not set rustic-git.io/decommission=true on $E2E_NODE (got '$DRAIN_LABEL')"
+
+curl -fsS -X POST "$ADMIN_BASE/admin/clusters/$REGION_ID/nodes/$E2E_NODE/undrain" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"reason":"e2e undrain check"}' >/dev/null
+UNDRAIN_LABEL=$(kubectl get node "$E2E_NODE" -o jsonpath='{.metadata.labels.rustic-git\.io/decommission}')
+[ -z "$UNDRAIN_LABEL" ] || fail "undrain did not clear rustic-git.io/decommission on $E2E_NODE (got '$UNDRAIN_LABEL')"
+
+curl -fsS "$ADMIN_BASE/admin/audit?action=drain" -H "Authorization: Bearer $ADMIN_TOKEN" | grep -q "\"target\":\"$REGION_ID/$E2E_NODE\"" \
+  || fail "no audit row found for drain of $REGION_ID/$E2E_NODE (GET /admin/audit?action=drain)"
+log "superadmin console: node drain/undrain and audit row passed"
+
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls rustic-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds) passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls rustic-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds), superadmin console (node drain/undrain, audit row) passed"
