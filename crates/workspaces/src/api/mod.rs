@@ -443,6 +443,10 @@ async fn list_quota_requests(
 struct Decision {
     #[serde(default)]
     note: Option<String>,
+    /// The operator's edited ask, replacing `r.spec.requested` before `overlay` runs — approve
+    /// grants what was actually submitted, which is the original request unless edited.
+    #[serde(default)]
+    requested: Option<crd::RequestedQuota>,
 }
 
 /// The ONE place `/v1` refuses an allocation.

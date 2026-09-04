@@ -284,3 +284,92 @@ async fn admin_nodes_reports_decommission_status_camel_case() {
     assert_eq!(rows[0]["decommissionStatus"], "drained 2026-09-04T00:00:00Z", "{body}");
     assert!(rows[0].get("decommission_status").is_none(), "must not also emit snake_case: {body}");
 }
+
+/// `?owner=` and `?state=` each narrow the queue independently, and combine.
+#[tokio::test]
+async fn list_all_quota_requests_filters_by_owner_and_state() {
+    let routes = vec![get(
+        format!("{API}/quotarequests"),
+        list_of(
+            "QuotaRequest",
+            vec![
+                req_obj("qr-1", "karthik", Some("pending")),
+                req_obj("qr-2", "karthik", Some("approved")),
+                req_obj("qr-3", "acme", Some("pending")),
+            ],
+        ),
+    )];
+    let s = admin_server(routes).await;
+    let get_req = |qs: &str| {
+        let url = format!("{}/admin/quota-requests{qs}", s.base);
+        reqwest::Client::new().get(url).bearer_auth(admin_token(&s.jwt)).send()
+    };
+
+    let body: Value = get_req("?owner=karthik").await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["qr-1", "qr-2"], "{body}"); // no creationTimestamp on either fixture: stable order
+
+    let body: Value = get_req("?state=pending").await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["qr-1", "qr-3"], "{body}");
+
+    let body: Value = get_req("?owner=karthik&state=pending").await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["qr-1"], "{body}");
+}
+
+/// Approving with an edited `requested` body grants what was submitted, not what was originally
+/// asked — the "approve with edits" decision from the spec's Decisions section.
+#[tokio::test]
+async fn approve_with_an_edited_body_grants_the_edited_values() {
+    let routes = vec![
+        get(format!("{API}/quotarequests/qr-1"), req_obj("qr-1", "karthik", Some("pending"))),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+        post(format!("{API}/quotas"), json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": "karthik"},
+            "spec": {"workspaces": 6, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 8, "memoryGb": 32}
+        })),
+        Route { method: "PATCH", path: format!("{API}/quotarequests/qr-1/status"), status: 200, body: req_obj("qr-1", "karthik", Some("approved")) },
+    ];
+    let s = admin_server(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/quota-requests/qr-1/approve", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "granting less", "requested": {"workspaces": 6}}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // The request asked for 10; the edited approval must land 6, not the original ask.
+    let written = s.rec.sent("POST", &format!("{API}/quotas")).remove(0);
+    assert_eq!(written["spec"]["workspaces"], 6, "{written}");
+
+    let marked = s.rec.sent("PATCH", &format!("{API}/quotarequests/qr-1/status")).remove(0);
+    assert_eq!(marked["status"]["state"], "approved", "{marked}");
+}
+
+/// Approving with no body (today's shape) is unchanged — the edit is optional, not mandatory.
+#[tokio::test]
+async fn approve_with_no_body_still_grants_exactly_what_was_asked() {
+    let routes = vec![
+        get(format!("{API}/quotarequests/qr-1"), req_obj("qr-1", "karthik", Some("pending"))),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+        post(format!("{API}/quotas"), json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Quota",
+            "metadata": {"name": "karthik"},
+            "spec": {"workspaces": 10, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 8, "memoryGb": 32}
+        })),
+        Route { method: "PATCH", path: format!("{API}/quotarequests/qr-1/status"), status: 200, body: req_obj("qr-1", "karthik", Some("approved")) },
+    ];
+    let s = admin_server(routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/quota-requests/qr-1/approve", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let written = s.rec.sent("POST", &format!("{API}/quotas")).remove(0);
+    assert_eq!(written["spec"]["workspaces"], 10, "{written}");
+}

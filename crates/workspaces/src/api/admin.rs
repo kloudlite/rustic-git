@@ -226,7 +226,10 @@ async fn approve_quota_request(
         Some(q) => q.spec.clone(),
         None => crate::quota::effective(client, &owner, team).await.map_err(kube_err)?,
     };
-    write_quota(&s, &owner, overlay(base, &r.spec.requested)).await?;
+    // An operator may grant less or more than asked; absent an edit, approve grants exactly what
+    // was requested — unchanged behavior.
+    let want = note.requested.clone().unwrap_or_else(|| r.spec.requested.clone());
+    write_quota(&s, &owner, overlay(base, &want)).await?;
     // The grant above is the consequential write; `decide` only marks the request, and if IT
     // fails the quota still landed — the row must survive that, so it's recorded here rather than
     // after the second fallible call.
@@ -251,10 +254,25 @@ async fn deny_quota_request(
     Ok(out)
 }
 
-/// The whole queue, every owner — the admin list has no `owner` filter, unlike `/v1`'s.
-async fn list_all_quota_requests(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+#[derive(serde::Deserialize, Default)]
+struct RequestFilter {
+    owner: Option<String>,
+    state: Option<crd::RequestState>,
+}
+
+/// The whole queue, every owner, narrowable by `?owner=` and `?state=` — `QuotaRequest` carries
+/// no label to select on and the fleet-wide row count is small, so filtering here (server-side of
+/// this process, client-side of the k3s API) is the honest lazy answer over a new list-selector.
+async fn list_all_quota_requests(
+    State(s): State<Arc<ApiState>>,
+    Query(f): Query<RequestFilter>,
+) -> Result<Response, Response> {
     let api: Api<crd::QuotaRequest> = Api::all(kube(&s)?.clone());
     let mut rows = api.list(&ListParams::default()).await.map_err(kube_err)?.items;
+    rows.retain(|r| {
+        f.owner.as_deref().is_none_or(|o| r.spec.owner == o)
+            && f.state.is_none_or(|st| r.status.as_ref().map(|s| s.state).unwrap_or_default() == st)
+    });
     rows.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
     Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
 }
