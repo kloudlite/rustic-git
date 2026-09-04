@@ -24,10 +24,15 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     }
     (
         StatusCode::OK,
-        format!("ok ({} warm)", app.store.pool.warm_count()),
+        format!(
+            "ok ({} warm) settings={}",
+            app.store.pool.warm_count(),
+            app.central.version(),
+        ),
     )
         .into_response()
 }
+
 
 /// Liveness only: is this process still able to reach the object store. Deliberately NOT gated on
 /// a live leader — `/healthz` is, and pointing the liveness probe at it means a leaderless minute
@@ -391,6 +396,14 @@ async fn route_inner(
     // match the PUBLIC router's git route as owner=`api`, and be served without ever being routed.
     if !peer && api_prefixed(&path) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    // `cluster/settings` is a shared object-store document, not a per-repo database — nothing to
+    // route by, servable on any node, exactly like `/healthz` below. Carved out here rather than
+    // added to `BROWSE_TAILS`/`api_route` because those two encode "owner-scoped repo route" and
+    // this path has no owner segment at all (`admin_settings.rs` mounts it directly on the peer
+    // router, not through `browse_routes()`).
+    if path.trim_start_matches('/') == "api/admin/settings" {
+        return next.run(req).await;
     }
     // An `/api/` path that is not a browse route is not routable, and must not fall through: no
     // browse route matches fewer than four segments, so matchit would hand

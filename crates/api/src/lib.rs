@@ -99,6 +99,11 @@ pub struct Api {
     /// See `browse::Membership`: the browse path's answer to "may this person read under
     /// this owner", kept for a minute.
     pub membership: crate::browse::Membership,
+    /// `stored ?? env ?? default`, refreshed every `SETTINGS_REFRESH_SECS` from `cluster/settings`
+    /// — this tier's own copy, distinct from `App`'s on the git tier (this process has no `App`).
+    /// `GET /v1/settings/central` reads the display fields off it for the web's clone menus;
+    /// `/healthz` reports its version.
+    pub central: rustic_git_core::settings::LiveSettings<rustic_git_core::settings::CentralSettings>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,6 +130,21 @@ pub async fn serve(
     if secret.is_empty() {
         return Err(rustic_git_core::err("api peer secret must not be empty"));
     }
+    let central = rustic_git_core::settings::LiveSettings::new(
+        rustic_git_core::settings::CentralSettings::from_env(),
+    );
+    if let Some(bytes) = rustic_git_storage::config::get_central(&store.os).await {
+        match serde_json::from_slice(&bytes) {
+            Ok(doc) => central.store(
+                rustic_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+            ),
+            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+        }
+    }
+    tokio::spawn(rustic_git_core::settings::refresh_central_beat(
+        rustic_git_storage::config::central_fetch(store.os.clone()),
+        central.clone(),
+    ));
     let api = Arc::new(Api {
         store,
         cache,
@@ -139,6 +159,7 @@ pub async fn serve(
             .expect("building an HTTP client cannot fail with these options"),
         on_keys_changed,
         membership: crate::browse::Membership::default(),
+        central,
     });
     // The anonymous write surfaces, bounded per client address and per address-in-the-body.
     // `N/SECONDS`: a burst of N, refilling evenly. The cli-code bucket is sized to the code's
@@ -150,7 +171,18 @@ pub async fn serve(
     let app = Router::new()
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
         // which would treat it as `/api/{owner}/{name}/...` and 404.
-        .route("/healthz", axum::routing::get(|| async { StatusCode::OK }))
+        .route(
+            "/healthz",
+            axum::routing::get(|State(api): State<Arc<Api>>| async move {
+                (StatusCode::OK, format!("settings={}", api.central.version()))
+            }),
+        )
+        // Display fields only — `clone_host`/`ssh_host`/`ssh_port`/`registry_host` — for the
+        // web's clone menus (`lib/clone.ts`). Public, like `/healthz`: these are already shown
+        // in a clone box to any visitor of a public repo's page, so there is nothing here worth
+        // gating behind a bearer. The write half (`PUT /api/admin/settings`) lives on the git
+        // tier's peer listener, not here.
+        .route("/v1/settings/central", axum::routing::get(settings_central))
         // Owner-scoped, not repo-scoped: two segments, not the three `handle`'s
         // `split_api_path` requires. Registered ahead of the fallback so it is matched
         // before `handle` ever sees it and refuses it as too short.
@@ -417,6 +449,9 @@ pub(crate) mod testing {
             client: reqwest::Client::new(),
             on_keys_changed: None,
             membership: crate::browse::Membership::default(),
+            central: rustic_git_core::settings::LiveSettings::new(
+                rustic_git_core::settings::CentralSettings::from_env(),
+            ),
         }
     }
 
@@ -431,6 +466,21 @@ pub(crate) mod testing {
             updated_ms: 0,
         }
     }
+}
+
+/// `GET /v1/settings/central` — the display-only slice of the central document, for the web's
+/// clone menus. `clone_host`/`ssh_host`/`registry_host` blank when unset (never written yet, or
+/// no admin-set override), so the web falls back to its own `process.env` in that case exactly
+/// as it did before this route existed.
+async fn settings_central(State(api): State<Arc<Api>>) -> Response {
+    let c = api.central.load();
+    axum::Json(serde_json::json!({
+        "cloneHost": c.clone_host,
+        "sshHost": c.ssh_host,
+        "sshPort": c.ssh_port,
+        "registryHost": c.registry_host,
+    }))
+    .into_response()
 }
 
 #[cfg(test)]

@@ -99,6 +99,12 @@ pub struct App {
     /// state, not an `Option`: "not configured" is safe to migrate as empty, "configured but
     /// unreachable" must not be, and a pair of fields could hold the nonsensical combination.
     pub dir: pulls::Source,
+    /// `stored ?? env ?? default` for every central-tier tunable, swapped in by
+    /// `rustic_git_core::settings::refresh_central_beat` every `SETTINGS_REFRESH_SECS`. Seeded
+    /// from env alone at construction; `main.rs`'s boot sequence does one synchronous GET of
+    /// `cluster/settings` and stores the merged result before serving anything, so the very
+    /// first request already sees an admin-set value rather than waiting out the first beat.
+    pub central: rustic_git_core::settings::LiveSettings<rustic_git_core::settings::CentralSettings>,
 }
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
@@ -174,6 +180,9 @@ impl App {
             leader_lock: tokio::sync::Mutex::new(()),
             claim_gate: tokio::sync::Semaphore::new(MAX_WAITING_CLAIMS),
             dir,
+            central: rustic_git_core::settings::LiveSettings::new(
+                rustic_git_core::settings::CentralSettings::from_env(),
+            ),
         }
     }
 

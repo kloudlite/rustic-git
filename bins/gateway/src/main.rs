@@ -38,6 +38,29 @@ async fn main() {
     };
 
     let gw = Arc::new(Gateway::new(jwt, region, kube, 22));
+    // The one object-store touch this binary makes: a minimal, read-only client for one key.
+    // `object_store_views` (not `open_store`) so this stays free of the SlateDB pool machinery
+    // every other tier needs and this one does not.
+    match rustic_git_storage::config::object_store_views() {
+        Ok((os, _mp)) => {
+            if let Some(bytes) = rustic_git_storage::config::get_central(&os).await {
+                match serde_json::from_slice(&bytes) {
+                    Ok(doc) => gw.central.store(
+                        rustic_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+                }
+            }
+            tokio::spawn(rustic_git_core::settings::refresh_central_beat(
+                rustic_git_storage::config::central_fetch(os),
+                gw.central.clone(),
+            ));
+        }
+        // Not fatal: the gateway's own job (SSH tunnels) needs no object store at all, so an
+        // unset/unreachable RUSTIC_GIT_S3_URL here means "central settings stay env-only",
+        // never "the gateway cannot serve".
+        Err(e) => tracing::warn!(error = %e, "cluster/settings unavailable; central settings stay env-only"),
+    }
     let router = app(gw);
 
     // The ENV VAR is the switch, not the file: set (as the Deployment always sets it) means TLS is

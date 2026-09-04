@@ -1,3 +1,4 @@
+pub(crate) mod admin_settings;
 pub(crate) mod git;
 pub(crate) mod limits;
 pub mod route;
@@ -40,6 +41,14 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .route("/own/renew", post(own_renew))
         .route("/own/owner", post(own_owner))
         .route("/own/release", post(own_release))
+        // Shared object-store document, not a per-repo database — servable on any node, so it
+        // carries no `BROWSE_TAILS` entry (`route_inner`'s `admin/settings` exemption is what lets
+        // it through the "unrecognised /api/ path" 404). Peer-only like everything else here;
+        // `admin_settings::put_settings` adds the second gate, a `superadmin` bearer claim.
+        .route(
+            "/api/admin/settings",
+            get(admin_settings::get_settings).put(admin_settings::put_settings),
+        )
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
         .layer(axum::middleware::from_fn_with_state("peer", rustic_git_core::metrics::http_metrics))

@@ -35,3 +35,4 @@ ssh = ["dep:russh"]
 
 [dev-dependencies]
 rustls = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

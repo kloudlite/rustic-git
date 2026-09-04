@@ -62,6 +62,21 @@ async fn run() -> Result<()> {
     // `false`: compaction and garbage collection belong to the node that owns the
     // repository. This process only ever adds packs.
     let store = open_store(false).await?;
+    let central = rustic_git_core::settings::LiveSettings::new(
+        rustic_git_core::settings::CentralSettings::from_env(),
+    );
+    if let Some(bytes) = rustic_git_storage::config::get_central(&store.os).await {
+        match serde_json::from_slice(&bytes) {
+            Ok(doc) => central.store(
+                rustic_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+            ),
+            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+        }
+    }
+    tokio::spawn(rustic_git_core::settings::refresh_central_beat(
+        rustic_git_storage::config::central_fetch(store.os.clone()),
+        central.clone(),
+    ));
     let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
     let secret = std::env::var("RUSTIC_GIT_PEER_SECRET")
         .map_err(|_| err("RUSTIC_GIT_PEER_SECRET required"))?;
@@ -121,8 +136,9 @@ async fn run() -> Result<()> {
     let grace = rustic_git_registry::gc::BLOB_GRACE;
     let gc_store = Arc::clone(&store);
     let gc_cache = cache.clone();
+    let gc_central = central.clone();
     let mut tasks =
-        vec![tokio::spawn(async move { gc_lane(&gc_store, grace, &gc_cache).await })];
+        vec![tokio::spawn(async move { gc_lane(&gc_store, grace, &gc_cache, gc_central).await })];
     for i in 0..lanes {
         let alive = cache.join(format!("worker-alive.{i}"));
         let w = Worker {
@@ -452,7 +468,9 @@ fn urlencoding(s: &str) -> String {
 /// owner has had a turn. One owner per cycle — not every owner at once — so the sweep never
 /// shows up as a burst of object-store listing traffic on top of whatever pushes are in flight.
 const GC_OWNER_GAP: std::time::Duration = std::time::Duration::from_secs(5);
-const GC_PASS_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+// The between-passes gap is now `central.load().gc_interval_secs`, read at the top of `gc_lane`'s
+// loop (`CentralSettings::from_env`'s default, 60, is what this constant used to be) — an admin
+// change takes effect on the next pass instead of the next restart.
 
 /// Every owner with anything under any image prefix. `blobs/` alone misses an owner whose layers
 /// were all deleted but whose manifests remain, and one whose image database exists with nothing
@@ -495,9 +513,15 @@ async fn gc_lane(
     store: &rustic_git_storage::store::Store,
     grace: std::time::Duration,
     cache: &std::path::Path,
+    central: rustic_git_core::settings::LiveSettings<rustic_git_core::settings::CentralSettings>,
 ) {
-    let upload_grace = rustic_git_registry::uploads::upload_grace();
     loop {
+        // Read at the top of the iteration, not captured once at spawn — an admin-lowered
+        // `upload_grace_secs` must take effect on the NEXT pass, not the next process restart.
+        let upload_grace =
+            std::time::Duration::from_secs(central.load().upload_grace_secs);
+        let gc_pass_gap =
+            std::time::Duration::from_secs(central.load().gc_interval_secs);
         // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
         match rustic_git_pulls::merge_worker::prune(cache, CACHE_KEEP, RUSTIC_GIT_MERGE_CACHE_BYTES) {
             0 => {}
@@ -513,7 +537,7 @@ async fn gc_lane(
         // image keyspace, not an owner with repos — see `reconcile_repo_owner`.
         let repo_owners = owners_under(store, "repo/").await;
         if owners.is_empty() && upload_owners.is_empty() && repo_owners.is_empty() {
-            tokio::time::sleep(GC_PASS_GAP).await;
+            tokio::time::sleep(gc_pass_gap).await;
             continue;
         }
         for owner in &owners {
@@ -545,7 +569,7 @@ async fn gc_lane(
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
-        tokio::time::sleep(GC_PASS_GAP).await;
+        tokio::time::sleep(gc_pass_gap).await;
     }
 }
 

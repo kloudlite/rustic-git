@@ -32,6 +32,16 @@ pub fn max_layer() -> u64 {
     })
 }
 
+/// The live value — `cluster/settings`-overridable, unlike `max_layer()` above, which stays a
+/// boot-time `OnceLock` because its one caller (`routes.rs`'s `DefaultBodyLimit` layer) is
+/// decorative: axum's body-limit layer does not apply to the raw `Body` extractor these routes
+/// take, so the real enforcement is the streaming count in `uploads.rs`, and THAT is what reads
+/// this instead. The "one true un-cache" in the central settings set (see Task 4's brief): the
+/// admin write path can now lower or raise the layer cap without a restart.
+pub fn max_layer_live(app: &App) -> u64 {
+    app.central.load().max_layer
+}
+
 pub async fn get_blob(
     State(app): State<Arc<App>>,
     Extension(trusted): Extension<Trusted>,
@@ -185,7 +195,7 @@ pub(super) async fn finish_blob(
     // Verified against the algorithm the client CLAIMED (`d.algo`, from the digest it pushed
     // under), not assumed sha256. `pour` lands the object only after the hash matches, so a
     // corrupt layer never becomes readable under a name that promises different bytes.
-    match super::uploads::pour(&app.store.os, &blob_path(owner, &d), Some(&d), super::uploads::body_stream(body)).await {
+    match super::uploads::pour(&app.store.os, &blob_path(owner, &d), Some(&d), super::uploads::body_stream(body), max_layer_live(app)).await {
         Ok(_) => {}
         Err(super::uploads::Refused::TooLarge) => {
             return oci_err(StatusCode::PAYLOAD_TOO_LARGE, "SIZE_INVALID", "layer too large")

@@ -21,24 +21,41 @@ pub enum Mark {
 /// read), swap in a new one from the refresh beat. Generic so the agent's `AgentSettings` and
 /// the central tier's `CentralSettings` share one type instead of two hand-rolled RwLocks.
 #[derive(Clone)]
-pub struct LiveSettings<T>(Arc<ArcSwap<T>>);
+pub struct LiveSettings<T> {
+    value: Arc<ArcSwap<T>>,
+    /// Bumped on every `store()`. `/healthz` reports this — not the stored document's
+    /// `updated_at`, which lives on `StoredCentralSettings` and would make this generic type
+    /// central-tier-specific — so an operator can confirm a process has actually picked up a
+    /// change without re-fetching the document itself.
+    version: Arc<std::sync::atomic::AtomicU64>,
+}
 
 impl<T> LiveSettings<T> {
     pub fn new(initial: T) -> Self {
-        Self(Arc::new(ArcSwap::from_pointee(initial)))
+        Self {
+            value: Arc::new(ArcSwap::from_pointee(initial)),
+            version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 
     /// The current value. Cheap enough to call at the top of every beat iteration — that is
     /// the whole point.
     pub fn load(&self) -> Arc<T> {
-        self.0.load_full()
+        self.value.load_full()
     }
 
     /// Refresh beats call this after a successful parse. Never called on a parse failure —
     /// "last good wins" is enforced by the CALLER simply not calling this, not by anything
     /// here.
     pub fn store(&self, new: T) {
-        self.0.store(Arc::new(new));
+        self.value.store(Arc::new(new));
+        self.version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `0` until the first `store()` — "still on the env-only boot default, nothing refreshed
+    /// yet".
+    pub fn version(&self) -> u64 {
+        self.version.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -231,6 +248,154 @@ pub struct StoredCentralSettingsSnapshot {
     pub updated_at: String,
 }
 
+/// The object-store key holding `StoredCentralSettings`, readable by any node — it is a shared
+/// document, not a per-repo database, so unlike a git/registry route it needs no ownership key
+/// and no `BROWSE_TAILS` entry (same exception `_catalog` and `/api/{owner}/images` already are).
+pub const CENTRAL_SETTINGS_KEY: &str = "cluster/settings";
+
+/// How often a central binary re-GETs `cluster/settings`. Bootstrap-only — like every other
+/// interval that governs its own beat, it cannot raise itself.
+pub const SETTINGS_REFRESH_SECS: u64 = 30;
+
+/// `(field name on the wire, Mark)` — same shape as `ClusterSettings`' meta table. Every field is
+/// `Mark::Live`: nothing in the current `CentralSettings` set feeds a value that is only read once
+/// at process start (a boot-only field, e.g. a knob baked into a pod template at spawn, would be
+/// `Mark::Boot` here instead — none of today's fields are that shape).
+pub const CENTRAL_SETTING_META: &[(&str, Mark)] = &[
+    ("maxBody", Mark::Live),
+    ("maxLayer", Mark::Live),
+    ("maxManifest", Mark::Live),
+    ("uploadGraceSecs", Mark::Live),
+    ("gcIntervalSecs", Mark::Live),
+    ("mergeLeaseSecs", Mark::Live),
+    ("announceStrandedSecs", Mark::Live),
+    ("feedRetentionSecs", Mark::Live),
+    ("cloneHost", Mark::Live),
+    ("sshHost", Mark::Live),
+    ("sshPort", Mark::Live),
+    ("registryHost", Mark::Live),
+    ("signupOpen", Mark::Live),
+];
+
+/// One violation, in `quota::refuse`'s sentence shape: `"{field} must be between {lo} and {hi},
+/// got {value}"` — so an admin write and a quota refusal read the same in the log and in the UI.
+fn range_err(field: &str, lo: impl std::fmt::Display, hi: impl std::fmt::Display, got: impl std::fmt::Display) -> String {
+    format!("{field} must be between {lo} and {hi}, got {got}")
+}
+
+/// Every changed field's range, checked before anything is written — the first violation wins,
+/// matching the "422 naming the field and its range" contract. `log_format`/`worker_lanes` are
+/// out of scope here: they are not part of `CentralSettings` in this codebase today (the
+/// inventory that would add them as `Mark::Boot` fields has not landed), so there is nothing of
+/// that shape to validate yet.
+pub fn validate_stored(patch: &StoredCentralSettings) -> Result<(), String> {
+    macro_rules! range {
+        ($f:ident, $lo:expr, $hi:expr) => {
+            if let Some(v) = patch.$f {
+                if !($lo..=$hi).contains(&v) {
+                    return Err(range_err(stringify!($f), $lo, $hi, v));
+                }
+            }
+        };
+    }
+    range!(max_body, 1_048_576u64, 8_589_934_592u64);
+    range!(max_layer, 1_048_576u64, 21_474_836_480u64);
+    range!(max_manifest, 65_536u64, 67_108_864u64);
+    range!(upload_grace_secs, 3_600u64, 604_800u64);
+    range!(gc_interval_secs, 30u64, 86_400u64);
+    range!(merge_lease_secs, 30u64, 3_600u64);
+    range!(announce_stranded_secs, 5u64, 300u64);
+    range!(feed_retention_secs, 3_600u64, 2_592_000u64);
+    range!(ssh_port, 1u16, 65_535u16);
+    Ok(())
+}
+
+/// The `history` half of a write: push the OLD document (minus its own history — no nesting) onto
+/// `new.history`, capped at ten, oldest dropped first.
+fn push_history(old: &StoredCentralSettings, new: &mut StoredCentralSettings) {
+    let snap = StoredCentralSettingsSnapshot {
+        max_body: old.max_body,
+        max_layer: old.max_layer,
+        max_manifest: old.max_manifest,
+        upload_grace_secs: old.upload_grace_secs,
+        gc_interval_secs: old.gc_interval_secs,
+        merge_lease_secs: old.merge_lease_secs,
+        announce_stranded_secs: old.announce_stranded_secs,
+        feed_retention_secs: old.feed_retention_secs,
+        clone_host: old.clone_host.clone(),
+        ssh_host: old.ssh_host.clone(),
+        ssh_port: old.ssh_port,
+        registry_host: old.registry_host.clone(),
+        signup_open: old.signup_open,
+        updated_by: old.updated_by.clone(),
+        updated_at: old.updated_at.clone(),
+    };
+    new.history = old.history.clone();
+    new.history.insert(0, snap);
+    new.history.truncate(10);
+}
+
+/// Merge `patch` field-by-field onto `current` (only the fields the caller actually set), push
+/// `current` onto history, and stamp `updated_by`/`updated_at`. Called by the admin write handler
+/// AFTER `validate_stored` has passed; a revert is the same call with `patch` built from a full
+/// `history[n]` snapshot.
+pub fn apply_patch(
+    current: &StoredCentralSettings,
+    patch: &StoredCentralSettings,
+    updated_by: &str,
+    updated_at: &str,
+) -> StoredCentralSettings {
+    let mut next = current.clone();
+    macro_rules! over {
+        ($f:ident) => {
+            if let Some(v) = patch.$f.clone() {
+                next.$f = Some(v);
+            }
+        };
+    }
+    over!(max_body);
+    over!(max_layer);
+    over!(max_manifest);
+    over!(upload_grace_secs);
+    over!(gc_interval_secs);
+    over!(merge_lease_secs);
+    over!(announce_stranded_secs);
+    over!(feed_retention_secs);
+    over!(clone_host);
+    over!(ssh_host);
+    over!(ssh_port);
+    over!(registry_host);
+    over!(signup_open);
+    push_history(current, &mut next);
+    next.updated_by = updated_by.to_string();
+    next.updated_at = updated_at.to_string();
+    next
+}
+
+/// One GET of `cluster/settings`, supplied by the caller rather than baked in here — `core` has
+/// no object-store dependency, and each binary already has its own client shape (the full `Store`
+/// for server/worker/api, a minimal read-only one for gateway, which opens no object store for
+/// anything else). `None` for a missing key OR a fetch error; the beat treats both as "nothing new
+/// to apply" and keeps the last good value.
+pub type CentralFetch = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<u8>>> + Send>> + Send + Sync,
+>;
+
+/// Every `SETTINGS_REFRESH_SECS`, re-GET the document and, on a successful parse, swap it in.
+/// "Last good wins": a missing key (never written yet) or a corrupt document leaves `live`
+/// untouched and warns once per bad refresh — never panics, never falls back to `from_env()`
+/// alone, because that would silently discard whatever an admin had already set.
+pub async fn refresh_central_beat(fetch: CentralFetch, live: LiveSettings<CentralSettings>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(SETTINGS_REFRESH_SECS)).await;
+        let Some(bytes) = fetch().await else { continue };
+        match serde_json::from_slice::<StoredCentralSettings>(&bytes) {
+            Ok(doc) => live.store(CentralSettings::from_env().merged_with(&doc)),
+            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document; keeping last good"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +425,115 @@ mod tests {
         unsafe {
             std::env::remove_var("RUSTIC_GIT_SSH_PORT");
         }
+    }
+
+    #[test]
+    fn validate_stored_rejects_out_of_range() {
+        let bad = StoredCentralSettings { ssh_port: Some(0), ..Default::default() };
+        let err = validate_stored(&bad).unwrap_err();
+        assert_eq!(err, "ssh_port must be between 1 and 65535, got 0");
+
+        let ok = StoredCentralSettings { ssh_port: Some(2222), ..Default::default() };
+        assert!(validate_stored(&ok).is_ok());
+    }
+
+    /// A write pushes the OLD document onto history and truncates at ten — the eleventh write
+    /// must drop the oldest entry, not grow unbounded.
+    #[test]
+    fn apply_patch_pushes_and_truncates_history() {
+        let mut doc = StoredCentralSettings::default();
+        for i in 0..11u64 {
+            let patch = StoredCentralSettings { max_body: Some(1_048_576 + i), ..Default::default() };
+            doc = apply_patch(&doc, &patch, "admin@example.com", &format!("t{i}"));
+        }
+        assert_eq!(doc.max_body, Some(1_048_576 + 10));
+        assert_eq!(doc.history.len(), 10, "history caps at ten entries");
+        // Newest-first: the entry just before the last write is at index 0.
+        assert_eq!(doc.history[0].max_body, Some(1_048_576 + 9));
+    }
+
+    /// A revert is `apply_patch` called with a full `history[n]` snapshot as the patch — proving
+    /// the round trip restores every field, not just the ones a partial PUT would touch.
+    #[test]
+    fn revert_round_trips_a_snapshot() {
+        let base = StoredCentralSettings { max_body: Some(2_000_000), ssh_port: Some(2200), ..Default::default() };
+        let changed = apply_patch(
+            &base,
+            &StoredCentralSettings { max_body: Some(3_000_000), ..Default::default() },
+            "admin@example.com",
+            "t1",
+        );
+        assert_eq!(changed.max_body, Some(3_000_000));
+        let snap = &changed.history[0];
+        let revert_patch = StoredCentralSettings {
+            max_body: snap.max_body,
+            max_layer: snap.max_layer,
+            max_manifest: snap.max_manifest,
+            upload_grace_secs: snap.upload_grace_secs,
+            gc_interval_secs: snap.gc_interval_secs,
+            merge_lease_secs: snap.merge_lease_secs,
+            announce_stranded_secs: snap.announce_stranded_secs,
+            feed_retention_secs: snap.feed_retention_secs,
+            clone_host: snap.clone_host.clone(),
+            ssh_host: snap.ssh_host.clone(),
+            ssh_port: snap.ssh_port,
+            registry_host: snap.registry_host.clone(),
+            signup_open: snap.signup_open,
+            history: vec![],
+            updated_by: String::new(),
+            updated_at: String::new(),
+        };
+        let reverted = apply_patch(&changed, &revert_patch, "admin@example.com", "t2");
+        assert_eq!(reverted.max_body, base.max_body);
+        assert_eq!(reverted.ssh_port, base.ssh_port);
+    }
+
+    /// A corrupt document leaves the live handle untouched — "last good wins" is the beat's job,
+    /// not the caller's.
+    #[tokio::test(start_paused = true)]
+    async fn refresh_beat_keeps_last_good_on_corrupt_document() {
+        let live = LiveSettings::new(CentralSettings::from_env());
+        let before = live.load().max_body;
+        let fetch: CentralFetch = std::sync::Arc::new(|| Box::pin(async { Some(b"not json".to_vec()) }));
+        let beat = tokio::spawn(refresh_central_beat(fetch, live.clone()));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(SETTINGS_REFRESH_SECS + 1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(live.load().max_body, before, "corrupt document must not change the live value");
+        beat.abort();
+    }
+
+    /// A missing key (never written) is treated the same as a corrupt one — nothing to apply.
+    #[tokio::test(start_paused = true)]
+    async fn refresh_beat_keeps_last_good_on_missing_key() {
+        let live = LiveSettings::new(CentralSettings::from_env());
+        let before = live.load().max_body;
+        let fetch: CentralFetch = std::sync::Arc::new(|| Box::pin(async { None }));
+        let beat = tokio::spawn(refresh_central_beat(fetch, live.clone()));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(SETTINGS_REFRESH_SECS + 1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(live.load().max_body, before);
+        beat.abort();
+    }
+
+    /// A well-formed document DOES swap in — the positive case beside the two "keeps last good"
+    /// tests above.
+    #[tokio::test(start_paused = true)]
+    async fn refresh_beat_applies_a_good_document() {
+        let live = LiveSettings::new(CentralSettings::from_env());
+        let doc = StoredCentralSettings { ssh_port: Some(2277), ..Default::default() };
+        let bytes = serde_json::to_vec(&doc).unwrap();
+        let fetch: CentralFetch = std::sync::Arc::new(move || {
+            let bytes = bytes.clone();
+            Box::pin(async move { Some(bytes) })
+        });
+        let beat = tokio::spawn(refresh_central_beat(fetch, live.clone()));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(SETTINGS_REFRESH_SECS + 1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(live.load().ssh_port, 2277);
+        beat.abort();
     }
 
     /// `LiveSettings::load`/`store` round-trip: last good wins is the CALLER's job (nothing here

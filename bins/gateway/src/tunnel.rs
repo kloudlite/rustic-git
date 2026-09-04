@@ -45,6 +45,12 @@ pub struct Gateway {
     per_ws: Mutex<HashMap<String, usize>>,
     per_owner: Mutex<HashMap<String, usize>>,
     tunnels: Arc<Semaphore>,
+    /// Env-only until `main.rs`'s boot-time GET and refresh beat store into it — this binary
+    /// today reads nothing from `CentralSettings` (no field feeds a gateway tunable yet), so the
+    /// handle exists only for `/healthz`'s version and for parity with the other three central
+    /// binaries.
+    pub central:
+        rustic_git_core::settings::LiveSettings<rustic_git_core::settings::CentralSettings>,
 }
 
 impl Gateway {
@@ -58,6 +64,9 @@ impl Gateway {
             per_ws: Mutex::new(HashMap::new()),
             per_owner: Mutex::new(HashMap::new()),
             tunnels: Arc::new(Semaphore::new(MAX_TUNNELS)),
+            central: rustic_git_core::settings::LiveSettings::new(
+                rustic_git_core::settings::CentralSettings::from_env(),
+            ),
         }
     }
 
@@ -139,7 +148,12 @@ fn take(map: &Mutex<HashMap<String, usize>>, key: &str, limit: usize) -> bool {
 
 pub fn app(gw: Arc<Gateway>) -> Router {
     Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/healthz",
+            get(|State(gw): State<Arc<Gateway>>| async move {
+                format!("ok settings={}", gw.central.version())
+            }),
+        )
         .route("/tunnel/{ws}", get(tunnel))
         .layer(axum::middleware::from_fn_with_state("gateway", rustic_git_core::metrics::http_metrics))
         .with_state(gw)

@@ -1,5 +1,4 @@
 use super::limits::{bad_request, client_err, fenced_elsewhere, internal, max_decompressed, ClientError};
-use rustic_git_core::httpx::max_body;
 use crate::protocol::{receive, upload};
 use crate::store::Repo;
 use crate::App;
@@ -137,13 +136,13 @@ async fn read_body(body: Body) -> Result<Bytes, Response> {
 }
 
 /// The request body as a blocking `Read` the indexer pulls from directly, so a push never sits
-/// in memory: `gix_pack::Bundle::write_to_directory` streams from any `BufRead`. `max_body`
-/// applies to the bytes on the wire, the same cap `read_body` enforces, but it surfaces as a
-/// read error inside the protocol — git shows it as the push's report line — rather than a 413,
-/// because it is only known once the indexer has consumed that much.
-fn live_body(body: Body) -> Box<dyn Read + Send> {
+/// in memory: `gix_pack::Bundle::write_to_directory` streams from any `BufRead`. `cap`
+/// (`app.central.load().max_body`, read live at the top of `receive_pack`) applies to the bytes
+/// on the wire, the same cap `read_body` enforces, but it surfaces as a read error inside the
+/// protocol — git shows it as the push's report line — rather than a 413, because it is only
+/// known once the indexer has consumed that much.
+fn live_body(body: Body, cap: usize) -> Box<dyn Read + Send> {
     use futures::StreamExt;
-    let cap = max_body();
     let mut seen = 0usize;
     let stream = body.into_data_stream().map(move |c| {
         let c = c.map_err(std::io::Error::other)?;
@@ -453,7 +452,7 @@ async fn receive_pack(
         Err(e) => return internal(e.into()),
     };
     metrics::counter!("git_pack_requests_total", "op" => "receive").increment(1);
-    let mut live = Some(live_body(body));
+    let mut live = Some(live_body(body, app.central.load().max_body as usize));
     let input = move || -> Input {
         match live.take() {
             Some(inner) => Ok(Box::new(Tee { inner, spool: spool.try_clone()? })),

@@ -87,6 +87,21 @@ async fn serve() -> Result<()> {
         None => rustic_git_server::pulls::Source::Absent,
     };
     let app = Arc::new(App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, dir));
+    // One synchronous GET before serving anything, so the first request already sees whatever an
+    // admin has already set rather than waiting out the first `SETTINGS_REFRESH_SECS` beat.
+    // Missing key or a corrupt document: keep the env-only default and let the beat try again.
+    if let Some(bytes) = rustic_git_server::config::get_central(&store.os).await {
+        match serde_json::from_slice(&bytes) {
+            Ok(doc) => app.central.store(
+                rustic_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+            ),
+            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+        }
+    }
+    tokio::spawn(rustic_git_core::settings::refresh_central_beat(
+        rustic_git_server::config::central_fetch(store.os.clone()),
+        app.central.clone(),
+    ));
     if !svc.is_empty() {
         // One beat before anything asks: a fresh fleet has no leader until somebody takes the
         // lease, and the first claim should not wait a tick for it. Not fatal — the loop retries

@@ -141,6 +141,27 @@ pub fn fleet_store_ok(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// One GET of `cluster/settings`, `None` for both "never written" and "unreachable" — the caller
+/// (`refresh_central_beat`, or a binary's own boot-time load) treats both the same way: keep
+/// whatever `LiveSettings` already holds.
+pub async fn get_central(os: &Arc<dyn slatedb::object_store::ObjectStore>) -> Option<Vec<u8>> {
+    use slatedb::object_store::{path::Path as OsPath, ObjectStoreExt};
+    let key = OsPath::from(rustic_git_core::settings::CENTRAL_SETTINGS_KEY);
+    match os.get(&key).await {
+        Ok(r) => r.bytes().await.ok().map(|b| b.to_vec()),
+        Err(_) => None,
+    }
+}
+
+/// A `CentralFetch` closure over a concrete object store — the one thing `refresh_central_beat`
+/// needs and `crates/core` cannot build itself (no object-store dependency there).
+pub fn central_fetch(os: Arc<dyn slatedb::object_store::ObjectStore>) -> rustic_git_core::settings::CentralFetch {
+    std::sync::Arc::new(move || {
+        let os = os.clone();
+        Box::pin(async move { get_central(&os).await })
+    })
+}
+
 pub async fn open_store(background: bool) -> Result<Arc<Store>> {
     // Before the first TLS handshake, which the object store is about to make.
     install_crypto_provider();

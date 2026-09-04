@@ -279,6 +279,7 @@ pub(super) async fn pour<S>(
     dest: &OsPath,
     expect: Option<&Digest>,
     mut src: S,
+    cap: u64,
 ) -> Result<u64, Refused>
 where
     S: Stream<Item = crate::Result<Bytes>> + Unpin,
@@ -297,7 +298,7 @@ where
         };
         n += chunk.len() as u64;
         metrics::counter!("registry_blob_bytes_in_total").increment(chunk.len() as u64);
-        if n > blobs::max_layer() {
+        if n > cap {
             let _ = w.abort().await;
             return Err(Refused::TooLarge);
         }
@@ -529,7 +530,7 @@ pub async fn patch(
             }
             Err(e) => return crate::oci_internal(e),
         };
-        match pour(&app.store.os, &path, None, src.chain(body_stream(body))).await {
+        match pour(&app.store.os, &path, None, src.chain(body_stream(body)), blobs::max_layer_live(&app)).await {
             Ok(len) => len,
             Err(e) => return refused(e),
         }
@@ -582,7 +583,7 @@ async fn patch_part(
             (Meta { id, parts: Vec::new(), len: 0 }, Bytes::new())
         }
     };
-    let room = blobs::max_layer().saturating_sub(meta.len);
+    let room = blobs::max_layer_live(app).saturating_sub(meta.len);
     let put = put_parts(mp, &path, &meta.id, meta.parts.len(), tail_then(tail, body), false, room)
         .await;
     let (ids, parted, tail) = match put {
@@ -748,7 +749,7 @@ pub async fn complete(
                 }
                 Err(e) => return crate::oci_internal(e),
             };
-            match pour(&app.store.os, &blob_path(owner, &d), Some(&d), src.chain(body_stream(body)))
+            match pour(&app.store.os, &blob_path(owner, &d), Some(&d), src.chain(body_stream(body)), blobs::max_layer_live(app))
                 .await
             {
                 Ok(len) => len,
@@ -813,7 +814,7 @@ async fn complete_parts(
         return Err(crate::oci_internal(crate::err("upload session needs a multipart store")));
     };
     let mut meta = sc.meta;
-    let room = blobs::max_layer().saturating_sub(meta.len);
+    let room = blobs::max_layer_live(app).saturating_sub(meta.len);
     let (ids, parted, _) =
         put_parts(&mp, &path, &meta.id, meta.parts.len(), tail_then(sc.tail, body), true, room)
             .await
@@ -848,7 +849,7 @@ async fn complete_parts(
         }
         Err(e) => return Err(crate::oci_internal(e)),
     };
-    if size > blobs::max_layer() {
+    if size > blobs::max_layer_live(app) {
         return Err(oci_err(
             StatusCode::PAYLOAD_TOO_LARGE,
             "SIZE_INVALID",

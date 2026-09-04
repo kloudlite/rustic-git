@@ -17,6 +17,10 @@ tracing = { workspace = true }
 metrics = { workspace = true }
 rustic-git-core = { path = "../../crates/core" }
 rustic-git-workspaces = { path = "../../crates/workspaces" }
+# The one place this binary touches the object store: a minimal, read-only GET of
+# `cluster/settings` on the refresh beat (`crates/storage::config::{object_store_views,
+# get_central, central_fetch}`) — nothing else here needs `Store`'s SlateDB pool machinery.
+rustic-git-storage = { path = "../../crates/storage" }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 # `ws` is what this binary is: the tunnel is a WebSocket upgrade and nothing else.
@@ -25,6 +29,7 @@ axum-server = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 rustic-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
