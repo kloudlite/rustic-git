@@ -10,6 +10,9 @@
 //! wire protocol on the ssh path, `docker compose` output on the agent), and interleaving
 //! log lines into it corrupts the payload.
 //!
+//! Every call site emits an EVENT — `subject.verb` as the message, everything specific as a
+//! field — per docs/superpowers/reviews/logging-events.md; that document is the review bar.
+//!
 //! `KLOUDLITE_GIT_LOG_FORMAT=json` switches every binary to one JSON object per line, and every
 //! deployed pod sets it: the collectors (`deploy/k3s/otel-agent.yaml`, the AKS twin in
 //! `deploy/kloudlite-git.yaml`) parse that object so level, module (`target`) and the call-site
