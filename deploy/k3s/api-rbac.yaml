@@ -109,6 +109,12 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "patch", "delete"]
+  # Read-only, and not optional: Owners, Clusters and Overview all compute their numbers from
+  # these on the request path (usage is never a cached counter), so without this rule those three
+  # areas answer 403 rather than degrading.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["volumes", "snapshots", "volumereplicas"]
+    verbs: ["get", "list"]
   # `patch` is the Clusters area's drain / undrain / decommission: the decommission LABEL, the
   # status annotation undrain clears, and `spec.unschedulable`. A node cannot be name-restricted
   # in RBAC (no `resourceNames` on a cluster-scoped list of one), so the scoping is in the handler

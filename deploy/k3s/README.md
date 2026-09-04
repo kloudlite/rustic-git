@@ -953,6 +953,9 @@ RBAC only on this side — no new CRD, no new process.
 # drain / undrain / decommission (the decommission label, the status annotation undrain clears,
 # and spec.unschedulable). Nodes cannot be name-restricted, so the scoping is in the handler:
 # one named node, in a region this cluster actually answers for, with a reason on the audit row.
+# It also gains `get`/`list` on volumes, snapshots and volumereplicas: Owners, Clusters and
+# Overview compute every number from those on the request path, so without them those three areas
+# answer 403 outright rather than showing a stale count.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 ```
 
