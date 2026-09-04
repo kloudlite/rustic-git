@@ -1075,13 +1075,13 @@ export function adminDecideQuotaRequest(
 }
 
 /** `note` required and non-empty (422 otherwise) — a quota write is dangerous per the Global
- *  Constraint, same rule as deny/roll/drain. Sent flat alongside the six dimensions rather than
- *  wrapped, matching how the api already deserializes the spec straight off the body. */
+ *  Constraint, same rule as deny/roll/drain. The api's `WriteQuotaBody` is `{ spec, note }`, the
+ *  spec wrapped, so a flat body would parse as a missing spec. */
 export function adminWriteQuota(owner: string, spec: Record<QuotaDim, number>, note: string, token: string) {
   return adminCall<Record<QuotaDim, number>>(`/admin/quota/${encodeURIComponent(owner)}`, {
     method: "PUT",
     token,
-    body: JSON.stringify({ ...spec, note }),
+    body: JSON.stringify({ spec, note }),
   });
 }
 
