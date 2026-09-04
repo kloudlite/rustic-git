@@ -17,7 +17,7 @@
 # deploy/k3s/dev-push.sh loop. Only the five kloudlite-git binaries make it into the context — see
 # .dockerignore — so a fat `target/` costs nothing to send.
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS server
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS server
 # openssh-client: the server shells out to ssh-keygen to generate its host key on first start.
 # git: the merge worker performs merges by running it (see crates/pulls/src/merge_worker.rs) —
 # bookworm ships 2.39, past the 2.38 that `merge-tree --write-tree` needs. One image serves all
@@ -51,7 +51,7 @@ CMD ["serve"]
 # The node controller. A separate IMAGE, not a fourth binary in the server one: this runs as root
 # with btrfs-progs and the host pool mounted, and shipping root's toolchain to the three processes
 # that must never have it is exactly what the split prevents.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS agent
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS agent
 # btrfs-progs: every storage operation shells out to it.
 # util-linux: losetup/mount for the block-layer restore path.
 # ca-certificates: the registry client and Azure blob store speak TLS.
@@ -79,7 +79,7 @@ ENTRYPOINT ["kloudlite-git-agent"]
 # The SSH gateway. Its own image rather than a fourth binary in the server one: this pod runs with
 # NET_BIND_SERVICE to hold hostPort 443 on a pool node, and that capability has no business on the
 # git server's pods.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS gateway
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS gateway
 # ca-certificates only: the gateway talks to the kube API server over TLS and to nothing else.
 # libcap2-bin is build-time only, for the setcap below.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
