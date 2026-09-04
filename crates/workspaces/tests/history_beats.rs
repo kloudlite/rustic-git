@@ -85,3 +85,121 @@ fn an_empty_fold_writes_nothing() {
     assert!(usage_rows(ts(), &[]).is_empty());
     assert!(fleet_rows(ts(), &[]).is_empty());
 }
+
+// ── one tick, end to end: mocked kube API in, canned ClickHouse out ────────
+
+mod tick {
+    use axum::{routing::post, Router};
+    use rustic_git_core::jwt::Jwt;
+    use rustic_git_workspaces::api::ApiState;
+    use rustic_git_workspaces::history::{beats::tick_once, History};
+    use rustic_git_workspaces::kube_test::{get, mock_client, Route};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    const API: &str = "/apis/rustic-git.io/v1alpha1";
+
+    /// A canned ClickHouse: records the body of every `INSERT`, answers 200 to all of them.
+    async fn canned_clickhouse() -> (String, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |body: String| {
+                let s = s.clone();
+                async move {
+                    s.lock().unwrap().push(body);
+                    (axum::http::StatusCode::OK, "")
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (format!("http://{addr}"), seen)
+    }
+
+    fn list_of(kind: &str, items: Vec<Value>) -> Value {
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    }
+
+    fn ws_obj() -> Value {
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+               "metadata": {"name": "w1"},
+               "spec": {"owner": "acme", "team": "", "name": "w1", "region": "r1", "image": "img:1",
+                        "desiredState": "running", "packages": [],
+                        "resources": {"cpuRequest": "1", "cpuLimit": "2", "memoryRequest": "1Gi", "memoryLimit": "2Gi"},
+                        "storage": {"quotaGb": 20}},
+               "status": {"phase": "ready", "nodeName": "n1", "podRef": "pod-w1", "volumeRef": "v1"}})
+    }
+
+    fn region_obj() -> Value {
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region",
+               "metadata": {"name": "r1"}, "spec": {"name": "Region one", "status": "active"}})
+    }
+
+    fn node_obj() -> Value {
+        json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n1", "labels": {}, "annotations": {}},
+               "status": {"conditions": [{"type": "Ready", "status": "True",
+                                          "lastHeartbeatTime": "2026-09-04T00:00:00Z",
+                                          "lastTransitionTime": "2026-09-04T00:00:00Z"}]}})
+    }
+
+    fn agent_ds() -> Value {
+        json!({"apiVersion": "apps/v1", "kind": "DaemonSet",
+               "metadata": {"name": "rustic-git-agent", "namespace": "kube-system"},
+               "spec": {"selector": {}, "template": {"metadata": {}, "spec": {"containers": [{"name": "agent", "image": "agent:1"}]}}},
+               "status": {"numberReady": 1, "desiredNumberScheduled": 1, "currentNumberScheduled": 1,
+                          "numberMisscheduled": 0, "numberUnavailable": 0}})
+    }
+
+    /// One `tick_once` against a mocked kube API (one owner, one region, one live workspace) and a
+    /// canned ClickHouse: both `usage_hourly` and `fleet_hourly` get exactly one INSERT, and each
+    /// body carries the row the fold computed — proof the loop wires the folds to the client the
+    /// same way the unit tests already proved the row shape.
+    #[tokio::test]
+    async fn one_tick_inserts_a_usage_row_and_a_fleet_row() {
+        let (ch_url, ch_seen) = canned_clickhouse().await;
+        let history = Arc::new(History::new(&ch_url, "default", ""));
+
+        let routes: Vec<Route> = vec![
+            // `owners::fleet`
+            get(format!("{API}/quotas"), list_of("Quota", vec![])),
+            get(format!("{API}/quotarequests"), list_of("QuotaRequest", vec![])),
+            get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj()])),
+            get(format!("{API}/environments"), list_of("Environment", vec![])),
+            get(format!("{API}/volumes"), list_of("Volume", vec![])),
+            get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
+            // `clusters::cluster_rows`
+            get(format!("{API}/regions"), list_of("Region", vec![region_obj()])),
+            get(format!("{API}/regions/r1"), region_obj()),
+            get("/api/v1/nodes", json!({"apiVersion": "v1", "kind": "NodeList", "metadata": {}, "items": [node_obj()]})),
+            get("/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent", agent_ds()),
+            get(format!("{API}/clustersettings/default"), json!({"apiVersion": "rustic-git.io/v1alpha1",
+                "kind": "ClusterSettings", "metadata": {"name": "default"}, "spec": {}, "status": {}})),
+        ];
+        let (client, _rec) = mock_client(routes);
+
+        let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+        let state = Arc::new(ApiState::new(jwt).with_kube(client).with_history(history));
+
+        tick_once(&state).await;
+
+        let bodies = ch_seen.lock().unwrap();
+        let usage: Vec<&String> = bodies.iter().filter(|b| b.starts_with("INSERT INTO rustic.usage_hourly")).collect();
+        let fleet: Vec<&String> = bodies.iter().filter(|b| b.starts_with("INSERT INTO rustic.fleet_hourly")).collect();
+        assert_eq!(usage.len(), 1, "one usage_hourly insert: {bodies:?}");
+        assert_eq!(fleet.len(), 1, "one fleet_hourly insert: {bodies:?}");
+
+        // Six dimension rows for the one owner the mock listed a workspace for.
+        let usage_rows: Vec<&str> = usage[0].lines().skip(1).collect();
+        assert_eq!(usage_rows.len(), 6, "{}", usage[0]);
+        assert!(usage_rows.iter().any(|r| r.contains(r#""owner":"acme""#) && r.contains(r#""dimension":"workspaces""#)));
+
+        // One region row, carrying the live workspace the mock listed.
+        let fleet_rows: Vec<&str> = fleet[0].lines().skip(1).collect();
+        assert_eq!(fleet_rows.len(), 1, "{}", fleet[0]);
+        assert!(fleet_rows[0].contains(r#""region":"r1""#));
+        assert!(fleet_rows[0].contains(r#""live_workspaces":1"#));
+    }
+}

@@ -159,49 +159,82 @@ fn fleet_inputs(rows: Vec<clusters::ClusterRow>, f: &owners::Fleet) -> Vec<Fleet
         .collect()
 }
 
+/// Sleeps until the next :00:00 UTC plus a few seconds of random jitter. `tokio::time::interval`
+/// fires its first tick immediately on creation, so this is what actually aligns the beat — every
+/// replica of the admin process boots at its own moment, but this makes them all converge on the
+/// hour instead of each running its own hourly clock from boot time. The jitter then keeps them
+/// from landing on the SAME instant: `ReplacingMergeTree` would collapse the resulting duplicate
+/// row fine, but there is no reason to make ClickHouse absorb N simultaneous inserts on the dot.
+async fn align_to_next_hour() {
+    use rand::Rng;
+    let secs_into_hour = (chrono::Utc::now().timestamp().rem_euclid(3600)) as u64;
+    let jitter = rand::thread_rng().gen_range(0..30);
+    tokio::time::sleep(std::time::Duration::from_secs(3600 - secs_into_hour + jitter)).await;
+}
+
 /// The hourly loop. Both folds are re-run from the cluster every hour; a failure logs and waits for
 /// the next hour rather than retrying tightly, because the next run recomputes everything anyway.
 pub async fn run_beats(state: Arc<ApiState>) {
+    align_to_next_hour().await;
     let mut iv = tokio::time::interval(HOUR);
     iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A missing ClickHouse is a boot-time configuration fact, not a per-tick failure: an operator
+    // needs to hear it once, not every hour forever, so only the first skip is loud.
+    let mut history_missing_warned = false;
     loop {
         iv.tick().await;
-        let Some(h) = state.history.as_deref() else { continue };
-        let ts = chrono::Utc::now();
-
-        let Some(client) = state.kube.as_ref() else {
-            tracing::warn!("hourly beats skipped: no kubernetes client configured");
+        if state.history.is_none() {
+            if !history_missing_warned {
+                tracing::warn!("hourly beats skipped: no ClickHouse configured");
+                history_missing_warned = true;
+            } else {
+                tracing::debug!("hourly beats skipped: no ClickHouse configured");
+            }
             continue;
-        };
-        let f = match owners::fleet(client).await {
-            Ok(f) => f,
-            Err(_) => {
-                tracing::warn!("hourly beats skipped: the owners fold failed");
-                continue;
-            }
-        };
+        }
+        tick_once(&state).await;
+    }
+}
 
-        let mut usage = Vec::with_capacity(f.owners.len());
-        for owner in &f.owners {
-            let directory_says = crate::api::scope::is_team(&state, owner).await;
-            let is_team = owners::team_of(owner, directory_says);
-            let own = f.quota_by_name.get(owner).cloned();
-            let limit = own.unwrap_or_else(|| owners::fallback_quota(&f.quota_by_name, is_team));
-            let used = f.usage_by_owner.get(owner).cloned().unwrap_or_default();
-            usage.push(UsageInput { owner: owner.clone(), is_team, used, limit });
-        }
-        if let Err(e) = h.insert("usage_hourly", &usage_rows(ts, &usage)).await {
-            tracing::warn!(error = %e, "usage_hourly beat not written");
-        }
+/// One hour's worth of work: fold the CRDs and write both tables. Split out of `run_beats` so a
+/// test can drive a single tick directly against a canned ClickHouse server and a mocked kube API,
+/// instead of waiting on a real clock and a real cluster.
+pub async fn tick_once(state: &Arc<ApiState>) {
+    let Some(h) = state.history.as_deref() else { return };
+    let ts = chrono::Utc::now();
 
-        match clusters::cluster_rows(&state).await {
-            Ok(rows) => {
-                let fleet = fleet_inputs(rows, &f);
-                if let Err(e) = h.insert("fleet_hourly", &fleet_rows(ts, &fleet)).await {
-                    tracing::warn!(error = %e, "fleet_hourly beat not written");
-                }
-            }
-            Err(_) => tracing::warn!("fleet_hourly beat skipped: the clusters fold failed"),
+    let Some(client) = state.kube.as_ref() else {
+        tracing::warn!("hourly beats skipped: no kubernetes client configured");
+        return;
+    };
+    let f = match owners::fleet(client).await {
+        Ok(f) => f,
+        Err(_) => {
+            tracing::warn!("hourly beats skipped: the owners fold failed");
+            return;
         }
+    };
+
+    let mut usage = Vec::with_capacity(f.owners.len());
+    for owner in &f.owners {
+        let directory_says = crate::api::scope::is_team(state, owner).await;
+        let is_team = owners::team_of(owner, directory_says);
+        let own = f.quota_by_name.get(owner).cloned();
+        let limit = own.unwrap_or_else(|| owners::fallback_quota(&f.quota_by_name, is_team));
+        let used = f.usage_by_owner.get(owner).cloned().unwrap_or_default();
+        usage.push(UsageInput { owner: owner.clone(), is_team, used, limit });
+    }
+    if let Err(e) = h.insert("usage_hourly", &usage_rows(ts, &usage)).await {
+        tracing::warn!(error = %e, "usage_hourly beat not written");
+    }
+
+    match clusters::cluster_rows(state).await {
+        Ok(rows) => {
+            let fleet = fleet_inputs(rows, &f);
+            if let Err(e) = h.insert("fleet_hourly", &fleet_rows(ts, &fleet)).await {
+                tracing::warn!(error = %e, "fleet_hourly beat not written");
+            }
+        }
+        Err(_) => tracing::warn!("fleet_hourly beat skipped: the clusters fold failed"),
     }
 }
