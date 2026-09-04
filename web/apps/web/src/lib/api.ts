@@ -1089,76 +1089,7 @@ export function createRegion(body: { id: string; name: string }, token: string) 
   });
 }
 
-// ── settings (admin host — crates/workspaces/src/api/admin/{schema,settings}.rs) ─
-
-/** `GET /admin/settings/schema`'s one row shape, shared by both scopes — everything a
- *  `SettingRow` needs except the current value, which comes from the scope's own GET. */
-export type SettingsSchemaRow = {
-  name: string;
-  description: string;
-  unit: string;
-  range: { min: number; max: number } | null;
-  mark: "live" | "boot";
-  readers: string[];
-  default: unknown;
-  env: string | null;
-};
-
-export function getSettingsSchema(token: string) {
-  return adminCall<{ central: SettingsSchemaRow[]; cluster: SettingsSchemaRow[] }>("/admin/settings/schema", {
-    method: "GET",
-    token,
-  });
-}
-
-/** The object-store document at `cluster/settings` — every field optional (unset means "fall
- *  back to env, then the built-in default"), plus the inline history and who/when it was last
- *  written. Keys left loose (`Record<string, unknown>` via index access) rather than hand-typed
- *  per field: the schema route is already the one place that enumerates them, so the web never
- *  hand-duplicates that list here too. */
-export type StoredCentralSettings = Record<string, unknown> & {
-  history?: Record<string, unknown>[];
-  updatedBy?: string;
-  updatedAt?: string;
-};
-
-export function getCentralSettings(token: string) {
-  return adminCall<StoredCentralSettings>("/admin/settings/central", { method: "GET", token });
-}
-
-export function putCentralSettings(patch: Record<string, unknown>, token: string) {
-  return adminCall<StoredCentralSettings>("/admin/settings/central", { method: "PUT", token, body: JSON.stringify(patch) });
-}
-
-/** The `ClusterSettings` CRD, as `crd::ClusterSettings` serializes it — `spec` is what
- *  `crd::CLUSTER_SETTING_META` enumerates, `status.observedGeneration` is what the pending
- *  marker compares against `metadata.generation`. */
-export type ClusterSettingsDoc = {
-  metadata?: { generation?: number; annotations?: Record<string, string> };
-  spec: Record<string, unknown>;
-  status?: { observedGeneration?: number };
-};
-
-export function getClusterSettings(region: string, token: string) {
-  return adminCall<ClusterSettingsDoc>(`/admin/settings/clusters/${encodeURIComponent(region)}`, { method: "GET", token });
-}
-
-export function putClusterSettings(region: string, patch: Record<string, unknown>, token: string) {
-  return adminCall<ClusterSettingsDoc>(`/admin/settings/clusters/${encodeURIComponent(region)}`, {
-    method: "PUT",
-    token,
-    body: JSON.stringify(patch),
-  });
-}
-
-/** `n` indexes the CR's inline history annotation, newest first — `0` is "one change ago", the
- *  only depth the revert button in the UI offers. */
-export function revertClusterSettings(region: string, n: number, token: string) {
-  return adminCall<ClusterSettingsDoc>(
-    `/admin/settings/clusters/${encodeURIComponent(region)}/revert/${n}`,
-    { method: "POST", token },
-  );
-}
+// ── workloads (admin host — crates/workspaces/src/api/admin/settings.rs) ─
 
 /** `crates/workspaces/src/api/workloads.rs::WorkloadDoc`. `scope` serializes as a plain string
  *  now (`Scope`'s hand-written `Serialize`) — `"central"` or the bare region id — the fix for the
@@ -1187,13 +1118,6 @@ export function rollWorkload(scope: string, name: string, reason: string, token:
     token,
     body: JSON.stringify({ reason }),
   });
-}
-
-/** Symmetric with `revertClusterSettings` — central has only ever had one prior version to revert
- *  to (`api::admin::settings::revert_central` forwards to the server tier's own single-depth
- *  history), so there is no `n` to pass. */
-export function revertCentralSettings(token: string) {
-  return adminCall<StoredCentralSettings>("/admin/settings/central/revert", { method: "POST", token });
 }
 
 /** Display-only slice of the central document — `crates/api/src/lib.rs::settings_central`, the

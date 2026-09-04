@@ -5,8 +5,9 @@ import { DIMS, dimLabel, type QuotaDim } from "@/lib/quota";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { writeDefault } from "../actions";
+import { PageHeader } from "../page-header";
 
-export const metadata: Metadata = { title: "Quota defaults" };
+export const metadata: Metadata = { title: "Quotas" };
 
 /** `default-user`/`default-team` are ordinary owners as far as `GET /v1/quota` is concerned — the
  *  superadmin claim's `may_act_on` arm is what lets this caller read a "owner" they are neither. */
@@ -30,24 +31,27 @@ function DefaultForm({ owner, title, limit }: { owner: string; title: string; li
 }
 
 export default async function Page() {
-  const { token } = await requireSuperadmin("/superadmin/defaults");
+  const { token } = await requireSuperadmin("/superadmin/quotas");
   const [user, team] = await Promise.all([
     api.getQuota("default-user", token),
     api.getQuota("default-team", token),
   ]);
 
   return (
-    <div className="grid gap-6 sm:grid-cols-2">
-      {user.ok ? (
-        <DefaultForm owner="default-user" title="Person default" limit={user.value.limit} />
-      ) : (
-        <p className="text-sm2 text-destructive">{user.message || "Could not read the person default."}</p>
-      )}
-      {team.ok ? (
-        <DefaultForm owner="default-team" title="Team default" limit={team.value.limit} />
-      ) : (
-        <p className="text-sm2 text-destructive">{team.message || "Could not read the team default."}</p>
-      )}
+    <div>
+      <PageHeader title="Quotas" purpose="The default allocation a new person or team starts with." />
+      <div className="grid gap-6 sm:grid-cols-2">
+        {user.ok ? (
+          <DefaultForm owner="default-user" title="Person default" limit={user.value.limit} />
+        ) : (
+          <p className="text-sm2 text-destructive">{user.message || "Could not read the person default."}</p>
+        )}
+        {team.ok ? (
+          <DefaultForm owner="default-team" title="Team default" limit={team.value.limit} />
+        ) : (
+          <p className="text-sm2 text-destructive">{team.message || "Could not read the team default."}</p>
+        )}
+      </div>
     </div>
   );
 }

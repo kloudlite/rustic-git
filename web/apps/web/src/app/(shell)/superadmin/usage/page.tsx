@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { QuotaBar } from "@/components/app/quota-bar";
+import { PageHeader } from "../page-header";
 
 export const metadata: Metadata = { title: "Usage" };
 
@@ -11,7 +12,9 @@ export default async function Page() {
   const rows = r.ok ? r.value : [];
 
   return (
-    <div className="space-y-6">
+    <div>
+      <PageHeader title="Usage" purpose="Every owner's usage against their quota." />
+      <div className="space-y-6">
       {/* ponytail: the owner list is derived from who has ever had a Quota or a request; an owner
           who has neither is not shown. A `GET /admin/quota` (no owner) listing every Quota plus
           every distinct owner label is the upgrade when the list has to be complete. */}
@@ -27,6 +30,7 @@ export default async function Page() {
           </div>
         ))
       )}
+      </div>
     </div>
   );
 }

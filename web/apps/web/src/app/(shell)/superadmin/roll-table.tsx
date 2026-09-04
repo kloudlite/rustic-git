@@ -8,24 +8,22 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { AutoRefresh } from "@/components/app/auto-refresh";
-import { rolloutStateLabel, settled } from "@/lib/settings";
-import type { WorkloadDoc, AdminNode } from "@/lib/api";
-import type { SaveResult } from "../actions";
+import { when } from "@/lib/time";
+import { settled } from "@/lib/settings";
+import type { WorkloadDoc } from "@/lib/api";
+import type { SaveResult } from "./actions";
+import { RolloutBadge } from "./status-badge";
 
-/** Read-only per spec §6, except the one manual roll — same reason-required, second-confirm-for-
- *  `rustic-git-srv` pattern `SettingsTable`'s save-and-roll dialog uses, since a manual roll of the
- *  StatefulSet carries the same DB-ownership-move risk either way it's triggered. */
-export function WorkloadsTable({
+/** Image tag + digest, ready/desired, rollout state, last roll who/when/reason, and the one
+ *  manual write — a required reason, with a second confirmation for `rustic-git-srv` since
+ *  rolling the StatefulSet moves database ownership between nodes (CLAUDE.md, "Deploying"). Used
+ *  by both Monitoring (central workloads) and each Clusters region panel (that region's agent
+ *  DaemonSet and gateway). */
+export function RollTable({
   workloads,
-  nodes,
-  hosts,
   onRoll,
 }: {
   workloads: WorkloadDoc[];
-  nodes: AdminNode[];
-  /** Slice of `GET /admin/settings/central` the Central tab already fetches — display-only here,
-   *  `unknown` values print as "—" rather than being coerced into a fake string. */
-  hosts: { cloneHost: unknown; sshHost: unknown; sshPort: unknown; registryHost: unknown };
   onRoll: (scope: string, name: string, reason: string) => Promise<SaveResult>;
 }) {
   const [target, setTarget] = useState<{ scope: string; name: string } | null>(null);
@@ -60,24 +58,22 @@ export function WorkloadsTable({
     });
   }
 
-  return (
-    <div className="space-y-6">
-      {anyRollingOut && <AutoRefresh intervalMs={3_000} />}
+  if (workloads.length === 0) {
+    return <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">No workloads reported.</p>;
+  }
 
-      <div className="border border-border bg-card px-4 py-3 text-caption text-muted-foreground">
-        <span className="mr-4">clone: {display(hosts.cloneHost)}</span>
-        <span className="mr-4">ssh: {display(hosts.sshHost)}{hosts.sshPort != null ? `:${display(hosts.sshPort)}` : ""}</span>
-        <span>registry: {display(hosts.registryHost)}</span>
-      </div>
+  return (
+    <div className="space-y-4">
+      {anyRollingOut && <AutoRefresh intervalMs={3_000} />}
 
       <div className="overflow-x-auto border border-border bg-card">
         <table className="w-full text-sm2">
           <thead className="border-b border-border text-left text-caption text-muted-foreground">
             <tr>
               <th className="px-3 py-2 font-medium">Workload</th>
-              <th className="px-3 py-2 font-medium">Scope</th>
               <th className="px-3 py-2 font-medium">Tag</th>
               <th className="px-3 py-2 font-medium">Digest</th>
+              <th className="px-3 py-2 font-medium">Ready</th>
               <th className="px-3 py-2 font-medium">Rollout</th>
               <th className="px-3 py-2 font-medium">Last roll</th>
               <th className="px-3 py-2 font-medium" />
@@ -87,48 +83,25 @@ export function WorkloadsTable({
             {workloads.map((w) => {
               const { tag, digest } = imageRef(w.image);
               return (
-              <tr key={`${w.scope}/${w.name}`}>
-                <td className="px-3 py-2 align-top font-medium">{w.name}</td>
-                <td className="px-3 py-2 align-top text-caption text-muted-foreground">{w.scope}</td>
-                <td className="px-3 py-2 align-top text-caption text-muted-foreground">{tag}</td>
-                <td className="px-3 py-2 align-top text-caption text-muted-foreground font-mono">{digest}</td>
-                <td className="px-3 py-2 align-top text-caption">
-                  {rolloutStateLabel(w.rolloutState, w.ready, w.desired)}
-                </td>
-                <td className="px-3 py-2 align-top text-caption text-muted-foreground">
-                  {w.lastRoll ? `${w.lastRoll.by} · ${w.lastRoll.at} · ${w.lastRoll.reason}` : "—"}
-                </td>
-                <td className="px-3 py-2 align-top">
-                  <Button size="sm" variant="outline" onClick={() => openDialog(w.scope, w.name)}>
-                    Roll
-                  </Button>
-                </td>
-              </tr>
+                <tr key={`${w.scope}/${w.name}`}>
+                  <td className="px-3 py-2 align-top font-medium">{w.name}</td>
+                  <td className="px-3 py-2 align-top text-caption text-muted-foreground">{tag}</td>
+                  <td className="px-3 py-2 align-top text-caption text-muted-foreground font-mono">{digest}</td>
+                  <td className="px-3 py-2 align-top text-caption tabular-nums">{w.ready}/{w.desired}</td>
+                  <td className="px-3 py-2 align-top text-caption"><RolloutBadge w={w} /></td>
+                  <td className="px-3 py-2 align-top text-caption text-muted-foreground">
+                    {w.lastRoll ? `${w.lastRoll.by} · ${when(new Date(w.lastRoll.at).getTime())} · ${w.lastRoll.reason}` : "—"}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <Button size="sm" variant="outline" onClick={() => openDialog(w.scope, w.name)}>
+                      Roll
+                    </Button>
+                  </td>
+                </tr>
               );
             })}
           </tbody>
         </table>
-      </div>
-
-      <div>
-        <h2 className="mb-2 text-sm2 font-medium">Nodes</h2>
-        <ul className="divide-y divide-border border border-border bg-card">
-          {nodes.length === 0 ? (
-            <li className="px-4 py-8 text-center text-sm2 text-muted-foreground">No nodes reported.</li>
-          ) : (
-            nodes.map((n) => (
-              <li key={n.name} className="flex items-center justify-between gap-3 px-4 py-3 text-sm2">
-                <span className="font-medium">{n.name}</span>
-                <span className={n.ready ? "text-muted-foreground" : "text-destructive"}>
-                  {n.ready ? "Ready" : "Not ready"}
-                </span>
-                <span className="text-caption text-muted-foreground">
-                  {n.decommission ? (n.decommissionStatus ?? "decommissioning") : ""}
-                </span>
-              </li>
-            ))
-          )}
-        </ul>
       </div>
 
       <Dialog open={target !== null} onOpenChange={(open) => !open && setTarget(null)}>
@@ -169,8 +142,4 @@ function imageRef(image: string | null): { tag: string; digest: string } {
   if (!image) return { tag: "—", digest: "—" };
   const [tag, digest] = image.split("@");
   return { tag, digest: digest ?? "—" };
-}
-
-function display(v: unknown): string {
-  return v == null || v === "" ? "—" : String(v);
 }

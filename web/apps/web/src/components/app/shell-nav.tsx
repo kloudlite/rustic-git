@@ -26,12 +26,11 @@ const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite", "superadmin"];
  *  owners rather than being one. Same hrefs as the old in-layout `NavTabs`; living here lets the
  *  shell draw them as the primary row instead of a second one underneath. */
 const SUPERADMIN_TABS = [
-  { href: "/superadmin", label: "Queue", exact: true },
+  { href: "/superadmin", label: "Requests", exact: true },
   { href: "/superadmin/usage", label: "Usage" },
-  { href: "/superadmin/defaults", label: "Defaults" },
-  { href: "/superadmin/regions", label: "Regions" },
-  { href: "/superadmin/nodes", label: "Nodes" },
-  { href: "/superadmin/settings", label: "Settings" },
+  { href: "/superadmin/quotas", label: "Quotas" },
+  { href: "/superadmin/clusters", label: "Clusters" },
+  { href: "/superadmin/monitoring", label: "Monitoring" },
 ];
 
 /** Where the URL is, in the terms the chrome cares about.

@@ -44,5 +44,5 @@ test("a third segment under environments is the environment itself, with its own
 test("the superadmin area is its own place, not an org", () => {
   expect(place("/superadmin", "karthik")).toEqual({ kind: "superadmin" });
   expect(place("/superadmin/usage", "karthik")).toEqual({ kind: "superadmin" });
-  expect(place("/superadmin/settings/clusters", "karthik")).toEqual({ kind: "superadmin" });
+  expect(place("/superadmin/clusters", "karthik")).toEqual({ kind: "superadmin" });
 });

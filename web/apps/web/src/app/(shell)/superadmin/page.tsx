@@ -5,9 +5,11 @@ import { when } from "@/lib/time";
 import { dimLabel, type QuotaDim } from "@/lib/quota";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { decideRequest } from "./actions";
+import { PageHeader } from "./page-header";
 
-export const metadata: Metadata = { title: "Quota queue" };
+export const metadata: Metadata = { title: "Requests" };
 
 function ageOf(createdAt: string | null | undefined) {
   return createdAt ? when(new Date(createdAt).getTime()) : "unknown";
@@ -28,7 +30,9 @@ export default async function Page() {
   const decided = rows.filter((row) => row.state !== "pending").slice(0, 10);
 
   return (
-    <div className="space-y-8">
+    <div>
+      <PageHeader title="Requests" purpose="Quota raise requests waiting on a decision." />
+      <div className="space-y-8">
       <section>
         <h2 className="mb-3 text-sm2 font-medium">Pending ({pending.length})</h2>
         {pending.length === 0 ? (
@@ -72,15 +76,14 @@ export default async function Page() {
               <li key={req.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm2">
                 <span className="font-medium">{req.owner}</span>
                 <span className="text-muted-foreground">{dims(req.requested)}</span>
-                <span className={req.state === "approved" ? "text-primary" : "text-destructive"}>
-                  {req.state}
-                </span>
+                <Badge variant={req.state === "approved" ? "outline" : "destructive"}>{req.state}</Badge>
                 <span className="text-caption text-muted-foreground">{ageOf(req.decidedAt)}</span>
               </li>
             ))}
           </ul>
         </section>
       )}
+      </div>
     </div>
   );
 }
