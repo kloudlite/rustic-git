@@ -12,6 +12,7 @@ use super::*;
 use axum::extract::Path;
 
 mod audit;
+mod clusters;
 mod owners;
 mod schema;
 mod settings;
@@ -78,6 +79,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/owners", get(owners::owners_list))
         .route("/admin/owners/{slug}", get(owners::owner_detail))
         .route("/admin/nodes", get(list_nodes))
+        .route("/admin/clusters", get(clusters::list_clusters))
+        .route("/admin/clusters/{region}", get(clusters::cluster_detail))
+        .route("/admin/clusters/{region}/status", axum::routing::put(clusters::set_region_status))
+        .route("/admin/clusters/{region}/nodes/{node}/drain", post(clusters::drain))
+        .route("/admin/clusters/{region}/nodes/{node}/undrain", post(clusters::undrain))
+        .route("/admin/clusters/{region}/nodes/{node}/decommission", post(clusters::decommission))
         .route("/admin/workspaces", get(admin_list_ws))
         .route("/admin/workspaces/{id}", axum::routing::delete(admin_delete_ws))
         .route("/admin/workspaces/{id}/stop", post(admin_stop_ws))
@@ -295,33 +302,41 @@ async fn list_all_quota_requests(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NodeDoc {
-    name: String,
-    ready: bool,
-    decommission: bool,
-    decommission_status: Option<String>,
+pub(crate) struct NodeDoc {
+    pub(crate) name: String,
+    pub(crate) ready: bool,
+    pub(crate) decommission: bool,
+    pub(crate) decommission_status: Option<String>,
+}
+
+/// Every node of one cluster, read fresh — `GET /admin/nodes` and the Clusters area both compose
+/// from this rather than each deciding for itself what "ready" or "draining" means.
+pub(crate) async fn node_docs(client: &kube::Client) -> Result<Vec<NodeDoc>, Response> {
+    let api: Api<k8s_openapi::api::core::v1::Node> = Api::all(client.clone());
+    Ok(api.list(&ListParams::default()).await.map_err(kube_err)?.items.iter().map(node_doc).collect())
+}
+
+pub(crate) fn node_doc(n: &k8s_openapi::api::core::v1::Node) -> NodeDoc {
+    let ready = n
+        .status
+        .as_ref()
+        .and_then(|st| st.conditions.as_ref())
+        .into_iter()
+        .flatten()
+        .any(|c| c.type_ == "Ready" && c.status == "True");
+    let labels = n.metadata.labels.clone().unwrap_or_default();
+    let annotations = n.metadata.annotations.clone().unwrap_or_default();
+    NodeDoc {
+        name: n.name_any(),
+        ready,
+        // Only the exact value counts, same rule the agent's own `decommissioning` applies.
+        decommission: labels.get(crd::DECOMMISSION_LABEL).map(String::as_str) == Some("true"),
+        decommission_status: annotations.get(crd::DECOMMISSION_STATUS).cloned(),
+    }
 }
 
 async fn list_nodes(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
-    let api: Api<k8s_openapi::api::core::v1::Node> = Api::all(kube(&s)?.clone());
-    let rows: Vec<NodeDoc> = api
-        .list(&ListParams::default()).await.map_err(kube_err)?.items.into_iter()
-        .map(|n| {
-            let ready = n.status.as_ref()
-                .and_then(|st| st.conditions.as_ref())
-                .into_iter().flatten()
-                .any(|c| c.type_ == "Ready" && c.status == "True");
-            let labels = n.metadata.labels.clone().unwrap_or_default();
-            let annotations = n.metadata.annotations.clone().unwrap_or_default();
-            NodeDoc {
-                name: n.name_any(),
-                ready,
-                decommission: labels.get("rustic-git.io/decommission").map(String::as_str) == Some("true"),
-                decommission_status: annotations.get("rustic-git.io/decommission-status").cloned(),
-            }
-        })
-        .collect();
-    Ok(Json(rows).into_response())
+    Ok(Json(node_docs(kube(&s)?).await?).into_response())
 }
 
 // ── cross-owner list / stop / delete ────────────────────────────────────────

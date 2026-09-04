@@ -109,9 +109,15 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "patch", "delete"]
+  # `patch` is the Clusters area's drain / undrain / decommission: the decommission LABEL, the
+  # status annotation undrain clears, and `spec.unschedulable`. A node cannot be name-restricted
+  # in RBAC (no `resourceNames` on a cluster-scoped list of one), so the scoping is in the handler
+  # — `client_for_region` answers only for a node this region's cluster actually has, and every
+  # write names exactly one node and carries a reason onto the audit row. Still no `delete`: the
+  # console never removes a Node object, and never the VM behind it.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "patch"]
   # admin::workloads' per-region half: rolling this region's own rustic-git-agent DaemonSet
   # (kube-system) and rustic-git-gateway Deployment (rustic-git-system, deploy/k3s/gateway.yaml).
   # No `create`/`delete` — same reasoning as the central Role in deploy/rustic-git.yaml, a roll

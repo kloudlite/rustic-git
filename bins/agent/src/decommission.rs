@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// The operator's one window into a drain, rewritten each beat and readable with
 /// `kubectl describe node`. ONE key: `draining …` while there is work left, `drained <RFC 3339>`
 /// when there is not. Two keys would be two things to check and one to forget.
-pub const DECOMMISSION_STATUS: &str = "rustic-git.io/decommission-status";
+pub use crate::crd::DECOMMISSION_STATUS;
 
 /// `WS_DECOMMISSION_SECS`, default 30 — fast, because everything it does is idempotent and cheap,
 /// and because the thing it is waiting for (a person stopping their workspace) deserves a prompt
@@ -32,7 +32,7 @@ pub(crate) fn beat_interval(settings: &crate::controller::Settings) -> std::time
 /// counts say which of the four is holding it.
 pub(crate) fn drain_status(running: usize, owned: usize, copies: usize, thin: usize, now: &str) -> String {
     if running == 0 && owned == 0 && copies == 0 && thin == 0 {
-        format!("drained {now}")
+        format!("{}{now}", crate::crd::DRAINED_PREFIX)
     } else {
         format!("draining running={running} owned={owned} copies={copies} thin={thin}")
     }
@@ -112,10 +112,10 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
     // left is the one that owns it. Rewriting a fresh `now` every 30 s would turn the operator's
     // gate into "when did we last look", and lose the only timestamp anyone wants. A node that
     // starts hosting work again writes `draining …` over it immediately.
-    if status.starts_with("drained ")
+    if status.starts_with(crate::crd::DRAINED_PREFIX)
         && me.and_then(|n| n.metadata.annotations.as_ref())
             .and_then(|a| a.get(DECOMMISSION_STATUS))
-            .is_some_and(|v| v.starts_with("drained "))
+            .is_some_and(|v| v.starts_with(crate::crd::DRAINED_PREFIX))
     {
         return;
     }

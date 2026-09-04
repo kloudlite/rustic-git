@@ -943,3 +943,17 @@ then `deploy/rustic-git-web.yaml` for the settings admin UI.
 **What existing readers see:** nothing, until a stored `cluster/settings` document or a
 `ClusterSettings/default` CR is actually written — every field's `stored ??` branch is empty at
 first boot, so every process runs exactly as it did on env alone.
+
+## Release: superadmin console
+
+RBAC only on this side — no new CRD, no new process.
+
+```sh
+# api-rbac.yaml: the rustic-git-admin ClusterRole gains `patch` on nodes, for the Clusters area's
+# drain / undrain / decommission (the decommission label, the status annotation undrain clears,
+# and spec.unschedulable). Nodes cannot be name-restricted, so the scoping is in the handler:
+# one named node, in a region this cluster actually answers for, with a reason on the audit row.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
+```
+
+Apply it BEFORE rolling the api image: without it a drain answers 403 from the k3s API server.

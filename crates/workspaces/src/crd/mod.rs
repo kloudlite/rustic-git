@@ -975,6 +975,15 @@ pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
 /// half-typed label must never drain a node.
 pub const DECOMMISSION_LABEL: &str = "rustic-git.io/decommission";
 
+/// The drain's one progress window, written by the draining node's own agent and read by the
+/// admin console's decommission gate. Lives here, next to the label, so the tier that WRITES it
+/// and the tier that READS it can never spell it differently.
+pub const DECOMMISSION_STATUS: &str = "rustic-git.io/decommission-status";
+
+/// The sticky stamp `DECOMMISSION_STATUS` carries once a node holds nothing — the prefix the
+/// console gates decommission on.
+pub const DRAINED_PREFIX: &str = "drained ";
+
 /// Labels every `Snapshot`/`VolumeReplica` create site stamps: `spec.volume`/`spec.owner` restated
 /// as labels so a watch or a list (the e2e's `-l rustic-git.io/volume=...`, `/v1`'s own reads) can
 /// select on them — a label cannot be queried out of an arbitrary spec field. A VIEW, same rule as
