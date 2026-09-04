@@ -7,8 +7,9 @@ use k8s_openapi::api::core::v1::{Node, NodeCondition, NodeSpec, NodeStatus};
 use kube::api::ObjectMeta;
 use rustic_git_workspaces::crd::{self, DesiredState, Phase, RequestState};
 use rustic_git_workspaces::history::watch::{
-    environment_events, event_id, node_events, quota_request_events, region_events,
-    snapshot_deleted, snapshot_events, volume_events, workspace_events,
+    environment_deleted, environment_events, event_id, node_events, quota_request_events,
+    region_events, snapshot_deleted, snapshot_events, volume_events, workspace_deleted,
+    workspace_events,
 };
 
 fn meta(name: &str, uid: &str, rv: &str) -> ObjectMeta {
@@ -56,7 +57,8 @@ fn first_sight_of_a_workspace_is_created() {
     let rows = workspace_events(None, &ws("uid-1", "1", Phase::Pending), "westeurope-k3s");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].kind, "workspace.created");
-    assert_eq!(rows[0].id, "uid-1:1:created");
+    // A create happens ONCE per uid, so its id carries no resourceVersion — see the next test.
+    assert_eq!(rows[0].id, "uid-1:0:created");
     // spec.owner is truth — never a label.
     assert_eq!(rows[0].owner, "acme");
     assert_eq!(rows[0].target, "ws-abc");
@@ -83,6 +85,30 @@ fn a_phase_change_into_ready_is_started_and_into_stopped_is_stopped() {
 fn an_unchanged_phase_produces_no_event() {
     let before = ws("uid-1", "2", Phase::Ready);
     assert!(workspace_events(Some(&before), &ws("uid-1", "3", Phase::Ready), "eu").is_empty());
+}
+
+/// A restart drops the last-seen map and re-lists every object, so first sight happens again — at
+/// whatever resourceVersion the object has reached by then. Both the id AND the timestamp must
+/// come from the create itself, or every restart adds another `workspace.created` row forever.
+#[test]
+fn a_restart_re_emits_the_same_created_row_at_a_later_resource_version() {
+    let mut early = ws("uid-1", "1", Phase::Pending);
+    early.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-09-04T10:00:00Z".parse().unwrap(),
+    ));
+    // The same object hours later: reconciled many times, then re-listed by a restarted watch.
+    let mut later = early.clone();
+    later.metadata.resource_version = Some("9182".into());
+    later.status = Some(crd::WorkspaceStatus {
+        phase: Phase::Ready,
+        ..Default::default()
+    });
+
+    let first = workspace_events(None, &early, "eu");
+    let after_restart = workspace_events(None, &later, "eu");
+    assert_eq!(after_restart[0].kind, "workspace.created");
+    assert_eq!(first[0].id, after_restart[0].id);
+    assert_eq!(first[0].ts, after_restart[0].ts);
 }
 
 /// The whole reason `ts` is not `Utc::now()`: a re-listed object must produce a byte-identical row.
@@ -132,6 +158,23 @@ fn an_environment_reaching_running_is_started() {
             .kind
             .ends_with(".created")
     );
+}
+
+#[test]
+fn deleting_a_workspace_or_an_environment_is_one_event_each() {
+    let rows = workspace_deleted(&ws("uid-1", "7", Phase::Stopped), "eu");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, "workspace.deleted");
+    // A delete IS an observed transition, so unlike `created` it keeps the resourceVersion.
+    assert_eq!(rows[0].id, "uid-1:7:deleted");
+    assert_eq!(rows[0].owner, "acme");
+    assert_eq!(rows[0].target, "ws-abc");
+
+    let rows = environment_deleted(&env("uid-e", "8", Phase::Stopped), "eu");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, "environment.deleted");
+    assert_eq!(rows[0].id, "uid-e:8:deleted");
+    assert_eq!(rows[0].owner, "acme");
 }
 
 fn snap(rv: &str, phase: Phase, transient: bool) -> crd::Snapshot {

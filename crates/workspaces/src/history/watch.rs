@@ -24,6 +24,17 @@ use kube::api::ResourceExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Reconnect delays for `watch_kind`. Short enough that an ordinary watch expiry costs nothing,
+/// capped so a watch that will never start (a missing RBAC verb) settles into a slow retry.
+const MIN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
+/// How often a still-failing watch repeats its warn.
+const LOUD_EVERY: u64 = 20;
+
+/// The `region` value the admin process's OWN cluster writes, matching `EventRow::region`'s
+/// convention everywhere else in this module.
+pub const CENTRAL: &str = "central";
+
 pub fn event_id(uid: &str, resource_version: &str, transition: &str) -> String {
     format!("{uid}:{resource_version}:{transition}")
 }
@@ -60,6 +71,17 @@ fn k8s_time(
 /// something an API server produced.
 fn epoch() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::UNIX_EPOCH
+}
+
+/// A create's timestamp is `creationTimestamp`, for the same reason its id drops the
+/// resourceVersion: both must be properties of the create itself, or a restart re-emits the row
+/// with a later time. Any other transition takes the object's last write.
+fn transition_at<K: ResourceExt>(o: &K, first_sight: bool) -> chrono::DateTime<chrono::Utc> {
+    match first_sight {
+        true => o.meta().creation_timestamp.as_ref().and_then(k8s_time),
+        false => managed_at(o),
+    }
+    .unwrap_or_else(epoch)
 }
 
 /// The one row constructor every mapper goes through, so no mapper can forget the id scheme.
@@ -127,10 +149,15 @@ fn parent_rows(
     attrs: serde_json::Value,
 ) -> Vec<EventRow> {
     if first_sight {
+        // `rv` is deliberately NOT part of a create's id. First sight is not an observed
+        // transition: it is "this object exists", and a restart re-lists the object at whatever
+        // resourceVersion it has reached by then. Keying on rv would mint a brand-new id on every
+        // restart and the ReplacingMergeTree would keep them all — one `workspace.created` per
+        // restart, forever. A uid is unique to a create, so `0` stands in for "no transition".
         return vec![row(
             ts,
             uid,
-            rv,
+            "0",
             "created",
             &format!("{kind_prefix}.created"),
             "",
@@ -165,7 +192,7 @@ pub fn workspace_events(
 ) -> Vec<EventRow> {
     let (uid, rv) = uid_rv(next);
     parent_rows(
-        managed_at(next).unwrap_or_else(epoch),
+        transition_at(next, prev.is_none()),
         &uid,
         &rv,
         "workspace",
@@ -186,7 +213,7 @@ pub fn environment_events(
 ) -> Vec<EventRow> {
     let (uid, rv) = uid_rv(next);
     parent_rows(
-        managed_at(next).unwrap_or_else(epoch),
+        transition_at(next, prev.is_none()),
         &uid,
         &rv,
         "environment",
@@ -542,8 +569,11 @@ fn no_delete<K>(_: &K, _: &str) -> Vec<EventRow> {
 /// cluster (the same bound the Store has) and is dropped whenever the watcher restarts, which
 /// re-lists everything — hence the `created` rows on restart, which the id scheme collapses.
 ///
-/// A watch that cannot start at all (no RBAC, no CRD, unreachable cluster) is logged once per
-/// attempt at debug and retried on the same sleep: this must never block or fail boot.
+/// A watch that cannot start at all (no RBAC, no CRD, unreachable cluster) must never block or
+/// fail boot, so it is retried forever — but a permanently missing RBAC verb would otherwise
+/// reconnect every few seconds in silence, so the FIRST failure of a run is logged at warn (that
+/// is the one an operator needs, and it names the kind), then every `LOUD_EVERY`th, and the delay
+/// doubles to `MAX_BACKOFF` instead of hammering a cluster that is not coming back.
 // ponytail: this loop is untested — `kube_test::mock_client` answers one canned JSON body per
 // request and cannot stream a watch, so there is no harness for it. Every rule lives in the
 // mappers above, which ARE tested; add a streaming mock the day the loop grows a decision.
@@ -563,6 +593,9 @@ async fn watch_kind<K>(
         + 'static,
 {
     let api = kube::Api::<K>::all(client);
+    let kind = K::kind(&()).to_string();
+    let mut backoff = MIN_BACKOFF;
+    let mut failures: u64 = 0;
     loop {
         let mut prev: HashMap<String, K> = HashMap::new();
         let mut stream =
@@ -589,11 +622,21 @@ async fn watch_kind<K>(
                 Ok(_) => continue,
                 Err(e) => {
                     // Never fatal: the loop re-establishes the watch, and the ids make the re-list
-                    // idempotent. Logging every blip at warn would be its own noise source.
-                    tracing::debug!(error = %e, %region, "history watch interrupted; restarting");
+                    // idempotent. Loud on the first failure of a run and then rarely, so a wedged
+                    // watch is visible without every reconnect blip becoming its own noise source.
+                    failures += 1;
+                    if failures == 1 || failures.is_multiple_of(LOUD_EVERY) {
+                        tracing::warn!(error = %e, %region, %kind, failures, "history watch interrupted; restarting");
+                    } else {
+                        tracing::debug!(error = %e, %region, %kind, "history watch interrupted; restarting");
+                    }
                     break;
                 }
             };
+            // An event at all means the watch is healthy: a later outage is a fresh run and gets
+            // its own warn and its own short first retry.
+            failures = 0;
+            backoff = MIN_BACKOFF;
             if rows.is_empty() {
                 continue;
             }
@@ -601,14 +644,35 @@ async fn watch_kind<K>(
                 tracing::warn!(error = %e, %region, n = rows.len(), "history watch rows not written");
             }
         }
-        // A watcher that ended restarts on the next tick rather than spinning on a broken cluster.
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // A watcher that ended restarts after a growing pause rather than spinning on a cluster
+        // that is not answering.
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
-/// Every watch for one cluster. Spawned once per region plus once for central (`region: "central"`,
-/// where `Region` objects live).
+/// The central cluster's one watch. `Region` is the only kind that lives there — every workspace,
+/// environment, snapshot, volume and quota request belongs to a region cluster, so running the
+/// other six here would be six watches against a cluster with none of those CRDs, each failing and
+/// retrying forever.
+pub async fn watch_central(client: kube::Client, history: Arc<History>) {
+    watch_kind::<crd::Region>(
+        client,
+        CENTRAL.to_string(),
+        history,
+        |p, n, _| region_events(p, n),
+        no_delete,
+    )
+    .await
+}
+
+/// Every watch for one region cluster — and `watch_central` alone for the central one, so the
+/// caller keeps one entry point and cannot spawn a region's watches against a cluster that holds
+/// none of those CRDs.
 pub async fn watch_region(client: kube::Client, region: String, history: Arc<History>) {
+    if region == CENTRAL {
+        return watch_central(client, history).await;
+    }
     let tasks = vec![
         tokio::spawn(watch_kind::<crd::Workspace>(
             client.clone(),
@@ -646,17 +710,10 @@ pub async fn watch_region(client: kube::Client, region: String, history: Arc<His
             no_delete,
         )),
         tokio::spawn(watch_kind::<Node>(
-            client.clone(),
-            region.clone(),
-            history.clone(),
-            node_events,
-            no_delete,
-        )),
-        tokio::spawn(watch_kind::<crd::Region>(
             client,
             region,
             history,
-            |p, n, _| region_events(p, n),
+            node_events,
             no_delete,
         )),
     ];
