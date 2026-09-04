@@ -867,6 +867,18 @@ pub struct QuotaSpec {
     /// Whole cores, summed over live working copies' limits.
     pub cpu: u32,
     pub memory_gb: u32,
+    /// Regions this owner has been GRANTED beyond whatever placement offers by default. Recorded
+    /// here, on the one per-owner cluster-scoped object the admin process already owns, rather
+    /// than on an `OwnerBinding` — a binding is per `{owner, region}` and is authored by the
+    /// claiming agent, so a per-owner grant list has no coherent home there. Nothing reads it for
+    /// placement yet (spec §B: "a recorded decision only"); per-owner region gating lands later
+    /// and reads exactly this field.
+    ///
+    /// Skipped when empty on purpose: `write_quota` merge-patches a whole `QuotaSpec`, and
+    /// `PUT /admin/quota/{owner}` bodies never mention regions — serializing `[]` would erase a
+    /// grant every time somebody edited a limit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<String>,
 }
 
 /// Nothing writes this today. It exists because every CRD in this repo has a status subresource —
@@ -887,9 +899,25 @@ pub const DEFAULT_TEAM_QUOTA: &str = "default-team";
 /// definite ceiling — a missing fallback object must not mean "unlimited".
 pub fn default_quota(team: bool) -> QuotaSpec {
     if team {
-        QuotaSpec { workspaces: 20, environments: 8, snapshots: 80, disk_gb: 400, cpu: 32, memory_gb: 128 }
+        QuotaSpec {
+            workspaces: 20,
+            environments: 8,
+            snapshots: 80,
+            disk_gb: 400,
+            cpu: 32,
+            memory_gb: 128,
+            regions: Vec::new(),
+        }
     } else {
-        QuotaSpec { workspaces: 5, environments: 2, snapshots: 20, disk_gb: 100, cpu: 8, memory_gb: 32 }
+        QuotaSpec {
+            workspaces: 5,
+            environments: 2,
+            snapshots: 20,
+            disk_gb: 100,
+            cpu: 8,
+            memory_gb: 32,
+            regions: Vec::new(),
+        }
     }
 }
 
@@ -962,6 +990,148 @@ pub enum RequestState {
     Pending,
     Approved,
     Denied,
+}
+
+/// What a person is asking for. One CRD for all four kinds, because the LIFECYCLE is identical —
+/// opened by a user, one pending at a time, decided by a superadmin, kept forever as the record —
+/// and only the payload and what approve DOES differ. Four CRDs would have meant four RBAC rules,
+/// four list routes and four console tables for one workflow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RequestKind {
+    Quota,
+    Access,
+    Region,
+    Other,
+}
+
+impl RequestKind {
+    /// The wire word, for a filter query and for the audit target — one spelling, so a URL's
+    /// `?kind=` and a stored object can never disagree.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RequestKind::Quota => "quota",
+            RequestKind::Access => "access",
+            RequestKind::Region => "region",
+            RequestKind::Other => "other",
+        }
+    }
+}
+
+/// Join a team, or move to a different role in one. `role` is the directory's own word
+/// (`member` / `admin` / `owner`) rather than an enum, because the directory's `Role` lives in
+/// `rustic-git-pulls` and this crate deliberately does not depend on it; `validate` is what stops
+/// a typo reaching the grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessAsk {
+    pub team: String,
+    pub role: String,
+}
+
+pub const ROLES: [&str; 3] = ["member", "admin", "owner"];
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionAsk {
+    pub region: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherAsk {
+    pub title: String,
+    pub body: String,
+}
+
+/// A person asking for something, and the decision on it. Supersedes `QuotaRequest`, which stays
+/// readable until the one-shot migration has run everywhere and a later release retires it.
+///
+/// Like `QuotaRequest`, this is the one shape whose STATUS the API tier writes rather than a
+/// controller: no controller reconciles a request — a person decides it — so the decision has
+/// nowhere else to live.
+#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "rustic-git.io",
+    version = "v1alpha1",
+    kind = "Request",
+    plural = "requests",
+    shortname = "req",
+    status = "RequestStatus",
+    printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
+    printcolumn = r#"{"name":"Kind","type":"string","jsonPath":".spec.kind"}"#,
+    printcolumn = r#"{"name":"State","type":"string","jsonPath":".status.state"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    derive = "PartialEq"
+)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestSpec {
+    /// The person or team the request is FOR — truth, never a label. For an access request this
+    /// is the asker's own slug and `access.team` names the team they want into: the team is what
+    /// they do not have yet, so it cannot also be the owner that authorizes the ask.
+    pub owner: String,
+    pub kind: RequestKind,
+    /// The signed-in user who opened it. Set by `/v1` from the caller's claims, never from the
+    /// body — a request that could name its own author is not evidence of anything.
+    pub requested_by: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<RequestedQuota>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<AccessAsk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<RegionAsk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<OtherAsk>,
+}
+
+impl RequestSpec {
+    /// Exactly the block for its kind, and nothing else. `approve` dispatches on `kind`, so a
+    /// request carrying a second block would have a payload the decision silently ignores — and
+    /// a request carrying none would be approved into a no-op.
+    pub fn validate(&self) -> Result<(), String> {
+        let present = [
+            ("quota", self.quota.is_some()),
+            ("access", self.access.is_some()),
+            ("region", self.region.is_some()),
+            ("other", self.other.is_some()),
+        ];
+        let want = self.kind.as_str();
+        if !present.iter().any(|(name, is_set)| *is_set && *name == want) {
+            return Err(format!("kind {want} needs a {want} block"));
+        }
+        for (name, is_set) in present {
+            if is_set && name != want {
+                return Err(format!("only the {want} block belongs on a {want} request"));
+            }
+        }
+        if let Some(a) = &self.access {
+            if !ROLES.contains(&a.role.as_str()) {
+                return Err("role must be member, admin or owner".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestStatus {
+    pub state: RequestState,
+    /// The deciding superadmin's email, for the audit trail. Never an owner of anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// What approve actually DID, in one sentence — the quota that was written, the role that was
+    /// set, the recorded region grant, or the free text a superadmin typed for an `other`. Kept
+    /// separately from `note` because the note is the decider's message to the asker and this is
+    /// the record of the effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
 }
 
 /// The label a `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
@@ -1195,6 +1365,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Region::crd(),
         Quota::crd(),
         QuotaRequest::crd(),
+        Request::crd(),
         ClusterSettings::crd(),
     ]
 }
@@ -1557,5 +1728,77 @@ mod tests {
         let mut meta: Vec<&str> = CLUSTER_SETTING_META.iter().map(|(name, _, _)| *name).collect();
         meta.sort_unstable();
         assert_eq!(props, meta, "CLUSTER_SETTING_META must name exactly ClusterSettingsSpec's fields");
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    fn base(kind: RequestKind) -> RequestSpec {
+        RequestSpec {
+            owner: "acme".into(),
+            kind,
+            requested_by: "meera".into(),
+            reason: "more room".into(),
+            quota: None,
+            access: None,
+            region: None,
+            other: None,
+        }
+    }
+
+    /// The wire form is what an operator reads with `kubectl get request -o yaml`, and what a
+    /// stored object parses back from — both directions, so a rename cannot pass unnoticed.
+    #[test]
+    fn a_request_round_trips_through_its_wire_form() {
+        let mut spec = base(RequestKind::Access);
+        spec.access = Some(AccessAsk { team: "acme".into(), role: "admin".into() });
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v["kind"], "access");
+        assert_eq!(v["requestedBy"], "meera");
+        assert_eq!(v["access"]["role"], "admin");
+        // Blocks for the other three kinds are absent, not null: a null would advertise a field
+        // the request never carried.
+        assert!(v.get("quota").is_none() && v.get("region").is_none() && v.get("other").is_none());
+        assert_eq!(serde_json::from_value::<RequestSpec>(v).unwrap(), spec);
+    }
+
+    /// A request carrying somebody else's block is not a typo to tolerate: `approve` dispatches on
+    /// `kind` and would silently ignore the block that was actually filled in.
+    #[test]
+    fn exactly_the_block_for_its_kind_must_be_present() {
+        let mut ok = base(RequestKind::Quota);
+        ok.quota = Some(RequestedQuota { workspaces: Some(9), ..Default::default() });
+        assert_eq!(ok.validate(), Ok(()));
+
+        let missing = base(RequestKind::Quota);
+        assert_eq!(missing.validate(), Err("kind quota needs a quota block".to_string()));
+
+        let mut extra = base(RequestKind::Quota);
+        extra.quota = Some(RequestedQuota::default());
+        extra.other = Some(OtherAsk { title: "t".into(), body: "b".into() });
+        assert_eq!(extra.validate(), Err("only the quota block belongs on a quota request".to_string()));
+
+        let mut wrong = base(RequestKind::Region);
+        wrong.access = Some(AccessAsk { team: "acme".into(), role: "admin".into() });
+        assert_eq!(wrong.validate(), Err("kind region needs a region block".to_string()));
+    }
+
+    /// Only the three directory roles; anything else would reach `grant_access` as a role nothing
+    /// can map, and a 500 on approve is a decision that half-happened.
+    #[test]
+    fn an_access_request_takes_only_a_real_role() {
+        let mut spec = base(RequestKind::Access);
+        spec.access = Some(AccessAsk { team: "acme".into(), role: "superuser".into() });
+        assert_eq!(spec.validate(), Err("role must be member, admin or owner".to_string()));
+    }
+
+    /// `regions` is a granted list, and an empty one is omitted so a merge patch of a `QuotaSpec`
+    /// that never mentions regions (every `PUT /admin/quota/{owner}` body) cannot erase a grant.
+    #[test]
+    fn an_empty_region_grant_is_omitted_from_a_quota_patch() {
+        let v = serde_json::to_value(default_quota(false)).unwrap();
+        assert!(v.get("regions").is_none());
     }
 }

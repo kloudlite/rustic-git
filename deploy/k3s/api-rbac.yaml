@@ -47,6 +47,12 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "create"]
+  # The generic request queue. Same reach as `quotarequests` and for the same reason: a person or
+  # a team admin may OPEN one for themselves, and deciding it is not a /v1 verb — no `patch`, and
+  # no `requests/status` at all, so this role cannot mark its own request approved.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["requests"]
+    verbs: ["get", "list", "create"]
   # Read-only, for ONE question: cloning an INTERRUPTED workspace. Its node is down, so nothing can
   # be cut there and the clone has to graft onto a sync point some OTHER node already holds — and
   # `status.branches` is the only record of who holds what. `get`/`list` and nothing else: the
@@ -95,6 +101,15 @@ rules:
     verbs: ["get", "list", "create", "patch", "delete"]
   - apiGroups: ["rustic-git.io"]
     resources: ["quotarequests/status"]
+    verbs: ["patch", "update"]
+  # Deciding a request: `patch` on the object for the migration's label repair, `patch`/`update` on
+  # the status subresource for the decision itself. `create` is here because the one-shot migration
+  # (`POST /admin/requests/migrate`) authors a Request per legacy QuotaRequest.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["requests"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["requests/status"]
     verbs: ["patch", "update"]
   - apiGroups: ["rustic-git.io"]
     resources: ["regions"]

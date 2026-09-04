@@ -264,6 +264,7 @@ fn overlay(base: crd::QuotaSpec, want: &crd::RequestedQuota) -> crd::QuotaSpec {
         disk_gb: want.disk_gb.unwrap_or(base.disk_gb),
         cpu: want.cpu.unwrap_or(base.cpu),
         memory_gb: want.memory_gb.unwrap_or(base.memory_gb),
+        regions: base.regions,
     }
 }
 

@@ -52,7 +52,7 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
             // `.spec.volume`: `replicated_condition` and `pull_volume` both filtered client-side
             // because a selector on it was a 400. Dropping it makes both a full-cluster scan again.
             "VolumeReplica" => &[".spec.node", ".status.phase", ".spec.volume"],
-            "Quota" | "QuotaRequest" => &[],
+            "Quota" | "QuotaRequest" | "Request" => &[],
             // The single `default` object per cluster: every agent watches it by name, not by
             // node, so there is no per-node axis to select on.
             "ClusterSettings" => &[],
@@ -112,13 +112,14 @@ fn every_phase_is_a_schema_enum() {
         // VolumeReplica's phase is deliberately a plain string, not `Phase` — it must be a
         // `selectableField`, and the API server only accepts a string type there.
         // Region's status is empty on purpose (no controller observes it) and has no phase at all.
-        // Quota's status carries only conditions (nothing writes it yet); QuotaRequest's status is
-        // `state`, an enum in its own right, asserted separately in `quota_kinds_are_published`.
+        // Quota's status carries only conditions (nothing writes it yet); QuotaRequest's and
+        // Request's status is `state`, an enum in its own right, asserted separately in
+        // `quota_kinds_are_published`.
         // ClusterSettings' status is just `observedGeneration` — no controller reconciles it into
         // a phase, so it has none.
         if matches!(
             crd.spec.names.kind.as_str(),
-            "OwnerBinding" | "VolumeReplica" | "Region" | "Quota" | "QuotaRequest" | "ClusterSettings"
+            "OwnerBinding" | "VolumeReplica" | "Region" | "Quota" | "QuotaRequest" | "Request" | "ClusterSettings"
         ) {
             continue;
         }

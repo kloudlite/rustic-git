@@ -1564,6 +1564,13 @@
                         "minimum": 0.0,
                         "type": "integer"
                       },
+                      "regions": {
+                        "description": "Regions this owner has been GRANTED beyond whatever placement offers by default. Recorded\nhere, on the one per-owner cluster-scoped object the admin process already owns, rather\nthan on an `OwnerBinding` — a binding is per `{owner, region}` and is authored by the\nclaiming agent, so a per-owner grant list has no coherent home there. Nothing reads it for\nplacement yet (spec §B: \"a recorded decision only\"); per-owner region gating lands later\nand reads exactly this field.\n\nSkipped when empty on purpose: `write_quota` merge-patches a whole `QuotaSpec`, and\n`PUT /admin/quota/{owner}` bodies never mention regions — serializing `[]` would erase a\ngrant every time somebody edited a limit.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
                       "snapshots": {
                         "description": "Snapshots — pushes, not sync points. The agent's own transient cuts are its business and\nare never anyone's allocation.",
                         "format": "uint32",
@@ -1789,6 +1796,226 @@
                   "spec"
                 ],
                 "title": "QuotaRequest",
+                "type": "object"
+              }
+            },
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "requests.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "Request",
+          "plural": "requests",
+          "shortNames": [
+            "req"
+          ],
+          "singular": "request"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.owner",
+                "name": "Owner",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".spec.kind",
+                "name": "Kind",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".status.state",
+                "name": "State",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".metadata.creationTimestamp",
+                "name": "Age",
+                "type": "date"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for RequestSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "A person asking for something, and the decision on it. Supersedes `QuotaRequest`, which stays\nreadable until the one-shot migration has run everywhere and a later release retires it.\n\nLike `QuotaRequest`, this is the one shape whose STATUS the API tier writes rather than a\ncontroller: no controller reconciles a request — a person decides it — so the decision has\nnowhere else to live.",
+                    "properties": {
+                      "access": {
+                        "description": "Join a team, or move to a different role in one. `role` is the directory's own word\n(`member` / `admin` / `owner`) rather than an enum, because the directory's `Role` lives in\n`rustic-git-pulls` and this crate deliberately does not depend on it; `validate` is what stops\na typo reaching the grant.",
+                        "nullable": true,
+                        "properties": {
+                          "role": {
+                            "type": "string"
+                          },
+                          "team": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "role",
+                          "team"
+                        ],
+                        "type": "object"
+                      },
+                      "kind": {
+                        "description": "What a person is asking for. One CRD for all four kinds, because the LIFECYCLE is identical —\nopened by a user, one pending at a time, decided by a superadmin, kept forever as the record —\nand only the payload and what approve DOES differ. Four CRDs would have meant four RBAC rules,\nfour list routes and four console tables for one workflow.",
+                        "enum": [
+                          "quota",
+                          "access",
+                          "region",
+                          "other"
+                        ],
+                        "type": "string"
+                      },
+                      "other": {
+                        "nullable": true,
+                        "properties": {
+                          "body": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "body",
+                          "title"
+                        ],
+                        "type": "object"
+                      },
+                      "owner": {
+                        "description": "The person or team the request is FOR — truth, never a label. For an access request this\nis the asker's own slug and `access.team` names the team they want into: the team is what\nthey do not have yet, so it cannot also be the owner that authorizes the ask.",
+                        "type": "string"
+                      },
+                      "quota": {
+                        "description": "The six fields again, every one optional: a request raises the dimensions it names and says\nnothing about the rest, so approving it must not silently reset a limit somebody already\ngranted.",
+                        "nullable": true,
+                        "properties": {
+                          "cpu": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "diskGb": {
+                            "format": "uint64",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "environments": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "memoryGb": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "snapshots": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          },
+                          "workspaces": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "nullable": true,
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "reason": {
+                        "default": "",
+                        "type": "string"
+                      },
+                      "region": {
+                        "nullable": true,
+                        "properties": {
+                          "region": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "region"
+                        ],
+                        "type": "object"
+                      },
+                      "requestedBy": {
+                        "description": "The signed-in user who opened it. Set by `/v1` from the caller's claims, never from the\nbody — a request that could name its own author is not evidence of anything.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "owner",
+                      "requestedBy"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "nullable": true,
+                    "properties": {
+                      "decidedAt": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "decidedBy": {
+                        "description": "The deciding superadmin's email, for the audit trail. Never an owner of anything.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "note": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "resolution": {
+                        "description": "What approve actually DID, in one sentence — the quota that was written, the role that was\nset, the recorded region grant, or the free text a superadmin typed for an `other`. Kept\nseparately from `note` because the note is the decider's message to the asker and this is\nthe record of the effect.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "state": {
+                        "description": "An enum, not a string, so the API server refuses a typo with a 422 — the same reason `Phase` is\none. A request with no status at all is pending: `/v1` creates the object and patches status\nseparately, and the window between the two must not read as \"decided\".",
+                        "enum": [
+                          "pending",
+                          "approved",
+                          "denied"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "Request",
                 "type": "object"
               }
             },
