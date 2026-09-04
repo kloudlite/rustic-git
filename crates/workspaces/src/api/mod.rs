@@ -162,6 +162,10 @@ pub trait Directory: Send + Sync {
 
     /// Put `user` into `team` at `role`, creating the membership if they are not in it yet. Only
     /// the admin process implements this — the user role has no route that could call it.
+    ///
+    /// `user` is the HANDLE the request was opened under, the same identity `team_role` takes; an
+    /// implementation whose store keys memberships on something else (the directory keys on email)
+    /// resolves it itself, and answers `NoSuchUser` when it cannot.
     async fn grant_access(&self, _team: &str, _user: &str, _role: TeamRole) -> GrantAccess {
         GrantAccess::Unsupported
     }

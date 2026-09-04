@@ -15,15 +15,24 @@ const API: &str = "/apis/rustic-git.io/v1alpha1";
 /// `grant` is what `grant_access` answers and `granted` is what it was asked — the access arm's
 /// whole contract is "which outcome maps to which status, and who was the grant for", and neither
 /// half is observable without both.
+///
+/// `handles` makes the stub key the way the real directory does: it is handed a HANDLE and its
+/// memberships live under an EMAIL, so a caller that hands over the wrong identity gets
+/// `NoSuchUser` here exactly as it would in production.
 #[derive(Default)]
 struct StubMembership {
     grant: Option<GrantAccess>,
+    handles: std::collections::HashMap<String, String>,
     granted: std::sync::Mutex<Vec<(String, String, TeamRole)>>,
 }
 
 impl StubMembership {
     fn answering(grant: GrantAccess) -> Self {
-        Self { grant: Some(grant), granted: Default::default() }
+        Self {
+            grant: Some(grant),
+            handles: [("meera".to_string(), "meera@example.com".to_string())].into(),
+            granted: Default::default(),
+        }
     }
 }
 
@@ -50,7 +59,8 @@ impl Directory for StubMembership {
     }
 
     async fn grant_access(&self, team: &str, user: &str, role: TeamRole) -> GrantAccess {
-        self.granted.lock().unwrap().push((team.into(), user.into(), role));
+        let Some(email) = self.handles.get(user) else { return GrantAccess::NoSuchUser };
+        self.granted.lock().unwrap().push((team.into(), email.clone(), role));
         // `GrantAccess` is deliberately not `Clone` (the refusal string is the directory's own
         // words, handed over once), so the canned answer is rebuilt rather than copied.
         match &self.grant {
@@ -354,7 +364,7 @@ async fn approving_access_grants_the_asker_into_the_named_team() {
     assert_eq!(r.status(), 200);
     assert_eq!(
         s.dir.granted.lock().unwrap().as_slice(),
-        [("acme".to_string(), "meera".to_string(), TeamRole::Admin)]
+        [("acme".to_string(), "meera@example.com".to_string(), TeamRole::Admin)]
     );
     let sent = s.rec.sent("PATCH", &format!("{API}/requests/req-6/status"));
     assert!(sent[0]["status"]["resolution"].as_str().unwrap().contains("acme"));
@@ -428,4 +438,21 @@ async fn the_migration_is_idempotent_by_uid() {
     assert_eq!(sent[0]["metadata"]["name"], "q-7f1c1a2e-0000-4000-8000-000000000001");
     assert_eq!(sent[0]["spec"]["kind"], "quota");
     assert_eq!(sent[0]["spec"]["quota"]["cpu"], 12);
+}
+
+/// The grant carries the asker's HANDLE and the directory keys memberships on email, so a
+/// handle the directory cannot resolve is `NoSuchUser` — not a membership written for a name
+/// nobody answers to.
+#[tokio::test]
+async fn an_unresolvable_handle_is_no_such_user() {
+    let mut req = pending_access_request();
+    req["spec"]["requestedBy"] = json!("nobody");
+    let s = admin_server_with(
+        vec![route_get(format!("{API}/requests/req-6"), req)],
+        StubMembership::answering(GrantAccess::Done),
+    )
+    .await;
+    let r = post(&format!("{}/admin/requests/req-6/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+    assert_eq!(r.status(), 422);
+    assert!(s.rec.sent("PATCH", &format!("{API}/requests/req-6/status")).is_empty());
 }

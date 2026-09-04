@@ -77,10 +77,22 @@ impl rustic_git_workspaces::api::Directory for Dir {
             TeamRole::Admin => Role::Admin,
             TeamRole::Member => Role::Member,
         };
+        // `user` is the handle the request was opened under (the JWT username), but every team
+        // membership keys on the email — the `_id` of the users collection — so an unresolved
+        // handle reaches `add_member` as an address nobody has and every approve answers
+        // "no such user".
+        let email = match self.0.user_by_handle(user).await {
+            Ok(Some(u)) => u.email,
+            Ok(None) => return GrantAccess::NoSuchUser,
+            Err(e) => {
+                tracing::error!(error = %e, %team, "resolving handle for team access");
+                return GrantAccess::Refused("the directory could not be read".into());
+            }
+        };
         // Add first, then fall through to a role change: a grant is "be in this team at this
         // role", and whether they were already in it is not the decider's problem. `add_member`'s
         // filter carries its own duplicate check, so this is safe to retry.
-        match self.0.add_member(team, user, role).await {
+        match self.0.add_member(team, &email, role).await {
             Ok(AddMember::Added) => return GrantAccess::Done,
             Ok(AddMember::NoSuchUser) => return GrantAccess::NoSuchUser,
             Ok(AddMember::NoSuchTeam) => return GrantAccess::NoSuchTeam,
@@ -90,7 +102,7 @@ impl rustic_git_workspaces::api::Directory for Dir {
                 return GrantAccess::Refused("the directory could not be written".into());
             }
         }
-        match self.0.set_role(team, user, role).await {
+        match self.0.set_role(team, &email, role).await {
             Ok(Membership::Done) => GrantAccess::Done,
             Ok(Membership::NotAMember) => GrantAccess::NoSuchUser,
             Ok(Membership::NoSuchTeam) => GrantAccess::NoSuchTeam,
