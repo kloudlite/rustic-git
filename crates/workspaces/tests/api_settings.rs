@@ -261,3 +261,94 @@ async fn revert_cluster_restores_the_named_entry_and_grows_history_again() {
     let new_hist: Value = serde_json::from_str(sent[0]["metadata"]["annotations"]["rustic-git.io/settings-history"].as_str().unwrap()).unwrap();
     assert_eq!(new_hist[0]["syncSecs"], 60, "the CURRENT spec (pre-revert) is pushed onto history by the revert write");
 }
+
+// ── boot vs live field rolls (fix round 2) ──────────────────────────────
+
+fn daemonset(ready: i32, desired: i32) -> Value {
+    json!({
+        "apiVersion": "apps/v1", "kind": "DaemonSet",
+        "metadata": {"name": "rustic-git-agent", "namespace": "kube-system"},
+        "spec": {"template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "img:1"}]}}},
+        "status": {"numberReady": ready, "desiredNumberScheduled": desired},
+    })
+}
+
+const AGENT_DS: &str = "/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent";
+const GATEWAY_DEPLOY: &str = "/apis/apps/v1/namespaces/rustic-git-system/deployments/rustic-git-gateway";
+
+/// A `Mark::Boot` field (`defaultImage`) whose one reader is settled: the CR is written AND
+/// `rustic-git-agent`'s DaemonSet is PATCHed with a fresh `rustic-git.io/restarted-at` — and
+/// nothing else is (the per-region gateway is never a reader of this field).
+#[tokio::test]
+async fn put_cluster_boot_field_rolls_only_its_reader() {
+    let s = admin_server(
+        vec![
+            get(format!("{API}/regions/us"), region("us")),
+            get(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+            get(AGENT_DS, daemonset(2, 2)),
+            patch(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+            patch(AGENT_DS, daemonset(2, 2)),
+        ],
+        None,
+        None,
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .put(format!("{}/admin/settings/clusters/us", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"defaultImage": "img:2"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+
+    assert_eq!(s.rec.sent("PATCH", &format!("{API}/clustersettings/default")).len(), 1, "the CR must be written");
+    let ds_patches = s.rec.sent("PATCH", AGENT_DS);
+    assert_eq!(ds_patches.len(), 1, "the one reader must be rolled exactly once");
+    assert!(ds_patches[0]["spec"]["template"]["metadata"]["annotations"]["rustic-git.io/restarted-at"].is_string());
+    assert!(s.rec.calls().iter().all(|c| !c.contains(GATEWAY_DEPLOY)), "the gateway is not a reader of defaultImage");
+}
+
+/// A LIVE field alone (`syncSecs`) writes the CR and rolls nothing — no PATCH to any workload at
+/// all, `rustic-git-agent` included.
+#[tokio::test]
+async fn put_cluster_live_field_rolls_nothing() {
+    let s = admin_server(
+        vec![
+            get(format!("{API}/regions/us"), region("us")),
+            get(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+            patch(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+        ],
+        None,
+        None,
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .put(format!("{}/admin/settings/clusters/us", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"syncSecs": 90}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    assert_eq!(s.rec.sent("PATCH", &format!("{API}/clustersettings/default")).len(), 1);
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with(&format!("PATCH {AGENT_DS}"))), "a live field must roll no workload");
+}
+
+/// An unregistered region is a 404 on BOTH verbs, and neither ever reaches `clustersettings` at
+/// all — `client_for_region` refuses before the CR is even asked about.
+#[tokio::test]
+async fn cluster_settings_unknown_region_is_404_on_get_and_put() {
+    let s = admin_server(vec![], None, None).await;
+
+    let get_resp = reqwest::Client::new()
+        .get(format!("{}/admin/settings/clusters/nope", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap();
+    assert_eq!(get_resp.status(), 404);
+
+    let put_resp = reqwest::Client::new()
+        .put(format!("{}/admin/settings/clusters/nope", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"syncSecs": 90}))
+        .send().await.unwrap();
+    assert_eq!(put_resp.status(), 404);
+
+    assert!(s.rec.calls().iter().all(|c| !c.contains("clustersettings")), "the CR must never be asked about for an unknown region");
+}
