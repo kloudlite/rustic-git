@@ -922,6 +922,37 @@ async fn require_superadmin(api: &Api, headers: &axum::http::HeaderMap) -> std::
     }
 }
 
+/// Same email either side of the `/`, case- and whitespace-insensitive: the directory lowercases
+/// what it stores, but a caller's session email need not already be normalized.
+fn is_same_user(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// "No one is left standing after this write" — the only shape that matters is the roster having
+/// exactly one row and that row being the target, so this takes the roster rather than a count:
+/// a count alone can't say WHICH one is left.
+fn is_last_superadmin(admins: &[rustic_git_pulls::directory::SuperAdmin], target: &str) -> bool {
+    matches!(admins, [only] if is_same_user(&only.user, target))
+}
+
+async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, result: &'static str) {
+    let entry = rustic_git_workspaces::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        actor: actor.to_string(),
+        action: action.to_string(),
+        target: target.to_string(),
+        // ponytail: no reason field on this route yet (add/remove predate the audit note
+        // requirement) — carry `None` rather than block the roster on a body change out of scope
+        // here; add a required `note` body alongside the other admin writes when this route
+        // grows one.
+        reason: None,
+        result: result.into(),
+    };
+    if let Err(e) = rustic_git_workspaces::audit::record(&api.store.os, &entry).await {
+        tracing::error!(error = %e, actor, action, target, "audit row not written");
+    }
+}
+
 pub(crate) async fn add_superadmin(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
@@ -935,8 +966,17 @@ pub(crate) async fn add_superadmin(
         Ok(d) => d,
         Err(r) => return r,
     };
+    // Minting a claim for an email with no account would be a superadmin nobody can sign in as.
+    match db.user(&user).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::UNPROCESSABLE_ENTITY, "that email has no account").into_response(),
+        Err(e) => return db_err("check account", &user, e),
+    }
     match db.add_superadmin(&user, &by).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            write_audit(&api, &by, "add-superadmin", &user, "ok").await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => db_err("grant admin", &user, e),
     }
 }
@@ -946,15 +986,29 @@ pub(crate) async fn remove_superadmin(
     headers: axum::http::HeaderMap,
     axum::extract::Path(user): axum::extract::Path<String>,
 ) -> Response {
-    if let Err(r) = require_superadmin(&api, &headers).await {
-        return r;
-    }
+    let by = match require_superadmin(&api, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
     let db = match directory(&api) {
         Ok(d) => d,
         Err(r) => return r,
     };
+    if is_same_user(&by, &user) {
+        return (StatusCode::CONFLICT, "you cannot remove your own administrator claim").into_response();
+    }
+    let admins = match db.superadmins().await {
+        Ok(a) => a,
+        Err(e) => return db_err("list admins", &user, e),
+    };
+    if is_last_superadmin(&admins, &user) {
+        return (StatusCode::CONFLICT, "the last administrator cannot be removed").into_response();
+    }
     match db.remove_superadmin(&user).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            write_audit(&api, &by, "remove-superadmin", &user, "ok").await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => db_err("revoke admin", &user, e),
     }
 }
@@ -1064,5 +1118,39 @@ mod profile_tests {
             assert!(check_website(bad).is_err(), "{bad:?} should be refused");
         }
         assert!(check_website(&format!("https://{}", "a".repeat(2048))).is_err());
+    }
+}
+
+// The three refusal rules on `add_superadmin`/`remove_superadmin` are tested as the pure
+// decisions they reduce to (`is_same_user`, `is_last_superadmin`) rather than through the
+// handlers: `Directory` is a concrete mongo-backed struct with no double, and there is no mongo
+// test harness in this workspace (`crates/pulls`' own directory tests are the same shape — see
+// `role_lookup_ignores_email_case` above). The `db.user`/`db.add_superadmin` calls those rules
+// gate are exercised by the e2e suite against a real cluster instead.
+#[cfg(test)]
+mod superadmin_rule_tests {
+    use super::{is_last_superadmin, is_same_user};
+    use mongodb::bson::DateTime;
+    use rustic_git_pulls::directory::SuperAdmin;
+
+    fn admin(user: &str) -> SuperAdmin {
+        SuperAdmin { user: user.into(), added_at: DateTime::now(), added_by: "bootstrap".into() }
+    }
+
+    /// A superadmin cannot remove their own claim through this route — the spec's exact wording.
+    #[test]
+    fn remove_superadmin_refuses_to_remove_yourself() {
+        assert!(is_same_user("a@x", "a@x"));
+        assert!(is_same_user(" A@X ", "a@x"), "case and whitespace must not defeat the check");
+        assert!(!is_same_user("a@x", "b@x"));
+    }
+
+    /// The last superadmin cannot be removed by anyone, even another superadmin.
+    #[test]
+    fn remove_superadmin_refuses_to_remove_the_last_one() {
+        let one = [admin("a@x")];
+        assert!(is_last_superadmin(&one, "a@x"));
+        let two = [admin("a@x"), admin("b@x")];
+        assert!(!is_last_superadmin(&two, "a@x"), "a second row means removal is still safe");
     }
 }
