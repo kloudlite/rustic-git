@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { needsNothing, regionCapacity } from "./overview";
+import { filterAttention, needsNothing, regionCapacity } from "./overview";
 import { FLAT } from "@/lib/history";
 
 const s = (last: number) => ({ series: [{ ts: "t", value: last }], summary: { last, delta: 0, min: last, max: last }, available: true });
@@ -27,5 +27,27 @@ describe("needsNothing", () => {
 
   test("false with an attention item", () => {
     expect(needsNothing({ pendingRequests: [], attention: [{} as never] })).toBe(false);
+  });
+});
+
+describe("filterAttention", () => {
+  const items = [
+    { kind: "signal.firing" },
+    { kind: "over_quota" },
+    { kind: "draining" },
+  ];
+
+  test("all keeps every row", () => {
+    expect(filterAttention(items, "all")).toHaveLength(3);
+  });
+
+  test("critical keeps only the rows attentionTone calls critical", () => {
+    expect(filterAttention(items, "critical")).toEqual([{ kind: "signal.firing" }]);
+  });
+
+  test("warning keeps an unenumerated kind, because unknown kinds are warn", () => {
+    // The guarded failure: filtering on the kind string instead of the tone would drop
+    // `over_quota` from every tab the moment nobody had listed it.
+    expect(filterAttention(items, "warn")).toEqual([{ kind: "over_quota" }]);
   });
 });

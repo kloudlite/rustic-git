@@ -5,12 +5,13 @@ import * as api from "@/lib/api";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { when } from "@/lib/time";
 import { DIMS, dimLabel } from "@/lib/quota";
-import { attentionTone, deltaLabel } from "@/lib/history";
+import { deltaLabel, eventSummary } from "@/lib/history";
 import { PageHeader } from "./page-header";
 import { regionCapacity } from "./overview";
+import { AttentionFeed } from "./attention-feed";
+import { RegionCapacityCard } from "./overview-capacity";
 import { Section } from "./ui/section";
 import { KpiStrip, KpiTile } from "./ui/kpi";
-import { CapacityBar } from "./ui/capacity-bar";
 import { Pill } from "./ui/pill";
 import { DataTable, Th, Td, Tr, EmptyState } from "./ui/data-table";
 import { Timeline, TimelineRow } from "./ui/timeline";
@@ -19,25 +20,32 @@ export const metadata: Metadata = { title: "Overview" };
 
 const HHMM = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "UTC" });
 
+/** `QuotaRequestDoc.requested` is a sparse map, so the summary is built from `DIMS` rather than
+ *  from its keys — one fixed order, the same words the requests queue uses. */
+function requestSummary(r: api.QuotaRequestDoc): string {
+  const dims = DIMS.filter((d) => r.requested[d] !== undefined).map((d) => `${dimLabel(d)} → ${r.requested[d]}`);
+  return dims.length > 0 ? dims.join(", ") : r.reason;
+}
+
 /** The landing screen (`Main.dc.html`): five KPI tiles with 7-day sparklines, a needs-attention
  *  feed beside capacity per region, then recent activity and the waiting queue.
  *
  *  One `Promise.all`, not a waterfall: eight reads at ~13 ms each in-cluster is one render, and
  *  serialising them would put the 10 s poll behind its own previous run. Every history read
  *  degrades on its own (`adminSeries` never rejects), so a missing ClickHouse costs sparklines,
- *  not the page.
+ *  not the page. The pending queue comes off `/admin/overview` itself rather than a ninth call —
+ *  it is the same `QuotaRequestDoc[]` the queue endpoint answers.
  *
- *  // ponytail: the "requests waiting" section reads the existing `QuotaRequestDoc` queue
- *  // (`api.adminListQuotaRequests`), not the generic `RequestDoc` sub-project B introduces —
- *  // that project hasn't landed in this tree yet. Swap to `adminListRequests`/`kindLabel` once
- *  // it does; the section's shape (kind pill, owner, summary, age) does not need to change. */
+ *  // ponytail: "Requests waiting" reads that `QuotaRequestDoc` queue, not the generic `RequestDoc`
+ *  // sub-project B introduces — it has not landed in this tree. Swap to `adminListRequests` and
+ *  // `kindLabel` once it does; the section's shape (kind pill, owner, summary, age) is unchanged. */
 export default async function OverviewPage() {
   const { token } = await requireSuperadmin("/superadmin");
   const opts = { range: "7d", step: "1d" };
-  const [o, clusters, pending, pendingS, firingS, over80S, wsS, envS] = await Promise.all([
+  const [o, clusters, events, pendingS, firingS, over80S, wsS, envS] = await Promise.all([
     api.adminOverview(token),
     api.adminClusters(token),
-    api.adminListQuotaRequests(token, { state: "pending" }),
+    api.adminHistoryEvents({ limit: 5 }, token),
     api.adminSeries("pending_requests", opts, token),
     api.adminSeries("firing_signals", opts, token),
     api.adminSeries("owners_over_80", opts, token),
@@ -47,20 +55,35 @@ export default async function OverviewPage() {
   if (!o.ok) throw new Error(o.message);
   const ov = o.value;
   const regions = clusters.ok ? clusters.value : [];
-  const queue = pending.ok ? pending.value : [];
+  const queue = ov.pendingRequests;
 
-  // Per-region gauges are three more reads each; regions are two, so this is bounded and still
-  // one round of parallelism rather than a nested waterfall.
+  // Three more series per region. Regions are a handful, so this is one more round of parallelism
+  // rather than a nested waterfall — awaiting them one at a time would cost 3n round trips.
   const capacity = await Promise.all(
-    regions.map(async (r) => ({
-      region: r,
-      gauges: regionCapacity(
-        await api.adminSeries("pool_used", { ...opts, region: r.region }, token),
-        await api.adminSeries("cpu_used", { ...opts, region: r.region }, token),
-        await api.adminSeries("memory_used", { ...opts, region: r.region }, token),
-      ),
-    })),
+    regions.map(async (region) => {
+      const [pool, cpu, memory] = await Promise.all([
+        api.adminSeries("pool_used", { ...opts, region: region.region }, token),
+        api.adminSeries("cpu_used", { ...opts, region: region.region }, token),
+        api.adminSeries("memory_used", { ...opts, region: region.region }, token),
+      ]);
+      return { region, gauges: regionCapacity(pool, cpu, memory) };
+    }),
   );
+
+  // History down is not an error here: the overview's own `recentAudit` carries the same writes,
+  // just without the history layer's phrasing, so the section stays populated either way.
+  const activity =
+    events.ok && events.value.events.length > 0
+      ? events.value.events.map((e) => ({ key: e.id, ts: e.ts, actor: e.actor, text: eventSummary(e), note: e.attrs.note ?? null }))
+      : ov.recentAudit.map((e, i) => ({
+          key: `${e.ts}-${i}`,
+          ts: e.ts,
+          actor: e.actor,
+          text: `${e.actor} ${e.action} ${e.target}`,
+          note: e.reason ?? null,
+        }));
+
+  const fleetLine = `${ov.fleet.workspaces} workspaces, ${ov.fleet.environments} environments and ${ov.fleet.owners} owners across ${regions.length} regions.`;
 
   return (
     <div className="space-y-4">
@@ -81,43 +104,36 @@ export default async function OverviewPage() {
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
         <Section eyebrow="Operations" title="Needs attention" count={ov.attention.length} bare>
-          {ov.attention.length === 0 ? (
-            <EmptyState action={<Link className="text-sm2 text-primary underline-offset-4 hover:underline" href="/superadmin/monitoring">Open monitoring</Link>}>
-              Nothing needs a superadmin right now.
-            </EmptyState>
-          ) : (
-            <ul>
-              {ov.attention.map((a, i) => (
-                <li key={`${a.kind}-${i}`} className="group/row flex items-center gap-3 border-b border-border px-4 py-2 last:border-0 hover:bg-muted">
-                  <Pill tone={attentionTone(a.kind)}>{a.kind}</Pill>
-                  <p className="min-w-0 flex-1 truncate text-sm2">{a.detail}</p>
-                  <Link href={a.href} className="text-sm2 text-muted-foreground group-hover/row:text-primary">Open</Link>
-                </li>
-              ))}
-            </ul>
-          )}
+          <AttentionFeed items={ov.attention} fleetLine={fleetLine} />
         </Section>
 
-        <Section eyebrow="Fleet" title="Capacity by region" count={regions.length}>
-          <div className="flex flex-col gap-4">
-            {capacity.map(({ region, gauges }) => (
-              <div key={region.region} className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm2 font-medium">{region.region}</span>
-                  <Pill tone={region.nodesReady === region.nodesTotal ? "ok" : "warn"}>
-                    {region.nodesReady} of {region.nodesTotal} nodes ready
-                  </Pill>
-                </div>
-                <CapacityBar used={gauges.pool.used} limit={gauges.pool.limit} unit="%" label="Disk pool" />
-                <CapacityBar used={gauges.cpu.used} limit={gauges.cpu.limit} unit="%" label="CPU" />
-                <CapacityBar used={gauges.memory.used} limit={gauges.memory.limit} unit="%" label="Memory" />
-                <Link href={`/superadmin/clusters/${encodeURIComponent(region.region)}`} className="text-caption text-primary underline-offset-4 hover:underline">
-                  Open
+        <Section
+          eyebrow="Fleet"
+          title="Capacity by region"
+          count={regions.length}
+          toolbar={
+            <Link href="/superadmin/clusters" className="text-caption text-primary underline-offset-4 hover:underline">
+              All clusters
+            </Link>
+          }
+        >
+          {capacity.length === 0 ? (
+            <EmptyState
+              action={
+                <Link className="text-sm2 text-primary underline-offset-4 hover:underline" href="/superadmin/clusters">
+                  Add a region
                 </Link>
-              </div>
-            ))}
-            {regions.length === 0 && <EmptyState>No regions yet.</EmptyState>}
-          </div>
+              }
+            >
+              No region is registered yet.
+            </EmptyState>
+          ) : (
+            <div className="flex flex-col gap-4">
+              {capacity.map(({ region, gauges }) => (
+                <RegionCapacityCard key={region.region} region={region} gauges={gauges} />
+              ))}
+            </div>
+          )}
         </Section>
       </div>
 
@@ -125,17 +141,27 @@ export default async function OverviewPage() {
         <Section
           eyebrow="History"
           title="Recent activity"
-          toolbar={<Link href="/superadmin/audit" className="text-caption text-primary underline-offset-4 hover:underline">Audit log</Link>}
+          toolbar={
+            <Link href="/superadmin/audit" className="text-caption text-primary underline-offset-4 hover:underline">
+              Audit log
+            </Link>
+          }
         >
-          {ov.recentAudit.length === 0 ? (
-            <EmptyState action={<Link className="text-sm2 text-primary underline-offset-4 hover:underline" href="/superadmin/audit">Open the audit log</Link>}>
+          {activity.length === 0 ? (
+            <EmptyState
+              action={
+                <Link className="text-sm2 text-primary underline-offset-4 hover:underline" href="/superadmin/audit">
+                  Open the audit log
+                </Link>
+              }
+            >
               No activity has been recorded yet.
             </EmptyState>
           ) : (
             <Timeline>
-              {ov.recentAudit.map((e, i) => (
-                <TimelineRow key={i} at={HHMM.format(new Date(e.ts))} actor={e.actor} note={null}>
-                  {`${e.actor} ${e.action} ${e.target}`}
+              {activity.map((a) => (
+                <TimelineRow key={a.key} at={HHMM.format(new Date(a.ts))} actor={a.actor} note={a.note}>
+                  {a.text}
                 </TimelineRow>
               ))}
             </Timeline>
@@ -147,24 +173,34 @@ export default async function OverviewPage() {
           title="Requests waiting"
           count={queue.length}
           bare
-          toolbar={<Link href="/superadmin/requests" className="text-caption text-primary underline-offset-4 hover:underline">Open queue</Link>}
+          toolbar={
+            <Link href="/superadmin/requests" className="text-caption text-primary underline-offset-4 hover:underline">
+              Open queue
+            </Link>
+          }
         >
           {queue.length === 0 ? (
             <EmptyState>No owner is waiting on a decision.</EmptyState>
           ) : (
             <DataTable>
               <thead>
-                <tr><Th>Owner</Th><Th>Summary</Th><Th numeric>Age</Th></tr>
+                <tr>
+                  <Th>Kind</Th>
+                  <Th>Owner</Th>
+                  <Th>Summary</Th>
+                  <Th numeric>Age</Th>
+                </tr>
               </thead>
               <tbody>
                 {queue.slice(0, 5).map((r) => (
                   <Tr key={r.id}>
-                    <Td>{r.owner}</Td>
-                    <Td className="max-w-0 truncate">
-                      {DIMS.filter((d) => r.requested[d] !== undefined)
-                        .map((d) => `${dimLabel(d)} → ${r.requested[d]}`)
-                        .join(", ")}
+                    {/* Quota is the only request kind the api answers today; the pill is here so the
+                        column does not move when the generic queue lands. */}
+                    <Td>
+                      <Pill tone="info">quota</Pill>
                     </Td>
+                    <Td>{r.owner}</Td>
+                    <Td className="max-w-0 truncate">{requestSummary(r)}</Td>
                     <Td numeric>{when(new Date(r.createdAt ?? 0).getTime())}</Td>
                   </Tr>
                 ))}

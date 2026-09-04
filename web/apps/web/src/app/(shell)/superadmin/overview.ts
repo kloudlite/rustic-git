@@ -1,5 +1,5 @@
 import type { Overview } from "@/lib/api";
-import type { HistorySeries } from "@/lib/history";
+import { attentionTone, type HistorySeries } from "@/lib/history";
 
 /** Nothing needs a decision — the landing view's one branch between "queue plus alerts" and
  *  "just the fleet". Pure so the branch is checkable without a fetch. */
@@ -18,4 +18,15 @@ function gauge(s: HistorySeries): Gauge {
 
 export function regionCapacity(pool: HistorySeries, cpu: HistorySeries, memory: HistorySeries) {
   return { pool: gauge(pool), cpu: gauge(cpu), memory: gauge(memory) };
+}
+
+export type AttentionFilter = "all" | "critical" | "warn";
+
+/** The feed's All/Critical/Warning tabs. The filter is over the TONE, not the kind string: kinds
+ *  are open (a new signal name ships without a web change) and `attentionTone` is already the one
+ *  place that decides how loud a kind is, so filtering on the raw string would silently drop the
+ *  rows nobody has enumerated yet. */
+export function filterAttention<T extends { kind: string }>(items: T[], filter: AttentionFilter): T[] {
+  if (filter === "all") return items;
+  return items.filter((i) => attentionTone(i.kind) === filter);
 }
