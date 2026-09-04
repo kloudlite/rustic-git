@@ -1003,7 +1003,7 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/otel-agent.yaml
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-peer.yaml
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 # 3. AKS: the admin Deployment's new env, after the ClickHouse user exists — the process logs
-#    `clickhouse migrations applied` once and then `clickhouse schema up to date` on every restart.
+#    `history.migrations.applied` with `count` > 0 once, then `count=0` on every restart.
 kubectl -n kloudlite-git apply -f deploy/kloudlite-git.yaml
 ```
 

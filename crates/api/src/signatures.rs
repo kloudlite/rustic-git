@@ -69,7 +69,7 @@ pub(crate) async fn commit_patch(
         .body(match serde_json::to_vec(&body) {
             Ok(b) => b,
             Err(e) => {
-                tracing::error!(owner = %owner, name = %name, error = %e, "commit patch");
+                tracing::error!(reason = "commit-patch", owner = %owner, name = %name, error = %e, "upstream.request.failed");
                 return (StatusCode::BAD_REQUEST, "could not read the patch").into_response();
             }
         })
@@ -78,7 +78,7 @@ pub(crate) async fn commit_patch(
     let r = match sent {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(owner = %owner, name = %name, error = %e, "commit patch");
+            tracing::error!(reason = "commit-patch", owner = %owner, name = %name, error = %e, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "could not reach the repository").into_response();
         }
     };
@@ -125,7 +125,7 @@ pub(crate) async fn verify_commit(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(error = %e, "signature upstream");
+            tracing::error!(reason = "signature", error = %e, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
@@ -135,14 +135,14 @@ pub(crate) async fn verify_commit(
     let body = match kloudlite_git_core::httpx::read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!(error = %e, "signature body");
+            tracing::error!(reason = "signature", error = %e, "upstream.body.failed");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
     let signed: Option<SignatureOf> = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!(error = %e, "signature parse");
+            tracing::error!(reason = "signature", error = %e, "upstream.parse.failed");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
@@ -275,7 +275,7 @@ pub(crate) async fn verify_signature(db: &kloudlite_git_pulls::directory::Direct
                     .unwrap_or_else(|_| unverified("invalid", "verification panicked"))
             }
             Err(e) => {
-                tracing::warn!(error = %e, "signer lookup");
+                tracing::warn!(reason = "signer", error = %e, "directory.read.failed");
                 unverified("invalid", "the signing key could not be looked up")
             }
         };
@@ -287,7 +287,7 @@ pub(crate) async fn verify_signature(db: &kloudlite_git_pulls::directory::Direct
     match db.signer_by_any(&[ssh_signature_fingerprint(&sig)]).await {
         Ok(known) => judge_ssh(&sig, &payload, known, &signed.author_email),
         Err(e) => {
-            tracing::warn!(error = %e, "signer lookup");
+            tracing::warn!(reason = "signer", error = %e, "directory.read.failed");
             unverified("invalid", "the signing key could not be looked up")
         }
     }

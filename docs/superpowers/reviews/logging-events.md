@@ -33,6 +33,10 @@ One name per concept, used identically in every crate:
 | `signal` | `sigterm`, `sigint` |
 | `mode` | a chosen configuration branch (`env-only`, `plain-http`, `sandboxed`) |
 | `reason` | why a refusal or skip happened, short and stable |
+| `op` | the underlying operation a generic wrapper was performing (`xadd`, `xack`) |
+| `role` | `reader` or `writer` |
+| `step` | which stage of a multi-step sequence (shutdown) an event is about |
+| `scope` | which settings document (`central`, a region) |
 
 Fields are `tracing` key-value pairs: `info!(listener = "http", %addr, "listener.started")`.
 
@@ -104,4 +108,60 @@ you add an event.
 | `history.watch.restarted` | warn once, then debug | `kind`, `region`, `error` |
 | `history.write.failed` | warn | `table`, `count`, `error` |
 | `alerts.write.failed` | warn | `count`, `error` |
+| `process.shutdown.stalled` | warn | `step`, `timeout_s` |
+| `store.multipart.unavailable` | info (boot, by design) | `url`, `mode` |
+| `cache.unavailable` / `cache.script.failed` | warn | `host` |
+| `cache.stream.failed` | warn | `stream`, `group`, `op`, `count`, `error` |
+| `ownership.map.opened` | info | `path`, `role` |
+| `ownership.open.failed` / `ownership.close.failed` | warn | `role`, `error` |
+| `ownership.checkpoint.failed` | warn | `reason`, `timeout_s`, `error` |
+| `ownership.prune.failed` | warn | `error` |
+| `ownership.claim.failed` / `ownership.release.failed` | warn | `repo`, `reason`, `error` |
+| `ownership.lost` | info | `repo` |
+| `lease.demoted` | warn | `epoch`, `reason` |
+| `lease.read.failed` / `lease.release.failed` | warn | `error` |
+| `pool.close.failed` | error | `repo`, `reason`, `error` |
+| `pool.close.stalled` / `pool.flush.stalled` | warn | `repo`, `timeout_ms` |
+| `pool.flush.failed` | warn | `repo`, `error` |
+| `pool.release_hook.missing` | error | `count` |
+| `route.forward.failed` | error | `repo`, `peer`, `error` |
+| `route.claim.failed` | warn | `repo`, `reason`, `error` |
+| `request.failed` | error | `error` |
+| `browse.not_found` | debug | `error` |
+| `repo.open.failed` / `repo.create.failed` / `repo.delete.failed` / `repo.visibility.failed` / `repo.protection.save.failed` | error | `owner`, `repo`, `error` |
+| `index.write.failed` / `index.marker.reconcile.failed` | warn | `owner`, `repo`, `reason`, `error` |
+| `packs.consolidated` | info | `owner`, `repo`, `before`, `after` |
+| `packs.consolidate.failed` / `packs.index.read.failed` / `packs.cache.prune.failed` | warn | `owner`, `repo`, `error` |
+| `merge.record.failed` | error | `owner`, `repo`, `error` |
+| `merge.mergeability.failed` / `merge.stranded.scan.failed` / `merge.announce.failed` | warn | `owner`, `repo`, `number`, `error` |
+| `peer.stream.failed` | warn | `error` |
+| `receive.options` | debug | `options` |
+| `receive.pack.failed` | error | `error` |
+| `directory.unavailable` | warn | `error` |
+| `directory.repair.completed` / `directory.repair.failed` | info / warn | `count`, `error` |
+| `directory.sweep.failed` | warn | `error` |
+| `registry.tag.read.failed` / `registry.counter.write.failed` / `registry.counters.flush.failed` / `registry.blob.rows.failed` / `registry.manifest.skipped` | warn | `owner`, `name`, `tag`/`digest`/`manifest`, `reason`, `error` |
 | `superadmin.acting` | info | `caller`, `owner` |
+| `tls.mode` | info (boot, by design) | `mode` |
+| `tunnel.dial.failed` | warn | `workspace`, `error` |
+| `merge.unavailable` | error | `reason` |
+| `merge.sync.failed` | warn | `owner`, `name`, `error` |
+| `gc.sweep.failed` | warn | `owner`, `error` |
+| `gc.markers.reconcile.failed` | warn | `owner`, `kind`, `error` |
+| `gc.cache.pruned` | info | `count` |
+| `gc.uploads.swept` / `gc.uploads.failed` | info / warn | `owner`, `count`, `error` |
+| `directory.read.failed` / `directory.write.failed` / `directory.request.failed` | error, or warn where the caller degrades one field | `reason`, `owner`/`team`/`user`/`handle`, `error` |
+| `directory.superadmins.seeded` / `directory.superadmins.seed.failed` | info / warn | `count`, `error` |
+| `auth.signing.unavailable` | warn | `reason` |
+| `auth.token.mint.failed` | error | `error` |
+| `kube.unavailable` | warn | `reason`, `error` |
+| `history.watch.skipped` / `history.unavailable` | warn | `reason` |
+| `feed.read.failed` / `browse.read.failed` | error | `reason`, `owner`, `error` |
+| `passkey.read.failed` / `passkey.write.failed` | error | `reason`, `error` |
+| `credential.read.failed` / `credential.write.failed` / `credential.create.failed` / `credential.revoke.failed` / `credential.unwind.failed` / `credential.forget.failed` | error, warn for the unwind/forget best-effort pair | `reason`, `owner`, `credential`/`jti`, `error` |
+| `sshkey.add.failed` / `sshkey.read.failed` | error | `owner`, `error` |
+| `key.platform.installed` / `key.platform.failed` | info / error | `owner`, `replaced`, `reason` |
+| `team.deleted` | info | `team`, `by` |
+| `audit.write.failed` | error | `actor`, `action`, `target`, `error` |
+| `repo.read.failed` / `repo.list.failed` | error | `owner`, `team`, `reason`, `error` |
+| `upstream.request.failed` / `upstream.body.failed` / `upstream.parse.failed` | error | `reason`, `owner`, `name`, `repo`, `number`, `status`, `error` |

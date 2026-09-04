@@ -40,7 +40,7 @@ impl Dir {
     async fn email_or_closed(&self, handle: &str) -> Option<String> {
         self.email_of(handle)
             .await
-            .inspect_err(|e| tracing::error!(error = %e, %handle, "resolving handle"))
+            .inspect_err(|e| tracing::error!(reason = "handle", %handle, error = %e, "directory.read.failed"))
             .ok()
             .flatten()
     }
@@ -63,11 +63,11 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
     async fn for_owner(&self, owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
         let authorized_keys = kloudlite_git_api::authorized_keys_for(&self.0, owner)
             .await
-            .inspect_err(|e| tracing::warn!(%owner, error = %e, "reading ssh keys"))
+            .inspect_err(|e| tracing::warn!(reason = "ssh-keys", %owner, error = %e, "directory.read.failed"))
             .ok()?;
         let (git_name, git_email) = kloudlite_git_api::git_identity_for(&self.0, owner)
             .await
-            .inspect_err(|e| tracing::warn!(%owner, error = %e, "reading git identity"))
+            .inspect_err(|e| tracing::warn!(reason = "git-identity", %owner, error = %e, "directory.read.failed"))
             .ok()?;
         Some(kloudlite_git_workspaces::api::OwnerMaterial { authorized_keys, git_name, git_email })
     }
@@ -112,7 +112,7 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
             Err(e) => {
                 // An unreadable directory is not a verdict on the asker: a decider retries this,
                 // where "no such user" would have them chasing a person who exists.
-                tracing::error!(error = %e, %team, "resolving handle for team access");
+                tracing::error!(reason = "handle", %team, error = %e, "directory.read.failed");
                 return GrantAccess::Refused("the directory could not be read".into());
             }
         };
@@ -125,7 +125,7 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
             Ok(AddMember::NoSuchTeam) => return GrantAccess::NoSuchTeam,
             Ok(AddMember::AlreadyMember) => {}
             Err(e) => {
-                tracing::error!(error = %e, %team, "granting team access");
+                tracing::error!(reason = "add-member", %team, error = %e, "directory.write.failed");
                 return GrantAccess::Refused("the directory could not be written".into());
             }
         }
@@ -137,7 +137,7 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
                 GrantAccess::Refused("a team must keep at least one owner".into())
             }
             Err(e) => {
-                tracing::error!(error = %e, %team, "setting team role");
+                tracing::error!(reason = "set-role", %team, error = %e, "directory.write.failed");
                 GrantAccess::Refused("the directory could not be written".into())
             }
         }
@@ -151,7 +151,7 @@ async fn main() {
     // Its own listener: 8090 is what the ingress forwards `/v1` to.
     kloudlite_git_core::metrics::serve_if_configured().await;
     if let Err(e) = run().await {
-        tracing::error!("{e}");
+        tracing::error!(error = %e, "process.exiting");
         std::process::exit(2);
     }
 }
@@ -183,7 +183,7 @@ async fn run() -> Result<()> {
         Ok(uri) if !uri.is_empty() => {
             let db = env("KLOUDLITE_GIT_MONGO_DB", "kloudlite");
             let d = kloudlite_git_pulls::directory::Directory::connect(&uri, &db).await?;
-            tracing::info!(db = %db, "directory in mongo db");
+            tracing::info!(db = %db, "directory.connected");
             // Only the admin process seeds the directory: the bootstrap is additive and harmless
             // to run twice, but running it from the user role too would mean an operator who
             // scales the user Deployment to zero and only runs `admin` still gets it seeded —
@@ -206,14 +206,14 @@ async fn run() -> Result<()> {
                 let seed = if seed.is_empty() { vec!["karthik@kloudlite.io".to_string()] } else { seed };
                 match d.ensure_superadmins(&seed).await {
                     Ok(0) => {}
-                    Ok(n) => tracing::info!(added = n, "superadmins seeded from KLOUDLITE_GIT_WORKSPACES_ADMINS"),
-                    Err(e) => tracing::warn!(error = %e, "superadmin bootstrap skipped"),
+                    Ok(n) => tracing::info!(count = n, "directory.superadmins.seeded"),
+                    Err(e) => tracing::warn!(error = %e, "directory.superadmins.seed.failed"),
                 }
             }
             Some(Arc::new(d))
         }
         _ => {
-            tracing::warn!("KLOUDLITE_GIT_MONGO_URI unset: /v1 routes will answer 503");
+            tracing::warn!(reason = "mongo-uri-unset", "directory.unavailable");
             None
         }
     };
@@ -224,7 +224,7 @@ async fn run() -> Result<()> {
     let jwt = match std::env::var("KLOUDLITE_GIT_JWT_SECRET") {
         Ok(s) if !s.is_empty() => Some(Arc::new(kloudlite_git_core::jwt::Jwt::new(&s)?)),
         _ => {
-            tracing::warn!("KLOUDLITE_GIT_JWT_SECRET unset: sign-in cannot issue tokens");
+            tracing::warn!(reason = "jwt-secret-unset", "auth.signing.unavailable");
             None
         }
     };
@@ -246,7 +246,7 @@ async fn run() -> Result<()> {
             // it: the cluster only says whether a snapshot's parent is still around.
             match kube::Client::try_default().await {
                 Ok(c) => state = state.with_kube(c),
-                Err(e) => tracing::warn!(error = %e, "no kubernetes config: /v1 workspace routes will answer 503"),
+                Err(e) => tracing::warn!(reason = "no-kube-config", error = %e, "kube.unavailable"),
             }
             // The admin role's one outbound call to the git tier: `PUT /admin/settings/central`
             // forwards a validated patch to the server tier's peer route rather than writing the
@@ -268,9 +268,9 @@ async fn run() -> Result<()> {
                 match kube::Config::incluster() {
                     Ok(cfg) => match kube::Client::try_from(cfg) {
                         Ok(c) => state = state.with_aks(c),
-                        Err(e) => tracing::warn!(error = %e, "in-cluster config rejected: /admin/workloads central rolls will answer 503"),
+                        Err(e) => tracing::warn!(reason = "in-cluster-config-rejected", error = %e, "kube.unavailable"),
                     },
-                    Err(e) => tracing::warn!(error = %e, "no in-cluster config: /admin/workloads central rolls will answer 503"),
+                    Err(e) => tracing::warn!(reason = "no-in-cluster-config", error = %e, "kube.unavailable"),
                 }
             }
             // ClickHouse is the admin process's alone (design §A1: it is the only writer of the
@@ -285,9 +285,8 @@ async fn run() -> Result<()> {
                         // must not be held hostage by an analytics store, and the next restart
                         // retries an idempotent set of statements.
                         match kloudlite_git_workspaces::history::schema::migrate(&h).await {
-                            Ok(0) => tracing::info!("clickhouse schema up to date"),
-                            Ok(n) => tracing::info!(applied = n, "clickhouse migrations applied"),
-                            Err(e) => tracing::error!(error = %e, "clickhouse migrations failed; history will be incomplete until the next restart"),
+                            Ok(n) => tracing::info!(count = n, "history.migrations.applied"),
+                            Err(e) => tracing::error!(error = %e, "history.migrations.failed"),
                         }
                         let h = Arc::new(h);
                         // The second consumer group on the one `events` stream. Spawned only in
@@ -321,9 +320,7 @@ async fn run() -> Result<()> {
                                     );
                                 }
                             }
-                            None => tracing::warn!(
-                                "KLOUDLITE_GIT_REGION unset: region history watches not started"
-                            ),
+                            None => tracing::warn!(reason = "region-unset", "history.watch.skipped"),
                         }
                         // `Region` objects live in the same k3s cluster as everything else
                         // (`/v1/regions` writes through the mounted kubeconfig); this AKS cluster
@@ -336,9 +333,7 @@ async fn run() -> Result<()> {
                         }
                         state = state.with_cache(cache.clone()).with_history(h);
                     }
-                    None => tracing::warn!(
-                        "KLOUDLITE_GIT_CLICKHOUSE_URL unset: /admin/history answers 503 and nothing is recorded"
-                    ),
+                    None => tracing::warn!(reason = "clickhouse-url-unset", "history.unavailable"),
                 }
             }
             // The requeue sweep and the agent register/work/done/failed routes moved to the
@@ -350,7 +345,7 @@ async fn run() -> Result<()> {
     };
 
     let l = tokio::net::TcpListener::bind(env("KLOUDLITE_GIT_API_ADDR", "0.0.0.0:8090")).await?;
-    tracing::info!(addr = %l.local_addr()?, %upstream, "api listening");
+    tracing::info!(listener = "api", addr = %l.local_addr()?, %upstream, "listener.started");
     // Adding or removing an ssh key has to reach every running workspace of that owner, and the
     // Secret it lands in is the workspaces tier's to write — so the hook is just that call.
     let on_keys_changed: Option<kloudlite_git_api::KeysChanged> = workspaces.clone().map(|ws| {

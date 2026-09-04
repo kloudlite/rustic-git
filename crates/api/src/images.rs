@@ -33,7 +33,7 @@ pub(crate) async fn images_proxy(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(error = %e, "upstream");
+            tracing::error!(error = %e, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
@@ -123,7 +123,7 @@ pub(crate) async fn image_write_proxy(
     let r = match up.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(error = %e, "upstream");
+            tracing::error!(error = %e, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };

@@ -184,7 +184,7 @@ async fn tunnel(
     let target = match resolve(&gw.kube, &ws, gw.ssh_port).await {
         Ok(t) => t,
         Err((status, why)) => {
-            tracing::debug!(ws = %ws, why, "refused");
+            tracing::debug!(workspace = %ws, reason = why, "tunnel.refused");
             return status.into_response();
         }
     };
@@ -200,7 +200,7 @@ async fn tunnel(
     let tcp = match tokio::net::TcpStream::connect(target.addr).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(ws = %ws, error = %e, "dial failed");
+            tracing::warn!(workspace = %ws, error = %e, "tunnel.dial.failed");
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
@@ -269,11 +269,11 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
     // Never the token, and never a byte of the stream: this line is the whole record of a session.
     tracing::info!(
         owner = slot.owner.as_deref().unwrap_or_default(),
-        ws = %slot.ws,
+        workspace = %slot.ws,
         bytes_in = r#in,
         bytes_out = out,
-        secs = start.elapsed().as_secs(),
-        "tunnel closed"
+        duration_ms = start.elapsed().as_millis() as u64,
+        "tunnel.closed"
     );
 }
 

@@ -37,7 +37,7 @@ async fn main() {
     kloudlite_git_core::metrics::init();
     kloudlite_git_core::metrics::serve_if_configured().await;
     if let Err(e) = run().await {
-        tracing::error!("{e}");
+        tracing::error!(error = %e, "process.exiting");
         std::process::exit(2);
     }
 }
@@ -70,7 +70,7 @@ async fn run() -> Result<()> {
             Ok(doc) => central.store(
                 kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
             ),
-            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+            Err(e) => tracing::warn!(scope = "central", error = %e, "settings.invalid"),
         }
     }
     tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
@@ -97,16 +97,12 @@ async fn run() -> Result<()> {
     // window is wider than the slowest honest iteration, so it only fires for a truly stuck loop.
     let cache = std::path::PathBuf::from(env("KLOUDLITE_GIT_CACHE_DIR", "./.local/cache"));
     let _ = std::fs::create_dir_all(&cache);
-    tracing::info!(lanes, %upstream, "merge worker ready");
+    tracing::info!(service = "worker", lanes, %upstream, "process.started");
     // Checked once, here, rather than discovered per merge: without git this process still nudges
     // and still sweeps blobs, so it looks healthy while refusing every merge it is handed. Loud at
     // startup is the difference between "the image is wrong" and "merges mysteriously fail".
     if !kloudlite_git_pulls::merge_worker::available() {
-        tracing::error!(
-            "merge worker: no `git` on PATH — every merge will be REFUSED. Install git in the \
-             runtime image (bookworm's 2.39 is new enough); mergeability for diverged changes \
-             will stay unanswered too"
-        );
+        tracing::error!(reason = "no-git-on-path", "merge.unavailable");
     }
     // Correctness never depended on Redis (see `Cache::connect`'s fail-open design) and still
     // does not — the floor is the owning node's own periodic lane, which needs neither Redis nor
@@ -115,11 +111,7 @@ async fn run() -> Result<()> {
     // on purpose, so a missing `KLOUDLITE_GIT_REDIS_URL` shows up in logs rather than showing up as
     // "mergeability takes a minute to update now".
     if !store.cache.connected() {
-        tracing::warn!(
-            "merge worker: no Redis (KLOUDLITE_GIT_REDIS_URL unset or unreachable) — no live stream \
-             nudges; mergeability checks fall back to each owning node's own sweep and will be \
-             much slower to notice changes"
-        );
+        tracing::warn!(reason = "redis-unset-or-unreachable", "cache.unavailable");
     }
 
     // Identifies one lane of one process to the consumer group, so `XAUTOCLAIM` can tell a dead
@@ -288,7 +280,7 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
             Ok(Some(v)) => v,
             Ok(None) => Vec::new(),
             Err(why) => {
-                tracing::warn!(repo = %e.repo, number, %why, "checking change");
+                tracing::warn!(repo = %e.repo, number, error = %why, "merge.mergeability.failed");
                 return;
             }
         };
@@ -315,7 +307,7 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
         })
         .await;
         if let Ok(Err(why)) = &synced {
-            tracing::warn!(%owner, %name, %why, "syncing branches");
+            tracing::warn!(%owner, %name, error = %why, "merge.sync.failed");
         }
     }
     for d in deep {
@@ -396,12 +388,12 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
         // rather than recording a failure this worker cannot stand behind.
         Ok(Err(e)) => {
             metrics::counter!("merge_outcomes_total", "state" => "error").increment(1);
-            tracing::warn!(%owner, %name, number, error = %e, "merging change");
+            tracing::warn!(%owner, %name, number, error = %e, "merge.failed");
             return;
         }
         Err(e) => {
             metrics::counter!("merge_outcomes_total", "state" => "error").increment(1);
-            tracing::warn!(%owner, %name, number, error = %e, "merging change");
+            tracing::warn!(%owner, %name, number, error = %e, "merge.failed");
             return;
         }
     };
@@ -411,7 +403,7 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
     // claimant's answer is the one that counts.
     let tail = format!("outcome?by={}", urlencoding(&w.me));
     if let Err(why) = post::<serde_json::Value>(w, owner, name, number, &tail, Some(body)).await {
-        tracing::error!(%owner, %name, number, %why, "reporting merge outcome");
+        tracing::error!(%owner, %name, number, error = %why, "merge.record.failed");
     }
 }
 
@@ -437,11 +429,11 @@ async fn check_one(w: &Worker, owner: &str, name: &str, d: &kloudlite_git_pulls:
         // Left as "checking…"; the owner's next sweep asks again. Better than writing a verdict
         // this worker could not actually reach the fleet to compute.
         Ok(Err(e)) => {
-            tracing::warn!(%owner, %name, number = d.number, error = %e, "checking change");
+            tracing::warn!(%owner, %name, number = d.number, error = %e, "merge.mergeability.failed");
             return;
         }
         Err(e) => {
-            tracing::warn!(%owner, %name, number = d.number, error = %e, "checking change");
+            tracing::warn!(%owner, %name, number = d.number, error = %e, "merge.mergeability.failed");
             return;
         }
     };
@@ -449,7 +441,7 @@ async fn check_one(w: &Worker, owner: &str, name: &str, d: &kloudlite_git_pulls:
     if let Err(why) =
         post::<serde_json::Value>(w, owner, name, d.number, "mergeability", Some(body)).await
     {
-        tracing::warn!(%owner, %name, number = d.number, %why, "reporting the check of change");
+        tracing::warn!(%owner, %name, number = d.number, error = %why, "merge.mergeability.failed");
     }
 }
 
@@ -490,7 +482,7 @@ async fn owners_under(store: &kloudlite_git_storage::store::Store, prefix: &str)
     match kloudlite_git_registry::list_dir_names(&store.os, prefix).await {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!(%prefix, error = %e, "gc: listing prefix");
+            tracing::warn!(%prefix, error = %e, "gc.listing.failed");
             vec![]
         }
     }
@@ -525,7 +517,7 @@ async fn gc_lane(
         // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
         match kloudlite_git_pulls::merge_worker::prune(cache, CACHE_KEEP, KLOUDLITE_GIT_MERGE_CACHE_BYTES) {
             0 => {}
-            n => tracing::info!(dropped = n, "gc: dropped idle merge cache(s)"),
+            n => tracing::info!(count = n, "gc.cache.pruned"),
         }
         let owners = image_owners(store).await;
         // Uploads are swept for their own owner set: a push can leave a staging object behind
@@ -542,30 +534,30 @@ async fn gc_lane(
         }
         for owner in &owners {
             match kloudlite_git_registry::gc::sweep_owner(store, owner, grace).await {
-                Ok(n) if n > 0 => tracing::info!(%owner, blobs = n, "gc: swept blob(s) for owner"),
+                Ok(n) if n > 0 => tracing::info!(%owner, count = n, "gc.sweep.completed"),
                 Ok(_) => {}
-                Err(e) => tracing::warn!(%owner, error = %e, "gc: sweeping owner"),
+                Err(e) => tracing::warn!(%owner, error = %e, "gc.sweep.failed"),
             }
             match kloudlite_git_registry::gc::reconcile_owner(store, owner).await {
-                Ok(n) if n > 0 => tracing::info!(%owner, markers = n, "gc: reconciled listing marker(s) for owner"),
+                Ok(n) if n > 0 => tracing::debug!(%owner, kind = "image", count = n, "gc.markers.reconciled"),
                 Ok(_) => {}
-                Err(e) => tracing::warn!(%owner, error = %e, "gc: reconciling markers for owner"),
+                Err(e) => tracing::warn!(%owner, kind = "image", error = %e, "gc.markers.reconcile.failed"),
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
         for owner in repo_owners.iter().filter(|o| o.as_str() != "img") {
             match kloudlite_git_registry::gc::reconcile_repo_owner(store, owner).await {
-                Ok(n) if n > 0 => tracing::info!(%owner, markers = n, "gc: reconciled repo listing marker(s) for owner"),
+                Ok(n) if n > 0 => tracing::debug!(%owner, kind = "repo", count = n, "gc.markers.reconciled"),
                 Ok(_) => {}
-                Err(e) => tracing::warn!(%owner, error = %e, "gc: reconciling repo markers for owner"),
+                Err(e) => tracing::warn!(%owner, kind = "repo", error = %e, "gc.markers.reconcile.failed"),
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
         for owner in &upload_owners {
             match store.sweep_stale_uploads(owner, upload_grace).await {
-                Ok(n) if n > 0 => tracing::info!(%owner, sessions = n, "gc: swept stale upload session(s) for owner"),
+                Ok(n) if n > 0 => tracing::info!(%owner, count = n, "gc.uploads.swept"),
                 Ok(_) => {}
-                Err(e) => tracing::warn!(%owner, error = %e, "gc: sweeping uploads for owner"),
+                Err(e) => tracing::warn!(%owner, error = %e, "gc.uploads.failed"),
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }

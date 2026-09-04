@@ -138,7 +138,7 @@ pub async fn serve(
             Ok(doc) => central.store(
                 kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
             ),
-            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+            Err(e) => tracing::warn!(scope = "central", error = %e, "settings.invalid"),
         }
     }
     tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
@@ -391,7 +391,7 @@ pub(crate) async fn user_identity(
             Ok(Some(row)) if row.kind == kloudlite_git_pulls::directory::CredentialKind::CliToken => {}
             Ok(_) => return Err((StatusCode::UNAUTHORIZED, "this CLI login was revoked").into_response()),
             Err(e) => {
-                tracing::error!(error = %e, "cli token lookup");
+                tracing::error!(reason = "cli-token", error = %e, "credential.read.failed");
                 return Err((StatusCode::BAD_GATEWAY, "could not check the login").into_response());
             }
         }

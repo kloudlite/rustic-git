@@ -62,7 +62,7 @@ pub(crate) async fn credential_caller_as<'a>(
         Ok(true) => Ok((user, db)),
         Ok(false) => Err((StatusCode::NOT_FOUND, "no such owner").into_response()),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "credential authorization");
+            tracing::error!(reason = "authorization", owner = %owner, error = %e, "credential.read.failed");
             Err((StatusCode::BAD_GATEWAY, "could not read credentials").into_response())
         }
     }
@@ -101,7 +101,7 @@ pub(crate) async fn create_token(
     let token = match api.store.create_token(&owner).await {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "create token");
+            tracing::error!(owner = %owner, error = %e, "credential.create.failed");
             return (StatusCode::BAD_GATEWAY, "could not create the token").into_response();
         }
     };
@@ -120,7 +120,7 @@ pub(crate) async fn create_token(
         // A digest collision is not a thing that happens; treat it as our failure.
         Ok(None) | Err(_) => {
             if let Err(e) = api.store.revoke_token_digest(&meta.id).await {
-                tracing::warn!(error = %e, "unwinding token");
+                tracing::warn!(error = %e, "credential.unwind.failed");
             }
             return (StatusCode::BAD_GATEWAY, "could not create the token").into_response();
         }
@@ -145,7 +145,7 @@ pub(crate) async fn list_tokens(
     match db.credentials_for(&owner, CredentialKind::Token).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "list tokens");
+            tracing::error!(reason = "list-tokens", owner = %owner, error = %e, "credential.read.failed");
             (StatusCode::BAD_GATEWAY, "could not list tokens").into_response()
         }
     }
@@ -203,7 +203,7 @@ pub(crate) async fn revoke(
         // caller something about a credential that may not be theirs.
         Ok(_) => return (StatusCode::NOT_FOUND, "no such credential").into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "revoke lookup");
+            tracing::error!(reason = "revoke-lookup", error = %e, "credential.read.failed");
             return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
         }
     };
@@ -212,7 +212,7 @@ pub(crate) async fn revoke(
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such credential").into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "revoke authorization");
+            tracing::error!(reason = "revoke-authorization", error = %e, "credential.read.failed");
             return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
         }
     }
@@ -225,13 +225,13 @@ pub(crate) async fn revoke(
         CredentialKind::SigningKey | CredentialKind::CliToken => Ok(()),
     };
     if let Err(e) = gone {
-        tracing::error!(error = %e, "revoke");
+        tracing::error!(error = %e, "credential.revoke.failed");
         return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
     }
     if let Err(e) = db.forget_credential(&id).await {
         // The credential no longer works, which is what was asked for. It will
         // linger in the list until the next attempt succeeds.
-        tracing::warn!(credential = %id, error = %e, "forget credential");
+        tracing::warn!(credential = %id, error = %e, "credential.forget.failed");
     }
     // AFTER the row is gone: the hook re-reads the owner's keys, and running it first would write
     // back the very key that was just revoked.
@@ -367,7 +367,7 @@ pub(crate) async fn add_key(
         Ok(Some(())) => {}
         Ok(None) => return (StatusCode::CONFLICT, "that key is already added").into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "add key");
+            tracing::error!(owner = %owner, error = %e, "sshkey.add.failed");
             return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
         }
     }
@@ -379,7 +379,7 @@ pub(crate) async fn add_key(
     if !body.signing && !is_gpg {
         if let Err(e) = api.store.add_ssh_key(&owner, &fingerprint).await {
             let _ = db.forget_credential(&meta.id).await;
-            tracing::error!(owner = %owner, error = %e, "add key");
+            tracing::error!(owner = %owner, error = %e, "sshkey.add.failed");
             return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
         }
         spawn_keys_changed(&api, &owner);
@@ -407,7 +407,7 @@ pub(crate) async fn list_keys(
     match db.credentials_for(&owner, kind).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "list keys");
+            tracing::error!(owner = %owner, error = %e, "sshkey.read.failed");
             (StatusCode::BAD_GATEWAY, "could not list keys").into_response()
         }
     }
@@ -485,7 +485,7 @@ pub(crate) async fn cli_code(
         token_exp: 0,
     };
     if let Err(e) = db.create_cli_login(&row).await {
-        tracing::error!(error = %e, "recording cli login code");
+        tracing::error!(reason = "cli-login-code", error = %e, "credential.write.failed");
         return (StatusCode::BAD_GATEWAY, "could not start a login").into_response();
     }
     (
@@ -534,7 +534,7 @@ pub(crate) async fn cli_approve(
         // code must not tell a guesser that some other code exists.
         Ok(None) => return (StatusCode::NOT_FOUND, "no such code").into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "looking up cli login code");
+            tracing::error!(reason = "cli-login-code", error = %e, "credential.read.failed");
             return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
         }
     };
@@ -542,7 +542,7 @@ pub(crate) async fn cli_approve(
     let (token, claims) = match jwt.mint_cli(&who.email, who.name.as_deref().unwrap_or_default(), Some(&username)) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!(error = %e, "mint cli token");
+            tracing::error!(error = %e, "auth.token.mint.failed");
             return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
         }
     };
@@ -562,11 +562,11 @@ pub(crate) async fn cli_approve(
     match db.add_credential(&row).await {
         Ok(Some(())) => {}
         Ok(None) => {
-            tracing::error!(jti = %row.id, "recording cli token: id already taken");
+            tracing::error!(reason = "jti-taken", jti = %row.id, "credential.write.failed");
             return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
         }
         Err(e) => {
-            tracing::error!(error = %e, "recording cli token");
+            tracing::error!(reason = "cli-token", error = %e, "credential.write.failed");
             return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
         }
     }
@@ -577,13 +577,13 @@ pub(crate) async fn cli_approve(
     let stored = match db.approve_cli_login(&code, &token, claims.exp).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!(error = %e, "approving cli login code");
+            tracing::error!(reason = "approve-cli-login-code", error = %e, "credential.write.failed");
             false
         }
     };
     if !stored {
         if let Err(e) = db.forget_credential(&row.id).await {
-            tracing::warn!(jti = %row.id, error = %e, "unwinding a cli token nobody will collect");
+            tracing::warn!(jti = %row.id, error = %e, "credential.unwind.failed");
         }
         return (StatusCode::CONFLICT, "that code was already used").into_response();
     }
@@ -629,7 +629,7 @@ pub(crate) async fn cli_pending_code(
         .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no such code").into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "looking up cli login code");
+            tracing::error!(reason = "cli-login-code", error = %e, "credential.read.failed");
             (StatusCode::BAD_GATEWAY, "could not look that up").into_response()
         }
     }
@@ -668,7 +668,7 @@ pub(crate) async fn cli_token(
             axum::Json(CliToken { token, expires_at: rfc3339(token_exp as i64 * 1000) }).into_response()
         }
         Err(e) => {
-            tracing::error!(error = %e, "collecting cli login token");
+            tracing::error!(reason = "collect-cli-login-token", error = %e, "credential.read.failed");
             (StatusCode::BAD_GATEWAY, "could not sign you in").into_response()
         }
     }
@@ -731,7 +731,7 @@ pub(crate) async fn list_cli_tokens(
         )
         .into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "list cli tokens");
+            tracing::error!(reason = "list-cli-tokens", owner = %owner, error = %e, "credential.read.failed");
             (StatusCode::BAD_GATEWAY, "could not list logins").into_response()
         }
     }
@@ -855,7 +855,7 @@ async fn ensure_platform_key(api: &Api, owner: &str, force: bool) -> std::result
     // could not write a key looked identical to one that was never asked — the logs said nothing
     // at all while the page showed "Could not load the key".
     let bad = |what: &str| {
-        tracing::error!(%owner, reason = what, "platform key");
+        tracing::error!(%owner, reason = what, "key.platform.failed");
         (StatusCode::BAD_GATEWAY, what.to_string()).into_response()
     };
 
@@ -878,7 +878,7 @@ async fn ensure_platform_key(api: &Api, owner: &str, force: bool) -> std::result
         .rotate_user_key(owner, &private, &fingerprint, old_fp.as_deref())
         .await
         .map_err(|_| bad("could not install the key"))?;
-    tracing::info!(%owner, replaced = old_fp.is_some(), "installed a platform key");
+    tracing::info!(%owner, replaced = old_fp.is_some(), "key.platform.installed");
     Ok(PlatformKey { public, fingerprint })
 }
 

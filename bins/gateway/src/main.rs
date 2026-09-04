@@ -52,7 +52,7 @@ async fn main() {
                     Ok(doc) => gw.central.store(
                         kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
                     ),
-                    Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+                    Err(e) => tracing::warn!(scope = "central", error = %e, "settings.invalid"),
                 }
             }
             tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
@@ -63,7 +63,15 @@ async fn main() {
         // Not fatal: the gateway's own job (SSH tunnels) needs no object store at all, so an
         // unset/unreachable KLOUDLITE_GIT_S3_URL here means "central settings stay env-only",
         // never "the gateway cannot serve".
-        Err(e) => tracing::warn!(error = %e, "cluster/settings unavailable; central settings stay env-only"),
+        // Info when there is simply no store URL (the dev/edge shape, true by design); warn only
+        // when one was configured and could not be opened.
+        Err(e) => {
+            if std::env::var("KLOUDLITE_GIT_S3_URL").is_err() {
+                tracing::info!(mode = "env-only", error = %e, "settings.central.unavailable");
+            } else {
+                tracing::warn!(mode = "env-only", error = %e, "settings.central.unavailable");
+            }
+        }
     }
     let router = app(gw);
 
@@ -86,30 +94,31 @@ async fn main() {
         };
         let https = router.clone();
         tokio::spawn(async move {
-            tracing::info!("gateway tls on 0.0.0.0:443");
             let addr: std::net::SocketAddr = ([0, 0, 0, 0], 443).into();
+            tracing::info!(listener = "https", %addr, "listener.started");
             if let Err(e) = axum_server::bind_rustls(addr, cfg).serve(https.into_make_service()).await {
                 // The TLS listener IS the product; losing it must not leave a pod that still
                 // passes its health check on 8080.
-                tracing::error!("tls listener: {e}");
+                tracing::error!(listener = "https", addr = %addr, error = %e, "listener.failed");
                 std::process::exit(1);
             }
         });
     } else {
-        tracing::warn!("GATEWAY_TLS_DIR unset — serving plain HTTP only (dev)");
+        // True by design where TLS terminates at the edge: a mode, not a degradation.
+        tracing::info!(mode = "plain-http", "tls.mode");
     }
 
     let l = match tokio::net::TcpListener::bind("0.0.0.0:8080").await {
         Ok(l) => l,
         Err(e) => fatal(format!("binding 8080: {e}")),
     };
-    tracing::info!("gateway on 0.0.0.0:8080");
+    tracing::info!(listener = "http", addr = "0.0.0.0:8080", "listener.started");
     if let Err(e) = axum::serve(l, router).await {
         fatal(format!("serving: {e}"));
     }
 }
 
 fn fatal(msg: String) -> ! {
-    tracing::error!("{msg}");
+    tracing::error!(error = %msg, "process.exiting");
     std::process::exit(1)
 }

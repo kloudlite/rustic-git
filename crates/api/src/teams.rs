@@ -38,7 +38,7 @@ pub(crate) async fn create_team(
             if e.downcast_ref::<kloudlite_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            tracing::error!(error = %msg, "create team");
+            tracing::error!(reason = "create-team", error = %msg, "directory.write.failed");
             (StatusCode::BAD_GATEWAY, "could not create team").into_response()
         }
     }
@@ -56,7 +56,7 @@ pub(crate) async fn list_teams(State(api): State<Arc<Api>>, headers: axum::http:
     match db.for_user(&user).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            tracing::error!(user = %user, error = %e, "list teams");
+            tracing::error!(reason = "list-teams", user = %user, error = %e, "directory.read.failed");
             (StatusCode::BAD_GATEWAY, "could not list teams").into_response()
         }
     }
@@ -114,7 +114,7 @@ pub(crate) async fn upsert_user(
                 Some(j) => match j.mint_admin(&u.email, &u.name, u.username.as_deref(), admin) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        tracing::error!(error = %e, "minting token");
+                        tracing::error!(error = %e, "auth.token.mint.failed");
                         return (StatusCode::BAD_GATEWAY, "could not issue a token").into_response();
                     }
                 },
@@ -127,7 +127,7 @@ pub(crate) async fn upsert_user(
             if e.downcast_ref::<kloudlite_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            tracing::error!(error = %msg, "upsert user");
+            tracing::error!(reason = "upsert-user", error = %msg, "directory.write.failed");
             (StatusCode::BAD_GATEWAY, "could not record user").into_response()
         }
     }
@@ -160,7 +160,7 @@ pub(crate) async fn claim_username(
                 Some(j) => match j.mint_admin(&u.email, &u.name, u.username.as_deref(), admin) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        tracing::error!(error = %e, "minting token");
+                        tracing::error!(error = %e, "auth.token.mint.failed");
                         return (StatusCode::BAD_GATEWAY, "could not issue a token").into_response();
                     }
                 },
@@ -176,7 +176,7 @@ pub(crate) async fn claim_username(
             if e.downcast_ref::<kloudlite_git_pulls::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            tracing::error!(error = %msg, "claim username");
+            tracing::error!(reason = "claim-username", error = %msg, "directory.write.failed");
             (StatusCode::BAD_GATEWAY, "could not claim that handle").into_response()
         }
     }
@@ -263,7 +263,7 @@ async fn team_for<'a>(
         Ok(Some(t)) => t,
         Ok(None) => return Err((StatusCode::NOT_FOUND, "no such team").into_response()),
         Err(e) => {
-            tracing::error!(team = %slug, error = %e, "read team");
+            tracing::error!(reason = "read-team", team = %slug, error = %e, "directory.read.failed");
             return Err((StatusCode::BAD_GATEWAY, "could not read team").into_response());
         }
     };
@@ -289,7 +289,7 @@ fn rank(r: Role) -> u8 {
 }
 
 fn db_err(what: &str, slug: &str, e: impl std::fmt::Display) -> Response {
-    tracing::error!(team = %slug, error = %e, "{what}");
+    tracing::error!(team = %slug, reason = what, error = %e, "directory.request.failed");
     (StatusCode::BAD_GATEWAY, format!("could not {what}")).into_response()
 }
 
@@ -443,7 +443,7 @@ pub(crate) async fn team_profile(
     let repos = match crate::repos::repo_listing(&api, &slug, false).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(team = %slug, error = %e, "profile repos");
+            tracing::error!(reason = "profile-repos", team = %slug, error = %e, "repo.list.failed");
             return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
         }
     };
@@ -493,7 +493,7 @@ pub(crate) async fn update_team(
             let names = match crate::repos::repo_listing(&api, &slug, true).await {
                 Ok(r) => r.into_iter().map(|r| r.name).collect::<Vec<_>>(),
                 Err(e) => {
-                    tracing::error!(team = %slug, error = %e, "profile repos");
+                    tracing::error!(reason = "profile-repos", team = %slug, error = %e, "repo.list.failed");
                     return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
                 }
             };
@@ -810,7 +810,7 @@ pub(crate) async fn delete_team(
     };
     match db.delete_team(&slug).await {
         Ok(DeleteTeam::Deleted) => {
-            tracing::info!(team = %slug, by = %user, "team deleted");
+            tracing::info!(team = %slug, by = %user, "team.deleted");
             StatusCode::NO_CONTENT.into_response()
         }
         // Worded for the person: what is in the way, and what to do about it.
@@ -945,7 +945,7 @@ async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str,
         result: result.into(),
     };
     if let Err(e) = kloudlite_git_workspaces::audit::record(&api.store.os, &entry).await {
-        tracing::error!(error = %e, actor, action, target, "audit row not written");
+        tracing::error!(actor, action, target, error = %e, "audit.write.failed");
     }
 }
 

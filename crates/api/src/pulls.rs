@@ -169,7 +169,7 @@ pub(crate) async fn merge_pull(
             .into_response(),
         Ok(404) => not_found(),
         Ok(s) => {
-            tracing::error!(owner = %owner, name = %name, number = number, status = s, "request merge: unexpected upstream status");
+            tracing::error!(reason = "request-merge", owner = %owner, name = %name, number = number, status = s, "upstream.request.failed");
             (StatusCode::BAD_GATEWAY, "could not ask for the merge").into_response()
         }
         Err(r) => r,
@@ -199,7 +199,7 @@ pub(crate) async fn close_pull(
         Ok(409) => (StatusCode::CONFLICT, "this change is not open").into_response(),
         Ok(404) => not_found(),
         Ok(s) => {
-            tracing::error!(owner = %owner, name = %name, number = number, status = s, "close pull: unexpected upstream status");
+            tracing::error!(reason = "close-pull", owner = %owner, name = %name, number = number, status = s, "upstream.request.failed");
             (StatusCode::BAD_GATEWAY, "could not close the change").into_response()
         }
         Err(r) => r,

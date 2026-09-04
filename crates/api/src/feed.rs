@@ -186,7 +186,7 @@ pub(crate) async fn activity(
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "feed authorization");
+            tracing::error!(reason = "authorization", owner = %owner, error = %e, "feed.read.failed");
             return (StatusCode::BAD_GATEWAY, "could not read the feed").into_response();
         }
     }
@@ -196,7 +196,7 @@ pub(crate) async fn activity(
     let repos = match repo_listing(&api, owner, true).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "feed repos");
+            tracing::error!(reason = "repos", owner = %owner, error = %e, "feed.read.failed");
             return (StatusCode::BAD_GATEWAY, "could not read the feed").into_response();
         }
     };

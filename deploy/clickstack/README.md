@@ -104,7 +104,7 @@ kubectl -n kloudlite-git create secret generic kloudlite-git-clickhouse \
 bump: a wrong host is a silent 503 on every /admin/history route.
 
 The admin process migrates `kloudlite` itself on its next start; `kubectl logs` shows
-`clickhouse migrations applied` once and `clickhouse schema up to date` on every restart after.
+`history.migrations.applied` with `count` > 0 once, and `count=0` on every restart after.
 
 ## Alerts
 

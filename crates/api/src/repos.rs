@@ -159,7 +159,7 @@ pub(crate) async fn create_repo(
         // Not 403: whether a team exists is not this caller's business to learn.
         Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "repo authorization");
+            tracing::error!(reason = "authorization", owner = %owner, error = %e, "repo.read.failed");
             return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
         }
     }
@@ -210,7 +210,7 @@ pub(crate) async fn create_upstream(api: &Api, owner: &str, name: &str, visibili
         // a rollback here has deleted one. Nothing is unwound on silence; a claim that did leak
         // is the owning node's structural sweep's to catch.
         Err(e) => {
-            tracing::error!(owner = %owner, name = %name, error = %e, "create repo upstream");
+            tracing::error!(reason = "create-repo", owner = %owner, name = %name, error = %e, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
         }
     };
@@ -228,7 +228,7 @@ pub(crate) async fn create_upstream(api: &Api, owner: &str, name: &str, visibili
             // Best effort, and its own failure is already logged by `ask_owner`: this request is
             // being refused either way.
             let _ = ask_owner(api, path).await;
-            tracing::error!(owner = %owner, name = %name, status = other, "create repo upstream");
+            tracing::error!(reason = "create-repo", owner = %owner, name = %name, status = other, "upstream.request.failed");
             (StatusCode::BAD_GATEWAY, "could not create repository").into_response()
         }
     }
@@ -254,7 +254,7 @@ pub(crate) async fn list_repos(
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "repo authorization");
+            tracing::error!(reason = "authorization", owner = %owner, error = %e, "repo.read.failed");
             return (StatusCode::BAD_GATEWAY, "could not list repositories").into_response();
         }
     }
@@ -263,7 +263,7 @@ pub(crate) async fn list_repos(
     match repo_listing(&api, owner, true).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "list repos");
+            tracing::error!(owner = %owner, error = %e, "repo.list.failed");
             (StatusCode::BAD_GATEWAY, "could not list repositories").into_response()
         }
     }
@@ -321,7 +321,7 @@ pub(crate) async fn settings_caller<'a>(
         Ok(true) => {}
         Ok(false) => return Err((StatusCode::NOT_FOUND, "no such repository").into_response()),
         Err(e) => {
-            tracing::error!(owner = %owner, error = %e, "repo authorization");
+            tracing::error!(reason = "authorization", owner = %owner, error = %e, "repo.read.failed");
             return Err((StatusCode::BAD_GATEWAY, "could not read the repository").into_response());
         }
     }
@@ -371,7 +371,7 @@ pub(crate) async fn update_repo(
             Ok(200..=299) => {}
             Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
             Ok(s) => {
-                tracing::error!(owner = %owner, name = %name, status = s, "visibility upstream");
+                tracing::error!(reason = "visibility", owner = %owner, name = %name, status = s, "upstream.request.failed");
                 return (StatusCode::BAD_GATEWAY, "could not change visibility").into_response();
             }
             Err(r) => return r,
@@ -385,7 +385,7 @@ pub(crate) async fn update_repo(
             Ok(200..=299) => {}
             Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
             Ok(s) => {
-                tracing::error!(owner = %owner, name = %name, status = s, "description upstream");
+                tracing::error!(reason = "description", owner = %owner, name = %name, status = s, "upstream.request.failed");
                 return (StatusCode::BAD_GATEWAY, "could not save the change").into_response();
             }
             Err(r) => return r,
@@ -412,7 +412,7 @@ pub(crate) async fn delete_repo(
     match ask_owner(&api, path).await {
         Ok(200..=299) => {}
         Ok(s) => {
-            tracing::error!(owner = %owner, name = %name, status = s, "delete upstream");
+            tracing::error!(reason = "delete", owner = %owner, name = %name, status = s, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "could not delete the repository").into_response();
         }
         Err(r) => return r,
@@ -432,7 +432,7 @@ pub(crate) async fn list_protection(
     let r = match api.client.get(url).header(kloudlite_git_core::peer::PEER_HEADER, &api.secret).send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(owner = %owner, name = %name, error = %e, "protection upstream");
+            tracing::error!(reason = "protection", owner = %owner, name = %name, error = %e, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
@@ -488,7 +488,7 @@ pub(crate) async fn set_protection(
         Ok(400) => (StatusCode::BAD_REQUEST, "that is not a branch pattern").into_response(),
         Ok(404) => (StatusCode::NOT_FOUND, "no such repository").into_response(),
         Ok(s) => {
-            tracing::error!(owner = %owner, name = %name, status = s, "protect upstream");
+            tracing::error!(reason = "protect", owner = %owner, name = %name, status = s, "upstream.request.failed");
             (StatusCode::BAD_GATEWAY, "could not save the rule").into_response()
         }
         Err(r) => r,

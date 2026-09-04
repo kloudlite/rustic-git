@@ -28,7 +28,7 @@ pub(crate) async fn to_owner(
         None => req,
     };
     req.send().await.map_err(|e| {
-        tracing::error!(error = %e, "upstream");
+        tracing::error!(error = %e, "upstream.request.failed");
         (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response()
     })
 }

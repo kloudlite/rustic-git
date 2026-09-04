@@ -262,7 +262,7 @@ pub(crate) async fn browse_caller(
                 Ok(true) => Ok(Some(repo_owner.to_string())),
                 Ok(false) => Ok(None),
                 Err(e) => {
-                    tracing::error!(owner = %repo_owner, error = %e, "browse authorization");
+                    tracing::error!(reason = "authorization", owner = %repo_owner, error = %e, "browse.read.failed");
                     Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
                 }
             };
@@ -274,7 +274,7 @@ pub(crate) async fn browse_caller(
         Ok(Some(o)) if kloudlite_git_core::httpx::basic_user_names(headers, &o, true) => Ok(Some(o)),
         Ok(_) => Err(unauthorized()),
         Err(e) => {
-            tracing::error!(error = %e, "token lookup");
+            tracing::error!(reason = "token", error = %e, "credential.read.failed");
             Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
         }
     }
@@ -326,7 +326,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
     let r = match up.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!(repo = %repo, error = %e, "upstream");
+            tracing::error!(repo = %repo, error = %e, "upstream.request.failed");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
@@ -334,7 +334,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
     let body = match kloudlite_git_core::httpx::read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!(repo = %repo, error = %e, "upstream body");
+            tracing::error!(repo = %repo, error = %e, "upstream.body.failed");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
