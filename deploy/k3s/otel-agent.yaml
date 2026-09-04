@@ -26,7 +26,8 @@
 # |                                   |                  | half                                   |
 # | daemonsets, deployments,          | get,list,watch   | k8s_cluster's object counts and phases |
 # | statefulsets, events,             |                  | — the Deployment below, not the        |
-# | resourcequotas                    |                  | DaemonSet                              |
+# | resourcequotas, jobs, cronjobs,   |                  | DaemonSet                              |
+# | replicationcontrollers, hpa       |                  |                                        |
 #
 # NOT granted, deliberately: anything in `rustic-git.io` (the CRDs are the API's and the agent's,
 # and telemetry has no business reading a workspace's spec), any write verb at all, and secrets.
@@ -55,6 +56,16 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events", "resourcequotas"]
+    verbs: ["get", "list", "watch"]
+  # k8s_cluster counts these too; without the grant it logs a 403 per list forever.
+  - apiGroups: [""]
+    resources: ["replicationcontrollers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -115,7 +126,7 @@ data:
       kubeletstats:
         collection_interval: 15s
         auth_type: serviceAccount
-        endpoint: https://${env:K8S_NODE_NAME}:10250
+        endpoint: https://${env:K8S_NODE_IP}:10250
         insecure_skip_verify: true
         metric_groups: [node, pod, container]
       # Pod logs, so HyperDX has logs beside metrics. Our binaries keep plain tracing output;
@@ -242,6 +253,9 @@ spec:
           env:
             - name: K8S_NODE_NAME
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            # The kubelet is dialled by IP: a node NAME is not something pod DNS resolves.
+            - name: K8S_NODE_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
             - name: RUSTIC_GIT_REGION
               # Edit per region before applying — this is the value every console query filters
               # on, and it must equal the region's `Region` CR id or its charts stay empty.

@@ -414,7 +414,7 @@ boot (numbered `CREATE … IF NOT EXISTS`, never edit one that shipped), consume
 stream in a **second** consumer group (`history`) that acks only after the insert — the stream
 stays a nudge, never the record, so with Redis down the consumer idles and everything else keeps
 writing — runs one reflector per kind per region (`history::watch`: Workspace, Environment,
-Snapshot, Volume, QuotaRequest, Node per region; Region centrally) turning transitions into rows
+Snapshot, Volume, QuotaRequest, Request, Node per region; Region centrally) turning transitions into rows
 keyed `{uid}:{resourceVersion}:{transition}` with `ts` DERIVED FROM THE OBJECT so a replayed watch
 is byte-identical rather than merely close, dual-writes every audit row as `admin.<action>` (the
 object-store log stays the legal record), and runs hourly folds recomputed from the CRDs every

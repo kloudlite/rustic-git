@@ -116,7 +116,7 @@ rules:
   # is not a decision.
   - apiGroups: ["rustic-git.io"]
     resources: ["requests"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "watch", "create"]
   - apiGroups: ["rustic-git.io"]
     resources: ["requests/status"]
     verbs: ["patch", "update"]

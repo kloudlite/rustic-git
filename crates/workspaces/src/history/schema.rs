@@ -156,8 +156,12 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     // therefore folds a duplicate away instead of letting it weight an average twice.
     //
     // ClickHouse cannot ALTER an engine, so each table is rebuilt beside itself and swapped in with
-    // EXCHANGE, which is atomic. One statement per migration because `query` posts exactly one, and
-    // each is safe to re-run alone after a crash between them.
+    // EXCHANGE, which is atomic. One statement per migration because `query` posts exactly one.
+    // The CREATE and INSERT steps re-run harmlessly, but 10 and 14 do not: the version is recorded
+    // only after a statement returns, so a crash inside that window re-runs the EXCHANGE and swaps
+    // the tables back, and the DROP that follows then removes the rebuilt table. Nothing is lost
+    // — the original survives under its own name — but the engine stays MergeTree; check
+    // `system.tables` after a boot that logged a migration error at 10 or 14.
     (
         8,
         "CREATE TABLE IF NOT EXISTS rustic.usage_hourly_v2 (\

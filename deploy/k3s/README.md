@@ -984,6 +984,7 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 Apply both BEFORE rolling the api image: without the CRD every `/v1/requests` create 404s from
 the API server, and without the RBAC the admin process 403s on the queue. Then, once per
 cluster, `POST /admin/requests/migrate` with a note — idempotent, safe to repeat.
+
 ## Release: the history layer on ClickStack
 
 ClickStack goes up FIRST, on AKS (`deploy/clickstack/README.md`), because the ingestion API key it
