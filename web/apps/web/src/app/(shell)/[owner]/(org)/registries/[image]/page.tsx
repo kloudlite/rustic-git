@@ -11,7 +11,7 @@ export default async function ImagePage({ params }: { params: Promise<{ owner: s
   const { owner, image } = await params;
   const { tags: list } = await guardImage(owner, image);
 
-  const host = registryHost();
+  const host = await registryHost();
   const lastPublished = list.reduce<number | null>((max, t) => {
     if (t.pushed_ms === null) return max;
     return max === null ? t.pushed_ms : Math.max(max, t.pushed_ms);

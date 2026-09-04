@@ -1089,6 +1089,107 @@ export function createRegion(body: { id: string; name: string }, token: string) 
   });
 }
 
+// ── settings (admin host — crates/workspaces/src/api/admin/{schema,settings}.rs) ─
+
+/** `GET /admin/settings/schema`'s one row shape, shared by both scopes — everything a
+ *  `SettingRow` needs except the current value, which comes from the scope's own GET. */
+export type SettingsSchemaRow = {
+  name: string;
+  description: string;
+  unit: string;
+  range: { min: number; max: number } | null;
+  mark: "live" | "boot";
+  readers: string[];
+  default: unknown;
+  env: string | null;
+};
+
+export function getSettingsSchema(token: string) {
+  return adminCall<{ central: SettingsSchemaRow[]; cluster: SettingsSchemaRow[] }>("/admin/settings/schema", {
+    method: "GET",
+    token,
+  });
+}
+
+/** The object-store document at `cluster/settings` — every field optional (unset means "fall
+ *  back to env, then the built-in default"), plus the inline history and who/when it was last
+ *  written. Keys left loose (`Record<string, unknown>` via index access) rather than hand-typed
+ *  per field: the schema route is already the one place that enumerates them, so the web never
+ *  hand-duplicates that list here too. */
+export type StoredCentralSettings = Record<string, unknown> & {
+  history?: Record<string, unknown>[];
+  updatedBy?: string;
+  updatedAt?: string;
+};
+
+export function getCentralSettings(token: string) {
+  return adminCall<StoredCentralSettings>("/admin/settings/central", { method: "GET", token });
+}
+
+export function putCentralSettings(patch: Record<string, unknown>, token: string) {
+  return adminCall<StoredCentralSettings>("/admin/settings/central", { method: "PUT", token, body: JSON.stringify(patch) });
+}
+
+/** The `ClusterSettings` CRD, as `crd::ClusterSettings` serializes it — `spec` is what
+ *  `crd::CLUSTER_SETTING_META` enumerates, `status.observedGeneration` is what the pending
+ *  marker compares against `metadata.generation`. */
+export type ClusterSettingsDoc = {
+  metadata?: { generation?: number; annotations?: Record<string, string> };
+  spec: Record<string, unknown>;
+  status?: { observedGeneration?: number };
+};
+
+export function getClusterSettings(region: string, token: string) {
+  return adminCall<ClusterSettingsDoc>(`/admin/settings/clusters/${encodeURIComponent(region)}`, { method: "GET", token });
+}
+
+export function putClusterSettings(region: string, patch: Record<string, unknown>, token: string) {
+  return adminCall<ClusterSettingsDoc>(`/admin/settings/clusters/${encodeURIComponent(region)}`, {
+    method: "PUT",
+    token,
+    body: JSON.stringify(patch),
+  });
+}
+
+/** `n` indexes the CR's inline history annotation, newest first — `0` is "one change ago", the
+ *  only depth the revert button in the UI offers. */
+export function revertClusterSettings(region: string, n: number, token: string) {
+  return adminCall<ClusterSettingsDoc>(
+    `/admin/settings/clusters/${encodeURIComponent(region)}/revert/${n}`,
+    { method: "POST", token },
+  );
+}
+
+/** `crates/workspaces/src/api/workloads.rs::WorkloadDoc`. `scope` is left untyped: its `Region`
+ *  variant cannot actually serialize today (an internally-tagged enum tagging a bare `String`
+ *  newtype — `serde` refuses it at runtime), a pre-existing bug in that crate this task does not
+ *  own; the roll-progress poll below only ever matches on `name`, never on `scope`'s shape, so it
+ *  stays correct whether or not that gets fixed. */
+export type WorkloadDoc = {
+  scope: unknown;
+  name: string;
+  kind: "statefulset" | "deployment" | "daemonset";
+  image: string | null;
+  ready: number;
+  desired: number;
+  rolloutState: "RollingOut" | "Stable";
+  lastRoll: { by: string; at: string; reason: string } | null;
+};
+
+export function listWorkloads(token: string) {
+  return adminCall<WorkloadDoc[]>("/admin/workloads", { method: "GET", token });
+}
+
+/** Display-only slice of the central document — `crates/api/src/lib.rs::settings_central`, the
+ *  UNAUTHENTICATED route on the ordinary api host (not `/admin`), so `lib/clone.ts` can call it
+ *  without a signed-in caller's token. Blank fields mean "never set", the same fallback-to-env
+ *  contract that route's own doc comment states. */
+export type PublicCentralSettings = { cloneHost: string; sshHost: string; sshPort: number; registryHost: string };
+
+export function getPublicCentralSettings() {
+  return call<PublicCentralSettings>("/v1/settings/central", { method: "GET" });
+}
+
 // ── superadmins (server tier, not the admin host — crates/api/src/teams.rs) ─
 
 export type SuperAdmin = { _id: string; addedAt: string; addedBy: string };

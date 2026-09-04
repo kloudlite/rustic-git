@@ -11,6 +11,7 @@ const TABS = [
   { href: "/superadmin/defaults", label: "Defaults" },
   { href: "/superadmin/regions", label: "Regions" },
   { href: "/superadmin/nodes", label: "Nodes" },
+  { href: "/superadmin/settings", label: "Settings" },
 ];
 
 /** `/superadmin`, gated on the `superadmin` claim — 404 for anyone without it, same shape as

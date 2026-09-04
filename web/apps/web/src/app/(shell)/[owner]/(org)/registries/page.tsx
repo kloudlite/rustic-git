@@ -18,7 +18,7 @@ export default async function RegistriesPage({ params }: { params: Promise<{ own
     throw new Error(list.message);
   }
 
-  const host = registryHost();
+  const host = await registryHost();
 
   // Full page width, like every other list in the namespace — the section tab
   // already names the page, so there is no title to repeat.

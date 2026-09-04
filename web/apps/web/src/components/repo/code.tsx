@@ -115,7 +115,7 @@ export async function CodeView({
 
   // A repo with no refs is not broken — it is new. It has nothing to list, so it
   // gets the one thing it needs: how to put something in it.
-  if (!head) return <EmptyRepo owner={owner} repo={repo} urls={cloneUrls(owner, repo)} isPrivate={!meta.public} />;
+  if (!head) return <EmptyRepo owner={owner} repo={repo} urls={await cloneUrls(owner, repo)} isPrivate={!meta.public} />;
 
   // The rail is a fact about the repo, so it is fetched the same way in every
   // directory — see `repoRail`. Inside a subdirectory these are cache hits: both
@@ -151,6 +151,7 @@ export async function CodeView({
       : await blob(token, owner, repo, head.oid, `${dir ? `${dir}/` : ""}${readmeEntry.name}`)
     : undefined;
   const readmeText = readme?.ok ? decodeBlob(readme.value) : undefined;
+  const urls = await cloneUrls(owner, repo);
 
   return (
     <div className="grid gap-10 xl:grid-cols-code-rail">
@@ -168,7 +169,7 @@ export async function CodeView({
           )}
           <div className="ml-auto">
             <CloneMenu
-              urls={cloneUrls(owner, repo)}
+              urls={urls}
               owner={owner}
               repo={repo}
               branch={head.kind === "branch" ? shortRef(head.name) : fallback ? shortRef(fallback.name) : undefined}
