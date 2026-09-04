@@ -3,15 +3,18 @@
 # rather than one per crate.
 version: 2
 updates:
+  # Actions and base images move rarely and each PR costs a full image build; one grouped PR a
+  # month is enough. Crates and packages stay weekly — that is where advisories land.
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
+    groups:
+      actions: { patterns: ["*"] }
   - package-ecosystem: docker
-    directory: /
-    schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /web
-    schedule: { interval: weekly }
+    directories: ["/", "/web"]
+    schedule: { interval: monthly }
+    groups:
+      images: { patterns: ["*"] }
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }

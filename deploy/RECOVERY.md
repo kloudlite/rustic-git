@@ -107,8 +107,8 @@ Verify: `kubectl -n kloudlite-git get secrets` lists all ten. Nothing else creat
 
 The manifests are pinned to image SHAs that exist in GHCR (`deploy/pin.sh` refuses one that
 does not); a fresh cluster pulls them anonymously. Values that name the environment and may
-need editing on a rebuilt one, all in `deploy/kloudlite-git.yaml`: `KLOUDLITE_GIT_AGENT_SOURCES` and
-the registry Ingress `limit-whitelist` (the pool nodes' public IPs — B.1 gives the new ones),
+need editing on a rebuilt one, all in `deploy/kloudlite-git.yaml`: the registry Ingress
+`limit-whitelist` (the pool nodes' public IPs — B.1 gives the new ones), and
 `KLOUDLITE_GIT_WORKSPACES_ADMINS`.
 
 ```sh
@@ -183,8 +183,7 @@ deploy/k3s/provision-azure.sh                    # idempotent; VNet, NSG (ssh + 
 ssh azureuser@<node> sudo bash -s -- /dev/disk/azure/scsi1/lun0 < deploy/k3s/format-pool.sh
 ```
 
-Note the pool nodes' new public IPs: they go into `KLOUDLITE_GIT_AGENT_SOURCES` and the registry
-`limit-whitelist` in `deploy/kloudlite-git.yaml` (A.3) — the registry's rate limit is lifted only for
+Note the pool nodes' new public IPs: they go into the registry `limit-whitelist` in `deploy/kloudlite-git.yaml` (A.3) — the registry's rate limit is lifted only for
 those addresses.
 
 ### B.2 The control plane — from the backup, or from scratch

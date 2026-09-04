@@ -3,7 +3,7 @@
 `dev.kloudlite.io` and `cr.khost.dev` are Cloudflare-proxied, so the ingress LoadBalancer's public
 IP must accept 80/443 from Cloudflare's ranges only — otherwise an attacker (or a DDoS) skips the
 edge and hits the origin directly, `CF-Connecting-IP` becomes forgeable, and everything that
-trusts the real IP (the registry `limit-whitelist`, `KLOUDLITE_GIT_AGENT_SOURCES`) trusts a header
+trusts the real IP (the registry `limit-whitelist`) trusts a header
 the client wrote.
 
 The Azure NSG rule is written by the cloud controller from the Service, so the lock is

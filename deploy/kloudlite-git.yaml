@@ -55,7 +55,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: kloudlite-git
-          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+          image: ghcr.io/kloudlite/kloudlite-git:305ebe439b7995280ef35bedaedf704f4c2dd480@sha256:6216e3b50f1d09d9a7bf5fc266c1ecbc68263d3307f98570585284aba419ef74
           args: ["serve"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -101,10 +101,6 @@ spec:
               value: /etc/kloudlite-git/host_key
             - name: KLOUDLITE_GIT_CACHE_DIR
               value: /var/cache/kloudlite-git
-            # Each region's agent token is only honoured from that region's node addresses (the k3s
-            # VMs' public IPs — see deploy/k3s/README.md). A leaked token is useless elsewhere.
-            - name: KLOUDLITE_GIT_AGENT_SOURCES
-              value: "centralindia-k3s=40.80.82.158/32,20.219.22.61/32"
             - name: KLOUDLITE_GIT_PEER_SVC
               value: kloudlite-git.kloudlite-git.svc.cluster.local
             - name: KLOUDLITE_GIT_SELF
@@ -390,7 +386,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: api
-          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+          image: ghcr.io/kloudlite/kloudlite-git:305ebe439b7995280ef35bedaedf704f4c2dd480@sha256:6216e3b50f1d09d9a7bf5fc266c1ecbc68263d3307f98570585284aba419ef74
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["kloudlite-git-api"]
@@ -564,7 +560,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+          image: ghcr.io/kloudlite/kloudlite-git:305ebe439b7995280ef35bedaedf704f4c2dd480@sha256:6216e3b50f1d09d9a7bf5fc266c1ecbc68263d3307f98570585284aba419ef74
           command: ["kloudlite-git-worker"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -767,7 +763,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: admin
-          image: ghcr.io/kloudlite/kloudlite-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
+          image: ghcr.io/kloudlite/kloudlite-git:305ebe439b7995280ef35bedaedf704f4c2dd480@sha256:6216e3b50f1d09d9a7bf5fc266c1ecbc68263d3307f98570585284aba419ef74
           command: ["kloudlite-git-api"]
           ports:
             - { name: http, containerPort: 8090 }
@@ -920,9 +916,10 @@ metadata:
     # Per client IP (real IP via deploy/ingress-nginx-config.yaml). A docker push is a handful of
     # large requests, not many small ones, so 50 r/s with a 5x burst never touches a real client;
     # a scraper hammering /v2 does. The region agents are exempt: they are the platform — this
-    # list is the node addresses in KLOUDLITE_GIT_AGENT_SOURCES above, and must move with them.
+    # list is the region's node addresses (the k3s VMs' public IPs, deploy/k3s/README.md) and
+    # must move with them.
     # (A third address, 4.224.42.0/32, sat here from 146b604 with no record of what it was and
-    # no place in AGENT_SOURCES; dropped 2026-08-29 — being rate-limited is the worst it can
+    # no place in that list; dropped 2026-08-29 — being rate-limited is the worst it can
     # suffer, and a 429 from it is how we learn its name.)
     nginx.ingress.kubernetes.io/limit-rps: "50"
     nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
