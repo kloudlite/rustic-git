@@ -19,6 +19,7 @@
 
 pub mod events;
 pub mod schema;
+pub mod watch;
 
 use std::time::Duration;
 

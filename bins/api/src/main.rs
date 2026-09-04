@@ -301,6 +301,28 @@ async fn run() -> Result<()> {
                             )
                             .await
                         });
+                        // One watch set per cluster this process can reach. `state.kube` is a
+                        // region's k3s (the mounted kubeconfig, the same client `client_for_region`
+                        // hands out) and `state.aks` is this cluster, where `Region` objects live —
+                        // the split every admin handler already makes, reused rather than a second
+                        // client to keep in step. A cluster that is absent simply gets no watch:
+                        // history is optional, and boot never waits on one.
+                        if let Some(k) = state.kube.clone() {
+                            let region = std::env::var("RUSTIC_GIT_REGION")
+                                .unwrap_or_else(|_| "default".into());
+                            let h = h.clone();
+                            tokio::spawn(rustic_git_workspaces::history::watch::watch_region(
+                                k, region, h,
+                            ));
+                        }
+                        if let Some(k) = state.aks.clone() {
+                            let h = h.clone();
+                            tokio::spawn(rustic_git_workspaces::history::watch::watch_region(
+                                k,
+                                "central".into(),
+                                h,
+                            ));
+                        }
                         state = state.with_cache(cache.clone()).with_history(h);
                     }
                     None => tracing::warn!(
