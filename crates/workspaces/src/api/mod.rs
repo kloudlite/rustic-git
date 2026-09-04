@@ -159,6 +159,26 @@ pub trait Directory: Send + Sync {
     /// every team-owned quota request silently seed from the person defaults, and nothing would
     /// fail loudly enough to notice.
     async fn is_team(&self, slug: &str) -> bool;
+
+    /// Put `user` into `team` at `role`, creating the membership if they are not in it yet. Only
+    /// the admin process implements this — the user role has no route that could call it.
+    async fn grant_access(&self, _team: &str, _user: &str, _role: TeamRole) -> GrantAccess {
+        GrantAccess::Unsupported
+    }
+}
+
+/// What a membership write did. Not a `Result`: "no such user" and "no such team" are answers a
+/// decider needs to read back verbatim, not errors to log.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GrantAccess {
+    Done,
+    NoSuchUser,
+    NoSuchTeam,
+    /// The directory's own refusal, already in words fit to show — a last-owner demotion, say.
+    Refused(String),
+    /// No directory is wired, or this one cannot write. A DEFAULT so every test stub in this crate
+    /// keeps compiling; the approve arm turns it into a 503 rather than a false success.
+    Unsupported,
 }
 
 pub struct ApiState {
@@ -878,5 +898,35 @@ mod tests {
         assert!(super::is_missing(&missing));
         let other = kube::Error::Api(Box::new(kube::core::Status::failure("conflict", "Conflict").with_code(409)));
         assert!(!super::is_missing(&other));
+    }
+
+    /// A directory that has not implemented granting answers `Unsupported`, and the approve arm
+    /// turns that into a refusal — never a silent success on a membership nothing wrote.
+    #[tokio::test]
+    async fn a_directory_without_granting_refuses_rather_than_pretending() {
+        use super::Directory as _;
+        struct Bare;
+        #[async_trait::async_trait]
+        impl super::Directory for Bare {
+            async fn teams_for(&self, _u: &str) -> Vec<String> {
+                Vec::new()
+            }
+            async fn is_live(&self, _j: &str) -> bool {
+                false
+            }
+            async fn for_owner(&self, _o: &str) -> Option<super::OwnerMaterial> {
+                None
+            }
+            async fn team_role(&self, _u: &str, _t: &str) -> Option<super::TeamRole> {
+                None
+            }
+            async fn is_team(&self, _s: &str) -> bool {
+                false
+            }
+        }
+        assert_eq!(
+            Bare.grant_access("acme", "meera", super::TeamRole::Admin).await,
+            super::GrantAccess::Unsupported
+        );
     }
 }

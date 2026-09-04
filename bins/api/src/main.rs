@@ -63,6 +63,46 @@ impl rustic_git_workspaces::api::Directory for Dir {
     async fn is_team(&self, slug: &str) -> bool {
         self.0.get(slug).await.ok().flatten().is_some()
     }
+
+    async fn grant_access(
+        &self,
+        team: &str,
+        user: &str,
+        role: rustic_git_workspaces::api::TeamRole,
+    ) -> rustic_git_workspaces::api::GrantAccess {
+        use rustic_git_pulls::directory::{AddMember, Membership, Role};
+        use rustic_git_workspaces::api::{GrantAccess, TeamRole};
+        let role = match role {
+            TeamRole::Owner => Role::Owner,
+            TeamRole::Admin => Role::Admin,
+            TeamRole::Member => Role::Member,
+        };
+        // Add first, then fall through to a role change: a grant is "be in this team at this
+        // role", and whether they were already in it is not the decider's problem. `add_member`'s
+        // filter carries its own duplicate check, so this is safe to retry.
+        match self.0.add_member(team, user, role).await {
+            Ok(AddMember::Added) => return GrantAccess::Done,
+            Ok(AddMember::NoSuchUser) => return GrantAccess::NoSuchUser,
+            Ok(AddMember::NoSuchTeam) => return GrantAccess::NoSuchTeam,
+            Ok(AddMember::AlreadyMember) => {}
+            Err(e) => {
+                tracing::error!(error = %e, %team, "granting team access");
+                return GrantAccess::Refused("the directory could not be written".into());
+            }
+        }
+        match self.0.set_role(team, user, role).await {
+            Ok(Membership::Done) => GrantAccess::Done,
+            Ok(Membership::NotAMember) => GrantAccess::NoSuchUser,
+            Ok(Membership::NoSuchTeam) => GrantAccess::NoSuchTeam,
+            Ok(Membership::LastOwner) => {
+                GrantAccess::Refused("a team must keep at least one owner".into())
+            }
+            Err(e) => {
+                tracing::error!(error = %e, %team, "setting team role");
+                GrantAccess::Refused("the directory could not be written".into())
+            }
+        }
+    }
 }
 
 #[tokio::main]
