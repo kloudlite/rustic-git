@@ -1297,9 +1297,11 @@ data:
         # receiver never discovers them. Transactions carry ResponseType (ServerBusyError is the
         # throttle); per-share utilisation is not available here — `df` on the nodes is.
         services: [Microsoft.Storage/storageAccounts]
-        # Storage metrics reach Azure Monitor two to four minutes late; a one-minute window
-        # therefore reads empty every time. Five minutes catches them.
-        collection_interval: 300s
+        # Storage metrics reach Azure Monitor the better part of an hour late (a five-minute
+        # window read zero for an account doing 390k transactions an hour), so this is an hourly
+        # after-the-fact view. The live view of blob health is our own
+        # `dependency_request_duration_seconds{dep="blob"}` and `dependency_errors_total`.
+        collection_interval: 3600s
         initial_delay: 3s
         metrics:
           Microsoft.Storage/storageAccounts:
