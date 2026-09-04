@@ -1024,3 +1024,20 @@ a streamed `list`.
 did and `/admin/history/*` answers 503. `KLOUDLITE_GIT_REGION` labels the watch against the mounted
 kubeconfig's cluster and must equal that region's collector value (`centralindia-k3s`), or
 telemetry and events land under different region names and neither side looks wrong.
+
+## Release: the rename (2026-09-04)
+
+`rustic-git` became `kloudlite-git` everywhere: crates, binaries, `KLOUDLITE_GIT_*`, the CRD group
+`kloudlite-git.io` and its labels, images `ghcr.io/kloudlite/kloudlite-git{,-web}`, namespaces
+`kloudlite-git` (AKS) and `kloudlite-git-system` (k3s), every Secret and ServiceAccount. Two things
+deliberately kept their old name because they are data locations, not labels: the blob container
+`rustic-git` (`KLOUDLITE_GIT_S3_URL=az://rustic-git`, every repo lives there) and the ZeroFS
+prefix inside it. The ClickHouse database and user were renamed in place (`RENAME DATABASE`).
+
+The cutover ran old and new side by side only for the stateless tiers. The server tier and the
+agent are single-writer (the ownership lease, the btrfs pool), so the old StatefulSet and
+DaemonSet were scaled to zero before the new ones took over. Objects owned by the old-group
+CRs (tenant NetworkPolicies, ResourceQuotas) were garbage-collected with the old CRDs and
+recreated by the new agent on its next reconcile; the four live CRs (Region, OwnerBindings) were
+re-created by hand under the new group with the same names and specs. The api tier's k3s
+kubeconfigs were re-minted for the new ServiceAccounts (`kloudlite-git-api`, `-admin`).
