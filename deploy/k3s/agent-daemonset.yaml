@@ -111,7 +111,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/rustic-git-agent:b5e412d1aa112a320bbbf186fb98b7326b86966d@sha256:dd2f7644cab21e0b378f97f67bed91c33fff842f5dcebda3727cba25b61bc992
+          image: ghcr.io/kloudlite/rustic-git-agent:d50da6dc0226ff4ae193441ad7de5bdbf4644b39@sha256:37ffd534c1dcb43f3788f96ac7195ee1515dae3e49ea3ce2aa37225383edc630
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -188,7 +188,7 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/rustic-git-workspace:b5e412d1aa112a320bbbf186fb98b7326b86966d@sha256:b05df2154c1b572836f4260c628a388f29bec49a1de07493fcaab3ac04b2c68e
+              value: ghcr.io/kloudlite/rustic-git-workspace:d50da6dc0226ff4ae193441ad7de5bdbf4644b39@sha256:881b5b5f0a2a671870ad77a23cefa6ab3163090e7d76f429be51674cff8c38f5
             - name: WS_BASE_PACKAGES
               value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
             - name: WS_REPLICA_SECS
