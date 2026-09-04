@@ -149,6 +149,27 @@ data:
       # without ingesting every workspace container on the node. Our binaries keep plain
       # tracing output; `KLOUDLITE_GIT_LOG_FORMAT=json` makes them structured here without
       # changing the code.
+      # The node's own syslog, kernel lines only: the NFS export not answering, a btrfs error on
+      # the pool, the OOM killer — what a pod log can never say about itself.
+      filelog/syslog:
+        include: [/var/log/syslog, /var/log/messages]
+        start_at: end
+        operators:
+          - type: filter
+            expr: 'body not matches "(?i)(nfs|btrfs|out of memory|oom-kill|i/o error|ext4-fs error|hung task)"'
+          - type: regex_parser
+            regex: '^(?P<time>\S+) (?P<host>\S+) (?P<proc>[^:\[]+)(\[\d+\])?: (?P<message>.*)$'
+            timestamp:
+              parse_from: attributes.time
+              layout_type: gotime
+              layout: '2006-01-02T15:04:05.999999-07:00'
+          - type: move
+            if: 'attributes.message != nil'
+            from: attributes.message
+            to: body
+          - type: add
+            field: attributes["service.name"]
+            value: node-syslog
       filelog:
         include: [/var/log/pods/kube-system_kloudlite-git-*/*/*.log, /var/log/pods/kloudlite-git-system_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
@@ -262,7 +283,7 @@ data:
           processors: [k8sattributes, resource, filter/ours, transform/identity, batch]
           exporters: [otlphttp]
         logs:
-          receivers: [filelog]
+          receivers: [filelog, filelog/syslog]
           processors: [k8sattributes, resource, transform/identity, batch]
           exporters: [otlphttp]
 ---
@@ -277,6 +298,10 @@ data:
     receivers:
       k8s_cluster:
         collection_interval: 30s
+      # Kubernetes events for the platform and every tenant namespace: OOMKilled, image pulls,
+      # evictions, FailedScheduling — what a pod's own log never carries.
+      k8s_events:
+        auth_type: serviceAccount
 
     processors:
       # `region` only. NO `k8s.node.name` here: these metrics describe every node in the cluster
@@ -302,6 +327,10 @@ data:
           receivers: [k8s_cluster]
           processors: [resource, batch]
           exporters: [otlphttp]
+        logs:
+          receivers: [k8s_events]
+          processors: [resource, batch]
+          exporters: [otlphttp]
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -316,6 +345,10 @@ spec:
       labels: { app: kloudlite-git-otel-agent }
     spec:
       serviceAccountName: kloudlite-git-otel-agent
+      # /var/log/syslog is root:adm 0640; the collector image runs unprivileged, so it joins
+      # `adm` (gid 4) to read it — read-only mount, no capability, no root.
+      securityContext:
+        supplementalGroups: [4]
       # Control-plane nodes run pods too (the gateway), and their logs and kubelet stats
       # are as interesting as any worker's — a collector that skipped them would leave a hole
       # nothing else fills.
@@ -348,6 +381,7 @@ spec:
           volumeMounts:
             - { name: conf, mountPath: /conf }
             - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
+            - { name: varlog, mountPath: /var/log, readOnly: true }
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 512Mi }
@@ -356,6 +390,8 @@ spec:
           configMap: { name: kloudlite-git-otel-agent }
         - name: varlogpods
           hostPath: { path: /var/log/pods }
+        - name: varlog
+          hostPath: { path: /var/log }
 ---
 apiVersion: apps/v1
 kind: Deployment

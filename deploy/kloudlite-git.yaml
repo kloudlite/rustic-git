@@ -1078,6 +1078,27 @@ data:
       # without ingesting every workspace container on the node. Our binaries keep plain
       # tracing output; `KLOUDLITE_GIT_LOG_FORMAT=json` makes them structured here without
       # changing the code.
+      # The node's own syslog, kernel lines only: an NFS export that stops answering, a btrfs
+      # error, the OOM killer — what a pod log can never say about itself.
+      filelog/syslog:
+        include: [/var/log/syslog, /var/log/messages]
+        start_at: end
+        operators:
+          - type: filter
+            expr: 'body not matches "(?i)(nfs|btrfs|out of memory|oom-kill|i/o error|ext4-fs error|hung task)"'
+          - type: regex_parser
+            regex: '^(?P<time>\S+) (?P<host>\S+) (?P<proc>[^:\[]+)(\[\d+\])?: (?P<message>.*)$'
+            timestamp:
+              parse_from: attributes.time
+              layout_type: gotime
+              layout: '2006-01-02T15:04:05.999999-07:00'
+          - type: move
+            if: 'attributes.message != nil'
+            from: attributes.message
+            to: body
+          - type: add
+            field: attributes["service.name"]
+            value: node-syslog
       filelog:
         include: [/var/log/pods/kloudlite-git_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
@@ -1191,7 +1212,7 @@ data:
           processors: [k8sattributes, resource, filter/ours, transform/identity, batch]
           exporters: [otlphttp]
         logs:
-          receivers: [filelog]
+          receivers: [filelog, filelog/syslog]
           processors: [k8sattributes, resource, transform/identity, batch]
           exporters: [otlphttp]
 ---
@@ -1263,6 +1284,69 @@ data:
               ServerSideLatency: []
               DataUsageV2: []
               DocumentCountV2: []
+      # The blob account every repo lives in and the Files share every home lives on, from the
+      # provider's side: transactions by response type (throttling and server errors are
+      # ResponseType values), availability, both latencies, and capacity.
+      azuremonitor/storage:
+        subscription_ids: ["9941afe7-e220-492f-bfab-63f539dc0b69"]
+        tenant_id: ${env:AZURE_TENANT_ID}
+        client_id: ${env:AZURE_CLIENT_ID}
+        client_secret: ${env:AZURE_CLIENT_SECRET}
+        resource_groups: [kolomi-rg, rustic-git-k3s]
+        services: [Microsoft.Storage/storageAccounts/blobServices, Microsoft.Storage/storageAccounts/fileServices]
+        collection_interval: 60s
+        initial_delay: 3s
+        metrics:
+          Microsoft.Storage/storageAccounts/blobServices:
+            Transactions: [count]
+            Availability: [average]
+            SuccessE2ELatency: [average]
+            SuccessServerLatency: [average]
+            Ingress: [total]
+            Egress: [total]
+            BlobCapacity: [average]
+          Microsoft.Storage/storageAccounts/fileServices:
+            Transactions: [count]
+            Availability: [average]
+            SuccessE2ELatency: [average]
+            PercentFileShareUtilization: [maximum]
+            PercentFileShareIOPSUtilization: [maximum]
+            FileCapacity: [average]
+        dimensions:
+          enabled: true
+          overrides:
+            Microsoft.Storage/storageAccounts/blobServices:
+              Transactions: [ResponseType]
+              Availability: []
+              SuccessE2ELatency: []
+              SuccessServerLatency: []
+              Ingress: []
+              Egress: []
+              BlobCapacity: []
+            Microsoft.Storage/storageAccounts/fileServices:
+              Transactions: [ResponseType]
+              Availability: []
+              SuccessE2ELatency: []
+              PercentFileShareUtilization: []
+              PercentFileShareIOPSUtilization: []
+              FileCapacity: []
+      # Synthetic probes from inside the cluster through the public edge — the only check that
+      # sees DNS, Cloudflare, TLS and the ingress the way a user does. 401 from the registry is
+      # the healthy answer (anonymous /v2/ must challenge, never 200).
+      httpcheck:
+        collection_interval: 30s
+        targets:
+          - endpoint: https://dev.kloudlite.io/api/health
+            method: GET
+          - endpoint: https://cr.khost.dev/v2/
+            method: GET
+          - endpoint: https://hyperdx-dev.kloudlite.io/api/health
+            method: GET
+      # Kubernetes events: OOMKilled, ImagePullBackOff, evictions, FailedScheduling — the facts a
+      # pod's own log never carries. Logs, not metrics; one row per event.
+      k8s_events:
+        auth_type: serviceAccount
+        namespaces: [kloudlite-git, clickstack, ingress-nginx, cert-manager]
       azuremonitor/cosmos-hourly:
         subscription_ids: ["9941afe7-e220-492f-bfab-63f539dc0b69"]
         tenant_id: ${env:AZURE_TENANT_ID}
@@ -1297,7 +1381,11 @@ data:
     service:
       pipelines:
         metrics:
-          receivers: [k8s_cluster, azuremonitor/redis, azuremonitor/cosmos, azuremonitor/cosmos-hourly]
+          receivers: [k8s_cluster, azuremonitor/redis, azuremonitor/cosmos, azuremonitor/cosmos-hourly, azuremonitor/storage, httpcheck]
+          processors: [resource, batch]
+          exporters: [otlphttp]
+        logs:
+          receivers: [k8s_events]
           processors: [resource, batch]
           exporters: [otlphttp]
 ---
@@ -1314,6 +1402,10 @@ spec:
       labels: { app: kloudlite-git-otel-agent }
     spec:
       serviceAccountName: kloudlite-git-otel-agent
+      # /var/log/syslog is root:adm 0640; the collector image runs unprivileged, so it joins
+      # `adm` (gid 4) to read it — read-only mount, no capability, no root.
+      securityContext:
+        supplementalGroups: [4]
       # Control-plane nodes run pods too (the gateway, ZeroFS), and their logs and kubelet stats
       # are as interesting as any worker's — a collector that skipped them would leave a hole
       # nothing else fills.
@@ -1346,6 +1438,7 @@ spec:
           volumeMounts:
             - { name: conf, mountPath: /conf }
             - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
+            - { name: varlog, mountPath: /var/log, readOnly: true }
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 512Mi }
@@ -1354,6 +1447,8 @@ spec:
           configMap: { name: kloudlite-git-otel-agent }
         - name: varlogpods
           hostPath: { path: /var/log/pods }
+        - name: varlog
+          hostPath: { path: /var/log }
 ---
 apiVersion: apps/v1
 kind: Deployment
