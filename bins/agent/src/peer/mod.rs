@@ -211,7 +211,16 @@ async fn snapshot(
             buf
         })
     });
-    let killer = KillOnDrop { stdout, child: Some(child), stderr_task, volume: volume_id, name: snapshot_name, _guard: guard };
+    let killer = KillOnDrop {
+        stdout,
+        child: Some(child),
+        stderr_task,
+        volume: volume_id,
+        name: snapshot_name,
+        started: std::time::Instant::now(),
+        sent: 0,
+        _guard: guard,
+    };
     // Dropping the stream on timeout drops `KillOnDrop`, which kills and reaps the child AND
     // releases the send lock — the whole point. The puller sees a truncated body after its 200,
     // which is the case it already handles (`pull_one`'s failed-receive path deletes the partial
@@ -242,6 +251,11 @@ struct KillOnDrop {
     stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
     volume: String,
     name: String,
+    /// The transfer metrics ride on this wrapper because it is the only thing that sees both ends
+    /// of a streamed send: every byte passes through `poll_read`, and `Drop` is the one point that
+    /// runs whether the puller finished, timed out or disconnected.
+    started: std::time::Instant,
+    sent: u64,
     _guard: OwnedMutexGuard<()>,
 }
 
@@ -251,7 +265,11 @@ impl tokio::io::AsyncRead for KillOnDrop {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().stdout).poll_read(cx, buf)
+        let me = self.get_mut();
+        let before = buf.filled().len();
+        let poll = std::pin::Pin::new(&mut me.stdout).poll_read(cx, buf);
+        me.sent += (buf.filled().len() - before) as u64;
+        poll
     }
 }
 
@@ -260,6 +278,9 @@ impl Drop for KillOnDrop {
         // Fire-and-forget: Drop cannot await. A child that already exited cleanly (the normal,
         // successful-send case) makes `kill`/`wait` here a cheap no-op; a child still writing
         // when the body was dropped early gets SIGKILL and reaped rather than orphaned.
+        metrics::counter!("snapshot_transfer_bytes_total", "direction" => "push").increment(self.sent);
+        metrics::histogram!("snapshot_transfer_duration_seconds", "direction" => "push")
+            .record(self.started.elapsed().as_secs_f64());
         let Some(mut child) = self.child.take() else { return };
         let stderr_task = self.stderr_task.take();
         let (volume, name) = (self.volume.clone(), self.name.clone());

@@ -275,6 +275,8 @@ fn register_metrics() {
         ("git_pack_requests_total", Counter, &[("op", "receive")]),
         ("git_pack_bytes_in_total", Counter, &[("op", "upload")]),
         ("git_pack_bytes_in_total", Counter, &[("op", "receive")]),
+        ("git_pack_duration_seconds", Histogram, &[]),
+        ("merge_stranded_total", Counter, &[]),
         ("registry_blob_bytes_in_total", Counter, &[]),
         ("registry_blob_bytes_out_total", Counter, &[]),
     ];

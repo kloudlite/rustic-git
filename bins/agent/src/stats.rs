@@ -102,6 +102,22 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
                         })
                         .count();
                     metrics::gauge!("node_working_copies_running").set(running as f64);
+                    // Off the SAME listing: a parent parked on something it is waiting for says so
+                    // in a False condition's reason, and these three are the waits an operator is
+                    // paged about. Recomputed whole every beat (zeroes included) — a gauge that is
+                    // only ever incremented keeps reporting a queue that has since drained.
+                    for reason in ["HomeNotReady", "NodeDead", "AwaitingReplica"] {
+                        let n = list
+                            .items
+                            .iter()
+                            .filter(|w| {
+                                w.status.as_ref().is_some_and(|s| {
+                                    s.conditions.iter().any(|c| c.status == "False" && c.reason == reason)
+                                })
+                            })
+                            .count();
+                        metrics::gauge!("workspaces_waiting", "reason" => reason).set(n as f64);
+                    }
                 }
                 Err(e) => tracing::warn!(kind = "Workspace", %node, error = %e, "listing.failed"),
             }

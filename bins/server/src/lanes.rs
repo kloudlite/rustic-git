@@ -220,6 +220,10 @@ pub async fn announce_stranded_merges(app: &App) {
                 }
             };
         for pr in stranded {
+            // Counted where the fact is known: this lane is the ONLY thing that notices a merge
+            // whose claimant went away, and the worker cannot tell a re-announcement from a first
+            // one. A rate above zero means jobs are outliving their leases.
+            metrics::counter!("merge_stranded_total").increment(1);
             let by = pr.merge.as_ref().map(|j| j.requested_by.clone()).unwrap_or_default();
             crate::events::publish(
                 &app.store.cache,

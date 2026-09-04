@@ -155,6 +155,27 @@ async fn main() {
         ("http_request_duration_seconds", Histogram, &[]),
         ("http_requests_total", Counter, &[("listener", "api"), ("class", "probe"), ("status", "5xx")]),
         ("http_requests_total", Counter, &[("listener", "api"), ("class", "probe"), ("status", "421")]),
+        // One series per dimension `quota::Dim` can refuse on, in `Dim::word`'s spelling — the same
+        // word the 409 says, so an alert and the user's message agree.
+        ("quota_refusals_total", Counter, &[("dimension", "workspaces")]),
+        ("quota_refusals_total", Counter, &[("dimension", "environments")]),
+        ("quota_refusals_total", Counter, &[("dimension", "snapshots")]),
+        ("quota_refusals_total", Counter, &[("dimension", "diskGb")]),
+        ("quota_refusals_total", Counter, &[("dimension", "cpu")]),
+        ("quota_refusals_total", Counter, &[("dimension", "memoryGb")]),
+        // Both roles register both: one image, and which router is mounted is an env var away.
+        ("requests_opened_total", Counter, &[("kind", "quota")]),
+        ("requests_opened_total", Counter, &[("kind", "access")]),
+        ("requests_opened_total", Counter, &[("kind", "region")]),
+        ("requests_opened_total", Counter, &[("kind", "other")]),
+        ("requests_decided_total", Counter, &[("kind", "quota"), ("decision", "approved")]),
+        ("requests_decided_total", Counter, &[("kind", "quota"), ("decision", "denied")]),
+        ("requests_decided_total", Counter, &[("kind", "access"), ("decision", "approved")]),
+        ("requests_decided_total", Counter, &[("kind", "access"), ("decision", "denied")]),
+        ("requests_decided_total", Counter, &[("kind", "region"), ("decision", "approved")]),
+        ("requests_decided_total", Counter, &[("kind", "region"), ("decision", "denied")]),
+        ("requests_decided_total", Counter, &[("kind", "other"), ("decision", "approved")]),
+        ("requests_decided_total", Counter, &[("kind", "other"), ("decision", "denied")]),
     ]);
     if let Err(e) = run().await {
         tracing::error!(error = %e, "process.exiting");

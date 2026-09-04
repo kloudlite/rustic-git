@@ -98,6 +98,8 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
     if let Err(e) = result {
         // Keep-biased: a failed cut leaves the CR `Working` and no CR/disk mismatch — the next
         // pass calls `snapshot_worktree` again, which converges on the same destination path.
+        metrics::counter!("snapshot_cut_failures_total", "kind" => if kind == "Environment" { "environment" } else { "workspace" })
+            .increment(1);
         tracing::warn!(snapshot = %name, error = %e.0, "snapshot.cut.failed");
         return Ok(Action::requeue(TICK));
     }

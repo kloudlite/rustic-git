@@ -9,6 +9,7 @@ name = "kloudlite_git_workspaces"
 
 [dependencies]
 tracing = { workspace = true }
+metrics = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 schemars = { workspace = true }

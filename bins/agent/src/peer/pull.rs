@@ -462,6 +462,7 @@ pub async fn pull_one(
     // fills the pool, and a full pool takes down every workspace on this node, not one volume.
     let mut reader =
         tokio::io::AsyncReadExt::take(StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other)), max_bytes + 1);
+    let started = std::time::Instant::now();
     let copy_result = tokio::io::copy(&mut reader, &mut stdin).await;
     let _ = stdin.shutdown().await;
     drop(stdin);
@@ -471,13 +472,20 @@ pub async fn pull_one(
             let _ = child.wait().await;
             false
         }
-        Ok(_) => matches!(child.wait().await, Ok(s) if s.success()),
+        Ok(n) => {
+            // Counted whatever `btrfs receive` then makes of them: these are wire bytes, and a
+            // transfer that arrived and failed to apply still cost the link exactly this much.
+            metrics::counter!("snapshot_transfer_bytes_total", "direction" => "pull").increment(n);
+            matches!(child.wait().await, Ok(s) if s.success())
+        }
         Err(_) => {
             let _ = child.wait().await;
             false
         }
     };
 
+    metrics::histogram!("snapshot_transfer_duration_seconds", "direction" => "pull")
+        .record(started.elapsed().as_secs_f64());
     if !ok {
         let after = subvolume_names(&dir);
         for n in after.iter().filter(|n| !before.contains(n)) {

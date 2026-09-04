@@ -60,7 +60,52 @@ where
         return Ok(());
     }
     let api: Api<K> = Api::all(ctx.client.clone());
-    patch_status(&api, &obj.name_any(), kind, serde_json::to_value(st).map_err(|e| ReconcileErr(e.to_string()))?).await
+    let next = serde_json::to_value(st).map_err(|e| ReconcileErr(e.to_string()))?;
+    // Only on a write that actually changes something — the no-op return above is the converged
+    // steady state, and timing it would restart the clock on every watch event.
+    observe_time_to_running(kind, &obj.name_any(), cur.and_then(|c| serde_json::to_value(c).ok()).as_ref(), &next);
+    patch_status(&api, &obj.name_any(), kind, next).await
+}
+
+/// When each parent last left `Ready`, so the transition back into it has something to subtract.
+///
+/// A process-wide map and not a `Ctx` field: it is metrics-only, every kind funnels through the one
+/// writer above, and an agent restart legitimately forgets — a start it did not observe the
+/// beginning of has no duration to report, and a histogram with no sample says exactly that.
+static NOT_READY_SINCE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    std::sync::OnceLock::new();
+
+/// `workspace_start_duration_seconds`, recorded where `Ready` is FIRST written — the one place the
+/// controller already knows both the previous phase and the new one, so nothing walks anything a
+/// second time. `Ready` is the CRD's spelling of running (see `apply_workspace`'s comment on it).
+fn observe_time_to_running(kind: &str, name: &str, was: Option<&serde_json::Value>, next: &serde_json::Value) {
+    let label = match kind {
+        "Workspace" => "workspace",
+        "Environment" => "environment",
+        _ => return,
+    };
+    let phase = |v: &serde_json::Value| v.get("phase").and_then(|p| p.as_str()).unwrap_or_default().to_string();
+    let (before, after) = (was.map(phase).unwrap_or_default(), phase(next));
+    let mut map = NOT_READY_SINCE.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner());
+    let key = format!("{label}/{name}");
+    match (before.as_str(), after.as_str()) {
+        (_, "Ready") => {
+            if let Some(since) = map.remove(&key) {
+                metrics::histogram!("workspace_start_duration_seconds", "kind" => label)
+                    .record(since.elapsed().as_secs_f64());
+            }
+        }
+        // A stop is not a start that is taking a long time: forget it, so the next start times
+        // itself from the start rather than from whenever it was stopped.
+        (_, "Stopped") | (_, "Error") => {
+            map.remove(&key);
+        }
+        // Everything else is a parent on its way somewhere: the first such write after a create or
+        // a start is the clock's zero, and later ones must not reset it.
+        _ => {
+            map.entry(key).or_insert_with(std::time::Instant::now);
+        }
+    }
 }
 
 /// Status equality that ignores `lastTransitionTime`: a condition re-stamped with `now` is not a

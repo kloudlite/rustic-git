@@ -30,6 +30,19 @@ async fn main() {
         ("node_pool_bytes_total", Gauge, &[]),
         ("node_pool_bytes_used", Gauge, &[]),
         ("node_working_copies_running", Gauge, &[]),
+        // Outcome series. The label combinations are the ones a rule filters on: a gauge that is
+        // absent until the first parked workspace reads as `unknown`, which is the opposite of the
+        // `0` it means. Histograms stay untouched, per `Kind::Histogram`'s doc.
+        ("workspace_start_duration_seconds", Histogram, &[]),
+        ("workspaces_waiting", Gauge, &[("reason", "HomeNotReady")]),
+        ("workspaces_waiting", Gauge, &[("reason", "NodeDead")]),
+        ("workspaces_waiting", Gauge, &[("reason", "AwaitingReplica")]),
+        ("snapshot_transfer_duration_seconds", Histogram, &[]),
+        ("snapshot_transfer_bytes_total", Counter, &[("direction", "push")]),
+        ("snapshot_transfer_bytes_total", Counter, &[("direction", "pull")]),
+        ("replication_backlog", Gauge, &[]),
+        ("snapshot_cut_failures_total", Counter, &[("kind", "workspace")]),
+        ("snapshot_cut_failures_total", Counter, &[("kind", "environment")]),
     ]);
     if let Err(e) = run(Config::from_env()).await {
         tracing::error!(error = %e, "process.exiting");

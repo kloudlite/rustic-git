@@ -230,3 +230,26 @@ you add an event.
 | `history.consumer.disabled` | info (boot, by design) | `mode` |
 | `alerts.skipped` | warn | `region`, `reason` |
 | `pool.usage.failed` | warn | `pool`, `reason`, `error` |
+
+## Metrics
+
+Outcome series added for postmortems. Each is emitted at the one place the fact is already known.
+
+| Metric | Type | Labels | Binary | Emitted at |
+| --- | --- | --- | --- | --- |
+| `workspace_start_duration_seconds` | histogram | `kind=workspace\|environment` | agent | `controller/status.rs::write_status` — the one funnel that sees the previous phase and the new one |
+| `workspaces_waiting` | gauge | `reason=HomeNotReady\|NodeDead\|AwaitingReplica` | agent | `stats.rs` beat, off the workspace listing it already makes |
+| `snapshot_transfer_duration_seconds` | histogram | `direction=push\|pull` | agent | `peer/pull.rs::pull_one` (pull), `peer/mod.rs::KillOnDrop::drop` (push) |
+| `snapshot_transfer_bytes_total` | counter | `direction=push\|pull` | agent | same two places |
+| `replication_backlog` | gauge | — | agent | `peer/sweeps.rs::retire_pass`, from `Parent::replicated` on the beat it already walks |
+| `snapshot_cut_failures_total` | counter | `kind=workspace\|environment` | agent | `snapshot.rs`, the failed-cut arm |
+| `quota_refusals_total` | counter | `dimension` (`Dim::word`) | api | `api/mod.rs::guard_alloc`, the single allocation gate |
+| `requests_opened_total` | counter | `kind=quota\|access\|region\|other` | api | `api/mod.rs::create_request_inner`, the one place a `Request` is authored |
+| `requests_decided_total` | counter | `kind`, `decision=approved\|denied` | api | `api/admin.rs::decide_generic` and the legacy `decide` |
+| `merge_queue_depth` | gauge | — | worker | `merge_one`, a drop guard so every early return releases it |
+| `worker_lane_heartbeat_age_seconds` | gauge | `lane` | worker | own 15 s beat over the same `worker-alive.{i}` files the liveness probe reads |
+| `merge_stranded_total` | counter | — | server | `lanes.rs::announce_stranded_merges` — the only place a stranded job is noticed; the worker cannot tell a re-announcement from a first one |
+| `git_pack_duration_seconds` | histogram | `op=upload\|receive` | server | `router/git.rs`'s `Disconnect` guard drop, which is the end of a STREAMED pack, not just of the handler |
+
+Not added: `ssh_sessions_open` — the accept/session path is `crates/git/src/ssh.rs`, outside this
+change's file scope. It is a two-line gauge in `new_client` plus `Drop for Conn`.

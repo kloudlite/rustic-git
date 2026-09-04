@@ -310,7 +310,19 @@ async fn decide(s: &ApiState, id: &str, state: crd::RequestState, by: &str, note
         "state": state, "decidedBy": by, "decidedAt": chrono::Utc::now().to_rfc3339(), "note": note,
     }});
     let out = api.patch_status(id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    // The retired `QuotaRequest` predecessor is still decidable, and its decisions belong in the
+    // same series as its successor's — a rule that counted only `Request` would undercount.
+    metrics::counter!("requests_decided_total", "kind" => "quota", "decision" => decision_word(state)).increment(1);
     Ok(Json(request_doc(&out)).into_response())
+}
+
+/// The metric's word for a decision. Pending never reaches either decider — both callers pass an
+/// explicit Approved/Denied — and is counted as `denied` rather than inventing a third value.
+fn decision_word(state: crd::RequestState) -> &'static str {
+    match state {
+        crd::RequestState::Approved => "approved",
+        _ => "denied",
+    }
 }
 
 /// Approve: write the `Quota` FIRST, then mark the request — see `api::mod`'s doc on
@@ -448,6 +460,14 @@ async fn decide_generic(
         "note": note, "resolution": resolution,
     }});
     let out = api.patch_status(id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    // The kind comes off the object the decision landed on, not off the caller: the route knows
+    // only an id, and the stored spec is what the decision was actually about.
+    metrics::counter!(
+        "requests_decided_total",
+        "kind" => out.spec.kind.as_str(),
+        "decision" => decision_word(state),
+    )
+    .increment(1);
     Ok(Json(generic_doc(&out)).into_response())
 }
 

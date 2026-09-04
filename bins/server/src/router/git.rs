@@ -98,10 +98,16 @@ pub(crate) async fn open(
 /// Signals the (blocking) protocol worker that the client is gone. Axum drops the handler future
 /// when the connection closes, so dropping this guard is our disconnect notification — without it
 /// an abandoned clone would keep building its pack to completion on a blocking thread.
-struct Disconnect(Arc<std::sync::atomic::AtomicBool>);
+///
+/// It is also where `git_pack_duration_seconds` is recorded: the guard rides with the response
+/// body, so its drop is the one moment that means "this request is over" for BOTH shapes of reply
+/// — a buffered one and a spilled one still streaming a pack minutes later. Timing `respond`
+/// instead would report a streamed clone as having taken microseconds.
+struct Disconnect(Arc<std::sync::atomic::AtomicBool>, &'static str, std::time::Instant);
 impl Drop for Disconnect {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        metrics::histogram!("git_pack_duration_seconds", "op" => self.1).record(self.2.elapsed().as_secs_f64());
     }
 }
 
@@ -481,7 +487,10 @@ async fn respond(
 ) -> Response {
     let (o, n) = (repo.owner.clone(), repo.name.clone());
     let flag = Arc::new(AtomicBool::new(false));
-    let mut guard = Some(Disconnect(flag.clone()));
+    // The same two `op` values `git_pack_requests_total` uses, off the content type the caller
+    // already picked — no third spelling of "which half of git this is".
+    let op = if ct.contains("upload-pack") { "upload" } else { "receive" };
+    let mut guard = Some(Disconnect(flag.clone(), op, std::time::Instant::now()));
     let store = app.store.clone();
     let first = attempt(store.clone(), repo, serve, input(), headers, flag.clone(), &mut guard).await;
     let res = match first {

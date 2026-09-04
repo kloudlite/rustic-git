@@ -42,6 +42,10 @@ async fn main() {
     kloudlite_git_core::metrics::register(&[
         ("merge_outcomes_total", Counter, &[("state", "error")]),
         ("merge_duration_seconds", Histogram, &[]),
+        ("merge_queue_depth", Gauge, &[]),
+        // `worker_lane_heartbeat_age_seconds` is deliberately absent: its `lane` label is
+        // `0..KLOUDLITE_GIT_WORKER_CONCURRENCY`, which is not known to a `&'static str` list, and
+        // its own beat sets every lane's within 15 s of boot.
     ]);
     if let Err(e) = run().await {
         tracing::error!(error = %e, "process.exiting");
@@ -150,6 +154,24 @@ async fn run() -> Result<()> {
         };
         tasks.push(tokio::spawn(async move { lane(&w, &alive).await }));
     }
+    // The same files the liveness probe reads, exported as an age so the wedge is visible BEFORE
+    // the probe kills the pod — and read from outside the lanes on purpose: a lane that publishes
+    // its own age can only do so while it is still running, which is never the interesting case.
+    let hb = cache.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            for i in 0..lanes {
+                let age = std::fs::metadata(hb.join(format!("worker-alive.{i}")))
+                    .and_then(|m| m.modified())
+                    .map(|t| t.elapsed().unwrap_or_default().as_secs_f64())
+                    // No file yet is a lane that has never ticked, which is the same signal as one
+                    // that stopped — never a silently missing series.
+                    .unwrap_or(f64::MAX);
+                metrics::gauge!("worker_lane_heartbeat_age_seconds", "lane" => i.to_string()).set(age);
+            }
+        }
+    });
     // Every lane loops forever, so the FIRST one to finish — panic or return — is a dead lane.
     // Awaiting the handles in order would only notice lane N after lanes 0..N had finished,
     // which is never; this resolves on any of them, and the `Err` exits the process so the pod
@@ -374,10 +396,16 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
     .await;
     let job = match claimed {
         Ok(Some(j)) => j,
+        // A claim that answered nothing (or 409'd) never became a job, so it never enters the
+        // depth below — the gauge counts what this process is actually holding.
         Ok(None) => return,
         // Includes the 409 "someone else has it", which is the common case on a redelivery.
         Err(_) => return,
     };
+    // Held for the rest of this function, so every early return — a failed merge, a panicked
+    // blocking task — puts the job back down. A gauge only ever incremented is a queue that looks
+    // full forever after the first failure.
+    let _depth = Depth::held();
     let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
     let started = std::time::Instant::now();
     let done = tokio::task::spawn_blocking(move || {
@@ -411,6 +439,24 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
     let tail = format!("outcome?by={}", urlencoding(&w.me));
     if let Err(why) = post::<serde_json::Value>(w, owner, name, number, &tail, Some(body)).await {
         tracing::error!(%owner, %name, number, error = %why, "merge.record.failed");
+    }
+}
+
+/// `merge_queue_depth`: the merges this process has claimed and not yet finished. Process-wide and
+/// not per lane, because that is the number an operator compares against the lane count — a depth
+/// pinned at `KLOUDLITE_GIT_WORKER_CONCURRENCY` is a worker with nothing spare.
+struct Depth;
+
+impl Depth {
+    fn held() -> Depth {
+        metrics::gauge!("merge_queue_depth").increment(1.0);
+        Depth
+    }
+}
+
+impl Drop for Depth {
+    fn drop(&mut self) {
+        metrics::gauge!("merge_queue_depth").decrement(1.0);
     }
 }
 

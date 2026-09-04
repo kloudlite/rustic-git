@@ -601,7 +601,11 @@ pub(crate) async fn create_request_inner(
     // rule as every other label in this codebase.
     r.metadata.labels = Some(std::collections::BTreeMap::from([(OWNER_LABEL.to_string(), owner)]));
     let api: Api<crd::Request> = Api::all(client.clone());
-    api.create(&kube::api::PostParams::default(), &r).await.map_err(kube_err)
+    let out = api.create(&kube::api::PostParams::default(), &r).await.map_err(kube_err)?;
+    // After the create, never before: a counted request that the API server refused is a queue
+    // depth nobody can find. This is the one place a `Request` is authored (see the doc above).
+    metrics::counter!("requests_opened_total", "kind" => out.spec.kind.as_str()).increment(1);
+    Ok(out)
 }
 
 async fn create_request(
@@ -699,6 +703,10 @@ pub(crate) async fn guard_alloc(
     let used = crate::quota::usage(c, owner).await.map_err(kube_err)?;
     for (dim, adding) in want {
         if let Err(msg) = crate::quota::check(*dim, &limit, &used, *adding) {
+            // The single gate every create/restore/clone/push passes through, so one counter here
+            // covers every refusal without a second one per handler. `dim.word()` is the same word
+            // the 409 sentence uses, so a spike and the message a user saw name the same thing.
+            metrics::counter!("quota_refusals_total", "dimension" => dim.word()).increment(1);
             return Err((StatusCode::CONFLICT, msg).into_response());
         }
     }

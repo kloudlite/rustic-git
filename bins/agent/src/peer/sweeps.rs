@@ -445,6 +445,12 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     let vols = &beat.volumes;
     let rows = &beat.replicas;
     let hosted = beat.hosted_volumes();
+    // Off the beat's own parent listing — `Parent::replicated` is the owner's `Replicated`
+    // condition as written, never recomputed here (see the field's doc), so the gauge and the UI
+    // give one answer. Distinct volumes, because two parents on one volume are one backlog item.
+    let backlog: HashSet<&str> =
+        beat.parents.iter().filter(|p| !p.replicated).map(|p| p.volume.as_str()).collect();
+    metrics::gauge!("replication_backlog").set(backlog.len() as f64);
     // A local voldir with no Volume CR at all is an orphan: nothing lists it, so no pull, no
     // retire and no worktree drop ever visits it again. The Volume is always created before any
     // node makes its directory (the parent's reconciler creates the CR, the pull beat only pulls
