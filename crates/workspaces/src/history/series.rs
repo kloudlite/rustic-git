@@ -143,9 +143,14 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
                 GROUP BY b) ORDER BY b"
         ),
         "decided_requests" => event_count("'request.approved', 'request.denied'"),
-        "audit_events" => event_count(
-            "'admin.drain', 'admin.undrain', 'admin.decommission', \
-             'admin.approve', 'admin.deny', 'admin.quota', 'admin.region'",
+        // CENTRAL-ONLY, so no `region_filter`: `events::audit_event` stamps every audit row
+        // `region: "central"`, and a region-scoped call would draw a flat zero. The `admin.`
+        // namespace is the contract rather than a list of actions, which goes stale the day
+        // somebody adds one.
+        "audit_events" => format!(
+            "SELECT {bucket}(ts) AS b, count() AS v FROM rustic.events FINAL \
+             WHERE kind LIKE 'admin.%' AND ts > now() - INTERVAL {days} DAY \
+             GROUP BY b ORDER BY b"
         ),
         "live_workspaces" => fleet_max("live_workspaces"),
         "live_environments" => fleet_max("live_environments"),
@@ -157,12 +162,19 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
              FROM rustic.fleet_hourly \
              WHERE ts > now() - INTERVAL {days} DAY {region_filter} GROUP BY b ORDER BY b"
         ),
-        // Every rule that was firing at the end of each bucket, from the transition log.
+        // `rustic.alerts` holds TRANSITIONS only, so a rule that began firing before the range and
+        // never changed since has no row in any bucket — a per-bucket argMax over the range would
+        // draw the longest-running alert in the fleet as not firing. State is carried forward
+        // instead: buckets are generated from the range, every (region, rule) is paired with every
+        // bucket, and each pair takes the newest transition at or before that bucket, read over the
+        // WHOLE table rather than the range. A rule with no transition at all yields `''`.
         "firing_signals" => format!(
             "SELECT b, countIf(s = 'firing') AS v FROM (\
-                SELECT {bucket}(ts) AS b, region, rule, argMax(state, ts) AS s \
-                FROM rustic.alerts FINAL \
-                WHERE ts > now() - INTERVAL {days} DAY {region_filter} \
+                SELECT b, region, rule, argMaxIf(state, ts, ts <= b) AS s \
+                FROM (SELECT {bucket}(now() - INTERVAL n HOUR) AS b \
+                      FROM numbers({days} * 24)) AS buckets \
+                CROSS JOIN (SELECT ts, region, rule, state FROM rustic.alerts FINAL \
+                            WHERE 1 = 1 {region_filter}) AS a \
                 GROUP BY b, region, rule) GROUP BY b ORDER BY b"
         ),
         // An owner counts once per bucket if ANY dimension is past 80% — the number the Overview

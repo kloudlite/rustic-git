@@ -18,7 +18,7 @@ fn one_row_per_owner_per_dimension_with_its_limit() {
             owner: "acme".into(),
             is_team: true,
             used: Usage { workspaces: 3, environments: 1, snapshots: 9, disk_gb: 120, cpu: 6, memory_gb: 24 },
-            limit: QuotaSpec { workspaces: 10, environments: 4, snapshots: 50, disk_gb: 500, cpu: 16, memory_gb: 64 },
+            limit: QuotaSpec { workspaces: 10, environments: 4, snapshots: 50, disk_gb: 500, cpu: 16, memory_gb: 64, regions: Vec::new() },
         }],
     );
     assert_eq!(rows.len(), 6, "six dimensions, one row each");

@@ -8,6 +8,7 @@ use kube::api::ObjectMeta;
 use rustic_git_workspaces::crd::{self, DesiredState, Phase, RequestState};
 use rustic_git_workspaces::history::watch::{
     environment_deleted, environment_events, event_id, node_events, quota_request_events,
+    request_events,
     region_events, snapshot_deleted, snapshot_events, volume_events, workspace_deleted,
     workspace_events,
 };
@@ -324,6 +325,57 @@ fn a_quota_request_is_opened_then_decided_once() {
         "eu"
     )
     .is_empty());
+}
+
+fn req(rv: &str, state: Option<RequestState>) -> crd::Request {
+    let mut r = crd::Request::new(
+        "req-1",
+        crd::RequestSpec {
+            owner: "acme".into(),
+            kind: crd::RequestKind::Access,
+            requested_by: "asker".into(),
+            reason: "let me in".into(),
+            quota: None,
+            access: Some(crd::AccessAsk { team: "acme".into(), role: "member".into() }),
+            region: None,
+            other: None,
+        },
+    );
+    r.metadata = meta("req-1", "uid-r", rv);
+    r.status = state.map(|state| crd::RequestStatus {
+        state,
+        decided_by: Some("root@acme.test".into()),
+        decided_at: None,
+        note: None,
+        resolution: None,
+    });
+    r
+}
+
+/// The generic `Request` emits the same `request.*` kinds as its predecessor, so one timeline spans
+/// both CRDs — but the asker is `spec.requestedBy` rather than the owner, and the ask rides in
+/// `attrs` because that is the only place a reader can tell a quota ask from an access one.
+#[test]
+fn a_request_carries_its_asker_and_its_kind() {
+    let opened = request_events(None, &req("1", None), "eu");
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].kind, "request.opened");
+    assert_eq!(opened[0].actor, "asker");
+    assert_eq!(opened[0].owner, "acme");
+    assert_eq!(opened[0].attrs["kind"], serde_json::json!("access"));
+
+    let pending = req("1", Some(RequestState::Pending));
+    let approved = request_events(Some(&pending), &req("2", Some(RequestState::Approved)), "eu");
+    assert_eq!(approved[0].kind, "request.approved");
+    assert_eq!(approved[0].id, "uid-r:2:approved");
+    assert_eq!(approved[0].actor, "root@acme.test");
+    assert_eq!(approved[0].attrs["kind"], serde_json::json!("access"));
+
+    // A status rewrite that does not change the state is not a second decision.
+    let decided = req("2", Some(RequestState::Approved));
+    assert!(
+        request_events(Some(&decided), &req("3", Some(RequestState::Approved)), "eu").is_empty()
+    );
 }
 
 fn region(rv: &str, status: &str) -> crd::Region {

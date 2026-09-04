@@ -192,3 +192,26 @@ async fn an_unsafe_table_name_is_refused_before_any_request() {
         .is_err());
     assert!(seen.lock().unwrap().is_empty(), "a refused name must not reach the server");
 }
+
+/// Both hourly tables end as ReplacingMergeTree: `tick_once` truncates `ts` to the hour, so two
+/// admin replicas beating in one hour write rows identical on the whole sort key and the second is
+/// a duplicate, not an observation. Asserted on the rebuild statement, since an engine cannot be
+/// ALTERed and the migrations that shipped must never be edited.
+#[test]
+fn the_hourly_tables_end_as_replacing_merge_trees() {
+    for table in ["usage_hourly", "fleet_hourly"] {
+        let create = schema::MIGRATIONS
+            .iter()
+            .filter(|(_, sql)| sql.contains(&format!("rustic.{table}_v2 (")))
+            .next_back()
+            .unwrap_or_else(|| panic!("{table} is never rebuilt"))
+            .1;
+        assert!(create.contains("ENGINE = ReplacingMergeTree"), "{table}: {create}");
+        assert!(
+            schema::MIGRATIONS
+                .iter()
+                .any(|(_, sql)| sql.contains(&format!("EXCHANGE TABLES rustic.{table} AND"))),
+            "{table} is rebuilt but never swapped in"
+        );
+    }
+}

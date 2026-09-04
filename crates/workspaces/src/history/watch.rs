@@ -323,11 +323,10 @@ pub fn volume_events(
     out
 }
 
-/// `QuotaRequest` only, deliberately. Sub-project B introduces the generic `Request` CRD; this
-/// mapper emits the same `request.*` kinds so the console's timeline needs no change when B lands.
-// ponytail: when `Request` ships, add a sibling mapper rather than generalising this one — the two
-// CRDs coexist until the one-shot migration retires `QuotaRequest`, and a union type here would
-// have to be unpicked again.
+/// `QuotaRequest` only, deliberately — `request_events` below covers the generic `Request`. Both
+/// emit the same `request.*` kinds, so the console's timeline spans the two CRDs.
+// ponytail: two near-identical mappers until the one-shot migration retires `QuotaRequest`; delete
+// this one then rather than unifying them, since a union type would have to be unpicked again.
 pub fn quota_request_events(
     prev: Option<&crd::QuotaRequest>,
     next: &crd::QuotaRequest,
@@ -383,6 +382,72 @@ pub fn quota_request_events(
         &next.name_any(),
         region,
         serde_json::json!({ "note": next.status.as_ref().and_then(|s| s.note.clone()) }),
+    )]
+}
+
+/// The generic `Request` CRD, beside `quota_request_events` rather than replacing it: the two
+/// coexist until the one-shot migration retires `QuotaRequest`, so legacy objects still stream and
+/// still need their mapper. Same `request.*` kinds, so the console's timeline spans both.
+pub fn request_events(
+    prev: Option<&crd::Request>,
+    next: &crd::Request,
+    region: &str,
+) -> Vec<EventRow> {
+    let (uid, rv) = uid_rv(next);
+    let ts = managed_at(next).unwrap_or_else(epoch);
+    // In `attrs` and not in the kind, so a reader filtering `request.opened` still sees all four —
+    // and so a new `RequestKind` needs no new event kind.
+    let ask = next.spec.kind.as_str();
+    if prev.is_none() {
+        // Unlike `QuotaRequest`, the asker is a spec field here and never has to be inferred.
+        return vec![row(
+            ts,
+            &uid,
+            &rv,
+            "opened",
+            "request.opened",
+            &next.spec.requested_by,
+            &next.spec.owner,
+            &next.name_any(),
+            region,
+            serde_json::json!({ "kind": ask, "reason": next.spec.reason }),
+        )];
+    }
+    let state = next
+        .status
+        .as_ref()
+        .map(|s| s.state)
+        .unwrap_or(RequestState::Pending);
+    let prev_state = prev
+        .and_then(|p| p.status.as_ref())
+        .map(|s| s.state)
+        .unwrap_or(RequestState::Pending);
+    let word = match state {
+        _ if state == prev_state => return Vec::new(),
+        RequestState::Approved => "approved",
+        RequestState::Denied => "denied",
+        // A decided request going back to pending is not a thing `/v1` can do; nothing to record.
+        RequestState::Pending => return Vec::new(),
+    };
+    let decided_by = next
+        .status
+        .as_ref()
+        .and_then(|s| s.decided_by.clone())
+        .unwrap_or_default();
+    vec![row(
+        ts,
+        &uid,
+        &rv,
+        word,
+        &format!("request.{word}"),
+        &decided_by,
+        &next.spec.owner,
+        &next.name_any(),
+        region,
+        serde_json::json!({
+            "kind": ask,
+            "note": next.status.as_ref().and_then(|s| s.note.clone()),
+        }),
     )]
 }
 
@@ -652,9 +717,9 @@ async fn watch_kind<K>(
 }
 
 /// The central cluster's one watch. `Region` is the only kind that lives there — every workspace,
-/// environment, snapshot, volume and quota request belongs to a region cluster, so running the
-/// other six here would be six watches against a cluster with none of those CRDs, each failing and
-/// retrying forever.
+/// environment, snapshot, volume and request belongs to a region cluster, so running the others
+/// here would be watches against a cluster with none of those CRDs, each failing and retrying
+/// forever.
 pub async fn watch_central(client: kube::Client, history: Arc<History>) {
     watch_kind::<crd::Region>(
         client,
@@ -707,6 +772,13 @@ pub async fn watch_region(client: kube::Client, region: String, history: Arc<His
             region.clone(),
             history.clone(),
             quota_request_events,
+            no_delete,
+        )),
+        tokio::spawn(watch_kind::<crd::Request>(
+            client.clone(),
+            region.clone(),
+            history.clone(),
+            request_events,
             no_delete,
         )),
         tokio::spawn(watch_kind::<Node>(

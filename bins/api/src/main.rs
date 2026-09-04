@@ -307,13 +307,24 @@ async fn run() -> Result<()> {
                         // the split every admin handler already makes, reused rather than a second
                         // client to keep in step. A cluster that is absent simply gets no watch:
                         // history is optional, and boot never waits on one.
-                        if let Some(k) = state.kube.clone() {
-                            let region = std::env::var("RUSTIC_GIT_REGION")
-                                .unwrap_or_else(|_| "default".into());
-                            let h = h.clone();
-                            tokio::spawn(rustic_git_workspaces::history::watch::watch_region(
-                                k, region, h,
-                            ));
+                        // No fallback name: every row a watch writes is STAMPED with the region,
+                        // so `"default"` on a cluster that is really `eu-west` mislabels history
+                        // permanently. A missing watch only leaves a gap an operator closes by
+                        // setting the variable and restarting; a wrong region cannot be undone.
+                        match std::env::var("RUSTIC_GIT_REGION").ok().filter(|r| !r.is_empty()) {
+                            Some(region) => {
+                                if let Some(k) = state.kube.clone() {
+                                    let h = h.clone();
+                                    tokio::spawn(
+                                        rustic_git_workspaces::history::watch::watch_region(
+                                            k, region, h,
+                                        ),
+                                    );
+                                }
+                            }
+                            None => tracing::warn!(
+                                "RUSTIC_GIT_REGION unset: region history watches not started"
+                            ),
                         }
                         if let Some(k) = state.aks.clone() {
                             let h = h.clone();

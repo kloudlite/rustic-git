@@ -149,6 +149,56 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
          FROM default.otel_metrics_sum \
          GROUP BY ts, region, node, metric, attributes",
     ),
+    // Migrations 2 and 3 shipped as plain MergeTree because a beat was stamped `now()` and two
+    // observations in one hour were two honest rows. `tick_once` truncates `ts` to the hour now, so
+    // two admin replicas in one hour write rows identical on the whole sort key — which already
+    // makes a row unique per (owner, dimension, hour) and per (region, hour). ReplacingMergeTree
+    // therefore folds a duplicate away instead of letting it weight an average twice.
+    //
+    // ClickHouse cannot ALTER an engine, so each table is rebuilt beside itself and swapped in with
+    // EXCHANGE, which is atomic. One statement per migration because `query` posts exactly one, and
+    // each is safe to re-run alone after a crash between them.
+    (
+        8,
+        "CREATE TABLE IF NOT EXISTS rustic.usage_hourly_v2 (\
+            ts DateTime, \
+            owner String, \
+            is_team UInt8, \
+            dimension LowCardinality(String), \
+            used Float64, \
+            `limit` Float64\
+         ) ENGINE = ReplacingMergeTree \
+           PARTITION BY toYYYYMM(ts) \
+           ORDER BY (owner, dimension, ts) \
+           TTL ts + INTERVAL 730 DAY",
+    ),
+    (9, "INSERT INTO rustic.usage_hourly_v2 SELECT * FROM rustic.usage_hourly"),
+    (10, "EXCHANGE TABLES rustic.usage_hourly AND rustic.usage_hourly_v2"),
+    (11, "DROP TABLE IF EXISTS rustic.usage_hourly_v2"),
+    (
+        12,
+        "CREATE TABLE IF NOT EXISTS rustic.fleet_hourly_v2 (\
+            ts DateTime, \
+            region LowCardinality(String), \
+            nodes_total UInt32, \
+            nodes_ready UInt32, \
+            agents_ready UInt32, \
+            live_workspaces UInt32, \
+            live_environments UInt32, \
+            snapshots UInt32, \
+            disk_gb UInt64, \
+            cpu UInt32, \
+            memory_gb UInt32, \
+            pool_used_bytes UInt64, \
+            pool_total_bytes UInt64\
+         ) ENGINE = ReplacingMergeTree \
+           PARTITION BY toYYYYMM(ts) \
+           ORDER BY (region, ts) \
+           TTL ts + INTERVAL 730 DAY",
+    ),
+    (13, "INSERT INTO rustic.fleet_hourly_v2 SELECT * FROM rustic.fleet_hourly"),
+    (14, "EXCHANGE TABLES rustic.fleet_hourly AND rustic.fleet_hourly_v2"),
+    (15, "DROP TABLE IF EXISTS rustic.fleet_hourly_v2"),
 ];
 
 /// Applies every migration this server has not recorded yet. Returns how many ran, so boot logs

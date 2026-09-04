@@ -192,7 +192,7 @@ async fn the_cursor_boundary_is_the_pair_not_the_timestamp() {
     assert_eq!(status, 200, "{body}");
     let sql = seen.lock().unwrap().join("\n");
     assert!(
-        sql.contains("(ts, id) < (parseDateTimeBestEffort('2026-09-03T12:00:00Z'), 'id-b')"),
+        sql.contains("(ts, id) < (parseDateTime64BestEffort('2026-09-03T12:00:00Z', 3), 'id-b')"),
         "{sql}"
     );
     // Two rows sharing a timestamp: paging from the first must be able to reach the second.
@@ -249,4 +249,74 @@ async fn both_routes_are_behind_the_superadmin_gate() {
         assert_eq!(code, 403, "{path}");
     }
     assert!(seen.lock().unwrap().is_empty(), "no handler ran before the claim check");
+}
+
+/// `events.ts` is `DateTime64(3)` and the cursor the handler hands out carries the milliseconds, so
+/// the boundary must be parsed at the same precision. A second-resolution parse truncates DOWN,
+/// which moves a `<` boundary later and silently skips every row sharing that second — the one
+/// failure mode a paging timeline cannot show you.
+#[tokio::test]
+async fn the_cursor_and_the_range_keep_their_milliseconds() {
+    let (base, jwt, seen) = with_history(json!([[
+        "id-a", "2026-09-03 12:00:00.123", "k", "a", "", "", "", "{}"
+    ]]))
+    .await;
+    let (status, body) = get(
+        &base,
+        "/admin/history/events?cursor=2026-09-03T12%3A00%3A00.123Z%7Cid-b\
+         &from=2026-09-01T00%3A00%3A00.500Z&to=2026-09-04T00%3A00%3A00.250Z",
+        &jwt,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let sql = seen.lock().unwrap().join("\n");
+    assert!(
+        sql.contains(
+            "(ts, id) < (parseDateTime64BestEffort('2026-09-03T12:00:00.123Z', 3), 'id-b')"
+        ),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("ts >= parseDateTime64BestEffort('2026-09-01T00:00:00.500Z', 3)"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("ts <= parseDateTime64BestEffort('2026-09-04T00:00:00.250Z', 3)"),
+        "{sql}"
+    );
+    // Round trip: the milliseconds survive into the next cursor too.
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["events"][0]["ts"], json!("2026-09-03T12:00:00.123Z"));
+}
+
+/// An audit id embeds its target, and a node target is `{region}/{node}` — a slash the filter
+/// allow-list has no reason to carry. Paging must not dead-end on one; a quote still must not get
+/// through, since the id lands in a string comparison.
+#[tokio::test]
+async fn a_cursor_id_may_carry_a_slash_but_never_a_quote() {
+    let (base, jwt, seen) = with_history(json!([])).await;
+    let (status, body) = get(
+        &base,
+        "/admin/history/events?cursor=2026-09-03T12%3A00%3A00.000Z%7C\
+         audit%3A2026-09-03%3Adrain%3Aeu-west%2Fnode-2",
+        &jwt,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .join("\n")
+            .contains("'audit:2026-09-03:drain:eu-west/node-2'"),
+        "the id must reach the statement intact"
+    );
+    for bad in ["a%27b", "a%5Cb", "a%60b"] {
+        let (status, body) = get(
+            &base,
+            &format!("/admin/history/events?cursor=2026-09-03T12%3A00%3A00Z%7C{bad}"),
+            &jwt,
+        )
+        .await;
+        assert_eq!(status, 404, "{bad}: {body}");
+    }
 }

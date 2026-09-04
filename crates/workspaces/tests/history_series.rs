@@ -65,12 +65,13 @@ fn every_series_reads_a_known_table_and_buckets_by_the_step() {
                 .contains("toStartOfDay"),
             "{name} ignores a 1d step"
         );
-        // A range that means something else must produce a different statement.
+        // A range that means something else must produce a different statement. `firing_signals`
+        // spends its range on the bucket list rather than a WHERE: its table holds transitions, and
+        // a filtered read would hide a rule that started firing before the window.
+        let wide = sql_for(name, &SeriesQuery { range: "90d".into(), ..q() }).unwrap();
         assert!(
-            sql_for(name, &SeriesQuery { range: "90d".into(), ..q() })
-                .unwrap()
-                .contains("INTERVAL 90 DAY"),
-            "{name} ignores range"
+            wide.contains("INTERVAL 90 DAY") || wide.contains("numbers(90 * 24)"),
+            "{name} ignores range: {wide}"
         );
     }
 }
@@ -90,8 +91,9 @@ fn restarts_is_the_rise_per_bucket_not_a_running_total() {
 fn every_series_that_can_filter_by_region_does() {
     let eu = SeriesQuery { region: Some("eu-west".into()), ..q() };
     for name in NAMES {
-        // `owners_over_80` reads `usage_hourly`, which has no region column.
-        if *name == "owners_over_80" {
+        // `owners_over_80` reads `usage_hourly`, which has no region column, and every audit row
+        // is written `region: "central"` — a region-scoped audit chart is empty by construction.
+        if *name == "owners_over_80" || *name == "audit_events" {
             continue;
         }
         assert!(
@@ -196,4 +198,34 @@ fn the_summary_is_last_delta_min_and_max() {
 fn an_empty_series_summarizes_to_zeros() {
     let s = summarize(&[]);
     assert_eq!((s.last, s.delta, s.min, s.max), (0.0, 0.0, 0.0, 0.0));
+}
+
+/// `rustic.alerts` holds transitions only, so a rule that began firing before the window has no row
+/// in it. The statement must carry state forward: buckets generated from the range, and the alerts
+/// side read WITHOUT a range filter so an older transition still decides those buckets. A range
+/// filter there is exactly the bug — it draws the longest-running alert in the fleet as ok.
+#[test]
+fn firing_signals_carries_state_forward_past_the_range() {
+    let sql = sql_for("firing_signals", &q()).unwrap();
+    assert!(sql.contains("argMaxIf(state, ts, ts <= b)"), "{sql}");
+    assert!(sql.contains("numbers(7 * 24)"), "{sql}");
+    let alerts_side = sql.split("rustic.alerts").nth(1).unwrap();
+    assert!(
+        !alerts_side.contains("INTERVAL"),
+        "the alerts side must not be range-filtered: {sql}"
+    );
+}
+
+/// Audit rows are all stamped `region: "central"` by `events::audit_event`, so a region-scoped call
+/// would draw a flat zero — the series is central-only and ignores a region. The kinds come from
+/// the `admin.` namespace rather than a hand-kept list, which goes stale on the first new action.
+#[test]
+fn audit_events_is_central_only_and_matches_the_admin_namespace() {
+    let sql = sql_for(
+        "audit_events",
+        &SeriesQuery { region: Some("eu-west".into()), ..q() },
+    )
+    .unwrap();
+    assert!(sql.contains("kind LIKE 'admin.%'"), "{sql}");
+    assert!(!sql.contains("region ="), "{sql}");
 }

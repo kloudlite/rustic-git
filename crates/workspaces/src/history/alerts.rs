@@ -343,8 +343,11 @@ pub fn state_of(
     }
 }
 
-/// A row for `rustic.alerts`. `id` is the coordinates of the transition, so a retried write of the
-/// same transition collapses under the ReplacingMergeTree rather than doubling a count.
+/// A row for `rustic.alerts`. `ts` is when the transition was OBSERVED, and `id` is that instant
+/// plus the transition's coordinates. The sort key is `(region, rule, ts, id)`, so FINAL can only
+/// collapse rows that agree on `ts` too — which means a retry must carry the ORIGINAL row and never
+/// a row re-stamped with the retrying beat's clock. `evaluate_forever` buffers rather than
+/// recomputing for exactly that reason.
 pub fn alert_row(
     ts: chrono::DateTime<chrono::Utc>,
     region: &str,
@@ -452,7 +455,14 @@ pub(crate) async fn region_names(state: &crate::api::ApiState) -> Option<Vec<Str
 /// Only transitions, because `rustic.alerts` answers "when did this start", and a row per
 /// evaluation would turn a 400-day retention into a hundred million rows saying nothing changed.
 pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
+    /// Roughly a day of transitions for a large fleet: enough that an outage of hours loses
+    /// nothing, bounded so a week-long one cannot grow the process without limit.
+    // ponytail: the oldest transitions are dropped first, because the newest state is what the
+    // page renders. Upgrade path: spool to disk if a long outage must lose nothing.
+    const MAX_PENDING: usize = 10_000;
+
     let mut last: HashMap<(String, String), String> = HashMap::new();
+    let mut pending: Vec<serde_json::Value> = Vec::new();
     let mut iv = tokio::time::interval(EVERY);
     iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -466,7 +476,7 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
             continue;
         };
         let now = chrono::Utc::now();
-        let mut writes = Vec::new();
+        let mut writes = std::mem::take(&mut pending);
         for region in &regions {
             let mut results = Vec::with_capacity(CATALOGUE.len());
             for rule in CATALOGUE {
@@ -480,11 +490,17 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
             }
             writes.extend(evaluate_once(region, now, &results, &mut last));
         }
-        if let Err(e) = h.insert("alerts", &writes).await {
-            // The in-memory `last` already moved, so a failed write would suppress the retry.
-            // Clearing it makes the next beat re-emit every transition it just computed.
-            tracing::warn!(error = %e, n = writes.len(), "alert transitions not written; re-emitting next beat");
-            last.clear();
+        let wrote = h.insert("alerts", &writes).await;
+        if let Err(e) = wrote {
+            // The in-memory `last` already moved, so a dropped batch would simply be lost. The
+            // ROWS are carried to the next beat rather than recomputed: recomputing would re-stamp
+            // them from a later clock, and a row under a second `ts`/`id` is a second row FINAL
+            // can never merge away.
+            tracing::warn!(error = %e, n = writes.len(), "alert transitions not written; retrying next beat");
+            pending = writes;
+            if pending.len() > MAX_PENDING {
+                pending.drain(..pending.len() - MAX_PENDING);
+            }
         }
     }
 }

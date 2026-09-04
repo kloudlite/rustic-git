@@ -141,6 +141,18 @@ fn literal(v: &str, timestamp: bool) -> Result<&str, Response> {
         .ok_or_else(|| (StatusCode::NOT_FOUND, "unusable filter").into_response())
 }
 
+/// The id half of a cursor cannot go through `literal`: an audit id embeds its target, and a node
+/// target is `{region}/{node}` — a slash the filter allow-list has no reason to carry, so a page
+/// that ended on a node event would dead-end. The id is only ever echoed back into a string
+/// comparison, so what is refused is exactly what could end that string or start an escape;
+/// nothing survives that then needs escaping.
+fn cursor_id(v: &str) -> Result<&str, Response> {
+    let bad = |c: char| c == '\'' || c == '\\' || c == '`' || c.is_control();
+    (!v.is_empty() && !v.chars().any(bad))
+        .then_some(v)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "unusable cursor").into_response())
+}
+
 pub(crate) async fn events(
     State(s): State<Arc<ApiState>>,
     Query(q): Query<EventsQuery>,
@@ -162,7 +174,7 @@ pub(crate) async fn events(
     for (op, value) in [(">=", &q.from), ("<=", &q.to)] {
         if let Some(v) = value.as_deref() {
             wheres.push(format!(
-                "ts {op} parseDateTimeBestEffort('{}')",
+                "ts {op} parseDateTime64BestEffort('{}', 3)",
                 literal(v, true)?
             ));
         }
@@ -172,11 +184,14 @@ pub(crate) async fn events(
             .split_once('|')
             .ok_or_else(|| (StatusCode::NOT_FOUND, "unusable cursor").into_response())?;
         // The same (ts DESC, id DESC) order the statement below sorts by, as a tuple comparison so
-        // the boundary is exactly one row rather than a whole millisecond.
+        // the boundary is exactly one row rather than a whole millisecond. Parsed at millisecond
+        // precision because `events.ts` is `DateTime64(3)` and the cursor carries the ms: a
+        // second-resolution parse truncates DOWN, moving the boundary later and silently skipping
+        // every row that shares that second.
         wheres.push(format!(
-            "(ts, id) < (parseDateTimeBestEffort('{}'), '{}')",
+            "(ts, id) < (parseDateTime64BestEffort('{}', 3), '{}')",
             literal(ts, true)?,
-            literal(id, true)?
+            cursor_id(id)?
         ));
     }
     let filter = if wheres.is_empty() {

@@ -9,6 +9,7 @@
 //! cluster; `run_beats` is the only part that needs one.
 
 use crate::api::admin::{clusters, owners};
+use chrono::Timelike;
 use crate::api::ApiState;
 use crate::crd::QuotaSpec;
 use crate::quota::{Dim, Usage};
@@ -201,7 +202,15 @@ pub async fn run_beats(state: Arc<ApiState>) {
 /// instead of waiting on a real clock and a real cluster.
 pub async fn tick_once(state: &Arc<ApiState>) {
     let Some(h) = state.history.as_deref() else { return };
-    let ts = chrono::Utc::now();
+    // Truncated to the hour, never `now()`: both tables are ReplacingMergeTrees whose sort key ends
+    // in `ts`, so two admin replicas beating in one hour write rows identical on the whole key and
+    // the duplicate folds away. A per-replica second would make them two rows the merge can never
+    // fold, and every `max()` over the hour would then answer from whichever replica ran later.
+    let ts = chrono::Utc::now()
+        .with_minute(0)
+        .and_then(|t| t.with_second(0))
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap_or_else(chrono::Utc::now);
 
     let Some(client) = state.kube.as_ref() else {
         tracing::warn!("hourly beats skipped: no kubernetes client configured");

@@ -53,11 +53,14 @@ pub async fn write_events(h: &History, rows: &[EventRow]) -> Result<(), HistoryE
 /// own coordinates, so re-copying an entry is a no-op rather than a double count.
 pub fn audit_event(ts: &str, actor: &str, action: &str, target: &str, result: &str) -> EventRow {
     EventRow {
-        // A row whose timestamp will not parse is still worth keeping: stamped now rather than
-        // dropped, since the object-store copy carries the original string regardless.
+        // A row whose timestamp will not parse is still worth keeping: stamped at the epoch rather
+        // than dropped, since the object-store copy carries the original string regardless. The
+        // epoch and not `now()` because `ts` is half the dedup key — a re-copy stamped from the
+        // wall clock is a second row FINAL can never merge — and because 1970 is the date an
+        // operator notices.
         ts: chrono::DateTime::parse_from_rfc3339(ts)
             .map(|t| t.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now()),
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH),
         id: format!("audit:{ts}:{action}:{target}"),
         kind: format!("admin.{action}"),
         actor: actor.to_string(),
@@ -97,7 +100,9 @@ pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<Even
     // the event: keep the row, leave the owner empty rather than inventing an attribution.
     let owner = e.repo.split_once('/').map(|(o, _)| o.to_string()).unwrap_or_default();
     Some(EventRow {
-        ts: chrono::DateTime::from_timestamp_millis(e.at_ms).unwrap_or_else(chrono::Utc::now),
+        // Same rule as `audit_event`: `ts` is half the dedup key, so an unrepresentable timestamp
+        // becomes the epoch rather than the redelivery's own clock.
+        ts: chrono::DateTime::from_timestamp_millis(e.at_ms).unwrap_or(chrono::DateTime::UNIX_EPOCH),
         id: format!("stream:{stream_id}"),
         // One namespace convention across the table (`admin.<action>`, `workspace.created`): the
         // git tier's own words are kept verbatim, only prefixed with the tier they came from.
