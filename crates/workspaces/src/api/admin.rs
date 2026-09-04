@@ -712,8 +712,12 @@ async fn migrate_requests(
             skipped += 1;
             continue;
         };
+        let name = format!("q-{uid}");
+        // A migrated copy carries no status, so it reads as pending; a legacy request that was
+        // already decided must not reappear in the pending queue.
+        let decided = old.status.as_ref().filter(|st| st.state != crd::RequestState::Pending);
         let mut r = crd::Request::new(
-            &format!("q-{uid}"),
+            &name,
             crd::RequestSpec {
                 owner: old.spec.owner.clone(),
                 kind: crd::RequestKind::Quota,
@@ -733,24 +737,23 @@ async fn migrate_requests(
             // Already migrated. The one error this loop swallows on purpose — it is the idempotence.
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 skipped += 1;
-                continue;
+                // The create and the status stamp are two calls, so an earlier run could have
+                // died between them and left a DECIDED legacy request pending forever in the new
+                // queue. Only then is the copy worth re-reading, and only while it is still
+                // pending is it worth stamping — a copy already decided, or since deleted, is
+                // left exactly as it stands.
+                if decided.is_none() {
+                    continue;
+                }
+                let Some(copy) = api.get_opt(&name).await.map_err(kube_err)? else { continue };
+                if copy.status.is_some_and(|st| st.state != crd::RequestState::Pending) {
+                    continue;
+                }
             }
             Err(e) => return Err(kube_err(e)),
         }
-        // A migrated copy carries no status, so it reads as pending; a legacy request that was
-        // already decided must not reappear in the pending queue.
-        if let Some(st) = old.status.as_ref() {
-            if st.state != crd::RequestState::Pending {
-                decide_generic(
-                    &s,
-                    &format!("q-{uid}"),
-                    st.state,
-                    st.decided_by.as_deref().unwrap_or(""),
-                    st.note.clone(),
-                    None,
-                )
-                .await?;
-            }
+        if let Some(st) = decided {
+            decide_generic(&s, &name, st.state, st.decided_by.as_deref().unwrap_or(""), st.note.clone(), None).await?;
         }
     }
     // The copies already landed; the row goes in before the response is built.

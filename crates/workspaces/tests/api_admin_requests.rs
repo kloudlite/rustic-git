@@ -456,3 +456,35 @@ async fn an_unresolvable_handle_is_no_such_user() {
     assert_eq!(r.status(), 422);
     assert!(s.rec.sent("PATCH", &format!("{API}/requests/req-6/status")).is_empty());
 }
+
+/// Create and status stamp are two calls, so a run that died between them left a decided legacy
+/// request pending in the new queue forever. A re-run has to finish the job it started.
+#[tokio::test]
+async fn a_rerun_stamps_a_copy_whose_status_never_landed() {
+    let uid = "7f1c1a2e-0000-4000-8000-000000000001";
+    let legacy = list_of(
+        "QuotaRequest",
+        vec![json!({
+            "metadata": {"name": "qr-9", "uid": uid, "creationTimestamp": "2026-09-03T10:00:00Z"},
+            "spec": {"owner": "zoe", "requested": {"cpu": 12}, "reason": "old"},
+            "status": {"state": "approved", "decidedBy": "root@example.com", "note": "ok"}
+        })],
+    );
+    let copy = json!({"metadata": {"name": format!("q-{uid}")},
+                      "spec": {"owner": "zoe", "kind": "quota", "requestedBy": "zoe", "reason": "old",
+                               "quota": {"cpu": 12}},
+                      "status": {"state": "pending"}});
+    let s = admin_server(vec![
+        route_get(format!("{API}/quotarequests"), legacy),
+        route_conflict("POST", format!("{API}/requests")),
+        route_get(format!("{API}/requests/q-{uid}"), copy),
+        route_patch(format!("{API}/requests/q-{uid}/status"), decided_access("approved")),
+    ])
+    .await;
+    let r =
+        post(&format!("{}/admin/requests/migrate", s.base), &admin_token(&s.jwt), json!({"note": "migrate"})).await;
+    assert_eq!(r.status(), 200);
+    let sent = s.rec.sent("PATCH", &format!("{API}/requests/q-{uid}/status"));
+    assert_eq!(sent[0]["status"]["state"], "approved");
+    assert_eq!(sent[0]["status"]["decidedBy"], "root@example.com");
+}
