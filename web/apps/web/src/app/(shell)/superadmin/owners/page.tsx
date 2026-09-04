@@ -2,23 +2,36 @@ import type { Metadata } from "next";
 import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { DIMS, type QuotaDim } from "@/lib/quota";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 import { PageHeader } from "../page-header";
-import { DefaultsCard } from "./defaults-card";
+import { KpiStrip, KpiTile } from "../ui/kpi";
+import { DefaultsTable } from "./defaults-table";
 import { OwnersTable } from "./owners-table";
 
 export const metadata: Metadata = { title: "Owners" };
 
+/** `Owners.dc.html`: KPI strip, the two defaults as ONE comparison table (v1 had two separate
+ *  lists that could not be read against each other), then the owners table sorted by pressure. */
 export default async function Page() {
   const { token } = await requireSuperadmin("/superadmin/owners");
   // `getQuota` on the caller's own `/v1/quota` route rather than a new admin one: a superadmin
   // claim already passes `may_act_on` for any owner (`scope::may_act_on`), and `default-user`/
   // `default-team` are ordinary owner names to that route.
-  const [owners, personDefault, teamDefault] = await Promise.all([
+  // ponytail: the pending count reads the quota-request queue, the only request kind that exists
+  // today; swap to the generic requests list when that lands, same shape.
+  const [owners, personDefault, teamDefault, pendingR, over80] = await Promise.all([
     api.adminOwners(token),
     api.getQuota("default-user", token),
     api.getQuota("default-team", token),
+    api.adminListQuotaRequests(token, { state: "pending" }),
+    api.adminSeries("owners_over_80", { range: "7d", step: "1d" }, token),
   ]);
-  const rows = owners.ok ? owners.value : [];
+  if (!owners.ok) throw new Error(owners.message);
+  const rows = owners.value;
+  const pending = pendingR.ok ? pendingR.value : [];
+  const teams = rows.filter((o) => o.isTeam).length;
+  const atLimit = rows.filter((r) => DIMS.some((d) => r.limit[d] > 0 && r.used[d] >= r.limit[d])).length;
+  const disk = rows.reduce((n, o) => n + (o.used.diskGb ?? 0), 0);
 
   // The upgrade path the spec calls for: per dimension, the single highest USED value any owner
   // in the fleet has today — so lowering a default below what someone already relies on is
@@ -32,22 +45,31 @@ export default async function Page() {
   );
 
   return (
-    <div>
-      <PageHeader title="Owners" purpose="Every person and team, with what they use against their limits. Open one to see its objects and set its quota." />
-      <div className="flex flex-col gap-6">
-        <DefaultsCard
-          personDefault={personDefault.ok ? personDefault.value : null}
-          teamDefault={teamDefault.ok ? teamDefault.value : null}
-          fleetMax={fleetMax}
+    <div className="space-y-4">
+      <AutoRefresh />
+      <PageHeader title="Owners" purpose="Every person and team that can allocate, and how close each one is to a wall." />
+      <KpiStrip>
+        <KpiTile label="Owners" value={rows.length} sub={`${rows.length - teams} people · ${teams} teams`} />
+        <KpiTile label="Teams" value={teams} sub="of every owner that can allocate" />
+        <KpiTile
+          label="Over 80% of a limit"
+          value={over80.summary.last}
+          sub={over80.available ? `${atLimit} of them at the limit` : "history unavailable"}
+          series={over80}
         />
-        {rows.length === 0 ? (
-          <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
-            No owner has a quota, a request, or a live object yet.
-          </p>
-        ) : (
-          <OwnersTable rows={rows} />
-        )}
-      </div>
+        <KpiTile
+          label="Pending requests"
+          value={pending.length}
+          sub={`from ${new Set(pending.map((p) => p.owner)).size} owners`}
+        />
+        <KpiTile label="Disk allocated" value={`${disk} GB`} sub="across every pool" />
+      </KpiStrip>
+      <DefaultsTable
+        personDefault={personDefault.ok ? personDefault.value : null}
+        teamDefault={teamDefault.ok ? teamDefault.value : null}
+        fleetMax={fleetMax}
+      />
+      <OwnersTable rows={rows} pending={pending} />
     </div>
   );
 }

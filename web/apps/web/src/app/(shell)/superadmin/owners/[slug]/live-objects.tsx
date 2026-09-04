@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { Loader2, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -10,6 +10,8 @@ import {
 } from "@/components/ui/dialog";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiEnvironment, ApiWorkspace } from "@/lib/api";
+import { Section } from "../../ui/section";
+import { DataTable, EmptyState, RowActions, Td, Th, Tr } from "../../ui/data-table";
 import {
   adminDeleteEnvironmentAction, adminDeleteWorkspaceAction, adminStopEnvironmentAction, adminStopWorkspaceAction,
 } from "../../actions";
@@ -50,12 +52,10 @@ function ActionCell({ owner, row }: { owner: string; row: Row }) {
   }
 
   return (
-    <div className="flex items-center justify-end gap-2">
-      <Button
+    <>
+      <button
         type="button"
-        size="sm"
-        variant="outline"
-        className={running ? "" : "text-destructive"}
+        className={running ? "text-sm2 text-muted-foreground hover:text-primary" : "text-sm2 text-muted-foreground hover:text-destructive"}
         onClick={() => {
           setOpen(true);
           setNote("");
@@ -63,7 +63,7 @@ function ActionCell({ owner, row }: { owner: string; row: Row }) {
         }}
       >
         {verb}
-      </Button>
+      </button>
       <Dialog open={open} onOpenChange={(o) => !o && setOpen(false)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -90,7 +90,7 @@ function ActionCell({ owner, row }: { owner: string; row: Row }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }
 
@@ -103,48 +103,70 @@ export function LiveObjects({
   workspaces: ApiWorkspace[];
   environments: ApiEnvironment[];
 }) {
-  const rows: Row[] = [
-    ...workspaces.map((w): Row => ({ kind: "workspace", id: w.id, name: w.name, state: w.state, node: w.placement, region: w.region })),
-    ...environments.map((e): Row => ({ kind: "environment", id: e.id, name: e.name, state: e.state, node: e.placement, region: e.region })),
-  ];
+  const [q, setQ] = useState("");
+  const rows: Row[] = useMemo(
+    () => [
+      ...workspaces.map((w): Row => ({ kind: "workspace", id: w.id, name: w.name, state: w.state, node: w.placement, region: w.region })),
+      ...environments.map((e): Row => ({ kind: "environment", id: e.id, name: e.name, state: e.state, node: e.placement, region: e.region })),
+    ],
+    [workspaces, environments],
+  );
+  const needle = q.trim().toLowerCase();
+  const shown = needle ? rows.filter((r) => r.name.toLowerCase().includes(needle)) : rows;
 
   return (
-    <div className="border border-border bg-card p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <span className="text-sm2 font-medium">Live working copies · {rows.length}</span>
-      </div>
-      {rows.length === 0 ? (
-        <p className="text-sm2 text-muted-foreground">No workspace or environment is live for this owner.</p>
+    <Section
+      eyebrow="Allocation"
+      title="Live workspaces and environments"
+      count={rows.length}
+      bare
+      toolbar={
+        <div className="relative w-56">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Filter by name"
+            aria-label="Filter by name"
+            className="h-8 pl-8 text-sm2"
+          />
+        </div>
+      }
+    >
+      {shown.length === 0 ? (
+        <EmptyState>No workspace or environment is live for this owner.</EmptyState>
       ) : (
-        <table className="w-full text-left text-sm2">
+        <DataTable>
           <thead>
-            <tr className="border-b border-border text-caption text-muted-foreground">
-              <th className="py-2 pr-3 font-medium">Name</th>
-              <th className="py-2 pr-3 font-medium">Kind</th>
-              <th className="py-2 pr-3 font-medium">State</th>
-              <th className="py-2 pr-3 font-medium">Node</th>
-              <th className="py-2 pr-3 font-medium">Region</th>
-              <th className="py-2 font-medium" />
+            <tr>
+              <Th>Name</Th>
+              <Th>Kind</Th>
+              <Th>State</Th>
+              <Th>Node</Th>
+              <Th>Region</Th>
+              <Th />
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={`${r.kind}-${r.id}`} className="border-b border-border last:border-0">
-                <td className="py-2 pr-3 font-mono text-caption">{r.name}</td>
-                <td className="py-2 pr-3 text-muted-foreground">{r.kind}</td>
-                <td className="py-2 pr-3"><WsEnvStateBadge state={r.state} /></td>
-                <td className="py-2 pr-3 font-mono text-caption text-muted-foreground">{r.node ?? "unplaced"}</td>
-                <td className="py-2 pr-3 text-muted-foreground">{r.region}</td>
-                <td className="py-2">
-                  {(r.state === "running" || r.state === "ready" || r.state === "stopped" || r.state === "error") && (
-                    <ActionCell owner={owner} row={r} />
-                  )}
-                </td>
-              </tr>
+            {shown.map((r) => (
+              <Tr key={`${r.kind}-${r.id}`}>
+                <Td className="font-mono text-caption">{r.name}</Td>
+                <Td className="text-muted-foreground">{r.kind}</Td>
+                <Td><WsEnvStateBadge state={r.state} /></Td>
+                <Td className="font-mono text-caption text-muted-foreground">{r.node ?? "unplaced"}</Td>
+                <Td className="text-muted-foreground">{r.region}</Td>
+                <Td>
+                  <RowActions>
+                    {(r.state === "running" || r.state === "ready" || r.state === "stopped" || r.state === "error") && (
+                      <ActionCell owner={owner} row={r} />
+                    )}
+                  </RowActions>
+                </Td>
+              </Tr>
             ))}
           </tbody>
-        </table>
+        </DataTable>
       )}
-    </div>
+    </Section>
   );
 }

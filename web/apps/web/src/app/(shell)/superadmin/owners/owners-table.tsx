@@ -3,91 +3,130 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { Search } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import type { OwnerRow } from "@/lib/api";
-import { atLimit, DIMS, dimLabel, tightestRatio } from "@/lib/quota";
+import type { OwnerRow, QuotaRequestDoc } from "@/lib/api";
+import { dimLabel, dimUnit } from "@/lib/quota";
+import { byTightest, tightest } from "@/lib/owners-sort";
+import { Section } from "../ui/section";
+import { CapacityBar } from "../ui/capacity-bar";
+import { Pill } from "../ui/pill";
+import { DataTable, EmptyState, RowActions, Td, Th, Tr } from "../ui/data-table";
 
-/** Same idiom as `repo-list.tsx`: the whole (small) fleet is already fetched, so filtering and
- *  sorting it locally is both simpler and faster than a round trip. */
-export function OwnersTable({ rows }: { rows: OwnerRow[] }) {
+type Kind = "all" | "team" | "person";
+
+/** Same idiom as `repo-list.tsx`: the whole (small) fleet is already fetched, so filtering it
+ *  locally is both simpler and faster than a round trip. The order is `byTightest` and nothing
+ *  else — the one question this table answers is who hits a wall next. */
+export function OwnersTable({ rows, pending }: { rows: OwnerRow[]; pending: QuotaRequestDoc[] }) {
   const [q, setQ] = useState("");
+  const [kind, setKind] = useState<Kind>("all");
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    const filtered = needle ? rows.filter((r) => r.owner.toLowerCase().includes(needle)) : rows;
-    // Ascending: the row with the least headroom on any dimension (the smallest ratio) sorts
-    // first — the operator's question is "who is closest to their limit".
-    return [...filtered].sort((a, b) => tightestRatio(a.limit, a.used) - tightestRatio(b.limit, b.used));
-  }, [rows, q]);
-
-  const pendingCount = rows.filter((r) => r.pending).length;
+    return byTightest(
+      rows.filter(
+        (r) =>
+          (!needle || r.owner.toLowerCase().includes(needle)) &&
+          (kind === "all" || (kind === "team") === r.isTeam),
+      ),
+    );
+  }, [rows, q, kind]);
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-3">
-        <div className="relative w-full max-w-xs">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Find an owner"
-            aria-label="Find an owner"
-            className="h-8 pl-8 text-sm2"
-          />
-        </div>
-        <span className="ml-auto text-caption text-muted-foreground">
-          {rows.length} owners{pendingCount > 0 ? ` · ${pendingCount} with a pending request` : ""}
-        </span>
-      </div>
-
+    <Section
+      eyebrow="Directory"
+      title="Owners"
+      count={rows.length}
+      bare
+      toolbar={
+        <>
+          <div className="relative w-56">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Filter owners"
+              aria-label="Filter owners"
+              className="h-8 pl-8 text-sm2"
+            />
+          </div>
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as Kind)}
+            aria-label="Kind"
+            className="h-8 border border-border bg-card px-2 text-sm2"
+          >
+            <option value="all">All kinds</option>
+            <option value="person">People</option>
+            <option value="team">Teams</option>
+          </select>
+        </>
+      }
+    >
       {shown.length === 0 ? (
-        <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
-          Nothing matches that.
-        </p>
+        <EmptyState>Nothing matches that — clear the filter to see every owner.</EmptyState>
       ) : (
-        <div className="overflow-x-auto border border-border bg-card">
-          <table className="w-full text-left text-sm2">
-            <thead>
-              <tr className="border-b border-border text-caption text-muted-foreground">
-                <th className="px-4 py-2 font-medium">Owner</th>
-                {DIMS.map((d) => (
-                  <th key={d} className="px-4 py-2 font-medium">{dimLabel(d)}</th>
-                ))}
-                <th className="px-4 py-2 font-medium">Limits from</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((r) => (
-                <tr key={r.owner} className="border-b border-border last:border-0 hover:bg-muted/50">
-                  <td className="px-4 py-2">
-                    <Link href={`/superadmin/owners/${encodeURIComponent(r.owner)}`} className="font-medium text-foreground">
-                      {r.owner}
-                    </Link>{" "}
-                    <Badge variant="outline">{r.isTeam ? "team" : "person"}</Badge>
-                    {r.pending && (
-                      <Badge variant="outline" className="ml-1 border-warning/40 bg-warning/10 text-warning">
-                        request
-                      </Badge>
+        <DataTable>
+          <thead>
+            <tr>
+              <Th>Owner</Th>
+              <Th>Kind</Th>
+              <Th>Tightest dimension</Th>
+              <Th numeric>WS</Th>
+              <Th numeric>Env</Th>
+              <Th numeric>Snap</Th>
+              <Th numeric>Disk</Th>
+              <Th numeric>CPU</Th>
+              <Th numeric>Mem</Th>
+              <Th>Requests</Th>
+              <Th />
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((r) => {
+              const t = tightest(r);
+              const waiting = pending.filter((p) => p.owner === r.owner).length;
+              const href = `/superadmin/owners/${encodeURIComponent(r.owner)}`;
+              return (
+                <Tr key={r.owner}>
+                  <Td>
+                    <Link href={href} className="font-medium hover:underline">{r.owner}</Link>
+                  </Td>
+                  <Td><Pill>{r.isTeam ? "team" : "person"}</Pill></Td>
+                  <Td className="w-56 py-2">
+                    <p className="text-caption text-muted-foreground">{dimLabel(t.dim).toLowerCase()}</p>
+                    <CapacityBar used={t.used} limit={t.limit} unit={dimUnit(t.dim)} />
+                  </Td>
+                  <Td numeric>{r.used.workspaces}</Td>
+                  <Td numeric>{r.used.environments}</Td>
+                  <Td numeric>{r.used.snapshots}</Td>
+                  <Td numeric>{r.used.diskGb} GB</Td>
+                  <Td numeric>{r.used.cpu}</Td>
+                  <Td numeric>{r.used.memoryGb} GB</Td>
+                  <Td>
+                    {waiting > 0 ? (
+                      <Pill tone="warn">{waiting} pending</Pill>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
                     )}
-                  </td>
-                  {DIMS.map((d) => (
-                    <td key={d} className="px-4 py-2 tabular-nums">
-                      <span className={atLimit(r, d) ? "font-semibold text-destructive" : "text-muted-foreground"}>
-                        {r.used[d]}
-                      </span>
-                      <span className="text-muted-foreground/60"> / {r.limit[d]}</span>
-                    </td>
-                  ))}
-                  <td className="px-4 py-2 text-caption text-muted-foreground">
-                    {r.source === "own" ? "own quota" : r.isTeam ? "team default" : "person default"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  </Td>
+                  <Td>
+                    <RowActions>
+                      <Link href={href} className="text-sm2 text-muted-foreground hover:text-primary">Set quota</Link>
+                      <Link href={`/${encodeURIComponent(r.owner)}/workspaces`} className="text-sm2 text-muted-foreground hover:text-primary">
+                        Open as
+                      </Link>
+                    </RowActions>
+                  </Td>
+                </Tr>
+              );
+            })}
+          </tbody>
+        </DataTable>
       )}
-    </div>
+      <p className="border-t border-border px-4 py-2 text-caption text-muted-foreground">
+        {shown.length} of {rows.length} owners · sorted by tightest dimension
+      </p>
+    </Section>
   );
 }

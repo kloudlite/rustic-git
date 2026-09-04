@@ -3,10 +3,18 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
-import { QuotaBar } from "@/components/app/quota-bar";
-import { dimLabel, type QuotaDim } from "@/lib/quota";
+import { AutoRefresh } from "@/components/app/auto-refresh";
+import { DIMS, dimLabel, dimUnit, requestedDiffs } from "@/lib/quota";
+import { limitSource } from "@/lib/owners-sort";
+import { eventSummary } from "@/lib/history";
 import { when } from "@/lib/time";
+import type { Tone } from "@/lib/console";
+import { Section } from "../../ui/section";
+import { KpiStrip, KpiTile } from "../../ui/kpi";
+import { CapacityBar } from "../../ui/capacity-bar";
+import { Pill } from "../../ui/pill";
+import { DataTable, EmptyState, Td, Th, Tr } from "../../ui/data-table";
+import { Timeline, TimelineRow } from "../../ui/timeline";
 import { SetQuotaForm } from "./set-quota-form";
 import { LiveObjects } from "./live-objects";
 
@@ -15,134 +23,215 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   return { title: slug };
 }
 
-const REQUEST_STATE_TONE: Record<string, string> = {
-  pending: "border-warning/40 bg-warning/10 text-warning",
-  approved: "border-success/40 bg-success/10 text-success",
-  denied: "border-destructive/40 bg-destructive/10 text-destructive",
-};
+const STATE_TONE: Record<string, Tone> = { pending: "warn", approved: "ok", denied: "critical" };
 
+/** `Owner.dc.html`: header, KPI strip, then Quota / Allocation / Storage / Requests / History as
+ *  sections in that order — the operator's read is "how tight, what's live, what's stored, what
+ *  are they asking for, what did we do to them". */
 export default async function Page({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const { token } = await requireSuperadmin(`/superadmin/owners/${slug}`);
-  const r = await api.adminOwnerDetail(slug, token);
+  // ponytail: quota requests are the only request kind today; this becomes the generic requests
+  // list when that lands, same table.
+  const [r, requestsR, eventsR] = await Promise.all([
+    api.adminOwnerDetail(slug, token),
+    api.adminListQuotaRequests(token, { owner: slug }),
+    api.adminHistoryEvents({ owner: slug, limit: 20 }, token),
+  ]);
   if (!r.ok) {
     if (r.kind === "notFound") notFound();
     throw new Error(r.message);
   }
   const owner = r.value;
+  const requests = requestsR.ok ? requestsR.value : owner.requests;
+  const pending = requests.filter((q) => q.state === "pending");
   const detached = owner.volumes.filter((v) => v.deleted);
+  const events = eventsR.ok ? eventsR.value.events : [];
 
   return (
-    <div>
-      <div className="mb-6 flex items-end justify-between gap-4">
+    <div className="space-y-4">
+      <AutoRefresh />
+      <div className="mb-2 flex items-end justify-between gap-4">
         <div>
+          <p className="text-caption text-muted-foreground">
+            <Link href="/superadmin/owners" className="hover:underline">Owners</Link> / {owner.owner}
+          </p>
           <h1 className="flex items-center gap-2 text-base font-medium">
             {owner.owner}
-            <Badge variant="outline">{owner.isTeam ? "team" : "person"}</Badge>
+            <Pill>{owner.isTeam ? "team" : "person"}</Pill>
           </h1>
-          <p className="text-sm2 text-muted-foreground">Live objects, quota, and history for this owner.</p>
         </div>
-        <div className="flex gap-2">
-          <SetQuotaForm owner={owner.owner} limit={owner.limit} />
+        <div className="flex items-center gap-2">
           <Link
             href={`/${encodeURIComponent(owner.owner)}/workspaces`}
             className="inline-flex h-8 items-center border border-border px-3 text-sm2 font-medium hover:bg-muted"
           >
             Open as {owner.owner}
           </Link>
+          <SetQuotaForm owner={owner.owner} limit={owner.limit} />
         </div>
       </div>
 
-      <div className="flex flex-col gap-6">
-        <div className="grid grid-cols-1 gap-4 border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-3">
-          <QuotaBar report={owner} source={owner.source === "own" ? "own quota" : owner.isTeam ? "team default" : "person default"} />
-        </div>
+      <KpiStrip>
+        <KpiTile label="Live workspaces" value={owner.used.workspaces} sub={`of ${owner.limit.workspaces} allowed`} />
+        <KpiTile label="Live environments" value={owner.used.environments} sub={`of ${owner.limit.environments} allowed`} />
+        <KpiTile
+          label="Snapshots"
+          value={owner.used.snapshots}
+          sub={`of ${owner.limit.snapshots} allowed · ${detached.length} detached`}
+        />
+        <KpiTile label="Disk" value={`${owner.used.diskGb} GB`} sub={`of ${owner.limit.diskGb} GB allocated`} />
+        <KpiTile
+          label="Requests pending"
+          value={pending.length}
+          sub={pending.length === 0 ? "nothing waiting on a decision" : `oldest ${when(new Date(pending[pending.length - 1].createdAt ?? 0).getTime())}`}
+        />
+      </KpiStrip>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[3fr_2fr]">
-          <LiveObjects owner={owner.owner} workspaces={owner.workspaces} environments={owner.environments} />
-
-          <div className="flex flex-col gap-6">
-            <div className="border border-border bg-card p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <span className="text-sm2 font-medium">Requests</span>
-                <Link href={`/superadmin/requests?owner=${encodeURIComponent(owner.owner)}`} className="text-caption">
-                  All
-                </Link>
+      <Section
+        eyebrow="Quota"
+        title="Capacity against the effective limits"
+        toolbar={
+          <span className="text-caption text-muted-foreground">
+            Effective quota: {owner.source === "own" ? `Quota/${owner.owner}` : owner.isTeam ? "default-team" : "default-user"}
+          </span>
+        }
+      >
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {DIMS.map((d) => (
+            <div key={d} className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm2 font-medium">{dimLabel(d)}</span>
+                {/* The source chip is the point of this grid: v1 showed six bars and never said
+                    whether a limit was the owner's own or the fallback. */}
+                <Pill>{limitSource(owner, d)}</Pill>
               </div>
-              {owner.requests.length === 0 ? (
-                <p className="text-sm2 text-muted-foreground">No request from this owner.</p>
-              ) : (
-                <ul className="flex flex-col gap-2 text-sm2">
-                  {owner.requests.map((req) => (
-                    <li key={req.id} className="flex items-center gap-2">
-                      <Badge variant="outline" className={REQUEST_STATE_TONE[req.state]}>{req.state}</Badge>
-                      <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                        {Object.keys(req.requested).map((d) => dimLabel(d as QuotaDim)).join(", ")}
-                      </span>
-                      <span className="shrink-0 text-caption text-muted-foreground">
-                        {when(new Date(req.createdAt ?? 0).getTime())}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <CapacityBar used={owner.used[d]} limit={owner.limit[d]} unit={dimUnit(d)} />
             </div>
-
-            <div className="border border-border bg-card p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <span className="text-sm2 font-medium">Detached volumes · {detached.length}</span>
-              </div>
-              {detached.length === 0 ? (
-                <p className="text-sm2 text-muted-foreground">None — every volume here still has a live working copy.</p>
-              ) : (
-                <ul className="flex flex-col gap-1 text-sm2">
-                  {detached.map((v) => (
-                    <li key={v.name} className="flex items-center justify-between text-caption text-muted-foreground">
-                      <span className="font-mono">{v.display_name}</span>
-                      <span>{v.snapshots} snapshots</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
+          ))}
         </div>
+      </Section>
 
-        <div className="border border-border bg-card p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <span className="text-sm2 font-medium">Audit trail</span>
-            <Link href={`/superadmin/audit?target=${encodeURIComponent(owner.owner)}`} className="text-caption">
-              All
-            </Link>
-          </div>
-          {owner.audit.length === 0 ? (
-            <p className="text-sm2 text-muted-foreground">No recorded write against this owner.</p>
-          ) : (
-            <table className="w-full text-left text-sm2">
-              <thead>
-                <tr className="border-b border-border text-caption text-muted-foreground">
-                  <th className="py-2 pr-3 font-medium">When</th>
-                  <th className="py-2 pr-3 font-medium">Actor</th>
-                  <th className="py-2 pr-3 font-medium">Action</th>
-                  <th className="py-2 pr-3 font-medium">Result</th>
-                  <th className="py-2 font-medium">Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {owner.audit.map((a, i) => (
-                  <tr key={`${a.ts}-${i}`} className="border-b border-border last:border-0">
-                    <td className="py-2 pr-3 text-caption text-muted-foreground">{when(new Date(a.ts).getTime())}</td>
-                    <td className="py-2 pr-3 font-mono text-caption">{a.actor}</td>
-                    <td className="py-2 pr-3">{a.action}</td>
-                    <td className="py-2 pr-3 text-muted-foreground">{a.result}</td>
-                    <td className="py-2 text-muted-foreground">{a.reason ?? ""}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </div>
+      <LiveObjects owner={owner.owner} workspaces={owner.workspaces} environments={owner.environments} />
+
+      <Section eyebrow="Storage" title="Volumes and snapshots" count={owner.volumes.length} bare>
+        {owner.volumes.length === 0 ? (
+          <EmptyState>Nothing pushed yet — a volume appears here on this owner&rsquo;s first push.</EmptyState>
+        ) : (
+          <DataTable>
+            <thead>
+              <tr>
+                <Th>Volume</Th>
+                <Th>Worktree</Th>
+                <Th>Kind</Th>
+                <Th numeric>Snapshots</Th>
+                <Th>Last push</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {owner.volumes.map((v) => (
+                <Tr key={v.name}>
+                  <Td className="font-mono text-caption">{v.volume ?? v.name}</Td>
+                  <Td>
+                    <span className="font-mono text-caption">{v.display_name}</span>
+                    {/* A detached volume has no working copy left: only its snapshots keep it
+                        alive, so it is the one row an operator can safely delete. */}
+                    {v.deleted && <Pill tone="warn" className="ml-2">detached</Pill>}
+                  </Td>
+                  <Td className="text-muted-foreground">{v.kind}</Td>
+                  <Td numeric>{v.snapshots}</Td>
+                  <Td className="text-muted-foreground">
+                    {v.last_push_at ? when(new Date(v.last_push_at).getTime()) : "—"}
+                  </Td>
+                </Tr>
+              ))}
+            </tbody>
+          </DataTable>
+        )}
+      </Section>
+
+      <Section
+        eyebrow="Requests"
+        title={`Requests from ${owner.owner}`}
+        count={requests.length}
+        bare
+        toolbar={
+          <Link href={`/superadmin/requests?owner=${encodeURIComponent(owner.owner)}`} className="text-caption text-primary hover:underline">
+            Queue
+          </Link>
+        }
+      >
+        {requests.length === 0 ? (
+          <EmptyState>No request from this owner — a quota raise starts on their own dashboard.</EmptyState>
+        ) : (
+          <DataTable>
+            <thead>
+              <tr>
+                <Th>Kind</Th>
+                <Th>Summary</Th>
+                <Th>Decision</Th>
+                <Th>By</Th>
+                <Th>When</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {requests.map((q) => (
+                <Tr key={q.id}>
+                  <Td><Pill>quota</Pill></Td>
+                  <Td className="text-muted-foreground">
+                    {requestedDiffs(owner.limit, q.requested)
+                      .map((d) => `${dimLabel(d.dim).toLowerCase()} ${d.from} → ${d.to}${dimUnit(d.dim) ? ` ${dimUnit(d.dim)}` : ""}`)
+                      .join(", ")}
+                  </Td>
+                  <Td><Pill tone={STATE_TONE[q.state] ?? "neutral"}>{q.state}</Pill></Td>
+                  <Td className="text-muted-foreground">{q.decidedBy ?? "—"}</Td>
+                  <Td className="text-muted-foreground">{when(new Date(q.createdAt ?? 0).getTime())}</Td>
+                </Tr>
+              ))}
+            </tbody>
+          </DataTable>
+        )}
+      </Section>
+
+      <Section
+        eyebrow="History"
+        title="Audit trail"
+        toolbar={
+          <Link href={`/superadmin/audit?target=${encodeURIComponent(owner.owner)}`} className="text-caption text-primary hover:underline">
+            All events
+          </Link>
+        }
+      >
+        {/* History is optional infrastructure: with no ClickHouse the events list is empty and the
+            owner's own audit rows (already on the detail) say the same thing in fewer words. */}
+        {events.length > 0 ? (
+          <Timeline>
+            {events.map((e) => (
+              <TimelineRow key={e.id} at={when(new Date(e.ts).getTime())} actor={e.actor} note={e.attrs.note ?? null}>
+                {eventSummary(e)}
+              </TimelineRow>
+            ))}
+          </Timeline>
+        ) : owner.audit.length > 0 ? (
+          <Timeline>
+            {owner.audit.map((a, i) => (
+              <TimelineRow key={`${a.ts}-${i}`} at={when(new Date(a.ts).getTime())} actor={a.actor} note={a.reason ?? null}>
+                {a.actor} {a.action} {a.target} · {a.result}
+              </TimelineRow>
+            ))}
+          </Timeline>
+        ) : (
+          <EmptyState
+            action={
+              <Link href="/superadmin/audit" className="text-sm2 text-primary hover:underline">
+                Open the audit log
+              </Link>
+            }
+          >
+            No recorded write against this owner.
+          </EmptyState>
+        )}
+      </Section>
     </div>
   );
 }
