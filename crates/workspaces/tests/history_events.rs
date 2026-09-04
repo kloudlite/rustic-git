@@ -64,7 +64,7 @@ fn a_stream_entry_becomes_an_event_row_keyed_by_its_stream_id() {
     ];
     let e = stream_event("1788523872000-0", &fields).expect("a known kind must map");
     assert_eq!(e.id, "stream:1788523872000-0");
-    assert_eq!(e.kind, "pull_merged");
+    assert_eq!(e.kind, "git.pull_merged");
     assert_eq!(e.owner, "alice");
     assert_eq!(e.target, "alice/web#7");
     assert_eq!(e.actor, "alice@example.com");
@@ -94,4 +94,31 @@ fn a_malformed_repo_yields_an_empty_owner_rather_than_a_panic() {
     let e = stream_event("2-0", &fields).expect("a known kind must still map");
     assert_eq!(e.owner, "");
     assert_eq!(e.target, "noslash#1");
+}
+
+/// Every kind the git tier can publish must map, and the target shape must match what the kind
+/// actually is: a PR event names a pull request, `head_moved` is repo-wide and names only the repo.
+#[test]
+fn every_git_kind_maps_with_the_target_shape_its_scope_implies() {
+    for (kind, target) in [
+        ("pull_opened", "alice/web#7"),
+        ("pull_commented", "alice/web#7"),
+        ("merge_requested", "alice/web#7"),
+        ("pull_merged", "alice/web#7"),
+        ("pull_closed", "alice/web#7"),
+        // Repo-wide: `number` is a 0 marker, not a pull request to name.
+        ("head_moved", "alice/web"),
+    ] {
+        let number = if kind == "head_moved" { "0" } else { "7" };
+        let fields = vec![
+            field("kind", kind),
+            field("repo", "alice/web"),
+            field("number", number),
+            field("actor", "alice@example.com"),
+            field("at_ms", "1788523872000"),
+        ];
+        let e = stream_event("3-0", &fields).unwrap_or_else(|| panic!("{kind} must map"));
+        assert_eq!(e.kind, format!("git.{kind}"));
+        assert_eq!(e.target, target, "target shape for {kind}");
+    }
 }

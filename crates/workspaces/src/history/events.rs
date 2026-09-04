@@ -6,6 +6,8 @@
 //! ReplacingMergeTree on `id` and that is the entire deduplication story: a replayed watch, a
 //! redelivered Redis entry and a retried insert all collapse to one row.
 
+use std::sync::Arc;
+
 use super::{History, HistoryError};
 
 /// The wire format ClickHouse's `DateTime64(3)` accepts over HTTP.
@@ -68,8 +70,6 @@ pub fn audit_event(ts: &str, actor: &str, action: &str, target: &str, result: &s
     }
 }
 
-use std::sync::Arc;
-
 /// The one stream every repo's events multiplex onto (`rustic_git_storage::events`), and OUR
 /// consumer group on it — separate from the merge worker's, so the two never steal each other's
 /// entries and neither depends on the other running.
@@ -99,10 +99,17 @@ pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<Even
     Some(EventRow {
         ts: chrono::DateTime::from_timestamp_millis(e.at_ms).unwrap_or_else(chrono::Utc::now),
         id: format!("stream:{stream_id}"),
-        kind: e.kind.as_str().to_string(),
+        // One namespace convention across the table (`admin.<action>`, `workspace.created`): the
+        // git tier's own words are kept verbatim, only prefixed with the tier they came from.
+        kind: format!("git.{}", e.kind.as_str()),
         actor: e.actor,
         owner,
-        target: format!("{}#{}", e.repo, e.number),
+        // `HeadMoved` is repo-wide and carries no PR, so its `number` is a 0 marker rather than a
+        // pull number — naming `repo#0` would invent a pull request that does not exist.
+        target: match e.kind {
+            rustic_git_storage::events::Kind::HeadMoved => e.repo.clone(),
+            _ => format!("{}#{}", e.repo, e.number),
+        },
         // The stream carries repo events, which belong to the git tier, not to a workspace region.
         region: "central".to_string(),
         attrs: serde_json::json!({ "title": e.title, "base": e.base, "head": e.head }),
