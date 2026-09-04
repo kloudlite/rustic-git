@@ -113,6 +113,28 @@ impl Default for CentralSettings {
 impl CentralSettings {
     /// Env ?? built-in default, one field per existing `RUSTIC_GIT_*` var — this is the FLOOR
     /// `merged_with` overrides from the stored document, never the other way around.
+    /// The floor before any env var or stored document is consulted — split out of `from_env`
+    /// so `api::admin::settings`'s schema route (`GET /admin/settings/schema`) can report a
+    /// field's built-in default without also reporting whatever this process's own env happens
+    /// to hold, which `from_env()` itself cannot separate back out.
+    pub fn built_in_defaults() -> Self {
+        Self {
+            max_body: 2_147_483_648,
+            max_layer: 5_368_709_120,
+            max_manifest: 4_194_304,
+            upload_grace_secs: 86_400,
+            gc_interval_secs: 60,
+            merge_lease_secs: 600,
+            announce_stranded_secs: 15,
+            feed_retention_secs: 604_800,
+            clone_host: String::new(),
+            ssh_host: String::new(),
+            ssh_port: 22,
+            registry_host: String::new(),
+            signup_open: true,
+        }
+    }
+
     pub fn from_env() -> Self {
         fn env_u64(key: &str, default: u64) -> u64 {
             std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -124,20 +146,16 @@ impl CentralSettings {
             std::env::var(key).unwrap_or_default()
         }
 
+        let d = Self::built_in_defaults();
         Self {
-            max_body: env_u64("RUSTIC_GIT_MAX_BODY", 2_147_483_648),
-            max_layer: env_u64("RUSTIC_GIT_MAX_LAYER", 5_368_709_120),
-            max_manifest: 4_194_304,
-            upload_grace_secs: env_u64("RUSTIC_GIT_UPLOAD_GRACE_SECS", 86_400),
-            gc_interval_secs: 60,
-            merge_lease_secs: 600,
-            announce_stranded_secs: 15,
-            feed_retention_secs: 604_800,
+            max_body: env_u64("RUSTIC_GIT_MAX_BODY", d.max_body),
+            max_layer: env_u64("RUSTIC_GIT_MAX_LAYER", d.max_layer),
+            upload_grace_secs: env_u64("RUSTIC_GIT_UPLOAD_GRACE_SECS", d.upload_grace_secs),
             clone_host: env_string("RUSTIC_GIT_CLONE_HOST"),
             ssh_host: env_string("RUSTIC_GIT_SSH_HOST"),
-            ssh_port: env_u16("RUSTIC_GIT_SSH_PORT", 22),
+            ssh_port: env_u16("RUSTIC_GIT_SSH_PORT", d.ssh_port),
             registry_host: env_string("RUSTIC_GIT_REGISTRY_HOST"),
-            signup_open: true,
+            ..d
         }
     }
 

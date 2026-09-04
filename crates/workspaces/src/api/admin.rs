@@ -11,6 +11,7 @@
 use super::*;
 use axum::extract::Path;
 
+mod schema;
 mod settings;
 pub use settings::PeerClient;
 
@@ -57,6 +58,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(settings::get_cluster).put(settings::put_cluster),
         )
         .route("/admin/settings/clusters/{region}/revert/{n}", post(settings::revert_cluster))
+        .route("/admin/settings/schema", get(schema::get_schema))
         // The claim check runs BEFORE every route above, not per-handler: `route_layer` wraps only
         // the routes already added, so a route added after this line would run unguarded — there
         // are none, and `every_admin_path_refuses_without_the_claim` is the tripwire if one is
