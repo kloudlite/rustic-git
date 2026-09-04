@@ -52,5 +52,19 @@ perl -pi -e "s#^(\s+image: ).*/kloudlite-git-agent:\S+#\${1}$REG/kloudlite-git-a
 kubectl apply -f agent-daemonset.yaml
 kubectl -n kube-system rollout status daemonset/kloudlite-git-agent --timeout=300s
 echo "agent-daemonset.yaml now pins $TAG — a dev image. Do not commit it; restore CI's pin with deploy/pin.sh <sha> and apply again."
-echo "server image: $REG/kloudlite-git:$TAG  (roll it with your own context, this script does not
-touch the server tier — it lives on a different cluster)"
+# The central tier too, when asked: the same dev image onto AKS with `kubectl set image` on the
+# default context. Nothing here edits deploy/kloudlite-git.yaml — the next `deploy/roll.sh` puts
+# CI's pin back, which is the point: a dev image never survives a real deploy.
+if [ "${1:-}" = "--aks" ]; then
+  echo "==> rolling the central tier on the default kubectl context"
+  for w in statefulset/kloudlite-git-srv deployment/kloudlite-git-api deployment/kloudlite-git-admin deployment/kloudlite-git-worker; do
+    kubectl -n kloudlite-git set image "$w" "*=$REG/kloudlite-git:$TAG" >/dev/null
+  done
+  kubectl -n kloudlite-git rollout status statefulset/kloudlite-git-srv --timeout=600s
+  for d in kloudlite-git-api kloudlite-git-admin kloudlite-git-worker; do
+    kubectl -n kloudlite-git rollout status "deployment/$d" --timeout=300s
+  done
+  echo "central tier now runs $TAG — a dev image. deploy/roll.sh restores CI's pin."
+else
+  echo "server image: $REG/kloudlite-git:$TAG  (pass --aks to roll the central tier too)"
+fi
