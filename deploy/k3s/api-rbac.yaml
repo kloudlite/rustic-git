@@ -102,12 +102,14 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["quotarequests/status"]
     verbs: ["patch", "update"]
-  # Deciding a request: `patch` on the object for the migration's label repair, `patch`/`update` on
-  # the status subresource for the decision itself. `create` is here because the one-shot migration
-  # (`POST /admin/requests/migrate`) authors a Request per legacy QuotaRequest.
+  # Deciding a request: `patch`/`update` on the status subresource, which is where every decision
+  # is written. `create` is here because the one-shot migration (`POST /admin/requests/migrate`)
+  # authors a Request per legacy QuotaRequest. No `patch` or `delete` on the object itself — no
+  # route edits or removes a request's spec, and a decision that could rewrite what was asked for
+  # is not a decision.
   - apiGroups: ["rustic-git.io"]
     resources: ["requests"]
-    verbs: ["get", "list", "create", "patch", "delete"]
+    verbs: ["get", "list", "create"]
   - apiGroups: ["rustic-git.io"]
     resources: ["requests/status"]
     verbs: ["patch", "update"]
