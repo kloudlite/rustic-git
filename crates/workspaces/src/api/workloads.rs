@@ -275,7 +275,7 @@ pub async fn roll_readers(s: &ApiState, scope: &Scope, readers: &[&str], reason:
         apply_patch(client, ns, kind, name, &patch).await.map_err(kube_err)?;
         // ponytail: tracing is the only admin audit sink today — no dedicated log store exists to
         // reuse. Route this through one if/when the quotas plan's decisions gain a real sink.
-        tracing::info!(scope = %scope, workload = name, %by, reason = %reason_text, "workload rolled");
+        tracing::info!(scope = %scope, name, %by, reason = %reason_text, "workload.rolled");
     }
     Ok(())
 }

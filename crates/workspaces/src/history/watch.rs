@@ -694,9 +694,9 @@ async fn watch_kind<K>(
                     // watch is visible without every reconnect blip becoming its own noise source.
                     failures += 1;
                     if failures == 1 || failures.is_multiple_of(LOUD_EVERY) {
-                        tracing::warn!(error = %e, %region, %kind, failures, "history watch interrupted; restarting");
+                        tracing::warn!(%kind, %region, attempt = failures, error = %e, "history.watch.restarted");
                     } else {
-                        tracing::debug!(error = %e, %region, %kind, "history watch interrupted; restarting");
+                        tracing::debug!(%kind, %region, error = %e, "history.watch.restarted");
                     }
                     break;
                 }
@@ -709,7 +709,7 @@ async fn watch_kind<K>(
                 continue;
             }
             if let Err(e) = write_events(&history, &rows).await {
-                tracing::warn!(error = %e, %region, n = rows.len(), "history watch rows not written");
+                tracing::warn!(%region, count = rows.len(), error = %e, "history.write.failed");
             }
         }
         // A watcher that ended restarts after a growing pause rather than spinning on a cluster

@@ -823,7 +823,7 @@ pub(crate) fn kube_err(e: kube::Error) -> Response {
         kube::Error::Api(ae) if ae.code == 404 => not_found(),
         kube::Error::Api(ae) if ae.code == 409 => (StatusCode::CONFLICT, "conflict, retry").into_response(),
         _ => {
-            tracing::error!(error = %e, "kubernetes");
+            tracing::error!(reason = "kubernetes", error = %e, "request.failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "kubernetes error").into_response()
         }
     }

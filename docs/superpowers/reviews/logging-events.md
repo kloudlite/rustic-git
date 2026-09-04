@@ -165,3 +165,67 @@ you add an event.
 | `audit.write.failed` | error | `actor`, `action`, `target`, `error` |
 | `repo.read.failed` / `repo.list.failed` | error | `owner`, `team`, `reason`, `error` |
 | `upstream.request.failed` / `upstream.body.failed` / `upstream.parse.failed` | error | `reason`, `owner`, `name`, `repo`, `number`, `status`, `error` |
+| `listing.failed` | warn | `kind`, `volume`/`owner`/`environment`/`node`, `reason`, `error` |
+| `sweep.skipped` | warn | `node`, `reason` |
+| `peer.client.failed` | warn | `error` |
+| `peer.addr.failed` | warn | `volume`, `node`, `error` |
+| `pull.retried` | warn | `volume`, `snapshot`, `node`, `reason` |
+| `pull.failed` | warn | `volume`, `snapshot`, `node`, `reason`, `bytes`, `error` |
+| `snapshot.cut.failed` | warn | `snapshot`, `error` |
+| `snapshot.generation.failed` | warn | `snapshot`, `reason`, `error` |
+| `snapshot.dropped` | info | `volume`, `snapshot`, `reason` |
+| `snapshot.drop.failed` | warn | `volume`, `snapshot`, `reason`, `error` |
+| `snapshot.prune.failed` | warn | `volume`, `snapshot`, `error` |
+| `snapshot.send.failed` | warn | `volume`, `snapshot`, `status`, `stderr` |
+| `snapshot.state.invalid` | warn | `value`, `error` |
+| `replica.deleted` | info | `volume`, `name`, `reason` |
+| `replica.delete.failed` | warn | `volume`, `name`, `reason`, `error` |
+| `replica.status.write.failed` | warn | `volume`, `error` |
+| `volume.release.failed` | warn | `volume`, `error` |
+| `volume.mark.failed` | warn | `volume`, `reason`, `error` |
+| `volume.dropped` | info | `volume`, `reason` |
+| `volume.drop.failed` | warn | `volume`, `reason`, `error` |
+| `volume.collected` | info | `volume`, `reason` |
+| `volume.collect.failed` | warn | `volume`, `error` |
+| `volume.cleanup.failed` | warn | `volume`, `path`, `reason`, `error` |
+| `volume.delete.waiting` | info | `volume`, `reason` |
+| `parent.mark.failed` | warn | `kind`, `name`, `reason`, `error` |
+| `worktree.dropped` | info | `volume`, `count` |
+| `worktree.drop.failed` | warn | `volume`, `reason`, `error` |
+| `sync.skipped` | debug | `name`, `reason` |
+| `sync.cut.failed` | warn | `name`, `error` |
+| `sync.generation.failed` | warn | `name`, `reason`, `error` |
+| `wake.failed` | warn | `node`, `status`, `reason`, `error` |
+| `claim.retried` | debug | `kind`, `name`, `reason` |
+| `reconcile.abandoned` | warn | `kind`, `name`, `reason`, `error` |
+| `heartbeat.failed` | error | `error` |
+| `labels.healed` | debug | `name`, `owner` |
+| `node.read.failed` | warn | `node`, `reason`, `error` |
+| `node.labels.missing` | warn | `node`, `reason` |
+| `node.annotate.failed` | warn | `node`, `error` |
+| `sandbox.mode` | info | `mode`, `runtime_class` |
+| `nix.gcroot.missing` / `nix.gcroot.failed` | warn | `reason`, `error` |
+| `nix.profiles.dir.failed` | warn | `error` |
+| `nix.gc.completed` / `nix.gc.failed` | info / warn | `bytes`, `freed`, `error` |
+| `janitor.reclaimed` | info | `attach`, `profiles` |
+| `janitor.beat.failed` | warn | `error` |
+| `home.oversized` | warn | `owner`, `bytes` |
+| `homecache.not_subvolume` | warn | `path`, `reason` |
+| `settings.unavailable` | warn | `scope`, `mode`, `error` |
+| `settings.status.write.failed` | warn | `scope`, `error` |
+| `settings.forward.failed` | error | `scope`, `reason`, `error` |
+| `profile.index.failed` / `profile.remove.failed` | warn | `workspace`/`volume`, `error` |
+| `workspace.rebuilding` | info | `workspace`, `reason` |
+| `workspace.hostkey.missing` | warn | `workspace`, `name` |
+| `workspace.keys.deferred` | info | `owner`, `workspace`, `reason` |
+| `quota.defaulted` | info | `owner`, `reason` |
+| `namespace.skipped` | warn | `owner`, `name`, `reason` |
+| `key.read.failed` / `key.install.failed` | warn | `owner`, `reason`, `error` |
+| `ssh.session.mint.failed` | error | `error` |
+| `attach.clear.failed` / `attach.policy.delete.failed` | warn | `workspace`, `environment`, `error` |
+| `audit.write.failed` | warn (no store) / error | `actor`, `action`, `target`, `reason`, `error` |
+| `audit.read.failed` | warn | `name` |
+| `workload.rolled` | info | `scope`, `name`, `by`, `reason` |
+| `history.beats.skipped` | warn once, then debug | `table`, `reason` |
+| `history.consumer.disabled` | info (boot, by design) | `mode` |
+| `alerts.skipped` | warn | `region`, `reason` |

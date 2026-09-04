@@ -96,7 +96,7 @@ pub(crate) async fn my_node(ctx: &Ctx) -> MyNode {
         // on a live node with nothing but a silent requeue. The sweep sees the whole listing and is
         // the authority on a node that is not there.
         Ok(None) => {
-            tracing::warn!(node = %ctx.node, "reconcile: my own Node object is missing; assuming alive");
+            tracing::warn!(node = %ctx.node, reason = "missing", "node.read.failed");
             MyNode::default()
         }
         Ok(Some(n)) => MyNode {
@@ -104,7 +104,7 @@ pub(crate) async fn my_node(ctx: &Ctx) -> MyNode {
             decommissioning: crate::peer::decommissioning(Some(&n)),
         },
         Err(e) => {
-            tracing::warn!(node = %ctx.node, error = %e, "reconcile: reading my own Node; assuming alive");
+            tracing::warn!(node = %ctx.node, error = %e, "node.read.failed");
             MyNode::default()
         }
     }
@@ -251,7 +251,7 @@ impl Ctx {
         };
         let runtime_class = (!merged.runtime_class.is_empty()).then(|| merged.runtime_class.clone());
         if let Some(rc) = &runtime_class {
-            tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
+            tracing::info!(mode = "sandboxed", runtime_class = %rc, "sandbox.mode");
         }
         let git_init_image = merged.git_init_image.clone();
         // Unbounded on purpose: the only senders are this agent's own finished operations, one

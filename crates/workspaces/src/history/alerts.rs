@@ -489,7 +489,7 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
                 let Some(sql) = rule.sql_for(region) else {
                     // Never silent: a region whose name we refuse to interpolate is invisible on
                     // the Signals page, and only this line says why.
-                    tracing::warn!(%region, "region name is not an identifier; alerts not evaluated");
+                    tracing::warn!(%region, reason = "region-not-an-identifier", "alerts.skipped");
                     break;
                 };
                 results.push((rule.name, h.query(&sql).await.map_err(|e| e.to_string())));
@@ -502,7 +502,7 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
             // ROWS are carried to the next beat rather than recomputed: recomputing would re-stamp
             // them from a later clock, and a row under a second `ts`/`id` is a second row FINAL
             // can never merge away.
-            tracing::warn!(error = %e, n = writes.len(), "alert transitions not written; retrying next beat");
+            tracing::warn!(count = writes.len(), error = %e, "alerts.write.failed");
             pending = writes;
             if pending.len() > MAX_PENDING {
                 pending.drain(..pending.len() - MAX_PENDING);

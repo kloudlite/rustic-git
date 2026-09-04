@@ -29,15 +29,15 @@ pub async fn wake_peers(ctx: &Arc<Ctx>, live: &[String], secret: &str) {
             let addr = match agent_pod_addr(&ctx.client, node).await {
                 Ok(a) => a,
                 Err(e) => {
-                    tracing::warn!(%node, error = %e, "wake: no peer address; the ticker will get it");
+                    tracing::warn!(%node, error = %e, "peer.addr.failed");
                     return;
                 }
             };
             let url = format!("http://{addr}/peer/v1/wake");
             match http.post(&url).header("x-peer-secret", *secret).timeout(Duration::from_secs(5)).send().await {
                 Ok(r) if r.status().is_success() => {}
-                Ok(r) => tracing::warn!(%node, status = %r.status(), "wake: peer refused"),
-                Err(e) => tracing::warn!(%node, error = %e, "wake: peer unreachable; the ticker will get it"),
+                Ok(r) => tracing::warn!(%node, status = %r.status(), reason = "refused", "wake.failed"),
+                Err(e) => tracing::warn!(%node, reason = "unreachable", error = %e, "wake.failed"),
             }
         }
     });

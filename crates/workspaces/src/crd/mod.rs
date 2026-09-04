@@ -330,7 +330,7 @@ where
     Ok(raw.and_then(|v| match serde_json::from_value(v.clone()) {
         Ok(state) => Some(state),
         Err(e) => {
-            tracing::warn!(error = %e, value = %v, "snapshot state did not parse; treating as absent");
+            tracing::warn!(error = %e, value = %v, "snapshot.state.invalid");
             None
         }
     }))

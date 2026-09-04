@@ -36,7 +36,7 @@ pub(crate) async fn audit(
 ) {
     let result = result.into();
     let Some(store) = s.keys.as_ref() else {
-        tracing::warn!(actor, action, target, "audit row not written: no object store configured");
+        tracing::warn!(actor, action, target, reason = "no-object-store", "audit.write.failed");
         return;
     };
     let entry = crate::audit::AuditEntry {
@@ -48,7 +48,7 @@ pub(crate) async fn audit(
         result,
     };
     if let Err(e) = crate::audit::record(&store.os, &entry).await {
-        tracing::error!(error = %e, actor, action, target, "audit row not written");
+        tracing::error!(actor, action, target, error = %e, "audit.write.failed");
     }
 
     // The queryable copy. The object-store row above is the append-only legal record and has
@@ -63,7 +63,7 @@ pub(crate) async fn audit(
             &entry.result,
         );
         if let Err(e) = crate::history::events::write_events(h, &[row]).await {
-            tracing::warn!(error = %e, action, target, "audit event not copied to history");
+            tracing::warn!(table = "audit", action, target, error = %e, "history.write.failed");
         }
     }
 }

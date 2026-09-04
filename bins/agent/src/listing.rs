@@ -130,7 +130,7 @@ async fn parents_matching(ctx: &Arc<Ctx>, mine: &ListParams, on_node: Option<&st
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "listing this node's workspaces; this beat does nothing");
+            tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
             return None;
         }
     }
@@ -162,7 +162,7 @@ async fn parents_matching(ctx: &Arc<Ctx>, mine: &ListParams, on_node: Option<&st
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "listing this node's environments; this beat does nothing");
+            tracing::warn!(kind = "Environment", error = %e, "listing.failed");
             return None;
         }
     }
@@ -178,14 +178,14 @@ pub async fn beat(ctx: &Arc<Ctx>) -> Option<Beat> {
     let volumes = match Api::<crd::Volume>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(l) => l.items,
         Err(e) => {
-            tracing::warn!(error = %e, "pull: listing volumes; this beat does nothing");
+            tracing::warn!(kind = "Volume", error = %e, "listing.failed");
             return None;
         }
     };
     let replicas = match Api::<crd::VolumeReplica>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(l) => l.items,
         Err(e) => {
-            tracing::warn!(error = %e, "pull: listing replicas; this beat does nothing");
+            tracing::warn!(kind = "VolumeReplica", error = %e, "listing.failed");
             return None;
         }
     };

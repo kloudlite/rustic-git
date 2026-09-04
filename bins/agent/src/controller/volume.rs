@@ -42,7 +42,7 @@ where
         "metadata": { "labels": { k8s::OWNER_LABEL: owner, k8s::KIND_LABEL: kind, k8s::TEAM_LABEL: team } }
     });
     api.patch(&obj.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
-    tracing::info!(name = %obj.name_any(), %owner, "healed listing labels from spec");
+    tracing::debug!(name = %obj.name_any(), %owner, "labels.healed");
     Ok(())
 }
 
@@ -295,7 +295,7 @@ pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, R
                 running.remove(&uid);
             }
             Some(_) => {
-                tracing::info!(volume = %v.name_any(), "delete waiting for an in-flight operation");
+                tracing::info!(volume = %v.name_any(), reason = "in-flight", "volume.delete.waiting");
                 return Ok(Action::requeue(TICK));
             }
             None => {}
@@ -314,7 +314,7 @@ pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, R
         // A node that never built for this volume has no profile — and a `/nix` this pod cannot
         // see is not a reason to strand a delete behind its finalizer.
         if let Err(e) = crate::nix::remove_profile(&profiles, &profile_id) {
-            tracing::warn!(volume = %profile_id, error = %e, "removing the nix profile");
+            tracing::warn!(volume = %profile_id, error = %e, "profile.remove.failed");
         }
     })
         .await
@@ -669,7 +669,7 @@ where
     // is not an error — the next pass meets the winner's pin and the guard below refuses as usual.
     if vol.spec.node_name.is_empty() {
         if take_volume(ctx, &id, node_name).await? {
-            tracing::info!(volume = %id, node = %node_name, "took over an unowned volume");
+            tracing::info!(volume = %id, node = %node_name, "volume.taken");
         }
         return Ok(Resolved::Wait {
             volume_ref: None,
@@ -713,7 +713,7 @@ where
             Err(_) => false,
         };
         if alive {
-            tracing::info!(volume = %id, owner = %vol.spec.node_name, "lost the volume; un-placing myself so the owner reclaims it");
+            tracing::info!(volume = %id, node = %vol.spec.node_name, reason = "lost", "volume.released");
             // GUARDED, exactly like the claim itself (`claim.rs:209-226`): this write races the
             // real owner's own claim of the same parent, and a forced apply (`write_ws_status`/
             // `patch_status`) would let this un-place silently clobber a claim node-b just made.

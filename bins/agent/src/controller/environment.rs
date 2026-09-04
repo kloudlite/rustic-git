@@ -357,7 +357,7 @@ async fn run_environment(
     let team = match crate::binding::get_binding(ctx, &e.spec.region, &e.spec.owner).await? {
         Some(b) => b.status.map(|s| s.team).unwrap_or(false),
         None => {
-            tracing::info!(owner = %e.spec.owner, "no OwnerBinding yet; sizing this environment's quota as a person's");
+            tracing::info!(owner = %e.spec.owner, reason = "no-ownerbinding", "quota.defaulted");
             false
         }
     };

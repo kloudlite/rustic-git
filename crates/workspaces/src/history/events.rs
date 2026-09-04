@@ -134,7 +134,7 @@ pub async fn consume_forever(cache: Arc<kloudlite_git_storage::cache::Cache>, hi
     if !cache.connected() {
         // Loud once, at startup: "the activity feed stopped filling in" is much harder to diagnose
         // than a missing KLOUDLITE_GIT_REDIS_URL named in the logs.
-        tracing::warn!("no Redis: the history consumer will idle; nothing else stops recording");
+        tracing::info!(mode = "no-redis", "history.consumer.disabled");
     }
     cache.xgroup_create_mkstream(STREAM, GROUP).await;
     // Random, not hostname-derived: two admin pods restarted into the same name would otherwise
@@ -161,7 +161,7 @@ pub async fn consume_forever(cache: Arc<kloudlite_git_storage::cache::Cache>, hi
             // a row on any build, so holding it would strand the PEL forever.
             Ok(()) => cache.xack(STREAM, GROUP, &ids).await,
             Err(e) => {
-                tracing::warn!(error = %e, n = rows.len(), "history insert failed; leaving the batch unacked for redelivery");
+                tracing::warn!(table = "events", count = rows.len(), error = %e, "history.write.failed");
                 tokio::time::sleep(IDLE).await;
             }
         }

@@ -43,7 +43,7 @@ pub(crate) async fn start_spread(
     }
     let Some(siblings) = crate::listing::parents_on_volume(ctx, volume_id).await else { return Ok(None) };
     let Some(node) = super::stop::start_placement(ctx, volume, &siblings).await? else { return Ok(None) };
-    tracing::info!(kind = %parent_kind, parent = %parent_name, %node, "handed over on start");
+    tracing::info!(kind = %parent_kind, name = %parent_name, %node, reason = "handover", "volume.moved");
     Ok(Some(node))
 }
 

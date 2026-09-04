@@ -275,12 +275,12 @@ where
             Err(kube::Error::Api(s)) if s.code == 409 && attempt + 1 < ATTEMPTS => {
                 // A peer wrote first. Re-read and re-decide rather than assuming it placed the
                 // object: it may have written something else entirely.
-                tracing::info!(%kind, object = %obj.name_any(), "placement write conflicted; re-reading");
+                tracing::debug!(%kind, name = %obj.name_any(), reason = "conflict", "claim.retried");
                 let name = obj.name_any();
                 obj = api.get(&name).await?;
             }
             Err(kube::Error::Api(s)) if s.code == 409 => {
-                tracing::info!(%kind, object = %obj.name_any(), "lost the placement race; a peer claimed it");
+                tracing::debug!(%kind, name = %obj.name_any(), reason = "lost-race", "claim.refused");
                 return Ok(Action::await_change());
             }
             Err(e) => return Err(e.into()),

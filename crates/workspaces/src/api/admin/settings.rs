@@ -55,7 +55,7 @@ fn object_store(s: &ApiState) -> Result<std::sync::Arc<dyn slatedb::object_store
 }
 
 fn internal(e: impl std::fmt::Display) -> Response {
-    tracing::error!(error = %e, "cluster/settings");
+    tracing::error!(reason = "cluster-settings", error = %e, "request.failed");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
 
@@ -171,7 +171,7 @@ pub(crate) async fn put_central(
         // Never format `peer.secret`/the argv into this — matches `merge_worker.rs`'s
         // `local()`/`networked()` split for the same reason.
         .map_err(|e| {
-            tracing::error!(error = %e, "forwarding central settings write");
+            tracing::error!(scope = "central", reason = "write", error = %e, "settings.forward.failed");
             (StatusCode::BAD_GATEWAY, "could not reach the server tier").into_response()
         })?;
     let status = resp.status();
@@ -244,7 +244,7 @@ pub(crate) async fn revert_central(
         .send()
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "forwarding central settings revert");
+            tracing::error!(scope = "central", reason = "revert", error = %e, "settings.forward.failed");
             (StatusCode::BAD_GATEWAY, "could not reach the server tier").into_response()
         })?;
     let status = resp.status();

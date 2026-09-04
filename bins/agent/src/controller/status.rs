@@ -162,7 +162,7 @@ where
             if settled_status_eq(obj, &next) {
                 return Ok(Action::await_change());
             }
-            tracing::warn!(kind = %kind, name = %obj.name_any(), reason = %reason, error = %msg, "permanent failure; not retrying");
+            tracing::warn!(kind = %kind, name = %obj.name_any(), reason = %reason, error = %msg, "reconcile.abandoned");
             let api: Api<K> = Api::all(ctx.client.clone());
             patch_status(&api, &obj.name_any(), kind, next).await?;
             Ok(Action::await_change())

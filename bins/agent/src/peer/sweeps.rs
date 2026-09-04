@@ -27,7 +27,7 @@ pub(crate) async fn reap_dead_replicas(ctx: &Arc<Ctx>, beat: &crate::listing::Be
         if node_is_dead(nodes.iter().find(|n| n.name_any() == r.spec.node), floor, now) {
             let rname = r.name_any();
             if let Err(e) = replica_api.delete(&rname, &Default::default()).await {
-                tracing::warn!(replica = %rname, error = %e, "pull: reaper: deleting a dead node's replica row");
+                tracing::warn!(name = %rname, reason = "dead-node", error = %e, "replica.delete.failed");
             }
         }
     }
@@ -152,7 +152,7 @@ pub(crate) async fn sweep_volumes(
                 Ok(Some(v)) => cur = v,
                 Ok(None) => continue, // a survivor's takeover landed between our list and this patch
                 Err(e) => {
-                    tracing::warn!(volume = %name, error = %e, "sweep: releasing an unavailable owner's volume");
+                    tracing::warn!(volume = %name, error = %e, "volume.release.failed");
                     continue;
                 }
             }
@@ -183,12 +183,12 @@ pub(crate) async fn sweep_volumes(
                     Err(kube::Error::Api(s)) if s.code == 409 && attempt < 2 => match api.get(&name).await {
                         Ok(fresh) => cur = fresh,
                         Err(e) => {
-                            tracing::warn!(volume = %name, error = %e, "sweep: re-read after conflict");
+                            tracing::warn!(volume = %name, reason = "re-read", error = %e, "volume.mark.failed");
                             break;
                         }
                     },
                     Err(e) => {
-                        tracing::warn!(volume = %name, error = %e, "sweep: marking an unavailable owner's volume");
+                        tracing::warn!(volume = %name, reason = "mark", error = %e, "volume.mark.failed");
                         break;
                     }
                 }
@@ -246,7 +246,7 @@ where
         Ok(Some(o)) => o,
         Ok(None) => return, // deleted between the listing and now: nothing to mark
         Err(e) => {
-            tracing::warn!(%kind, %name, error = %e, "sweep: reading a parent to mark it");
+            tracing::warn!(%kind, %name, reason = "read", error = %e, "parent.mark.failed");
             return;
         }
     };
@@ -275,12 +275,12 @@ where
             Err(kube::Error::Api(s)) if s.code == 409 && attempt == 0 => match api.get(name).await {
                 Ok(fresh) => cur = fresh,
                 Err(e) => {
-                    tracing::warn!(%kind, %name, error = %e, "sweep: re-read after conflict");
+                    tracing::warn!(%kind, %name, reason = "re-read", error = %e, "parent.mark.failed");
                     return;
                 }
             },
             Err(e) => {
-                tracing::warn!(%kind, %name, error = %e, "sweep: marking an unavailable node's parent");
+                tracing::warn!(%kind, %name, reason = "mark", error = %e, "parent.mark.failed");
                 return;
             }
         }
@@ -371,9 +371,9 @@ async fn sweep_orphan_snapshots(ctx: &Arc<Ctx>, known: &HashSet<String>, snapsho
         }
         let name = s.name_any();
         match api.delete(&name, &Default::default()).await {
-            Ok(_) => tracing::info!(volume = %s.spec.volume, snapshot = %name, "pull: retire: no Volume CR; dropping the orphaned snapshot"),
+            Ok(_) => tracing::info!(volume = %s.spec.volume, snapshot = %name, reason = "no-volume-cr", "snapshot.dropped"),
             Err(e) if matches!(&e, kube::Error::Api(st) if st.code == 404) => {}
-            Err(e) => tracing::warn!(snapshot = %name, error = %e, "pull: retire: deleting an orphaned snapshot"),
+            Err(e) => tracing::warn!(snapshot = %name, reason = "no-volume-cr", error = %e, "snapshot.drop.failed"),
         }
     }
 }
@@ -411,7 +411,7 @@ pub(crate) async fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listin
         let local = match ctx.engine.local_snapshots(&id) {
             Ok(l) => l,
             Err(e) => {
-                tracing::warn!(volume = %id, error = %e, "pull: retire: listing local snapshots; skipping this volume");
+                tracing::warn!(kind = "Snapshot", volume = %id, reason = "local", error = %e, "listing.failed");
                 continue;
             }
         };
@@ -424,13 +424,13 @@ pub(crate) async fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listin
             if !matches!(api.get_opt(&name).await, Ok(None)) {
                 continue;
             }
-            tracing::info!(volume = %id, snapshot = %name, "pull: retire: no Snapshot CR; dropping the orphaned snapshot bytes");
+            tracing::info!(volume = %id, snapshot = %name, reason = "no-record", "snapshot.dropped");
             // btrfs delete takes a blocking flock and shells out — never on the reactor thread.
             let (engine, vol, cname) = (ctx.engine.clone(), id.clone(), name.clone());
             match tokio::task::spawn_blocking(move || engine.drop_snapshot(&vol, &cname)).await {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: dropping orphaned snapshot bytes; left for the next pass"),
-                Err(e) => tracing::warn!(volume = %id, snapshot = %name, error = %e, "pull: retire: the orphan-bytes drop task panicked"),
+                Ok(Err(e)) => tracing::warn!(volume = %id, snapshot = %name, reason = "no-record", error = %e, "snapshot.drop.failed"),
+                Err(e) => tracing::warn!(volume = %id, snapshot = %name, reason = "panicked", error = %e, "snapshot.drop.failed"),
             }
             dropped.push((id.clone(), name));
         }
@@ -452,13 +452,13 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     // as present — garbage collection finishes on its own and the next beat sees it absent.
     let known: HashSet<String> = vols.iter().map(|v| v.name_any()).collect();
     for id in orphan_voldirs(&ctx.engine.pool.root.join("vol"), &known) {
-        tracing::info!(volume = %id, "pull: retire: no Volume CR; dropping the orphaned local copy");
+        tracing::info!(volume = %id, reason = "no-volume-cr", "volume.dropped");
         // A voldir walk plus one `btrfs subvolume delete` per subvolume under it: seconds to
         // minutes of a thread, and this beat shares its reactor with every reconcile and every
         // peer send on the node. Same rule `sweep_orphan_snap_bytes` follows two functions up.
         let (engine, vol) = (ctx.engine.clone(), id.clone());
         if let Err(e) = tokio::task::spawn_blocking(move || janitor::cleanup_local(&engine, &vol)).await {
-            tracing::warn!(volume = %id, error = %e, "pull: retire: the orphan-voldir cleanup task panicked");
+            tracing::warn!(volume = %id, reason = "panicked", error = %e, "volume.drop.failed");
         }
     }
     // The row half of the same orphan. `retire_pass` only ever visits LISTED volumes, so a
@@ -469,10 +469,10 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     // per row it creates. Stamp the ownerReference at creation if row garbage ever outgrows this.
     for r in beat.replicas.iter().filter(|r| r.spec.node == ctx.node && !known.contains(&r.spec.volume)) {
         let rname = r.name_any();
-        tracing::info!(volume = %r.spec.volume, row = %rname, "pull: retire: no Volume CR; dropping my orphaned replica row");
+        tracing::info!(volume = %r.spec.volume, name = %rname, reason = "no-volume-cr", "replica.deleted");
         if let Err(e) = Api::<crd::VolumeReplica>::all(ctx.client.clone()).delete(&rname, &Default::default()).await {
             if !matches!(&e, kube::Error::Api(s) if s.code == 404) {
-                tracing::warn!(row = %rname, error = %e, "pull: retire: deleting my orphaned replica row");
+                tracing::warn!(name = %rname, reason = "no-volume-cr", error = %e, "replica.delete.failed");
             }
         }
     }
@@ -484,7 +484,7 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
             sweep_orphan_snap_bytes(ctx, beat, &l.items).await;
             collect_unreferenced_volumes(ctx, beat, &l.items, live).await;
         }
-        Err(e) => tracing::warn!(error = %e, "pull: retire: listing snapshots; sweeping none"),
+        Err(e) => tracing::warn!(kind = "Snapshot", error = %e, "listing.failed"),
     }
     // Same batching as `interesting_volumes`: one hop off the reactor for every probe this loop
     // needs instead of a `stat` per volume on it.
@@ -526,10 +526,10 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
                             (ctx.engine.clone(), id.clone(), v.spec.node_name.clone(), ctx.node.clone());
                         match tokio::task::spawn_blocking(move || janitor::drop_stale_worktrees(&engine, &vol, &owner, &me)).await {
                             Ok(dropped) if dropped > 0 => {
-                                tracing::info!(volume = %id, dropped, "pull: dropped stale live worktree(s) left by a takeover")
+                                tracing::info!(volume = %id, count = dropped, "worktree.dropped")
                             }
                             Ok(_) => {}
-                            Err(e) => tracing::warn!(volume = %id, error = %e, "pull: the stale-worktree drop task panicked"),
+                            Err(e) => tracing::warn!(volume = %id, reason = "panicked", error = %e, "worktree.drop.failed"),
                         }
                     }
                 }
@@ -539,16 +539,16 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
         let rname = crd::replica_name(&id, &ctx.node);
         if let Err(e) = Api::<crd::VolumeReplica>::all(ctx.client.clone()).delete(&rname, &Default::default()).await {
             if !matches!(&e, kube::Error::Api(s) if s.code == 404) {
-                tracing::warn!(volume = %id, error = %e, "pull: retire: deleting my replica row; keeping the copy");
+                tracing::warn!(volume = %id, reason = "keeping-copy", error = %e, "replica.delete.failed");
                 continue; // row first, copy second: a copy without a row is harmless, a row without a copy is a lie
             }
         }
         let (engine, vol) = (ctx.engine.clone(), id.clone());
         if let Err(e) = tokio::task::spawn_blocking(move || janitor::cleanup_local(&engine, &vol)).await {
-            tracing::warn!(volume = %id, error = %e, "pull: retire: the copy-drop task panicked");
+            tracing::warn!(volume = %id, reason = "panicked", error = %e, "volume.drop.failed");
             continue;
         }
-        tracing::info!(volume = %id, "pull: retire: slot moved elsewhere, copy dropped");
+        tracing::info!(volume = %id, reason = "slot-moved", "volume.dropped");
     }
 }
 
@@ -601,9 +601,9 @@ async fn collect_unreferenced_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Bea
             continue;
         }
         match Api::<crd::Volume>::all(ctx.client.clone()).delete(&id, &Default::default()).await {
-            Ok(_) => tracing::info!(volume = %id, "pull: retire: no working copy and no snapshot; collecting the volume"),
+            Ok(_) => tracing::info!(volume = %id, reason = "unreferenced", "volume.collected"),
             Err(e) if matches!(&e, kube::Error::Api(s) if s.code == 404) => {}
-            Err(e) => tracing::warn!(volume = %id, error = %e, "pull: retire: collecting an unreferenced volume"),
+            Err(e) => tracing::warn!(volume = %id, error = %e, "volume.collect.failed"),
         }
     }
 }

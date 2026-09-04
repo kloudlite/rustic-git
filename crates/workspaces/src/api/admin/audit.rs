@@ -42,7 +42,7 @@ fn list_err(e: crate::audit::ListError) -> Response {
     match e {
         crate::audit::ListError::InvalidFilter(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response(),
         crate::audit::ListError::Store(e) => {
-            tracing::error!(error = %e, "admin/audit");
+            tracing::error!(reason = "audit", error = %e, "request.failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
         }
     }

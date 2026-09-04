@@ -147,7 +147,7 @@ async fn ensure_profile(
                         let indexed = std::fs::read_link(crate::nix::profile_path(&profiles, &id))
                             .and_then(|store_path| crate::nix::record_index(&profiles, &hash, &store_path));
                         if let Err(e) = indexed {
-                            tracing::warn!(workspace = %id, error = %e, "built profile not indexed; it will not be reused");
+                            tracing::warn!(workspace = %id, error = %e, "profile.index.failed");
                         }
                         Ok::<(), std::io::Error>(())
                     }
@@ -159,10 +159,10 @@ async fn ensure_profile(
             }
             Ok(_) => {
                 let _ = std::fs::remove_file(crate::nix::building_path(&ctx.profiles_dir, id));
-                tracing::info!(workspace = %id, "the spec changed during the build; rebuilding");
+                tracing::info!(workspace = %id, reason = "spec-changed", "workspace.rebuilding");
             }
             Err(_) if stale => {
-                tracing::info!(workspace = %id, "a build for a superseded spec failed; rebuilding");
+                tracing::info!(workspace = %id, reason = "superseded", "workspace.rebuilding");
             }
             Err(e) => {
                 // The OLD packages, not the ones that failed (`profile_failed` keeps them):
@@ -340,7 +340,7 @@ async fn ensure_ssh(
     // string the CLI would try to pin — and say so, because the symptom is a workspace nobody can
     // ssh into with no other trace.
     if public.is_empty() {
-        tracing::warn!(workspace = %id, secret = %name, "host key Secret has no public half; status.sshHostKey left as it was");
+        tracing::warn!(workspace = %id, name = %name, "workspace.hostkey.missing");
         return Ok(());
     }
     if prev.ssh_host_key.as_deref() != Some(public.as_str()) {

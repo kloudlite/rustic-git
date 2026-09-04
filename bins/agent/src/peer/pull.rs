@@ -106,7 +106,7 @@ pub(crate) async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str
     let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(list) => list.items,
         Err(e) => {
-            tracing::warn!(error = %e, "pull: listing nodes; reaping, unclaiming and placing nothing");
+            tracing::warn!(kind = "Node", error = %e, "listing.failed");
             return false;
         }
     };
@@ -124,7 +124,7 @@ pub(crate) async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str
     // wrongly NotReady past it stops reconciling until its Node object recovers, which is the
     // deliberate trade — a wrong sweep deletes data, a paused one only waits.
     if node_is_dead(nodes.iter().find(|k| k.name_any() == ctx.node), floor, now) {
-        tracing::warn!(node = %ctx.node, "pull: my own Node reads NotReady past the floor; sweeping nothing this pass");
+        tracing::warn!(node = %ctx.node, reason = "node-not-ready", "sweep.skipped");
         return false;
     }
 
@@ -143,7 +143,7 @@ pub(crate) async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str
     let candidates = match pool_nodes(&ctx.client).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = %e, "pull: listing pool nodes");
+            tracing::warn!(kind = "Node", reason = "pool", error = %e, "listing.failed");
             return false;
         }
     };
@@ -151,7 +151,7 @@ pub(crate) async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str
     let http = match peer_http_client() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "pull: building the http client");
+            tracing::warn!(error = %e, "peer.client.failed");
             return false;
         }
     };
@@ -259,7 +259,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
     let all: Vec<crd::Snapshot> = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
         Ok(list) => list.items,
         Err(e) => {
-            tracing::warn!(%volume, error = %e, "pull: listing snapshots; keeping everything");
+            tracing::warn!(kind = "Snapshot", %volume, error = %e, "listing.failed");
             return false;
         }
     };
@@ -270,7 +270,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
     let mut have: HashSet<String> = match ctx.engine.local_snapshots(volume) {
         Ok(names) => names.into_iter().collect(),
         Err(e) => {
-            tracing::warn!(%volume, error = %e, "pull: local_snapshots");
+            tracing::warn!(kind = "Snapshot", %volume, reason = "local", error = %e, "listing.failed");
             return false;
         }
     };
@@ -313,7 +313,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
     for &source in &sources {
         match agent_pod_addr(&ctx.client, source).await {
             Ok(a) => addrs.push((source, a)),
-            Err(e) => tracing::warn!(%volume, source, error = %e, "pull: no peer address; skipping this source"),
+            Err(e) => tracing::warn!(%volume, node = source, error = %e, "peer.addr.failed"),
         }
     }
 
@@ -350,7 +350,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             let timeout = send_timeout(&ctx.settings);
             let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref(), max_bytes, timeout).await;
             if result.is_err() && my_parent.is_some() {
-                tracing::warn!(%volume, %name, source, "pull: incremental receive failed, falling back to a full pull from the same source");
+                tracing::warn!(%volume, snapshot = %name, node = source, reason = "incremental-failed", "pull.retried");
                 result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None, max_bytes, timeout).await;
             }
             match result {
@@ -359,12 +359,12 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
                     pulled = true;
                     break;
                 }
-                Err(e) => tracing::warn!(%volume, %name, source, error = %e, "pull: receive failed; trying next source"),
+                Err(e) => tracing::warn!(%volume, snapshot = %name, node = source, reason = "receive", error = %e, "pull.failed"),
             }
         }
         if !pulled {
             any_pull_failed = true;
-            tracing::warn!(%volume, %name, "pull: no source could supply this snapshot this pass");
+            tracing::warn!(%volume, snapshot = %name, reason = "no-source", "pull.failed");
         }
     }
 
@@ -387,8 +387,8 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             Ok(Ok(())) => {
                 have.remove(&name);
             }
-            Ok(Err(e)) => tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired snapshot failed; left for the next pass"),
-            Err(e) => tracing::warn!(%volume, snapshot = %name, error = %e, "pull: the retire drop task panicked"),
+            Ok(Err(e)) => tracing::warn!(%volume, snapshot = %name, reason = "retired", error = %e, "snapshot.drop.failed"),
+            Err(e) => tracing::warn!(%volume, snapshot = %name, reason = "panicked", error = %e, "snapshot.drop.failed"),
         }
     }
 
@@ -409,7 +409,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
     }
     let branches: std::collections::BTreeMap<String, String> = best.into_iter().map(|(w, (_, n))| (w, n)).collect();
     if let Err(e) = write_replica_status(ctx, volume, !missing_at_end, branches).await {
-        tracing::warn!(%volume, error = %e, "pull: writing VolumeReplica status");
+        tracing::warn!(%volume, error = %e, "replica.status.write.failed");
     }
     any_pull_failed
 }
@@ -467,7 +467,7 @@ pub async fn pull_one(
     drop(stdin);
     let ok = match copy_result {
         Ok(n) if n > max_bytes => {
-            tracing::warn!(%volume, %name, max_bytes, "pull: the source exceeded this volume's receive ceiling");
+            tracing::warn!(%volume, snapshot = %name, bytes = max_bytes, reason = "ceiling", "pull.failed");
             let _ = child.wait().await;
             false
         }

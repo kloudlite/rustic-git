@@ -98,7 +98,7 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
     if let Err(e) = result {
         // Keep-biased: a failed cut leaves the CR `Working` and no CR/disk mismatch — the next
         // pass calls `snapshot_worktree` again, which converges on the same destination path.
-        tracing::warn!(snapshot = %name, error = %e.0, "snapshot: cutting the snapshot failed; will retry");
+        tracing::warn!(snapshot = %name, error = %e.0, "snapshot.cut.failed");
         return Ok(Action::requeue(TICK));
     }
     // ponytail: no `sizeBytes` — a `du -s` over a btrfs subvolume walks every inode, which is
@@ -173,17 +173,17 @@ async fn record_post_cut_generation(ctx: &Arc<Ctx>, api: &Api<crd::Snapshot>, na
     let gen = match tokio::task::spawn_blocking(move || engine.generation(&vol, &wt)).await {
         Ok(Ok(g)) => g,
         Ok(Err(e)) => {
-            tracing::warn!(snapshot = %name, error = %e.0, "snapshot: re-reading the post-cut generation");
+            tracing::warn!(snapshot = %name, reason = "read", error = %e.0, "snapshot.generation.failed");
             return;
         }
         Err(e) => {
-            tracing::warn!(snapshot = %name, error = %e, "snapshot: post-cut generation task panicked");
+            tracing::warn!(snapshot = %name, reason = "panicked", error = %e, "snapshot.generation.failed");
             return;
         }
     };
     let body = serde_json::json!({"metadata": {"annotations": {crate::sync::SYNCED_GENERATION: gen.to_string()}}});
     if let Err(e) = api.patch(name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&body)).await {
-        tracing::warn!(snapshot = %name, error = %e, "snapshot: recording the post-cut generation");
+        tracing::warn!(snapshot = %name, reason = "record", error = %e, "snapshot.generation.failed");
     }
 }
 
@@ -287,7 +287,7 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     let list = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(%volume, error = %e, "retention: listing snapshots; nothing deleted this pass");
+            tracing::warn!(kind = "Snapshot", %volume, reason = "retention", error = %e, "listing.failed");
             return;
         }
     };
@@ -306,7 +306,7 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     let seeded = match seeded_from_cuts(ctx, volume).await {
         Ok(h) => h,
         Err(e) => {
-            tracing::warn!(%volume, error = %e, "retention: listing seeded-from cuts; nothing deleted this pass");
+            tracing::warn!(kind = "Snapshot", %volume, reason = "seeded-from", error = %e, "listing.failed");
             return;
         }
     };
@@ -316,7 +316,7 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
     for (name, s) in &ready {
         if name != head && s.spec.transient && s.spec.worktree == worktree && !seeded.contains(name) {
             if let Err(e) = snap_api.delete(name, &Default::default()).await {
-                tracing::warn!(%volume, snapshot = %name, error = %e, "retention: delete failed; left for the next pass");
+                tracing::warn!(%volume, snapshot = %name, error = %e, "snapshot.prune.failed");
             }
         }
     }

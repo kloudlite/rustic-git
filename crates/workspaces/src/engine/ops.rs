@@ -121,7 +121,7 @@ impl Engine {
             if self.has_btrfs {
                 run(&["btrfs", "subvolume", "create", root.to_str().unwrap()])?;
             } else {
-                tracing::warn!(path = %root.display(), "no btrfs/root: homecache is a plain directory, not a subvolume");
+                tracing::warn!(path = %root.display(), reason = "no-btrfs-root", "homecache.not_subvolume");
                 std::fs::create_dir(&root).map_err(EngErr::io)?;
             }
         } else if self.has_btrfs && !is_subvolume(&root) {

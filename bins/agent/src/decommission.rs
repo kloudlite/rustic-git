@@ -69,7 +69,7 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
     let nodes = match Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(l) => l.items,
         Err(e) => {
-            tracing::warn!(error = %e, "decommission: listing nodes; doing nothing this beat");
+            tracing::warn!(kind = "Node", error = %e, "listing.failed");
             return;
         }
     };
@@ -124,7 +124,7 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
         .patch(&ctx.node, &PatchParams::default(), &Patch::Merge(&patch))
         .await
     {
-        tracing::warn!(error = %e, "decommission: annotating my own node");
+        tracing::warn!(node = %ctx.node, error = %e, "node.annotate.failed");
     }
 }
 

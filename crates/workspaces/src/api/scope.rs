@@ -42,7 +42,7 @@ pub(crate) async fn may_act_on(s: &ApiState, c: &Caller, owner: &str) -> bool {
         // Every cross-owner access a claim allows is recorded with the caller: the point of the
         // claim is that support never has to impersonate, and an un-logged one would be worse than
         // impersonation, not better.
-        tracing::info!(caller = %c.name, %owner, "superadmin acting on another owner");
+        tracing::info!(caller = %c.name, %owner, "superadmin.acting");
         return true;
     }
     false

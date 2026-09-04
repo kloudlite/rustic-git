@@ -186,10 +186,10 @@ pub async fn run_beats(state: Arc<ApiState>) {
         iv.tick().await;
         if state.history.is_none() {
             if !history_missing_warned {
-                tracing::warn!("hourly beats skipped: no ClickHouse configured");
+                tracing::warn!(reason = "no-clickhouse", "history.beats.skipped");
                 history_missing_warned = true;
             } else {
-                tracing::debug!("hourly beats skipped: no ClickHouse configured");
+                tracing::debug!(reason = "no-clickhouse", "history.beats.skipped");
             }
             continue;
         }
@@ -213,13 +213,13 @@ pub async fn tick_once(state: &Arc<ApiState>) {
         .unwrap_or_else(chrono::Utc::now);
 
     let Some(client) = state.kube.as_ref() else {
-        tracing::warn!("hourly beats skipped: no kubernetes client configured");
+        tracing::warn!(reason = "no-kube-client", "history.beats.skipped");
         return;
     };
     let f = match owners::fleet(client).await {
         Ok(f) => f,
         Err(_) => {
-            tracing::warn!("hourly beats skipped: the owners fold failed");
+            tracing::warn!(reason = "owners-fold-failed", "history.beats.skipped");
             return;
         }
     };
@@ -234,16 +234,16 @@ pub async fn tick_once(state: &Arc<ApiState>) {
         usage.push(UsageInput { owner: owner.clone(), is_team, used, limit });
     }
     if let Err(e) = h.insert("usage_hourly", &usage_rows(ts, &usage)).await {
-        tracing::warn!(error = %e, "usage_hourly beat not written");
+        tracing::warn!(table = "usage_hourly", error = %e, "history.write.failed");
     }
 
     match clusters::cluster_rows(state).await {
         Ok(rows) => {
             let fleet = fleet_inputs(rows, &f);
             if let Err(e) = h.insert("fleet_hourly", &fleet_rows(ts, &fleet)).await {
-                tracing::warn!(error = %e, "fleet_hourly beat not written");
+                tracing::warn!(table = "fleet_hourly", error = %e, "history.write.failed");
             }
         }
-        Err(_) => tracing::warn!("fleet_hourly beat skipped: the clusters fold failed"),
+        Err(_) => tracing::warn!(table = "fleet_hourly", reason = "clusters-fold-failed", "history.beats.skipped"),
     }
 }

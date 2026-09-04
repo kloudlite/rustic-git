@@ -32,7 +32,7 @@ pub fn spawn_janitor(pool: String, nix: Arc<dyn nix::Nix>) {
             let beat = tokio::task::spawn_blocking(move || {
                 let (attach, profiles) = janitor_beat(&pool);
                 if attach > 0 || profiles > 0 {
-                    tracing::info!(attach, profiles, "agent: janitor reclaimed attach dir(s), profile index entries");
+                    tracing::info!(attach, profiles, "janitor.reclaimed");
                 }
                 // The store is a per-node cache; the profile out-links are its only roots, so a
                 // GC is always safe and the only question is when. Size by `du` of the store dir,
@@ -50,11 +50,11 @@ pub fn spawn_janitor(pool: String, nix: Arc<dyn nix::Nix>) {
             // this sweep bounds the index, it does not reclaim urgently.
             match beat {
                 Ok((used, 0)) if used > NIX_GC_HIGH_BYTES => match nix.collect_garbage().await {
-                    Ok(freed) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
-                    Err(e) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
+                    Ok(freed) => tracing::info!(bytes = used, freed, "nix.gc.completed"),
+                    Err(e) => tracing::warn!(error = %e, "nix.gc.failed"),
                 },
                 Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "agent: the janitor beat panicked; skipping it"),
+                Err(e) => tracing::warn!(error = %e, "janitor.beat.failed"),
             }
         }
     });
@@ -176,7 +176,7 @@ fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration) ->
 /// to cost real IO, keep per-owner sizes from `btrfs qgroup`/`du --max-depth=1` instead.
 fn warn_oversized_homes(pool: &std::path::Path) {
     for (owner, bytes) in oversized_homes(pool) {
-        tracing::warn!(%owner, bytes, "agent: shared home far exceeds what configs need; a cache has escaped HOME_CACHE_DIR");
+        tracing::warn!(%owner, bytes, "home.oversized");
     }
 }
 
@@ -272,7 +272,7 @@ pub fn cleanup_local(engine: &Engine, id: &str) {
     }
     if let Err(e) = std::fs::remove_dir_all(&voldir) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(%id, path = %voldir.display(), error = %e, "agent: cleanup: remove");
+            tracing::warn!(volume = %id, path = %voldir.display(), reason = "remove", error = %e, "volume.cleanup.failed");
         }
     }
     let vol_root = engine.pool.root.join("vol");
@@ -315,10 +315,11 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
     match std::process::Command::new("btrfs").arg("subvolume").arg("delete").arg(path).output() {
         Ok(out) if out.status.success() => {}
         Ok(out) => tracing::warn!(
-            %id,
+            volume = %id,
             path = %path.display(),
+            reason = "subvolume-delete",
             stderr = %String::from_utf8_lossy(&out.stderr),
-            "agent: cleanup: btrfs subvolume delete"
+            "volume.cleanup.failed"
         ),
         // Test-only: no `btrfs` on PATH means this is the crate's own Mac test run, where a
         // plain `remove_dir_all` is the only thing a subvolume path can mean. Never in
@@ -327,11 +328,11 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Err(e) = std::fs::remove_dir_all(path) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(%id, path = %path.display(), error = %e, "agent: cleanup: remove_dir_all fallback");
+                    tracing::warn!(volume = %id, path = %path.display(), reason = "remove_dir_all", error = %e, "volume.cleanup.failed");
                 }
             }
         }
-        Err(e) => tracing::warn!(%id, path = %path.display(), error = %e, "agent: cleanup: btrfs subvolume delete"),
+        Err(e) => tracing::warn!(volume = %id, path = %path.display(), reason = "subvolume-delete", error = %e, "volume.cleanup.failed"),
     }
 }
 

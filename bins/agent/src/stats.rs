@@ -80,8 +80,8 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
                     metrics::gauge!("node_pool_bytes_used").set(used as f64);
                     metrics::gauge!("node_pool_bytes_total").set(total as f64);
                 }
-                Ok(None) => tracing::warn!(%pool, "could not read pool usage this beat; keeping the last exported value"),
-                Err(e) => tracing::warn!(%pool, error = %e, "pool usage read panicked; keeping the last exported value"),
+                Ok(None) => tracing::warn!(%pool, reason = "unreadable", "pool.usage.failed"),
+                Err(e) => tracing::warn!(%pool, reason = "panicked", error = %e, "pool.usage.failed"),
             }
             // Working copies RUNNING on this node, from this node's own objects — the same
             // `status.nodeName` the controller converges on, so the gauge and the placement can
@@ -103,7 +103,7 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
                         .count();
                     metrics::gauge!("node_working_copies_running").set(running as f64);
                 }
-                Err(e) => tracing::warn!(%node, error = %e, "listing workspaces for this node failed; keeping the last exported value"),
+                Err(e) => tracing::warn!(kind = "Workspace", %node, error = %e, "listing.failed"),
             }
         }
     });

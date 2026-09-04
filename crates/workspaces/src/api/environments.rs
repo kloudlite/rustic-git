@@ -392,7 +392,7 @@ pub(crate) async fn delete_env(
             for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
                 let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
                 if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
-                    tracing::warn!(workspace = %w.name_any(), error = %e, "clearing an attachment");
+                    tracing::warn!(workspace = %w.name_any(), error = %e, "attach.clear.failed");
                     failed += 1;
                 }
             }
@@ -401,7 +401,7 @@ pub(crate) async fn delete_env(
             }
         }
         Err(err) => {
-            tracing::warn!(environment = %id, error = %err, "listing workspaces to clear attachments; some may still name this environment");
+            tracing::warn!(kind = "Workspace", environment = %id, error = %err, "listing.failed");
             warning = Some("could not list workspaces to clear; some may still name this deleted environment".to_string());
         }
     }

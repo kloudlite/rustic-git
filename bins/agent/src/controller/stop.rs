@@ -110,8 +110,8 @@ where
                 }
                 // Keep-biased, as the beat is: an unreadable generation costs one extra sync point
                 // later, while failing the stop costs the teardown.
-                Ok(Err(e)) => tracing::warn!(worktree = %worktree, error = %e.0, "stop: reading the worktree generation"),
-                Err(e) => tracing::warn!(worktree = %worktree, error = %e, "stop: generation task panicked"),
+                Ok(Err(e)) => tracing::warn!(name = %worktree, reason = "read", error = %e.0, "sync.generation.failed"),
+                Err(e) => tracing::warn!(name = %worktree, reason = "panicked", error = %e, "sync.generation.failed"),
             }
             match api.create(&PostParams::default(), &snap).await {
                 // Lost the race with our own earlier pass; it is the same CR either way.
@@ -200,7 +200,7 @@ pub async fn start_placement(
     for p in parents {
         crate::peer::unplace_parent(ctx, p).await;
     }
-    tracing::info!(volume = %id, to = %preferred, "start: spreading a movable volume");
+    tracing::info!(volume = %id, node = %preferred, reason = "spread", "volume.moved");
     Ok(Some(preferred))
 }
 

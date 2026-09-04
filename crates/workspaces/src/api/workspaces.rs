@@ -276,7 +276,7 @@ async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &s
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    tracing::info!(%owner, workspace = %id, "not placed within 5s; the key install is left to the next list");
+    tracing::info!(%owner, workspace = %id, reason = "not-placed", "workspace.keys.deferred");
 }
 
 /// Rewrite the owner's key Secret in EVERY workspace namespace they have — what an ssh key add or
@@ -290,14 +290,14 @@ pub async fn refresh_user_keys(s: &ApiState, owner: &str) {
     let list = match api.list(&ListParams::default().labels(&sel)).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(%owner, error = ?e, "could not list workspace namespaces to refresh keys");
+            tracing::warn!(kind = "Namespace", %owner, error = %e, "listing.failed");
             return;
         }
     };
     let mine = owners_namespaces(s, owner).await;
     for ns in list.items.iter().map(|n| n.name_any()) {
         if !mine.contains(&ns) {
-            tracing::warn!(%owner, namespace = %ns, "namespace carries the owner label but is not theirs by name");
+            tracing::warn!(%owner, name = %ns, reason = "owner-label-mismatch", "namespace.skipped");
             continue;
         }
         write_user_key(s, c, &ns, owner).await;
@@ -310,7 +310,7 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
         Ok(Some(p)) => p,
         Ok(None) => return, // never generated one; /v1/platform-key makes it on first read
         Err(e) => {
-            tracing::warn!(%owner, error = ?e, "could not read the platform key");
+            tracing::warn!(%owner, reason = "platform-key", error = %e, "key.read.failed");
             return;
         }
     };
@@ -321,7 +321,7 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
     // empty `authorized_keys` is not "no keys yet", it is the owner locked out of their workspace.
     let Some(lookup) = &s.directory else { return };
     let Some(material) = lookup.for_owner(owner).await else {
-        tracing::warn!(%owner, "could not read the owner's ssh keys; leaving the secret alone");
+        tracing::warn!(%owner, reason = "owner-keys", "key.read.failed");
         return;
     };
     let secret = crate::k8s::user_key_secret(owner, ns, &private, &material);
@@ -333,7 +333,7 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
         )
         .await
     {
-        tracing::warn!(%owner, error = ?e, "could not install the platform key in the namespace");
+        tracing::warn!(%owner, error = %e, "key.install.failed");
     }
 }
 
@@ -481,7 +481,7 @@ pub(crate) async fn ssh_session(
             .into_response());
     };
     let (token, claims) = s.jwt.mint_ssh_session(&owner, &id, &w.spec.region).map_err(|e| {
-        tracing::error!(error = %e, "mint ssh session");
+        tracing::error!(error = %e, "ssh.session.mint.failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "could not mint a session").into_response()
     })?;
     let expires_at = chrono::DateTime::from_timestamp(claims.exp as i64, 0)
@@ -672,7 +672,7 @@ async fn drop_attach_policy(c: &kube::Client, id: &str, env: Option<&str>) {
     let policies: Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
         Api::namespaced(c.clone(), &crd::env_namespace(env));
     if let Err(e) = policies.delete(&crate::k8s::attach_policy_name(id), &DeleteParams::default()).await {
-        tracing::warn!(workspace = %id, environment = %env, error = %e, "removing the environment-side attach policy");
+        tracing::warn!(workspace = %id, environment = %env, error = %e, "attach.policy.delete.failed");
     }
 }
 

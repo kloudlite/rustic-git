@@ -145,7 +145,7 @@ pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
         // Listed but dead — the previous agent pod's namespace took the transport with it. Lazy
         // AND forced: lazy detaches the tree even though the workspace pods still hold it open,
         // forced stops the kernel waiting on a server that will never answer this client again.
-        tracing::warn!(target = %target_str, "shared home is mounted but not answering; unmounting the stale mount before remounting");
+        tracing::warn!(export = %target_str, "home.remounting");
         // In this pod's own mount namespace: `Bidirectional` propagation carries the detach out
         // to the node, and the host filesystem has no umount.nfs helper to reach anyway.
         let st = std::process::Command::new("umount")
@@ -228,7 +228,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         return Err(format!("WS_NIXPKGS must be github:NixOS/nixpkgs/<40-hex-rev>, not {pin:?}"));
     }
     if let Err(e) = std::fs::create_dir_all(nix::PROFILES_DIR) {
-        tracing::warn!(error = %e, "could not create the Nix profiles dir — the daemon container seeds /nix");
+        tracing::warn!(error = %e, "nix.profiles.dir.failed");
     }
     // One indirect root over the whole profiles tree: `nix build --no-link` registers none, and
     // the publish rename would orphan an out-link's auto-root anyway.
@@ -237,7 +237,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // controller sits idle looking healthy. Fail loudly here rather than in production.
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
     let roles = node_roles(&client, &cfg.node).await;
-    tracing::info!(node = %cfg.node, ?roles, "node roles");
+    tracing::info!(node = %cfg.node, ?roles, "node.roles");
     // Resolved BEFORE `Ctx`: `Ctx::new` reads the boot-marked fields (`default_image`,
     // `git_init_image`, `runtime_class`) straight off this handle instead of `std::env` itself,
     // so the CRD's admin-written value is what a fresh pod boots with, not just what a running
@@ -256,7 +256,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
             let peer_ctx = ctx.clone();
             tokio::spawn(async move {
                 if let Err(e) = peer::serve(&peer_ctx, secret).await {
-                    tracing::error!(error = %e, "peer listener exited");
+                    tracing::error!(listener = "peer", error = %e, "listener.failed");
                 }
             });
         }
@@ -281,7 +281,7 @@ async fn initial_settings(client: &kube::Client) -> AgentSettings {
         Ok(Some(obj)) => base.merged_with(&obj.spec),
         Ok(None) => base,
         Err(e) => {
-            tracing::warn!(error = %e, "boot: could not read ClusterSettings/default; starting from env/default alone");
+            tracing::warn!(scope = "cluster", mode = "env-only", error = %e, "settings.unavailable");
             base
         }
     }
@@ -309,7 +309,7 @@ fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSe
                         Some(Ok(obj)) => apply_settings(&api, &settings, obj).await,
                         // A malformed spec never reaches here as `Ok` — kube-runtime's own
                         // decode failed first, which IS the "logged once, changes nothing" case.
-                        Some(Err(e)) => tracing::warn!(error = %e, "settings watch: last good wins"),
+                        Some(Err(e)) => tracing::warn!(scope = "cluster", error = %e, "settings.invalid"),
                         None => return,
                     }
                 }
@@ -336,7 +336,7 @@ async fn apply_settings(api: &kube::Api<crd::ClusterSettings>, settings: &LiveSe
     });
     let params = kube::api::PatchParams::apply(crd::AGENT_FIELD_MANAGER).force();
     if let Err(e) = api.patch_status("default", &params, &kube::api::Patch::Apply(&body)).await {
-        tracing::warn!(error = %e, "settings: writing status.observedGeneration");
+        tracing::warn!(scope = "cluster", error = %e, "settings.status.write.failed");
     }
 }
 
@@ -346,7 +346,7 @@ async fn apply_settings(api: &kube::Api<crd::ClusterSettings>, settings: &LiveSe
 async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client.clone());
     let Ok(Some(n)) = api.get_opt(node).await else {
-        tracing::warn!(%node, "could not read this node's labels: claiming no unplaced work");
+        tracing::warn!(%node, reason = "unreadable", "node.labels.missing");
         return vec![];
     };
     let labels = n.metadata.labels.unwrap_or_default();
@@ -358,7 +358,7 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
     if roles.is_empty() {
         // Zero roles means zero claim watches, and an agent with no claim watch looks identical to
         // a healthy one from the outside — it just never picks anything up. Say so.
-        tracing::warn!(%node, "no kloudlite-git.io/session or /env label: this node claims no unplaced work");
+        tracing::warn!(%node, reason = "no-role-label", "node.labels.missing");
     }
     roles
 }

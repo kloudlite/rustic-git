@@ -101,7 +101,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             .touched_objects()
             .for_each(|r| async move {
                 if let Err(e) = r {
-                    tracing::warn!(error = %e, "volume watch")
+                    tracing::warn!(kind = "Volume", reason = "watch", error = %e, "reconcile.queue.failed")
                 }
             })
     };
@@ -117,7 +117,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
                 if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
-                    tracing::warn!(error = %e, "volume reconcile")
+                    tracing::warn!(kind = "Volume", error = %e, "reconcile.queue.failed")
                 }
             }
         });
@@ -166,7 +166,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
                 if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
-                    tracing::warn!(error = %e, "workspace reconcile")
+                    tracing::warn!(kind = "Workspace", error = %e, "reconcile.queue.failed")
                 }
             }
         });
@@ -214,7 +214,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
                 if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
-                    tracing::warn!(error = %e, "environment reconcile")
+                    tracing::warn!(kind = "Environment", error = %e, "reconcile.queue.failed")
                 }
             }
         });
@@ -236,7 +236,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 // left here is the queue and watch side, which it never sees.
                 if let Err(e) = r {
                     if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
-                        tracing::warn!(error = %e, "workspace claim")
+                        tracing::warn!(kind = "Workspace", reason = "claim", error = %e, "reconcile.queue.failed")
                     }
                 }
             })
@@ -280,7 +280,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
                 if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
-                    tracing::warn!(error = %e, "ownerbinding reconcile")
+                    tracing::warn!(kind = "OwnerBinding", error = %e, "reconcile.queue.failed")
                 }
             }
         });
@@ -297,7 +297,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
                 if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
-                    tracing::warn!(error = %e, "snapshot reconcile")
+                    tracing::warn!(kind = "Snapshot", error = %e, "reconcile.queue.failed")
                 }
             }
         });
@@ -310,7 +310,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 // left here is the queue and watch side, which it never sees.
                 if let Err(e) = r {
                     if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
-                        tracing::warn!(error = %e, "environment claim")
+                        tracing::warn!(kind = "Environment", reason = "claim", error = %e, "reconcile.queue.failed")
                     }
                 }
             })
@@ -337,9 +337,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     tokio::pin!(everything);
     tokio::select! {
         _ = &mut everything => {}
-        _ = shutdown_signal() => {
-            tracing::info!("shutdown signal; draining in-flight reconciles");
+        signal = shutdown_signal() => {
+            tracing::info!(signal, "process.shutdown.begun");
+            let began = std::time::Instant::now();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(20), &mut everything).await;
+            tracing::info!(duration_ms = began.elapsed().as_millis() as u64, "process.shutdown.completed");
         }
     }
     Ok(())
@@ -347,11 +349,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
 
 /// SIGTERM (the kubelet) or SIGINT (a terminal). Tokio multiplexes signal listeners, so this
 /// coexists with the handlers `shutdown_on_signal` installs on each controller.
-async fn shutdown_signal() {
+async fn shutdown_signal() -> &'static str {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
     tokio::select! {
-        _ = term.recv() => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => "sigterm",
+        _ = tokio::signal::ctrl_c() => "sigint",
     }
 }
 
@@ -360,7 +362,7 @@ async fn shutdown_signal() {
 fn error_policy<K: Resource<DynamicType = ()>>(obj: Arc<K>, err: &ReconcileErr, _ctx: Arc<Ctx>) -> Action {
     // Named, because three controllers share this policy: an unattributed "reconcile failed" line
     // says nothing about which object is stuck or even which kind it was.
-    tracing::warn!(kind = %K::kind(&()), name = %obj.name_any(), error = %err, "reconcile failed, requeueing");
+    tracing::warn!(kind = %K::kind(&()), name = %obj.name_any(), error = %err, "reconcile.failed");
     Action::requeue(RETRY)
 }
 
@@ -394,7 +396,7 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
             tick.tick().await;
             match api.list(&kube::api::ListParams::default().limit(1)).await {
                 Ok(_) => heartbeat(&ctx.pool),
-                Err(e) => tracing::error!(error = %e, "heartbeat: api unreachable, not beating"),
+                Err(e) => tracing::error!(error = %e, "heartbeat.failed"),
             }
         }
     });

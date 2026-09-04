@@ -111,7 +111,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     let list = match api.list(&ListParams::default().fields(&format!("spec.volume={}", live.volume))).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(volume = %live.volume, error = %e, "sync: listing snapshots");
+            tracing::warn!(kind = "Snapshot", volume = %live.volume, error = %e, "listing.failed");
             return;
         }
     };
@@ -123,7 +123,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
             && s.spec.worktree == live.name
             && s.status.as_ref().map(|st| st.phase) == Some(crd::Phase::Working)
     }) {
-        tracing::debug!(worktree = %live.name, "sync: a transient is Working, skipping this pass");
+        tracing::debug!(name = %live.name, reason = "cut-in-flight", "sync.skipped");
         return;
     }
     let (parent, recorded, recorded_state) = match newest_recorded(&list.items, &live.name) {
@@ -137,11 +137,11 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
         // Keep-biased: an unreadable generation is "we do not know", and cutting on "we do not
         // know" would cut on every single pass. A node without btrfs never syncs at all.
         Ok(Err(e)) => {
-            tracing::warn!(worktree = %live.name, error = %e, "sync: reading the worktree generation");
+            tracing::warn!(name = %live.name, reason = "read", error = %e, "sync.generation.failed");
             return;
         }
         Err(e) => {
-            tracing::warn!(worktree = %live.name, error = %e, "sync: generation task panicked");
+            tracing::warn!(name = %live.name, reason = "panicked", error = %e, "sync.generation.failed");
             return;
         }
     };
@@ -160,10 +160,10 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
     snap.metadata.labels = Some(crd::snapshot_labels(&live.owner, &live.volume));
     snap.metadata.annotations.get_or_insert_with(Default::default).insert(SYNCED_GENERATION.to_string(), gen.to_string());
     match api.create(&PostParams::default(), &snap).await {
-        Ok(_) => tracing::info!(%name, worktree = %live.name, generation = gen, "sync: cut a sync point"),
+        Ok(_) => tracing::debug!(snapshot = %name, name = %live.name, generation = gen, "sync.cut"),
         // Lost a race with our own previous pass; the CR is there either way.
         Err(kube::Error::Api(s)) if s.code == 409 => {}
-        Err(e) => tracing::warn!(worktree = %live.name, error = %e, "sync: creating the sync point"),
+        Err(e) => tracing::warn!(name = %live.name, error = %e, "sync.cut.failed"),
     }
 }
 

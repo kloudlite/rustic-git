@@ -122,7 +122,7 @@ pub fn router(state: PeerState) -> Router {
 pub async fn serve(ctx: &Ctx, secret: String) -> Result<(), String> {
     let addr = std::env::var("WS_PEER_ADDR").unwrap_or_else(|_| "0.0.0.0:8444".into());
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("{addr}: {e}"))?;
-    tracing::info!(%addr, "peer listener up");
+    tracing::info!(listener = "peer", %addr, "listener.started");
     axum::serve(listener, router(PeerState::from_ctx(ctx, secret))).await.map_err(|e| e.to_string())
 }
 
@@ -271,7 +271,7 @@ impl Drop for KillOnDrop {
                     Some(t) => t.await.unwrap_or_default(),
                     None => Vec::new(),
                 };
-                tracing::warn!(%volume, %name, status = ?exit, stderr = %tail_str(&stderr, 300), "snapshot: btrfs send exited non-zero");
+                tracing::warn!(%volume, snapshot = %name, status = ?exit, stderr = %tail_str(&stderr, 300), "snapshot.send.failed");
             }
         });
     }

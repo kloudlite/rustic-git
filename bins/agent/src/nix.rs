@@ -31,7 +31,7 @@ pub fn building_path(root: &Path, id: &str) -> PathBuf { profile_dir(root, id).j
 pub fn ensure_gcroot() {
     let gcroots = Path::new("/nix/var/nix/gcroots");
     if !gcroots.is_dir() {
-        tracing::warn!("no /nix/var/nix/gcroots: profiles are not rooted and a GC may collect them");
+        tracing::warn!(reason = "no-gcroots-dir", "nix.gcroot.missing");
         return;
     }
     let link = gcroots.join("kloudlite-profiles");
@@ -39,7 +39,7 @@ pub fn ensure_gcroot() {
         return;
     }
     if let Err(e) = std::os::unix::fs::symlink(PROFILES_DIR, &link) {
-        tracing::warn!(error = %e, "could not register the profiles GC root");
+        tracing::warn!(error = %e, "nix.gcroot.failed");
     }
 }
 

@@ -199,7 +199,7 @@ pub async fn list(
         last_consumed = Some(key);
         let bytes = os.get(&OsPath::from(key.as_str())).await?.bytes().await?.to_vec();
         let Some(entry) = parse_entry(&bytes) else {
-            tracing::warn!(key, "unreadable audit row");
+            tracing::warn!(name = key, "audit.read.failed");
             continue;
         };
         if filter.actor.as_deref().is_some_and(|a| entry.actor != a) {
