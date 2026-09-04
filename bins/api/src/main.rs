@@ -169,6 +169,14 @@ async fn run() -> Result<()> {
                 Ok(c) => state = state.with_kube(c),
                 Err(e) => tracing::warn!(error = %e, "no kubernetes config: /v1 workspace routes will answer 503"),
             }
+            // The admin role's one outbound call to the git tier: `PUT /admin/settings/central`
+            // forwards a validated patch to the server tier's peer route rather than writing the
+            // object store itself (spec's "no direct object-store write path of its own by
+            // design"). `GET /admin/settings/central` reads `cluster/settings` off `store`
+            // directly instead — see `ApiState::keys`, already wired below.
+            if role == "admin" {
+                state = state.with_peer(rustic_git_workspaces::api::admin::PeerClient::new(upstream.clone(), secret.clone()));
+            }
             // Only the admin role ever talks to its OWN cluster (`admin::workloads`'s central
             // half) — server/api/worker/gateway have no business with it, only this process does.
             // `kube::Config::incluster()` is used explicitly rather than `try_default()`: the

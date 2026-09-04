@@ -11,6 +11,9 @@
 use super::*;
 use axum::extract::Path;
 
+mod settings;
+pub use settings::PeerClient;
+
 /// Runs before ANY handler on this router. A token that fails to verify is 401; one that verifies
 /// but carries no claim is 403 — both before the request reaches a handler, which is what makes
 /// `every_admin_path_refuses_without_the_claim`'s "zero calls" assertion true by construction
@@ -48,6 +51,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/environments/{id}/stop", post(super::environments::stop_env))
         .route("/admin/workloads", get(list_workloads_route))
         .route("/admin/workloads/{scope}/{name}/roll", post(roll_workload_route))
+        .route("/admin/settings/central", get(settings::get_central).put(settings::put_central))
+        .route(
+            "/admin/settings/clusters/{region}",
+            get(settings::get_cluster).put(settings::put_cluster),
+        )
+        .route("/admin/settings/clusters/{region}/revert/{n}", post(settings::revert_cluster))
         // The claim check runs BEFORE every route above, not per-handler: `route_layer` wraps only
         // the routes already added, so a route added after this line would run unguarded — there
         // are none, and `every_admin_path_refuses_without_the_claim` is the tripwire if one is
@@ -317,9 +326,9 @@ fn parse_scope(seg: &str) -> super::workloads::Scope {
     if seg == "central" { super::workloads::Scope::Central } else { super::workloads::Scope::Region(seg.to_string()) }
 }
 
-/// Every active region — the source `list_workloads`' per-region half walks, same as Task 6's
-/// `ClusterSettings` resolution will.
-async fn active_regions(s: &ApiState) -> Result<Vec<String>, Response> {
+/// Every active region — the source `list_workloads`' per-region half walks, and `api::settings`'
+/// central-scope boot roll (`sshHost`/`sshPort` → every region's gateway) walks the same list.
+pub(crate) async fn active_regions(s: &ApiState) -> Result<Vec<String>, Response> {
     let api: Api<crd::Region> = Api::all(kube(s)?.clone());
     Ok(api
         .list(&ListParams::default())

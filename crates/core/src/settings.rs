@@ -279,7 +279,10 @@ pub const CENTRAL_SETTING_META: &[(&str, Mark)] = &[
 
 /// One violation, in `quota::refuse`'s sentence shape: `"{field} must be between {lo} and {hi},
 /// got {value}"` — so an admin write and a quota refusal read the same in the log and in the UI.
-fn range_err(field: &str, lo: impl std::fmt::Display, hi: impl std::fmt::Display, got: impl std::fmt::Display) -> String {
+/// `pub`: `ClusterSettings`' own range check (`crates/workspaces/src/api/settings.rs`) formats its
+/// 422s through this SAME function rather than a second copy, so the two settings scopes can never
+/// drift on what a range violation reads like.
+pub fn range_err(field: &str, lo: impl std::fmt::Display, hi: impl std::fmt::Display, got: impl std::fmt::Display) -> String {
     format!("{field} must be between {lo} and {hi}, got {got}")
 }
 

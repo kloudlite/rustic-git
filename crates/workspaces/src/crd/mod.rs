@@ -40,6 +40,18 @@ pub const VERSION: &str = "v1alpha1";
 /// The controller writes status under its own manager; a server-side-apply conflict against it
 /// therefore means another controller, not `/v1`.
 pub const AGENT_FIELD_MANAGER: &str = "rustic-git-agent";
+/// The admin process's own field manager on the settings routes — distinct from
+/// `AGENT_FIELD_MANAGER` so a settings write and the agent's own status writes are never
+/// attributed to the same manager in a server-side-apply conflict.
+pub const AGENT_FIELD_MANAGER_ADMIN: &str = "rustic-git-admin";
+/// `ClusterSettings`' history annotation: the previous ten specs, newest first, JSON — parallel to
+/// `StoredCentralSettings.history` but as an annotation rather than a struct field, since the CRD
+/// spec is what server-side apply owns field-by-field and a growing history array there would be a
+/// moving target for every other writer of the spec (there are none today, but the annotation
+/// keeps the spec itself exactly the shape `ClusterSettingsSpec` declares).
+pub const SETTINGS_HISTORY_ANNOTATION: &str = "rustic-git.io/settings-history";
+pub const SETTINGS_UPDATED_BY_ANNOTATION: &str = "rustic-git.io/updated-by";
+pub const SETTINGS_UPDATED_AT_ANNOTATION: &str = "rustic-git.io/updated-at";
 /// Held while a subvolume exists on a node. The object must outlive the delete request until the
 /// controller has actually reclaimed the bytes — otherwise the record of what to reclaim is gone
 /// before the reclaim happens.
@@ -1051,7 +1063,7 @@ pub mod defaults {
 /// is the last generation an agent actually applied, so the UI's "pending" marker has
 /// something to compare against. Cluster-scoped like every other kind here: there is one
 /// object per region's k3s, not per namespace.
-#[derive(CustomResource, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(CustomResource, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "rustic-git.io",
     version = "v1alpha1",

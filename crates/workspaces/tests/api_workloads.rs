@@ -100,6 +100,21 @@ async fn roll_unknown_name_is_404() {
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("PATCH")));
 }
 
+/// A region scope that names no `crd::Region` at all is a 404 too, before `client_for` ever
+/// resolves to `kube(s)` — this is the review finding on Task 5: with only one `kube::Client`
+/// wired, a bogus region used to fall through to the real cluster's client unchecked.
+#[tokio::test]
+async fn roll_unknown_region_is_404() {
+    let s = admin_server(vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/workloads/no-such-region/rustic-git-agent/roll", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"reason": "x"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with("PATCH")));
+}
+
 /// An empty reason is refused before anything is read — the one validation the manual route
 /// adds beyond what a settings-triggered roll needs.
 #[tokio::test]

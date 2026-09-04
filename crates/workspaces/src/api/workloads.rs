@@ -86,10 +86,14 @@ fn resolve(scope: &Scope, name: &str) -> Option<Kind> {
     table.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
 }
 
-fn client_for<'a>(s: &'a ApiState, scope: &Scope) -> Result<&'a kube::Client, Response> {
+/// `Scope::Region` is resolved through `client_for_region`, which 404s a region name that names
+/// no active `crd::Region` — `scope` is the one path segment `{scope}/{name}/roll` and the
+/// settings routes let a caller type, so nothing else stands between an arbitrary string and a
+/// PATCH against whatever `kube(s)` happens to point at today (review finding on Task 5).
+async fn client_for<'a>(s: &'a ApiState, scope: &Scope) -> Result<&'a kube::Client, Response> {
     match scope {
         Scope::Central => aks(s),
-        Scope::Region(_) => kube(s),
+        Scope::Region(region) => super::client_for_region(s, region).await,
     }
 }
 
@@ -195,8 +199,8 @@ async fn apply_patch(client: &kube::Client, ns: &str, kind: Kind, name: &str, pa
 }
 
 pub enum RollReason {
-    // Constructed by Task 6's settings-write handlers, not yet by anything in this crate.
-    #[allow(dead_code)]
+    // Constructed by the settings-write handlers (`api::admin::settings`) for a changed
+    // `Mark::Boot` field.
     Setting(&'static str),
     Manual(String),
 }
@@ -218,15 +222,14 @@ fn conflict(name: &str, ready: i64, desired: i64) -> Response {
     (StatusCode::CONFLICT, axum::Json(serde_json::json!({"name": name, "ready": ready, "desired": desired}))).into_response()
 }
 
-/// Roll every named reader within ONE scope, or roll none of them.
-///
-/// Precheck-then-write, in two passes over `readers`, is what makes the settings-write path's
-/// "409, nothing written" promise (spec §7) true here rather than merely documented: Task 6 calls
-/// this BEFORE persisting the settings document, and a conflict on reader 3 of 5 must not have
-/// already rolled readers 1 and 2.
-pub async fn roll_readers(s: &ApiState, scope: &Scope, readers: &[&str], reason: RollReason, by: &str) -> Result<(), Response> {
-    let client = client_for(s, scope)?;
-    let mut targets = Vec::with_capacity(readers.len());
+/// The read-only half of a roll: every named reader in `scope` must have `ready == desired`, or
+/// this is a 409 naming the first one that isn't — and nothing is written, by construction, since
+/// this function never calls `apply_patch`. Task 6's settings-write handlers call this ALONE, with
+/// no patch yet, so a settings document is never persisted ahead of a roll that turns out to
+/// conflict; `roll_readers` below calls it again immediately before writing, which is what makes
+/// its own "409, nothing written" promise true for the manual-roll route too.
+pub async fn precheck_readers(s: &ApiState, scope: &Scope, readers: &[&str]) -> Result<(), Response> {
+    let client = client_for(s, scope).await?;
     for &name in readers {
         let kind = resolve(scope, name).ok_or_else(not_found)?;
         let ns = namespace(scope, name);
@@ -234,6 +237,23 @@ pub async fn roll_readers(s: &ApiState, scope: &Scope, readers: &[&str], reason:
         if info.ready < info.desired {
             return Err(conflict(name, info.ready, info.desired));
         }
+    }
+    Ok(())
+}
+
+/// Roll every named reader within ONE scope, or roll none of them.
+///
+/// Precheck-then-write is what makes the settings-write path's "409, nothing written" promise
+/// (spec §7) true here rather than merely documented: Task 6 calls `precheck_readers` BEFORE
+/// persisting the settings document, and a conflict on reader 3 of 5 must not have already rolled
+/// readers 1 and 2.
+pub async fn roll_readers(s: &ApiState, scope: &Scope, readers: &[&str], reason: RollReason, by: &str) -> Result<(), Response> {
+    precheck_readers(s, scope, readers).await?;
+    let client = client_for(s, scope).await?;
+    let mut targets = Vec::with_capacity(readers.len());
+    for &name in readers {
+        let kind = resolve(scope, name).ok_or_else(not_found)?;
+        let ns = namespace(scope, name);
         targets.push((name, ns, kind));
     }
     let ts = chrono::Utc::now().to_rfc3339();
@@ -266,7 +286,7 @@ pub struct WorkloadDoc {
 /// touched.
 pub async fn workload_doc(s: &ApiState, scope: &Scope, name: &str) -> Result<WorkloadDoc, Response> {
     let kind = resolve(scope, name).ok_or_else(not_found)?;
-    let client = client_for(s, scope)?;
+    let client = client_for(s, scope).await?;
     doc(client, scope.clone(), name, kind).await.map_err(kube_err)
 }
 

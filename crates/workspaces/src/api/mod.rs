@@ -177,9 +177,11 @@ pub struct ApiState {
     /// region cluster and keeps reading `kube`. `None` off-AKS (dev, tests): central rolls answer
     /// 503 rather than not existing, same convention as `kube`.
     pub aks: Option<kube::Client>,
-    /// The auth store, solely so workspace creation can copy the owner's platform-issued git key
-    /// into their namespace. `None` in dev and in tests: workspaces still create, they just come
-    /// up without a key.
+    /// The auth store: workspace creation copies the owner's platform-issued git key into their
+    /// namespace through it, and `GET /admin/settings/central` reads `cluster/settings` off its
+    /// `.os` object-store handle directly (this tier can read the object store anywhere, matching
+    /// `_catalog`/`/api/{owner}/images` — only the write is peer-only). `None` in dev and in
+    /// tests: workspaces still create without a key, and the central settings route answers 503.
     pub keys: Option<Arc<rustic_git_storage::store::Store>>,
     /// This tier's own region's `default_replicas`/`quota_gb_ceiling` — Task 3 gives the agent
     /// its own handle from a `ClusterSettings` reflector; this one seeds from env only, since
@@ -187,6 +189,11 @@ pub struct ApiState {
     /// here in this task), but the field exists so `clamp_quota` has a live ceiling to read
     /// instead of a compiled-in number.
     pub settings: LiveSettings<AgentSettings>,
+    /// The server tier's peer listener + peer secret — the ONE call this admin process makes
+    /// outbound to the git tier, forwarding a validated central-settings write (`PUT
+    /// /api/admin/settings`, Task 4). `None` in dev/tests: `GET /admin/settings/central` still
+    /// answers from `keys`' object store directly, only the `PUT` needs this.
+    pub peer: Option<admin::PeerClient>,
 }
 
 impl ApiState {
@@ -198,7 +205,13 @@ impl ApiState {
             aks: None,
             keys: None,
             settings: LiveSettings::new(AgentSettings::from_env()),
+            peer: None,
         }
+    }
+
+    pub fn with_peer(mut self, peer: admin::PeerClient) -> Self {
+        self.peer = Some(peer);
+        self
     }
 
     pub fn with_directory(mut self, directory: Arc<dyn Directory>) -> Self {
@@ -605,6 +618,22 @@ pub(crate) async fn check_region(s: &ApiState, region: &str) -> Result<(), Respo
         return Ok(());
     }
     Err((StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": "unknown region"}))).into_response())
+}
+
+/// The single `kube::Client` this tier holds today, but only after proving `region` names an
+/// EXISTING active `crd::Region` — `admin::workloads`'s `Scope::Region(seg)` and the settings
+/// routes both take `seg`/`region` straight off a URL path segment, so without this check a typo
+/// or a probe would resolve to `kube(s)` anyway (there is only one client wired) and PATCH the
+/// real cluster under a name nothing registered. `client_for` upgrades to a real per-region map
+/// the day one exists; this is the one place both callers go through so that upgrade is a single
+/// change (review finding on Task 5).
+pub(crate) async fn client_for_region<'a>(s: &'a ApiState, region: &str) -> Result<&'a kube::Client, Response> {
+    let client = kube(s)?;
+    let api: Api<crd::Region> = Api::all(client.clone());
+    match api.get_opt(region).await.map_err(kube_err)? {
+        Some(r) if r.spec.status == "active" => Ok(client),
+        _ => Err((StatusCode::NOT_FOUND, "no such region").into_response()),
+    }
 }
 
 pub(crate) fn not_found() -> Response {
