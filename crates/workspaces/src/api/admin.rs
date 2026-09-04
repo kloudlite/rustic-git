@@ -474,10 +474,15 @@ async fn apply_approval(
             let dir = s.directory.as_ref().ok_or_else(|| {
                 (StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response()
             })?;
+            // An unknown word is refused, never rounded down to `Member`: the request says what
+            // was asked for, and granting something else under an approve is a lie in the record.
             let role = match ask.role.as_str() {
                 "owner" => TeamRole::Owner,
                 "admin" => TeamRole::Admin,
-                _ => TeamRole::Member,
+                "member" => TeamRole::Member,
+                other => {
+                    return Err((StatusCode::UNPROCESSABLE_ENTITY, format!("unknown role {other}")).into_response())
+                }
             };
             // The grant is for the person who ASKED, not for `spec.owner`: an access request's
             // owner is the asker's own slug and the team is what they do not have yet.
@@ -496,7 +501,7 @@ async fn apply_approval(
                 GrantAccess::Unsupported => Err(audit_refusal(
                     s,
                     actor,
-                    &owner,
+                    &id,
                     d,
                     StatusCode::NOT_IMPLEMENTED,
                     "this process cannot write team membership",

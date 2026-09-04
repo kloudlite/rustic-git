@@ -2,7 +2,7 @@
 //! console never has to know whether the migration to the generic CRD has run.
 
 use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{admin::router, ApiState, Directory, TeamRole};
+use rustic_git_workspaces::api::{admin::router, ApiState, Directory, GrantAccess, TeamRole};
 use rustic_git_workspaces::kube_test::{
     get as route_get, mock_client, not_found, patch as route_patch, post as route_post, Recorder, Route,
 };
@@ -11,7 +11,20 @@ use std::sync::Arc;
 
 const API: &str = "/apis/rustic-git.io/v1alpha1";
 
-struct StubMembership;
+/// `grant` is what `grant_access` answers and `granted` is what it was asked — the access arm's
+/// whole contract is "which outcome maps to which status, and who was the grant for", and neither
+/// half is observable without both.
+#[derive(Default)]
+struct StubMembership {
+    grant: Option<GrantAccess>,
+    granted: std::sync::Mutex<Vec<(String, String, TeamRole)>>,
+}
+
+impl StubMembership {
+    fn answering(grant: GrantAccess) -> Self {
+        Self { grant: Some(grant), granted: Default::default() }
+    }
+}
 
 #[async_trait::async_trait]
 impl Directory for StubMembership {
@@ -34,25 +47,43 @@ impl Directory for StubMembership {
     async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
         None
     }
-}
+
+    async fn grant_access(&self, team: &str, user: &str, role: TeamRole) -> GrantAccess {
+        self.granted.lock().unwrap().push((team.into(), user.into(), role));
+        // `GrantAccess` is deliberately not `Clone` (the refusal string is the directory's own
+        // words, handed over once), so the canned answer is rebuilt rather than copied.
+        match &self.grant {
+            Some(GrantAccess::Done) => GrantAccess::Done,
+            Some(GrantAccess::NoSuchUser) => GrantAccess::NoSuchUser,
+            Some(GrantAccess::NoSuchTeam) => GrantAccess::NoSuchTeam,
+            Some(GrantAccess::Refused(why)) => GrantAccess::Refused(why.clone()),
+            _ => GrantAccess::Unsupported,
+        }
+    }}
 
 struct Server {
     base: String,
     jwt: Arc<Jwt>,
     rec: Recorder,
+    dir: Arc<StubMembership>,
 }
 
 async fn admin_server(routes: Vec<Route>) -> Server {
+    admin_server_with(routes, StubMembership::default()).await
+}
+
+async fn admin_server_with(routes: Vec<Route>, dir: StubMembership) -> Server {
+    let dir = Arc::new(dir);
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let mut state = ApiState::new(jwt.clone());
-    state = state.with_directory(Arc::new(StubMembership));
+    state = state.with_directory(dir.clone());
     let (client, rec) = mock_client(routes);
     state = state.with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), jwt, rec }
+    Server { base: format!("http://{addr}"), jwt, rec, dir }
 }
 
 fn admin_token(jwt: &Jwt) -> String {
@@ -229,6 +260,8 @@ async fn approving_a_region_request_records_the_grant() {
     assert_eq!(r.status(), 200);
     let patched = s.rec.sent("PATCH", &format!("{API}/quotas/karthik"));
     assert_eq!(patched[0]["spec"]["regions"], json!(["westeurope-k3s"]));
+    // Read-modify-write, not a fresh spec: a region grant must not reset the limits already there.
+    assert_eq!(patched[0]["spec"]["workspaces"], 5);
     let sent = s.rec.sent("PATCH", &format!("{API}/requests/req-2/status"));
     assert!(
         sent[0]["status"]["resolution"].as_str().unwrap().contains("recorded"),
@@ -288,4 +321,78 @@ async fn a_legacy_id_decides_through_the_generic_route() {
     let r = post(&format!("{}/admin/requests/qr-9/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
     assert_eq!(r.status(), 200);
     assert_eq!(s.rec.sent("POST", &format!("{API}/quotas"))[0]["spec"]["cpu"], 12);
+}
+
+fn pending_access_request() -> Value {
+    json!({"metadata": {"name": "req-6", "creationTimestamp": "2026-09-04T10:00:00Z"},
+           "spec": {"owner": "meera", "kind": "access", "requestedBy": "meera", "reason": "r",
+                    "access": {"team": "acme", "role": "admin"}},
+           "status": {"state": "pending"}})
+}
+
+fn decided_access(state: &str) -> Value {
+    json!({"metadata": {"name": "req-6"},
+           "spec": {"owner": "meera", "kind": "access", "requestedBy": "meera", "reason": "r",
+                    "access": {"team": "acme", "role": "admin"}},
+           "status": {"state": state}})
+}
+
+/// The grant goes to the person who ASKED and the team they named — `spec.owner` is the asker's
+/// own slug here, so granting on it would put them in a team of one named after themselves.
+#[tokio::test]
+async fn approving_access_grants_the_asker_into_the_named_team() {
+    let s = admin_server_with(
+        vec![
+            route_get(format!("{API}/requests/req-6"), pending_access_request()),
+            route_patch(format!("{API}/requests/req-6/status"), decided_access("approved")),
+        ],
+        StubMembership::answering(GrantAccess::Done),
+    )
+    .await;
+    let r = post(&format!("{}/admin/requests/req-6/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        s.dir.granted.lock().unwrap().as_slice(),
+        [("acme".to_string(), "meera".to_string(), TeamRole::Admin)]
+    );
+    let sent = s.rec.sent("PATCH", &format!("{API}/requests/req-6/status"));
+    assert!(sent[0]["status"]["resolution"].as_str().unwrap().contains("acme"));
+}
+
+/// Each directory answer has ONE status, and none of them marks the request decided: an approve
+/// that did not grant must leave the row pending for somebody to retry.
+#[tokio::test]
+async fn a_refused_grant_maps_to_its_status_and_decides_nothing() {
+    for (answer, code) in [
+        (GrantAccess::NoSuchUser, 422),
+        (GrantAccess::NoSuchTeam, 422),
+        (GrantAccess::Refused("acme would have no owner left".into()), 409),
+        (GrantAccess::Unsupported, 501),
+    ] {
+        let s = admin_server_with(
+            vec![route_get(format!("{API}/requests/req-6"), pending_access_request())],
+            StubMembership::answering(answer),
+        )
+        .await;
+        let r =
+            post(&format!("{}/admin/requests/req-6/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+        assert_eq!(r.status(), code);
+        assert!(s.rec.sent("PATCH", &format!("{API}/requests/req-6/status")).is_empty());
+    }
+}
+
+/// An unknown role word is refused rather than rounded down to `member` — an approve that grants
+/// something other than what was asked for is a false record.
+#[tokio::test]
+async fn an_unknown_role_is_refused() {
+    let mut req = pending_access_request();
+    req["spec"]["access"]["role"] = json!("superadmin");
+    let s = admin_server_with(
+        vec![route_get(format!("{API}/requests/req-6"), req)],
+        StubMembership::answering(GrantAccess::Done),
+    )
+    .await;
+    let r = post(&format!("{}/admin/requests/req-6/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+    assert_eq!(r.status(), 422);
+    assert!(s.dir.granted.lock().unwrap().is_empty());
 }
