@@ -26,11 +26,24 @@ helm upgrade --install clickstack-operators clickstack/clickstack-operators \
   --version 1.1.0 --namespace clickstack --create-namespace \
   -f deploy/clickstack/operators-values.yaml
 
-# 2. The stack.
+# 2. HyperDX's database: a `hyperdx` database on the platform's Cosmos DB for MongoDB account
+#    (kolomi-rg/kloudlite-rustic-git, MongoDB API 7.0, serverless). HyperDX creates it on first
+#    connect; the Secret carries the account's connection string with `/hyperdx` as the path.
+#    Runs on YOUR shell — it handles a credential.
+SUB=$(az account show --query id -o tsv)
+CS=$(az rest --method post --url "https://management.azure.com/subscriptions/$SUB/resourceGroups/kolomi-rg/providers/Microsoft.DocumentDB/databaseAccounts/kloudlite-rustic-git/listConnectionStrings?api-version=2024-05-15" --query 'connectionStrings[0].connectionString' -o tsv)
+URI=$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); print(u.urlunsplit((p.scheme,p.netloc,"/hyperdx",p.query,"")))' "$CS")
+kubectl -n clickstack create secret generic hyperdx-mongo --from-literal=MONGO_URI="$URI"
+unset CS URI
+
+# 3. The stack.
 helm upgrade --install clickstack clickstack/clickstack \
   --version 3.2.0 --namespace clickstack \
   -f deploy/clickstack/clickstack-values.yaml
 ```
+
+The operators chart still installs the MongoDB operator (it has no off switch in 1.1.0); with
+`mongodb.enabled: false` it has nothing to reconcile and idles at a few MB.
 
 ## The one manual step: the ingestion API key
 
