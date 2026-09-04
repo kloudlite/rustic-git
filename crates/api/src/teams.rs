@@ -1044,9 +1044,21 @@ pub(crate) async fn list_superadmins(State(api): State<Arc<Api>>, headers: axum:
         Err(r) => return r,
     };
     match db.superadmins().await {
-        Ok(rows) => axum::Json(rows).into_response(),
+        Ok(rows) => axum::Json(rows.iter().map(superadmin_doc).collect::<Vec<_>>()).into_response(),
         Err(e) => db_err("list admins", "", e),
     }
+}
+
+/// `SuperAdmin` is a stored document, not a wire shape: its `added_at` is a bson `DateTime`, which
+/// serde-json renders as `{"$date":{"$numberLong":…}}` — a string `new Date()` cannot parse. Every
+/// other timestamp this API returns is RFC 3339, so this one is converted rather than the web
+/// learning to read bson.
+fn superadmin_doc(a: &rustic_git_pulls::directory::SuperAdmin) -> serde_json::Value {
+    serde_json::json!({
+        "_id": a.user,
+        "addedAt": a.added_at.try_to_rfc3339_string().unwrap_or_default(),
+        "addedBy": a.added_by,
+    })
 }
 
 #[cfg(test)]
