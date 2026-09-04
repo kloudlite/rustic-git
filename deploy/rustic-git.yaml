@@ -55,7 +55,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:d50da6dc0226ff4ae193441ad7de5bdbf4644b39@sha256:01b2bd951de23cff0cbaa073019e0b1cc0cfa1e715b86f84b3d0c0866204d815
+          image: ghcr.io/kloudlite/rustic-git:5039e81ecb95e05795d7a3dd2d9a757dcfeca13f@sha256:f23dc70607992e87c7012ff8bd5ff7357e3d006f688c444d78e1cd9b1e7e56c2
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -387,7 +387,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:d50da6dc0226ff4ae193441ad7de5bdbf4644b39@sha256:01b2bd951de23cff0cbaa073019e0b1cc0cfa1e715b86f84b3d0c0866204d815
+          image: ghcr.io/kloudlite/rustic-git:5039e81ecb95e05795d7a3dd2d9a757dcfeca13f@sha256:f23dc70607992e87c7012ff8bd5ff7357e3d006f688c444d78e1cd9b1e7e56c2
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -558,7 +558,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:d50da6dc0226ff4ae193441ad7de5bdbf4644b39@sha256:01b2bd951de23cff0cbaa073019e0b1cc0cfa1e715b86f84b3d0c0866204d815
+          image: ghcr.io/kloudlite/rustic-git:5039e81ecb95e05795d7a3dd2d9a757dcfeca13f@sha256:f23dc70607992e87c7012ff8bd5ff7357e3d006f688c444d78e1cd9b1e7e56c2
           command: ["rustic-git-worker"]
           env:
             - name: RUSTIC_GIT_METRICS_ADDR
@@ -758,7 +758,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: admin
-          image: ghcr.io/kloudlite/rustic-git:d50da6dc0226ff4ae193441ad7de5bdbf4644b39@sha256:01b2bd951de23cff0cbaa073019e0b1cc0cfa1e715b86f84b3d0c0866204d815
+          image: ghcr.io/kloudlite/rustic-git:5039e81ecb95e05795d7a3dd2d9a757dcfeca13f@sha256:f23dc70607992e87c7012ff8bd5ff7357e3d006f688c444d78e1cd9b1e7e56c2
           command: ["rustic-git-api"]
           ports:
             - { name: http, containerPort: 8090 }
