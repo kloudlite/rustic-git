@@ -489,6 +489,9 @@ fn write_pack(
         alloc_limit_bytes: Some(1024 * 1024 * 1024), // 1 GiB per-object cap: reject zlib/delta bombs
         compression: Default::default(),
     };
+    // ponytail: the boot-time env cap, not the live `max_body` setting — this crate has no
+    // handle to the server's settings and the SSH path reaches here without one. Thread
+    // `CentralSettings.max_body` down from both callers when a live change here matters.
     let mut capped =
         Capped { inner: input, left: rustic_git_core::httpx::max_body() as u64, hit_cap: false };
     let outcome = match gix_pack::Bundle::write_to_directory(

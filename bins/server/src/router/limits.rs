@@ -4,6 +4,8 @@ use rustic_git_core::httpx::max_body;
 
 /// Cap on the decompressed size of a gzipped request body — bounds the zlib-bomb amplification
 /// on top of the wire-size limit. 8x the body cap.
+// ponytail: derived from the boot-time env cap, not the live `max_body` setting — the gzip layer
+// is built once at router construction. Rebuild it from `app.central` if a live change matters.
 pub(crate) fn max_decompressed() -> u64 {
     (max_body() as u64) * 8
 }
