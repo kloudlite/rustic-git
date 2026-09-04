@@ -95,8 +95,8 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         ("NodeDiskAlmostFull", "otel_metrics_gauge", "k8s.node.filesystem.usage", &["k8s.node.name", "0.85"]),
         // Azure Monitor's own metrics: one series per Azure resource, bucketed at Azure's publish
         // interval, and the "N of M" counted inside the query rather than as a `for` window.
-        ("CosmosRuSaturation", "otel_metrics_gauge", "azure_normalizedruconsumption_maximum",
-            &["azuremonitor.resource_id", "INTERVAL 300 SECOND", "INTERVAL 1800 SECOND", "v >= 80", "max(n) >= 3"]),
+        ("CosmosThrottled", "otel_metrics_gauge", "azure_throttledrequestpercentage_maximum",
+            &["azuremonitor.resource_id", "INTERVAL 300 SECOND", "INTERVAL 1800 SECOND", "v >= 1", "max(n) >= 2"]),
         ("CosmosUnavailable", "otel_metrics_gauge", "azure_serviceavailability_average",
             &["azuremonitor.resource_id", "INTERVAL 900 SECOND", "v < 99.9", "max(n) >= 1"]),
         ("CosmosLatencyHigh", "otel_metrics_gauge", "azure_serversidelatency_average",
@@ -135,7 +135,7 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
 #[test]
 fn the_azure_rules_are_single_bucket_and_absent_data_stays_unknown() {
     for name in [
-        "CosmosRuSaturation", "CosmosUnavailable", "CosmosLatencyHigh",
+        "CosmosThrottled", "CosmosUnavailable", "CosmosLatencyHigh",
         "RedisMemoryHigh", "RedisLoadHigh", "RedisReplicationUnhealthy", "RedisMissRateHigh",
     ] {
         let rule = CATALOGUE.iter().find(|r| r.name == name).expect(name);
@@ -159,7 +159,7 @@ fn a_rule_is_evaluated_only_in_its_own_tier() {
     }
     // Azure Monitor exports the managed Cosmos and Redis under `region: central` only.
     for name in [
-        "CosmosRuSaturation", "CosmosUnavailable", "CosmosLatencyHigh",
+        "CosmosThrottled", "CosmosUnavailable", "CosmosLatencyHigh",
         "RedisMemoryHigh", "RedisLoadHigh", "RedisReplicationUnhealthy", "RedisMissRateHigh",
     ] {
         assert!(by(name).applies_to("central"), "{name} is central");

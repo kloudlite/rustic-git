@@ -360,11 +360,11 @@ pub const CATALOGUE: &[Rule] = &[
         ),
     },
     Rule {
-        name: "CosmosRuSaturation",
+        name: "CosmosThrottled",
         tier: &[Tier::Central],
-        why: "Cosmos throttles with 429s past the provisioned RU/s; normalized consumption is the per-partition number, so one hot partition shows here before the account average does.",
+        why: "A serverless account publishes no RU consumption; the throttle percentage is the only signal that requests are being refused with 429s, which the directory client retries and the sign-in path turns into an error.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_normalizedruconsumption_maximum", "max", 300, 1800, "v >= 80", 3, region),
+        sql: |region| azure_rule("azure_throttledrequestpercentage_maximum", "max", 300, 1800, "v >= 1", 2, region),
     },
     Rule {
         name: "CosmosUnavailable",

@@ -1249,7 +1249,8 @@ data:
           Microsoft.DocumentDB/databaseAccounts:
             TotalRequests: [count]
             TotalRequestUnits: [total]
-            NormalizedRUConsumption: [maximum]
+            # Serverless accounts publish no NormalizedRUConsumption; throttling is the RU signal there.
+            ThrottledRequestPercentage: [maximum]
             ServerSideLatency: [average]
             ServiceAvailability: [average]
             MongoRequests: [count]
