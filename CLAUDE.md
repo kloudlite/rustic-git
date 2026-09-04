@@ -393,6 +393,45 @@ revert to any of them. The admin API (`bins/api` with `RUSTIC_GIT_API_ROLE=admin
 the admin ServiceAccount gets `patch` on exactly the `KNOWN` Deployments/StatefulSets/DaemonSet,
 the agent gets `get/list/watch` on `ClusterSettings` and nothing to write it with.
 
+## History and telemetry
+
+Telemetry is **ClickStack's**, not ours: the official charts run ClickHouse, a gateway OTel
+collector and HyperDX on AKS (`deploy/clickstack/`), and an `opentelemetry-collector-contrib`
+agent in every cluster (`deploy/k3s/otel-agent.yaml`, copied into `deploy/rustic-git.yaml` for AKS
+with three changes and no others) scrapes the pods already annotated `prometheus.io/scrape`, reads
+the kubelet for node and pod resource usage, ships pod logs, stamps `region`, and exports OTLP to
+the gateway — which writes the exporter's own `default.otel_*` tables. **We write no metrics
+pipeline**; if a number is missing the fix is collector config.
+
+What IS ours is the `rustic` database, and **the admin process is its only writer** (`bins/api`
+with `RUSTIC_GIT_API_ROLE=admin`, `crates/workspaces/src/history/`): `events` (the record, no TTL),
+`usage_hourly` and `fleet_hourly` (2 y), `alerts` (400 d) and the `metrics_5m` rollup over the
+collector's tables (400 d, because the exporter drops raw metrics at 30). It migrates the schema at
+boot (numbered `CREATE … IF NOT EXISTS`, never edit one that shipped), consumes the Redis `events`
+stream in a **second** consumer group (`history`) that acks only after the insert — the stream
+stays a nudge, never the record, so with Redis down the consumer idles and everything else keeps
+writing — runs one reflector per kind per region (`history::watch`: Workspace, Environment,
+Snapshot, Volume, QuotaRequest, Node per region; Region centrally) turning transitions into rows
+keyed `{uid}:{resourceVersion}:{transition}` with `ts` DERIVED FROM THE OBJECT so a replayed watch
+is byte-identical rather than merely close, dual-writes every audit row as `admin.<action>` (the
+object-store log stays the legal record), and runs hourly folds recomputed from the CRDs every
+time, never from an earlier row. `events` and `alerts` are `ReplacingMergeTree`; every reader
+queries `FINAL`.
+
+`deploy/alerts.md` is evaluated **twice from one catalogue**: HyperDX pages a human, and
+`history::alerts` evaluates the same rules as SQL every 30 s in 30 s buckets with the catalogue's
+real `for` windows, writing only state TRANSITIONS to `rustic.alerts`. A window the samples do not
+cover is `unknown`, never `ok` — that rule is why the old on-request scrape was retired, since a
+point-in-time scrape could not compute a `for 5m` and left nine of ten rules permanently unknown.
+`GET /admin/monitoring/signals` now only reads that table. The console's charts are
+`GET /admin/history/{series}` — a fixed catalogue of twelve names plus `usage`, one SQL each, with
+every caller-shaped value (range, step, region, owner, dimension) through an allow-list or
+`series::ident` because that path has no bound parameters; an unknown name is a 404.
+`RUSTIC_GIT_CLICKHOUSE_URL` is optional everywhere: without it every process runs exactly as today
+and `/admin/history/*` answers `503 history unavailable`, which the web renders as a flat
+placeholder. `RUSTIC_GIT_HYPERDX_URL` is optional the same way — unset means no "Open in HyperDX"
+link rather than a dead one.
+
 ## Web app
 
 Next.js app router in `web/apps/web` (its own `CLAUDE.md`/`AGENTS.md` there warns the installed

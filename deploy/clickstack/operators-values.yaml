@@ -1,0 +1,29 @@
+# ClickStack, step 1 of 2: the operators the stack's CRs need.
+#
+# Installed once per cluster, before `clickstack` below, and it owns no data — a reinstall is safe.
+# Pin the chart version in the install command (README.md), never `latest`: an operator that
+# upgrades itself under a running ClickHouse is exactly the kind of surprise this repo pins image
+# digests to avoid.
+#
+# Verified against `helm show values clickstack/clickstack-operators --version 1.1.0`: this chart
+# ships a ClickHouse operator and a MongoDB one, and NOT an OpenTelemetry operator — the collectors
+# here are plain Deployments, so there is nothing for one to reconcile.
+
+clickhouse-operator:
+  # Both off because the cluster has no cert-manager-issued webhook cert for this chart and the
+  # admission webhook is the only thing that would need one. The CRs below come from this repo, not
+  # from users, so schema validation at admission buys nothing a `helm upgrade` does not already
+  # catch.
+  webhook:
+    enabled: false
+  certManager:
+    enabled: false
+  crd:
+    enabled: true
+
+mongodb-operator:
+  operator:
+    # HyperDX's own state only. Narrowed to the one resource the stack creates so this operator
+    # never reconciles a MongoDB object some other team installs in this cluster.
+    watchedResources:
+      - mongodbcommunity

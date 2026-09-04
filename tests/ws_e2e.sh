@@ -1528,5 +1528,53 @@ curl -fsS "$ADMIN_BASE/admin/audit?action=drain" -H "Authorization: Bearer $ADMI
   || fail "no audit row found for drain of $REGION_ID/$E2E_NODE (GET /admin/audit?action=drain)"
 log "superadmin console: node drain/undrain and audit row passed"
 
+# ---------------------------------------------------------------------------
+# History layer. Skipped rather than failed when the admin process has no
+# ClickHouse: `RUSTIC_GIT_CLICKHOUSE_URL` is optional by design (a process
+# without it runs exactly as before), so a laptop run without ClickStack must
+# still pass the rest of this file. Same shape as every other prerequisite
+# here — a missing one skips its block; only exit 77 at the top says the whole
+# run was not a pass.
+# ---------------------------------------------------------------------------
+HISTORY_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN_BASE/admin/history/live_workspaces" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")
+if [ "$HISTORY_STATUS" = "503" ]; then
+  log "history: no ClickHouse configured on the admin process, skipping the history assertions"
+  HISTORY_CLAUSE=""
+else
+  log "history: asserting every console series answers with a series and a summary"
+  for series in pending_requests firing_signals owners_over_80 live_workspaces live_environments \
+                decided_requests time_to_decide_p50 pool_used cpu_used memory_used restarts \
+                audit_events; do
+    BODY=$(curl -fsS "$ADMIN_BASE/admin/history/$series?range=7d&step=1h" \
+      -H "Authorization: Bearer $ADMIN_TOKEN") || fail "history series $series did not answer"
+    echo "$BODY" | grep -q '"summary"' || fail "history series $series has no summary: $BODY"
+    echo "$BODY" | grep -q '"series"' || fail "history series $series has no series: $BODY"
+  done
+
+  # An unknown series is a 404, not an empty chart — a typo in the web must be visible.
+  UNKNOWN=$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN_BASE/admin/history/not_a_series" \
+    -H "Authorization: Bearer $ADMIN_TOKEN")
+  [ "$UNKNOWN" = "404" ] || fail "an unknown history series answered $UNKNOWN, expected 404"
+
+  # The audit dual write: the drain/undrain above wrote audit rows, so the events table must carry
+  # them as `admin.drain`. This is the one end-to-end proof that a write reached ClickHouse.
+  log "history: asserting the drain audit row reached the events table"
+  for i in $(seq 1 30); do
+    curl -fsS "$ADMIN_BASE/admin/history/events?kind=admin.drain" -H "Authorization: Bearer $ADMIN_TOKEN" \
+      | grep -q "$REGION_ID/$E2E_NODE" && break
+    sleep 2
+    [ "$i" -eq 30 ] && fail "the drain audit row never appeared in history events"
+  done
+
+  # Signals read the alerts table now, and say so. `source` is `none` until the evaluator has run
+  # once against a region with samples, which is a legitimate outcome on a fresh stack.
+  SIGNALS=$(curl -fsS "$ADMIN_BASE/admin/monitoring/signals" -H "Authorization: Bearer $ADMIN_TOKEN")
+  echo "$SIGNALS" | grep -qE '"source":"(monitor|none)"' || fail "signals carries no source: $SIGNALS"
+  echo "$SIGNALS" | grep -q '"NoLeader"' || fail "signals lost the catalogue: $SIGNALS"
+  log "history: twelve series, unknown-series 404, audit dual write and signals passed"
+  HISTORY_CLAUSE=", history layer (twelve series, unknown series 404s, audit dual write lands, signals read from the alerts table)"
+fi
+
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls rustic-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds, generic requests (access request opened, one-pending-per-kind, unioned queue, approve sets membership, second decision 409s)), superadmin console (node drain/undrain, audit row) passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls rustic-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds, generic requests (access request opened, one-pending-per-kind, unioned queue, approve sets membership, second decision 409s)), superadmin console (node drain/undrain, audit row) passed$HISTORY_CLAUSE"

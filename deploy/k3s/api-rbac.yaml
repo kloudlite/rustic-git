@@ -90,6 +90,13 @@ kind: ClusterRole
 metadata:
   name: rustic-git-admin
 rules:
+  # `watch` on every read below is the history layer's, not the console's: `history::watch` runs
+  # one reflector per kind per region in the admin process and turns the transitions it sees into
+  # `rustic.events` rows (crates/workspaces/src/history/watch.rs). Without it each watch retries
+  # forever behind a backoff and the console's charts stay empty while every other admin surface
+  # works — the one failure mode this rule exists to prevent. It adds no authority: a `watch` is a
+  # streamed `list`, and nothing here gained a write verb.
+  #
   # The only role that may create, patch or delete a Quota, a QuotaRequest or a Region — the
   # design doc's whole point: RBAC, not a claim check inside a shared process, is what stops the
   # user-role process writing one of these, because that process's ServiceAccount cannot.
@@ -98,7 +105,7 @@ rules:
     verbs: ["get", "list", "create", "patch", "delete"]
   - apiGroups: ["rustic-git.io"]
     resources: ["quotarequests"]
-    verbs: ["get", "list", "create", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   - apiGroups: ["rustic-git.io"]
     resources: ["quotarequests/status"]
     verbs: ["patch", "update"]
@@ -115,23 +122,23 @@ rules:
     verbs: ["patch", "update"]
   - apiGroups: ["rustic-git.io"]
     resources: ["regions"]
-    verbs: ["get", "list", "create", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # No `delete`: `ClusterSettings` is never removed, only its fields reset to defaults by
   # omission — the object itself (named `default`) is expected to always exist once created.
   - apiGroups: ["rustic-git.io"]
     resources: ["clustersettings"]
-    verbs: ["get", "create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
   # The decommission view and the cross-owner list/stop/delete surfaces both need the full object,
   # not the read the user role keeps for its own owner-scoped routes.
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
-    verbs: ["get", "list", "patch", "delete"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
   # Read-only, and not optional: Owners, Clusters and Overview all compute their numbers from
   # these on the request path (usage is never a cached counter), so without this rule those three
   # areas answer 403 rather than degrading.
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes", "snapshots", "volumereplicas"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   # `patch` is the Clusters area's drain / undrain / decommission: the decommission LABEL, the
   # status annotation undrain clears, and `spec.unschedulable`. A node cannot be name-restricted
   # in RBAC (no `resourceNames` on a cluster-scoped list of one), so the scoping is in the handler
@@ -140,7 +147,7 @@ rules:
   # console never removes a Node object, and never the VM behind it.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "patch"]
+    verbs: ["get", "list", "watch", "patch"]
   # admin::workloads' per-region half: rolling this region's own rustic-git-agent DaemonSet
   # (kube-system) and rustic-git-gateway Deployment (rustic-git-system, deploy/k3s/gateway.yaml).
   # No `create`/`delete` — same reasoning as the central Role in deploy/rustic-git.yaml, a roll

@@ -448,6 +448,24 @@ spec:
             # cluster syncing its own desired state, and this Secret goes away with it.
             - name: KUBECONFIG
               value: /etc/rustic-git/k3s/config
+            # ClickStack. Optional by design: without these the admin process runs exactly as
+            # before and every /admin/history route answers 503 (crates/workspaces/src/history).
+            - name: RUSTIC_GIT_CLICKHOUSE_URL
+              value: http://clickstack-clickhouse.clickstack.svc:8123
+            - name: RUSTIC_GIT_CLICKHOUSE_USER
+              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: user, optional: true } }
+            - name: RUSTIC_GIT_CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: password, optional: true } }
+            # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
+            - name: RUSTIC_GIT_HYPERDX_URL
+              value: https://hyperdx.dev.kloudlite.io
+            # The region the MOUNTED KUBECONFIG points at, and the label that cluster's watch
+            # stamps on its event rows — this process's own cluster is always `central`, hard-coded
+            # in bins/api/src/main.rs, so this is never that. It must equal the `RUSTIC_GIT_REGION`
+            # on that region's deploy/k3s/otel-agent.yaml, or a chart joins telemetry to events
+            # from a different region and neither side looks wrong.
+            - name: RUSTIC_GIT_REGION
+              value: westeurope-k3s
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
@@ -910,3 +928,196 @@ spec:
                 name: rustic-git-http
                 port:
                   number: 80
+
+---
+# The AKS collector: deploy/k3s/otel-agent.yaml, copied, with THREE changes and no others — keep it
+# that way, and diff the two files when either is edited:
+#
+#   1. namespace `rustic-git` instead of `kube-system` (this cluster has no pooled nodes, so the
+#      agent's DaemonSet namespace is meaningless here and the workloads it scrapes live here).
+#   2. `RUSTIC_GIT_REGION: central` — the label bins/api hard-codes for this, its own, cluster.
+#   3. the exporter points at the gateway's ClusterIP, not `otel.dev.kloudlite.io`: the gateway
+#      runs in this same cluster, so leaving through the ingress would cost a TLS handshake and a
+#      round trip through nginx to arrive back three namespaces away.
+#
+# The header table in the k3s file IS this role too; it is not repeated.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustic-git-otel-agent
+  namespace: rustic-git
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-otel-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  # k8s_cluster's own reads: it reports the cluster's object counts and phases, which is where
+  # `nodes_ready` and the pod-phase gauges come from. Read-only, like everything above.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/stats", "events", "resourcequotas"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rustic-git-otel-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rustic-git-otel-agent
+subjects:
+  - kind: ServiceAccount
+    name: rustic-git-otel-agent
+    namespace: rustic-git
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rustic-git-otel-agent
+  namespace: rustic-git
+data:
+  config.yaml: |
+    receivers:
+      # Every pod already annotated `prometheus.io/scrape` — the same annotation the retired
+      # on-request scrape used, so nothing had to be re-annotated for this.
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: kubernetes-pods
+              scrape_interval: 15s
+              kubernetes_sd_configs: [{ role: pod }]
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                  action: keep
+                  regex: "true"
+                # The annotation names the metrics port; without this rewrite discovery would
+                # scrape the pod's first declared port, which for most of ours is not 9464.
+                - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                  action: replace
+                  regex: ([^:]+)(?::\d+)?;(\d+)
+                  replacement: $$1:$$2
+                  target_label: __address__
+                - source_labels: [__meta_kubernetes_pod_name]
+                  target_label: k8s_pod_name
+                - source_labels: [__meta_kubernetes_namespace]
+                  target_label: k8s_namespace_name
+                - source_labels: [__meta_kubernetes_pod_node_name]
+                  target_label: k8s_node_name
+      # Node and pod CPU/memory/filesystem, straight from each kubelet. This is why the agent
+      # exports only the two gauges the kubelet cannot know (btrfs pool, running worktrees).
+      kubeletstats:
+        collection_interval: 15s
+        auth_type: serviceAccount
+        endpoint: https://${env:K8S_NODE_NAME}:10250
+        insecure_skip_verify: true
+        metric_groups: [node, pod, container]
+      k8s_cluster:
+        collection_interval: 30s
+      # Pod logs, so HyperDX has logs beside metrics. Our binaries keep plain tracing output;
+      # `RUSTIC_GIT_LOG_FORMAT=json` makes them structured here without changing the code.
+      filelog:
+        include: [/var/log/pods/*/*/*.log]
+        include_file_path: true
+        operators:
+          - type: container
+            id: container-parser
+
+    processors:
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata: [k8s.namespace.name, k8s.pod.name, k8s.node.name, k8s.deployment.name, k8s.container.name]
+      # The one label every query in `history/series.rs` and `history/alerts.rs` filters on. Set
+      # here, per cluster, because nothing in the telemetry itself knows which region it is in.
+      # `k8s.node.name` is upserted alongside it for the same reason the alert rules group by node:
+      # the prometheus receiver's relabelled `k8s_node_name` is a metric label, not a resource
+      # attribute, and the per-node rules read the resource.
+      resource:
+        attributes:
+          - { key: region, value: "${env:RUSTIC_GIT_REGION}", action: upsert }
+          - { key: k8s.node.name, value: "${env:K8S_NODE_NAME}", action: insert }
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+
+    exporters:
+      otlphttp:
+        endpoint: http://clickstack-otel-collector.clickstack.svc:4318
+        headers:
+          authorization: "${env:OTEL_INGESTION_KEY}"
+        # The collector's own queue is the buffer. Nothing of ours buffers telemetry — a dropped
+        # sample is a gap in a chart, and building a durable queue for that would be the most
+        # over-engineered thing in this repo.
+        retry_on_failure: { enabled: true }
+        sending_queue: { enabled: true, queue_size: 5000 }
+
+    service:
+      pipelines:
+        metrics:
+          receivers: [prometheus, kubeletstats, k8s_cluster]
+          processors: [k8sattributes, resource, batch]
+          exporters: [otlphttp]
+        logs:
+          receivers: [filelog]
+          processors: [k8sattributes, resource, batch]
+          exporters: [otlphttp]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-otel-agent
+  namespace: rustic-git
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: rustic-git-otel-agent }
+  template:
+    metadata:
+      labels: { app: rustic-git-otel-agent }
+    spec:
+      serviceAccountName: rustic-git-otel-agent
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.109.0
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: RUSTIC_GIT_REGION
+              # `central`, the one region id that is not a Region CR — bins/api hard-codes it for
+              # this cluster's own watch, so telemetry and events agree only if it is spelled the
+              # same here.
+              value: central
+            - name: OTEL_INGESTION_KEY
+              # No `optional: true`: a collector that started without the key would export nothing
+              # and look healthy, which is strictly worse than the CrashLoopBackOff a missing
+              # Secret gives. Create it first — deploy/clickstack/README.md.
+              valueFrom: { secretKeyRef: { name: rustic-git-otel, key: key } }
+          volumeMounts:
+            - { name: conf, mountPath: /conf }
+            - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: conf
+          configMap: { name: rustic-git-otel-agent }
+        - name: varlogpods
+          hostPath: { path: /var/log/pods }

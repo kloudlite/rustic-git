@@ -1,0 +1,135 @@
+# ClickStack, step 2 of 2: ClickHouse, the gateway OTel collector, HyperDX and HyperDX's MongoDB.
+#
+# Keys verified against `helm show values clickstack/clickstack --version 3.2.0` and, for the
+# `otel-collector` block, `helm show values open-telemetry/opentelemetry-collector` (the subchart
+# this chart aliases). Anything still unverified carries a `# verify:` comment.
+#
+# ONE ClickHouse replica, deliberately (design §"Not doing": no multi-node ClickHouse). This is
+# telemetry, not the platform's record of anything a user owns — the git repos and the workspaces
+# survive its loss entirely, and the console degrades to "history unavailable". A second replica
+# would double the cost of the one component here whose outage is survivable.
+
+clickhouse:
+  enabled: true
+  cluster:
+    # Rendered verbatim into the ClickHouseCluster CR, so these are the operator's field names,
+    # not the chart's.
+    spec:
+      replicas: 1
+      shards: 1
+      dataVolumeClaimSpec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: managed-csi
+        resources:
+          requests:
+            storage: 100Gi
+  keeper:
+    spec:
+      replicas: 1
+      dataVolumeClaimSpec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: managed-csi
+        resources:
+          requests:
+            storage: 5Gi
+  # No `service:` key exists on this chart — the operator owns the Service and defaults it to
+  # ClusterIP, which is what we want: nothing outside the cluster speaks the native protocol to
+  # this, and the collector's ingress below is the one door in. Do NOT add a LoadBalancer here.
+
+global:
+  otelCollector:
+    # Merged on top of the collector image's built-in config. The only thing we change is the
+    # exporter's retention: 30 days of raw metrics, which is exactly what `rustic.metrics_5m`
+    # (400 d, written by the admin process) exists to outlive.
+    # verify: the built-in exporter is named `clickhouse` and takes a `ttl` duration — confirm with
+    # `kubectl -n clickstack exec deploy/clickstack-otel-collector -- cat /etc/otelcol-contrib/config.yaml`
+    # before trusting a fresh chart version.
+    customConfig: |
+      exporters:
+        clickhouse:
+          ttl: 720h
+
+otel-collector:
+  # The GATEWAY collector: it receives OTLP from every cluster's agent collector and writes
+  # ClickHouse. The agents are ours (deploy/k3s/otel-agent.yaml), not this chart's.
+  enabled: true
+  mode: deployment
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+    hosts:
+      # OTLP/HTTP on 4318 — the protocol every agent collector in this repo exports with
+      # (`otlphttp`). nginx already serves HTTP/2 to clients on a TLS listener, so an agent's
+      # exports are multiplexed over one connection without any annotation.
+      - host: otel.dev.kloudlite.io
+        paths:
+          - path: /
+            pathType: Prefix
+            port: 4318
+    tls:
+      - secretName: otel-tls
+        hosts: [otel.dev.kloudlite.io]
+    # OTLP/gRPC gets its OWN hostname rather than a path on the one above: nginx's
+    # `backend-protocol` annotation applies to the whole server block, so a GRPC rule and an HTTP
+    # rule on one host would break whichever came second. Nothing of ours uses this door yet — it
+    # exists for a third-party exporter that only speaks gRPC.
+    additionalIngresses:
+      - name: grpc
+        ingressClassName: nginx
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt
+          # Without this nginx downgrades the connection and every export fails with a protocol
+          # error that reads like a TLS problem.
+          nginx.ingress.kubernetes.io/backend-protocol: GRPC
+        hosts:
+          - host: otel-grpc.dev.kloudlite.io
+            paths:
+              - path: /
+                pathType: Prefix
+                port: 4317
+        tls:
+          - secretName: otel-grpc-tls
+            hosts: [otel-grpc.dev.kloudlite.io]
+
+hyperdx:
+  ingress:
+    enabled: true
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+      # HyperDX has its own login, but this area is superadmin-only and a second gate costs one
+      # annotation — the same "the console is not a public surface" stance the admin process takes
+      # by running as a separate process behind `refuse_without_claim`. The htpasswd Secret is
+      # created by hand, from the superadmin's own credentials; see README.md.
+      nginx.ingress.kubernetes.io/auth-type: basic
+      nginx.ingress.kubernetes.io/auth-secret: hyperdx-basic-auth
+      nginx.ingress.kubernetes.io/auth-realm: "rustic-git superadmin"
+    # Passed through verbatim as the Ingress `spec`, so this is Kubernetes' schema, not the
+    # chart's — hence `ingressClassName` here rather than beside the annotations.
+    spec:
+      ingressClassName: nginx
+      rules:
+        - host: hyperdx.dev.kloudlite.io
+          http:
+            paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    # The chart's fullname helper, and it embeds the RELEASE name: this is right
+                    # only for `helm install clickstack …` as the README's command spells it.
+                    # Verified with `helm template clickstack …`.
+                    name: clickstack-app
+                    port:
+                      number: 3000
+      tls:
+        - secretName: hyperdx-tls
+          hosts: [hyperdx.dev.kloudlite.io]
+
+mongodb:
+  # HyperDX's own state (saved searches, dashboards, alert definitions). Small, and unrelated to
+  # the platform's Mongo — do NOT point it at `rustic-git-mongo`.
+  enabled: true
+  spec:
+    members: 1

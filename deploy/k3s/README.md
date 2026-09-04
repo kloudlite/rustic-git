@@ -17,7 +17,8 @@ Files, in the order a cluster is built:
 | `system-netpol.yaml` | The one NetworkPolicy admitting 2049 to ZeroFS. The mount runs in the node's netns via `nsenter`, so its client is the node, never an agent pod: the `from` list is the node subnet (`10.60.1.0/24`, for a mount on ZeroFS's own node) **plus one `/32` per node's `flannel.1` address** (every other node, masqueraded over VXLAN). Hand-maintained — a new node's `/32` goes in before its agent mounts. The export authenticates nothing, so reachability is the authorization. `app: zerofs` is the sole selector. Apply with `zerofs.yaml`. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `zerofs.yaml` | The region's shared-home NFS export (ZeroFS, single replica — see its header). Apply before rolling agents with `WS_HOMES_EXPORT` set; see "Shared home" below. |
-| `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods, and metrics (9464) only from a namespace literally named `monitoring` — no such namespace exists yet, so edit that rule to name the scraper's real namespace before expecting 9464 to be reachable. No Service — discovery is by pod IP from the API. See "Replication" below. |
+| `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods, and metrics (9464) only from the OTel collector's pod in `kube-system` (`otel-agent.yaml`). It used to name a namespace called `monitoring` that never existed, so 9464 was unreachable and the agent's gauges went nowhere. No Service — discovery is by pod IP from the API. See "Replication" below. |
+| `otel-agent.yaml` | The region's OpenTelemetry collector: ServiceAccount + ClusterRole (the header table is the role), the scrape/kubelet/log config, and one Deployment. Exports to the ClickStack gateway on AKS. Needs the `rustic-git-otel` Secret first (`../clickstack/README.md`) and `RUSTIC_GIT_REGION` edited to this region's id. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `rustic-git-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
@@ -49,7 +50,7 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f system-netpol.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f system-netpol.yaml -f otel-agent.yaml
 ```
 
 ### Upgrading an existing cluster off PersistentVolumes
@@ -983,3 +984,39 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 Apply both BEFORE rolling the api image: without the CRD every `/v1/requests` create 404s from
 the API server, and without the RBAC the admin process 403s on the queue. Then, once per
 cluster, `POST /admin/requests/migrate` with a note — idempotent, safe to repeat.
+## Release: the history layer on ClickStack
+
+ClickStack goes up FIRST, on AKS (`deploy/clickstack/README.md`), because the ingestion API key it
+mints is what every region's collector needs; a collector applied before the Secret exists
+CrashLoopBackOffs on a missing env var rather than starting and silently sending nothing. That
+failure mode is chosen on purpose — see the `OTEL_INGESTION_KEY` comment in `otel-agent.yaml`.
+
+```sh
+# 1. AKS: the charts, then the API key (see deploy/clickstack/README.md), then the Secret in
+#    every cluster.
+# 2. Per region: the collector's Secret, then the collector, then the widened metrics policy and
+#    the api RBAC the history layer's watches need.
+KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create secret generic rustic-git-otel \
+  --from-literal=key='<ingestion key>'
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/otel-agent.yaml
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-peer.yaml
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
+# 3. AKS: the admin Deployment's new env, after the ClickHouse user exists — the process logs
+#    `clickhouse migrations applied` once and then `clickhouse schema up to date` on every restart.
+kubectl -n rustic-git apply -f deploy/rustic-git.yaml
+```
+
+`agent-peer.yaml`'s metrics rule previously admitted a namespace named `monitoring` that never
+existed, so the agent's 9464 was unreachable; applying the new one is what makes the node gauges
+arrive at all.
+
+`api-rbac.yaml` adds `watch` to every read the `rustic-git-admin` ClusterRole already had. The
+admin process runs one reflector per kind per region and turns the transitions into
+`rustic.events`; without `watch` each one retries forever behind a backoff and the console's
+charts stay empty while every other admin surface works. It grants no new authority — a `watch` is
+a streamed `list`.
+
+`deploy/rustic-git.yaml` gains the AKS copy of the collector (namespace `rustic-git`, region
+`central`, exporting to the gateway's ClusterIP) and four env vars on `rustic-git-admin`:
+`RUSTIC_GIT_CLICKHOUSE_URL`/`_USER`/`_PASSWORD` and `RUSTIC_GIT_HYPERDX_URL`. All optional —
+unset, the admin process behaves exactly as it did and `/admin/history/*` answers 503.

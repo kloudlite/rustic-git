@@ -37,13 +37,18 @@ spec:
       ports:
         - protocol: TCP
           port: 8444
-    # The scraper must live in a namespace literally named `monitoring`, or this rule must be
-    # edited to name the one it does live in — no such namespace exists on this cluster yet, so
-    # today the rule is inert and nothing reaches 9464.
+    # The OTel agent collector (deploy/k3s/otel-agent.yaml) scrapes the agent's 9464. It runs in
+    # kube-system, so this selects that namespace and that pod rather than the `monitoring` one
+    # that never existed — while that rule stood, nothing could reach 9464 and the agent's gauges
+    # went nowhere. Both selectors are in ONE `from` entry on purpose: as two entries they would
+    # be OR'd, and `namespaceSelector: kube-system` alone admits every pod in kube-system.
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: monitoring
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app: rustic-git-otel-agent
       ports:
         - protocol: TCP
           port: 9464
