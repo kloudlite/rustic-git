@@ -334,7 +334,9 @@ pub fn reserved_repo_name(name: &str) -> bool {
 /// `img` would put its database at `repo/img/{name}`, nesting it inside the prefix every image
 /// database lives under. `vol` is the same story one keyspace over: the volume registry's
 /// routing key, and a repo owned by `vol` would nest its database under `repo/vol/{name}`.
-pub const RESERVED_OWNERS: [&str; 4] = ["api", "v2", "img", "vol"];
+/// `superadmin` is the web's operations area at `/superadmin/*`: an owner of that name would put
+/// a namespace page under every path the console owns.
+pub const RESERVED_OWNERS: [&str; 5] = ["api", "v2", "img", "vol", "superadmin"];
 
 /// Owner names are segments, minus the ones the URL space has already spent.
 ///
@@ -384,6 +386,7 @@ mod reserved_owner_tests {
     #[test]
     fn vol_is_reserved() {
         assert!(!valid_owner("vol"));
+        assert!(!valid_owner("superadmin"));
         assert!(valid_owner("volley")); // a prefix match must not over-reserve
     }
 }
