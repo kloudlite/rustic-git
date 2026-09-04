@@ -144,7 +144,9 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
     }
     // Every counter delta is computed inside one series before it is summed: `max - min` across two
     // pods is the spread between two cumulative counters, not an increase.
-    for rule in CATALOGUE.iter().filter(|r| (r.sql_for("eu").unwrap()).contains("otel_metrics_sum")) {
+    // `httpcheck.status` lands in the sum table but is a 0/1 flag per probe run, not a counter:
+    // ProbeDown counts good runs, it never differences anything, so the per-series rule is moot.
+    for rule in CATALOGUE.iter().filter(|r| r.name != "ProbeDown" && (r.sql_for("eu").unwrap()).contains("otel_metrics_sum")) {
         let sql = rule.sql_for("eu").unwrap();
         assert!(sql.contains("k8s.pod.name"), "{} sums across series: {sql}", rule.name);
     }
