@@ -27,10 +27,6 @@ export default async function ClustersPage() {
   ]);
   const rows = r.ok ? r.value : [];
   const workloads = workloadsR.ok ? workloadsR.value : [];
-  // One `pool_used` read per region: the series is the only place a disk ratio exists.
-  const pools = await Promise.all(
-    rows.map((c) => api.adminSeries("pool_used", { range: "7d", step: "1d", region: c.region }, token)),
-  );
 
   const nodesReady = rows.reduce((n, c) => n + c.nodesReady, 0);
   const nodesTotal = rows.reduce((n, c) => n + c.nodesTotal, 0);
@@ -60,11 +56,11 @@ export default async function ClustersPage() {
       </KpiStrip>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {rows.map((c, i) => (
+        {rows.map((c) => (
           <RegionCard
             key={c.region}
             region={c}
-            pool={pools[i]}
+            token={token}
             agentImage={tagOf(workloads.find((w) => w.scope === c.region && w.kind === "daemonset")?.image ?? null)}
           />
         ))}

@@ -10,10 +10,10 @@ export function nodeTone(n: AdminNode): Tone {
   return n.decommission ? "info" : "ok";
 }
 
-/** The last verb appears only once the node's own status reads the sticky `drained <RFC 3339>`:
- *  that stamp is the gate on retiring the machine, and offering it earlier would be offering to
- *  discard bytes no other node holds yet. */
-export function nodeVerbs(n: AdminNode): ("drain" | "undrain" | "decommission" | "delete-vm")[] {
-  if (!n.decommission) return ["drain", "decommission"];
-  return isDrained(n.decommissionStatus) ? ["undrain", "delete-vm"] : ["undrain", "decommission"];
+/** `decommission` cordons the node, which is what gates deleting its VM by hand — so it appears
+ *  only once the node's own status reads the sticky `drained <RFC 3339>`. Offering it mid-drain
+ *  would be offering to retire bytes no other node holds yet (and the api 409s it anyway). */
+export function nodeVerbs(n: AdminNode): ("drain" | "undrain" | "decommission")[] {
+  if (!n.decommission) return ["drain"];
+  return isDrained(n.decommissionStatus) ? ["undrain", "decommission"] : ["undrain"];
 }

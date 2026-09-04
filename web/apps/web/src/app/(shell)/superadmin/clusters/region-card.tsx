@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { cn } from "@/lib/utils";
+import * as api from "@/lib/api";
 import type { AdminClusterRow } from "@/lib/api";
-import type { HistorySeries } from "@/lib/history";
 import { settingsStatusTone } from "@/lib/clusters";
 import { Section } from "../ui/section";
 import { Pill } from "../ui/pill";
@@ -10,15 +10,18 @@ import { RegionStatusToggle } from "./region-status";
 
 /** One region as a `Section` (`Clusters.dc.html`): ready dots, the disk-pool bar, live working
  *  copies, the agent image tag and the ClusterSettings chip — everything without a second click. */
-export function RegionCard({
+export async function RegionCard({
   region,
-  pool,
   agentImage,
+  token,
 }: {
   region: AdminClusterRow;
-  pool: HistorySeries;
   agentImage: string | null;
+  token: string;
 }) {
+  // Each card reads its own `pool_used` — the only place a disk ratio exists — so the cards fetch
+  // side by side rather than the page awaiting a second serialised round trip for all of them.
+  const pool = await api.adminSeries("pool_used", { range: "7d", step: "1d", region: region.region }, token);
   const href = `/superadmin/clusters/${encodeURIComponent(region.region)}`;
   const settings = settingsStatusTone(region.settingsStatus);
   return (

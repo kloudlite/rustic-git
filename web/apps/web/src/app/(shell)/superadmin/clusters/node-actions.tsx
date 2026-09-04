@@ -8,7 +8,6 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { isDrained } from "@/lib/clusters";
 import { drainNodeAction, undrainNodeAction, decommissionNodeAction } from "../actions";
 
 type Verb = "drain" | "undrain" | "decommission";
@@ -34,13 +33,12 @@ export function NodeActions({
   region,
   node,
   verbs,
-  decommissionStatus,
 }: {
   region: string;
   node: string;
-  /** From `nodeVerbs` — the caller decides what this node may be asked to do. */
-  verbs: ("drain" | "undrain" | "decommission" | "delete-vm")[];
-  decommissionStatus: string | null;
+  /** From `nodeVerbs` — the caller decides what this node may be asked to do, so a verb the
+   *  api would 409 (decommission before the `drained` stamp) is never rendered at all. */
+  verbs: Verb[];
 }) {
   const router = useRouter();
   const [verb, setVerb] = useState<Verb | null>(null);
@@ -77,19 +75,14 @@ export function NodeActions({
 
   return (
     <>
-      {error && <span className="text-caption text-destructive">{error}</span>}
       {verbs.map((v) => (
         <button
           key={v}
           type="button"
-          className="text-sm2 text-muted-foreground hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-          // `decommission` is the cordon and nothing more — the `drained` stamp is its gate, and
-          // deleting the VM stays a human step outside this console (CLAUDE.md). So the verb the
-          // mockup calls "Delete VM" is this same button, finally enabled.
-          disabled={v === "decommission" && !isDrained(decommissionStatus)}
-          onClick={() => open(v === "delete-vm" ? "decommission" : v)}
+          className="text-sm2 text-muted-foreground hover:text-primary"
+          onClick={() => open(v)}
         >
-          {v === "delete-vm" ? "Decommission" : v[0].toUpperCase() + v.slice(1)}
+          {VERB_COPY[v].label}
         </button>
       ))}
       {verb && dialog()}
@@ -107,6 +100,7 @@ export function NodeActions({
               {confirmedFirst ? copy.second : "A reason is required — it's recorded on the node alongside who and when."}
             </DialogDescription>
           </DialogHeader>
+          {error && <p role="alert" className="text-sm2 font-medium text-destructive">{error}</p>}
           {!confirmedFirst && (
             <Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder={`Why is this node being ${verb === "undrain" ? "undrained" : `${verb}ed`}?`} rows={3} />
           )}

@@ -10,8 +10,8 @@ test("a ready node is calm, a draining one is informational, a dead one is criti
   expect(nodeTone(n({ ready: false }))).toBe("critical");
 });
 
-test("only a drained node offers the last verb — the sticky stamp is the gate", () => {
-  expect(nodeVerbs(n({}))).toEqual(["drain", "decommission"]);
-  expect(nodeVerbs(n({ decommission: true, decommissionStatus: "draining running=2 owned=6 copies=4 thin=2" }))).toEqual(["undrain", "decommission"]);
-  expect(nodeVerbs(n({ decommission: true, decommissionStatus: "drained 2026-08-28T11:04:22Z" }))).toEqual(["undrain", "delete-vm"]);
+test("only a drained node offers decommission — the sticky stamp is the gate", () => {
+  expect(nodeVerbs(n({}))).toEqual(["drain"]);
+  expect(nodeVerbs(n({ decommission: true, decommissionStatus: "draining running=2 owned=6 copies=4 thin=2" }))).toEqual(["undrain"]);
+  expect(nodeVerbs(n({ decommission: true, decommissionStatus: "drained 2026-08-28T11:04:22Z" }))).toEqual(["undrain", "decommission"]);
 });

@@ -15,7 +15,6 @@ import { DataTable, EmptyState, RowActions, Td, Th, Tr } from "../../ui/data-tab
 import { RegionStatusToggle } from "../region-status";
 import { NodeActions } from "../node-actions";
 import { DrainRefresh } from "../drain-refresh";
-import { PoolBar } from "../pool-bar";
 
 export async function generateMetadata({ params }: { params: Promise<{ region: string }> }): Promise<Metadata> {
   const { region } = await params;
@@ -108,7 +107,6 @@ export default async function ClusterDetailPage({ params }: { params: Promise<{ 
                 <Th>Decommission</Th>
                 <Th numeric>Hosted</Th>
                 <Th numeric>Replicas</Th>
-                <Th>Disk pool</Th>
                 <Th />
               </tr>
             </thead>
@@ -122,16 +120,12 @@ export default async function ClusterDetailPage({ params }: { params: Promise<{ 
                   <Td className="font-mono text-caption">{n.decommissionStatus ?? "—"}</Td>
                   <Td numeric>{n.workingCopies}</Td>
                   <Td numeric>{n.replicasHeld}</Td>
-                  {/* Region-wide: no per-node disk figure exists on the wire, so every row reads
-                      the region's own `pool_used` series. */}
-                  <Td className="w-40"><PoolBar series={pool} label="region pool" /></Td>
                   <Td>
                     <RowActions>
                       <NodeActions
                         region={detail.region}
                         node={n.name}
                         verbs={nodeVerbs(n)}
-                        decommissionStatus={n.decommissionStatus}
                       />
                     </RowActions>
                   </Td>
