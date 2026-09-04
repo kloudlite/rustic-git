@@ -151,7 +151,9 @@ fn parse_entry(bytes: &[u8]) -> Option<AuditEntry> {
 }
 
 /// Reads the requested month prefixes newest-first, filters `actor`/`action`/`target` in memory,
-/// and pages by `limit` with a cursor that is just the last object key read. An unrecognised
+/// and pages by `limit` with a cursor that is the last object key this page CONSUMED — the next
+/// page resumes at the key after it. Naming the first unread key instead would drop exactly one
+/// row per page boundary, since the resume skips past whatever the cursor names. An unrecognised
 /// `cursor` (the row it named is gone, or it never existed) answers with an empty page rather than
 /// silently restarting at page 1 — a caller paging forward must not loop.
 ///
@@ -186,11 +188,15 @@ pub async fn list(
 
     let mut rows = Vec::new();
     let mut next_cursor = None;
+    // The last key CONSUMED, filtered-out rows included: a resume must skip them too, or every
+    // page would re-walk the same non-matching keys.
+    let mut last_consumed: Option<&String> = None;
     for key in &keys[start.min(keys.len())..] {
         if rows.len() >= limit {
-            next_cursor = Some(key.clone());
+            next_cursor = last_consumed.cloned();
             break;
         }
+        last_consumed = Some(key);
         let bytes = os.get(&OsPath::from(key.as_str())).await?.bytes().await?.to_vec();
         let Some(entry) = parse_entry(&bytes) else {
             tracing::warn!(key, "unreadable audit row");
@@ -254,6 +260,42 @@ mod tests {
     fn months_with_from_after_to_is_empty() {
         let f = AuditFilter { from: Some("2026-08".into()), to: Some("2026-06".into()), ..Default::default() };
         assert_eq!(months(&f).unwrap(), Vec::<String>::new());
+    }
+
+    /// The cursor contract: walking the log a page at a time must yield exactly the unpaged
+    /// walk. A cursor naming the first UNREAD key instead of the last read one silently drops one
+    /// row per page boundary, which is invisible in any single-page test.
+    #[tokio::test]
+    async fn paging_yields_the_same_rows_as_one_unpaged_read() {
+        let os: Arc<dyn ObjectStore> = Arc::new(slatedb::object_store::memory::InMemory::new());
+        let month = chrono::Utc::now().format("%Y-%m").to_string();
+        for i in 0..5 {
+            let entry = AuditEntry {
+                ts: format!("{month}-04T10:0{i}:00Z"),
+                actor: "op@example.com".into(),
+                action: "deny".into(),
+                target: format!("owner{i}"),
+                reason: None,
+                result: "ok".into(),
+            };
+            record(&os, &entry).await.unwrap();
+        }
+        let all = list(&os, AuditFilter::default(), None, 100).await.unwrap();
+        assert_eq!(all.rows.len(), 5);
+        assert!(all.next_cursor.is_none());
+
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = list(&os, AuditFilter::default(), cursor, 2).await.unwrap();
+            paged.extend(page.rows);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let names = |rows: &[AuditEntry]| rows.iter().map(|r| r.target.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&paged), names(&all.rows));
     }
 
     /// A malformed date names the field in the 422 the caller turns this into.
