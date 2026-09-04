@@ -38,6 +38,7 @@ describe("settingsStatusTone", () => {
     expect(settingsStatusTone("present")).toBe("present");
     expect(settingsStatusTone("absent")).toBe("absent");
     expect(settingsStatusTone("stale")).toBe("stale");
+    expect(settingsStatusTone("stale (lag 2)")).toBe("stale");
     expect(settingsStatusTone("parse-error")).toBe("unknown");
   });
 });

@@ -26,7 +26,7 @@ export function RegionStatusBadge({ status }: { status: string }) {
   return status === "active" ? <Badge variant="outline">active</Badge> : <Badge variant="secondary">{status}</Badge>;
 }
 
-/** `present`/`absent`/the pending `stale` addition — anything else reads as neutral rather than
+/** `present`/`absent`/`stale (lag N)` — anything else reads as neutral rather than
  *  breaking the row (`lib/clusters.ts::settingsStatusTone`). */
 export function SettingsStatusBadge({ status }: { status: string }) {
   const tone = settingsStatusTone(status);

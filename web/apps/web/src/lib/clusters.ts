@@ -34,5 +34,7 @@ export function isDrained(raw: string | null | undefined): boolean {
 export type SettingsStatusTone = "present" | "absent" | "stale" | "unknown";
 
 export function settingsStatusTone(status: string): SettingsStatusTone {
-  return status === "present" || status === "absent" || status === "stale" ? status : "unknown";
+  // The backend spells lag into the value ("stale (lag 2)"), so match the prefix, not the literal.
+  if (status.startsWith("stale")) return "stale";
+  return status === "present" || status === "absent" ? status : "unknown";
 }
