@@ -53,6 +53,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/workloads", get(list_workloads_route))
         .route("/admin/workloads/{scope}/{name}/roll", post(roll_workload_route))
         .route("/admin/settings/central", get(settings::get_central).put(settings::put_central))
+        .route("/admin/settings/central/revert", post(settings::revert_central))
         .route(
             "/admin/settings/clusters/{region}",
             get(settings::get_cluster).put(settings::put_cluster),

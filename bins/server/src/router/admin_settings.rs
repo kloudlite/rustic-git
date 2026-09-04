@@ -107,3 +107,37 @@ pub(crate) async fn put_settings(
     );
     Json(next).into_response()
 }
+
+/// `POST /api/admin/settings/revert`. No body: the target is always `history[0]` — "undo the
+/// last write" — the same one the CLUSTER twin's `revert_cluster` names by index into its own
+/// annotation-backed history, just with no index to pick since this route only ever means the
+/// most recent entry. `apply_patch` with that snapshot as the patch reproduces that instant AND
+/// pushes the current (pre-revert) document onto history as a new entry — same semantics as
+/// every other write, so a revert can itself be reverted.
+pub(crate) async fn revert_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let updated_by = match require_superadmin(&app, &headers) {
+        Ok(sub) => sub,
+        Err(r) => return r,
+    };
+    let existing = match current(&app).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let Some(snap) = existing.history.first() else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "no history to revert to").into_response();
+    };
+    let patch: StoredCentralSettings = snap.into();
+    let updated_at = crate::ownership::now_ms().to_string();
+    let next = apply_patch(&existing, &patch, &updated_by, &updated_at);
+    let bytes = match serde_json::to_vec(&next) {
+        Ok(b) => b,
+        Err(e) => return internal(e),
+    };
+    if let Err(e) = app.store.os.put(&key(), PutPayload::from(bytes)).await {
+        return internal(e);
+    }
+    app.central.store(
+        rustic_git_core::settings::CentralSettings::from_env().merged_with(&next),
+    );
+    Json(next).into_response()
+}

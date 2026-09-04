@@ -266,6 +266,32 @@ pub struct StoredCentralSettingsSnapshot {
     pub updated_at: String,
 }
 
+/// A history entry, reused as the `patch` argument to `apply_patch` for a revert — every field it
+/// carries is the value in force at that instant, so overriding `current` field-by-field with it
+/// reproduces that instant exactly (`history` itself is left empty; `apply_patch` rebuilds it).
+impl From<&StoredCentralSettingsSnapshot> for StoredCentralSettings {
+    fn from(snap: &StoredCentralSettingsSnapshot) -> Self {
+        Self {
+            max_body: snap.max_body,
+            max_layer: snap.max_layer,
+            max_manifest: snap.max_manifest,
+            upload_grace_secs: snap.upload_grace_secs,
+            gc_interval_secs: snap.gc_interval_secs,
+            merge_lease_secs: snap.merge_lease_secs,
+            announce_stranded_secs: snap.announce_stranded_secs,
+            feed_retention_secs: snap.feed_retention_secs,
+            clone_host: snap.clone_host.clone(),
+            ssh_host: snap.ssh_host.clone(),
+            ssh_port: snap.ssh_port,
+            registry_host: snap.registry_host.clone(),
+            signup_open: snap.signup_open,
+            history: Vec::new(),
+            updated_by: String::new(),
+            updated_at: String::new(),
+        }
+    }
+}
+
 /// The object-store key holding `StoredCentralSettings`, readable by any node — it is a shared
 /// document, not a per-repo database, so unlike a git/registry route it needs no ownership key
 /// and no `BROWSE_TAILS` entry (same exception `_catalog` and `/api/{owner}/images` already are).

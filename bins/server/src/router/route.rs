@@ -402,7 +402,7 @@ async fn route_inner(
     // added to `BROWSE_TAILS`/`api_route` because those two encode "owner-scoped repo route" and
     // this path has no owner segment at all (`admin_settings.rs` mounts it directly on the peer
     // router, not through `browse_routes()`).
-    if path.trim_start_matches('/') == "api/admin/settings" {
+    if matches!(path.trim_start_matches('/'), "api/admin/settings" | "api/admin/settings/revert") {
         return next.run(req).await;
     }
     // An `/api/` path that is not a browse route is not routable, and must not fall through: no

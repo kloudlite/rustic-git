@@ -179,6 +179,54 @@ pub(crate) async fn put_central(
     Ok(Json(body).into_response())
 }
 
+/// `POST /admin/settings/central/revert`, the central twin of `revert_cluster` below. Unlike the
+/// cluster route this names no index — `history[0]` is always the target ("undo the last write"),
+/// since the central document has no per-region caller to disambiguate. Same shape as
+/// `put_central`: precheck boot readers against the target values with nothing written yet,
+/// forward to the server tier's own revert route (which does the actual swap-and-push-history),
+/// then roll for real.
+pub(crate) async fn revert_central(State(s): State<Arc<ApiState>>, headers: axum::http::HeaderMap) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let current = current_central(&s).await?;
+    let Some(snap) = current.history.first() else {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "no history to revert to").into_response());
+    };
+    let target: StoredCentralSettings = snap.into();
+    let changed_boot = central_boot_fields(&current, &target);
+    let mut roll_targets: Vec<(&'static str, Scope, &'static str)> = Vec::new();
+    for field in &changed_boot {
+        for (scope, reader) in central_boot_readers(&s, field).await? {
+            workloads::precheck_readers(&s, &scope, &[reader]).await?;
+            roll_targets.push((field, scope, reader));
+        }
+    }
+    let peer = peer(&s)?;
+    let Some(token) = rustic_git_core::httpx::bearer_token(&headers) else {
+        return Err((StatusCode::UNAUTHORIZED, "bearer token required").into_response());
+    };
+    let resp = peer
+        .client
+        .post(format!("{}/api/admin/settings/revert", peer.upstream))
+        .header(rustic_git_core::peer::PEER_HEADER, &peer.secret)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "forwarding central settings revert");
+            (StatusCode::BAD_GATEWAY, "could not reach the server tier").into_response()
+        })?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        return Ok((axum::http::StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY), Json(body))
+            .into_response());
+    }
+    for (field, scope, reader) in roll_targets {
+        let _ = workloads::roll_readers(&s, &scope, &[reader], RollReason::Setting(field), &c.name).await;
+    }
+    Ok(Json(body).into_response())
+}
+
 // ── cluster: direct CRD write ────────────────────────────────────────────
 
 /// Same range-error sentence `validate_stored` uses (`core::settings::range_err`), so the two

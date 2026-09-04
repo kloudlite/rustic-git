@@ -30,6 +30,22 @@ async fn keys_store() -> Arc<rustic_git_storage::store::Store> {
     )
 }
 
+/// A `keys_store` with `cluster/settings` pre-seeded — `revert_central` reads `history[0]`
+/// straight off the object store (`current_central`), same as `get_central` does, so a test that
+/// wants a non-empty history writes the document here rather than going through a PUT first.
+async fn keys_store_with(doc: &Value) -> Arc<rustic_git_storage::store::Store> {
+    let store = keys_store().await;
+    let key = slatedb::object_store::path::Path::from(rustic_git_core::settings::CENTRAL_SETTINGS_KEY);
+    slatedb::object_store::ObjectStoreExt::put(
+        store.os.as_ref(),
+        &key,
+        slatedb::object_store::PutPayload::from(serde_json::to_vec(doc).unwrap()),
+    )
+    .await
+    .unwrap();
+    store
+}
+
 struct Server {
     base: String,
     jwt: Arc<Jwt>,
@@ -64,7 +80,7 @@ struct PeerMock {
 }
 
 async fn peer_mock(secret: &str, respond: Value, status: u16) -> PeerMock {
-    use axum::{extract::State, http::HeaderMap, routing::put, Json, Router};
+    use axum::{extract::State, http::HeaderMap, routing::post, routing::put, Json, Router};
     let seen: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
     let seen2 = seen.clone();
     #[derive(Clone)]
@@ -79,8 +95,20 @@ async fn peer_mock(secret: &str, respond: Value, status: u16) -> PeerMock {
         s.seen.lock().unwrap().push((peer_hdr, body));
         (axum::http::StatusCode::from_u16(s.status).unwrap(), Json(s.respond)).into_response()
     }
+    // `revert_central` sends no body, so this mock's revert arm accepts an empty one too —
+    // `Json<Value>` with an empty request body is a null `Value`, matched the same way.
+    async fn revert_handler(State(s): State<S>, headers: HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let peer_hdr = headers.get(rustic_git_core::peer::PEER_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let body: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(&body).unwrap_or_default() };
+        s.seen.lock().unwrap().push((peer_hdr, body));
+        (axum::http::StatusCode::from_u16(s.status).unwrap(), Json(s.respond)).into_response()
+    }
     let state = S { seen: seen2, respond, status };
-    let app = Router::new().route("/api/admin/settings", put(handler)).with_state(state);
+    let app = Router::new()
+        .route("/api/admin/settings", put(handler))
+        .route("/api/admin/settings/revert", post(revert_handler))
+        .with_state(state);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -132,6 +160,46 @@ async fn put_central_forwards_and_returns_the_peer_routes_body() {
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[0].0, "shh", "the peer secret must ride along");
     assert_eq!(seen[0].1["maxBody"], 4194304);
+}
+
+/// No history yet (a fresh `cluster/settings` document): 422 decided locally, same as the
+/// range-error case above — the server tier is never even asked.
+#[tokio::test]
+async fn revert_central_with_no_history_is_422_and_forwards_nothing() {
+    let peer = peer_mock("shh", json!({}), 200).await;
+    let s = admin_server(vec![], Some(keys_store().await), Some(PeerClient::new(peer.base.clone(), peer.secret.clone()))).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/settings/central/revert", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 422);
+    assert!(peer.seen.lock().unwrap().is_empty(), "the server tier must never be called with no history to revert to");
+}
+
+/// A document with history forwards a bare `POST` (with the peer secret and the caller's bearer
+/// token, no body) to the server tier's revert route, and returns whatever that route answers
+/// with — same round-trip shape as the PUT twin above.
+#[tokio::test]
+async fn revert_central_forwards_and_returns_the_peer_routes_body() {
+    let current_doc = json!({"maxBody": 8388608, "history": [{"maxBody": 4194304}], "updatedBy": "root@example.com"});
+    let reverted_doc = json!({"maxBody": 4194304, "history": [{"maxBody": 8388608}], "updatedBy": "root@example.com"});
+    let peer = peer_mock("shh", reverted_doc.clone(), 200).await;
+    let s = admin_server(
+        vec![],
+        Some(keys_store_with(&current_doc).await),
+        Some(PeerClient::new(peer.base.clone(), peer.secret.clone())),
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/settings/central/revert", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body, reverted_doc);
+    let seen = peer.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "shh", "the peer secret must ride along");
 }
 
 // ── cluster ──────────────────────────────────────────────────────────────

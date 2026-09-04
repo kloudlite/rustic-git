@@ -164,4 +164,58 @@ async fn list_workloads_shape() {
     assert_eq!(srv["desired"], 3);
     assert_eq!(srv["rolloutState"], "Stable");
     assert!(srv["lastRoll"].is_null());
+    // `Scope` serializes as a plain string, not serde's default externally-tagged shape.
+    assert_eq!(srv["scope"], "central");
+}
+
+/// `Scope::Region` serializes as the bare region id — `"centralindia"`, never
+/// `{"Region":"centralindia"}` or `"region/centralindia"` (that's `Display`, used only in logs).
+#[tokio::test]
+async fn list_workloads_region_scope_is_plain_string() {
+    let mut routes = vec![get(
+        "/apis/rustic-git.io/v1alpha1/regions",
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": [
+            {"apiVersion": "rustic-git.io/v1alpha1", "kind": "Region", "metadata": {"name": "centralindia"}, "spec": {"name": "centralindia", "status": "active"}},
+        ]}),
+    )];
+    // `admin_server` wires both `aks` and `kube` to the same mock client, so `list_workloads`'s
+    // central half still runs and needs its own routes even though this test's assertions are
+    // about the region half.
+    routes.push(get(
+        format!("{APPS}/namespaces/rustic-git/statefulsets/rustic-git-srv"),
+        json!({
+            "apiVersion": "apps/v1", "kind": "StatefulSet",
+            "metadata": {"name": "rustic-git-srv", "namespace": "rustic-git"},
+            "spec": {"replicas": 1, "template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "ghcr.io/x:1"}]}}},
+            "status": {"readyReplicas": 1},
+        }),
+    ));
+    for name in ["rustic-git-api", "rustic-git-worker", "rustic-git-web", "rustic-git-admin"] {
+        routes.push(get(format!("{APPS}/namespaces/rustic-git/deployments/{name}"), deployment(name, 1, 1)));
+    }
+    routes.extend([
+        get(
+            "/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent",
+            json!({
+                "apiVersion": "apps/v1", "kind": "DaemonSet",
+                "metadata": {"name": "rustic-git-agent", "namespace": "kube-system"},
+                "spec": {"template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "ghcr.io/x:1"}]}}},
+                "status": {"numberReady": 1, "desiredNumberScheduled": 1},
+            }),
+        ),
+        get(
+            format!("{APPS}/namespaces/rustic-git-system/deployments/rustic-git-gateway"),
+            deployment("rustic-git-gateway", 1, 1),
+        ),
+    ]);
+    let s = admin_server(routes).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/admin/workloads", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let agent = rows.iter().find(|r| r["name"] == "rustic-git-agent").unwrap();
+    assert_eq!(agent["scope"], "centralindia");
 }

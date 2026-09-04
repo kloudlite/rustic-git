@@ -49,6 +49,7 @@ pub fn peer_router(app: Arc<App>) -> Router {
             "/api/admin/settings",
             get(admin_settings::get_settings).put(admin_settings::put_settings),
         )
+        .route("/api/admin/settings/revert", post(admin_settings::revert_settings))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
         .layer(axum::middleware::from_fn_with_state("peer", rustic_git_core::metrics::http_metrics))

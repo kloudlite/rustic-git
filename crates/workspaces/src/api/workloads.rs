@@ -35,8 +35,7 @@ pub enum Kind {
     DaemonSet,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
     Central,
     Region(String),
@@ -47,6 +46,19 @@ impl std::fmt::Display for Scope {
         match self {
             Scope::Central => write!(f, "central"),
             Scope::Region(r) => write!(f, "region/{r}"),
+        }
+    }
+}
+
+// A plain string over the wire — "central" or the bare region id — not serde's default
+// externally-tagged shape (`{"Central":null}` / `{"Region":"x"}`, and a unit variant next to a
+// tuple variant is what makes the derive panic). `Display` uses "region/{r}" for tracing
+// disambiguation; the JSON form matches `parse_scope` (`api/admin.rs`), which is the only reader.
+impl serde::Serialize for Scope {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Scope::Central => s.serialize_str("central"),
+            Scope::Region(r) => s.serialize_str(r),
         }
     }
 }
