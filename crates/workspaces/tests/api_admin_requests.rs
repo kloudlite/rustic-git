@@ -3,7 +3,9 @@
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{admin::router, ApiState, Directory, TeamRole};
-use rustic_git_workspaces::kube_test::{get as route_get, mock_client, Recorder, Route};
+use rustic_git_workspaces::kube_test::{
+    get as route_get, mock_client, not_found, patch as route_patch, post as route_post, Recorder, Route,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -37,7 +39,6 @@ impl Directory for StubMembership {
 struct Server {
     base: String,
     jwt: Arc<Jwt>,
-    #[allow(dead_code)]
     rec: Recorder,
 }
 
@@ -132,4 +133,159 @@ async fn the_kind_filter_narrows_both_sources() {
     let rows: Vec<Value> = r.json().await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], "req-1");
+}
+
+// ── decisions ──────────────────────────────────────────────────────────────
+
+async fn post(url: &str, token: &str, body: Value) -> reqwest::Response {
+    reqwest::Client::new().post(url).bearer_auth(token).json(&body).send().await.unwrap()
+}
+
+fn pending_quota_request(id: &str) -> Value {
+    json!({"metadata": {"name": id, "creationTimestamp": "2026-09-04T10:00:00Z"},
+           "spec": {"owner": "karthik", "kind": "quota", "requestedBy": "karthik", "reason": "r",
+                    "quota": {"workspaces": 9}},
+           "status": {"state": "pending"}})
+}
+
+fn pending_region_request() -> Value {
+    json!({"metadata": {"name": "req-2", "creationTimestamp": "2026-09-04T10:00:00Z"},
+           "spec": {"owner": "karthik", "kind": "region", "requestedBy": "karthik", "reason": "r",
+                    "region": {"region": "westeurope-k3s"}},
+           "status": {"state": "pending"}})
+}
+
+fn pending_other_request() -> Value {
+    json!({"metadata": {"name": "req-3", "creationTimestamp": "2026-09-04T10:00:00Z"},
+           "spec": {"owner": "karthik", "kind": "other", "requestedBy": "karthik", "reason": "r",
+                    "other": {"title": "t", "body": "b"}},
+           "status": {"state": "pending"}})
+}
+
+fn decided(id: &str, state: &str) -> Value {
+    json!({"metadata": {"name": id}, "spec": {"owner": "karthik", "kind": "quota",
+           "requestedBy": "karthik", "reason": "r", "quota": {"workspaces": 9}},
+           "status": {"state": state}})
+}
+
+fn quota_object(regions: &[&str]) -> Value {
+    json!({"metadata": {"name": "karthik"},
+           "spec": {"workspaces": 5, "environments": 2, "snapshots": 20, "diskGb": 100,
+                    "cpu": 8, "memoryGb": 32, "regions": regions}})
+}
+
+fn active_region() -> Value {
+    json!({"metadata": {"name": "westeurope-k3s"}, "spec": {"name": "West Europe", "status": "active"}})
+}
+
+/// Quota approve is unchanged in substance: the Quota is written FIRST, then the request marked,
+/// and the operator's edited values win over what was asked.
+#[tokio::test]
+async fn approving_a_quota_request_writes_the_quota_first() {
+    let s = admin_server(vec![
+        route_get(format!("{API}/requests/req-1"), pending_quota_request("req-1")),
+        not_found(format!("{API}/quotas/karthik")),
+        route_post(
+            format!("{API}/quotas"),
+            json!({"metadata": {"name": "karthik"}, "spec": {"workspaces": 12, "environments": 0,
+                   "snapshots": 0, "diskGb": 0, "cpu": 0, "memoryGb": 0}}),
+        ),
+        route_patch(
+            format!("{API}/requests/req-1/status"),
+            decided("req-1", "approved"),
+        ),
+    ])
+    .await;
+    let r = post(
+        &format!("{}/admin/requests/req-1/approve", s.base),
+        &admin_token(&s.jwt),
+        json!({"note": "ok", "quota": {"workspaces": 12}}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let written = s.rec.sent("POST", &format!("{API}/quotas"));
+    assert_eq!(written[0]["spec"]["workspaces"], 12, "the operator's edit, not the asked-for 9");
+}
+
+/// Region approve records the grant on the owner's Quota and says so in `resolution` — the spec's
+/// "a recorded decision only" has to be visible to the person who reads the decision back.
+#[tokio::test]
+async fn approving_a_region_request_records_the_grant() {
+    let s = admin_server(vec![
+        route_get(format!("{API}/requests/req-2"), pending_region_request()),
+        route_get(format!("{API}/regions/westeurope-k3s"), active_region()),
+        route_get(format!("{API}/quotas/karthik"), quota_object(&[])),
+        route_patch(
+            format!("{API}/quotas/karthik"),
+            quota_object(&["westeurope-k3s"]),
+        ),
+        route_patch(
+            format!("{API}/requests/req-2/status"),
+            decided("req-2", "approved"),
+        ),
+    ])
+    .await;
+    let r = post(&format!("{}/admin/requests/req-2/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+    assert_eq!(r.status(), 200);
+    let patched = s.rec.sent("PATCH", &format!("{API}/quotas/karthik"));
+    assert_eq!(patched[0]["spec"]["regions"], json!(["westeurope-k3s"]));
+    let sent = s.rec.sent("PATCH", &format!("{API}/requests/req-2/status"));
+    assert!(
+        sent[0]["status"]["resolution"].as_str().unwrap().contains("recorded"),
+        "the resolution has to say the grant is recorded, not enforced"
+    );
+}
+
+/// An `other` request has nothing to write, so the free-text resolution IS the decision. Without
+/// it, approve would mark a request done having done nothing at all.
+#[tokio::test]
+async fn approving_an_other_request_needs_a_resolution() {
+    let s = admin_server(vec![route_get(format!("{API}/requests/req-3"), pending_other_request())]).await;
+    let r = post(&format!("{}/admin/requests/req-3/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+    assert_eq!(r.status(), 422);
+    assert!(s.rec.sent("PATCH", &format!("{API}/requests/req-3/status")).is_empty());
+}
+
+/// Two admins racing: the second sees the decision, not a silent overwrite.
+#[tokio::test]
+async fn an_already_decided_request_is_a_conflict() {
+    let s = admin_server(vec![route_get(format!("{API}/requests/req-4"), decided("req-4", "approved"))]).await;
+    let r = post(&format!("{}/admin/requests/req-4/deny", s.base), &admin_token(&s.jwt), json!({"note": "no"})).await;
+    assert_eq!(r.status(), 409);
+}
+
+/// Deny writes nothing but the mark, and the note is required — the asker has to be told why.
+#[tokio::test]
+async fn deny_requires_a_note() {
+    let s = admin_server(vec![route_get(format!("{API}/requests/req-5"), pending_quota_request("req-5"))]).await;
+    let r = post(&format!("{}/admin/requests/req-5/deny", s.base), &admin_token(&s.jwt), json!({})).await;
+    assert_eq!(r.status(), 422);
+}
+
+/// A legacy `QuotaRequest` id decides through the SAME route: the console shows one queue, so it
+/// must be able to act on every row in it without knowing which CRD the row came from.
+#[tokio::test]
+async fn a_legacy_id_decides_through_the_generic_route() {
+    let s = admin_server(vec![
+        route_get(
+            format!("{API}/quotarequests/qr-9"),
+            json!({"metadata": {"name": "qr-9"}, "spec": {"owner": "zoe", "requested": {"cpu": 12}, "reason": "old"},
+                   "status": {"state": "pending"}}),
+        ),
+        not_found(format!("{API}/quotas/zoe")),
+        route_post(
+            format!("{API}/quotas"),
+            json!({"metadata": {"name": "zoe"}, "spec": {"workspaces": 0, "environments": 0, "snapshots": 0,
+                   "diskGb": 0, "cpu": 12, "memoryGb": 0}}),
+        ),
+        route_patch(
+            format!("{API}/quotarequests/qr-9/status"),
+            json!({"metadata": {"name": "qr-9"}, "spec": {"owner": "zoe", "requested": {"cpu": 12}, "reason": "old"},
+                   "status": {"state": "approved"}}),
+        ),
+    ])
+    .await;
+    let r = post(&format!("{}/admin/requests/qr-9/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(s.rec.sent("POST", &format!("{API}/quotas"))[0]["spec"]["cpu"], 12);
 }

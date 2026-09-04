@@ -118,6 +118,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/quota/{owner}", axum::routing::put(write_quota_route))
         .route("/admin/overview", get(overview::overview_handler))
         .route("/admin/requests", get(list_requests))
+        .route("/admin/requests/{id}/approve", post(approve_request))
+        .route("/admin/requests/{id}/deny", post(deny_request))
         .route("/admin/quota-requests", get(list_all_quota_requests))
         .route("/admin/quota-requests/{id}/approve", post(approve_quota_request))
         .route("/admin/quota-requests/{id}/deny", post(deny_quota_request))
@@ -291,18 +293,29 @@ async fn approve_quota_request(
     // The DECIDING caller's name is still read here (for `decidedBy` and the base-quota guess
     // below), even though the claim itself was already checked by the layer.
     let c = caller(&s, &headers).await?;
-    let note: Decision = if body.is_empty() { Default::default() } else {
-        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
-    };
+    approve_legacy(&s, &c.name, &id, &legacy_body(&body)?).await
+}
+
+/// The legacy body, parsed. `/admin/quota-requests/…` and the generic route's fallback for an
+/// un-migrated id decide the same object the same way, so they share one body rather than each
+/// growing its own copy of the read-decide-mark order.
+fn legacy_body(body: &axum::body::Bytes) -> Result<Decision, Response> {
+    if body.is_empty() {
+        return Ok(Decision::default());
+    }
+    serde_json::from_slice(body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())
+}
+
+async fn approve_legacy(s: &ApiState, actor: &str, id: &str, note: &Decision) -> Result<Response, Response> {
     // An already-decided request is a 409 the operator needs to see in the log — they raced
     // another admin — so the refusal is recorded against the request id, the only target known
     // before the read succeeds.
-    let r = audited(&s, &c.name, "approve", &id, note.note.clone(), pending_request(&s, &id).await).await?;
+    let r = audited(s, actor, "approve", id, note.note.clone(), pending_request(s, id).await).await?;
     let owner = r.spec.owner.clone();
-    let client = kube(&s)?;
+    let client = kube(s)?;
     let api: Api<crd::Quota> = Api::all(client.clone());
     let existing = api.get_opt(&owner).await.map_err(kube_err)?;
-    let team = scope::is_team(&s, &owner).await;
+    let team = scope::is_team(s, &owner).await;
     let base = match &existing {
         Some(q) => q.spec.clone(),
         None => crate::quota::effective(client, &owner, team).await.map_err(kube_err)?,
@@ -310,12 +323,12 @@ async fn approve_quota_request(
     // An operator may grant less or more than asked; absent an edit, approve grants exactly what
     // was requested — unchanged behavior.
     let want = note.requested.clone().unwrap_or_else(|| r.spec.requested.clone());
-    audited(&s, &c.name, "approve", &owner, note.note.clone(), write_quota(&s, &owner, overlay(base, &want)).await).await?;
+    audited(s, actor, "approve", &owner, note.note.clone(), write_quota(s, &owner, overlay(base, &want)).await).await?;
     // The grant above is the consequential write; `decide` only marks the request, and if IT
     // fails the quota still landed — the row must survive that, so it's recorded here rather than
     // after the second fallible call.
-    audit(&s, &c.name, "approve", &owner, note.note.clone(), "ok").await;
-    decide(&s, &id, crd::RequestState::Approved, &c.name, note.note).await
+    audit(s, actor, "approve", &owner, note.note.clone(), "ok").await;
+    decide(s, id, crd::RequestState::Approved, actor, note.note.clone()).await
 }
 
 /// Deny: mark the request only, no `Quota` write.
@@ -326,20 +339,256 @@ async fn deny_quota_request(
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
-    let note: Decision = if body.is_empty() { Default::default() } else {
-        serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
-    };
-    let r = audited(&s, &c.name, "deny", &id, note.note.clone(), pending_request(&s, &id).await).await?;
+    deny_legacy(&s, &c.name, &id, &legacy_body(&body)?).await
+}
+
+async fn deny_legacy(s: &ApiState, actor: &str, id: &str, note: &Decision) -> Result<Response, Response> {
+    let r = audited(s, actor, "deny", id, note.note.clone(), pending_request(s, id).await).await?;
     let out = audited(
-        &s,
-        &c.name,
+        s,
+        actor,
         "deny",
         &r.spec.owner,
         note.note.clone(),
-        decide(&s, &id, crd::RequestState::Denied, &c.name, note.note.clone()).await,
+        decide(s, id, crd::RequestState::Denied, actor, note.note.clone()).await,
     )
     .await?;
-    audit(&s, &c.name, "deny", &r.spec.owner, note.note, "ok").await;
+    audit(s, actor, "deny", &r.spec.owner, note.note.clone(), "ok").await;
+    Ok(out)
+}
+
+// ── generic decisions ───────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+struct GenericDecision {
+    #[serde(default)]
+    note: Option<String>,
+    /// A quota decision's edited grant, replacing `spec.quota` before `overlay` runs — approve
+    /// grants what was actually submitted, which is the original ask unless edited.
+    #[serde(default)]
+    quota: Option<crd::RequestedQuota>,
+    /// Required on an `other` approve and free on the rest: an `other` request has nothing to
+    /// write, so this sentence IS the decision.
+    #[serde(default)]
+    resolution: Option<String>,
+}
+
+impl GenericDecision {
+    /// The legacy shape of the same decision, for an id the migration has not reached yet.
+    fn legacy(&self) -> Decision {
+        Decision { note: self.note.clone(), requested: self.quota.clone() }
+    }
+}
+
+fn decision_body(body: &axum::body::Bytes) -> Result<GenericDecision, Response> {
+    if body.is_empty() {
+        return Ok(GenericDecision::default());
+    }
+    serde_json::from_slice(body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())
+}
+
+/// `None` means no `Request` by that name — the caller falls back to the legacy CRD rather than
+/// 404ing, because one console queue lists both and every row in it must be decidable.
+async fn pending_generic(s: &ApiState, id: &str) -> Result<Option<crd::Request>, Response> {
+    check_path_segment(id)?;
+    let api: Api<crd::Request> = Api::all(kube(s)?.clone());
+    let Some(r) = api.get_opt(id).await.map_err(kube_err)? else {
+        return Ok(None);
+    };
+    if !is_pending_generic(&r) {
+        return Err((StatusCode::CONFLICT, "that request has already been decided").into_response());
+    }
+    Ok(Some(r))
+}
+
+/// Stamp the outcome. `status`, not spec: the request is what was asked, the decision is what
+/// happened to it, and only this tier ever writes it (no controller reconciles a request).
+async fn decide_generic(
+    s: &ApiState,
+    id: &str,
+    state: crd::RequestState,
+    by: &str,
+    note: Option<String>,
+    resolution: Option<String>,
+) -> Result<Response, Response> {
+    let api: Api<crd::Request> = Api::all(kube(s)?.clone());
+    let patch = serde_json::json!({"status": {
+        "state": state, "decidedBy": by, "decidedAt": chrono::Utc::now().to_rfc3339(),
+        "note": note, "resolution": resolution,
+    }});
+    let out = api.patch_status(id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    Ok(Json(generic_doc(&out)).into_response())
+}
+
+/// The base a grant lands on: the owner's own `Quota` if they have one, otherwise the effective
+/// defaults — approving must never quietly drop a limit the fallback table already gives them.
+async fn quota_base(s: &ApiState, owner: &str) -> Result<crd::QuotaSpec, Response> {
+    let client = kube(s)?;
+    let api: Api<crd::Quota> = Api::all(client.clone());
+    match api.get_opt(owner).await.map_err(kube_err)? {
+        Some(q) => Ok(q.spec),
+        None => {
+            let team = scope::is_team(s, owner).await;
+            crate::quota::effective(client, owner, team).await.map_err(kube_err)
+        }
+    }
+}
+
+/// The consequential half of an approve, per kind. Returns the sentence that goes into
+/// `status.resolution`: what this decision actually DID.
+///
+/// Every arm writes its effect BEFORE the request is marked, and the caller audits between the
+/// two — if the mark then fails, the grant still landed and the row says so, which is the only
+/// order that never claims something that did not happen.
+async fn apply_approval(
+    s: &ApiState,
+    r: &crd::Request,
+    d: &GenericDecision,
+    actor: &str,
+) -> Result<String, Response> {
+    let owner = r.spec.owner.clone();
+    // Every audit row for a decision names the REQUEST, not the owner: a reader following one
+    // decision needs its rows to collate, and the owner is already on the request.
+    let id = r.name_any();
+    match r.spec.kind {
+        crd::RequestKind::Quota => {
+            let want = d.quota.clone().or_else(|| r.spec.quota.clone()).unwrap_or_default();
+            let base = quota_base(s, &owner).await?;
+            audited(
+                s,
+                actor,
+                "request.approved",
+                &id,
+                d.note.clone(),
+                write_quota(s, &owner, overlay(base, &want)).await,
+            )
+            .await?;
+            Ok("quota written".to_string())
+        }
+        crd::RequestKind::Access => {
+            let ask = r.spec.access.clone().ok_or_else(|| {
+                // `validate` runs on create, so this is only reachable for an object written
+                // around `/v1` — a restored backup, say. Refuse rather than approve a no-op.
+                (StatusCode::UNPROCESSABLE_ENTITY, "this access request carries no access block").into_response()
+            })?;
+            let dir = s.directory.as_ref().ok_or_else(|| {
+                (StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response()
+            })?;
+            let role = match ask.role.as_str() {
+                "owner" => TeamRole::Owner,
+                "admin" => TeamRole::Admin,
+                _ => TeamRole::Member,
+            };
+            // The grant is for the person who ASKED, not for `spec.owner`: an access request's
+            // owner is the asker's own slug and the team is what they do not have yet.
+            let who = r.spec.requested_by.clone();
+            match dir.grant_access(&ask.team, &who, role).await {
+                GrantAccess::Done => Ok(format!("{who} is {} of {}", ask.role, ask.team)),
+                GrantAccess::NoSuchUser => {
+                    Err(audit_refusal(s, actor, &id, d, StatusCode::UNPROCESSABLE_ENTITY, "no such user").await)
+                }
+                GrantAccess::NoSuchTeam => {
+                    Err(audit_refusal(s, actor, &id, d, StatusCode::UNPROCESSABLE_ENTITY, "no such team").await)
+                }
+                GrantAccess::Refused(why) => {
+                    Err(audit_refusal(s, actor, &id, d, StatusCode::CONFLICT, &why).await)
+                }
+                GrantAccess::Unsupported => Err(audit_refusal(
+                    s,
+                    actor,
+                    &owner,
+                    d,
+                    StatusCode::NOT_IMPLEMENTED,
+                    "this process cannot write team membership",
+                )
+                .await),
+            }
+        }
+        crd::RequestKind::Region => {
+            let ask = r.spec.region.clone().ok_or_else(|| {
+                (StatusCode::UNPROCESSABLE_ENTITY, "this region request carries no region block").into_response()
+            })?;
+            // The region must still exist and be active — an approve is a decision somebody will
+            // read months from now, and one naming a retired region is worse than a refusal.
+            check_region(s, &ask.region).await?;
+            let mut base = quota_base(s, &owner).await?;
+            if !base.regions.contains(&ask.region) {
+                base.regions.push(ask.region.clone());
+            }
+            audited(s, actor, "request.approved", &id, d.note.clone(), write_quota(s, &owner, base).await).await?;
+            Ok(format!("{} recorded as a granted region for {owner}; placement does not read it yet", ask.region))
+        }
+        crd::RequestKind::Other => {
+            let text = d.resolution.as_deref().unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, "resolution is required").into_response());
+            }
+            Ok(text)
+        }
+    }
+}
+
+/// A refusal from a grant is a decision that did NOT happen, and 409-and-up refusals are evidence
+/// (same rule as `audited`) — recorded here because the failure is the directory's answer, not a
+/// `Result` `audited` could wrap.
+async fn audit_refusal(
+    s: &ApiState,
+    actor: &str,
+    id: &str,
+    d: &GenericDecision,
+    code: StatusCode,
+    why: &str,
+) -> Response {
+    if code.as_u16() >= 409 {
+        audit(s, actor, "request.approved", id, d.note.clone(), format!("error:{}", code.as_u16())).await;
+    }
+    (code, why.to_string()).into_response()
+}
+
+async fn approve_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let d = decision_body(&body)?;
+    let Some(r) = audited(&s, &c.name, "request.approved", &id, d.note.clone(), pending_generic(&s, &id).await).await?
+    else {
+        return approve_legacy(&s, &c.name, &id, &d.legacy()).await;
+    };
+    let resolution = apply_approval(&s, &r, &d, &c.name).await?;
+    // The effect above is the consequential write; `decide_generic` only marks the request, and if
+    // IT fails the grant still landed — so the row is recorded here rather than after the second
+    // fallible call.
+    audit(&s, &c.name, "request.approved", &id, d.note.clone(), "ok").await;
+    decide_generic(&s, &id, crd::RequestState::Approved, &c.name, d.note, Some(resolution)).await
+}
+
+/// Deny: mark the request only, no grant of any kind. The note is required — the asker reads it.
+async fn deny_request(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let d = decision_body(&body)?;
+    let note = require_note(d.note.as_deref().unwrap_or(""))?;
+    let pending = audited(&s, &c.name, "request.denied", &id, Some(note.clone()), pending_generic(&s, &id).await).await?;
+    if pending.is_none() {
+        return deny_legacy(&s, &c.name, &id, &d.legacy()).await;
+    }
+    let out = audited(
+        &s,
+        &c.name,
+        "request.denied",
+        &id,
+        Some(note.clone()),
+        decide_generic(&s, &id, crd::RequestState::Denied, &c.name, Some(note.clone()), None).await,
+    )
+    .await?;
+    audit(&s, &c.name, "request.denied", &id, Some(note), "ok").await;
     Ok(out)
 }
 
