@@ -125,7 +125,7 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
             &["%/storageAccounts/kloudlitegithomes", "v > 200", "max(n) >= 5"]),
         // A 4xx is the endpoint answering, so it counts as up; grouping by url is what makes the
         // worst url decide instead of a fleet-wide count of probe points.
-        ("ProbeDown", "otel_metrics_gauge", "httpcheck.status",
+        ("ProbeDown", "otel_metrics_sum", "httpcheck.status",
             &["http.url", "'2xx', '4xx'", "INTERVAL 120 SECOND", "countIf(good = 0) > 0"]),
         ("DependencyErrorRate", "otel_metrics_sum", "dependency_errors_total",
             &["dependency_request_duration_seconds_count", "Attributes['dep']", "INTERVAL 300 SECOND", "total >= 20", "> 0.05"]),

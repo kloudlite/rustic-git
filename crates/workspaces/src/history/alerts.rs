@@ -558,7 +558,7 @@ pub const CATALOGUE: &[Rule] = &[
         sql: |region| whole_window(
             &format!(
                 "SELECT countIf(Attributes['http.status_class'] IN ('2xx', '4xx')) AS good \
-                 FROM default.otel_metrics_gauge \
+                 FROM default.otel_metrics_sum \
                  WHERE MetricName = 'httpcheck.status' \
                    AND Value = 1 \
                    AND ResourceAttributes['region'] = '{region}' \
