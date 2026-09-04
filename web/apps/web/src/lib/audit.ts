@@ -41,19 +41,3 @@ export function auditQueryString(filter: AuditFilter): string {
   const qs = q.toString();
   return qs ? `?${qs}` : "";
 }
-
-// The write actions named in the plan's vocabulary (constraints.md) — Task 1 owns the backend's
-// canonical list; this is the UI's filter choices, not an API field, so it's fine to keep in sync
-// by hand rather than fetch a schema for a fixed, small set.
-export const AUDIT_ACTIONS = [
-  "approve",
-  "deny",
-  "set_quota",
-  "roll",
-  "drain",
-  "undrain",
-  "decommission",
-  "add_superadmin",
-  "remove_superadmin",
-  "create_region",
-] as const;

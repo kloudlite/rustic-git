@@ -22,11 +22,14 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
 
   const res = await api.adminAudit(token, filter);
   const page = res.ok ? res.value : { rows: [], next_cursor: null };
+  // Distinct action words from the rows already fetched — the datalist's suggestions can never
+  // drift from the real backend vocabulary because it never names one itself.
+  const knownActions = [...new Set(page.rows.map((r) => r.action))].sort();
 
   return (
     <div>
       <PageHeader title="Audit" purpose="Who did what, when, and why — every superadmin write, forever." />
-      <AuditFilters filter={filter} />
+      <AuditFilters filter={filter} knownActions={knownActions} />
       {!res.ok && (
         <p className="mb-3 border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm2 text-destructive">
           {res.message}
