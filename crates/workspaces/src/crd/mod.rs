@@ -877,6 +877,12 @@ pub struct QuotaSpec {
     /// Skipped when empty on purpose: `write_quota` merge-patches a whole `QuotaSpec`, and
     /// `PUT /admin/quota/{owner}` bodies never mention regions — serializing `[]` would erase a
     /// grant every time somebody edited a limit.
+    ///
+    /// ponytail: that same skip makes a grant a ONE-WAY DOOR — a merge patch can add to this list
+    /// and never remove from it, so there is no revoke path short of editing the `Quota` by hand.
+    /// Acceptable while nothing reads the field for placement; the day it gates anything, revoke
+    /// becomes a route of its own that sends the full list (a JSON patch on `/spec/regions`, not a
+    /// merge patch) rather than another field on the quota body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<String>,
 }
