@@ -82,7 +82,7 @@ The catalogue in `deploy/alerts.md` is evaluated in two places on purpose: Hyper
 created once from the catalogue and documented beside it; and the admin process evaluates the
 same rules every 30 s as SQL over `otel_metrics_*` with real `for` windows, writing state
 transitions to `rustic.alerts`, which is what the console's Signals table and Overview read.
-Two evaluators, one catalogue, so a difference is a bug in one of them, never a mystery.
+Two evaluators, one catalogue, so a difference is a bug in one of them, never a mystery. Rules without a `for` use the table's default 5 m except `DbFenceDetected` (fires on one breached bucket); `WorkerHeartbeatStale` is evaluated by its restart-count half (`absent(up)` has no SQL equivalent); the two node-exporter rules read the agent's pool gauges and kubelet filesystem metrics instead.
 The previous on-request scrape (`GET /admin/monitoring/signals`) keeps its response shape and
 reads `rustic.alerts`; a region with no collector reporting shows every rule `unknown`.
 
@@ -101,7 +101,7 @@ from CRDs every run.
 `{ series: [{ts, value}], summary: {last, delta, min, max} }` for the fixed series the console
 needs (`pending_requests`, `firing_signals`, `owners_over_80`, `live_workspaces`,
 `live_environments`, `decided_requests`, `time_to_decide_p50`, `pool_used`, `cpu_used`,
-`memory_used`, `restarts`, `audit_events`, `usage:{owner}:{dimension}`); each series is one
+`memory_used`, `restarts`, `audit_events`, and `usage` with required `owner=` and `dimension=` params — colons in a path segment were refused); each series is one
 SQL statement in `history/series.rs` over `rustic.*` or `otel_metrics_*`; unknown series 404;
 no ClickHouse → `503 history unavailable` (the web renders a flat placeholder).
 `GET /admin/history/events?kind=&owner=&region=&from=&to=&cursor=` pages `rustic.events`.
