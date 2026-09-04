@@ -60,6 +60,12 @@ the product's top tab row is for the org level.
 Quota defaults live under Owners (a "Defaults" card at the top of the list), not as their own
 area: they are a property of owners.
 
+Navigation (owner, 2026-09-04): rail → list → detail everywhere. The Owners LIST is the way into
+any person or team (search box, usage against limits, tightest first, a pending-request badge);
+the owner detail's "Open as <owner>" opens that owner's normal product pages. The Clusters LIST is
+the way into a region. The header search inside superadmin is scoped to owners, nodes and
+requests. The kloudlite logo returns to the product.
+
 ## Screens
 
 ### Overview
