@@ -36,10 +36,10 @@ async fn without_clickhouse_the_page_gets_a_503_not_an_error() {
     assert_eq!(resp.text().await.unwrap(), "history unavailable");
 }
 
-/// The catalogue is still ten rules and every one of them still carries its "Why" — the console
-/// renders that column straight from this response.
+/// Every rule still carries its "Why" — the console renders that column straight from this
+/// response, and a blank one is a row nobody can act on.
 #[test]
 fn every_catalogue_rule_carries_its_why() {
-    assert_eq!(CATALOGUE.len(), 10);
+    assert_eq!(CATALOGUE.len(), 17);
     assert!(CATALOGUE.iter().all(|r| !r.why.is_empty()));
 }

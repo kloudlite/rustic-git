@@ -173,6 +173,37 @@ fn worst_node_ratio(
     )
 }
 
+/// The Azure Monitor rules, which all have the same shape: one series per Azure resource in
+/// `otel_metrics_gauge`, bucketed at the interval Azure actually publishes at (5 min for Cosmos,
+/// 1 min for Redis — a 30 s bucket would be mostly empty), counted per resource, and the WORST
+/// resource decides. `count` is the catalogue's "N of M": the whole window is one verdict, so
+/// `for_secs` stays `STEP_SECS` and `state_of` reads the single row it returns.
+fn azure_rule(
+    metric: &str,
+    agg: &str,
+    bucket_secs: u64,
+    window_secs: u64,
+    bad: &str,
+    count: u64,
+    region: &str,
+) -> String {
+    whole_window(
+        &format!(
+            "SELECT countIf({bad}) AS n FROM (\
+                SELECT toStartOfInterval(TimeUnix, INTERVAL {bucket_secs} SECOND) AS b, \
+                       ResourceAttributes['azuremonitor.resource_id'] AS resource, \
+                       {agg}(Value) AS v \
+                FROM default.otel_metrics_gauge \
+                WHERE MetricName = '{metric}' \
+                  AND ResourceAttributes['region'] = '{region}' \
+                  AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
+                GROUP BY b, resource) \
+             GROUP BY resource"
+        ),
+        &format!("max(n) >= {count}"),
+    )
+}
+
 /// The catalogue, in `deploy/alerts.md`'s order and by its names.
 pub const CATALOGUE: &[Rule] = &[
     Rule {
@@ -326,6 +357,69 @@ pub const CATALOGUE: &[Rule] = &[
              maxIf(Value, MetricName = 'k8s.node.filesystem.available') AS den",
             0.85,
             region,
+        ),
+    },
+    Rule {
+        name: "CosmosRuSaturation",
+        tier: &[Tier::Central],
+        why: "Cosmos throttles with 429s past the provisioned RU/s; normalized consumption is the per-partition number, so one hot partition shows here before the account average does.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_normalizedruconsumption_maximum", "max", 300, 1800, "v >= 80", 3, region),
+    },
+    Rule {
+        name: "CosmosUnavailable",
+        tier: &[Tier::Central],
+        why: "Every repo's SlateDB manifest and the ownership map live here; below the SLA the fleet is losing writes, not slowing down.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_serviceavailability_average", "avg", 300, 900, "v < 99.9", 1, region),
+    },
+    Rule {
+        name: "CosmosLatencyHigh",
+        tier: &[Tier::Central],
+        why: "Server-side latency is Cosmos' own time, with no network in it; past 100 ms every git request that opens a database pays it.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_serversidelatency_average", "avg", 300, 1800, "v > 100", 3, region),
+    },
+    Rule {
+        name: "RedisMemoryHigh",
+        tier: &[Tier::Central],
+        why: "Past the maxmemory policy Redis starts evicting, and the events stream is what gets evicted — the fallbacks hold, but every consumer degrades to its beat.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_usedmemorypercentage_maximum", "max", 60, 600, "v >= 80", 5, region),
+    },
+    Rule {
+        name: "RedisLoadHigh",
+        tier: &[Tier::Central],
+        why: "Server load is the fraction of the cycle spent busy; near 100 the instance stops accepting work rather than slowing down gracefully.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_serverload_maximum", "max", 60, 600, "v >= 80", 5, region),
+    },
+    Rule {
+        name: "RedisReplicationUnhealthy",
+        tier: &[Tier::Central],
+        why: "Geo replication is the only copy of the stream outside one region; unhealthy is a silent state, and one minute of it is the whole signal.",
+        for_secs: STEP_SECS,
+        sql: |region| azure_rule("azure_georeplicationhealthy_minimum", "min", 60, 300, "v < 1", 1, region),
+    },
+    Rule {
+        name: "RedisMissRateHigh",
+        tier: &[Tier::Central],
+        // Two metrics, so this one cannot use `azure_rule` — but the shape is the same: one ratio
+        // per resource over the whole window, worst resource decides. The 100-lookup floor is what
+        // stops a nearly idle cache reading as 100% misses on three requests.
+        why: "A cache that mostly misses is a cache nobody is served by; below the lookup floor the ratio is noise, so it is not evaluated.",
+        for_secs: STEP_SECS,
+        sql: |region| whole_window(
+            &format!(
+                "SELECT sumIf(Value, MetricName = 'azure_cachemisses_total') AS misses, \
+                        sumIf(Value, MetricName = 'azure_cachehits_total') AS hits \
+                 FROM default.otel_metrics_gauge \
+                 WHERE MetricName IN ('azure_cachemisses_total', 'azure_cachehits_total') \
+                   AND ResourceAttributes['region'] = '{region}' \
+                   AND TimeUnix > now() - INTERVAL 600 SECOND \
+                 GROUP BY ResourceAttributes['azuremonitor.resource_id']"
+            ),
+            "max(if(misses + hits >= 100, misses / (misses + hits), 0)) > 0.5",
         ),
     },
 ];

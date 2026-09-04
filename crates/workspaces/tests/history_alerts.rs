@@ -93,6 +93,24 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         ("WorkerHeartbeatStale", "otel_metrics_gauge", "k8s.container.restarts", &["INTERVAL 3600 SECOND", "HAVING count() > 0"]),
         ("PoolAlmostFull", "otel_metrics_gauge", "node_pool_bytes_used", &["k8s.node.name", "0.8"]),
         ("NodeDiskAlmostFull", "otel_metrics_gauge", "k8s.node.filesystem.usage", &["k8s.node.name", "0.85"]),
+        // Azure Monitor's own metrics: one series per Azure resource, bucketed at Azure's publish
+        // interval, and the "N of M" counted inside the query rather than as a `for` window.
+        ("CosmosRuSaturation", "otel_metrics_gauge", "azure_normalizedruconsumption_maximum",
+            &["azuremonitor.resource_id", "INTERVAL 300 SECOND", "INTERVAL 1800 SECOND", "v >= 80", "max(n) >= 3"]),
+        ("CosmosUnavailable", "otel_metrics_gauge", "azure_serviceavailability_average",
+            &["azuremonitor.resource_id", "INTERVAL 900 SECOND", "v < 99.9", "max(n) >= 1"]),
+        ("CosmosLatencyHigh", "otel_metrics_gauge", "azure_serversidelatency_average",
+            &["azuremonitor.resource_id", "INTERVAL 1800 SECOND", "v > 100", "max(n) >= 3"]),
+        ("RedisMemoryHigh", "otel_metrics_gauge", "azure_usedmemorypercentage_maximum",
+            &["azuremonitor.resource_id", "INTERVAL 60 SECOND", "INTERVAL 600 SECOND", "v >= 80", "max(n) >= 5"]),
+        ("RedisLoadHigh", "otel_metrics_gauge", "azure_serverload_maximum",
+            &["azuremonitor.resource_id", "INTERVAL 60 SECOND", "INTERVAL 600 SECOND", "v >= 80", "max(n) >= 5"]),
+        ("RedisReplicationUnhealthy", "otel_metrics_gauge", "azure_georeplicationhealthy_minimum",
+            &["azuremonitor.resource_id", "INTERVAL 300 SECOND", "v < 1", "max(n) >= 1"]),
+        // The lookup floor is the load-bearing half: without it three requests that all miss read
+        // as a 100% miss rate.
+        ("RedisMissRateHigh", "otel_metrics_gauge", "azure_cachemisses_total",
+            &["azure_cachehits_total", "azuremonitor.resource_id", "INTERVAL 600 SECOND", "misses + hits >= 100", "> 0.5"]),
     ];
     assert_eq!(want.len(), CATALOGUE.len(), "every rule must be covered here");
     for (name, table, metric, fragments) in want {
@@ -111,6 +129,24 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
     }
 }
 
+/// Every Azure rule folds its whole window into ONE row, so `state_of` reads it as a single
+/// bucket — the "3 of 6" is inside the SQL. `HAVING count() > 0` is what keeps a resource that is
+/// not reporting at all an `unknown` rather than a healthy `ok`.
+#[test]
+fn the_azure_rules_are_single_bucket_and_absent_data_stays_unknown() {
+    for name in [
+        "CosmosRuSaturation", "CosmosUnavailable", "CosmosLatencyHigh",
+        "RedisMemoryHigh", "RedisLoadHigh", "RedisReplicationUnhealthy", "RedisMissRateHigh",
+    ] {
+        let rule = CATALOGUE.iter().find(|r| r.name == name).expect(name);
+        let sql = rule.sql_for("central").expect("central is an identifier");
+        assert_eq!(rule.for_secs, 30, "{name} must be one bucket wide");
+        assert!(sql.contains("HAVING count() > 0"), "{name} would call missing data ok: {sql}");
+        assert!(sql.contains("GROUP BY resource") || sql.contains("GROUP BY ResourceAttributes['azuremonitor.resource_id']"),
+            "{name} folds every Azure resource together: {sql}");
+    }
+}
+
 /// A rule reads metrics only one tier emits. Evaluated in the other it can only ever write
 /// `unknown`, which on the Signals page is indistinguishable from a collector that has died — so
 /// the rule is not evaluated there at all.
@@ -118,6 +154,14 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
 fn a_rule_is_evaluated_only_in_its_own_tier() {
     let by = |n: &str| CATALOGUE.iter().find(|r| r.name == n).expect(n);
     for name in ["NoLeader", "LeaseRenewFailing", "DbFenceDetected", "MisdirectedWrites", "WorkerHeartbeatStale"] {
+        assert!(by(name).applies_to("central"), "{name} is central");
+        assert!(!by(name).applies_to("westeurope-k3s"), "{name} must not run in a region");
+    }
+    // Azure Monitor exports the managed Cosmos and Redis under `region: central` only.
+    for name in [
+        "CosmosRuSaturation", "CosmosUnavailable", "CosmosLatencyHigh",
+        "RedisMemoryHigh", "RedisLoadHigh", "RedisReplicationUnhealthy", "RedisMissRateHigh",
+    ] {
         assert!(by(name).applies_to("central"), "{name} is central");
         assert!(!by(name).applies_to("westeurope-k3s"), "{name} must not run in a region");
     }
