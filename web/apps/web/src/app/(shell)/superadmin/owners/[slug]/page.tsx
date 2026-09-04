@@ -5,6 +5,7 @@ import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { QuotaBar } from "@/components/app/quota-bar";
+import { dimLabel, type QuotaDim } from "@/lib/quota";
 import { when } from "@/lib/time";
 import { SetQuotaForm } from "./set-quota-form";
 import { LiveObjects } from "./live-objects";
@@ -76,7 +77,7 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
                     <li key={req.id} className="flex items-center gap-2">
                       <Badge variant="outline" className={REQUEST_STATE_TONE[req.state]}>{req.state}</Badge>
                       <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                        {Object.keys(req.requested).join(", ")}
+                        {Object.keys(req.requested).map((d) => dimLabel(d as QuotaDim)).join(", ")}
                       </span>
                       <span className="shrink-0 text-caption text-muted-foreground">
                         {when(new Date(req.createdAt ?? 0).getTime())}

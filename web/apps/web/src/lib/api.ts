@@ -1085,12 +1085,6 @@ export function adminWriteQuota(owner: string, spec: Record<QuotaDim, number>, n
   });
 }
 
-export type OwnerUsage = { owner: string; limit: Record<QuotaDim, number>; used: Record<QuotaDim, number> };
-
-export function adminUsage(token: string) {
-  return adminCall<OwnerUsage[]>("/admin/usage", { method: "GET", token });
-}
-
 /** `GET /admin/owners` — every owner's usage against their limit, tightest-first (the api's own
  *  sort, never re-sorted here except by the list's own controls). */
 export type OwnerRow = {
@@ -1125,22 +1119,23 @@ export function adminOwnerDetail(slug: string, token: string) {
 
 // `/admin/workspaces/{id}` and `/admin/environments/{id}` reuse the SAME handlers `/v1` calls for
 // the caller's own objects, just with the owner taken from the object rather than the token — see
-// `crates/workspaces/src/api/admin.rs`'s "cross-owner list / stop / delete" section. No note: the
-// api takes none on these two routes (only quota and roll/drain/decommission require one).
-export function adminStopWorkspace(id: string, token: string) {
-  return adminCall<ApiWorkspace>(`/admin/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST", token });
+// `crates/workspaces/src/api/admin.rs`'s "cross-owner list / stop / delete" section, wrapped there
+// to take the note every admin write carries — acting on somebody else's working copy is the
+// loudest thing this console does, and the api 422s an empty one.
+export function adminStopWorkspace(id: string, token: string, note: string) {
+  return adminCall<ApiWorkspace>(`/admin/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST", token, body: JSON.stringify({ note }) });
 }
 
-export function adminDeleteWorkspace(id: string, token: string) {
-  return adminCall<ApiWorkspace>(`/admin/workspaces/${encodeURIComponent(id)}`, { method: "DELETE", token });
+export function adminDeleteWorkspace(id: string, token: string, note: string) {
+  return adminCall<ApiWorkspace>(`/admin/workspaces/${encodeURIComponent(id)}`, { method: "DELETE", token, body: JSON.stringify({ note }) });
 }
 
-export function adminStopEnvironment(id: string, token: string) {
-  return adminCall<ApiEnvironment>(`/admin/environments/${encodeURIComponent(id)}/stop`, { method: "POST", token });
+export function adminStopEnvironment(id: string, token: string, note: string) {
+  return adminCall<ApiEnvironment>(`/admin/environments/${encodeURIComponent(id)}/stop`, { method: "POST", token, body: JSON.stringify({ note }) });
 }
 
-export function adminDeleteEnvironment(id: string, token: string) {
-  return adminCall<ApiEnvironment>(`/admin/environments/${encodeURIComponent(id)}`, { method: "DELETE", token });
+export function adminDeleteEnvironment(id: string, token: string, note: string) {
+  return adminCall<ApiEnvironment>(`/admin/environments/${encodeURIComponent(id)}`, { method: "DELETE", token, body: JSON.stringify({ note }) });
 }
 
 export type AdminNode = { name: string; ready: boolean; decommission: boolean; decommissionStatus: string | null };
@@ -1198,7 +1193,7 @@ export function adminClusterSettings(region: string, token: string) {
   });
 }
 
-export function createRegion(body: { id: string; name: string }, token: string) {
+export function createRegion(body: { id: string; name: string; note: string }, token: string) {
   return adminCall<{ id: string; name: string; status: string }>("/admin/regions", {
     method: "POST",
     token,
@@ -1209,8 +1204,9 @@ export function createRegion(body: { id: string; name: string }, token: string) 
 // ── clusters (admin host — crates/workspaces/src/api/admin/clusters.rs) ──
 
 /** `GET /admin/clusters` — one row per region, everything the Clusters list card needs without a
- *  second click. `settingsStatus` is an open string (`"stale"` is a pending backend addition) —
- *  render via `lib/clusters.ts::settingsStatusTone` rather than matching it here. */
+ *  second click. `settingsStatus` is an open string (`"present"`, or `"stale (lag N)"` when the
+ *  agents have not caught up) — render via `lib/clusters.ts::settingsStatusTone` rather than
+ *  matching it here. */
 export type AdminClusterRow = {
   region: string;
   status: string;

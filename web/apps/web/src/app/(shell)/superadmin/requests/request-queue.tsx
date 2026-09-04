@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { OwnerUsage, QuotaRequestDoc } from "@/lib/api";
+import type { OwnerRow, QuotaRequestDoc } from "@/lib/api";
 import { DIMS, dimLabel, requestedDiffs, type QuotaDim } from "@/lib/quota";
 import { when } from "@/lib/time";
 import { DecisionPanel } from "./decision-panel";
@@ -16,7 +16,7 @@ const AGE_MS: Record<"1d" | "7d", number> = { "1d": 86_400_000, "7d": 7 * 86_400
 /** The whole queue is small enough that one fetch covers Pending, Decided, and a row's own
  *  history — client-side filtering over it (owner substring, dimension, age) is the honest lazy
  *  answer over adding a server-side shape for narrowing this small a list. */
-export function RequestQueue({ rows, usage }: { rows: QuotaRequestDoc[]; usage: OwnerUsage[] }) {
+export function RequestQueue({ rows, usage }: { rows: QuotaRequestDoc[]; usage: OwnerRow[] }) {
   const router = useRouter();
   const usageByOwner = useMemo(() => new Map(usage.map((u) => [u.owner, u])), [usage]);
 

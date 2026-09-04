@@ -19,7 +19,6 @@ export default async function MonitoringPage() {
   const { token } = await requireSuperadmin("/superadmin/monitoring");
   const [workloadsR, signalsR] = await Promise.all([api.listWorkloads(token), api.adminMonitoringSignals(token)]);
   if (!workloadsR.ok) throw new Error(workloadsR.message);
-  if (!signalsR.ok) throw new Error(signalsR.message);
   const central = workloadsR.value.filter((w) => w.scope === "central");
 
   return (
@@ -27,7 +26,14 @@ export default async function MonitoringPage() {
       <AutoRefresh intervalMs={10_000} />
       <PageHeader title="Monitoring" purpose="Central workload image, rollout state, the manual roll, and the alert catalogue." />
       <RollTable workloads={central} onRoll={rollWorkloadAction} />
-      <SignalsTable data={signalsR.value} />
+      {/* The scrape is the flakiest read on the page (many pods, a rate window, a timeout). It
+          must not take the roll table down with it: the workloads half is what an operator acts
+          on, and a failed scrape is a notice, not a blank page. */}
+      {signalsR.ok ? (
+        <SignalsTable data={signalsR.value} />
+      ) : (
+        <p className="text-caption text-destructive">Signals unavailable: {signalsR.message}</p>
+      )}
     </div>
   );
 }

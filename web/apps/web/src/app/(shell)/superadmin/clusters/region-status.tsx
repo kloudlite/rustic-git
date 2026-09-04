@@ -22,8 +22,12 @@ export function RegionStatusToggle({ region, status }: { region: string; status:
   const [pending, startTransition] = useTransition();
 
   if (status !== "active") {
+    // Activate has no dialog to surface a refusal in, so the message sits beside the button —
+    // the same place the deactivate branch puts it, or a 403 would look like nothing happened.
     return (
-      <Button
+      <>
+        {error && <span className="mr-2 text-caption text-destructive">{error}</span>}
+        <Button
         type="button"
         size="sm"
         variant="outline"
@@ -36,9 +40,10 @@ export function RegionStatusToggle({ region, status }: { region: string; status:
           })
         }
       >
-        {pending && <Loader2 className="animate-spin" />}
-        Activate
-      </Button>
+          {pending && <Loader2 className="animate-spin" />}
+          Activate
+        </Button>
+      </>
     );
   }
 

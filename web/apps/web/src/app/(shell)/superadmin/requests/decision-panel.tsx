@@ -11,7 +11,7 @@ import { when } from "@/lib/time";
 import { decideRequest } from "../actions";
 
 /** The row a request is decided against: current limit and in-use count per dimension, so the
- *  panel needs no fetch of its own — the page already has `adminUsage` for every owner shown. */
+ *  panel needs no fetch of its own — the page already has `adminOwners` for every owner shown. */
 type OwnerUsageRow = { limit: Record<QuotaDim, number>; used: Record<QuotaDim, number> };
 
 const ZERO: Record<QuotaDim, number> = { workspaces: 0, environments: 0, snapshots: 0, diskGb: 0, cpu: 0, memoryGb: 0 };

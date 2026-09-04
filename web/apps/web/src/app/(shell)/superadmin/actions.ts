@@ -63,14 +63,19 @@ export async function setQuota(owner: string, formData: FormData): Promise<Quota
   return { ok: true };
 }
 
-export async function createRegionAction(formData: FormData) {
+/** Returns a `SaveResult` like every sibling: a rejected id or a 403 from the admin host has to
+ *  reach the form, not vanish into a redirect that looks like success. */
+export async function createRegionAction(formData: FormData): Promise<SaveResult> {
   const id = String(formData.get("id") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
-  if (!id || !name) return;
+  const note = String(formData.get("note") ?? "").trim();
+  if (!id || !name) return { ok: false, message: "id and name are required" };
   const token = await tokenOr();
-  if (typeof token !== "string") return;
-  await api.createRegion({ id, name }, token);
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.createRegion({ id, name, note }, token);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath("/superadmin/clusters");
+  return { ok: true };
 }
 
 /** Activate needs no reason (restoring what was already registered); deactivate does — the api
@@ -155,38 +160,39 @@ export async function loadMoreAudit(filter: AuditFilter, cursor: string): Promis
 export type WriteResult = { ok: true } | { ok: false; message: string };
 
 /** The owner detail page's Stop/Delete on a live working copy — same routes an owner's own
- *  workspaces page uses, just cross-owner. `owner` names the detail page to revalidate. */
-export async function adminStopWorkspaceAction(owner: string, id: string): Promise<WriteResult> {
+ *  workspaces page uses, just cross-owner. `owner` names the detail page to revalidate; `note` is
+ *  the required reason the audit row carries (the api 422s an empty one). */
+export async function adminStopWorkspaceAction(owner: string, id: string, note: string): Promise<WriteResult> {
   const token = await tokenOr();
   if (typeof token !== "string") return { ok: false, message: token.error };
-  const r = await api.adminStopWorkspace(id, token);
+  const r = await api.adminStopWorkspace(id, token, note);
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath(`/superadmin/owners/${encodeURIComponent(owner)}`);
   return { ok: true };
 }
 
-export async function adminDeleteWorkspaceAction(owner: string, id: string): Promise<WriteResult> {
+export async function adminDeleteWorkspaceAction(owner: string, id: string, note: string): Promise<WriteResult> {
   const token = await tokenOr();
   if (typeof token !== "string") return { ok: false, message: token.error };
-  const r = await api.adminDeleteWorkspace(id, token);
+  const r = await api.adminDeleteWorkspace(id, token, note);
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath(`/superadmin/owners/${encodeURIComponent(owner)}`);
   return { ok: true };
 }
 
-export async function adminStopEnvironmentAction(owner: string, id: string): Promise<WriteResult> {
+export async function adminStopEnvironmentAction(owner: string, id: string, note: string): Promise<WriteResult> {
   const token = await tokenOr();
   if (typeof token !== "string") return { ok: false, message: token.error };
-  const r = await api.adminStopEnvironment(id, token);
+  const r = await api.adminStopEnvironment(id, token, note);
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath(`/superadmin/owners/${encodeURIComponent(owner)}`);
   return { ok: true };
 }
 
-export async function adminDeleteEnvironmentAction(owner: string, id: string): Promise<WriteResult> {
+export async function adminDeleteEnvironmentAction(owner: string, id: string, note: string): Promise<WriteResult> {
   const token = await tokenOr();
   if (typeof token !== "string") return { ok: false, message: token.error };
-  const r = await api.adminDeleteEnvironment(id, token);
+  const r = await api.adminDeleteEnvironment(id, token, note);
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath(`/superadmin/owners/${encodeURIComponent(owner)}`);
   return { ok: true };

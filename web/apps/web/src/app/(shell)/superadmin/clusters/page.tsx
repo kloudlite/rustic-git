@@ -2,10 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { AutoRefresh } from "@/components/app/auto-refresh";
-import { createRegionAction } from "../actions";
+import { AddRegionForm } from "./add-region-form";
 import { PageHeader } from "../page-header";
 import { RegionStatusBadge, SettingsStatusBadge } from "../status-badge";
 import { RegionStatusToggle } from "./region-status";
@@ -74,19 +72,7 @@ export default async function ClustersPage() {
         )}
       </div>
 
-      <form action={createRegionAction} className="flex items-end gap-3 border border-border bg-card p-4">
-        <label className="grid gap-1 text-sm2">
-          Id
-          <Input name="id" required className="h-8" />
-        </label>
-        <label className="grid gap-1 text-sm2">
-          Name
-          <Input name="name" required className="h-8" />
-        </label>
-        <Button type="submit" size="sm">
-          Add region
-        </Button>
-      </form>
+      <AddRegionForm />
     </div>
   );
 }

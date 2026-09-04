@@ -4,48 +4,92 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiEnvironment, ApiWorkspace } from "@/lib/api";
 import {
   adminDeleteEnvironmentAction, adminDeleteWorkspaceAction, adminStopEnvironmentAction, adminStopWorkspaceAction,
 } from "../../actions";
 
+/** One live working copy's Stop/Delete — the same admin routes an owner's own workspaces page
+ *  uses, just cross-owner, and therefore behind a confirmation that names the consequence and
+ *  takes the required reason the audit row carries. No age column: neither `ApiWorkspace` nor
+ *  `ApiEnvironment` carries a creation timestamp today (see `crates/workspaces/src/model.rs`),
+ *  and inventing one here would be a field the api never sent. */
 type Row =
   | { kind: "workspace"; id: string; name: string; state: ApiWorkspace["state"]; node: string | null; region: string }
   | { kind: "environment"; id: string; name: string; state: ApiEnvironment["state"]; node: string | null; region: string };
 
-/** One live working copy's Stop/Delete — the same admin routes an owner's own workspaces page
- *  uses, just cross-owner. No age column: neither `ApiWorkspace` nor `ApiEnvironment` carries a
- *  creation timestamp today (see `crates/workspaces/src/model.rs`), and inventing one here would
- *  be a field the api never sent. */
 function ActionCell({ owner, row }: { owner: string; row: Row }) {
   const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState("");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const running = row.state === "running" || row.state === "ready";
+  const verb = running ? "Stop" : "Delete";
 
   function act() {
+    if (note.trim() === "") return;
     setError(null);
     startTransition(async () => {
       const action = row.kind === "workspace"
         ? (running ? adminStopWorkspaceAction : adminDeleteWorkspaceAction)
         : (running ? adminStopEnvironmentAction : adminDeleteEnvironmentAction);
-      const r = await action(owner, row.id);
+      const r = await action(owner, row.id, note.trim());
       if (!r.ok) {
         setError(r.message);
         return;
       }
+      setOpen(false);
       router.refresh();
     });
   }
 
   return (
     <div className="flex items-center justify-end gap-2">
-      {error && <span className="text-caption text-destructive">{error}</span>}
-      <Button type="button" size="sm" variant="outline" onClick={act} disabled={pending} className={running ? "" : "text-destructive"}>
-        {pending && <Loader2 className="animate-spin" />}
-        {running ? "Stop" : "Delete"}
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className={running ? "" : "text-destructive"}
+        onClick={() => {
+          setOpen(true);
+          setNote("");
+          setError(null);
+        }}
+      >
+        {verb}
       </Button>
+      <Dialog open={open} onOpenChange={(o) => !o && setOpen(false)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{verb} {row.name}</DialogTitle>
+            <DialogDescription>
+              {running
+                ? `This ${row.kind} belongs to ${owner} and is running right now — stopping it interrupts whoever is using it.`
+                : `Deleting this ${row.kind} removes ${owner}'s working copy. Pushed snapshots are kept.`}
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Why (required)"
+            aria-label="Note"
+          />
+          {error && <p role="alert" className="text-sm2 font-medium text-destructive">{error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="button" onClick={act} disabled={pending || note.trim() === ""}>
+              {pending && <Loader2 className="animate-spin" />}
+              {verb}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
