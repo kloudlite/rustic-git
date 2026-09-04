@@ -935,17 +935,13 @@ fn is_last_superadmin(admins: &[rustic_git_pulls::directory::SuperAdmin], target
     matches!(admins, [only] if is_same_user(&only.user, target))
 }
 
-async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, result: &'static str) {
+async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, reason: String, result: &'static str) {
     let entry = rustic_git_workspaces::audit::AuditEntry {
         ts: chrono::Utc::now().to_rfc3339(),
         actor: actor.to_string(),
         action: action.to_string(),
         target: target.to_string(),
-        // ponytail: no reason field on this route yet (add/remove predate the audit note
-        // requirement) — carry `None` rather than block the roster on a body change out of scope
-        // here; add a required `note` body alongside the other admin writes when this route
-        // grows one.
-        reason: None,
+        reason: Some(reason),
         result: result.into(),
     };
     if let Err(e) = rustic_git_workspaces::audit::record(&api.store.os, &entry).await {
@@ -953,13 +949,34 @@ async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str,
     }
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct SuperadminNote {
+    note: String,
+}
+
+/// Global Constraint: add/remove superadmin carry a required, non-empty note on the audit row —
+/// checked first, before either rule below, so a caller who forgot the note sees that and not a
+/// stale "you cannot remove yourself" for a request they'd have changed anyway.
+fn require_note(body: SuperadminNote) -> std::result::Result<String, Response> {
+    let note = body.note.trim().to_string();
+    if note.is_empty() {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "note is required").into_response());
+    }
+    Ok(note)
+}
+
 pub(crate) async fn add_superadmin(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
     axum::extract::Path(user): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<SuperadminNote>,
 ) -> Response {
     let by = match require_superadmin(&api, &headers).await {
         Ok(u) => u,
+        Err(r) => return r,
+    };
+    let note = match require_note(body) {
+        Ok(n) => n,
         Err(r) => return r,
     };
     let db = match directory(&api) {
@@ -974,7 +991,7 @@ pub(crate) async fn add_superadmin(
     }
     match db.add_superadmin(&user, &by).await {
         Ok(()) => {
-            write_audit(&api, &by, "add-superadmin", &user, "ok").await;
+            write_audit(&api, &by, "add-superadmin", &user, note, "ok").await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => db_err("grant admin", &user, e),
@@ -985,9 +1002,14 @@ pub(crate) async fn remove_superadmin(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
     axum::extract::Path(user): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<SuperadminNote>,
 ) -> Response {
     let by = match require_superadmin(&api, &headers).await {
         Ok(u) => u,
+        Err(r) => return r,
+    };
+    let note = match require_note(body) {
+        Ok(n) => n,
         Err(r) => return r,
     };
     let db = match directory(&api) {
@@ -1006,7 +1028,7 @@ pub(crate) async fn remove_superadmin(
     }
     match db.remove_superadmin(&user).await {
         Ok(()) => {
-            write_audit(&api, &by, "remove-superadmin", &user, "ok").await;
+            write_audit(&api, &by, "remove-superadmin", &user, note, "ok").await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => db_err("revoke admin", &user, e),
@@ -1129,9 +1151,19 @@ mod profile_tests {
 // gate are exercised by the e2e suite against a real cluster instead.
 #[cfg(test)]
 mod superadmin_rule_tests {
-    use super::{is_last_superadmin, is_same_user};
+    use super::{is_last_superadmin, is_same_user, require_note, SuperadminNote};
     use mongodb::bson::DateTime;
     use rustic_git_pulls::directory::SuperAdmin;
+
+    /// An empty or whitespace-only note is refused before either removal rule runs.
+    #[test]
+    fn add_or_remove_superadmin_refuses_an_empty_note() {
+        for bad in ["", "   ", "\n\t"] {
+            let e = require_note(SuperadminNote { note: bad.into() }).unwrap_err();
+            assert_eq!(e.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert_eq!(require_note(SuperadminNote { note: " revoked, left the team ".into() }).unwrap(), "revoked, left the team");
+    }
 
     fn admin(user: &str) -> SuperAdmin {
         SuperAdmin { user: user.into(), added_at: DateTime::now(), added_by: "bootstrap".into() }
