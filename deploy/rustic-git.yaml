@@ -448,29 +448,6 @@ spec:
             # cluster syncing its own desired state, and this Secret goes away with it.
             - name: KUBECONFIG
               value: /etc/rustic-git/k3s/config
-            # ClickStack. Optional by design: without these the admin process runs exactly as
-            # before and every /admin/history route answers 503 (crates/workspaces/src/history).
-            # verify: the ClickHouse Service is created by the ClickHouse OPERATOR from the CR,
-            # not by a chart template, so `helm template` cannot prove this name. Confirm it with
-            # `kubectl -n clickstack get svc` before the first roll — a wrong host here is a
-            # silent 503 on every /admin/history route, which is exactly what an unset variable
-            # looks like.
-            - name: RUSTIC_GIT_CLICKHOUSE_URL
-              value: http://clickstack-clickhouse.clickstack.svc:8123
-            - name: RUSTIC_GIT_CLICKHOUSE_USER
-              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: user, optional: true } }
-            - name: RUSTIC_GIT_CLICKHOUSE_PASSWORD
-              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: password, optional: true } }
-            # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
-            - name: RUSTIC_GIT_HYPERDX_URL
-              value: https://hyperdx.dev.kloudlite.io
-            # The region the MOUNTED KUBECONFIG points at, and the label that cluster's watch
-            # stamps on its event rows — this process's own cluster is always `central`, hard-coded
-            # in bins/api/src/main.rs, so this is never that. It must equal the `RUSTIC_GIT_REGION`
-            # on that region's deploy/k3s/otel-agent.yaml, or a chart joins telemetry to events
-            # from a different region and neither side looks wrong.
-            - name: RUSTIC_GIT_REGION
-              value: centralindia-k3s
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
@@ -827,6 +804,29 @@ spec:
             # documents, repeated for this name.
             - name: KUBECONFIG
               value: /etc/rustic-git/k3s/config
+            # ClickStack. Optional by design: without these the admin process runs exactly as
+            # before and every /admin/history route answers 503 (crates/workspaces/src/history).
+            # The ClickHouse Service is created by the ClickHouse OPERATOR from the CR, not by a
+            # chart template, which is why it is the operator's `-headless` name and not the
+            # chart's fullname; re-check `kubectl -n clickstack get svc` after a chart bump — a
+            # wrong host here is a silent 503 on every /admin/history route, which is exactly
+            # what an unset variable looks like.
+            - name: RUSTIC_GIT_CLICKHOUSE_URL
+              value: http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123
+            - name: RUSTIC_GIT_CLICKHOUSE_USER
+              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: user, optional: true } }
+            - name: RUSTIC_GIT_CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: rustic-git-clickhouse, key: password, optional: true } }
+            # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
+            - name: RUSTIC_GIT_HYPERDX_URL
+              value: https://hyperdx.dev.kloudlite.io
+            # The region the MOUNTED KUBECONFIG points at, and the label that cluster's watch
+            # stamps on its event rows — this process's own cluster is always `central`, hard-coded
+            # in bins/api/src/main.rs, so this is never that. It must equal the `RUSTIC_GIT_REGION`
+            # on that region's deploy/k3s/otel-agent.yaml, or a chart joins telemetry to events
+            # from a different region and neither side looks wrong.
+            - name: RUSTIC_GIT_REGION
+              value: centralindia-k3s
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5

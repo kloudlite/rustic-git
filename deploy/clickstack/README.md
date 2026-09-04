@@ -9,11 +9,10 @@ Applied by hand, like the k3s side — not by `deploy/roll.sh`, which only rolls
 
 The value files were written against `helm show values clickstack/clickstack --version 3.2.0`,
 `clickstack/clickstack-operators --version 1.1.0` and the upstream
-`open-telemetry/opentelemetry-collector` chart the stack aliases as `otel-collector`. Two things could not be checked without a running install and carry a `# verify:` comment: the
+`open-telemetry/opentelemetry-collector` chart the stack aliases as `otel-collector`. One thing could not be checked without a running install and carries a `# verify:` comment: the
 name of the collector image's built-in ClickHouse exporter, which the raw-metric `ttl` is merged
-onto (`clickstack-values.yaml`), and the ClickHouse Service host the admin process connects to,
-which the operator creates rather than the chart (`deploy/rustic-git.yaml`). Re-read both before
-bumping a chart version. Every other object name below was taken from
+onto (`clickstack-values.yaml`). The ClickHouse Service host the admin process connects to was
+read off the first install (below). Re-read both before bumping a chart version. Every other object name below was taken from
 `helm template clickstack …`, so they hold for a release named `clickstack` and no other.
 
 ## Install
@@ -71,7 +70,7 @@ gets a third user:
 
 ```sh
 kubectl -n clickstack get secret clickstack-secret -o jsonpath='{.data}' | jq   # the chart's two
-kubectl -n clickstack get svc                                                  # the ClickHouse Service name
+kubectl -n clickstack get svc   # ClickHouse is `clickstack-clickhouse-clickhouse-headless`
 ```
 
 ```sql
@@ -89,12 +88,10 @@ kubectl -n rustic-git create secret generic rustic-git-clickhouse \
 
 `deploy/rustic-git.yaml` reads exactly that Secret for `RUSTIC_GIT_CLICKHOUSE_USER` /
 `RUSTIC_GIT_CLICKHOUSE_PASSWORD`, both `optional: true`, and hard-codes
-`RUSTIC_GIT_CLICKHOUSE_URL` as `http://clickstack-clickhouse.clickstack.svc:8123`. **Verify that
-host after the first install.** It is the chart's fullname helper with the release named
-`clickstack`, but the Service itself is created by the ClickHouse OPERATOR from the CR, not by a
-chart template, so `helm template` cannot prove it — the operator may name or suffix it
-differently. `kubectl -n clickstack get svc` settles it; the same `# verify:` note sits on the env
-in `deploy/rustic-git.yaml`.
+`RUSTIC_GIT_CLICKHOUSE_URL` as `http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123`
+— the operator's name for the Service, not the chart's fullname (`helm template` cannot show it;
+`kubectl -n clickstack get svc` did, on the first install). Re-check it after a chart or operator
+bump: a wrong host is a silent 503 on every /admin/history route.
 
 The admin process migrates `rustic` itself on its next start; `kubectl logs` shows
 `clickhouse migrations applied` once and `clickhouse schema up to date` on every restart after.
