@@ -44,8 +44,10 @@ helm upgrade --install clickstack clickstack/clickstack \
   -f deploy/clickstack/clickstack-values.yaml
 ```
 
-The operators chart still installs the MongoDB operator (it has no off switch in 1.1.0); with
-`mongodb.enabled: false` it has nothing to reconcile and idles at a few MB.
+The operators chart also installs the MongoDB operator (no off switch in 1.1.0). With
+`mongodb.enabled: false` it has nothing to reconcile, so it was deleted by hand on 2026-09-04
+(Deployment, webhook Service, its RBAC and the `mongodbcommunity` CRD). A `helm upgrade` of the
+operators chart brings it back; delete it again afterwards.
 
 ## The one manual step: the ingestion API key
 
