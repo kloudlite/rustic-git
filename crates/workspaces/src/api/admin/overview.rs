@@ -51,12 +51,24 @@ pub(crate) struct Overview {
     errors: Vec<String>,
 }
 
+/// Oldest first, `None` (no creation timestamp — should not happen, but is not this handler's to
+/// assume) sorted LAST rather than promoted to the front by `Option`'s default `None < Some`
+/// ordering, which would put an undated request ahead of every dated one.
+fn by_creation_oldest_first(a: &crd::QuotaRequest, b: &crd::QuotaRequest) -> std::cmp::Ordering {
+    match (&a.metadata.creation_timestamp, &b.metadata.creation_timestamp) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(x), Some(y)) => x.cmp(y),
+    }
+}
+
 /// Oldest pending first, capped at three — the landing page's queue teaser, not the full list
 /// `GET /admin/quota-requests` already serves.
 async fn pending_oldest_first(s: &ApiState) -> Result<Vec<super::super::QuotaRequestDoc>, Response> {
     let filter = RequestFilter { owner: None, state: Some(crd::RequestState::Pending) };
     let mut rows = list_all_quota_requests_inner(s, &filter).await?;
-    rows.sort_by(|a, b| a.metadata.creation_timestamp.cmp(&b.metadata.creation_timestamp));
+    rows.sort_by(by_creation_oldest_first);
     rows.truncate(3);
     Ok(rows.iter().map(super::super::request_doc).collect())
 }
@@ -88,16 +100,34 @@ fn cluster_attention(rows: &[clusters::ClusterRow]) -> impl Iterator<Item = Atte
             detail: format!("{}: no agents ready", c.region),
             href: format!("/superadmin/clusters/{}", c.region),
         });
-        // ponytail: unreachable today (`clusters::settings_status` never returns this string, by
-        // its own module doc) — kept because the spec names it, cheap to check, and free the day
-        // a typed settings decode starts failing closed with it instead of a 5xx.
-        let bad_settings = (c.settings_status == "parse-error").then(|| AttentionItem {
+        // `present` is the only settings state that needs no attention — `absent` (never saved)
+        // and `stale (lag N)` (a save that has not reached every reader yet) both belong here,
+        // same as a hypothetical decode failure would.
+        let bad_settings = (c.settings_status != "present").then(|| AttentionItem {
             kind: "settings",
-            detail: format!("{}: cluster settings failed to parse", c.region),
+            detail: format!("{}: settings {}", c.region, c.settings_status),
             href: format!("/superadmin/clusters/{}", c.region),
         });
         zero_agents.into_iter().chain(bad_settings)
     })
+}
+
+/// The pure half of `firing_signals` — every `state: "firing"` row of `monitoring::signals`'s own
+/// JSON shape, mapped to an attention item. Split out so it is unit-testable without a live
+/// scrape (`monitoring.rs`'s HTTP fetch has no mockable seam this task can add).
+fn firing_from_signals_json(body: &serde_json::Value) -> Vec<AttentionItem> {
+    body["signals"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r["state"] == "firing")
+        .map(|r| AttentionItem {
+            kind: "signal",
+            detail: r["alert"].as_str().unwrap_or("unknown").to_string(),
+            href: "/superadmin/monitoring".into(),
+        })
+        .collect()
 }
 
 /// `monitoring::signals`'s full route, called directly rather than over HTTP — reused as a black
@@ -110,16 +140,7 @@ async fn firing_signals(s: &Arc<ApiState>) -> Result<Vec<AttentionItem>, String>
         .await
         .map_err(|e| format!("signals: {e}"))?;
     let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("signals: {e}"))?;
-    let rows = body["signals"].as_array().cloned().unwrap_or_default();
-    Ok(rows
-        .into_iter()
-        .filter(|r| r["state"] == "firing")
-        .map(|r| AttentionItem {
-            kind: "signal",
-            detail: r["alert"].as_str().unwrap_or("unknown").to_string(),
-            href: "/superadmin/monitoring".into(),
-        })
-        .collect())
+    Ok(firing_from_signals_json(&body))
 }
 
 /// The fleet's size, globally and per region — folded from the same six list calls
@@ -177,12 +198,37 @@ fn fleet_numbers(f: &owners::Fleet) -> FleetNumbers {
 pub(crate) async fn overview_handler(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
     let mut errors = Vec::new();
 
-    let pending_requests = pending_oldest_first(&s).await?;
+    let pending_requests = match pending_oldest_first(&s).await {
+        Ok(rows) => rows,
+        Err(resp) => {
+            errors.push(format!("pending requests: HTTP {}", resp.status()));
+            Vec::new()
+        }
+    };
 
     let regions = active_regions(&s).await.unwrap_or_default();
     let workloads = super::super::workloads::list_workloads(&s, &regions).await.unwrap_or_default();
-    let nodes = super::node_docs(kube(&s)?).await?;
-    let cluster_rows = clusters::cluster_rows(&s).await?;
+
+    // The one fetch of Workspace/Environment this whole page needs: `cluster_rows_degraded`
+    // folds them per region and `fleet_numbers` folds them per owner, so nothing after this line
+    // lists either CRD again.
+    let f = match kube(&s) {
+        Ok(client) => match owners::fleet(client).await {
+            Ok(f) => f,
+            Err(resp) => {
+                errors.push(format!("fleet: HTTP {}", resp.status()));
+                owners::Fleet::default()
+            }
+        },
+        Err(resp) => {
+            errors.push(format!("fleet: HTTP {}", resp.status()));
+            owners::Fleet::default()
+        }
+    };
+    let fleet = fleet_numbers(&f);
+
+    let (cluster_rows, nodes, cluster_errors) = clusters::cluster_rows_degraded(&s, &f.ws, &f.envs).await;
+    errors.extend(cluster_errors);
 
     let mut attention: Vec<AttentionItem> =
         workload_attention(&workloads).chain(node_attention(&nodes)).chain(cluster_attention(&cluster_rows)).collect();
@@ -205,8 +251,33 @@ pub(crate) async fn overview_handler(State(s): State<Arc<ApiState>>) -> Result<R
         }
     };
 
-    let f = owners::fleet(kube(&s)?).await?;
-    let fleet = fleet_numbers(&f);
-
     Ok(Json(Overview { pending_requests, attention, recent_audit, fleet, errors }).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A firing row becomes one `signal` attention item; an `ok`/`unknown` row is dropped — the
+    /// one behavior `monitoring::signals`'s own HTTP fetch has no seam to mock in this crate.
+    #[test]
+    fn only_firing_signals_become_attention_items() {
+        let body = serde_json::json!({"signals": [
+            {"alert": "NoLeader", "state": "firing", "why": "", "detail": null},
+            {"alert": "DbFenceDetected", "state": "ok", "why": "", "detail": null},
+            {"alert": "TunnelSaturation", "state": "unknown", "why": "", "detail": null},
+        ]});
+        let items = firing_from_signals_json(&body);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "signal");
+        assert_eq!(items[0].detail, "NoLeader");
+    }
+
+    /// A missing/malformed `signals` array yields no items, never a panic — the same shape a
+    /// `signals` call this task cannot exercise end to end (no `aks` scrape target in a unit
+    /// test) would answer with.
+    #[test]
+    fn a_missing_signals_array_yields_nothing() {
+        assert!(firing_from_signals_json(&serde_json::json!({})).is_empty());
+    }
 }

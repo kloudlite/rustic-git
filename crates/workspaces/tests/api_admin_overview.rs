@@ -75,6 +75,33 @@ fn req_obj(name: &str, owner: &str, created: &str) -> Value {
            "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}})
 }
 
+fn daemonset(name: &str, ready: i32, desired: i32) -> Value {
+    json!({"apiVersion": "apps/v1", "kind": "DaemonSet",
+           "metadata": {"name": name, "namespace": "kube-system"},
+           "spec": {"template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "x:1"}]}}},
+           "status": {"numberReady": ready, "desiredNumberScheduled": desired}})
+}
+
+fn deployment(name: &str, ns: &str, ready: i32, desired: i32) -> Value {
+    json!({"apiVersion": "apps/v1", "kind": "Deployment",
+           "metadata": {"name": name, "namespace": ns},
+           "spec": {"replicas": desired, "template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "x:1"}]}}},
+           "status": {"readyReplicas": ready}})
+}
+
+/// `rustic-git-agent`/`rustic-git-gateway` for one region — every per-region workload
+/// `list_workloads` walks, so both must be mocked or the whole list (not just this region's row)
+/// comes back empty.
+fn workload_routes(agent_ready: i32, agent_desired: i32, gateway_ready: i32, gateway_desired: i32) -> Vec<Route> {
+    vec![
+        get("/apis/apps/v1/namespaces/kube-system/daemonsets/rustic-git-agent", daemonset("rustic-git-agent", agent_ready, agent_desired)),
+        get(
+            "/apis/apps/v1/namespaces/rustic-git-system/deployments/rustic-git-gateway",
+            deployment("rustic-git-gateway", "rustic-git-system", gateway_ready, gateway_desired),
+        ),
+    ]
+}
+
 fn base_routes(regions: Vec<Value>, nodes: Vec<Value>, ws: Vec<Value>, reqs: Vec<Value>) -> Vec<Route> {
     let mut routes = vec![get(format!("{API}/regions"), list_of("Region", regions.clone()))];
     // `client_for_region` re-reads each region by name before trusting it — one mock per region.
@@ -138,6 +165,64 @@ async fn overview_composes_pending_attention_audit_and_fleet() {
     assert_eq!(body["fleet"]["owners"], 2);
     assert_eq!(body["fleet"]["perRegion"]["r1"]["workspaces"], 1);
     assert_eq!(body["fleet"]["perRegion"]["r2"]["workspaces"], 1);
+}
+
+/// Every attention kind this handler can produce through a live route (firing signals need a
+/// real metrics scrape target this harness has no seam to mock — covered instead by
+/// `overview::tests::only_firing_signals_become_attention_items`, a unit test on the pure mapping).
+#[tokio::test]
+async fn attention_covers_workload_node_region_and_settings_kinds() {
+    let regions = vec![region_obj("r1")];
+    let nodes = vec![node_obj("n1", false)];
+    let ws = vec![ws_obj("w1", "ann", "r1")];
+    let mut routes = base_routes(regions, nodes, ws, vec![]);
+    // Under-ready agent: fires BOTH `workload` (ready < desired) and `region` (agents_ready == 0)
+    // — the same shared object backs `list_workloads`'s row and `agent_counts`'s own read of it.
+    routes.extend(workload_routes(0, 1, 1, 1));
+    let s = admin_server(routes, None).await;
+
+    let body: Value = reqwest::Client::new()
+        .get(format!("{}/admin/overview", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let attention = body["attention"].as_array().unwrap();
+    let kind = |k: &str| attention.iter().any(|a| a["kind"] == k);
+    assert!(kind("workload"), "{attention:?}");
+    assert!(kind("node"), "{attention:?}");
+    assert!(kind("region"), "{attention:?}");
+    // No `ClusterSettings/default` mocked at all: `settings_status` reads back "absent".
+    assert!(kind("settings"), "{attention:?}");
+}
+
+/// A sub-source that cannot be read (here: the whole kube API, so pending requests, nodes, the
+/// fleet listing and cluster rows all fail) degrades every one of them into `errors` — the page
+/// still 200s with its other sections (there are none left to render here, but nothing 5xxs).
+#[tokio::test]
+async fn a_kube_outage_degrades_every_sub_source_instead_of_5xxing() {
+    // No routes at all: every list/get the handler makes 404s, which `kube_err` turns into a
+    // real `Response` error each fallible section below must swallow rather than propagate.
+    let s = admin_server(vec![], None).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/admin/overview", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+
+    assert_eq!(body["pendingRequests"].as_array().unwrap().len(), 0);
+    assert_eq!(body["attention"].as_array().unwrap().len(), 0);
+    assert_eq!(body["fleet"]["owners"], 0);
+    let errors = body["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|e| e.as_str().unwrap().contains("fleet")), "{errors:?}");
 }
 
 /// Nothing pending and nothing firing is the documented empty state's data shape — an empty

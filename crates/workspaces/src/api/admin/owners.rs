@@ -50,6 +50,7 @@ fn fallback_quota(quota_by_name: &HashMap<String, crd::QuotaSpec>, team: bool) -
 /// request, and the raw `Workspace`/`Environment`/`Volume`/`Snapshot` rows usage is folded from.
 /// One call per kind regardless of how many owners exist — the N+1 the per-owner version made
 /// (`quota::usage` and `Quota::get_opt` called once per owner) is what this replaces.
+#[derive(Default)]
 pub(crate) struct Fleet {
     pub(crate) quota_by_name: HashMap<String, crd::QuotaSpec>,
     pub(crate) pending_owners: HashSet<String>,

@@ -77,11 +77,6 @@ async fn facts(client: &kube::Client, region: &str) -> Result<RegionFacts, Respo
     Ok(RegionFacts { nodes, workspaces, environments })
 }
 
-fn working_copies(f: &RegionFacts) -> i64 {
-    (f.workspaces.iter().filter(|w| live_workspace(w)).count() + f.environments.iter().filter(|e| live_environment(e)).count())
-        as i64
-}
-
 /// The region's agent DaemonSet, or zeros. A region whose agent has never been deployed is a fact
 /// worth showing on the row, not a 5xx that hides every other region with it.
 async fn agent_counts(s: &ApiState, region: &str) -> (i64, i64) {
@@ -112,35 +107,81 @@ fn settings_lag(generation: Option<i64>, observed: Option<i64>) -> String {
     }
 }
 
-/// One row per region — factored out of the route so Overview can compose from it directly
-/// instead of a second walk of `Region`/nodes/workloads.
-pub(crate) async fn cluster_rows(s: &ApiState) -> Result<Vec<ClusterRow>, Response> {
-    let regions: Vec<crd::Region> =
-        Api::<crd::Region>::all(kube(s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
-    // ponytail: ONE settings read for the whole list, because every region resolves to the same
-    // client today (`workloads`' own note). Move it inside the loop, keyed on that region's
-    // client, the moment a region -> client map exists.
-    let settings_status = settings_status(kube(s)?).await?;
+/// One region's row, built from Workspace/Environment lists the CALLER already fetched (never
+/// re-listed here — that per-region re-list, times every region, was the N+1 Overview's fleet
+/// numbers duplicated) and a Node list fetched once for the whole batch.
+async fn one_row(
+    s: &ApiState,
+    r: &crd::Region,
+    all_ws: &[crd::Workspace],
+    all_envs: &[crd::Environment],
+    nodes: &[super::NodeDoc],
+) -> Result<ClusterRow, Response> {
+    let region = r.name_any();
+    let client = region_client(s, r).await?;
+    let working_copies = (all_ws.iter().filter(|w| w.spec.region == region && live_workspace(w)).count()
+        + all_envs.iter().filter(|e| e.spec.region == region && live_environment(e)).count()) as i64;
+    let (agents_ready, agents_desired) = agent_counts(s, &region).await;
+    let settings_status = settings_status(client).await?;
+    Ok(ClusterRow {
+        region: region.clone(),
+        status: r.spec.status.clone(),
+        agents_ready,
+        agents_desired,
+        nodes_ready: nodes.iter().filter(|n| n.ready).count() as i64,
+        nodes_total: nodes.len() as i64,
+        draining: nodes.iter().filter(|n| n.decommission).count() as i64,
+        working_copies,
+        settings_status,
+    })
+}
+
+/// Every region's row, plus the node list they all share — degraded, never all-or-nothing: one
+/// region's own client/settings read failing drops only that row, named in the returned errors,
+/// while the rest of the list still renders. `all_ws`/`all_envs` are the caller's own lists
+/// (Overview passes `owners::Fleet.ws`/`.envs`, already fetched for the fleet numbers) so this
+/// never re-lists either CRD.
+pub(crate) async fn cluster_rows_degraded(
+    s: &ApiState,
+    all_ws: &[crd::Workspace],
+    all_envs: &[crd::Environment],
+) -> (Vec<ClusterRow>, Vec<super::NodeDoc>, Vec<String>) {
+    let Ok(client) = kube(s) else {
+        return (Vec::new(), Vec::new(), vec!["clusters: kubernetes not configured".into()]);
+    };
+    let regions = match Api::<crd::Region>::all(client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items,
+        Err(e) => return (Vec::new(), Vec::new(), vec![format!("clusters: {e}")]),
+    };
+    let mut errors = Vec::new();
+    let nodes: Vec<super::NodeDoc> = match Api::<Node>::all(client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items.iter().map(super::node_doc).collect(),
+        Err(e) => {
+            errors.push(format!("nodes: {e}"));
+            Vec::new()
+        }
+    };
     let mut rows = Vec::with_capacity(regions.len());
     for r in &regions {
-        let region = r.name_any();
-        let client = region_client(s, r).await?;
-        let f = facts(client, &region).await?;
-        let (agents_ready, agents_desired) = agent_counts(s, &region).await;
-        let docs: Vec<super::NodeDoc> = f.nodes.iter().map(super::node_doc).collect();
-        rows.push(ClusterRow {
-            region: region.clone(),
-            status: r.spec.status.clone(),
-            agents_ready,
-            agents_desired,
-            nodes_ready: docs.iter().filter(|n| n.ready).count() as i64,
-            nodes_total: docs.len() as i64,
-            draining: docs.iter().filter(|n| n.decommission).count() as i64,
-            working_copies: working_copies(&f),
-            settings_status: settings_status.clone(),
-        });
+        match one_row(s, r, all_ws, all_envs, &nodes).await {
+            Ok(row) => rows.push(row),
+            Err(resp) => errors.push(format!("cluster {}: HTTP {}", r.name_any(), resp.status())),
+        }
     }
-    Ok(rows)
+    (rows, nodes, errors)
+}
+
+/// `GET /admin/clusters`'s all-or-nothing shape, built on the same degraded walk — any failure
+/// (a region's, the node list's) becomes this route's one error instead of a partial list, since
+/// the route's existing callers expect a complete list or a clear failure, not a silent gap.
+pub(crate) async fn cluster_rows(s: &ApiState) -> Result<Vec<ClusterRow>, Response> {
+    let all_ws = Api::<crd::Workspace>::all(kube(s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+    let all_envs = Api::<crd::Environment>::all(kube(s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+    let (rows, _, errors) = cluster_rows_degraded(s, &all_ws, &all_envs).await;
+    match errors.into_iter().next() {
+        Some(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e).into_response()),
+        None => Ok(rows),
+    }
 }
 
 pub(crate) async fn list_clusters(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
