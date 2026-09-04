@@ -1052,10 +1052,12 @@ data:
         endpoint: https://${env:K8S_NODE_IP}:10250
         insecure_skip_verify: true
         metric_groups: [node, pod, container]
-      # Pod logs, so HyperDX has logs beside metrics. Our binaries keep plain tracing output;
-      # `RUSTIC_GIT_LOG_FORMAT=json` makes them structured here without changing the code.
+      # OUR pods' logs only (everything in the rustic-git namespace), so HyperDX has logs beside metrics
+      # without ingesting every workspace container on the node. Our binaries keep plain
+      # tracing output; `RUSTIC_GIT_LOG_FORMAT=json` makes them structured here without
+      # changing the code.
       filelog:
-        include: [/var/log/pods/*/*/*.log]
+        include: [/var/log/pods/rustic-git_*/*/*.log]
         include_file_path: true
         operators:
           - type: container
@@ -1083,6 +1085,11 @@ data:
         attributes:
           - { key: region, value: "${env:RUSTIC_GIT_REGION}", action: upsert }
           - { key: k8s.node.name, value: "${env:K8S_NODE_NAME}", action: insert }
+      # HyperDX's service picker reads `service.name`; the container name is the one our pods
+      # already carry (rustic-git-agent, rustic-git-api, …). Logs only — metrics keep their own.
+      resource/service:
+        attributes:
+          - { key: service.name, from_attribute: k8s.container.name, action: insert }
       batch:
         timeout: 10s
         send_batch_size: 1024
@@ -1106,7 +1113,7 @@ data:
           exporters: [otlphttp]
         logs:
           receivers: [filelog]
-          processors: [k8sattributes, resource, batch]
+          processors: [k8sattributes, resource, resource/service, batch]
           exporters: [otlphttp]
 ---
 # The cluster-wide half. Same image, same ServiceAccount, one receiver.
