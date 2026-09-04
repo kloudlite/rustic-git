@@ -3,6 +3,7 @@ import { cache } from "react";
 import type { Commit } from "@/lib/browse";
 import type { SnapshotState } from "@/lib/snapshot-state";
 import type { QuotaDim, QuotaReport } from "@/lib/quota";
+import { auditQueryString, type AuditFilter, type AuditPage } from "@/lib/audit";
 
 /**
  * The api server, from the web app's server side only.
@@ -1091,6 +1092,20 @@ export type AdminNode = { name: string; ready: boolean; decommission: boolean; d
 
 export function adminListNodes(token: string) {
   return adminCall<AdminNode[]>("/admin/nodes", { method: "GET", token });
+}
+
+export function adminAudit(token: string, filter: AuditFilter) {
+  return adminCall<AuditPage>(`/admin/audit${auditQueryString(filter)}`, { method: "GET", token });
+}
+
+/** Raw `Response`, not `ApiResult` — the CSV export route streams this straight through to the
+ *  browser rather than parsing it, so it needs the actual body and status, not `adminCall`'s
+ *  JSON-shaped envelope. The one caller that talks to `ADMIN_BASE` directly. */
+export function adminAuditCsv(token: string, filter: AuditFilter): Promise<Response> {
+  return fetch(`${ADMIN_BASE}/admin/audit.csv${auditQueryString(filter)}`, {
+    headers: { authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
 }
 
 export function createRegion(body: { id: string; name: string }, token: string) {

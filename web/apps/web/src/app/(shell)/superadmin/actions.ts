@@ -5,6 +5,7 @@ import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 import { DIMS, type QuotaDim } from "@/lib/quota";
 import { conflictMessage } from "@/lib/settings";
+import type { AuditFilter, AuditPage } from "@/lib/audit";
 
 export type DecideResult = { ok: true } | { ok: false; message: string };
 
@@ -63,4 +64,17 @@ export async function rollWorkloadAction(scope: string, name: string, reason: st
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath(scope === "central" ? "/superadmin/monitoring" : "/superadmin/clusters");
   return { ok: true };
+}
+
+export type AuditPageResult = { ok: true; page: AuditPage } | { ok: false; message: string };
+
+/** The "Load more" button's fetch: same filter as the page's initial server-rendered load, just
+ *  with the previous page's `next_cursor`. A read, but a server action all the same — the browser
+ *  never gets the admin token, only this. */
+export async function loadMoreAudit(filter: AuditFilter, cursor: string): Promise<AuditPageResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminAudit(token, { ...filter, cursor });
+  if (!r.ok) return { ok: false, message: r.message };
+  return { ok: true, page: r.value };
 }
