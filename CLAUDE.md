@@ -341,6 +341,33 @@ inputs is published straight from the index and never invokes nix (an evaluation
 janitor sweeps entries no `{id}/current` resolves to. The derivation name carries no workspace id —
 it used to, which is what stopped two identical package sets sharing one store path.
 
+## Live settings
+
+Two scopes, two stores: per-region agent tunables live in `ClusterSettings/default`
+(`crates/workspaces/src/crd/mod.rs`), a cluster-scoped CR every `rustic-git-agent` watches through
+a reflector; central tunables (server/worker/gateway/api) live in the `cluster/settings`
+object-store document, refreshed on a 30s beat. Every knob resolves `stored ?? env ?? default` —
+env is the bootstrap value a fresh cluster boots with, never the last word — and an unparsable
+document or CR spec changes nothing (last good wins, logged once per refresh). Never read
+`std::env::var` directly for a knob that has a `Settings` field; go through the process's
+`LiveSettings<T>` handle (`crates/core/src/settings.rs`) the same way ownership goes through
+`App::election_tick`/`OwnershipStore` rather than a hand-rolled leader check. Most fields are
+`Mark::Live` and take effect on the reader's next beat, never mid-operation (an in-flight `btrfs
+send` or nix build finishes under the value it started with). A `Mark::Boot` field (an image tag,
+a runtime class) only takes effect at process start, so a save that changes one rolls exactly the
+readers `CLUSTER_SETTING_META`/`admin::workloads::KNOWN` name for it — a merge patch of
+`rustic-git.io/restarted-at` on the pod template, never a pod delete — and only after prechecking
+that every affected reader is already `ready == desired`; a reader still mid-rollout answers the
+save with 409 and nothing is written, so the settings document never runs ahead of the pods that
+read it. Every write validates each field's range (422 naming the field), keeps the last ten
+versions (an annotation on `ClusterSettings`, an inline array on the central document) and can
+revert to any of them. The admin API (`bins/api` with `RUSTIC_GIT_API_ROLE=admin`) exposes
+`GET/PUT /admin/settings/central`, `GET/PUT /admin/settings/clusters/{region}`, `GET
+/admin/settings/schema` (the `Mark`/range/reader table the UI renders from) and the read-only
+`GET /admin/workloads` (same roll-target list, for the infrastructure tab); RBAC mirrors this —
+the admin ServiceAccount gets `patch` on exactly the `KNOWN` Deployments/StatefulSets/DaemonSet,
+the agent gets `get/list/watch` on `ClusterSettings` and nothing to write it with.
+
 ## Web app
 
 Next.js app router in `web/apps/web` (its own `CLAUDE.md`/`AGENTS.md` there warns the installed

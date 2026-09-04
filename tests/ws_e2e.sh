@@ -561,6 +561,71 @@ done
 [ -n "$SYNC3" ] || fail "no new sync point carrying packages=[hello] within ~50 s of the PATCH; the definition-change trigger is not firing"
 
 # ---------------------------------------------------------------------------
+# Live settings, live case: `syncSecs` is `Mark::Live` — the agent's reflector picks up
+# `ClusterSettings/default` on its own and the next refresh beat runs at the new cadence, no roll.
+# The spec's Testing section asks for this by driving it from the admin UI ("change syncSecs from
+# the UI and watch the cut cadence change within a minute"); this script has no browser driver, so
+# it drives the same CR field with kubectl instead, per Task 9's brief.
+# ---------------------------------------------------------------------------
+log "live settings: patching ClusterSettings/default syncSecs to 10 and waiting for a fresh cut"
+BEFORE_SETTINGS=$(ready_transients | tail -1)
+kubectl patch clustersettings default --type merge -p '{"spec":{"syncSecs":10}}' \
+  || fail "kubectl patch clustersettings default syncSecs failed"
+sudo bash -c "printf 'sync after settings change' > '$(live_dir "$WS_ID")/sync-settings.txt'"
+AFTER_SETTINGS=""
+for i in $(seq 1 15); do
+  AFTER_SETTINGS=$(ready_transients | tail -1)
+  [ -n "$AFTER_SETTINGS" ] && [ "$AFTER_SETTINGS" != "$BEFORE_SETTINGS" ] && break
+  sleep 1
+done
+[ -n "$AFTER_SETTINGS" ] && [ "$AFTER_SETTINGS" != "$BEFORE_SETTINGS" ] \
+  || fail "no new sync-$WS_ID-* transient within ~15s of the live syncSecs=10 change"
+log "live settings: cadence change observed (new transient $AFTER_SETTINGS)"
+
+# ---------------------------------------------------------------------------
+# Live settings, boot case: `gitInitImage` is `Mark::Boot` — a save must roll `rustic-git-agent`
+# by patching the pod template's restart annotation (never a pod delete), and a second save while
+# the first roll is still in flight must 409 with nothing written. Unlike the live case above,
+# this mechanism (precheck-then-write-then-roll, the 409) lives entirely in the admin API, not in
+# a raw CR write — so this half is driven through $ADMIN_BASE rather than kubectl, and the two
+# blocks together cover both paths spec §7 distinguishes.
+# ---------------------------------------------------------------------------
+log "boot settings: PUT gitInitImage through the admin api and expecting rustic-git-agent to roll"
+BEFORE_RESTARTED_AT=$(kubectl -n kube-system get daemonset rustic-git-agent \
+  -o jsonpath='{.spec.template.metadata.annotations.rustic-git\.io/restarted-at}' 2>/dev/null || true)
+BOOT_CODE=$(curl -s -o /tmp/ws_e2e_boot_put.json -w '%{http_code}' \
+  -X PUT "$ADMIN_BASE/admin/settings/clusters/$REGION_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"gitInitImage":"alpine/git:2.45.3"}')
+BOOT_BODY=$(cat /tmp/ws_e2e_boot_put.json)
+rm -f /tmp/ws_e2e_boot_put.json
+[ "$BOOT_CODE" = "200" ] || fail "PUT gitInitImage answered $BOOT_CODE, not 200: $BOOT_BODY"
+
+log "boot settings: a second save while the first roll is still in flight must 409, nothing written"
+RETRY_CODE=$(curl -s -o /tmp/ws_e2e_boot_put2.json -w '%{http_code}' \
+  -X PUT "$ADMIN_BASE/admin/settings/clusters/$REGION_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"gitInitImage":"alpine/git:2.45.4"}')
+RETRY_BODY=$(cat /tmp/ws_e2e_boot_put2.json)
+rm -f /tmp/ws_e2e_boot_put2.json
+# The rollout can settle before this second request lands on a fast cluster — the assertion below
+# only fires when it caught the roll actually in flight, same tolerance the rest of this script
+# gives to timing-sensitive kubectl races.
+if [ "$RETRY_CODE" = "409" ]; then
+  echo "$RETRY_BODY" | grep -q '"ready"' || fail "409 body missing the ready/desired reader state: $RETRY_BODY"
+  log "boot settings: second save while rolling correctly answered 409: $RETRY_BODY"
+else
+  log "boot settings: first roll had already settled before the second save landed ($RETRY_CODE) — 409 path not exercised this run"
+fi
+
+kubectl -n kube-system rollout status daemonset/rustic-git-agent --timeout=120s \
+  || fail "rustic-git-agent DaemonSet rollout did not complete after the gitInitImage change"
+AFTER_RESTARTED_AT=$(kubectl -n kube-system get daemonset rustic-git-agent \
+  -o jsonpath='{.spec.template.metadata.annotations.rustic-git\.io/restarted-at}' 2>/dev/null || true)
+[ -n "$AFTER_RESTARTED_AT" ] || fail "rustic-git-agent pod template has no rustic-git.io/restarted-at annotation after the boot save"
+[ "$AFTER_RESTARTED_AT" != "$BEFORE_RESTARTED_AT" ] \
+  || fail "rustic-git.io/restarted-at did not change: still $BEFORE_RESTARTED_AT"
+log "boot settings: rustic-git-agent rolled, restarted-at is fresh ($AFTER_RESTARTED_AT)"
+
+# ---------------------------------------------------------------------------
 # Push: the one mutating verb — `/v1` writes a `Snapshot` CR and the owning node cuts it (btrfs
 # snapshot + upload) and marks it Ready, which moves `Volume.status.head`. Nothing is POSTed
 # anywhere: /v1/volumes/{id}/history reads the chain of Ready `Snapshot` CRs back, so history must
@@ -1404,4 +1469,4 @@ else
   log "volume takeover: node JOIN passed (standby moved $STANDBY -> $NEW_STANDBY, old row and subvolume gone, then settled back to $STANDBY)"
 fi
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds) passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls rustic-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds) passed"

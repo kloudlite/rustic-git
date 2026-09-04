@@ -912,3 +912,34 @@ revokes nobody.
 `default-team` apply to every owner with no `Quota` object of their own, and those numbers match
 the compiled-in table, so a missing object was never a wider allowance. A quota blocks new
 allocation only; nothing already running is touched.
+
+## Release: live settings
+
+One new CRD (`ClusterSettings`, singleton `default` per region) and no new process — the admin
+`bins/api` gains settings routes on its existing router, and `rustic-git-agent`/the central tier
+gain a refresh beat each. Apply in this order:
+
+```sh
+# 1. The CRD — adds `clustersettings`. Additive; nothing existing reads or writes it yet.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
+
+# 2. api-rbac.yaml: the rustic-git-admin ClusterRole gains create/patch on ClusterSettings and
+#    patch (restart-annotation only, via the admission policy) on the KNOWN central workloads.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
+
+# 3. agent-rbac.yaml: the agent ClusterRole gains get/list/watch on ClusterSettings — read-only,
+#    same reasoning as its Quota row.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml
+```
+
+Then the AKS roll: `deploy/rustic-git.yaml` adds the `rustic-git-admin` Role/RoleBinding for
+patching the KNOWN_CENTRAL workloads' pod templates, and turns on
+`automountServiceAccountToken: true` on the `rustic-git-admin` Deployment specifically (every
+other Deployment here keeps it `false` — this is the one process whose own in-cluster token is
+what lets it roll its siblings, distinct from the k3s kubeconfig Secret it already mounts for
+`ClusterSettings`/agent workload rolls). Repin and roll with `deploy/pin.sh`/`deploy/roll.sh`,
+then `deploy/rustic-git-web.yaml` for the settings admin UI.
+
+**What existing readers see:** nothing, until a stored `cluster/settings` document or a
+`ClusterSettings/default` CR is actually written — every field's `stored ??` branch is empty at
+first boot, so every process runs exactly as it did on env alone.
