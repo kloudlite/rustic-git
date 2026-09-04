@@ -66,7 +66,9 @@ spec:
             - name: TOKIO_WORKER_THREADS
               value: "4"
             - name: KLOUDLITE_GIT_S3_URL
-              value: az://kloudlite-git
+              # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
+              # holds every repo; a name change here means copying every object, not editing a line.
+              value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
               valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
@@ -401,7 +403,9 @@ spec:
             - name: TOKIO_WORKER_THREADS
               value: "4"
             - name: KLOUDLITE_GIT_S3_URL
-              value: az://kloudlite-git
+              # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
+              # holds every repo; a name change here means copying every object, not editing a line.
+              value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
               valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
@@ -573,7 +577,9 @@ spec:
             - name: TOKIO_WORKER_THREADS
               value: "4"
             - name: KLOUDLITE_GIT_S3_URL
-              value: az://kloudlite-git
+              # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
+              # holds every repo; a name change here means copying every object, not editing a line.
+              value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
               valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
@@ -778,7 +784,9 @@ spec:
             - name: KLOUDLITE_GIT_API_ROLE
               value: admin
             - name: KLOUDLITE_GIT_S3_URL
-              value: az://kloudlite-git
+              # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
+              # holds every repo; a name change here means copying every object, not editing a line.
+              value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
               valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY

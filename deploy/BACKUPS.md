@@ -9,7 +9,7 @@ Tick the boxes with the `az` output pasted underneath; a box without output is a
 
 | Store | What is in it | Where | Copy count today |
 | --- | --- | --- | --- |
-| Blob container `kloudlite-git` (`KLOUDLITE_GIT_S3_URL: az://kloudlite-git`) | Every git repo, registry manifest and tag, PR row (SlateDB per repo/image/volume), credentials as plain keys, `index/` markers, registry blobs and manifests | storage account named in Secret `kloudlite-git-storage` | one (LRS unless changed) |
+| Blob container `rustic-git` (the pre-rename name; data location, kept) (`KLOUDLITE_GIT_S3_URL: az://rustic-git`) | Every git repo, registry manifest and tag, PR row (SlateDB per repo/image/volume), credentials as plain keys, `index/` markers, registry blobs and manifests | storage account named in Secret `kloudlite-git-storage` | one (LRS unless changed) |
 | Blob containers `wslayers`, `wslayers-k3s` (one per region) | Every pushed workspace/environment snapshot (btrfs send streams), content-addressed `blobs/{owner}/{algo}/{hex}` | one storage account per region; agent Secret `AZURE_*` | one per region |
 | Cosmos DB, Mongo API (`kloudlite-git-mongo`) | Pull-request store used by the server tier | Cosmos account | Cosmos-managed periodic backup (default: 2 copies, 8 h interval, 8 h retention) |
 | k3s SQLite `state.db` on `k3s-cp` | The CRDs: every Workspace, Environment, Region, Volume, Snapshot, VolumeReplica, OwnerBinding — the record of what the subvolumes and snapshots ARE, and (`Region`) what regions exist | one VM | hourly tarball to container `k3s-backup` (this repo's timer) |

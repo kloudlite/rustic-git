@@ -48,7 +48,7 @@ data:
 
     [storage]
     # Azure Blob, not S3: this platform's object storage IS the blob account every other tier
-    # already writes to (`KLOUDLITE_GIT_S3_URL=az://kloudlite-git`), so ZeroFS points at the same
+    # already writes to (`KLOUDLITE_GIT_S3_URL=az://rustic-git`), so ZeroFS points at the same
     # account. `azure://{container}/{prefix}` — the prefix keeps the homes LSM tree in its own
     # keyspace inside a container the rest of the platform also uses, so no container has to be
     # created by hand and nothing here can collide with registry blobs or repo databases.
