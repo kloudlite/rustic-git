@@ -37,7 +37,9 @@ export function blockFor(kind: RequestKind, form: FormData): Record<string, unkn
       const raw = str(d);
       if (!raw) continue;
       const n = Number(raw);
-      if (!Number.isFinite(n) || n < 0) throw new Error(`That is not a valid amount for ${d}.`);
+      // Zero is not a raise: "at least one dimension" has to mean one that actually moves, or a
+      // form of zeros passes the check below and asks a superadmin to approve nothing.
+      if (!Number.isFinite(n) || n <= 0) throw new Error(`That is not a valid amount for ${d}.`);
       quota[d] = n;
     }
     if (Object.keys(quota).length === 0) throw new Error("Raise at least one dimension.");

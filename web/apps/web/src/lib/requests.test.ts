@@ -24,3 +24,11 @@ test("an incomplete form is refused before it is sent", () => {
   expect(() => blockFor("region", new FormData())).toThrow("Pick a region.");
   expect(() => blockFor("quota", new FormData())).toThrow("Raise at least one dimension.");
 });
+
+/** Zero is not a raise: a form of zeros would otherwise pass "at least one dimension" and ask a
+ *  superadmin to approve nothing. */
+test("a zero is not a dimension to raise", () => {
+  const q = new FormData();
+  q.set("cpu", "0");
+  expect(() => blockFor("quota", q)).toThrow("That is not a valid amount for cpu.");
+});
