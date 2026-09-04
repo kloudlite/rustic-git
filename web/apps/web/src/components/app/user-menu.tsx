@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { LogOut, Settings, ShieldCheck } from "lucide-react";
+import { Inbox, LogOut, Settings, ShieldCheck } from "lucide-react";
 import { Initials } from "@/components/app/initials";
 import {
   DropdownMenu,
@@ -43,6 +43,10 @@ export function UserMenu({
 
         <DropdownMenuItem asChild>
           <Link href="/settings"><Settings className="size-4" /> Profile settings</Link>
+        </DropdownMenuItem>
+
+        <DropdownMenuItem asChild>
+          <Link href="/requests"><Inbox className="size-4" /> My requests</Link>
         </DropdownMenuItem>
 
         {superadmin ? (

@@ -26,7 +26,9 @@ export async function requestQuota(_prev: QuotaRequestState, formData: FormData)
   const token = await tokenOr();
   if (typeof token !== "string") return { error: token.error };
 
-  const r = await api.createQuotaRequest({ owner: owner || undefined, requested, reason }, token);
+  // Same dialog, same 409-driven entry point — a kind-quota Request now, so a quota ask and every
+  // other kind share one queue and one decision path.
+  const r = await api.createRequest({ owner: owner || undefined, kind: "quota", reason, quota: requested }, token);
   if (!r.ok) {
     if (r.kind === "conflict") return { error: "A request is already pending for this owner." };
     if (r.kind === "forbidden") return { error: "Only a team admin can request a team quota." };
