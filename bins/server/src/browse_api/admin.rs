@@ -56,7 +56,7 @@ pub(super) async fn api_visibility(
     if !public {
         let public_path = crate::index::path(true, crate::index::Kind::Repo, &owner, &name);
         if let Err(e) = crate::index::ignore_not_found(app.store.os.delete(&public_path).await) {
-            tracing::warn!(owner = %owner, repo = %name, error = %e, "index pre-delete");
+            tracing::warn!(owner = %owner, repo = %name, reason = "pre_delete", error = %e, "index.write.failed");
         }
     }
     match app.store.set_public(&owner, &name, public).await {
@@ -67,7 +67,7 @@ pub(super) async fn api_visibility(
         Err(e) => {
             // The flag is written; only the cache bump can have failed. The operator's next step
             // is fixed text — the backend's own words stay in the log.
-            tracing::error!(owner = %owner, repo = %name, error = %e, "set-visibility");
+            tracing::error!(owner = %owner, repo = %name, error = %e, "repo.visibility.failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("visibility changed but cached answers may be stale; retry with `admin purge-cache {owner}/{name}`"),
@@ -103,7 +103,7 @@ async fn write_marker(app: &App, owner: &str, name: &str, public: bool, meta: Op
         updated_ms: 0,
     };
     if let Err(e) = crate::index::write(&app.store, crate::index::Kind::Repo, owner, &m).await {
-        tracing::warn!(owner = %owner, repo = %name, error = %e, "index write");
+        tracing::warn!(owner = %owner, repo = %name, reason = "write", error = %e, "index.write.failed");
     }
 }
 
@@ -151,7 +151,7 @@ pub(super) async fn api_create(
             if msg.contains("invalid repo path") {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            tracing::error!(owner = %owner, repo = %name, error = %msg, "create-repo");
+            tracing::error!(owner = %owner, repo = %name, error = %msg, "repo.create.failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "could not create repository").into_response();
         }
     }
@@ -228,12 +228,12 @@ pub(super) async fn api_delete(
     // Markers removed BEFORE storage: gone from listings first, so a crash mid-delete never
     // leaves a marker pointing at a repo that no longer exists.
     if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Repo, &owner, &name).await {
-        tracing::warn!(owner = %owner, repo = %name, error = %e, "index remove");
+        tracing::warn!(owner = %owner, repo = %name, reason = "remove", error = %e, "index.write.failed");
     }
     match app.store.delete_repo(&owner, &name).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
-            tracing::error!(owner = %owner, repo = %name, error = %e, "delete-repo");
+            tracing::error!(owner = %owner, repo = %name, error = %e, "repo.delete.failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "could not delete the repository").into_response()
         }
     }
@@ -280,7 +280,7 @@ pub(super) async fn api_protect(
             if msg.contains("pattern") {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            tracing::error!(owner = %owner, repo = %name, error = %msg, "protect");
+            tracing::error!(owner = %owner, repo = %name, error = %msg, "repo.protection.save.failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "could not save the rule").into_response()
         }
     }

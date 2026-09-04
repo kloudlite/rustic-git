@@ -35,7 +35,7 @@ impl Cache {
             // Same fire-and-forget discipline as `drop_refs`; a lost nudge self-heals via each
             // consumer's fallback scan (see `crate::events` module doc).
             if let Err(e) = run::<()>(&mut cmd, &mut c).await {
-                tracing::warn!(stream = %stream, error = %e, "cache xadd failed");
+                tracing::warn!(stream = %stream, op = "xadd", error = %e, "cache.stream.failed");
             }
         }
     }
@@ -57,7 +57,7 @@ impl Cache {
             cmd.arg("CREATE").arg(stream).arg(group).arg("$").arg("MKSTREAM");
             if let Err(e) = run::<()>(&mut cmd, &mut c).await {
                 if !e.to_string().contains("BUSYGROUP") {
-                    tracing::warn!(%stream, %group, error = %e, "consumer group create failed");
+                    tracing::warn!(%stream, %group, op = "xgroup_create", error = %e, "cache.stream.failed");
                 }
             }
         }
@@ -98,7 +98,7 @@ impl Cache {
         match tokio::time::timeout(CMD_TIMEOUT, cmd.query_async::<StreamReply>(&mut c)).await {
             Ok(Ok(reply)) => reply.0,
             Ok(Err(e)) => {
-                tracing::warn!(%stream, %group, error = %e, "consumer group read failed");
+                tracing::warn!(%stream, %group, op = "xreadgroup", error = %e, "cache.stream.failed");
                 Vec::new()
             }
             Err(_) => Vec::new(), // timed out waiting; the caller's sweep covers it
@@ -117,7 +117,7 @@ impl Cache {
         }
         if let Some(mut c) = self.conn.clone() {
             if let Err(e) = run::<()>(&mut xack_cmd(stream, group, ids), &mut c).await {
-                tracing::warn!(%stream, %group, n = ids.len(), error = %e, "consumer group ack failed");
+                tracing::warn!(%stream, %group, op = "xack", count = ids.len(), error = %e, "cache.stream.failed");
             }
         }
     }
@@ -150,7 +150,7 @@ impl Cache {
         match run_within::<AutoclaimReply>(MAINTENANCE_TIMEOUT, &mut cmd, &mut c).await {
             Ok(reply) => reply.0 .0,
             Err(e) => {
-                tracing::warn!(%stream, %group, error = %e, "consumer group autoclaim failed");
+                tracing::warn!(%stream, %group, op = "xautoclaim", error = %e, "cache.stream.failed");
                 Vec::new()
             }
         }
@@ -171,7 +171,7 @@ impl Cache {
         match run::<StreamEntries>(&mut cmd, &mut c).await {
             Ok(reply) => reply.0,
             Err(e) => {
-                tracing::warn!(%stream, error = %e, "stream read failed");
+                tracing::warn!(%stream, op = "xrevrange", error = %e, "cache.stream.failed");
                 Vec::new()
             }
         }

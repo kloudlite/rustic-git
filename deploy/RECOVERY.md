@@ -119,8 +119,9 @@ Verify, in this order (each is a different failure):
 
 ```sh
 kubectl -n kloudlite-git get pods                                   # all Running, 0 restarts
-kubectl -n kloudlite-git logs -l role=server --tail=500 | grep -E 'lease: leading|newer DB client'
-#   want exactly ONE pod logging "lease: leading" (and "opened as WRITER" beside it), and NO
+kubectl -n kloudlite-git logs -l role=server --tail=500 | grep -E 'lease.acquired|newer DB client'
+#   want exactly ONE pod logging "lease.acquired" (and "ownership.map.opened" with role=writer
+#   beside it), and NO
 #   "newer DB client" on a settled fleet — that line means a demoted leader wrote after it lost
 #   the lease, which the epoch check is supposed to stop first
 kubectl -n kloudlite-git get endpoints kloudlite-git-lb -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\n"}{end}'
@@ -161,7 +162,8 @@ ssh -T git@git.khost.dev                                                        
 git ls-remote https://dev.kloudlite.io/<owner>/<repo>.git                                                                      # a repo that existed: its refs came back from the object store
 docker login cr.khost.dev && docker pull cr.khost.dev/<owner>/<image>:<tag>                                                    # layers came back from blobs/
 # after ~5 min, the ownership map's WAL health:
-kubectl -n kloudlite-git logs -l role=server | grep -iE 'checkpoint|timed out' | tail -3        # want "checkpoint ok in <ms>"
+kubectl -n kloudlite-git logs -l role=server | grep -iE 'checkpoint|shutdown.stalled' | tail -3   # want "ownership.checkpoint.completed"
+#   (debug level — set RUST_LOG=debug if the deployment runs at info)
 ```
 
 The first registry request to any image after a roll can 500 once (known fenced-handle gap);

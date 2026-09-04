@@ -496,10 +496,10 @@ impl Store {
                     if let Err(e) =
                         self.reconcile_marker(owner, name, crate::index::Kind::Repo, db_public).await
                     {
-                        tracing::warn!(owner = %owner, repo = %name, error = %e, "reconciling the visibility marker failed");
+                        tracing::warn!(owner = %owner, repo = %name, reason = "write", error = %e, "index.marker.reconcile.failed");
                     }
                 }
-                Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "reading visibility for the marker reconcile failed"),
+                Err(e) => tracing::warn!(owner = %owner, repo = %name, reason = "read", error = %e, "index.marker.reconcile.failed"),
             }
         }
         let objects_dir = self.cache_dir.join(owner).join(name).join("objects");
@@ -562,7 +562,7 @@ impl Store {
         let (pd, fl) = (repo.pack_dir.clone(), files);
         let pruned = tokio::task::spawn_blocking(move || prune_stale_packs(&pd, &fl)).await;
         if let Err(e) = pruned.map_err(std::io::Error::other).and_then(|r| r) {
-            tracing::warn!(owner = %owner, repo = %name, error = %e, "pruning stale cached packs failed");
+            tracing::warn!(owner = %owner, repo = %name, error = %e, "packs.cache.prune.failed");
         }
         Ok(Some(repo))
     }

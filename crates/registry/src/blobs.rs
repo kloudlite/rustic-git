@@ -240,11 +240,11 @@ pub async fn delete_blob(
             match app.store.image_db(&owner, &name).await {
                 Ok(db) => {
                     if let Err(e) = super::store::forget_blob_rows(&db, &d).await {
-                        tracing::warn!(owner = %owner, name = %name, digest = %d, error = %e, "blob delete: hold rows");
+                        tracing::warn!(owner = %owner, name = %name, digest = %d, reason = "scan", error = %e, "registry.blob.rows.failed");
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(owner = %owner, name = %name, digest = %d, error = %e, "blob delete: hold rows");
+                    tracing::warn!(owner = %owner, name = %name, digest = %d, reason = "write", error = %e, "registry.blob.rows.failed");
                 }
             }
             StatusCode::ACCEPTED.into_response()

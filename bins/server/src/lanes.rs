@@ -26,7 +26,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
             tokio::time::sleep(LEADER_RENEW).await;
             if let Err(e) = a.election_tick().await {
                 metrics::counter!("ownership_election_failures_total").increment(1);
-                tracing::warn!(error = %e, "election tick");
+                tracing::warn!(error = %e, "election.tick.failed");
             }
         }
     });
@@ -46,7 +46,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
             // another node claim, which is the intended outcome.
             if let Err(e) = a.renew_once().await {
                 metrics::counter!("ownership_renew_failures_total").increment(1);
-                tracing::warn!(error = %e, "renewing leases");
+                tracing::warn!(error = %e, "lease.renew.failed");
             }
             // Move the ownership map's flush pointer so the WAL behind it can be reclaimed. A
             // no-op on a follower, so this beat is "on whoever writes" without being started or
@@ -58,10 +58,11 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
                 last_checkpoint = std::time::Instant::now();
                 match tokio::time::timeout(CHECKPOINT_TIMEOUT, a.ownership.checkpoint()).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::warn!(error = %e, "ownership checkpoint"),
+                    Ok(Err(e)) => tracing::warn!(reason = "error", error = %e, "ownership.checkpoint.failed"),
                     Err(_) => tracing::warn!(
+                        reason = "timeout",
                         timeout_s = CHECKPOINT_TIMEOUT.as_secs(),
-                        "ownership checkpoint: timed out; leases keep renewing"
+                        "ownership.checkpoint.failed"
                     ),
                 }
             }
@@ -80,7 +81,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     lane(app.clone(), 30, |a| async move {
         use kloudlite_git_registry::store::ImageExt;
         if let Err(e) = a.store.flush_pulls().await {
-            tracing::warn!(error = %e, "flushing pull counters");
+            tracing::warn!(error = %e, "registry.counters.flush.failed");
         }
     });
     lane(app.clone(), 15, |a| async move { announce_stranded_merges(&a).await });
@@ -95,7 +96,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
                 continue;
             }
             if let Err(e) = app.prune_once().await {
-                tracing::warn!(error = %e, "pruning ownership");
+                tracing::warn!(error = %e, "ownership.prune.failed");
             }
         }
     });
@@ -157,12 +158,12 @@ pub async fn reconcile_owned_markers(app: &App) {
         let db_public = match db_public {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(owner = %owner, repo = %name, error = %e, "reconcile marker");
+                tracing::warn!(owner = %owner, repo = %name, reason = "read", error = %e, "index.marker.reconcile.failed");
                 continue;
             }
         };
         if let Err(e) = app.store.reconcile_marker(owner, name, kind, db_public).await {
-            tracing::warn!(owner = %owner, repo = %name, error = %e, "reconcile marker");
+            tracing::warn!(owner = %owner, repo = %name, reason = "write", error = %e, "index.marker.reconcile.failed");
         }
         tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
     }
@@ -187,7 +188,7 @@ pub async fn check_owned_pulls(app: &App) {
         // Only git repos have pull requests; images and volumes share the pool with them.
         let Some((crate::index::Kind::Repo, owner, name)) = kind_of(&key) else { continue };
         if let Err(e) = crate::pulls::check_repo(&app.store, owner, name).await {
-            tracing::warn!(owner = %owner, repo = %name, error = %e, "checking mergeability");
+            tracing::warn!(owner = %owner, repo = %name, error = %e, "merge.mergeability.failed");
         }
         tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
     }
@@ -214,7 +215,7 @@ pub async fn announce_stranded_merges(app: &App) {
                 Ok(v) if v.is_empty() => continue, // nothing waiting; no reason to pace
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!(owner = %owner, repo = %name, error = %e, "looking for stranded merges");
+                    tracing::warn!(owner = %owner, repo = %name, error = %e, "merge.stranded.scan.failed");
                     continue;
                 }
             };
@@ -238,7 +239,7 @@ pub async fn announce_stranded_merges(app: &App) {
             // announcement on the next beat, while stamping first would lose the announcement
             // itself if the publish never happened.
             if let Err(e) = crate::pulls::mark_announced(&app.store, owner, name, pr.number).await {
-                tracing::warn!(owner = %owner, repo = %name, number = pr.number, error = %e, "stamping the merge announcement");
+                tracing::warn!(owner = %owner, repo = %name, number = pr.number, error = %e, "merge.announce.failed");
             }
         }
         tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
@@ -259,7 +260,7 @@ pub async fn consolidate_owned_packs(app: &App, max_packs: usize) {
         let packs = match app.store.pack_index(owner, name).await {
             Ok(v) => v.iter().filter(|(f, _)| f.ends_with(".pack")).count(),
             Err(e) => {
-                tracing::warn!(owner = %owner, repo = %name, error = %e, "reading the pack index");
+                tracing::warn!(owner = %owner, repo = %name, error = %e, "packs.index.read.failed");
                 continue;
             }
         };
@@ -268,9 +269,9 @@ pub async fn consolidate_owned_packs(app: &App, max_packs: usize) {
         }
         match app.store.consolidate(owner, name).await {
             Ok((before, after)) => {
-                tracing::info!(owner = %owner, repo = %name, before, after, "consolidated packs")
+                tracing::info!(owner = %owner, repo = %name, before, after, "packs.consolidated")
             }
-            Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "consolidating packs"),
+            Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "packs.consolidate.failed"),
         }
         tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
     }

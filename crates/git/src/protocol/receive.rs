@@ -111,7 +111,7 @@ pub fn serve(
         // Debug (`?`, not `%`) is load-bearing: Debug-formatting a str escapes control
         // bytes (ESC, CR, etc.) as `\u{..}`, so an attacker-controlled option value
         // can't inject ANSI/log-forging sequences into an operator's terminal.
-        tracing::info!(push_options = ?push_options, "push options");
+        tracing::debug!(options = ?push_options, "receive.options");
     }
 
     // 2+3. index pack, upload, validate tips, apply refs.
@@ -132,7 +132,7 @@ pub fn serve(
         let m = match e.downcast_ref::<ClientPack>() {
             Some(c) => c.0.replace('\n', " "),
             None => {
-                tracing::error!(error = %e, "receive-pack failed");
+                tracing::error!(error = %e, "receive.pack.failed");
                 "internal error".to_string()
             }
         };

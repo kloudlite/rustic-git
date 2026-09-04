@@ -79,7 +79,7 @@ async fn serve() -> Result<()> {
             match kloudlite_git_server::directory::Directory::connect(&uri, &env("KLOUDLITE_GIT_MONGO_DB", "kloudlite")).await {
                 Ok(d) => kloudlite_git_server::pulls::Source::Directory(Arc::new(d)),
                 Err(e) => {
-                    tracing::warn!(error = %e, "directory unreachable, pull requests will not migrate");
+                    tracing::warn!(error = %e, "directory.unavailable");
                     kloudlite_git_server::pulls::Source::Unavailable
                 }
             }
@@ -95,7 +95,7 @@ async fn serve() -> Result<()> {
             Ok(doc) => app.central.store(
                 kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
             ),
-            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document at boot; using env defaults"),
+            Err(e) => tracing::warn!(scope = "central", error = %e, "settings.invalid"),
         }
     }
     tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
@@ -107,7 +107,7 @@ async fn serve() -> Result<()> {
         // lease, and the first claim should not wait a tick for it. Not fatal — the loop retries
         // and /healthz stays un-ready until a lease is read.
         if let Err(e) = app.election_tick().await {
-            tracing::warn!(error = %e, "first election tick");
+            tracing::warn!(attempt = 1, error = %e, "election.tick.failed");
         }
     }
     store.pool.spawn_sweeper();
@@ -123,13 +123,14 @@ async fn serve() -> Result<()> {
 
     let l = listeners::bind(&peer_addr).await?;
     let key = host_key(&env("KLOUDLITE_GIT_HOST_KEY", "./.local/host_key"))?;
+    tracing::info!(listener = "http", addr = %l.http.local_addr()?, "listener.started");
+    tracing::info!(listener = "ssh", addr = %l.ssh.local_addr()?, "listener.started");
+    tracing::info!(listener = "peer", addr = %l.peer_http.local_addr()?, "listener.started");
+    tracing::info!(listener = "peer", addr = %l.peer_stream.local_addr()?, "listener.started");
     tracing::info!(
-        "http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
-        l.http.local_addr()?,
-        l.ssh.local_addr()?,
-        l.peer_http.local_addr()?,
-        l.peer_stream.local_addr()?,
-        store.pool.max_warm()
+        service = "server",
+        warm_databases = store.pool.max_warm(),
+        "process.started"
     );
 
     // SIGTERM: stop accepting, let in-flight requests finish, close every warm database. Without
@@ -155,7 +156,8 @@ async fn serve() -> Result<()> {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("sigterm handler");
         term.recv().await;
-        tracing::info!("sigterm: releasing the pool");
+        let began = std::time::Instant::now();
+        tracing::info!(signal = "sigterm", "process.shutdown.begun");
         // A watchdog, because every step below has been observed to hang. Measured: the leader sat
         // through the whole 90s terminationGracePeriodSeconds and was SIGKILLed while every other
         // pod exited in 17s — and a SIGKILLed leader is a fleet-wide claim outage for the length of
@@ -164,7 +166,7 @@ async fn serve() -> Result<()> {
         // and it is attempted first with its own bound.
         tokio::spawn(async {
             tokio::time::sleep(HARD_EXIT).await;
-            tracing::error!("shutdown watchdog: exiting");
+            tracing::error!(reason = "shutdown_watchdog", "process.exiting");
             // Exit 1, not 0: this path means shutdown hung and got cut short by the watchdog,
             // not that it finished cleanly. A 0 here made every hung-shutdown restart look like a
             // normal exit in the pod's exit-code history, hiding exactly the failure mode this
@@ -175,13 +177,20 @@ async fn serve() -> Result<()> {
         // Bounded: a release that cannot finish must not hold up the signal to drain. The lease
         // lapses on its own TTL if this does not land, which is the slower path but not a wrong one.
         match tokio::time::timeout(RELEASE_DEADLINE, pool_for_term.close()).await {
-            Ok(()) => tracing::info!("sigterm: pool released"),
-            Err(_) => tracing::warn!("sigterm: pool release timed out; draining anyway"),
+            Ok(()) => tracing::info!(
+                duration_ms = began.elapsed().as_millis() as u64,
+                "process.shutdown.completed"
+            ),
+            Err(_) => tracing::warn!(
+                step = "pool_release",
+                timeout_s = RELEASE_DEADLINE.as_secs(),
+                "process.shutdown.stalled"
+            ),
         }
         // AFTER the pool: releasing repos goes through the leader, which may be this node. Bounded
         // like everything here; an unreleased lease lapses on its TTL.
         if tokio::time::timeout(RELEASE_DEADLINE, app_for_term.resign()).await.is_err() {
-            tracing::warn!("sigterm: resigning the leader lease timed out; it lapses on its TTL");
+            tracing::warn!(step = "resign", timeout_s = RELEASE_DEADLINE.as_secs(), "process.shutdown.stalled");
         }
         let _ = term_tx.send(true); // then let the listeners drain what is in flight
     });
@@ -226,7 +235,7 @@ async fn serve() -> Result<()> {
     // pool.close() would run under the other's in-flight requests. try_join waits for both.
     tokio::select! {
         r = async { tokio::try_join!(http_srv, peer_srv) } => { r?; }
-        _ = deadline => { tracing::warn!("drain deadline reached; exiting with sockets still open"); }
+        _ = deadline => { tracing::warn!(step = "drain", timeout_s = DRAIN_DEADLINE.as_secs(), "process.shutdown.stalled"); }
         r = kloudlite_git_server::proxy::serve_peer_streams(a4, l.peer_stream) => { r?; }
         r = kloudlite_git_server::ssh::serve(app.clone(), l.ssh, key) => { r?; }
     }
@@ -241,7 +250,7 @@ async fn serve() -> Result<()> {
     // Bounded like the SIGTERM path: with the leader down every release waits out its retries,
     // and an unbounded close here left only the watchdog's exit 1 to end the process.
     if tokio::time::timeout(RELEASE_DEADLINE, store.pool.close()).await.is_err() {
-        tracing::warn!("final pool release timed out; exiting anyway");
+        tracing::warn!(step = "final_pool_release", timeout_s = RELEASE_DEADLINE.as_secs(), "process.shutdown.stalled");
     }
     app.resign().await;
     Ok(())

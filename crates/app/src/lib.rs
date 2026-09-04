@@ -132,7 +132,7 @@ impl pool::ReleaseHook for App {
         // lease simply lapses on its own TTL instead of the drain. Log and close anyway.
         Box::pin(async move {
             if let Err(e) = App::release(self, &repo).await {
-                tracing::warn!(repo = %repo, error = %e, "releasing the lease failed; it will lapse on its own TTL");
+                tracing::warn!(repo = %repo, reason = "evict", error = %e, "ownership.release.failed");
             }
         })
     }
@@ -337,7 +337,7 @@ impl App {
         self.held_expires_ms.store(cur.lease.expires_ms, std::sync::atomic::Ordering::Relaxed);
         self.note_live(&cur.lease);
         if fresh {
-            tracing::info!(epoch = cur.lease.epoch, "lease: leading");
+            tracing::info!(epoch = cur.lease.epoch, "lease.acquired");
         }
         Ok(())
     }
@@ -363,7 +363,7 @@ impl App {
                 Err(e) => Err(e),
             };
             if let Err(e) = r {
-                tracing::warn!(error = %e, "releasing the leader lease; it lapses on its TTL");
+                tracing::warn!(error = %e, "lease.release.failed");
             }
         }
         self.demote("shutdown").await;
@@ -374,7 +374,7 @@ impl App {
         if !self.is_leader() {
             return;
         }
-        tracing::warn!(epoch = self.leader_epoch(), why, "lease: demoting");
+        tracing::warn!(epoch = self.leader_epoch(), reason = why, "lease.demoted");
         self.leader_epoch.store(0, std::sync::atomic::Ordering::Relaxed);
         self.held_expires_ms.store(0, std::sync::atomic::Ordering::Relaxed);
         self.set_leader(None);
@@ -416,7 +416,7 @@ impl App {
             Ok(c) => c,
             // The map is unreadable from here. We know nothing, so we may not serve.
             Err(e) => {
-                tracing::warn!(repo = %repo, error = %e, "ownership read failed; refusing to serve");
+                tracing::warn!(repo = %repo, error = %e, "ownership.read.failed");
                 return Route::Unavailable;
             }
         };
@@ -493,7 +493,7 @@ impl App {
                 match self.claim(repo).await {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
                     Err(e) => {
-                        tracing::warn!(repo = %repo, error = %e, "claiming from the leader failed");
+                        tracing::warn!(repo = %repo, error = %e, "ownership.claim.failed");
                         // The leader is unreachable. If the (expired) entry names US and we still
                         // hold the database open, keep serving it. A grant only ever comes from
                         // the leader, so an unreachable leader means nobody else can have been
@@ -717,7 +717,7 @@ impl App {
     pub async fn renew_once(&self) -> Result<()> {
         let lost = self.renew_all(&self.store.pool.warm_repos()).await?;
         for repo in lost {
-            tracing::info!(repo = %repo, "lost the lease: closing it");
+            tracing::info!(repo = %repo, "ownership.lost");
             if let Some((o, n)) = repo.split_once('/') {
                 self.store.pool.evict(o, n).await;
             }
@@ -873,7 +873,7 @@ impl App {
                 None
             }
             Err(e) => {
-                tracing::warn!(error = %e, "reading the leader lease");
+                tracing::warn!(error = %e, "lease.read.failed");
                 self.leader()
             }
         }
@@ -904,7 +904,7 @@ impl App {
             };
             metrics::counter!("ownership_claims_total", "result" => result).increment(1);
             self.fenced_check(self.ownership.put(repo, e).await).await?;
-            tracing::debug!(repo = %repo, node = %e.node, epoch, "ownership: granted");
+            tracing::debug!(repo = %repo, node = %e.node, epoch, "ownership.granted");
         } else {
             metrics::counter!("ownership_claims_total", "result" => "heldby").increment(1);
         }

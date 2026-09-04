@@ -160,7 +160,7 @@ fn open_reader(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>) -> Ro
                 Ok(r) => {
                     *cell.write().await = Some(std::sync::Arc::new(r));
                     if logged {
-                        tracing::info!("ownership map opened");
+                        tracing::info!(role = "reader", "ownership.map.opened");
                     }
                     return;
                 }
@@ -168,7 +168,7 @@ fn open_reader(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>) -> Ro
                     // First failure only: the writer may not have created the map yet, and one
                     // line a second forever is noise, not signal.
                     if !logged {
-                        tracing::warn!(error = %e, "ownership map not readable yet; retrying");
+                        tracing::warn!(error = %e, "ownership.open.failed");
                         logged = true;
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -187,14 +187,14 @@ impl Role {
                 opener.cancel();
                 if let Some(r) = slot.write().await.take() {
                     if let Err(e) = r.close().await {
-                        tracing::warn!(error = %e, "closing the ownership reader");
+                        tracing::warn!(role = "reader", error = %e, "ownership.close.failed");
                     }
                 }
             }
             // A fenced writer's close reports the fence again; there is nothing left to do about it.
             Role::Writer(db) => {
                 if let Err(e) = db.close().await {
-                    tracing::warn!(error = %e, "closing the ownership writer");
+                    tracing::warn!(role = "writer", error = %e, "ownership.close.failed");
                 }
             }
         }
@@ -315,7 +315,7 @@ impl OwnershipStore {
             .await?;
         // Said out loud because a writer that quietly came up as anything else is the difference
         // between a WAL that gets reclaimed and one that grows forever.
-        tracing::info!(path = %PATH, "ownership: opened as WRITER (leader)");
+        tracing::info!(path = %PATH, role = "writer", "ownership.map.opened");
         let old = std::mem::replace(&mut *self.role.write().await, Role::Writer(std::sync::Arc::new(db)));
         old.retire().await;
         Ok(())
@@ -331,7 +331,7 @@ impl OwnershipStore {
         }
         let old = std::mem::replace(&mut *self.role.write().await, open_reader(os.clone()));
         old.retire().await;
-        tracing::info!(path = %PATH, "ownership: reopened as reader");
+        tracing::info!(path = %PATH, role = "reader", "ownership.map.opened");
     }
 
     /// Flush the memtable so `replay_after_wal_id` advances and the WAL behind it becomes
@@ -349,7 +349,7 @@ impl OwnershipStore {
             // Logged on SUCCESS, not only on failure. A checkpoint that never runs and one that
             // runs as a no-op are indistinguishable from the object store, and telling them apart
             // is the whole question — one line every five minutes is a cheap answer.
-            tracing::info!(ms = t.elapsed().as_millis() as u64, "ownership: checkpoint ok");
+            tracing::debug!(duration_ms = t.elapsed().as_millis() as u64, "ownership.checkpoint.completed");
         }
         Ok(())
     }

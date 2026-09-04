@@ -33,7 +33,7 @@ async fn current(app: &App) -> Result<StoredCentralSettings, Response> {
         Ok(r) => {
             let bytes = r.bytes().await.map_err(internal)?;
             serde_json::from_slice(&bytes).map_err(|e| {
-                tracing::error!(error = %e, "corrupt cluster/settings document");
+                tracing::warn!(scope = "central", error = %e, "settings.invalid");
                 (StatusCode::INTERNAL_SERVER_ERROR, "stored settings document is corrupt").into_response()
             })
         }
@@ -43,7 +43,7 @@ async fn current(app: &App) -> Result<StoredCentralSettings, Response> {
 }
 
 fn internal(e: impl std::fmt::Display) -> Response {
-    tracing::error!(error = %e, "cluster/settings");
+    tracing::error!(error = %e, "request.failed");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
 

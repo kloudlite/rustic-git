@@ -79,7 +79,7 @@ pub(super) async fn odb_json<T: Serialize + Send + 'static>(
         Ok(Ok(Err(e))) => {
             if crate::browse::is_not_found(&e) {
                 // The one place the not-found reason is visible; `internal` logs the other arm.
-                tracing::debug!(error = %e, "browse: not found");
+                tracing::debug!(error = %e, "browse.not_found");
                 hidden()
             } else {
                 internal(e)

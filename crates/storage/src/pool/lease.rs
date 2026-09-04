@@ -187,7 +187,7 @@ impl Pool {
     async fn close_bounded(e: Arc<Entry>) {
         let close = tokio::spawn(async move { e.close().await });
         if tokio::time::timeout(Self::FLUSH_PATIENCE, close).await.is_err() {
-            tracing::warn!(patience = ?Self::FLUSH_PATIENCE, "closing an evicted database is still running; not waiting");
+            tracing::warn!(timeout_ms = Self::FLUSH_PATIENCE.as_millis() as u64, "pool.close.stalled");
         }
     }
 

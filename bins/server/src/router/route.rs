@@ -543,7 +543,7 @@ async fn route_inner(
                         let asked = app.claim_to_recover(&repo).await;
                         // The leader is unreachable, or refused: answer as before.
                         if let Err(ref why) = asked {
-                            tracing::warn!(repo = %repo, error = %why, "claim after failed forward");
+                            tracing::warn!(repo = %repo, reason = "after_failed_forward", error = %why, "route.claim.failed");
                         }
                         let mut next_step =
                             decide_recovery(asked.ok().as_ref(), &peer.name, &app.self_name);
@@ -555,7 +555,7 @@ async fn route_inner(
                             match app.forwarder.forward(&addr, &owner, hops, rebuild()).await {
                                 Ok(res) => return res,
                                 Err(again) if !crate::proxy::is_connect_error(&again) => {
-                                    tracing::error!(repo = %repo, peer = %peer.name, error = %again, "forwarding");
+                                    tracing::error!(repo = %repo, peer = %peer.name, error = %again, "route.forward.failed");
                                     return (StatusCode::BAD_GATEWAY, "peer error").into_response();
                                 }
                                 // Two connect failures, and the leader says it is still theirs:
@@ -581,7 +581,7 @@ async fn route_inner(
                                     )
                                 }
                                 Err(e) => {
-                                    tracing::warn!(repo = %repo, error = %e, "force-claiming");
+                                    tracing::warn!(repo = %repo, reason = "force_claim", error = %e, "route.claim.failed");
                                     Recovery::GiveUp
                                 }
                             };
@@ -601,7 +601,7 @@ async fn route_inner(
                             Recovery::Force | Recovery::GiveUp => {}
                         }
                     }
-                    tracing::error!(repo = %repo, peer = %peer.name, error = %e, "forwarding");
+                    tracing::error!(repo = %repo, peer = %peer.name, error = %e, "route.forward.failed");
                     (StatusCode::BAD_GATEWAY, "peer error").into_response()
                 }
             }

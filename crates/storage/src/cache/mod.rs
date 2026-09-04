@@ -102,7 +102,7 @@ impl Cache {
             // No `url` dep in this crate; drop credentials by keeping only the part after the
             // last '@' (redis://:password@host -> host), never log the raw URL.
             let host = url.rsplit('@').next().unwrap_or("redis");
-            tracing::warn!(host = %host, "cache unreachable; serving without it");
+            tracing::warn!(host = %host, "cache.unavailable");
         }
         Cache { conn, mem: None, mem_stream: None }
     }
@@ -161,7 +161,7 @@ impl Cache {
         if !matches!(r, Ok(Ok(_))) {
             static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                tracing::warn!("cache read script failed; serving every read uncached");
+                tracing::warn!("cache.script.failed");
             }
         }
         r.ok()?.ok().flatten()

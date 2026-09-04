@@ -140,7 +140,7 @@ pub(super) async fn imagetags(
                 let d = match app.store.tag(&owner, &name, &tag).await {
                     Ok(d) => d?,
                     Err(e) => {
-                        tracing::warn!(owner = %owner, image = %name, %tag, error = %e, "reading tag; omitted");
+                        tracing::warn!(owner = %owner, name = %name, %tag, error = %e, "registry.tag.read.failed");
                         return None;
                     }
                 };

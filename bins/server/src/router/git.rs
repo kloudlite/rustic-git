@@ -74,7 +74,7 @@ pub(crate) async fn open(
         // against the owner.
         Err(e) if crate::pool::is_fenced(&e) => Err(fenced_elsewhere()),
         Err(e) => {
-            tracing::error!(owner = %owner, repo = %name, error = %e, "open_repo");
+            tracing::error!(owner = %owner, repo = %name, error = %e, "repo.open.failed");
             // We were routed here, so the map names us — and we have just proved we cannot serve.
             // Holding the lease anyway leaves the repo with an owner that cannot open it until the
             // TTL lapses; a forced claim makes that worse, because it fenced a peer to get here.
@@ -88,7 +88,7 @@ pub(crate) async fn open(
             app.store.pool.evict(&owner, &name).await;
             let repo = format!("{owner}/{name}");
             if let Err(e) = app.release(&repo).await {
-                tracing::warn!(repo = %repo, error = %e, "releasing after a failed open");
+                tracing::warn!(repo = %repo, reason = "after_failed_open", error = %e, "ownership.release.failed");
             }
             Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
         }

@@ -30,7 +30,7 @@ pub async fn serve_peer_streams(app: Arc<App>, listener: TcpListener) -> Result<
         let app = app.clone();
         tokio::spawn(async move {
             if let Err(e) = serve_peer_stream(app, sock).await {
-                tracing::warn!(error = %e, "peer stream failed");
+                tracing::warn!(error = %e, "peer.stream.failed");
             }
         });
     }

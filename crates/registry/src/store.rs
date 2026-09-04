@@ -281,13 +281,13 @@ async fn backfill_blob_rows(store: &Store, owner: &str, name: &str, db: &Db) -> 
         let bytes = match bytes {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(owner = %owner, name = %name, manifest = %loc, error = %e, "blob rows: skipping unreadable manifest");
+                tracing::warn!(owner = %owner, name = %name, manifest = %loc, reason = "unreadable", error = %e, "registry.manifest.skipped");
                 skipped = true;
                 continue;
             }
         };
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            tracing::warn!(owner = %owner, name = %name, manifest = %loc, "blob rows: skipping unparseable manifest");
+            tracing::warn!(owner = %owner, name = %name, manifest = %loc, reason = "unparseable", "registry.manifest.skipped");
             skipped = true;
             continue;
         };
@@ -623,7 +623,7 @@ impl ImageExt for Store {
         if !public {
             let public_path = crate::index::path(true, crate::index::Kind::Img, owner, name);
             if let Err(e) = crate::index::ignore_not_found(self.os.delete(&public_path).await) {
-                tracing::warn!(owner = %owner, name = %name, error = %e, "index pre-delete img");
+                tracing::warn!(owner = %owner, name = %name, reason = "pre_delete", error = %e, "registry.marker.refresh.failed");
             }
         }
         self.touch_image(owner, name).await?;
@@ -646,7 +646,7 @@ impl ImageExt for Store {
         // Marker is a view, never the source of truth: log-and-continue on failure rather than
         // failing a visibility flip that already landed in the DB.
         if let Err(e) = crate::index::write(self, crate::index::Kind::Img, owner, &m).await {
-            tracing::warn!(owner = %owner, name = %name, error = %e, "index write img");
+            tracing::warn!(owner = %owner, name = %name, reason = "write", error = %e, "registry.marker.refresh.failed");
         }
         Ok(())
     }

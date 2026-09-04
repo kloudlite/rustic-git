@@ -438,7 +438,7 @@ pub async fn refresh_central_beat(fetch: CentralFetch, live: LiveSettings<Centra
         let Some(bytes) = fetch().await else { continue };
         match serde_json::from_slice::<StoredCentralSettings>(&bytes) {
             Ok(doc) => live.store(CentralSettings::from_env().merged_with(&doc)),
-            Err(e) => tracing::warn!(error = %e, "corrupt cluster/settings document; keeping last good"),
+            Err(e) => tracing::warn!(scope = "central", error = %e, "settings.invalid"),
         }
     }
 }

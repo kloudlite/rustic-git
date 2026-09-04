@@ -49,11 +49,11 @@ pub async fn serve_if_configured() {
     let l = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("binding KLOUDLITE_GIT_METRICS_ADDR={addr}: {e}"));
-    tracing::info!(%addr, "metrics listening");
+    tracing::info!(listener = "metrics", %addr, "listener.started");
     let app = routes().route("/healthz", get(|| async { "ok" }));
     tokio::spawn(async move {
         if let Err(e) = axum::serve(l, app).await {
-            tracing::error!(%addr, error = %e, "metrics listener");
+            tracing::error!(listener = "metrics", %addr, error = %e, "listener.failed");
         }
     });
 }

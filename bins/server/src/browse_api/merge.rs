@@ -101,7 +101,7 @@ pub(crate) async fn perform(
     // Defined after the parse so it can name the repo. The backend's own words go to the log
     // only: a `boom` forwarded verbatim surfaced SlateDB text in the PR UI.
     let boom = |e: crate::Error| {
-        tracing::error!(owner = %owner, repo = %name, error = %e, "merge");
+        tracing::error!(owner = %owner, repo = %name, error = %e, "merge.record.failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
     };
     let repo = match app.store.open_repo(&owner, &name).await {

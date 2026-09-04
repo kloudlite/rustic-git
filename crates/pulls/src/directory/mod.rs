@@ -399,8 +399,8 @@ impl Directory {
         dir.ensure_indexes().await?;
         match dir.lowercase_signing_fingerprints().await {
             Ok(0) => {}
-            Ok(n) => tracing::info!(rows = n, "directory: lowercased signing-key fingerprint rows"),
-            Err(e) => tracing::warn!(error = %e, "directory: fingerprint repair skipped"),
+            Ok(n) => tracing::info!(count = n, "directory.repair.completed"),
+            Err(e) => tracing::warn!(error = %e, "directory.repair.failed"),
         }
         // Cosmos's TTL is on `_ts`, not on a field of ours, so expiry is swept from here. Every
         // process that opens the directory sweeps hourly, first pass at boot; the delete is
@@ -412,8 +412,8 @@ impl Directory {
                 tick.tick().await;
                 match sweeper.sweep_expired().await {
                     Ok(0) => {}
-                    Ok(n) => tracing::debug!(rows = n, "directory: swept expired rows"),
-                    Err(e) => tracing::warn!(error = %e, "directory: sweep skipped"),
+                    Ok(n) => tracing::debug!(count = n, "directory.sweep.completed"),
+                    Err(e) => tracing::warn!(error = %e, "directory.sweep.failed"),
                 }
             }
         });

@@ -59,7 +59,7 @@ pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
                 // Aborting the sweep here is correct — see the module doc — but a silent abort
                 // means GC for this owner stops forever with nothing said. Name the owner and the
                 // manifest so whoever is paged (or grepping logs later) knows exactly what to fix.
-                tracing::error!(owner = %owner, manifest = %p, error = %e, "gc: aborting sweep: unreadable manifest");
+                tracing::error!(owner = %owner, manifest = %p, reason = "unreadable_manifest", error = %e, "gc.sweep.aborted");
                 return Err(e);
             }
         };
@@ -71,7 +71,7 @@ pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
         let v: serde_json::Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             Err(e) => {
-                tracing::error!(owner = %owner, manifest = %p, error = %e, "gc: aborting sweep: unparseable manifest");
+                tracing::error!(owner = %owner, manifest = %p, reason = "unparseable_manifest", error = %e, "gc.sweep.aborted");
                 return Err(e.into());
             }
         };

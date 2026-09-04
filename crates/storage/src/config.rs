@@ -99,7 +99,7 @@ pub fn object_store_views() -> Result<StoreViews> {
         slatedb::Db::resolve_object_store(&url)?
     };
     if mp.is_none() {
-        tracing::warn!(%url, "object store has no MultipartStore; chunked uploads take the slow path");
+        tracing::info!(%url, mode = "single-part-uploads", "store.multipart.unavailable");
     }
     Ok((os, mp))
 }

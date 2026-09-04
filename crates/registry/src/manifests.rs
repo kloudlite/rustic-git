@@ -262,7 +262,7 @@ pub async fn put_manifest(
     // Counters are the marker's inputs and the GC reconcile rewrites a drifted marker, so a
     // failure to compute them is logged, never a failed push.
     if let Err(e) = app.store.note_manifest_put(&mut batch, &owner, &name, existed).await {
-        tracing::warn!(owner = %owner, name = %name, error = %e, "manifest count img");
+        tracing::warn!(owner = %owner, name = %name, reason = "put", error = %e, "registry.counter.write.failed");
     }
     if let Err(e) = db.write(batch).await {
         return crate::oci_internal(e.into());
@@ -273,7 +273,7 @@ pub async fn put_manifest(
     // Marker is a view, never the source of truth: log-and-continue rather than fail a push that
     // already landed the manifest and tag(s).
     if let Err(e) = app.store.refresh_image_marker(&owner, &name).await {
-        tracing::warn!(owner = %owner, name = %name, error = %e, "index refresh img");
+        tracing::warn!(owner = %owner, name = %name, reason = "put", error = %e, "registry.marker.refresh.failed");
     }
     let mut resp = (
         StatusCode::CREATED,
@@ -459,7 +459,7 @@ pub async fn delete_manifest(
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
                 Ok(()) => {
                     if let Err(e) = app.store.note_manifest_deleted(&owner, &name).await {
-                        tracing::warn!(owner = %owner, name = %name, error = %e, "manifest count img");
+                        tracing::warn!(owner = %owner, name = %name, reason = "delete", error = %e, "registry.counter.write.failed");
                     }
                     StatusCode::ACCEPTED.into_response()
                 }
