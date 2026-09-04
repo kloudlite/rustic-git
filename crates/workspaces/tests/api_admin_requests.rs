@@ -23,6 +23,8 @@ const API: &str = "/apis/rustic-git.io/v1alpha1";
 struct StubMembership {
     grant: Option<GrantAccess>,
     handles: std::collections::HashMap<String, String>,
+    /// `acme`'s members, keyed the way the directory keys them: by email, never by handle.
+    team: Vec<(String, TeamRole)>,
     granted: std::sync::Mutex<Vec<(String, String, TeamRole)>>,
 }
 
@@ -31,6 +33,7 @@ impl StubMembership {
         Self {
             grant: Some(grant),
             handles: [("meera".to_string(), "meera@example.com".to_string())].into(),
+            team: vec![("meera@example.com".to_string(), TeamRole::Member)],
             granted: Default::default(),
         }
     }
@@ -38,12 +41,19 @@ impl StubMembership {
 
 #[async_trait::async_trait]
 impl Directory for StubMembership {
-    async fn teams_for(&self, _user: &str) -> Vec<String> {
-        vec![]
+    // Both of these take a HANDLE and answer from memberships held under an EMAIL, exactly as the
+    // directory does — team scoping and the team-admin check compare `members.user`, so an
+    // unresolved handle is no teams and no role rather than a comparison against an address.
+    async fn teams_for(&self, user: &str) -> Vec<String> {
+        match self.handles.get(user) {
+            Some(email) if self.team.iter().any(|(m, _)| m == email) => vec!["acme".into()],
+            _ => vec![],
+        }
     }
 
-    async fn team_role(&self, _user: &str, _team: &str) -> Option<TeamRole> {
-        None
+    async fn team_role(&self, user: &str, team: &str) -> Option<TeamRole> {
+        let email = self.handles.get(user)?;
+        self.team.iter().find(|(m, _)| m == email && team == "acme").map(|(_, r)| *r)
     }
 
     async fn is_team(&self, _slug: &str) -> bool {
@@ -487,4 +497,17 @@ async fn a_rerun_stamps_a_copy_whose_status_never_landed() {
     let sent = s.rec.sent("PATCH", &format!("{API}/requests/q-{uid}/status"));
     assert_eq!(sent[0]["status"]["state"], "approved");
     assert_eq!(sent[0]["status"]["decidedBy"], "root@example.com");
+}
+
+/// Team scoping and the team-admin check both compare a `members.user` entry, and those hold
+/// emails while every caller here holds a handle — so the resolution has to happen before the
+/// comparison, or a real member reads as belonging to nothing.
+#[tokio::test]
+async fn a_handle_resolves_to_the_membership_held_under_its_email() {
+    let dir = StubMembership::answering(GrantAccess::Done);
+    assert_eq!(dir.teams_for("meera").await, vec!["acme".to_string()]);
+    assert_eq!(dir.team_role("meera", "acme").await, Some(TeamRole::Member));
+    // The email is not an identity any caller holds; passing one through must not match either.
+    assert!(dir.teams_for("meera@example.com").await.is_empty());
+    assert!(dir.team_role("meera@example.com", "acme").await.is_none());
 }
