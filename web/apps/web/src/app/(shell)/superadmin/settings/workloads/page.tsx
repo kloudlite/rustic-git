@@ -12,10 +12,29 @@ export const metadata: Metadata = { title: "Workloads" };
  *  under `/admin/workloads`. */
 export default async function WorkloadsPage() {
   const { token } = await requireSuperadmin("/superadmin/settings/workloads");
-  const [workloadsRes, nodesRes] = await Promise.all([api.listWorkloads(token), api.adminListNodes(token)]);
+  const [workloadsRes, nodesRes, centralRes] = await Promise.all([
+    api.listWorkloads(token),
+    api.adminListNodes(token),
+    // Same document the Central tab already renders — the hosts block here is a read-only slice
+    // of it, not a second source of truth, so no new backend route.
+    api.getCentralSettings(token),
+  ]);
 
   if (!workloadsRes.ok) throw new Error(workloadsRes.message);
   const nodes = nodesRes.ok ? nodesRes.value : [];
+  const central = centralRes.ok ? centralRes.value : {};
 
-  return <WorkloadsTable workloads={workloadsRes.value} nodes={nodes} onRoll={rollWorkloadAction} />;
+  return (
+    <WorkloadsTable
+      workloads={workloadsRes.value}
+      nodes={nodes}
+      hosts={{
+        cloneHost: central.cloneHost,
+        sshHost: central.sshHost,
+        sshPort: central.sshPort,
+        registryHost: central.registryHost,
+      }}
+      onRoll={rollWorkloadAction}
+    />
+  );
 }

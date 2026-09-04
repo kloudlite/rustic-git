@@ -18,10 +18,14 @@ import type { SaveResult } from "../actions";
 export function WorkloadsTable({
   workloads,
   nodes,
+  hosts,
   onRoll,
 }: {
   workloads: WorkloadDoc[];
   nodes: AdminNode[];
+  /** Slice of `GET /admin/settings/central` the Central tab already fetches — display-only here,
+   *  `unknown` values print as "—" rather than being coerced into a fake string. */
+  hosts: { cloneHost: unknown; sshHost: unknown; sshPort: unknown; registryHost: unknown };
   onRoll: (scope: string, name: string, reason: string) => Promise<SaveResult>;
 }) {
   const [target, setTarget] = useState<{ scope: string; name: string } | null>(null);
@@ -60,26 +64,34 @@ export function WorkloadsTable({
     <div className="space-y-6">
       {anyRollingOut && <AutoRefresh intervalMs={3_000} />}
 
+      <div className="border border-border bg-card px-4 py-3 text-caption text-muted-foreground">
+        <span className="mr-4">clone: {display(hosts.cloneHost)}</span>
+        <span className="mr-4">ssh: {display(hosts.sshHost)}{hosts.sshPort != null ? `:${display(hosts.sshPort)}` : ""}</span>
+        <span>registry: {display(hosts.registryHost)}</span>
+      </div>
+
       <div className="overflow-x-auto border border-border bg-card">
         <table className="w-full text-sm2">
           <thead className="border-b border-border text-left text-caption text-muted-foreground">
             <tr>
               <th className="px-3 py-2 font-medium">Workload</th>
               <th className="px-3 py-2 font-medium">Scope</th>
-              <th className="px-3 py-2 font-medium">Image</th>
+              <th className="px-3 py-2 font-medium">Tag</th>
+              <th className="px-3 py-2 font-medium">Digest</th>
               <th className="px-3 py-2 font-medium">Rollout</th>
               <th className="px-3 py-2 font-medium">Last roll</th>
               <th className="px-3 py-2 font-medium" />
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {workloads.map((w) => (
+            {workloads.map((w) => {
+              const { tag, digest } = imageRef(w.image);
+              return (
               <tr key={`${w.scope}/${w.name}`}>
                 <td className="px-3 py-2 align-top font-medium">{w.name}</td>
                 <td className="px-3 py-2 align-top text-caption text-muted-foreground">{w.scope}</td>
-                <td className="px-3 py-2 align-top text-caption text-muted-foreground">
-                  {digestOrTag(w.image)}
-                </td>
+                <td className="px-3 py-2 align-top text-caption text-muted-foreground">{tag}</td>
+                <td className="px-3 py-2 align-top text-caption text-muted-foreground font-mono">{digest}</td>
                 <td className="px-3 py-2 align-top text-caption">
                   {rolloutStateLabel(w.rolloutState, w.ready, w.desired)}
                 </td>
@@ -92,7 +104,8 @@ export function WorkloadsTable({
                   </Button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -150,8 +163,14 @@ export function WorkloadsTable({
   );
 }
 
-/** Images are `repo:tag` or `repo@sha256:hex` — either way the whole string is what the operator
- *  wants to compare against a known-good pin, so this only handles the missing case. */
-function digestOrTag(image: string | null): string {
-  return image ?? "—";
+/** `deploy/pin.sh` pins `repo:tag@sha256:hex` — split on `@` so the table can show the
+ *  human-readable tag and the verifiable digest as two columns instead of one long string. */
+function imageRef(image: string | null): { tag: string; digest: string } {
+  if (!image) return { tag: "—", digest: "—" };
+  const [tag, digest] = image.split("@");
+  return { tag, digest: digest ?? "—" };
+}
+
+function display(v: unknown): string {
+  return v == null || v === "" ? "—" : String(v);
 }
