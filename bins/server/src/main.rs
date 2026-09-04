@@ -292,6 +292,8 @@ fn register_metrics() {
         series.push(("http_requests_total", Counter, l));
     }
     kloudlite_git_core::metrics::register(&series);
+    kloudlite_git_core::metrics::register_dependency("blob", kloudlite_git_storage::metered::OPS);
+    kloudlite_git_core::metrics::register_dependency("redis", kloudlite_git_storage::cache::OPS);
 }
 
 #[tokio::main]

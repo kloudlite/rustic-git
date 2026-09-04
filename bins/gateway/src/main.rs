@@ -27,6 +27,8 @@ async fn main() {
         ("http_requests_total", Counter, &[("listener", "gateway"), ("class", "probe"), ("status", "5xx")]),
         ("http_requests_total", Counter, &[("listener", "gateway"), ("class", "probe"), ("status", "421")]),
     ]);
+    kloudlite_git_core::metrics::register_dependency("blob", kloudlite_git_storage::metered::OPS);
+    kloudlite_git_core::metrics::register_dependency("redis", kloudlite_git_storage::cache::OPS);
     // Exactly one rustls CryptoProvider, installed before the first handshake — which for this
     // binary is the kube client, not the listener. Its absence is a panic inside rustls that names
     // nothing about startup order.

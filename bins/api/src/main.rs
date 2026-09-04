@@ -176,7 +176,12 @@ async fn main() {
         ("requests_decided_total", Counter, &[("kind", "region"), ("decision", "denied")]),
         ("requests_decided_total", Counter, &[("kind", "other"), ("decision", "approved")]),
         ("requests_decided_total", Counter, &[("kind", "other"), ("decision", "denied")]),
+            ("history_stream_pending", Gauge, &[]),
     ]);
+    kloudlite_git_core::metrics::register_dependency("blob", kloudlite_git_storage::metered::OPS);
+    kloudlite_git_core::metrics::register_dependency("redis", kloudlite_git_storage::cache::OPS);
+    kloudlite_git_core::metrics::register_dependency("mongo", kloudlite_git_pulls::directory::OPS);
+    kloudlite_git_core::metrics::register_dependency("clickhouse", kloudlite_git_workspaces::history::OPS);
     if let Err(e) = run().await {
         tracing::error!(error = %e, "process.exiting");
         std::process::exit(2);

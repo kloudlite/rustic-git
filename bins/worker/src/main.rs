@@ -47,6 +47,8 @@ async fn main() {
         // `0..KLOUDLITE_GIT_WORKER_CONCURRENCY`, which is not known to a `&'static str` list, and
         // its own beat sets every lane's within 15 s of boot.
     ]);
+    kloudlite_git_core::metrics::register_dependency("blob", kloudlite_git_storage::metered::OPS);
+    kloudlite_git_core::metrics::register_dependency("redis", kloudlite_git_storage::cache::OPS);
     if let Err(e) = run().await {
         tracing::error!(error = %e, "process.exiting");
         std::process::exit(2);

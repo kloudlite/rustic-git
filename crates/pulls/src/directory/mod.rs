@@ -946,6 +946,8 @@ fn on_command(ev: mongodb::event::command::CommandEvent) {
         Failed(e) => {
             dep_took(DEP, mongo_op(&e.command_name), e.duration, Some(kind_of(&e.failure)))
         }
+        // The enum is `#[non_exhaustive]`; a future event kind is not a measurement we take.
+        _ => {}
     }
 }
 
@@ -1000,7 +1002,6 @@ pub(crate) fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
 mod tests {
     use super::check_handle;
 
-    #[test]
     /// The classifier is what a rule filters on: total, and never the error's text.
     #[test]
     fn mongo_failures_land_in_one_of_the_five_classes() {
