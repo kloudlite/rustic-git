@@ -1337,7 +1337,7 @@ export type SignalsResponse = {
   // Field names are the wire ones verbatim — `SignalsResponse` has no `rename_all`, unlike
   // most admin responses.
   scrape_failures: [string, string][];
-  pods_scraped: number;
+  pods_listed: number;
   /** Absent (not null — `skip_serializing_if`) unless `RUSTIC_GIT_GRAFANA_URL` is configured, so
    *  a monitoring page never renders a dead link. */
   grafana_url?: string;
