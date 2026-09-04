@@ -302,7 +302,7 @@ REGION_ID="e2e-$RANDOM"
 log "registering region $REGION_ID"
 REGION_JSON=$(curl -fsS -X POST "$ADMIN_BASE/admin/regions" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$REGION_ID\",\"name\":\"E2E Region\"}")
+  -d "{\"id\":\"$REGION_ID\",\"name\":\"E2E Region\",\"note\":\"e2e run\"}")
 echo "$REGION_JSON" | grep -q "\"$REGION_ID\"" || fail "region create did not echo the region: $REGION_JSON"
 
 # The controller shards on `spec.nodeName`, so it needs to know which node it IS. This must be the
@@ -595,7 +595,7 @@ BEFORE_RESTARTED_AT=$(kubectl -n kube-system get daemonset rustic-git-agent \
   -o jsonpath='{.spec.template.metadata.annotations.rustic-git\.io/restarted-at}' 2>/dev/null || true)
 BOOT_CODE=$(curl -s -o /tmp/ws_e2e_boot_put.json -w '%{http_code}' \
   -X PUT "$ADMIN_BASE/admin/settings/clusters/$REGION_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' -d '{"gitInitImage":"alpine/git:2.45.3"}')
+  -H 'Content-Type: application/json' -d '{"gitInitImage":"alpine/git:2.45.3","note":"e2e boot roll"}')
 BOOT_BODY=$(cat /tmp/ws_e2e_boot_put.json)
 rm -f /tmp/ws_e2e_boot_put.json
 [ "$BOOT_CODE" = "200" ] || fail "PUT gitInitImage answered $BOOT_CODE, not 200: $BOOT_BODY"
@@ -603,7 +603,7 @@ rm -f /tmp/ws_e2e_boot_put.json
 log "boot settings: a second save while the first roll is still in flight must 409, nothing written"
 RETRY_CODE=$(curl -s -o /tmp/ws_e2e_boot_put2.json -w '%{http_code}' \
   -X PUT "$ADMIN_BASE/admin/settings/clusters/$REGION_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' -d '{"gitInitImage":"alpine/git:2.45.4"}')
+  -H 'Content-Type: application/json' -d '{"gitInitImage":"alpine/git:2.45.4","note":"e2e boot roll retry"}')
 RETRY_BODY=$(cat /tmp/ws_e2e_boot_put2.json)
 rm -f /tmp/ws_e2e_boot_put2.json
 # The rollout can settle before this second request lands on a fast cluster — the assertion below
