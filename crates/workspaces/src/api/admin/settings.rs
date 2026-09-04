@@ -138,7 +138,17 @@ pub(crate) async fn put_central(
     let mut roll_targets: Vec<(&'static str, Scope, &'static str)> = Vec::new();
     for field in &changed_boot {
         for (scope, reader) in central_boot_readers(&s, field).await? {
-            workloads::precheck_readers(&s, &scope, &[reader]).await?;
+            // A reader still mid-roll refuses the save; the refusal is a decision the log must
+            // carry, the same as the cluster-scope precheck.
+            super::audited(
+                &s,
+                &c.name,
+                "put-central-settings",
+                "central",
+                Some(note.clone()),
+                workloads::precheck_readers(&s, &scope, &[reader]).await,
+            )
+            .await?;
             roll_targets.push((field, scope, reader));
         }
     }
@@ -208,7 +218,17 @@ pub(crate) async fn revert_central(
     let mut roll_targets: Vec<(&'static str, Scope, &'static str)> = Vec::new();
     for field in &changed_boot {
         for (scope, reader) in central_boot_readers(&s, field).await? {
-            workloads::precheck_readers(&s, &scope, &[reader]).await?;
+            // A reader still mid-roll refuses the save; the refusal is a decision the log must
+            // carry, the same as the cluster-scope precheck.
+            super::audited(
+                &s,
+                &c.name,
+                "revert-central-settings",
+                "central",
+                Some(note.clone()),
+                workloads::precheck_readers(&s, &scope, &[reader]).await,
+            )
+            .await?;
             roll_targets.push((field, scope, reader));
         }
     }
