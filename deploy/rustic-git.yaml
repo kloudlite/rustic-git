@@ -672,6 +672,48 @@ spec:
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
+# The admin process's authority over ITS OWN cluster (AKS) — distinct from the k3s ClusterRole
+# `rustic-git-admin` already holds in deploy/k3s/api-rbac.yaml, which is a different cluster
+# entirely. Scoped tightly: get/list/patch, only on the five Deployments/StatefulSet
+# `admin::workloads::KNOWN_CENTRAL` names — not create or delete, because a roll only ever
+# patches an object that already exists, and resourceNames so a bug here cannot touch any other
+# workload in the namespace (rustic-git-web lives in this same namespace too, see
+# deploy/rustic-git-web.yaml, hence it is on this list rather than needing a second Role).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustic-git-admin
+  namespace: rustic-git
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rustic-git-admin-workloads
+  namespace: rustic-git
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: ["rustic-git-srv"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["rustic-git-api", "rustic-git-worker", "rustic-git-web", "rustic-git-admin"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rustic-git-admin-workloads
+  namespace: rustic-git
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rustic-git-admin-workloads
+subjects:
+  - kind: ServiceAccount
+    name: rustic-git-admin
+    namespace: rustic-git
+---
 # The superadmin-only surface. Same image and binary as rustic-git-api, one env apart
 # (RUSTIC_GIT_API_ROLE=admin) — see CLAUDE.md "Admin APIs live on their own server". One replica:
 # losing this pod for a few minutes during a roll is acceptable (nothing here is on any ordinary
@@ -694,9 +736,13 @@ spec:
         prometheus.io/port: "9464"
         prometheus.io/path: /metrics
     spec:
-      # Same reasoning as rustic-git-api: this process reaches the k3s cluster with its own
-      # mounted kubeconfig Secret, not a projected ServiceAccount token.
-      automountServiceAccountToken: false
+      # Unlike rustic-git-api: this process ALSO talks to its own cluster now
+      # (admin::workloads' central-scope rolls), over a projected ServiceAccount token — nothing
+      # to rotate, unlike the mounted k3s kubeconfig Secret it still uses for region CRDs. Bound
+      # to the rustic-git-admin ServiceAccount and its namespaced Role below, get/list/patch on
+      # exactly the workloads in admin::workloads::KNOWN_CENTRAL.
+      serviceAccountName: rustic-git-admin
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001

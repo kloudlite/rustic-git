@@ -169,6 +169,23 @@ async fn run() -> Result<()> {
                 Ok(c) => state = state.with_kube(c),
                 Err(e) => tracing::warn!(error = %e, "no kubernetes config: /v1 workspace routes will answer 503"),
             }
+            // Only the admin role ever talks to its OWN cluster (`admin::workloads`'s central
+            // half) — server/api/worker/gateway have no business with it, only this process does.
+            // `kube::Config::incluster()` is used explicitly rather than `try_default()`: the
+            // block above already points `KUBECONFIG` at a mounted region kubeconfig Secret, and
+            // `try_default()` would honor that env var and hand back the SAME region client
+            // again instead of this cluster's own projected ServiceAccount token.
+            // `automountServiceAccountToken: true` is set on the admin Deployment alone
+            // (deploy/rustic-git.yaml), so this succeeds only there.
+            if role == "admin" {
+                match kube::Config::incluster() {
+                    Ok(cfg) => match kube::Client::try_from(cfg) {
+                        Ok(c) => state = state.with_aks(c),
+                        Err(e) => tracing::warn!(error = %e, "in-cluster config rejected: /admin/workloads central rolls will answer 503"),
+                    },
+                    Err(e) => tracing::warn!(error = %e, "no in-cluster config: /admin/workloads central rolls will answer 503"),
+                }
+            }
             // The requeue sweep and the agent register/work/done/failed routes moved to the
             // server tier (Task 14) — this process now only serves the user-facing
             // /v1/workspaces|environments|regions|volumes routes.

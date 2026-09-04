@@ -48,6 +48,7 @@ mod environments;
 mod push;
 mod scope;
 mod volumes;
+mod workloads;
 mod workspaces;
 
 // The crate's public surface is unchanged by the split: `bins/api` and the tests name
@@ -170,6 +171,12 @@ pub struct ApiState {
     /// `None` when no kubeconfig/in-cluster config is available: every workspace, environment and
     /// volume route answers 503 rather than not existing.
     pub kube: Option<kube::Client>,
+    /// The AKS in-cluster client — `rustic-git-admin`'s OWN cluster, distinct from `kube` above
+    /// (a region's k3s, reached over a mounted kubeconfig). Only `admin::workloads`' central-scope
+    /// calls use this; every CRD (workspaces, environments, regions, quotas) still lives in a
+    /// region cluster and keeps reading `kube`. `None` off-AKS (dev, tests): central rolls answer
+    /// 503 rather than not existing, same convention as `kube`.
+    pub aks: Option<kube::Client>,
     /// The auth store, solely so workspace creation can copy the owner's platform-issued git key
     /// into their namespace. `None` in dev and in tests: workspaces still create, they just come
     /// up without a key.
@@ -188,6 +195,7 @@ impl ApiState {
             jwt,
             directory: None,
             kube: None,
+            aks: None,
             keys: None,
             settings: LiveSettings::new(AgentSettings::from_env()),
         }
@@ -200,6 +208,11 @@ impl ApiState {
 
     pub fn with_kube(mut self, client: kube::Client) -> Self {
         self.kube = Some(client);
+        self
+    }
+
+    pub fn with_aks(mut self, client: kube::Client) -> Self {
+        self.aks = Some(client);
         self
     }
 
@@ -543,6 +556,12 @@ async fn list_regions(
 pub(crate) fn kube(s: &ApiState) -> Result<&kube::Client, Response> {
     s.kube.as_ref().ok_or_else(|| {
         (StatusCode::SERVICE_UNAVAILABLE, "kubernetes not configured on this node").into_response()
+    })
+}
+
+pub(crate) fn aks(s: &ApiState) -> Result<&kube::Client, Response> {
+    s.aks.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "this node's own cluster is not configured").into_response()
     })
 }
 

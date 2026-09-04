@@ -112,6 +112,18 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list"]
+  # admin::workloads' per-region half: rolling this region's own rustic-git-agent DaemonSet
+  # (kube-system) and rustic-git-gateway Deployment (rustic-git-system, deploy/k3s/gateway.yaml).
+  # No `create`/`delete` — same reasoning as the central Role in deploy/rustic-git.yaml, a roll
+  # only ever patches an object that already exists.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["rustic-git-agent"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["rustic-git-gateway"]
+    verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

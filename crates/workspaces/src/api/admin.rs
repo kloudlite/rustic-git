@@ -46,6 +46,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/environments", get(super::environments::list_env))
         .route("/admin/environments/{id}", axum::routing::delete(super::environments::delete_env))
         .route("/admin/environments/{id}/stop", post(super::environments::stop_env))
+        .route("/admin/workloads", get(list_workloads_route))
+        .route("/admin/workloads/{scope}/{name}/roll", post(roll_workload_route))
         // The claim check runs BEFORE every route above, not per-handler: `route_layer` wraps only
         // the routes already added, so a route added after this line would run unguarded — there
         // are none, and `every_admin_path_refuses_without_the_claim` is the tripwire if one is
@@ -305,4 +307,59 @@ async fn admin_delete_ws(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     super::workspaces::delete_as(&s, &headers, &id).await
+}
+
+// ── workload rolls ──────────────────────────────────────────────────────
+
+/// `central`, or a region id — the same encoding `POST /admin/workloads/{scope}/{name}/roll`'s
+/// one path segment uses to name either half of `KNOWN`.
+fn parse_scope(seg: &str) -> super::workloads::Scope {
+    if seg == "central" { super::workloads::Scope::Central } else { super::workloads::Scope::Region(seg.to_string()) }
+}
+
+/// Every active region — the source `list_workloads`' per-region half walks, same as Task 6's
+/// `ClusterSettings` resolution will.
+async fn active_regions(s: &ApiState) -> Result<Vec<String>, Response> {
+    let api: Api<crd::Region> = Api::all(kube(s)?.clone());
+    Ok(api
+        .list(&ListParams::default())
+        .await
+        .map_err(kube_err)?
+        .items
+        .into_iter()
+        .filter(|r| r.spec.status == "active")
+        .map(|r| r.name_any())
+        .collect())
+}
+
+async fn list_workloads_route(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    let regions = active_regions(&s).await?;
+    let rows = super::workloads::list_workloads(&s, &regions).await?;
+    Ok(Json(rows).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct RollBody {
+    #[serde(default)]
+    reason: String,
+}
+
+/// The manual route's one validation beyond what the boot-triggered path needs: a boot roll's
+/// reason is always `setting:<field>`, this one is free text a human typed, so it must not be
+/// empty.
+async fn roll_workload_route(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path((scope, name)): Path<(String, String)>,
+    Json(body): Json<RollBody>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "reason is required").into_response());
+    }
+    let scope = parse_scope(&scope);
+    super::workloads::roll_readers(&s, &scope, &[name.as_str()], super::workloads::RollReason::Manual(reason), &c.name).await?;
+    let row = super::workloads::workload_doc(&s, &scope, &name).await?;
+    Ok(Json(row).into_response())
 }
