@@ -1,6 +1,8 @@
 # The end-to-end scripts under tests/ are not part of `cargo test`: registry_e2e.sh needs a running
-# server AND a container daemon, ws_e2e.sh needs root, a btrfs pool and a k3s cluster. This run is
-# what keeps "not in `cargo test`" from meaning "never run". Nightly rather than per push: it is
+# server AND a container daemon. This run is what keeps "not in `cargo test`" from meaning "never
+# run". ws_e2e.sh is NOT here: it needs root, btrfs and a k3s cluster, which no hosted runner has,
+# and the self-hosted one was never registered — run it by hand from the k3s build VM
+# (deploy/k3s/README.md, "Iterating"). Nightly rather than per push: it is
 # slower than the unit suite and red here means a real `docker push`/`pull` failed, which the
 # per-push run cannot see (tests/registry_http.rs drives the handlers, never a daemon).
 name: e2e
@@ -23,7 +25,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --locked --bin rustic-git
+      - run: cargo build --locked --bin kloudlite-git
       - name: registry_e2e.sh against a local server
         # `file://`, not `mem://`: `admin add-token` is its own process, and the credential it
         # writes is a plain object-store key the server reads on first use — two `mem://`
@@ -33,9 +35,9 @@ jobs:
         # docker treats loopback as an insecure registry by default — no daemon.json needed.
         run: |
           set -euo pipefail
-          export RUSTIC_GIT_S3_URL="file://$RUNNER_TEMP/store"
-          TOKEN=$(target/debug/rustic-git admin add-token acme)
-          target/debug/rustic-git serve > "$RUNNER_TEMP/server.log" 2>&1 &
+          export KLOUDLITE_GIT_S3_URL="file://$RUNNER_TEMP/store"
+          TOKEN=$(target/debug/kloudlite-git admin add-token acme)
+          target/debug/kloudlite-git serve > "$RUNNER_TEMP/server.log" 2>&1 &
           for i in $(seq 1 30); do
             curl -s -o /dev/null http://localhost:8080/v2/ && break
             [ "$i" = 30 ] && { echo "server never answered on :8080"; exit 1; }
@@ -44,30 +46,3 @@ jobs:
           TOKEN="$TOKEN" REG=localhost:8080 OWNER=acme ./tests/registry_e2e.sh
       - if: failure()
         run: cat "$RUNNER_TEMP/server.log"
-
-  workspaces:
-    # ws_e2e.sh needs what no GitHub-hosted runner has: passwordless root, btrfs tools, a reachable
-    # k3s cluster with deploy/k3s/crds.yaml and gateway.yaml applied, and AZURE_*
-    # credentials. That is a self-hosted runner on the k3s build VM (deploy/k3s/README.md,
-    # "Iterating" — it already has the toolchain and a warm target dir, and it is NOT a pool node,
-    # which the script refuses to share with the DaemonSet). Register it with the label
-    # `btrfs-k3s` (Settings → Actions → Runners → New self-hosted runner, Linux x64, on the VM,
-    # `./config.sh --labels btrfs-k3s`), put the three credentials in repository secrets, and set
-    # the repository variable WS_E2E_RUNNER=btrfs-k3s. Until that variable exists this job is
-    # skipped, not failed — a `runs-on` label nobody serves would sit queued for the whole
-    # timeout, every night, and read as red for the wrong reason.
-    if: vars.WS_E2E_RUNNER == 'btrfs-k3s'
-    runs-on: [self-hosted, linux, btrfs-k3s]
-    timeout-minutes: 90
-    env:
-      AZURE_ACCOUNT: ${{ secrets.WS_E2E_AZURE_ACCOUNT }}
-      AZURE_KEY: ${{ secrets.WS_E2E_AZURE_KEY }}
-      AZURE_CONTAINER: ${{ secrets.WS_E2E_AZURE_CONTAINER }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # The runner's own toolchain and target dir, deliberately: a cold build of four binaries on
-      # the VM is the eight minutes dev-push.sh exists to avoid.
-      - run: cargo build --locked --bin rustic-git --bin rustic-git-api --bin rustic-git-agent --bin kl
-      # 77 is "a prerequisite was missing" and on this runner every prerequisite is supposed to be
-      # present, so it is a failure here too — the script's own exit code already says so.
-      - run: ./tests/ws_e2e.sh
