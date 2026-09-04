@@ -1108,6 +1108,25 @@ export function adminAuditCsv(token: string, filter: AuditFilter): Promise<Respo
   });
 }
 
+/** One row of `GET /admin/settings/schema` — `crates/workspaces/src/api/admin/schema.rs::Row`.
+ *  `range` is `null` for a bool/string field, where a min/max means nothing. */
+export type SettingsSchemaRow = {
+  name: string;
+  description: string;
+  unit: string;
+  range: { min: number; max: number } | null;
+  mark: "live" | "boot";
+  readers: string[];
+  default: unknown;
+  env: string | null;
+};
+
+export type SettingsSchema = { central: SettingsSchemaRow[]; cluster: SettingsSchemaRow[] };
+
+export function adminSettingsSchema(token: string) {
+  return adminCall<SettingsSchema>("/admin/settings/schema", { method: "GET", token });
+}
+
 export function createRegion(body: { id: string; name: string }, token: string) {
   return adminCall<{ id: string; name: string; status: string }>("/admin/regions", {
     method: "POST",
