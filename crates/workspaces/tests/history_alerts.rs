@@ -2,7 +2,7 @@
 //! rather than plumbing, and the property that matters most is the one the previous, scrape-based
 //! evaluator could not hold: a rule whose window is not fully covered says `unknown`, never `ok`.
 
-use kloudlite_git_workspaces::history::alerts::{alert_row, evaluate_once, state_of, CATALOGUE};
+use kloudlite_git_workspaces::history::alerts::{alert_row, evaluate_once, state_of, Tier, CATALOGUE};
 use std::collections::HashMap;
 
 /// One bucket per `step`, newest last, as `[ts, breached]` — the shape every catalogue query
@@ -108,6 +108,33 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
     for rule in CATALOGUE.iter().filter(|r| (r.sql_for("eu").unwrap()).contains("otel_metrics_sum")) {
         let sql = rule.sql_for("eu").unwrap();
         assert!(sql.contains("k8s.pod.name"), "{} sums across series: {sql}", rule.name);
+    }
+}
+
+/// A rule reads metrics only one tier emits. Evaluated in the other it can only ever write
+/// `unknown`, which on the Signals page is indistinguishable from a collector that has died — so
+/// the rule is not evaluated there at all.
+#[test]
+fn a_rule_is_evaluated_only_in_its_own_tier() {
+    let by = |n: &str| CATALOGUE.iter().find(|r| r.name == n).expect(n);
+    for name in ["NoLeader", "LeaseRenewFailing", "DbFenceDetected", "MisdirectedWrites", "WorkerHeartbeatStale"] {
+        assert!(by(name).applies_to("central"), "{name} is central");
+        assert!(!by(name).applies_to("westeurope-k3s"), "{name} must not run in a region");
+    }
+    for name in ["ReconcileErrors", "PoolAlmostFull", "NodeDiskAlmostFull", "TunnelSaturation"] {
+        assert!(by(name).applies_to("westeurope-k3s"), "{name} is regional");
+        assert!(!by(name).applies_to("central"), "{name} must not run centrally");
+    }
+    // HTTP is served by both tiers, so this one rule is genuinely both.
+    assert!(by("Http5xxRate").applies_to("central"));
+    assert!(by("Http5xxRate").applies_to("westeurope-k3s"));
+    // Every rule belongs somewhere: an empty tier list would silently retire it.
+    for rule in CATALOGUE {
+        assert!(
+            rule.tier.contains(&Tier::Central) || rule.tier.contains(&Tier::Region),
+            "{} is evaluated nowhere",
+            rule.name
+        );
     }
 }
 

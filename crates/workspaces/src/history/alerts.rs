@@ -27,8 +27,26 @@ const STEP_SECS: u64 = 30;
 /// within a bucket of when it happened, and slow enough that ten queries are nothing.
 const EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Which fleet a rule's metrics come from. `central` is the AKS tier (server, worker, gateway,
+/// api); every `Region` CR is a k3s cluster with an agent on each node. A rule evaluated in the
+/// wrong tier can only ever be `unknown` — the metric is not emitted there at all — and a
+/// permanent `unknown` on the Signals page is indistinguishable from a broken collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Central,
+    Region,
+}
+
+/// The tier one region name belongs to.
+pub fn tier_of(region: &str) -> Tier {
+    if region == super::watch::CENTRAL { Tier::Central } else { Tier::Region }
+}
+
 pub struct Rule {
     pub name: &'static str,
+    /// The tiers this rule is evaluated in — a slice because `Http5xxRate` is genuinely both:
+    /// the server tier and every region's api serve HTTP.
+    pub tier: &'static [Tier],
     /// The catalogue's own "Why" column — carried so the console never has to restate it and the
     /// two can never drift.
     pub why: &'static str,
@@ -39,6 +57,11 @@ pub struct Rule {
 }
 
 impl Rule {
+    /// Whether this rule is evaluated for a region at all.
+    pub fn applies_to(&self, region: &str) -> bool {
+        self.tier.contains(&tier_of(region))
+    }
+
     /// This rule's SQL for one region, or `None` if the region name is not an identifier we are
     /// willing to interpolate. The SQL itself is static text; the region is the only caller-shaped
     /// value that reaches it, so it is CHECKED rather than escaped — a Kubernetes object name is
@@ -154,6 +177,7 @@ fn worst_node_ratio(
 pub const CATALOGUE: &[Rule] = &[
     Rule {
         name: "NoLeader",
+        tier: &[Tier::Central],
         why: "Zero: nobody holds the lease, so no claim in the fleet succeeds; two: the epoch check failed and the fence is all that stands between two writers.",
         for_secs: 120,
         // `sum by (pod)` first: a pod reports this gauge several times inside a 30 s bucket, and a
@@ -172,6 +196,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "LeaseRenewFailing",
+        tier: &[Tier::Central],
         why: "A node that cannot renew loses its leases at the TTL; another node claims, and its warm databases must close.",
         for_secs: 180,
         sql: |region| format!(
@@ -181,6 +206,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "DbFenceDetected",
+        tier: &[Tier::Central],
         why: "The invariant violation: two nodes opened one SlateDB. Zero is the only acceptable value.",
         // The catalogue is `increase(db_fence_detected_total[10m]) > 0` with no `for`: any rise
         // anywhere in the ten minutes fires, and stays firing for the rest of them — a fence that
@@ -200,6 +226,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "Http5xxRate",
+        tier: &[Tier::Central, Tier::Region],
         why: "Per listener and route class so a registry outage is not hidden by healthy git traffic.",
         for_secs: 300,
         sql: |region| ratio_rule(
@@ -213,6 +240,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "MisdirectedWrites",
+        tier: &[Tier::Central],
         why: "421s during a roll are expected; sustained ones mean the pods disagree about who holds the leader lease.",
         for_secs: 600,
         sql: |region| format!(
@@ -222,6 +250,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "ReconcileErrors",
+        tier: &[Tier::Region],
         why: "A controller in an error loop keeps retrying with backoff; the ratio is what shows it.",
         for_secs: 300,
         // The catalogue groups by `kind`: one controller in an error loop is the alert, and folding
@@ -230,6 +259,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "TunnelSaturation",
+        tier: &[Tier::Region],
         why: "MAX_TUNNELS is 1000 per gateway pod; refusals start with 503 past it.",
         for_secs: 300,
         sql: |region| format!(
@@ -245,6 +275,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "WorkerHeartbeatStale",
+        tier: &[Tier::Central],
         why: "The liveness probe only restarts; this pages when it keeps happening.",
         // The catalogue's window IS the hour: `increase(restarts[1h]) > 3` is one number, so the
         // rule has a single bucket rather than a `for` on top of it.
@@ -269,6 +300,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "PoolAlmostFull",
+        tier: &[Tier::Region],
         why: "btrfs past 80% starts failing allocations before df says full.",
         for_secs: 300,
         // The agent's own gauges (Task 7), which is what makes this rule evaluable at all — it was
@@ -283,6 +315,7 @@ pub const CATALOGUE: &[Rule] = &[
     },
     Rule {
         name: "NodeDiskAlmostFull",
+        tier: &[Tier::Region],
         why: "The worker's merge caches and the slatedb object cache live on the root disk.",
         for_secs: 300,
         // `kubeletstats`' node filesystem metrics, so this needs no exporter of ours either.
@@ -485,7 +518,10 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
         let mut writes = std::mem::take(&mut pending);
         for region in &regions {
             let mut results = Vec::with_capacity(CATALOGUE.len());
-            for rule in CATALOGUE {
+            // Only this region's tier: `TunnelSaturation` in `central` or `NoLeader` in a k3s
+            // region reads a metric nothing there emits, so it could only ever write `unknown` —
+            // a row that looks exactly like a collector that has stopped reporting.
+            for rule in CATALOGUE.iter().filter(|r| r.applies_to(region)) {
                 let Some(sql) = rule.sql_for(region) else {
                     // Never silent: a region whose name we refuse to interpolate is invisible on
                     // the Signals page, and only this line says why.
