@@ -13,7 +13,7 @@ export async function decideRequest(id: string, decision: "approve" | "deny", fo
   const token = await tokenOr();
   if (typeof token !== "string") return;
   await api.adminDecideQuotaRequest(id, decision, note, token);
-  revalidatePath("/superadmin");
+  revalidatePath("/superadmin/requests");
 }
 
 /** Bound with the default's own name (`default-user`/`default-team`) — the one writer
@@ -28,7 +28,7 @@ export async function writeDefault(owner: string, formData: FormData) {
   const token = await tokenOr();
   if (typeof token !== "string") return;
   await api.adminWriteQuota(owner, spec, token);
-  revalidatePath("/superadmin/quotas");
+  revalidatePath("/superadmin/owners");
 }
 
 export async function createRegionAction(formData: FormData) {

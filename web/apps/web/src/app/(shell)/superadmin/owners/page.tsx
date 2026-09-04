@@ -4,16 +4,18 @@ import * as api from "@/lib/api";
 import { QuotaBar } from "@/components/app/quota-bar";
 import { PageHeader } from "../page-header";
 
-export const metadata: Metadata = { title: "Usage" };
+export const metadata: Metadata = { title: "Owners" };
 
 export default async function Page() {
-  const { token } = await requireSuperadmin("/superadmin/usage");
+  const { token } = await requireSuperadmin("/superadmin/owners");
   const r = await api.adminUsage(token);
   const rows = r.ok ? r.value : [];
 
   return (
     <div>
-      <PageHeader title="Usage" purpose="Every owner's usage against their quota." />
+      {/* ponytail: the Defaults card (person/team default quota, moved from the old Quotas tab)
+          lands on this page once its own task does — for now this is the usage list only. */}
+      <PageHeader title="Owners" purpose="Every owner's usage against their quota." />
       <div className="space-y-6">
       {/* ponytail: the owner list is derived from who has ever had a Quota or a request; an owner
           who has neither is not shown. A `GET /admin/quota` (no owner) listing every Quota plus

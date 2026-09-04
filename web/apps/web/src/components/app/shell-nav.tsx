@@ -22,17 +22,6 @@ export type RepoTabSpec = { suffix: string; label: string; icon: React.ReactNode
 // `new-repo` and `new-team` are not
 const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite", "superadmin"];
 
-/** The superadmin area's own tab row — not an owner's `sections()`, since superadmin acts on
- *  owners rather than being one. Same hrefs as the old in-layout `NavTabs`; living here lets the
- *  shell draw them as the primary row instead of a second one underneath. */
-const SUPERADMIN_TABS = [
-  { href: "/superadmin", label: "Requests", exact: true },
-  { href: "/superadmin/usage", label: "Usage" },
-  { href: "/superadmin/quotas", label: "Quotas" },
-  { href: "/superadmin/clusters", label: "Clusters" },
-  { href: "/superadmin/monitoring", label: "Monitoring" },
-];
-
 /** Where the URL is, in the terms the chrome cares about.
  *
  *  `/{owner}/{x}` is unambiguous because the names the namespace has spent —
@@ -104,7 +93,10 @@ export function ShellTabs({
 }) {
   const at = place(usePathname(), me);
   if (at.kind === "superadmin") {
-    return <NavTabs tabs={SUPERADMIN_TABS} className={className} aria-label="Admin" />;
+    // The eight-area row lives in the `/superadmin` layout's own rail now (`rail.tsx`), because
+    // it has eight items and its own left rail at desktop width — the top shell row is one line
+    // and is for an org's sections. Nothing to draw a second time here.
+    return null;
   }
   if (at.kind === "org") {
     // A person's own namespace is not a team: it has no members, no roles and nothing to
