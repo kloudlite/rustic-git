@@ -67,6 +67,14 @@ rules:
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list", "watch"]
+  # The receiver's documented role (k8sclusterreceiver README, v0.109.0) also lists these
+  # subresources and the legacy extensions group; a cluster that gates them separately 403s.
+  - apiGroups: [""]
+    resources: ["namespaces/status", "nodes/spec", "pods/status", "replicationcontrollers/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions"]
+    resources: ["daemonsets", "deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
