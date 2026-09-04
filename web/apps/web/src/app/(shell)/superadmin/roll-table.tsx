@@ -13,6 +13,8 @@ import { settled } from "@/lib/settings";
 import type { WorkloadDoc } from "@/lib/api";
 import type { SaveResult } from "./actions";
 import { RolloutBadge } from "./status-badge";
+import { Section } from "./ui/section";
+import { DataTable, EmptyState, RowActions, Td, Th, Tr } from "./ui/data-table";
 
 /** Image tag + digest, ready/desired, rollout state, last roll who/when/reason, and the one
  *  manual write — a required reason, with a second confirmation for `rustic-git-srv` since
@@ -22,9 +24,15 @@ import { RolloutBadge } from "./status-badge";
 export function RollTable({
   workloads,
   onRoll,
+  restarts,
+  title = "Central workloads",
 }: {
   workloads: WorkloadDoc[];
   onRoll: (scope: string, name: string, reason: string) => Promise<SaveResult>;
+  /** Restart count per workload name, from the signals response — optional because the Clusters
+   *  tab renders the same table without a scrape behind it. */
+  restarts?: Record<string, number>;
+  title?: string;
 }) {
   const [target, setTarget] = useState<{ scope: string; name: string } | null>(null);
   const [reason, setReason] = useState("");
@@ -59,50 +67,64 @@ export function RollTable({
   }
 
   if (workloads.length === 0) {
-    return <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">No workloads reported.</p>;
+    return (
+      <Section eyebrow="Workloads" title={title} count={0} bare>
+        <EmptyState>No workload is reported for this scope. One appears here as soon as its Deployment exists.</EmptyState>
+      </Section>
+    );
   }
 
   return (
     <div className="space-y-4">
       {anyRollingOut && <AutoRefresh intervalMs={3_000} />}
 
-      <div className="overflow-x-auto border border-border bg-card">
-        <table className="w-full text-sm2">
-          <thead className="border-b border-border text-left text-caption text-muted-foreground">
+      <Section eyebrow="Workloads" title={title} count={workloads.length} bare>
+        <DataTable>
+          <thead>
             <tr>
-              <th className="px-3 py-2 font-medium">Workload</th>
-              <th className="px-3 py-2 font-medium">Tag</th>
-              <th className="px-3 py-2 font-medium">Digest</th>
-              <th className="px-3 py-2 font-medium">Ready</th>
-              <th className="px-3 py-2 font-medium">Rollout</th>
-              <th className="px-3 py-2 font-medium">Last roll</th>
-              <th className="px-3 py-2 font-medium" />
+              <Th>Workload</Th>
+              <Th>Image tag</Th>
+              <Th>Digest</Th>
+              <Th numeric>Ready</Th>
+              <Th>Rollout</Th>
+              <Th numeric>Restarts</Th>
+              <Th>Last roll</Th>
+              <Th />
             </tr>
           </thead>
-          <tbody className="divide-y divide-border">
+          <tbody>
             {workloads.map((w) => {
               const { tag, digest } = imageRef(w.image);
               return (
-                <tr key={`${w.scope}/${w.name}`}>
-                  <td className="px-3 py-2 align-top font-medium">{w.name}</td>
-                  <td className="px-3 py-2 align-top text-caption text-muted-foreground">{tag}</td>
-                  <td className="px-3 py-2 align-top text-caption text-muted-foreground font-mono">{digest}</td>
-                  <td className="px-3 py-2 align-top text-caption tabular-nums">{w.ready}/{w.desired}</td>
-                  <td className="px-3 py-2 align-top text-caption"><RolloutBadge w={w} /></td>
-                  <td className="px-3 py-2 align-top text-caption text-muted-foreground">
+                <Tr key={`${w.scope}/${w.name}`}>
+                  <Td className="font-medium">{w.name}</Td>
+                  <Td className="text-muted-foreground">{tag}</Td>
+                  <Td className="font-mono text-caption text-muted-foreground">{digest}</Td>
+                  <Td numeric>{w.ready} / {w.desired}</Td>
+                  <Td><RolloutBadge w={w} /></Td>
+                  <Td numeric className={restarts?.[w.name] ? "text-warning" : "text-muted-foreground"}>
+                    {restarts?.[w.name] ?? 0}
+                  </Td>
+                  <Td className="text-muted-foreground">
                     {w.lastRoll ? `${w.lastRoll.by} · ${when(new Date(w.lastRoll.at).getTime())} · ${w.lastRoll.reason}` : "—"}
-                  </td>
-                  <td className="px-3 py-2 align-top">
-                    <Button size="sm" variant="outline" onClick={() => openDialog(w.scope, w.name)}>
-                      Roll
-                    </Button>
-                  </td>
-                </tr>
+                  </Td>
+                  <Td>
+                    <RowActions>
+                      <button
+                        type="button"
+                        className="text-sm2 text-muted-foreground hover:text-foreground"
+                        onClick={() => openDialog(w.scope, w.name)}
+                      >
+                        Roll
+                      </button>
+                    </RowActions>
+                  </Td>
+                </Tr>
               );
             })}
           </tbody>
-        </table>
-      </div>
+        </DataTable>
+      </Section>
 
       <Dialog open={target !== null} onOpenChange={(open) => !open && setTarget(null)}>
         <DialogContent className="sm:max-w-md">
