@@ -82,9 +82,13 @@ reason }`, `status { state: pending | approved | denied, decidedBy, decidedAt, n
 - Login mints `superadmin: true` into the session JWT when the user is listed; `/v1` and the
   web read the claim (`/v1` keeps `require_admin` but it now checks the claim, and `/v1/regions`
   moves under it too).
-- The web gets an `/admin` area, visible only with the claim: quota requests queue (approve /
-  deny with note), every owner's usage vs limit, the two defaults (editable), regions, the
-  decommission status of each node (`rustic-git.io/decommission-status`).
+- The web gets a `/superadmin` area (owner, 2026-09-04: its own shell place, reached from the
+  profile menu, visible only with the claim), an OPERATIONS console with five tabs: Requests
+  (quota queue, approve / deny with note), Usage (every owner's usage vs limit), Quotas (the two
+  editable defaults), Clusters (regions with "add region"; each cluster's nodes with their
+  decommission status and its per-region workloads with a manual roll), Monitoring (the central
+  workloads: image, ready/desired, rollout state, last roll, manual roll). Users never see quota
+  usage on their own pages; a refused create offers the request dialog.
 - A superadmin can act on any owner's objects through `/v1` (list, stop, delete) — `may_act_on`
   gains the claim as a third arm — so support can clean up without impersonation.
 

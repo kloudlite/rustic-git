@@ -96,6 +96,12 @@ keeps the old value until it finishes. Nothing is interrupted by a settings chan
 
 ### 5. The admin UI
 
+**Superseded by the owner on 2026-09-04:** "most settings remain in config". The superadmin area
+shows NO tunable tables; the routes below and both scopes' storage stay, gated by the claim and
+unused by the web, so the UI can grow one later. What the area shows instead is in
+`2026-09-03-quotas-and-superadmin-design.md` §4 (Requests, Usage, Quotas, Clusters, Monitoring).
+The original design of this section follows for the record.
+
 `/admin/settings` with two tabs: **Central** and **Clusters** (one panel per region). Each knob is
 a row: name, description, unit, current value (editable), env bootstrap value, built-in default,
 range, last change (who, when). Save writes only the changed fields. A "pending" marker shows
