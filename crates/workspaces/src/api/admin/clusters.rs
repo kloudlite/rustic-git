@@ -288,11 +288,16 @@ pub(crate) async fn set_region_status(
     let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
     let existing = api.get_opt(&region).await.map_err(kube_err)?.ok_or_else(not_found)?;
     let apply = crd::Region::new(&region, crd::RegionSpec { name: existing.spec.name.clone(), status: status.into() });
-    let saved = api
-        .patch(&region, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&apply))
-        .await
-        .map_err(kube_err)?;
     let action = if status == "inactive" { "deactivate-region" } else { "activate-region" };
+    let saved = super::audited(
+        &s,
+        &c.name,
+        action,
+        &region,
+        (!note.is_empty()).then(|| note.clone()),
+        api.patch(&region, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&apply)).await.map_err(kube_err),
+    )
+    .await?;
     audit(&s, &c.name, action, &region, (!note.is_empty()).then_some(note), "ok").await;
     Ok(Json(region_doc(&saved)).into_response())
 }
@@ -344,8 +349,9 @@ pub(crate) async fn drain(
 ) -> Result<Response, Response> {
     let (c, client, reason, _) = target(&s, &headers, &region, &node, &body).await?;
     let patch = serde_json::json!({"metadata": {"labels": {crd::DECOMMISSION_LABEL: "true"}}});
-    let out = patch_node(client, &node, patch).await?;
-    audit(&s, &c.name, "drain", &format!("{region}/{node}"), Some(reason), "ok").await;
+    let target = format!("{region}/{node}");
+    let out = super::audited(&s, &c.name, "drain", &target, Some(reason.clone()), patch_node(client, &node, patch).await).await?;
+    audit(&s, &c.name, "drain", &target, Some(reason), "ok").await;
     Ok(Json(super::node_doc(&out)).into_response())
 }
 
@@ -362,8 +368,9 @@ pub(crate) async fn undrain(
         "labels": {crd::DECOMMISSION_LABEL: serde_json::Value::Null},
         "annotations": {crd::DECOMMISSION_STATUS: serde_json::Value::Null},
     }});
-    let out = patch_node(client, &node, patch).await?;
-    audit(&s, &c.name, "undrain", &format!("{region}/{node}"), Some(reason), "ok").await;
+    let target = format!("{region}/{node}");
+    let out = super::audited(&s, &c.name, "undrain", &target, Some(reason.clone()), patch_node(client, &node, patch).await).await?;
+    audit(&s, &c.name, "undrain", &target, Some(reason), "ok").await;
     Ok(Json(super::node_doc(&out)).into_response())
 }
 
@@ -383,11 +390,23 @@ pub(crate) async fn decommission(
         .as_ref()
         .and_then(|a| a.get(crd::DECOMMISSION_STATUS))
         .is_some_and(|v| v.starts_with(crd::DRAINED_PREFIX));
+    let target = format!("{region}/{node}");
     if !drained {
-        return Err((StatusCode::CONFLICT, "not drained yet").into_response());
+        // The refusal is the point of the row: "someone tried to retire a node the agent had not
+        // finished draining" is exactly what an operator reads the log for.
+        let refusal = Err((StatusCode::CONFLICT, "not drained yet").into_response());
+        return super::audited(&s, &c.name, "decommission", &target, Some(reason), refusal).await;
     }
-    let out = patch_node(client, &node, serde_json::json!({"spec": {"unschedulable": true}})).await?;
-    audit(&s, &c.name, "decommission", &format!("{region}/{node}"), Some(reason), "ok").await;
+    let out = super::audited(
+        &s,
+        &c.name,
+        "decommission",
+        &target,
+        Some(reason.clone()),
+        patch_node(client, &node, serde_json::json!({"spec": {"unschedulable": true}})).await,
+    )
+    .await?;
+    audit(&s, &c.name, "decommission", &target, Some(reason), "ok").await;
     Ok(Json(super::node_doc(&out)).into_response())
 }
 

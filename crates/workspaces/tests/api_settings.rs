@@ -127,7 +127,7 @@ async fn put_central_out_of_range_is_422_and_forwards_nothing() {
     let resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/central", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"sshPort": 0}))
+        .json(&json!({"sshPort": 0, "note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 422);
     let body = resp.text().await.unwrap();
@@ -146,13 +146,13 @@ async fn put_central_forwards_and_returns_the_peer_routes_body() {
     let resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/central", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"maxBody": 4194304}))
+        .json(&json!({"maxBody": 4194304, "note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
     let body: Value = reqwest::Client::new()
         .put(format!("{}/admin/settings/central", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"maxBody": 4194304}))
+        .json(&json!({"maxBody": 4194304, "note": "test"}))
         .send().await.unwrap()
         .json().await.unwrap();
     assert_eq!(body, history_doc);
@@ -171,6 +171,7 @@ async fn revert_central_with_no_history_is_422_and_forwards_nothing() {
     let resp = reqwest::Client::new()
         .post(format!("{}/admin/settings/central/revert", s.base))
         .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 422);
     assert!(peer.seen.lock().unwrap().is_empty(), "the server tier must never be called with no history to revert to");
@@ -193,6 +194,7 @@ async fn revert_central_forwards_and_returns_the_peer_routes_body() {
     let resp = reqwest::Client::new()
         .post(format!("{}/admin/settings/central/revert", s.base))
         .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
     let body: Value = resp.json().await.unwrap();
@@ -232,7 +234,7 @@ async fn put_cluster_out_of_range_is_422_and_writes_nothing() {
     let resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/clusters/us", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"syncSecs": 1}))
+        .json(&json!({"syncSecs": 1, "note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 422);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("PATCH")));
@@ -256,7 +258,7 @@ async fn put_cluster_writes_annotations_and_history() {
     let resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/clusters/us", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"syncSecs": 120}))
+        .json(&json!({"syncSecs": 120, "note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
     let sent = s.rec.sent("PATCH", &format!("{API}/clustersettings/default"));
@@ -293,7 +295,7 @@ async fn put_cluster_boot_field_conflicts_mid_rollout_and_writes_nothing() {
     let resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/clusters/us", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"defaultImage": "img:2"}))
+        .json(&json!({"defaultImage": "img:2", "note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 409);
     let body: Value = resp.json().await.unwrap();
@@ -321,6 +323,7 @@ async fn revert_cluster_restores_the_named_entry_and_grows_history_again() {
     let resp = reqwest::Client::new()
         .post(format!("{}/admin/settings/clusters/us/revert/0", s.base))
         .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
     let sent = s.rec.sent("PATCH", &format!("{API}/clustersettings/default"));
@@ -364,7 +367,7 @@ async fn put_cluster_boot_field_rolls_only_its_reader() {
     let resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/clusters/us", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"defaultImage": "img:2"}))
+        .json(&json!({"defaultImage": "img:2", "note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
 
@@ -392,7 +395,7 @@ async fn put_cluster_live_field_rolls_nothing() {
     let resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/clusters/us", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"syncSecs": 90}))
+        .json(&json!({"syncSecs": 90, "note": "test"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
     assert_eq!(s.rec.sent("PATCH", &format!("{API}/clustersettings/default")).len(), 1);
@@ -414,7 +417,7 @@ async fn cluster_settings_unknown_region_is_404_on_get_and_put() {
     let put_resp = reqwest::Client::new()
         .put(format!("{}/admin/settings/clusters/nope", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"syncSecs": 90}))
+        .json(&json!({"syncSecs": 90, "note": "test"}))
         .send().await.unwrap();
     assert_eq!(put_resp.status(), 404);
 

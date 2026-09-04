@@ -132,7 +132,7 @@ async fn a_superadmin_may_register_a_region_on_the_admin_host() {
     let resp = reqwest::Client::new()
         .post(format!("{}/admin/regions", s.base))
         .bearer_auth(admin_token(&s.jwt))
-        .json(&json!({"id": "us", "name": "US"}))
+        .json(&json!({"id": "us", "name": "US", "note": "new region"}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
 }

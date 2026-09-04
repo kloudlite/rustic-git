@@ -31,8 +31,9 @@ pub(crate) async fn audit(
     action: &str,
     target: &str,
     reason: Option<String>,
-    result: &'static str,
+    result: impl Into<std::borrow::Cow<'static, str>>,
 ) {
+    let result = result.into();
     let Some(store) = s.keys.as_ref() else {
         tracing::warn!(actor, action, target, "audit row not written: no object store configured");
         return;
@@ -43,11 +44,51 @@ pub(crate) async fn audit(
         action: action.to_string(),
         target: target.to_string(),
         reason,
-        result: result.into(),
+        result,
     };
     if let Err(e) = crate::audit::record(&store.os, &entry).await {
         tracing::error!(error = %e, actor, action, target, "audit row not written");
     }
+}
+
+/// A refusal is evidence too: "we tried to drain that node and the API server said no" is exactly
+/// what an operator reads the log for. Only 409 and up — a 4xx below that is a malformed request
+/// that never reached a decision, and logging those would bury the real ones.
+pub(crate) async fn audited<T>(
+    s: &ApiState,
+    actor: &str,
+    action: &str,
+    target: &str,
+    reason: Option<String>,
+    r: Result<T, Response>,
+) -> Result<T, Response> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(resp) => {
+            let code = resp.status().as_u16();
+            if code >= 409 {
+                audit(s, actor, action, target, reason, format!("error:{code}")).await;
+            }
+            Err(resp)
+        }
+    }
+}
+
+/// The Global Constraint's "reason on every write except approve", as one body shape: every
+/// mutating admin route that has no more specific body takes this and nothing else.
+#[derive(serde::Deserialize)]
+pub(crate) struct NoteBody {
+    #[serde(default)]
+    pub(crate) note: String,
+}
+
+/// 422 on an empty or whitespace-only note, named the same way every other required field is.
+pub(crate) fn require_note(note: &str) -> Result<String, Response> {
+    let note = note.trim().to_string();
+    if note.is_empty() {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "note is required").into_response());
+    }
+    Ok(note)
 }
 pub use settings::PeerClient;
 
@@ -92,8 +133,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/workspaces/{id}", axum::routing::delete(admin_delete_ws))
         .route("/admin/workspaces/{id}/stop", post(admin_stop_ws))
         .route("/admin/environments", get(super::environments::list_env))
-        .route("/admin/environments/{id}", axum::routing::delete(super::environments::delete_env))
-        .route("/admin/environments/{id}/stop", post(super::environments::stop_env))
+        .route("/admin/environments/{id}", axum::routing::delete(admin_delete_env))
+        .route("/admin/environments/{id}/stop", post(admin_stop_env))
         .route("/admin/workloads", get(list_workloads_route))
         .route("/admin/workloads/{scope}/{name}/roll", post(roll_workload_route))
         .route("/admin/settings/central", get(settings::get_central).put(settings::put_central))
@@ -126,6 +167,10 @@ struct NewRegion {
     /// existing records stay readable.
     #[serde(default = "active_status")]
     status: String,
+    /// Registering a region is a write like any other, so it carries its own reason rather than
+    /// leaving the audit row's `why` column empty (Global Constraint).
+    #[serde(default)]
+    note: String,
 }
 
 fn active_status() -> String {
@@ -141,17 +186,23 @@ async fn create_region(
     // one place that decides is the layer every route on this router shares.
     let c = caller(&s, &headers).await?;
     check_path_segment(&body.id)?;
+    let note = require_note(&body.note)?;
     let status = if body.status == "inactive" { "inactive" } else { "active" };
     let r = crd::Region::new(&body.id, crd::RegionSpec { name: body.name, status: status.into() });
     // Apply, not create: re-registering IS how a region is retired or renamed, so a second POST of
     // the same id must not be a 409.
     let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
-    let saved = api
-        .patch(&body.id, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&r))
-        .await
-        .map_err(kube_err)?;
     let action = if status == "inactive" { "deactivate-region" } else { "add-region" };
-    audit(&s, &c.name, action, &body.id, None, "ok").await;
+    let saved = audited(
+        &s,
+        &c.name,
+        action,
+        &body.id,
+        Some(note.clone()),
+        api.patch(&body.id, &PatchParams::apply("rustic-git-api").force(), &Patch::Apply(&r)).await.map_err(kube_err),
+    )
+    .await?;
+    audit(&s, &c.name, action, &body.id, Some(note), "ok").await;
     Ok((StatusCode::CREATED, Json(region_doc(&saved))).into_response())
 }
 
@@ -189,7 +240,7 @@ async fn write_quota_route(
     if note.is_empty() {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "note is required").into_response());
     }
-    let q = write_quota(&s, &owner, body.spec).await?;
+    let q = audited(&s, &c.name, "set-quota", &owner, Some(note.clone()), write_quota(&s, &owner, body.spec).await).await?;
     audit(&s, &c.name, "set-quota", &owner, Some(note), "ok").await;
     Ok(Json(q.spec).into_response())
 }
@@ -241,7 +292,10 @@ async fn approve_quota_request(
     let note: Decision = if body.is_empty() { Default::default() } else {
         serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
     };
-    let r = pending_request(&s, &id).await?;
+    // An already-decided request is a 409 the operator needs to see in the log — they raced
+    // another admin — so the refusal is recorded against the request id, the only target known
+    // before the read succeeds.
+    let r = audited(&s, &c.name, "approve", &id, note.note.clone(), pending_request(&s, &id).await).await?;
     let owner = r.spec.owner.clone();
     let client = kube(&s)?;
     let api: Api<crd::Quota> = Api::all(client.clone());
@@ -254,7 +308,7 @@ async fn approve_quota_request(
     // An operator may grant less or more than asked; absent an edit, approve grants exactly what
     // was requested — unchanged behavior.
     let want = note.requested.clone().unwrap_or_else(|| r.spec.requested.clone());
-    write_quota(&s, &owner, overlay(base, &want)).await?;
+    audited(&s, &c.name, "approve", &owner, note.note.clone(), write_quota(&s, &owner, overlay(base, &want)).await).await?;
     // The grant above is the consequential write; `decide` only marks the request, and if IT
     // fails the quota still landed — the row must survive that, so it's recorded here rather than
     // after the second fallible call.
@@ -273,8 +327,16 @@ async fn deny_quota_request(
     let note: Decision = if body.is_empty() { Default::default() } else {
         serde_json::from_slice(&body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid body").into_response())?
     };
-    let r = pending_request(&s, &id).await?;
-    let out = decide(&s, &id, crd::RequestState::Denied, &c.name, note.note.clone()).await?;
+    let r = audited(&s, &c.name, "deny", &id, note.note.clone(), pending_request(&s, &id).await).await?;
+    let out = audited(
+        &s,
+        &c.name,
+        "deny",
+        &r.spec.owner,
+        note.note.clone(),
+        decide(&s, &id, crd::RequestState::Denied, &c.name, note.note.clone()).await,
+    )
+    .await?;
     audit(&s, &c.name, "deny", &r.spec.owner, note.note, "ok").await;
     Ok(out)
 }
@@ -359,10 +421,11 @@ async fn list_nodes(State(s): State<Arc<ApiState>>) -> Result<Response, Response
 // (`list_for_owner`/`stop_as`/`delete_as`), called with the owner taken from a query param or the
 // object itself rather than the caller — `my_ws`'s superadmin arm is what makes that legitimate.
 //
-// Environments are ALREADY generic: `list_env`/`stop_env`/`delete_env` take the owner from
-// `?owner=`/`find_env` and already admit a superadmin (`may_act_on`'s claim arm), so they are
-// mounted directly above with no wrapper at all — a wrapper that only forwarded its arguments
-// would be a function whose only job is to exist.
+// Environments' `stop_env`/`delete_env` are already generic (owner from `find_env`, superadmin
+// admitted by `may_act_on`'s claim arm), so the wrappers below add exactly one thing each: the
+// required note and the audit row. Acting on somebody ELSE's workspace is the loudest thing this
+// console does, so it is the one place a wrapper earns its existence. `list_env` is a read and is
+// still mounted directly.
 
 #[derive(serde::Deserialize)]
 struct OwnerQuery {
@@ -381,16 +444,57 @@ async fn admin_stop_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
+    Json(body): Json<NoteBody>,
 ) -> Result<Response, Response> {
-    super::workspaces::stop_as(&s, &headers, &id).await
+    let c = caller(&s, &headers).await?;
+    let note = require_note(&body.note)?;
+    let out = audited(&s, &c.name, "stop-workspace", &id, Some(note.clone()), super::workspaces::stop_as(&s, &headers, &id).await)
+        .await?;
+    audit(&s, &c.name, "stop-workspace", &id, Some(note), "ok").await;
+    Ok(out)
 }
 
 async fn admin_delete_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
+    Json(body): Json<NoteBody>,
 ) -> Result<Response, Response> {
-    super::workspaces::delete_as(&s, &headers, &id).await
+    let c = caller(&s, &headers).await?;
+    let note = require_note(&body.note)?;
+    let out =
+        audited(&s, &c.name, "delete-workspace", &id, Some(note.clone()), super::workspaces::delete_as(&s, &headers, &id).await)
+            .await?;
+    audit(&s, &c.name, "delete-workspace", &id, Some(note), "ok").await;
+    Ok(out)
+}
+
+async fn admin_stop_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<NoteBody>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let note = require_note(&body.note)?;
+    let r = super::environments::stop_env(State(s.clone()), headers.clone(), Path(id.clone())).await;
+    let out = audited(&s, &c.name, "stop-environment", &id, Some(note.clone()), r).await?;
+    audit(&s, &c.name, "stop-environment", &id, Some(note), "ok").await;
+    Ok(out)
+}
+
+async fn admin_delete_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<NoteBody>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let note = require_note(&body.note)?;
+    let r = super::environments::delete_env(State(s.clone()), headers.clone(), Path(id.clone())).await;
+    let out = audited(&s, &c.name, "delete-environment", &id, Some(note.clone()), r).await?;
+    audit(&s, &c.name, "delete-environment", &id, Some(note), "ok").await;
+    Ok(out)
 }
 
 // ── workload rolls ──────────────────────────────────────────────────────
@@ -444,7 +548,16 @@ async fn roll_workload_route(
     }
     let target = format!("{scope}/{name}");
     let scope = parse_scope(&scope);
-    super::workloads::roll_readers(&s, &scope, &[name.as_str()], super::workloads::RollReason::Manual(reason.clone()), &c.name).await?;
+    audited(
+        &s,
+        &c.name,
+        "roll",
+        &target,
+        Some(reason.clone()),
+        super::workloads::roll_readers(&s, &scope, &[name.as_str()], super::workloads::RollReason::Manual(reason.clone()), &c.name)
+            .await,
+    )
+    .await?;
     // The roll already happened; `workload_doc` below is only a read for the response, so a row
     // must land before it in case that read fails.
     audit(&s, &c.name, "roll", &target, Some(reason), "ok").await;

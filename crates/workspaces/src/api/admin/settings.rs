@@ -118,9 +118,15 @@ fn central_boot_fields(current: &StoredCentralSettings, patch: &StoredCentralSet
 pub(crate) async fn put_central(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
-    Json(patch): Json<StoredCentralSettings>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
+    // The note rides ALONGSIDE the fields rather than wrapping them: `StoredCentralSettings` sets
+    // no `deny_unknown_fields`, so an extra key is ignored on the way in and the body stays the
+    // same flat shape the server tier's own route already forwards.
+    let note = super::require_note(body.get("note").and_then(|v| v.as_str()).unwrap_or_default())?;
+    let patch: StoredCentralSettings =
+        serde_json::from_value(body).map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response())?;
     if let Err(msg) = validate_stored(&patch) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response());
     }
@@ -176,7 +182,7 @@ pub(crate) async fn put_central(
     for (field, scope, reader) in roll_targets {
         let _ = workloads::roll_readers(&s, &scope, &[reader], RollReason::Setting(field), &c.name).await;
     }
-    super::audit(&s, &c.name, "put-central-settings", "central", None, "ok").await;
+    super::audit(&s, &c.name, "put-central-settings", "central", Some(note), "ok").await;
     Ok(Json(body).into_response())
 }
 
@@ -186,8 +192,13 @@ pub(crate) async fn put_central(
 /// `put_central`: precheck boot readers against the target values with nothing written yet,
 /// forward to the server tier's own revert route (which does the actual swap-and-push-history),
 /// then roll for real.
-pub(crate) async fn revert_central(State(s): State<Arc<ApiState>>, headers: axum::http::HeaderMap) -> Result<Response, Response> {
+pub(crate) async fn revert_central(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<super::NoteBody>,
+) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
+    let note = super::require_note(&body.note)?;
     let current = current_central(&s).await?;
     let Some(snap) = current.history.first() else {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "no history to revert to").into_response());
@@ -225,7 +236,7 @@ pub(crate) async fn revert_central(State(s): State<Arc<ApiState>>, headers: axum
     for (field, scope, reader) in roll_targets {
         let _ = workloads::roll_readers(&s, &scope, &[reader], RollReason::Setting(field), &c.name).await;
     }
-    super::audit(&s, &c.name, "revert-central-settings", "central", None, "ok").await;
+    super::audit(&s, &c.name, "revert-central-settings", "central", Some(note), "ok").await;
     Ok(Json(body).into_response())
 }
 
@@ -358,15 +369,21 @@ pub(crate) async fn get_cluster(State(s): State<Arc<ApiState>>, Path(region): Pa
 /// The shared body of `put_cluster` and `revert_cluster`: validate is the CALLER's job (a revert
 /// replays a snapshot that was already valid when it was captured), everything from the boot diff
 /// onward is identical either way.
+struct ClusterWrite<'a> {
+    caller_name: &'a str,
+    action: &'static str,
+    note: String,
+    region: &'a str,
+}
+
 async fn apply_cluster_patch(
     s: &ApiState,
-    caller_name: &str,
-    action: &'static str,
-    region: &str,
+    w: ClusterWrite<'_>,
     client: kube::Client,
     current: crd::ClusterSettings,
     patch: crd::ClusterSettingsSpec,
 ) -> Result<Response, Response> {
+    let ClusterWrite { caller_name, action, note, region } = w;
     let api: Api<crd::ClusterSettings> = Api::all(client);
     let changed = changed_cluster_boot_fields(&current.spec, &patch);
     if !changed.is_empty() {
@@ -375,7 +392,15 @@ async fn apply_cluster_patch(
         readers.dedup();
         // Step: precheck every affected reader — nothing below is written until every one is
         // settled (spec §7's "the CR is not touched").
-        workloads::precheck_readers(s, &Scope::Region(region.to_string()), &readers).await?;
+        super::audited(
+            s,
+            caller_name,
+            action,
+            region,
+            Some(note.clone()),
+            workloads::precheck_readers(s, &Scope::Region(region.to_string()), &readers).await,
+        )
+        .await?;
     }
     let mut ann = current.metadata.annotations.clone().unwrap_or_default();
     push_cluster_history(&current.spec, &mut ann);
@@ -384,10 +409,17 @@ async fn apply_cluster_patch(
     let merged = merge_cluster_spec(current.spec.clone(), &patch);
     let mut apply = crd::ClusterSettings::new("default", merged);
     apply.metadata.annotations = Some(ann);
-    let patched = api
-        .patch("default", &PatchParams::apply(crd::AGENT_FIELD_MANAGER_ADMIN).force(), &Patch::Apply(&apply))
-        .await
-        .map_err(kube_err)?;
+    let patched = super::audited(
+        s,
+        caller_name,
+        action,
+        region,
+        Some(note.clone()),
+        api.patch("default", &PatchParams::apply(crd::AGENT_FIELD_MANAGER_ADMIN).force(), &Patch::Apply(&apply))
+            .await
+            .map_err(kube_err),
+    )
+    .await?;
     // `.ok()`: same reasoning as the central path above — the precheck already refused a
     // conflicting roll, the CR write already landed, and the settings document is the source of
     // truth.
@@ -396,7 +428,7 @@ async fn apply_cluster_patch(
             workloads::roll_readers(s, &Scope::Region(region.to_string()), readers, RollReason::Setting(field), caller_name)
                 .await;
     }
-    super::audit(s, caller_name, action, region, None, "ok").await;
+    super::audit(s, caller_name, action, region, Some(note), "ok").await;
     Ok(Json(patched).into_response())
 }
 
@@ -404,29 +436,50 @@ pub(crate) async fn put_cluster(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(region): Path<String>,
-    Json(patch): Json<crd::ClusterSettingsSpec>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
+    // Same flat shape as `put_central`, for the same reason: `ClusterSettingsSpec` ignores the
+    // extra key, so no wrapper type has to exist on either side of the wire.
+    let note = super::require_note(body.get("note").and_then(|v| v.as_str()).unwrap_or_default())?;
+    let patch: crd::ClusterSettingsSpec =
+        serde_json::from_value(body).map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response())?;
     if let Err(msg) = validate_cluster_patch(&patch) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response());
     }
     let client = super::client_for_region(&s, &region).await?.clone();
     let api: Api<crd::ClusterSettings> = Api::all(client.clone());
     let current = api.get_opt("default").await.map_err(kube_err)?.unwrap_or_else(default_cluster_settings);
-    apply_cluster_patch(&s, &c.name, "put-cluster-settings", &region, client, current, patch).await
+    apply_cluster_patch(
+        &s,
+        ClusterWrite { caller_name: &c.name, action: "put-cluster-settings", note, region: &region },
+        client,
+        current,
+        patch,
+    )
+    .await
 }
 
 pub(crate) async fn revert_cluster(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path((region, n)): Path<(String, usize)>,
+    Json(body): Json<super::NoteBody>,
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
+    let note = super::require_note(&body.note)?;
     let client = super::client_for_region(&s, &region).await?.clone();
     let api: Api<crd::ClusterSettings> = Api::all(client.clone());
     let current = api.get_opt("default").await.map_err(kube_err)?.ok_or_else(not_found)?;
     let ann = current.metadata.annotations.clone().unwrap_or_default();
     let hist = history_from_annotations(&ann);
     let target = hist.get(n).cloned().ok_or_else(not_found)?;
-    apply_cluster_patch(&s, &c.name, "revert-cluster-settings", &region, client, current, target).await
+    apply_cluster_patch(
+        &s,
+        ClusterWrite { caller_name: &c.name, action: "revert-cluster-settings", note, region: &region },
+        client,
+        current,
+        target,
+    )
+    .await
 }
