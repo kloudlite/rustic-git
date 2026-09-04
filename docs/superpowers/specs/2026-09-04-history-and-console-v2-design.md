@@ -18,106 +18,105 @@ Three sub-projects, built in this order because each feeds the next:
   raised by users, decided by superadmins.
 - **C. Console v2** — the ten approved screens, full-width, every number backed by A or B.
 
-## A. History layer
+## A. History layer — on ClickStack
+
+Owner (2026-09-04): "use clickstack for monitoring". ClickStack is ClickHouse's open-source
+observability stack: ClickHouse + an OpenTelemetry collector (the ClickHouse exporter) +
+HyperDX (UI, search, dashboards, alerts) + MongoDB for HyperDX's own state. We deploy it with
+the official Helm charts (`https://clickhouse.github.io/ClickStack-helm-charts`:
+`clickstack-operators`, then `clickstack`) on AKS in a `clickstack` namespace, and we do NOT
+write a monitor binary or our own metrics tables: telemetry arrives through OpenTelemetry,
+lands in the exporter's standard tables, and both HyperDX and our console read them.
 
 ### A1. Store
 
-One ClickHouse server, `rustic-git-clickhouse`, a StatefulSet with one replica in the
-`rustic-git` namespace on AKS, image `clickhouse/clickhouse-server` pinned by digest, one
-PVC (`managed-csi`, 100 Gi, resizable), HTTP port 8123 and native 9000 exposed only as a
-ClusterIP Service. Credentials in Secret `rustic-git-clickhouse` (`url`, `user`, `password`);
-`RUSTIC_GIT_CLICKHOUSE_URL` is optional everywhere — a process without it runs exactly as
-today and the console shows "history unavailable" where a series would be.
+ClickHouse from the chart (one replica, 100 Gi PVC on `managed-csi`, ClusterIP only). Two
+databases:
 
-**The admin process is the only writer** (`bins/api`, role `admin`), through ClickHouse's HTTP
-interface with `reqwest` (already a dependency) — inserts as `JSONEachRow` batches, queries as
-`JSONCompact`. No ORM, no new crate. It owns the schema: at boot it runs the numbered
-migrations in `crates/workspaces/src/history/schema.rs` (`CREATE TABLE IF NOT EXISTS`, recorded
-in `schema_migrations`), so a fresh ClickHouse becomes usable with no manual step.
+- `default` — the OTel exporter's tables, owned by the collector: `otel_metrics_gauge`,
+  `otel_metrics_sum`, `otel_metrics_histogram`, `otel_logs`, `otel_traces`
+  (`TimeUnix`, `MetricName`, `Value`, `Attributes`, `ResourceAttributes`, …). Retention is the
+  exporter's `ttl` (30 d for raw metrics) plus a materialized 5-minute rollup we add
+  (`rustic.metrics_5m`, 400 d) for the long sparklines.
+- `rustic` — ours, owned by the admin process (`bins/api`, role `admin`, the only writer of
+  this database, migrations at boot from `crates/workspaces/src/history/schema.rs`):
+  `events` (ReplacingMergeTree on `id`; `ts, kind, actor, owner, target, region, attrs`;
+  no TTL — the record), `usage_hourly` (`owner, is_team, dimension, used, limit`; 2 y),
+  `fleet_hourly` (`region, nodes_total, nodes_ready, agents_ready, live_workspaces,
+  live_environments, snapshots, disk_gb, cpu, memory_gb, pool_used_bytes, pool_total_bytes`;
+  2 y), `alerts` (ReplacingMergeTree; `region, rule, state, detail`; 400 d).
 
-Tables (all `MergeTree`, partitioned by month, ordered as noted):
+Credentials: the chart's ClickHouse secret; the admin process gets `RUSTIC_GIT_CLICKHOUSE_URL`
+(HTTP, 8123, user with rights on `rustic` and read on `default`). Optional everywhere — a
+process without it runs as today and the console shows "history unavailable" for a series.
+Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in,
+`JSONCompact` out); no new crate.
 
-| table | row | order | TTL |
-|---|---|---|---|
-| `events` | `ts DateTime64(3)`, `id String` (dedupe key), `kind LowCardinality`, `actor`, `owner`, `target`, `region`, `attrs String` (JSON) | `(kind, ts)` | none — this is the record |
-| `samples` | `ts DateTime`, `region`, `node`, `workload`, `pod`, `metric LowCardinality`, `labels String`, `value Float64` | `(region, metric, node, ts)` | 30 days |
-| `samples_5m` | materialized view over `samples`: 5-minute `avg/max/last` per `(region, metric, node, workload, labels)` | same | 400 days |
-| `usage_hourly` | `ts`, `owner`, `is_team`, `dimension`, `used`, `limit` | `(owner, dimension, ts)` | 2 years |
-| `fleet_hourly` | `ts`, `region`, `nodes_total`, `nodes_ready`, `agents_ready`, `live_workspaces`, `live_environments`, `snapshots`, `disk_gb`, `cpu`, `memory_gb`, `pool_used_bytes`, `pool_total_bytes` | `(region, ts)` | 2 years |
-| `alerts` | `ts`, `region`, `rule`, `state` (firing/ok/unknown), `detail` | `(region, rule, ts)` | 400 days |
+### A2. Telemetry: OpenTelemetry collectors, no custom monitor
 
-`events` and `alerts` are `ReplacingMergeTree` on their `id` so at-least-once delivery never
-double-counts; every reader queries `FINAL` or groups by `id`.
+- **Gateway collector** — the chart's OTel collector in `clickstack` (OTLP gRPC 4317 / HTTP
+  4318, `authorization: <ingestion API key>` from HyperDX Team Settings; the key lives in
+  Secret `rustic-git-otel` and is what every sender uses). Exposed to the regions through an
+  Ingress path `otel.dev.kloudlite.io` (TLS, HTTP/2 for gRPC) — the k3s clusters cannot reach
+  a ClusterIP on AKS.
+- **Agent collectors** — the official `opentelemetry-collector-contrib` as a Deployment in
+  every cluster (`deploy/k3s/otel-agent.yaml` per region; the same manifest in `rustic-git`
+  on AKS), config in a ConfigMap: `prometheus` receiver scraping every pod annotated
+  `prometheus.io/scrape: "true"` (`kubernetes_sd_configs`, 15 s), `k8s_cluster` and
+  `kubeletstats` receivers for node/pod CPU, memory and filesystem, `k8sattributes` +
+  `resource` processors stamping `region`, `batch`, and an `otlphttp` exporter to the
+  gateway with the key. RBAC for service discovery in a header-table Role like the agent's.
+  A collector that cannot reach the gateway retries with its own queue; nothing of ours
+  buffers.
+- **Logs** — the same agent collectors ship pod logs (`filelog` receiver on
+  `/var/log/pods`) so HyperDX has logs beside metrics; our binaries keep plain `tracing`
+  output, unchanged.
+- **Node gauges** — `rustic-git-agent` gains a 15 s stats beat on its own `/metrics`:
+  `node_pool_bytes_total`, `node_pool_bytes_used` (btrfs usage of the pool),
+  `node_working_copies_running`. CPU, memory and load come from `kubeletstats`, not from us.
 
-### A2. Feeds
+### A3. Alerts
 
-**Redis stream consumer.** The existing `events` stream (`crates/storage/src/events.rs`, PR
-and merge events) gets a second consumer group, `history`, read by the admin process with
-`XREADGROUP` + periodic `XAUTOCLAIM` exactly as the worker does; a batch is `XACK`ed only after
-its ClickHouse insert returns 200. The stream stays what CLAUDE.md says it is — a nudge, never
-the record: if Redis is down the consumer idles and the beats below keep writing.
+The catalogue in `deploy/alerts.md` is evaluated in two places on purpose: HyperDX alerts
+(saved searches with thresholds, notifying by webhook/email — the operator's pager) are
+created once from the catalogue and documented beside it; and the admin process evaluates the
+same rules every 30 s as SQL over `otel_metrics_*` with real `for` windows, writing state
+transitions to `rustic.alerts`, which is what the console's Signals table and Overview read.
+Two evaluators, one catalogue, so a difference is a bug in one of them, never a mystery.
+The previous on-request scrape (`GET /admin/monitoring/signals`) keeps its response shape and
+reads `rustic.alerts`; a region with no collector reporting shows every rule `unknown`.
 
-**Kubernetes watches.** The admin process runs one reflector per region (and one for
-central) over `Workspace`, `Environment`, `Snapshot`, `Volume`, `QuotaRequest`/`Request`,
-`Region`, `ClusterSettings` and `Node`, and turns transitions into `events` rows:
-`workspace.created/started/stopped/deleted`, `environment.*`, `snapshot.ready/deleted`,
-`volume.moved/released/unavailable`, `request.opened/approved/denied`, `region.activated/
-deactivated`, `node.ready/notready/draining/drained/cordoned`. The event `id` is
-`{uid}:{resourceVersion}:{transition}`, so a restart replaying the watch is idempotent.
+### A4. Feeds into `rustic`
 
-**Audit.** Every audit row the admin process writes (`crate::audit::record`) is also an
-`events` row (`kind = "admin.<action>"`). The object-store audit log stays the append-only
-legal record; ClickHouse is the queryable copy.
+Unchanged from the first draft: the Redis `events` stream consumer group `history` in the
+admin process (XREADGROUP/XAUTOCLAIM as the worker, XACK after insert — the stream stays a
+nudge, never the record); per-region Kubernetes watches turning CRD/Node transitions into
+`events` rows with idempotent ids (`{uid}:{resourceVersion}:{transition}`); audit rows dual-
+written as `admin.<action>` events; hourly `usage_hourly` and `fleet_hourly` beats computed
+from CRDs every run.
 
-**Beats.** The admin process runs an hourly `usage_hourly` beat (the `owners::fleet` fold,
-one row per owner per dimension) and an hourly `fleet_hourly` beat (the `clusters` fold plus
-the latest node pool gauges). Both compute from CRDs on every run — nothing is derived from an
-earlier row.
+### A5. History API
 
-**Monitors.** A new binary, `rustic-git-monitor`, runs as a one-replica Deployment in every
-cluster (k3s `kube-system` per region, and `rustic-git` on AKS for the central tier). Every
-15 s it lists pods annotated `prometheus.io/scrape: "true"` in its cluster (RBAC: `pods`
-get/list), scrapes each `/metrics`, and ships the samples to central as one batch:
-`POST /ingest/v1/samples` on the admin process, authenticated with the region's peer secret
-(`RUSTIC_GIT_PEER_SECRET`, the same secret the agents use), never the superadmin claim. It
-also evaluates the alert catalogue in `deploy/alerts.md` **with real windows** (it keeps the
-last 15 minutes of samples in memory) and posts state transitions to `POST /ingest/v1/alerts`.
-The ingest router is mounted on the admin process OUTSIDE `refuse_without_claim`, on its own
-path prefix, and reaches k3s through a new Ingress path `dev.kloudlite.io/ingest/*` →
-`rustic-git-admin` (the web Ingress host; the admin process still has no Ingress of its own for
-`/admin/*`). Payloads are bounded (1 MiB, 5 000 rows) and a monitor that cannot reach central
-buffers up to 15 minutes then drops oldest.
-
-**Node gauges.** `rustic-git-agent` gains a 15 s stats beat exposing, on its own `/metrics`:
-`node_pool_bytes_total`, `node_pool_bytes_used` (btrfs filesystem usage of the pool),
-`node_cpu_cores`, `node_memory_bytes_total`, `node_memory_bytes_available`, `node_load1`,
-`node_working_copies_running`. The monitor scrapes them like any other metric, which is how a
-region's disk pool, CPU and memory bars get real numbers.
-
-The on-request scrape from the previous plan (`GET /admin/monitoring/signals`) is retired:
-signals are read from `alerts` (current state = latest row per rule) and workload restarts
-from `samples`. A cluster with no monitor yet shows every rule `unknown` with the reason
-"no monitor reporting for this region".
-
-### A3. History API
-
-`GET /admin/history/{series}?range=7d|30d|90d&step=1h|1d&region=&owner=` returns
-`{ series: [{ts, value}], summary: {last, delta, min, max} }` for a fixed set of named series
-the console needs (`pending_requests`, `firing_signals`, `owners_over_80`, `live_workspaces`,
+`GET /admin/history/{series}?range=7d|30d|90d&step=1h|1d&region=&owner=` →
+`{ series: [{ts, value}], summary: {last, delta, min, max} }` for the fixed series the console
+needs (`pending_requests`, `firing_signals`, `owners_over_80`, `live_workspaces`,
 `live_environments`, `decided_requests`, `time_to_decide_p50`, `pool_used`, `cpu_used`,
-`memory_used`, `restarts`, `audit_events`, plus `usage:{owner}:{dimension}`). Each series is
-one SQL statement in `history/series.rs`; an unknown series is 404; a missing ClickHouse is
-`503 history unavailable`, which the web renders as a flat placeholder, never an error page.
-`GET /admin/history/events?kind=&owner=&region=&from=&to=&cursor=` pages the events table
-(the timelines on Overview, Owner and Cluster).
+`memory_used`, `restarts`, `audit_events`, `usage:{owner}:{dimension}`); each series is one
+SQL statement in `history/series.rs` over `rustic.*` or `otel_metrics_*`; unknown series 404;
+no ClickHouse → `503 history unavailable` (the web renders a flat placeholder).
+`GET /admin/history/events?kind=&owner=&region=&from=&to=&cursor=` pages `rustic.events`.
+A "Open in HyperDX" link on Monitoring uses `RUSTIC_GIT_HYPERDX_URL` when set.
 
-### A4. Deploy
+### A6. Deploy
 
-`deploy/rustic-git.yaml` gains the ClickHouse StatefulSet, Service and PVC, the monitor
-Deployment for AKS, the Ingress path, and `RUSTIC_GIT_CLICKHOUSE_URL` on the admin Deployment.
-`deploy/k3s/monitor.yaml` (Deployment + ServiceAccount + Role for `pods` get/list in every
-namespace) is applied per region; `agent-peer.yaml`'s metrics NetworkPolicy is widened to admit
-the monitor's namespace. `deploy/alerts.md` gains a column "evaluated by monitor since v2".
+`deploy/clickstack/` — the two Helm value files (operators, clickstack: one ClickHouse
+replica with the PVC, HyperDX behind `hyperdx.dev.kloudlite.io` gated to superadmin emails at
+the Ingress, the gateway collector with its Ingress), a README with the exact `helm` commands
+and the one manual step (create the ingestion API key, store it in `rustic-git-otel`).
+`deploy/rustic-git.yaml`: `RUSTIC_GIT_CLICKHOUSE_URL` and `RUSTIC_GIT_HYPERDX_URL` on the admin
+Deployment, the AKS agent collector. `deploy/k3s/otel-agent.yaml` per region;
+`agent-peer.yaml`'s metrics NetworkPolicy admits the collector's namespace. `deploy/alerts.md`
+gains the HyperDX alert definitions.
 
 ## B. Generic requests
 
@@ -169,15 +168,15 @@ before merge; the e2e script gains one assertion per history series.
 
 ## Not doing
 
-Prometheus/Grafana (the monitor covers alerting; Grafana can point at ClickHouse later);
+Prometheus/Grafana (ClickStack replaces both);
 per-owner region gating in placement (B records the grant, placement follows in a later spec);
 multi-node ClickHouse; retention below the TTLs above.
 
 ## Decisions to confirm (defaults applied if unchanged)
 
-1. ClickHouse in-cluster on AKS, single node, 100 Gi PVC (vs a managed service).
-2. Monitor ships to central through `dev.kloudlite.io/ingest/*` with the peer secret (vs a
-   per-region ClickHouse or a VPN).
+1. ClickStack via the official Helm charts on AKS, one ClickHouse replica, 100 Gi PVC (vs Managed ClickStack in ClickHouse Cloud).
+2. Regions ship telemetry to the ClickStack gateway collector at `otel.dev.kloudlite.io`
+   with the HyperDX ingestion key (vs a per-region ClickHouse or a VPN).
 3. Retention: samples 30 d raw / 400 d at 5-minute rollup; usage and fleet 2 y; events forever.
 4. `Request` replaces `QuotaRequest` (old objects readable, migrated once, retired later).
 5. Region requests are recorded grants until per-owner region gating exists.
