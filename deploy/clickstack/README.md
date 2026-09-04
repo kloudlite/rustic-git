@@ -119,3 +119,15 @@ way to tell which is right.
 Losing ClickHouse loses history and nothing else — no repository, workspace, snapshot or quota
 lives here. Reinstall the chart, let the admin process re-migrate, and accept the gap. That is why
 one replica is enough.
+
+## Azure Monitor: Cosmos and Redis
+
+The AKS cluster collector (`kloudlite-git-otel-cluster` in `deploy/kloudlite-git.yaml`) pulls the
+two managed dependencies through the `azuremonitor` receiver — the directory's Cosmos account and
+the Redis every server and worker nudges through. It authenticates with the service principal
+`kloudlite-git-azuremonitor` (Monitoring Reader on kolomi-rg), whose credentials live in the
+Secret `kloudlite-git-azuremonitor` (`tenant`, `client-id`, `client-secret`, `subscription`).
+Created 2026-09-04 with `az ad sp create-for-rbac --role "Monitoring Reader" --scopes <rg id>`;
+rotate by re-running that and replacing the Secret. Metrics land as `azure_<metric>_<aggregation>`
+(`azure_totalrequestunits_total`, `azure_usedmemorypercentage_maximum`, …) with `region=central`.
+Cosmos metrics exist at a five-minute grain only, hence the second receiver instance.

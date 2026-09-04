@@ -1206,10 +1206,57 @@ data:
     receivers:
       k8s_cluster:
         collection_interval: 30s
+      # The two managed dependencies every request touches: the directory's Cosmos account and
+      # the Redis every server and worker nudges through. Azure Monitor is the only place their
+      # numbers exist, read with a Monitoring Reader service principal (Secret
+      # kloudlite-git-azuremonitor, deploy/clickstack/README.md). Named metrics with one
+      # aggregation each: a blanket pull is every metric times five aggregations of nothing.
+      # Two instances because the grain comes from `collection_interval` and Azure answers 501
+      # when a resource type has no metric at that grain: Cosmos metrics exist at PT5M only.
+      azuremonitor/redis:
+        subscription_ids: ["9941afe7-e220-492f-bfab-63f539dc0b69"]
+        tenant_id: ${env:AZURE_TENANT_ID}
+        client_id: ${env:AZURE_CLIENT_ID}
+        client_secret: ${env:AZURE_CLIENT_SECRET}
+        resource_groups: [kolomi-rg]
+        services: [Microsoft.Cache/redisEnterprise]
+        collection_interval: 60s
+        initial_delay: 1s
+        metrics:
+          Microsoft.Cache/redisEnterprise:
+            connectedclients: [maximum]
+            totalcommandsprocessed: [total]
+            cachehits: [total]
+            cachemisses: [total]
+            evictedkeys: [total]
+            usedmemory: [maximum]
+            usedmemorypercentage: [maximum]
+            serverLoad: [maximum]
+            percentProcessorTime: [maximum]
+            cacheLatency: [average]
+            operationsPerSecond: [maximum]
+            geoReplicationHealthy: [minimum]
+      azuremonitor/cosmos:
+        subscription_ids: ["9941afe7-e220-492f-bfab-63f539dc0b69"]
+        tenant_id: ${env:AZURE_TENANT_ID}
+        client_id: ${env:AZURE_CLIENT_ID}
+        client_secret: ${env:AZURE_CLIENT_SECRET}
+        resource_groups: [kolomi-rg]
+        services: [Microsoft.DocumentDB/databaseAccounts]
+        collection_interval: 300s
+        initial_delay: 5s
+        metrics:
+          Microsoft.DocumentDB/databaseAccounts:
+            TotalRequests: [count]
+            TotalRequestUnits: [total]
+            NormalizedRUConsumption: [maximum]
+            ServerSideLatency: [average]
+            ServiceAvailability: [average]
+            MongoRequests: [count]
+            DataUsageV2: [total]
+            DocumentCountV2: [total]
 
     processors:
-      # `region` only. NO `k8s.node.name` here: these metrics describe every node in the cluster
-      # and already carry the right one per datapoint — stamping this pod's would be a lie.
       resource:
         attributes:
           - { key: region, value: "${env:KLOUDLITE_GIT_REGION}", action: upsert }
@@ -1228,7 +1275,7 @@ data:
     service:
       pipelines:
         metrics:
-          receivers: [k8s_cluster]
+          receivers: [k8s_cluster, azuremonitor/redis, azuremonitor/cosmos]
           processors: [resource, batch]
           exporters: [otlphttp]
 ---
@@ -1304,11 +1351,20 @@ spec:
       serviceAccountName: kloudlite-git-otel-agent
       containers:
         - name: collector
-          image: otel/opentelemetry-collector-contrib:0.109.0@sha256:af0f72b2d2493fc17f06cf3bc136548240cd7ebb2c8b1c8a7be6f3eb03068389
+          # Newer than the DaemonSet's 0.109.0 on purpose: `azuremonitor` grew its per-metric
+          # allow-list after 0.109, and this collector runs no kubeletstats, so the utilization-metric
+          # reason for the old pin does not apply here.
+          image: otel/opentelemetry-collector-contrib:0.128.0@sha256:1ab0baba0ee3695d823c46653d8a6e8894896e668ce8bd7ebe002e948d827bc7
           args: ["--config=/conf/config.yaml"]
           env:
             - name: KLOUDLITE_GIT_REGION
               value: central
+            - name: AZURE_TENANT_ID
+              valueFrom: { secretKeyRef: { name: kloudlite-git-azuremonitor, key: tenant } }
+            - name: AZURE_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: kloudlite-git-azuremonitor, key: client-id } }
+            - name: AZURE_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-git-azuremonitor, key: client-secret } }
             - name: OTEL_INGESTION_KEY
               valueFrom: { secretKeyRef: { name: kloudlite-git-otel, key: key } }
           volumeMounts:
