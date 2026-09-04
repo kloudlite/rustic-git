@@ -29,7 +29,10 @@ pub(crate) async fn audit(
     reason: Option<String>,
     result: &'static str,
 ) {
-    let Some(store) = s.keys.as_ref() else { return };
+    let Some(store) = s.keys.as_ref() else {
+        tracing::warn!(actor, action, target, "audit row not written: no object store configured");
+        return;
+    };
     let entry = crate::audit::AuditEntry {
         ts: chrono::Utc::now().to_rfc3339(),
         actor: actor.to_string(),
@@ -224,9 +227,11 @@ async fn approve_quota_request(
         None => crate::quota::effective(client, &owner, team).await.map_err(kube_err)?,
     };
     write_quota(&s, &owner, overlay(base, &r.spec.requested)).await?;
-    let out = decide(&s, &id, crd::RequestState::Approved, &c.name, note.note.clone()).await?;
-    audit(&s, &c.name, "approve", &owner, note.note, "ok").await;
-    Ok(out)
+    // The grant above is the consequential write; `decide` only marks the request, and if IT
+    // fails the quota still landed — the row must survive that, so it's recorded here rather than
+    // after the second fallible call.
+    audit(&s, &c.name, "approve", &owner, note.note.clone(), "ok").await;
+    decide(&s, &id, crd::RequestState::Approved, &c.name, note.note).await
 }
 
 /// Deny: mark the request only, no `Quota` write.
@@ -415,7 +420,9 @@ async fn roll_workload_route(
     let target = format!("{scope}/{name}");
     let scope = parse_scope(&scope);
     super::workloads::roll_readers(&s, &scope, &[name.as_str()], super::workloads::RollReason::Manual(reason.clone()), &c.name).await?;
-    let row = super::workloads::workload_doc(&s, &scope, &name).await?;
+    // The roll already happened; `workload_doc` below is only a read for the response, so a row
+    // must land before it in case that read fails.
     audit(&s, &c.name, "roll", &target, Some(reason), "ok").await;
+    let row = super::workloads::workload_doc(&s, &scope, &name).await?;
     Ok(Json(row).into_response())
 }

@@ -1,5 +1,5 @@
-#[cfg(feature = "testkit")]
 pub mod audit;
+#[cfg(feature = "testkit")]
 pub mod kube_test;
 pub mod k8s;
 pub mod packages;
