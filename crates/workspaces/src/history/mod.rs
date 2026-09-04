@@ -21,6 +21,7 @@ pub mod alerts;
 pub mod beats;
 pub mod events;
 pub mod schema;
+pub mod series;
 pub mod watch;
 
 use std::time::Duration;

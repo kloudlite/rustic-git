@@ -13,6 +13,7 @@ use axum::extract::Path;
 
 mod audit;
 pub(crate) mod clusters;
+mod history;
 pub mod monitoring;
 pub(crate) mod owners;
 mod overview;
@@ -176,6 +177,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/settings/clusters/{region}/revert/{n}", post(settings::revert_cluster))
         .route("/admin/settings/schema", get(schema::get_schema))
         .route("/admin/monitoring/signals", get(monitoring::signals))
+        .route("/admin/history/events", get(history::events))
+        // AFTER `/admin/history/events`, so the literal path wins over the `{series}` capture.
+        .route("/admin/history/{series}", get(history::series))
         .route("/admin/audit", get(audit::list_audit))
         .route("/admin/audit.csv", get(audit::audit_csv))
         // The claim check runs BEFORE every route above, not per-handler: `route_layer` wraps only
