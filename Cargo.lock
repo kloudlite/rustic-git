@@ -3804,6 +3804,7 @@ dependencies = [
  "kloudlite-git-workspaces",
  "kube",
  "libc",
+ "metrics",
  "object_store",
  "rand 0.8.7",
  "reqwest",
