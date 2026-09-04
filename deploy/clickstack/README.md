@@ -84,7 +84,7 @@ kubectl -n clickstack get svc   # ClickHouse is `clickstack-clickhouse-clickhous
 ```sql
 CREATE USER IF NOT EXISTS rustic IDENTIFIED BY '<password>';
 GRANT SELECT ON default.* TO rustic;
-GRANT CREATE, INSERT, SELECT, ALTER ON rustic.* TO rustic;
+GRANT CREATE, INSERT, SELECT, ALTER, DROP TABLE ON rustic.* TO rustic;   -- DROP: an engine change rebuilds a table beside itself and swaps (migrations 8-15)
 ```
 
 Then, in the AKS namespace the admin process runs in:

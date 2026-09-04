@@ -301,12 +301,11 @@ async fn run() -> Result<()> {
                             )
                             .await
                         });
-                        // One watch set per cluster this process can reach. `state.kube` is a
-                        // region's k3s (the mounted kubeconfig, the same client `client_for_region`
-                        // hands out) and `state.aks` is this cluster, where `Region` objects live —
-                        // the split every admin handler already makes, reused rather than a second
-                        // client to keep in step. A cluster that is absent simply gets no watch:
-                        // history is optional, and boot never waits on one.
+                        // Every watch runs against `state.kube` — the region's k3s through the
+                        // mounted kubeconfig, the same client `client_for_region` hands out —
+                        // because that is where every CRD of ours, `Region` included, lives. A
+                        // missing client simply means no watch: history is optional, and boot
+                        // never waits on one.
                         // No fallback name: every row a watch writes is STAMPED with the region,
                         // so `"default"` on a cluster that is really `eu-west` mislabels history
                         // permanently. A missing watch only leaves a gap an operator closes by
@@ -326,9 +325,10 @@ async fn run() -> Result<()> {
                                 "RUSTIC_GIT_REGION unset: region history watches not started"
                             ),
                         }
-                        // `watch_central`, not `watch_region`: this cluster holds `Region` and
-                        // nothing else of ours, and a workspace watch against it 404s forever.
-                        if let Some(k) = state.aks.clone() {
+                        // `Region` objects live in the same k3s cluster as everything else
+                        // (`/v1/regions` writes through the mounted kubeconfig); this AKS cluster
+                        // holds none of our CRDs, so a watch against `state.aks` 404s forever.
+                        if let Some(k) = state.kube.clone() {
                             let h = h.clone();
                             tokio::spawn(rustic_git_workspaces::history::watch::watch_central(
                                 k, h,
