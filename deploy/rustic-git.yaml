@@ -55,7 +55,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:76b1e2c1155ab2a669f958a38e1f06cc136b80c0@sha256:ffb69bcc8f19ce2c975fb33c1063e581432cf079a8090ee091eff84a0c77fa9e
+          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
           args: ["serve"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -390,7 +390,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:76b1e2c1155ab2a669f958a38e1f06cc136b80c0@sha256:ffb69bcc8f19ce2c975fb33c1063e581432cf079a8090ee091eff84a0c77fa9e
+          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -564,7 +564,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:76b1e2c1155ab2a669f958a38e1f06cc136b80c0@sha256:ffb69bcc8f19ce2c975fb33c1063e581432cf079a8090ee091eff84a0c77fa9e
+          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
           command: ["rustic-git-worker"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -767,7 +767,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: admin
-          image: ghcr.io/kloudlite/rustic-git:76b1e2c1155ab2a669f958a38e1f06cc136b80c0@sha256:ffb69bcc8f19ce2c975fb33c1063e581432cf079a8090ee091eff84a0c77fa9e
+          image: ghcr.io/kloudlite/rustic-git:24944b2f2e5a54e49f4a910e094b31aa3675df6c@sha256:4822b4c73fb27430bdf022057a6d9db6108cdc2069452b154fb20cef6f920cfe
           command: ["rustic-git-api"]
           ports:
             - { name: http, containerPort: 8090 }
