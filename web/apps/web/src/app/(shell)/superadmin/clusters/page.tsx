@@ -1,76 +1,77 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { AutoRefresh } from "@/components/app/auto-refresh";
-import { AddRegionForm } from "./add-region-form";
 import { PageHeader } from "../page-header";
-import { RegionStatusBadge, SettingsStatusBadge } from "../status-badge";
-import { RegionStatusToggle } from "./region-status";
+import { KpiStrip, KpiTile } from "../ui/kpi";
+import { EmptyState } from "../ui/data-table";
+import { AddRegionForm } from "./add-region-form";
+import { RegionCard } from "./region-card";
 
 export const metadata: Metadata = { title: "Clusters" };
 
-/** One card per region — everything the mockup (`Clusters.dc.html`) asks for without a second
- *  click: agents ready/desired, nodes ready/total plus how many are draining, live working
- *  copies, and whether `ClusterSettings/default` exists for it. Open for the node table. */
+/** `deploy/pin.sh` pins `repo:tag@sha256:hex`; the card wants the readable half. */
+function tagOf(image: string | null): string | null {
+  const ref = image?.split("@")[0];
+  return ref ? (ref.split(":")[1] ?? ref) : null;
+}
+
+/** One section per region — everything `Clusters.dc.html` asks for without a second click: node
+ *  dots, the disk pool, live working copies, the agent image and the settings chip. */
 export default async function ClustersPage() {
   const { token } = await requireSuperadmin("/superadmin/clusters");
-  const r = await api.adminClusters(token);
+  const [r, workloadsR, copies] = await Promise.all([
+    api.adminClusters(token),
+    api.listWorkloads(token),
+    api.adminSeries("live_workspaces", { range: "7d", step: "1d" }, token),
+  ]);
   const rows = r.ok ? r.value : [];
+  const workloads = workloadsR.ok ? workloadsR.value : [];
+  // One `pool_used` read per region: the series is the only place a disk ratio exists.
+  const pools = await Promise.all(
+    rows.map((c) => api.adminSeries("pool_used", { range: "7d", step: "1d", region: c.region }, token)),
+  );
+
+  const nodesReady = rows.reduce((n, c) => n + c.nodesReady, 0);
+  const nodesTotal = rows.reduce((n, c) => n + c.nodesTotal, 0);
+  const agentsReady = rows.reduce((n, c) => n + c.agentsReady, 0);
+  const agentsDesired = rows.reduce((n, c) => n + c.agentsDesired, 0);
+  const draining = rows.reduce((n, c) => n + c.draining, 0);
+  const workingCopies = rows.reduce((n, c) => n + c.workingCopies, 0);
+  const active = rows.filter((c) => c.status === "active").length;
 
   return (
-    <div className="space-y-8">
-      <PageHeader title="Clusters" purpose="Every region and how it is doing. Open one for its nodes and workloads." />
+    <div className="space-y-4">
+      <AutoRefresh />
+      <PageHeader title="Clusters" purpose="Every region this install runs in, and how much room is left in each." />
       {!r.ok && <p className="text-sm2 text-destructive">{r.message}</p>}
 
-      <AutoRefresh />
+      <KpiStrip>
+        <KpiTile label="Regions" value={rows.length} sub={`${active} accepting new work`} />
+        <KpiTile label="Nodes ready" value={`${nodesReady} / ${nodesTotal}`} sub={`${draining} draining · ${nodesTotal - nodesReady} not ready`} />
+        <KpiTile label="Agents ready" value={`${agentsReady} / ${agentsDesired}`} sub="one agent per btrfs-capable node" />
+        <KpiTile label="Draining" value={draining} sub={draining === 0 ? "no node is being retired" : "running work keeps running"} />
+        <KpiTile
+          label="Live working copies"
+          value={workingCopies}
+          sub={copies.available ? "workspaces and environments" : "history unavailable"}
+          series={copies}
+        />
+      </KpiStrip>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {rows.map((c) => (
-          <div key={c.region} className="flex flex-col gap-3 border border-border bg-card p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <Link href={`/superadmin/clusters/${encodeURIComponent(c.region)}`} className="font-mono text-sm2 font-medium">
-                  {c.region}
-                </Link>
-                <RegionStatusBadge status={c.status} />
-              </div>
-              <div className="flex items-center gap-2">
-                <RegionStatusToggle region={c.region} status={c.status} />
-                <Link href={`/superadmin/clusters/${encodeURIComponent(c.region)}`} className="text-caption text-primary">
-                  Open
-                </Link>
-              </div>
-            </div>
-            <div className="grid grid-cols-4 gap-3 text-sm2">
-              <div>
-                <div className="text-caption text-muted-foreground">Agents</div>
-                <div className="font-medium tabular-nums">{c.agentsReady} / {c.agentsDesired}</div>
-              </div>
-              <div>
-                <div className="text-caption text-muted-foreground">Nodes</div>
-                <div className="font-medium tabular-nums">
-                  {c.nodesReady} / {c.nodesTotal}
-                  {c.draining > 0 && <span className="ml-1 text-warning">· {c.draining} draining</span>}
-                </div>
-              </div>
-              <div>
-                <div className="text-caption text-muted-foreground">Live copies</div>
-                <div className="font-medium tabular-nums">{c.workingCopies}</div>
-              </div>
-              <div>
-                <div className="text-caption text-muted-foreground">Settings</div>
-                <SettingsStatusBadge status={c.settingsStatus} />
-              </div>
-            </div>
-          </div>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        {rows.map((c, i) => (
+          <RegionCard
+            key={c.region}
+            region={c}
+            pool={pools[i]}
+            agentImage={tagOf(workloads.find((w) => w.scope === c.region && w.kind === "daemonset")?.image ?? null)}
+          />
         ))}
-        {rows.length === 0 && (
-          <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground md:col-span-2">
-            No regions yet — add one below.
-          </p>
-        )}
       </div>
+      {rows.length === 0 && (
+        <EmptyState>No region is registered yet — add the first one below to start placing work.</EmptyState>
+      )}
 
       <AddRegionForm />
     </div>

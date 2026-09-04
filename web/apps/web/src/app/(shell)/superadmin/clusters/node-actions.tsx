@@ -33,12 +33,13 @@ const VERB_COPY: Record<Verb, { label: string; title: string; second: string }> 
 export function NodeActions({
   region,
   node,
-  decommission,
+  verbs,
   decommissionStatus,
 }: {
   region: string;
   node: string;
-  decommission: boolean;
+  /** From `nodeVerbs` — the caller decides what this node may be asked to do. */
+  verbs: ("drain" | "undrain" | "decommission" | "delete-vm")[];
   decommissionStatus: string | null;
 }) {
   const router = useRouter();
@@ -74,25 +75,25 @@ export function NodeActions({
     });
   }
 
-  if (decommission) {
-    return (
-      <div className="flex items-center justify-end gap-2">
-        {error && <span className="text-caption text-destructive">{error}</span>}
-        <Button type="button" size="sm" variant="outline" onClick={() => open("undrain")}>Undrain</Button>
-        <Button type="button" size="sm" variant="outline" disabled={!isDrained(decommissionStatus)} onClick={() => open("decommission")}>
-          Decommission
-        </Button>
-        {verb && dialog()}
-      </div>
-    );
-  }
-
   return (
-    <div className="flex items-center justify-end gap-2">
+    <>
       {error && <span className="text-caption text-destructive">{error}</span>}
-      <Button type="button" size="sm" variant="outline" onClick={() => open("drain")}>Drain</Button>
+      {verbs.map((v) => (
+        <button
+          key={v}
+          type="button"
+          className="text-sm2 text-muted-foreground hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          // `decommission` is the cordon and nothing more — the `drained` stamp is its gate, and
+          // deleting the VM stays a human step outside this console (CLAUDE.md). So the verb the
+          // mockup calls "Delete VM" is this same button, finally enabled.
+          disabled={v === "decommission" && !isDrained(decommissionStatus)}
+          onClick={() => open(v === "delete-vm" ? "decommission" : v)}
+        >
+          {v === "delete-vm" ? "Decommission" : v[0].toUpperCase() + v.slice(1)}
+        </button>
+      ))}
       {verb && dialog()}
-    </div>
+    </>
   );
 
   function dialog() {
