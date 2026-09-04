@@ -186,6 +186,15 @@ pub async fn effective(c: &kube::Client, owner: &str, team: bool) -> Result<crd:
     if let Some(q) = api.get_opt(owner).await? {
         return Ok(q.spec);
     }
+    // The two default names ARE their kind, regardless of what the directory says about them —
+    // `default-team` is not a real team slug, so `Directory::is_team` answers "no" and a caller
+    // that trusted it would hand the person table to the team defaults page. Override, don't add
+    // a second caller-side check: every caller of `effective` gets this for free.
+    let team = match owner {
+        crd::DEFAULT_TEAM_QUOTA => true,
+        crd::DEFAULT_USER_QUOTA => false,
+        _ => team,
+    };
     let fallback = if team { crd::DEFAULT_TEAM_QUOTA } else { crd::DEFAULT_USER_QUOTA };
     if let Some(q) = api.get_opt(fallback).await? {
         return Ok(q.spec);
@@ -217,6 +226,15 @@ mod tests {
         assert_eq!(refuse(Dim::Workspaces, 5, 5), "workspaces: 5 of 5 in use; request more under Quota");
         assert_eq!(refuse(Dim::DiskGb, 96, 100), "diskGb: 96 of 100 in use; request more under Quota");
         assert_eq!(refuse(Dim::MemoryGb, 32, 32), "memoryGb: 32 of 32 in use; request more under Quota");
+    }
+
+    #[test]
+    fn default_quota_names_are_their_own_kind() {
+        // `default_quota(true/false)` is the compiled-in table used when neither the owner's own
+        // `Quota` nor a `default-*` object exists in the cluster — exactly the no-kube-client path
+        // `effective` falls through to, since these two names never have an owner-named `Quota`.
+        assert_eq!(crd::default_quota(true).workspaces, 20);
+        assert_eq!(crd::default_quota(false).workspaces, 5);
     }
 
     #[test]
