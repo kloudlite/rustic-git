@@ -187,16 +187,18 @@ fn azure_rule(
     count: u64,
     region: &str,
 ) -> String {
-    azure_rule_where(metric, "", agg, bucket_secs, window_secs, bad, count, region)
+    azure_rule_expr(metric, &format!("{agg}(Value)"), bucket_secs, window_secs, bad, count, region)
 }
 
-/// `azure_rule` with an extra `AND …` on the points, for a metric Azure splits by dimension
-/// (`MongoRequests` by `metadata_errorcode`) where only one slice is the signal.
+/// `azure_rule` with the bucket value as a full expression, for a metric Azure splits by
+/// dimension (`MongoRequests` by `metadata_errorcode`) where one slice is the signal. A
+/// `sumIf` over the unfiltered points, not a `WHERE`: the slice is absent when it is zero (no
+/// throttled request means no 16500 point at all), and a filtered query would then return no
+/// row and read as `unknown` rather than `ok`.
 #[allow(clippy::too_many_arguments)]
-fn azure_rule_where(
+fn azure_rule_expr(
     metric: &str,
-    filter: &str,
-    agg: &str,
+    value_expr: &str,
     bucket_secs: u64,
     window_secs: u64,
     bad: &str,
@@ -208,9 +210,9 @@ fn azure_rule_where(
             "SELECT countIf({bad}) AS n FROM (\
                 SELECT toStartOfInterval(TimeUnix, INTERVAL {bucket_secs} SECOND) AS b, \
                        ResourceAttributes['azuremonitor.resource_id'] AS resource, \
-                       {agg}(Value) AS v \
+                       {value_expr} AS v \
                 FROM default.otel_metrics_gauge \
-                WHERE MetricName = '{metric}' {filter} \
+                WHERE MetricName = '{metric}' \
                   AND ResourceAttributes['region'] = '{region}' \
                   AND TimeUnix > now() - INTERVAL {window_secs} SECOND \
                 GROUP BY b, resource) \
@@ -380,7 +382,7 @@ pub const CATALOGUE: &[Rule] = &[
         tier: &[Tier::Central],
         why: "A serverless Mongo account publishes no RU consumption; Azure answers a request over the account's RU ceiling with error code 16500 (429), which the directory client retries and the sign-in path turns into an error. Ten in five minutes is a real ceiling, not a retry.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule_where("azure_mongorequests_count", "AND Attributes['metadata_errorcode'] = '16500'", "sum", 300, 1800, "v >= 10", 1, region),
+        sql: |region| azure_rule_expr("azure_mongorequests_count", "sumIf(Value, Attributes['metadata_errorcode'] = '16500')", 300, 1800, "v >= 10", 1, region),
     },
     Rule {
         name: "CosmosUnavailable",
@@ -392,9 +394,9 @@ pub const CATALOGUE: &[Rule] = &[
     Rule {
         name: "CosmosLatencyHigh",
         tier: &[Tier::Central],
-        why: "Server-side latency is Cosmos' own time, with no network in it; past 100 ms every git request that opens a database pays it.",
+        why: "Server-side latency is what Azure spent on the request, network excluded. A serverless Mongo account idles around 100 ms; 250 ms sustained means the account is being throttled short of a 429 or a partition is hot.",
         for_secs: STEP_SECS,
-        sql: |region| azure_rule("azure_serversidelatency_average", "avg", 300, 1800, "v > 100", 3, region),
+        sql: |region| azure_rule("azure_serversidelatency_average", "avg", 300, 1800, "v > 250", 3, region),
     },
     Rule {
         name: "RedisMemoryHigh",

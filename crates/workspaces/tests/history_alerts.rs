@@ -96,11 +96,11 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         // Azure Monitor's own metrics: one series per Azure resource, bucketed at Azure's publish
         // interval, and the "N of M" counted inside the query rather than as a `for` window.
         ("CosmosThrottled", "otel_metrics_gauge", "azure_mongorequests_count",
-            &["azuremonitor.resource_id", "metadata_errorcode", "16500", "INTERVAL 300 SECOND", "INTERVAL 1800 SECOND", "v >= 10", "max(n) >= 1"]),
+            &["azuremonitor.resource_id", "sumIf(Value, Attributes['metadata_errorcode'] = '16500')", "INTERVAL 300 SECOND", "INTERVAL 1800 SECOND", "v >= 10", "max(n) >= 1"]),
         ("CosmosUnavailable", "otel_metrics_gauge", "azure_serviceavailability_average",
             &["azuremonitor.resource_id", "INTERVAL 3600 SECOND", "INTERVAL 10800 SECOND", "v < 99.9", "max(n) >= 1"]),
         ("CosmosLatencyHigh", "otel_metrics_gauge", "azure_serversidelatency_average",
-            &["azuremonitor.resource_id", "INTERVAL 1800 SECOND", "v > 100", "max(n) >= 3"]),
+            &["azuremonitor.resource_id", "INTERVAL 1800 SECOND", "v > 250", "max(n) >= 3"]),
         ("RedisMemoryHigh", "otel_metrics_gauge", "azure_usedmemorypercentage_maximum",
             &["azuremonitor.resource_id", "INTERVAL 60 SECOND", "INTERVAL 600 SECOND", "v >= 80", "max(n) >= 5"]),
         ("RedisLoadHigh", "otel_metrics_gauge", "azure_serverload_maximum",
