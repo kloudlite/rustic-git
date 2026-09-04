@@ -115,7 +115,7 @@ ENTRYPOINT ["kloudlite-git-gateway"]
 # agent builds per workspace and mounts read-only, so this image stays stock apart from the above.
 # Runtime steps that depend on mounts (chown of the volume, seeding rc files, exec sshd) live in
 # `k8s::prelude`, not here.
-FROM alpine:3.20 AS workspace
+FROM alpine:3.24 AS workspace
 RUN apk add --no-cache libstdc++ libgcc \
     && mkdir -p /var/empty \
     && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
