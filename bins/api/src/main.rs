@@ -349,6 +349,16 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as rustic_git_api::KeysChanged
     });
+    // The hourly folds. Spawned from the admin role only, and only with ClickHouse configured —
+    // the fold itself is a cluster-wide list, and running it hourly for nowhere to write it would
+    // be pure load on the API server.
+    if role == "admin" {
+        if let Some(ws) = workspaces.clone() {
+            if ws.history.is_some() {
+                tokio::spawn(rustic_git_workspaces::history::beats::run_beats(ws));
+            }
+        }
+    }
     // The admin role mounts ONLY `/admin` — no `/v1` route is compiled into that router at all, so
     // a `/v1` authorization bug literally cannot reach an admin handler on that process; the user
     // role mounts ONLY `/v1` and never sees an admin route (design doc §5). `role` was read once,

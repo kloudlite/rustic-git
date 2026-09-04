@@ -46,7 +46,7 @@ use std::sync::Arc;
 pub mod admin;
 mod environments;
 mod push;
-mod scope;
+pub(crate) mod scope;
 mod volumes;
 mod workloads;
 mod workspaces;

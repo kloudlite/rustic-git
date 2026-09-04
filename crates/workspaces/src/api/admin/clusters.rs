@@ -28,8 +28,8 @@ pub(crate) struct ClusterRow {
     pub(crate) status: String,
     pub(crate) agents_ready: i64,
     agents_desired: i64,
-    nodes_ready: i64,
-    nodes_total: i64,
+    pub(crate) nodes_ready: i64,
+    pub(crate) nodes_total: i64,
     draining: i64,
     working_copies: i64,
     /// `present` once a `ClusterSettings/default` exists for the region, `absent` while it is

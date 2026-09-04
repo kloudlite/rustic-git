@@ -28,7 +28,7 @@ pub(crate) struct OwnerRow {
 /// the directory says — the same override `quota::effective` makes, kept in step here so a row
 /// for `default-team` (which can appear if it ever gets its own `QuotaRequest`) does not read as
 /// a person.
-fn team_of(owner: &str, directory_says: bool) -> bool {
+pub(crate) fn team_of(owner: &str, directory_says: bool) -> bool {
     match owner {
         crd::DEFAULT_TEAM_QUOTA => true,
         crd::DEFAULT_USER_QUOTA => false,
@@ -41,7 +41,7 @@ fn team_of(owner: &str, directory_says: bool) -> bool {
 /// read once by the caller, from a listing or a single `get_opt`) instead of reading it again:
 /// `quota::effective` re-runs `get_opt(owner)` internally, which would be a second read of the
 /// same object this module already has in hand.
-fn fallback_quota(quota_by_name: &HashMap<String, crd::QuotaSpec>, team: bool) -> crd::QuotaSpec {
+pub(crate) fn fallback_quota(quota_by_name: &HashMap<String, crd::QuotaSpec>, team: bool) -> crd::QuotaSpec {
     let fallback = if team { crd::DEFAULT_TEAM_QUOTA } else { crd::DEFAULT_USER_QUOTA };
     quota_by_name.get(fallback).cloned().unwrap_or_else(|| crd::default_quota(team))
 }

@@ -12,9 +12,9 @@ use super::*;
 use axum::extract::Path;
 
 mod audit;
-mod clusters;
+pub(crate) mod clusters;
 pub mod monitoring;
-mod owners;
+pub(crate) mod owners;
 mod overview;
 mod schema;
 mod settings;
