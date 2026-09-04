@@ -29,14 +29,34 @@ export async function saveClusterSettings(region: string, patch: Record<string, 
   return { ok: true };
 }
 
-/** One depth only — the most recent prior version (`n = 0`), the one thing a revert button needs;
- *  central has no revert route today (only `ClusterSettings` carries the inline history
- *  annotation), so there is no `revertCentralSettings` to write yet. */
+/** One depth only — the most recent prior version (`n = 0`), the one thing a revert button needs. */
 export async function revertClusterSettingsAction(region: string): Promise<SaveResult> {
   const token = await tokenOr();
   if (typeof token !== "string") return { ok: false, message: token.error };
   const r = await api.revertClusterSettings(region, 0, token);
   if (!r.ok) return { ok: false, message: r.message };
   revalidatePath("/superadmin/settings/clusters");
+  return { ok: true };
+}
+
+/** Central's own single-depth revert (`POST /admin/settings/central/revert`, unblocked by the
+ *  Rust fix at `fd9e851a`) — same shape as the cluster one above. */
+export async function revertCentralSettingsAction(): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.revertCentralSettings(token);
+  if (!r.ok) return { ok: false, message: r.message };
+  revalidatePath("/superadmin/settings");
+  return { ok: true };
+}
+
+/** The Workloads tab's one write: a manual roll with an operator-typed reason. `scope` is
+ *  `"central"` or a region id (`WorkloadDoc.scope`'s own encoding). */
+export async function rollWorkloadAction(scope: string, name: string, reason: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.rollWorkload(scope, name, reason, token);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
+  revalidatePath("/superadmin/settings/workloads");
   return { ok: true };
 }

@@ -125,3 +125,16 @@ export function conflictMessage(raw: string): string {
   }
   return raw;
 }
+
+/** The Workloads tab's one derived label — `WorkloadDoc.rolloutState` is already `"RollingOut"` /
+ *  `"Stable"` from the server, this only adds the ready/desired count the row shows next to it. */
+export function rolloutStateLabel(rolloutState: "RollingOut" | "Stable", ready: number, desired: number): string {
+  return rolloutState === "Stable" ? "Stable" : `Rolling out (${ready}/${desired} ready)`;
+}
+
+/** A workload has settled once it reports ready == desired — the same test the roll-progress rows
+ *  on the Central/Clusters tabs use inline (`rollingReaders` in `settings-table.tsx`), pulled out
+ *  here so the Workloads tab's own poll-until-settled loop shares it instead of re-deriving. */
+export function settled(w: { ready: number; desired: number }): boolean {
+  return w.ready >= w.desired;
+}

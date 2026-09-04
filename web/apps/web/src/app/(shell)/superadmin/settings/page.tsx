@@ -3,7 +3,7 @@ import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { mergeRows } from "@/lib/settings";
 import { SettingsTable } from "./settings-table";
-import { saveCentralSettings } from "./actions";
+import { saveCentralSettings, revertCentralSettingsAction } from "./actions";
 
 export const metadata: Metadata = { title: "Settings" };
 
@@ -26,5 +26,7 @@ export default async function CentralSettingsPage() {
 
   const rows = mergeRows(schemaRes.value.central, valuesRes.value, valuesRes.value.updatedBy, valuesRes.value.updatedAt);
 
-  return <SettingsTable rows={rows} workloads={workloads} onSave={saveCentralSettings} />;
+  return (
+    <SettingsTable rows={rows} workloads={workloads} onSave={saveCentralSettings} onRevert={revertCentralSettingsAction} />
+  );
 }

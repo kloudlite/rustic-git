@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
-  bootReaders, changedFields, conflictMessage, confirmationFor, mergeRows, pendingKeys, type SettingRow,
+  bootReaders, changedFields, conflictMessage, confirmationFor, mergeRows, pendingKeys, rolloutStateLabel, settled,
+  type SettingRow,
 } from "@/lib/settings";
 
 const row = (over: Partial<SettingRow>): SettingRow => ({
@@ -85,4 +86,15 @@ test("mergeRows resolves value from the stored document, falling back to the sch
   );
   expect(rows[0]).toMatchObject({ key: "maxBody", value: 500, defaultValue: 100, lastChangedBy: "alice" });
   expect(rows[1]).toMatchObject({ key: "sshPort", value: 22, mark: "boot", readers: ["rustic-git-gateway"] });
+});
+
+test("rolloutStateLabel shows the ready/desired count only while rolling out", () => {
+  expect(rolloutStateLabel("Stable", 3, 3)).toBe("Stable");
+  expect(rolloutStateLabel("RollingOut", 2, 3)).toBe("Rolling out (2/3 ready)");
+});
+
+test("settled is true once ready catches up to desired", () => {
+  expect(settled({ ready: 2, desired: 3 })).toBe(false);
+  expect(settled({ ready: 3, desired: 3 })).toBe(true);
+  expect(settled({ ready: 4, desired: 3 })).toBe(true);
 });

@@ -1160,13 +1160,11 @@ export function revertClusterSettings(region: string, n: number, token: string) 
   );
 }
 
-/** `crates/workspaces/src/api/workloads.rs::WorkloadDoc`. `scope` is left untyped: its `Region`
- *  variant cannot actually serialize today (an internally-tagged enum tagging a bare `String`
- *  newtype — `serde` refuses it at runtime), a pre-existing bug in that crate this task does not
- *  own; the roll-progress poll below only ever matches on `name`, never on `scope`'s shape, so it
- *  stays correct whether or not that gets fixed. */
+/** `crates/workspaces/src/api/workloads.rs::WorkloadDoc`. `scope` serializes as a plain string
+ *  now (`Scope`'s hand-written `Serialize`) — `"central"` or the bare region id — the fix for the
+ *  internally-tagged-enum panic Task 7 hit is in (`fd9e851a`). */
 export type WorkloadDoc = {
-  scope: unknown;
+  scope: string;
   name: string;
   kind: "statefulset" | "deployment" | "daemonset";
   image: string | null;
@@ -1178,6 +1176,24 @@ export type WorkloadDoc = {
 
 export function listWorkloads(token: string) {
   return adminCall<WorkloadDoc[]>("/admin/workloads", { method: "GET", token });
+}
+
+/** `POST /admin/workloads/{scope}/{name}/roll` — the one write the Workloads tab offers, a
+ *  manual restart with a required reason (`crates/workspaces/src/api/admin.rs::roll_workload_route`
+ *  400s an empty one). `scope` is `"central"` or a region id, same encoding as `WorkloadDoc.scope`. */
+export function rollWorkload(scope: string, name: string, reason: string, token: string) {
+  return adminCall<WorkloadDoc>(`/admin/workloads/${encodeURIComponent(scope)}/${encodeURIComponent(name)}/roll`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/** Symmetric with `revertClusterSettings` — central has only ever had one prior version to revert
+ *  to (`api::admin::settings::revert_central` forwards to the server tier's own single-depth
+ *  history), so there is no `n` to pass. */
+export function revertCentralSettings(token: string) {
+  return adminCall<StoredCentralSettings>("/admin/settings/central/revert", { method: "POST", token });
 }
 
 /** Display-only slice of the central document — `crates/api/src/lib.rs::settings_central`, the
