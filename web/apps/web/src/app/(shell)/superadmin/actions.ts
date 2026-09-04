@@ -191,3 +191,25 @@ export async function adminDeleteEnvironmentAction(owner: string, id: string): P
   revalidatePath(`/superadmin/owners/${encodeURIComponent(owner)}`);
   return { ok: true };
 }
+
+/** Access page's Add — the api 422s an email with no account, or an empty note, and either
+ *  surfaces to the form inline (never a toast: it names which field). */
+export async function addSuperadminAction(email: string, note: string): Promise<WriteResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.addSuperadmin(email, token, note);
+  if (!r.ok) return { ok: false, message: r.message };
+  revalidatePath("/superadmin/access");
+  return { ok: true };
+}
+
+/** Access page's Remove — the api 409s removing yourself or the last row; the client mirrors
+ *  both rules to disable the button, but the api's answer is still what renders on a race. */
+export async function removeSuperadminAction(email: string, note: string): Promise<WriteResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.removeSuperadmin(email, token, note);
+  if (!r.ok) return { ok: false, message: r.message };
+  revalidatePath("/superadmin/access");
+  return { ok: true };
+}

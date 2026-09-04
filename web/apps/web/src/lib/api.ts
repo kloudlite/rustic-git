@@ -1365,11 +1365,21 @@ export function listSuperadmins(token: string) {
   return call<SuperAdmin[]>("/api/admin/superadmins", { method: "GET", token });
 }
 
-export function addSuperadmin(user: string, token: string) {
-  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, { method: "POST", token });
+// A required note (Global Constraint: reason on every write except approve) — the api 422s an
+// empty one, and that message surfaces to the form rather than being swallowed.
+export function addSuperadmin(user: string, token: string, note: string) {
+  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ note }),
+  });
 }
 
-export function removeSuperadmin(user: string, token: string) {
-  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, { method: "DELETE", token });
+export function removeSuperadmin(user: string, token: string, note: string) {
+  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, {
+    method: "DELETE",
+    token,
+    body: JSON.stringify({ note }),
+  });
 }
 
