@@ -32,6 +32,18 @@ pub fn patch(path: impl Into<String>, body: serde_json::Value) -> Route {
     Route { method: "PATCH", path: path.into(), status: 200, body }
 }
 
+/// A create that lost the race — the migration's own idempotence test needs the API server to
+/// answer a repeat `POST` with 409 AlreadyExists, same shape `not_found` gives a missing GET.
+pub fn conflict(method: &'static str, path: impl Into<String>) -> Route {
+    Route {
+        method,
+        path: path.into(),
+        status: 409,
+        body: serde_json::to_value(kube::core::Status::failure("already exists", "AlreadyExists").with_code(409))
+            .expect("Status serializes"),
+    }
+}
+
 pub fn not_found(path: impl Into<String>) -> Route {
     Route {
         method: "GET",

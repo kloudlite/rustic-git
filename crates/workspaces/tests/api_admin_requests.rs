@@ -4,7 +4,8 @@
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{admin::router, ApiState, Directory, GrantAccess, TeamRole};
 use rustic_git_workspaces::kube_test::{
-    get as route_get, mock_client, not_found, patch as route_patch, post as route_post, Recorder, Route,
+    conflict as route_conflict, get as route_get, mock_client, not_found, patch as route_patch,
+    post as route_post, Recorder, Route,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -395,4 +396,36 @@ async fn an_unknown_role_is_refused() {
     let r = post(&format!("{}/admin/requests/req-6/approve", s.base), &admin_token(&s.jwt), json!({"note": "ok"})).await;
     assert_eq!(r.status(), 422);
     assert!(s.dir.granted.lock().unwrap().is_empty());
+}
+
+/// Idempotent by uid: the new object's NAME is derived from the legacy object's uid, so a second
+/// run finds it already there and copies nothing. An operator has to be able to run this twice.
+#[tokio::test]
+async fn the_migration_is_idempotent_by_uid() {
+    let legacy = list_of(
+        "QuotaRequest",
+        vec![json!({
+            "metadata": {"name": "qr-9", "uid": "7f1c1a2e-0000-4000-8000-000000000001",
+                         "creationTimestamp": "2026-09-03T10:00:00Z"},
+            "spec": {"owner": "zoe", "requested": {"cpu": 12}, "reason": "old"},
+            "status": {"state": "pending"}
+        })],
+    );
+    let s = admin_server(vec![
+        route_get(format!("{API}/quotarequests"), legacy),
+        // The API server answers a second create of the same name with 409 AlreadyExists — the
+        // migration's own idempotence, not a check it does itself.
+        route_conflict("POST", format!("{API}/requests")),
+    ])
+    .await;
+    let r =
+        post(&format!("{}/admin/requests/migrate", s.base), &admin_token(&s.jwt), json!({"note": "migrate"})).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["copied"], 0);
+    assert_eq!(body["skipped"], 1);
+    let sent = s.rec.sent("POST", &format!("{API}/requests"));
+    assert_eq!(sent[0]["metadata"]["name"], "q-7f1c1a2e-0000-4000-8000-000000000001");
+    assert_eq!(sent[0]["spec"]["kind"], "quota");
+    assert_eq!(sent[0]["spec"]["quota"]["cpu"], 12);
 }

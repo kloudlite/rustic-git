@@ -118,6 +118,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/quota/{owner}", axum::routing::put(write_quota_route))
         .route("/admin/overview", get(overview::overview_handler))
         .route("/admin/requests", get(list_requests))
+        .route("/admin/requests/migrate", post(migrate_requests))
         .route("/admin/requests/{id}/approve", post(approve_request))
         .route("/admin/requests/{id}/deny", post(deny_request))
         .route("/admin/quota-requests", get(list_all_quota_requests))
@@ -683,6 +684,79 @@ pub(crate) async fn list_requests_inner(s: &ApiState, f: &RequestFilter) -> Resu
 
 async fn list_requests(State(s): State<Arc<ApiState>>, Query(f): Query<RequestFilter>) -> Result<Response, Response> {
     Ok(Json(list_requests_inner(&s, &f).await?).into_response())
+}
+
+/// Copy every legacy `QuotaRequest` into a `Request` of kind quota, once. Idempotent because the
+/// new object's NAME is derived from the old one's uid: a re-run collides on create and skips,
+/// so nothing has to remember whether this already ran.
+///
+/// A route rather than a `kl` subcommand or a boot step: it needs the admin process's cluster
+/// credentials, it must be auditable, and it must be a decision an operator TAKES rather than a
+/// thing that happens to their cluster on a rolling restart. The legacy CRD is retired in a later
+/// release; until then the queue unions both anyway, so running this late costs nothing.
+async fn migrate_requests(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    // The body carries only an operator's note; nothing here reads it, so it is not recorded
+    // beyond the fact that a migration ran (the counts are the reason a reader wants).
+    Json(_body): Json<NoteBody>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let legacy = list_all_quota_requests_inner(&s, &RequestFilter::default()).await?;
+    let api: Api<crd::Request> = Api::all(kube(&s)?.clone());
+    let (mut copied, mut skipped) = (0u32, 0u32);
+    for old in &legacy {
+        let Some(uid) = old.metadata.uid.as_deref() else {
+            // No uid means the object never reached etcd — nothing to copy, and no stable name
+            // to make the copy idempotent under.
+            skipped += 1;
+            continue;
+        };
+        let mut r = crd::Request::new(
+            &format!("q-{uid}"),
+            crd::RequestSpec {
+                owner: old.spec.owner.clone(),
+                kind: crd::RequestKind::Quota,
+                // The old CRD never recorded an author; the owner is who it was for.
+                requested_by: old.spec.owner.clone(),
+                reason: old.spec.reason.clone(),
+                quota: Some(old.spec.requested.clone()),
+                access: None,
+                region: None,
+                other: None,
+            },
+        );
+        r.metadata.labels =
+            Some(std::collections::BTreeMap::from([(OWNER_LABEL.to_string(), old.spec.owner.clone())]));
+        match api.create(&PostParams::default(), &r).await {
+            Ok(_) => copied += 1,
+            // Already migrated. The one error this loop swallows on purpose — it is the idempotence.
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                skipped += 1;
+                continue;
+            }
+            Err(e) => return Err(kube_err(e)),
+        }
+        // A migrated copy carries no status, so it reads as pending; a legacy request that was
+        // already decided must not reappear in the pending queue.
+        if let Some(st) = old.status.as_ref() {
+            if st.state != crd::RequestState::Pending {
+                decide_generic(
+                    &s,
+                    &format!("q-{uid}"),
+                    st.state,
+                    st.decided_by.as_deref().unwrap_or(""),
+                    st.note.clone(),
+                    None,
+                )
+                .await?;
+            }
+        }
+    }
+    // The copies already landed; the row goes in before the response is built.
+    audit(&s, &c.name, "requests.migrated", "quotarequests", Some(format!("copied={copied} skipped={skipped}")), "ok")
+        .await;
+    Ok(Json(serde_json::json!({"copied": copied, "skipped": skipped})).into_response())
 }
 
 // ── nodes ────────────────────────────────────────────────────────────────
