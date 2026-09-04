@@ -1,15 +1,18 @@
 "use client";
 
 import { useEffect } from "react";
+import { log, reason } from "@/lib/log";
 import "./globals.css";
 
 /** The boundary UNDER the root layout: what renders when the layout itself threw (a font, the
  *  theme provider), which no route group's `error.tsx` can catch. It replaces the whole document,
  *  so it carries its own `html`/`body` and its own stylesheet, and stays plain — the shell's
  *  Button and tokens come from the tree that just failed. */
+const logger = log("web::global-error");
+
 export default function GlobalError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   // The only place the real error goes; see `(shell)/error.tsx` for why it is not rendered.
-  useEffect(() => console.error(error), [error]);
+  useEffect(() => logger.error("page.render.failed", { boundary: "global", digest: error.digest, error: reason(error) }), [error]);
 
   return (
     <html lang="en">

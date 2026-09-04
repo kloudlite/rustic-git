@@ -1,4 +1,5 @@
 import "server-only";
+import { log } from "@/lib/log";
 
 /** Outbound mail, through Resend's HTTP API. Two emails, one sender.
  *
@@ -49,6 +50,6 @@ async function send(to: string, subject: string, lines: string[]): Promise<SendR
   }).catch((e: unknown) => ({ ok: false, status: 0, text: async () => String(e) }));
   if (r.ok) return { sent: true };
   const detail = (await r.text()).slice(0, 200);
-  console.error("resend", r.status, detail);
+  log("web::lib::mail").error("mail.send.failed", { provider: "resend", status: r.status, detail });
   return { sent: false, reason: "The email could not be sent." };
 }

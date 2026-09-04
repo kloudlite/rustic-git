@@ -5,6 +5,19 @@ import Credentials from "next-auth/providers/credentials";
 import { signIn as apiSignIn } from "@/lib/api";
 import { verifyAssertion } from "@/lib/assertion";
 import { Lockout } from "@/lib/lockout";
+import { log } from "@/lib/log";
+import { count } from "@/lib/metrics";
+
+const logger = log("web::auth");
+
+/** Every refusal counted under the reason it was refused for — a burst of `bad_password` is
+ *  somebody guessing, a burst of `api_unavailable` is our own outage, and a single counter
+ *  would make them the same alert. The address is never a label: that is unbounded, and it is
+ *  personal data sitting in a metrics store forever. */
+function refused(reason: string) {
+  count("auth_failures_total", { reason });
+  logger.warn("auth.signin.failed", { reason });
+}
 
 /** Five wrong preview passwords a minute per account (S-23); see `Lockout` for the ceiling. */
 const lockout = new Lockout(5, 60_000);
@@ -28,16 +41,23 @@ function previewCredentials() {
     authorize(raw) {
       const email = String(raw?.email ?? "").trim().toLowerCase();
       const given = String(raw?.password ?? "");
-      if (!allowed.includes(email)) return null;
+      if (!allowed.includes(email)) {
+        refused("not_allowed");
+        return null;
+      }
       // One secret covers every allow-listed account, so guesses are counted per account and
       // the answer while locked is the same "no" a wrong password gets.
-      if (lockout.locked(email)) return null;
+      if (lockout.locked(email)) {
+        refused("locked");
+        return null;
+      }
       /* Length-independent compare is overkill for a shared preview password, but
          a plain === leaks length through timing and costs nothing to avoid. */
       let diff = given.length === password.length ? 0 : 1;
       for (let i = 0; i < password.length; i++) diff |= given.charCodeAt(i) ^ password.charCodeAt(i);
       if (diff !== 0) {
         lockout.fail(email);
+        refused("bad_password");
         return null;
       }
       lockout.clear(email);
@@ -73,9 +93,15 @@ function assertionProvider(id: string, name: string) {
     credentials: { assertion: {} },
     authorize(raw) {
       const assertion = String(raw?.assertion ?? "");
-      if (!assertion) return null;
+      if (!assertion) {
+        refused("no_assertion");
+        return null;
+      }
       const email = verifyAssertion(assertion);
-      if (!email) return null;
+      if (!email) {
+        refused("bad_assertion");
+        return null;
+      }
       return { id: email, email, name: email.split("@")[0] };
     },
   });
@@ -188,7 +214,8 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
         } else {
           // Signing in must not fail because the directory is briefly down. The
           // session exists with no api token, and the pages that need one say so.
-          console.error("sign-in: api server said", r.kind, r.message);
+          count("auth_failures_total", { reason: "api_unavailable" });
+          logger.error("auth.signin.failed", { reason: "api_unavailable", kind: r.kind, detail: r.message });
         }
       }
       return token;

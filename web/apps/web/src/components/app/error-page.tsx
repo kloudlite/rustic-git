@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect } from "react";
+import { log, reason } from "@/lib/log";
 import { Button } from "@/components/ui/button";
 
 /** The body every route-group error.tsx renders: eyebrow, headline, one reassuring
  *  sentence, the digest, retry. Only the words and the wrapper class differ per
  *  group, so they pass those and nothing else. Client component by Next's rule. */
+const logger = log("web::error-page");
+
 export function ErrorPage({
   error,
   reset,
@@ -21,7 +24,10 @@ export function ErrorPage({
 }) {
   // The only place the real error goes -- a message can carry a handle, a query, a
   // path, a token, a provider response. None of it belongs on screen.
-  useEffect(() => console.error(error), [error]);
+  useEffect(
+    () => logger.error("page.render.failed", { boundary: title, digest: error.digest, error: reason(error) }),
+    [error, title],
+  );
 
   return (
     <div className={className}>

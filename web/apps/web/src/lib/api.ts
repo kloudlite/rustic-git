@@ -6,6 +6,10 @@ import type { QuotaDim, QuotaReport } from "@/lib/quota";
 import { auditQueryString, type AuditEntry, type AuditFilter, type AuditPage } from "@/lib/audit";
 import { FLAT, type HistoryEvent, type HistorySeries, type SeriesName } from "@/lib/history";
 import { fixtureFor } from "@/lib/fixtures/superadmin";
+import { log, reason } from "@/lib/log";
+import { count } from "@/lib/metrics";
+
+const logger = log("web::lib::api");
 
 /**
  * The api server, from the web app's server side only.
@@ -69,6 +73,9 @@ async function callAgainst<T>(
     if (seeded !== undefined) return { ok: true, value: seeded as T };
   }
 
+  // Which of the two processes this call is against; the label the counter is read by.
+  const upstream = base === ADMIN_BASE ? "admin" : "api";
+
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
   if (init.token) {
@@ -91,9 +98,19 @@ async function callAgainst<T>(
       headers,
       cache: "no-store",
     });
-  } catch {
-    // The api server being unreachable is not the user's problem to read about.
+  } catch (e) {
+    // The api server being unreachable is not the user's problem to read about — but it is
+    // exactly what an operator is looking for, so it goes to the log and the counter here
+    // rather than dying inside the sentence the page renders.
+    count("upstream_requests_total", { upstream, status: "error" });
+    logger.error("api.upstream.failed", { upstream, path, method: init.method ?? "GET", error: reason(e) });
     return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
+  }
+  count("upstream_requests_total", { upstream, status: String(res.status) });
+  // 4xx are ordinary answers (a taken handle, a role that is not enough); only the upstream
+  // failing at its own end is an event.
+  if (res.status >= 500) {
+    logger.warn("api.upstream.failed", { upstream, path, method: init.method ?? "GET", status: res.status });
   }
 
   if (res.ok) {

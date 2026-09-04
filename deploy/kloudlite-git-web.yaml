@@ -21,6 +21,14 @@ spec:
   template:
     metadata:
       labels: { app: kloudlite-git-web }
+      annotations:
+        # Scraped on the container port directly, which is also the only way /api/metrics
+        # answers: the handler refuses anything carrying the ingress's x-forwarded-* headers
+        # or a Host that is not the pod's own port, so the endpoint needs no credential here
+        # and is not reachable through dev.kloudlite.io.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: /api/metrics
     spec:
       # No imagePullSecrets: the package is public, and ghcr-secret's token is not
       # scoped to it — supplying a credential that is refused makes the pull 403
