@@ -66,7 +66,7 @@ fn by_creation_oldest_first(a: &crd::QuotaRequest, b: &crd::QuotaRequest) -> std
 /// Oldest pending first, capped at three — the landing page's queue teaser, not the full list
 /// `GET /admin/quota-requests` already serves.
 async fn pending_oldest_first(s: &ApiState) -> Result<Vec<super::super::QuotaRequestDoc>, Response> {
-    let filter = RequestFilter { owner: None, state: Some(crd::RequestState::Pending) };
+    let filter = RequestFilter { owner: None, state: Some(crd::RequestState::Pending), kind: None };
     let mut rows = list_all_quota_requests_inner(s, &filter).await?;
     rows.sort_by(by_creation_oldest_first);
     rows.truncate(3);

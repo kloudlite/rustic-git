@@ -117,6 +117,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/regions", post(create_region))
         .route("/admin/quota/{owner}", axum::routing::put(write_quota_route))
         .route("/admin/overview", get(overview::overview_handler))
+        .route("/admin/requests", get(list_requests))
         .route("/admin/quota-requests", get(list_all_quota_requests))
         .route("/admin/quota-requests/{id}/approve", post(approve_quota_request))
         .route("/admin/quota-requests/{id}/deny", post(deny_quota_request))
@@ -346,6 +347,9 @@ async fn deny_quota_request(
 pub(crate) struct RequestFilter {
     owner: Option<String>,
     state: Option<crd::RequestState>,
+    /// New in the generic queue; the legacy list ignores it (every legacy row is a quota row, so
+    /// any other value simply drops them).
+    kind: Option<crd::RequestKind>,
 }
 
 /// The whole queue, every owner, narrowable by `?owner=` and `?state=` — `QuotaRequest` carries
@@ -373,6 +377,58 @@ async fn list_all_quota_requests(
 ) -> Result<Response, Response> {
     let rows = list_all_quota_requests_inner(&s, &f).await?;
     Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
+}
+
+/// A legacy `QuotaRequest` wearing the generic doc — the migration has not necessarily run, and a
+/// console must never have to know that. `requested` becomes the `quota` block, and everything
+/// else it never had stays absent.
+fn legacy_doc(r: &crd::QuotaRequest) -> RequestDoc {
+    let st = r.status.clone().unwrap_or_default();
+    RequestDoc {
+        id: r.name_any(),
+        owner: r.spec.owner.clone(),
+        kind: crd::RequestKind::Quota,
+        // The old CRD never recorded an author, and inventing one would be worse than an empty
+        // string: the owner is who it was for, not necessarily who typed it.
+        requested_by: String::new(),
+        reason: r.spec.reason.clone(),
+        quota: Some(r.spec.requested.clone()),
+        access: None,
+        region: None,
+        other: None,
+        state: st.state,
+        decided_by: st.decided_by,
+        decided_at: st.decided_at,
+        note: st.note,
+        resolution: None,
+        created_at: r.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string()),
+    }
+}
+
+/// The whole queue, both CRDs, newest first. Filtering happens here (server-side of this process,
+/// client-side of the k3s API) for the same reason `list_all_quota_requests_inner` does it: the
+/// fleet-wide row count is small and neither CRD carries a label to select a kind or a state on.
+pub(crate) async fn list_requests_inner(s: &ApiState, f: &RequestFilter) -> Result<Vec<RequestDoc>, Response> {
+    let api: Api<crd::Request> = Api::all(kube(s)?.clone());
+    let mut rows: Vec<RequestDoc> =
+        api.list(&ListParams::default()).await.map_err(kube_err)?.items.iter().map(generic_doc).collect();
+    if f.kind.is_none_or(|k| k == crd::RequestKind::Quota) {
+        let legacy = RequestFilter { owner: f.owner.clone(), state: f.state, kind: None };
+        rows.extend(list_all_quota_requests_inner(s, &legacy).await?.iter().map(legacy_doc));
+    }
+    rows.retain(|r| {
+        f.owner.as_deref().is_none_or(|o| r.owner == o)
+            && f.state.is_none_or(|st| r.state == st)
+            && f.kind.is_none_or(|k| r.kind == k)
+    });
+    // `created_at` is an RFC 3339 string, so string order IS time order; an undated row (a
+    // just-created object the API server has not stamped) sorts last rather than first.
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(rows)
+}
+
+async fn list_requests(State(s): State<Arc<ApiState>>, Query(f): Query<RequestFilter>) -> Result<Response, Response> {
+    Ok(Json(list_requests_inner(&s, &f).await?).into_response())
 }
 
 // ── nodes ────────────────────────────────────────────────────────────────
