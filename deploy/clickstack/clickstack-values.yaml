@@ -59,6 +59,11 @@ otel-collector:
     ingressClassName: nginx
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
+      # Cloudflare fronts this host in Flexible mode and fetches the origin over plain HTTP, so
+      # nginx's default redirect-to-https loops (308 to itself) — the same trap the registry
+      # ingress in deploy/rustic-git.yaml documents. TLS is the edge's; the origin cert only
+      # exists so the record can go Full later without a second change.
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
     hosts:
       # OTLP/HTTP on 4318 — the protocol every agent collector in this repo exports with
       # (`otlphttp`). nginx already serves HTTP/2 to clients on a TLS listener, so an agent's
@@ -80,6 +85,11 @@ otel-collector:
         ingressClassName: nginx
         annotations:
           cert-manager.io/cluster-issuer: letsencrypt
+          # Cloudflare fronts this host in Flexible mode and fetches the origin over plain HTTP, so
+          # nginx's default redirect-to-https loops (308 to itself) — the same trap the registry
+          # ingress in deploy/rustic-git.yaml documents. TLS is the edge's; the origin cert only
+          # exists so the record can go Full later without a second change.
+          nginx.ingress.kubernetes.io/ssl-redirect: "false"
           # Without this nginx downgrades the connection and every export fails with a protocol
           # error that reads like a TLS problem.
           nginx.ingress.kubernetes.io/backend-protocol: GRPC
@@ -104,6 +114,11 @@ hyperdx:
     enabled: true
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
+      # Cloudflare fronts this host in Flexible mode and fetches the origin over plain HTTP, so
+      # nginx's default redirect-to-https loops (308 to itself) — the same trap the registry
+      # ingress in deploy/rustic-git.yaml documents. TLS is the edge's; the origin cert only
+      # exists so the record can go Full later without a second change.
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
       # HyperDX has its own login, but this area is superadmin-only and a second gate costs one
       # annotation — the same "the console is not a public surface" stance the admin process takes
       # by running as a separate process behind `refuse_without_claim`. The htpasswd Secret is
