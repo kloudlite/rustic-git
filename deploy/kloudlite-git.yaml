@@ -55,7 +55,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: kloudlite-git
-          image: ghcr.io/kloudlite/kloudlite-git:664823f1ad3b7f8658345c2329a97e4d0d226c98@sha256:daf3d7c5a2ddf0e313150fde0dce2b6ad3a6ebd0181afa2b3a01efac84c97a2b
+          image: ghcr.io/kloudlite/kloudlite-git:0276916c22a3a157415c2ccc3467f7dc791f0eb6@sha256:00a35c66bf11aff00a1fa444de002fa0e1ba8f7141be09db09c682e5548e2cb1
           args: ["serve"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -388,7 +388,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: api
-          image: ghcr.io/kloudlite/kloudlite-git:664823f1ad3b7f8658345c2329a97e4d0d226c98@sha256:daf3d7c5a2ddf0e313150fde0dce2b6ad3a6ebd0181afa2b3a01efac84c97a2b
+          image: ghcr.io/kloudlite/kloudlite-git:0276916c22a3a157415c2ccc3467f7dc791f0eb6@sha256:00a35c66bf11aff00a1fa444de002fa0e1ba8f7141be09db09c682e5548e2cb1
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["kloudlite-git-api"]
@@ -564,7 +564,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/kloudlite-git:664823f1ad3b7f8658345c2329a97e4d0d226c98@sha256:daf3d7c5a2ddf0e313150fde0dce2b6ad3a6ebd0181afa2b3a01efac84c97a2b
+          image: ghcr.io/kloudlite/kloudlite-git:0276916c22a3a157415c2ccc3467f7dc791f0eb6@sha256:00a35c66bf11aff00a1fa444de002fa0e1ba8f7141be09db09c682e5548e2cb1
           command: ["kloudlite-git-worker"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -769,7 +769,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: admin
-          image: ghcr.io/kloudlite/kloudlite-git:664823f1ad3b7f8658345c2329a97e4d0d226c98@sha256:daf3d7c5a2ddf0e313150fde0dce2b6ad3a6ebd0181afa2b3a01efac84c97a2b
+          image: ghcr.io/kloudlite/kloudlite-git:0276916c22a3a157415c2ccc3467f7dc791f0eb6@sha256:00a35c66bf11aff00a1fa444de002fa0e1ba8f7141be09db09c682e5548e2cb1
           command: ["kloudlite-git-api"]
           ports:
             - { name: http, containerPort: 8090 }
