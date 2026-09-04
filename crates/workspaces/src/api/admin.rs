@@ -12,6 +12,7 @@ use super::*;
 use axum::extract::Path;
 
 mod audit;
+mod owners;
 mod schema;
 mod settings;
 
@@ -74,7 +75,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/quota-requests", get(list_all_quota_requests))
         .route("/admin/quota-requests/{id}/approve", post(approve_quota_request))
         .route("/admin/quota-requests/{id}/deny", post(deny_quota_request))
-        .route("/admin/usage", get(usage_all))
+        .route("/admin/owners", get(owners::owners_list))
+        .route("/admin/owners/{slug}", get(owners::owner_detail))
         .route("/admin/nodes", get(list_nodes))
         .route("/admin/workspaces", get(admin_list_ws))
         .route("/admin/workspaces/{id}", axum::routing::delete(admin_delete_ws))
@@ -157,15 +159,27 @@ async fn write_quota(s: &ApiState, owner: &str, spec: crd::QuotaSpec) -> Result<
     }
 }
 
+#[derive(serde::Deserialize)]
+struct WriteQuotaBody {
+    spec: crd::QuotaSpec,
+    /// Global Constraint: "set quota" is one of the writes that must carry a reason on the audit
+    /// row, so it is required here rather than left `Option` like a roll's free-text reason.
+    note: String,
+}
+
 async fn write_quota_route(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(owner): Path<String>,
-    Json(spec): Json<crd::QuotaSpec>,
+    Json(body): Json<WriteQuotaBody>,
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
-    let q = write_quota(&s, &owner, spec).await?;
-    audit(&s, &c.name, "set-quota", &owner, None, "ok").await;
+    let note = body.note.trim().to_string();
+    if note.is_empty() {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "note is required").into_response());
+    }
+    let q = write_quota(&s, &owner, body.spec).await?;
+    audit(&s, &c.name, "set-quota", &owner, Some(note), "ok").await;
     Ok(Json(q.spec).into_response())
 }
 
@@ -275,42 +289,6 @@ async fn list_all_quota_requests(
     });
     rows.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
     Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
-}
-
-// ── usage across every owner ────────────────────────────────────────────────
-
-#[derive(serde::Serialize)]
-struct OwnerUsage {
-    owner: String,
-    limit: crd::QuotaSpec,
-    used: crate::quota::Usage,
-}
-
-/// ponytail: the owner list is derived from who has an explicit `Quota` or has ever opened a
-/// `QuotaRequest` — an owner using only the defaults and who has never asked for more is not
-/// listed. A `Node`-free way to enumerate every owner would need a third index (every distinct
-/// `rustic-git.io/owner` label value); add one if the admin usage page has to be exhaustive.
-async fn usage_all(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
-    let client = kube(&s)?;
-    let quotas: Api<crd::Quota> = Api::all(client.clone());
-    let reqs: Api<crd::QuotaRequest> = Api::all(client.clone());
-    let mut owners: std::collections::BTreeSet<String> = quotas
-        .list(&ListParams::default()).await.map_err(kube_err)?.items.into_iter()
-        .map(|q| q.name_any())
-        .filter(|n| n != crd::DEFAULT_USER_QUOTA && n != crd::DEFAULT_TEAM_QUOTA)
-        .collect();
-    owners.extend(reqs.list(&ListParams::default()).await.map_err(kube_err)?.items.into_iter().map(|r| r.spec.owner));
-    let mut rows = Vec::new();
-    for owner in owners {
-        // ponytail: whether `owner` is a team decides which default column applies, and the only
-        // honest answer needs the directory; without one every row falls back to the person
-        // default rather than 503ing the whole page over one lookup.
-        let team = scope::is_team(&s, &owner).await;
-        let limit = crate::quota::effective(client, &owner, team).await.map_err(kube_err)?;
-        let used = crate::quota::usage(client, &owner).await.map_err(kube_err)?;
-        rows.push(OwnerUsage { owner, limit, used });
-    }
-    Ok(Json(rows).into_response())
 }
 
 // ── nodes ────────────────────────────────────────────────────────────────

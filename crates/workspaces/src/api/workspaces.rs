@@ -390,6 +390,12 @@ pub(crate) async fn list_for_owner(
     if !may_act_on(s, &caller_id, owner).await {
         return Err(not_found());
     }
+    Ok(Json(ws_for_owner(s, owner).await?).into_response())
+}
+
+/// The read half of `list_for_owner`, owner already authorized — the admin Owner detail page
+/// reuses this directly since the claim already stands in for `may_act_on` there.
+pub(crate) async fn ws_for_owner(s: &ApiState, owner: &str) -> Result<Vec<Workspace>, Response> {
     let c = kube(s)?;
     let api: Api<crd::Workspace> = Api::all(c.clone());
     let items = mine(api.list(&owned_in(owner, "")).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
@@ -402,7 +408,7 @@ pub(crate) async fn list_for_owner(
             write_user_key(s, c, &crd::ws_namespace(owner, ""), owner).await;
         }
     }
-    Ok(Json(list).into_response())
+    Ok(list)
 }
 
 pub(crate) async fn get_ws(

@@ -33,7 +33,7 @@ pub(crate) async fn volume_region(c: &kube::Client, volume: &str) -> Option<Stri
 }
 
 #[derive(serde::Serialize)]
-struct VolumeSummary {
+pub(crate) struct VolumeSummary {
     /// Registry name — the ws/env id, matching the `{owner}/{name}` the vol-agent surface and
     /// `RegistryClient` already key on.
     name: String,
@@ -233,17 +233,26 @@ pub(crate) async fn list_volumes(
         Some(_) => return Err(not_found()),
         None => caller_owners(&s, &caller_id).await,
     };
+    Ok(Json(volumes_for(&s, &owners, q.kind.as_deref()).await?).into_response())
+}
 
+/// The query behind `/v1/volumes`, owner-set already resolved by the caller — the admin Owner
+/// detail page reuses this with a single-owner set instead of re-deriving the same grouping.
+pub(crate) async fn volumes_for(
+    s: &ApiState,
+    owners: &[String],
+    kind: Option<&str>,
+) -> Result<Vec<VolumeSummary>, Response> {
     // The rows ARE the snapshots: one label-selected list, grouped by `spec.volume`. The registry
     // volume index is not consulted at all any more — a push writes a `Snapshot` CR and nothing
     // else, so a listing that read the index would have gone blind on everything pushed since.
-    let api: Api<crd::Snapshot> = Api::all(kube(&s)?.clone());
-    let snaps = mine(api.list(&ListParams::default().labels(&owner_set_selector(&owners))).await.map_err(kube_err)?.items, &owners);
+    let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
+    let snaps = mine(api.list(&ListParams::default().labels(&owner_set_selector(owners))).await.map_err(kube_err)?.items, owners);
 
     // The cluster answers only "does a parent still exist", so this degrades the page rather than
     // emptying it. `None` is an unanswered question, never an answer of "nothing": labelling every
     // row "source deleted" during a blip is the failure mode this distinction exists to prevent.
-    let live = live_parents(&s, &owners).await;
+    let live = live_parents(s, owners).await;
     let known = live.is_some();
     let live = live.unwrap_or_default();
 
@@ -292,11 +301,11 @@ pub(crate) async fn list_volumes(
         });
     }
 
-    if let Some(kind) = &q.kind {
-        keep.retain(|v| &v.kind == kind);
+    if let Some(kind) = kind {
+        keep.retain(|v| v.kind == kind);
     }
     keep.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(Json(keep).into_response())
+    Ok(keep)
 }
 
 /// `DELETE /v1/volumes/{name}` — delete a volume and every snapshot on it. What the environment

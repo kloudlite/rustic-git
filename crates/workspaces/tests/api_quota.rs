@@ -355,7 +355,7 @@ async fn a_denied_request_does_not_block_the_next_one() {
 #[tokio::test]
 async fn the_user_router_has_never_heard_of_admin() {
     let s = server(true, vec![]).await;
-    for path in ["/admin/regions", "/admin/quota-requests", "/admin/usage", "/admin/nodes"] {
+    for path in ["/admin/regions", "/admin/quota-requests", "/admin/owners", "/admin/nodes"] {
         let code = reqwest::Client::new()
             .get(format!("{}{path}", s.base))
             .bearer_auth(admin_token(&s.jwt))

@@ -285,16 +285,22 @@ pub(crate) async fn list_env(
             owners
         }
     };
-    let c = kube(&s)?;
+    Ok(Json(envs_for(&s, &owners).await?).into_response())
+}
+
+/// The query behind `/v1/environments`, owner-set already resolved by the caller — the admin
+/// Owner detail page reuses this with a single-owner set instead of re-deriving the same read.
+pub(crate) async fn envs_for(s: &ApiState, owners: &[String]) -> Result<Vec<Environment>, Response> {
+    let c = kube(s)?;
     let api: Api<crd::Environment> = Api::all(c.clone());
     let mut list = vec![];
     for owner in owners {
-        let pushed = pushed_volumes(&s, c, &owner).await?;
-        for e in mine(api.list(&owned_by(&owner)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner)) {
+        let pushed = pushed_volumes(s, c, owner).await?;
+        for e in mine(api.list(&owned_by(owner)).await.map_err(kube_err)?.items, std::slice::from_ref(owner)) {
             list.push(env_doc(&e, &pushed));
         }
     }
-    Ok(Json(list).into_response())
+    Ok(list)
 }
 
 pub(crate) async fn get_env(

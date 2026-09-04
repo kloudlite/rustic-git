@@ -2187,7 +2187,7 @@ async fn the_user_router_has_never_heard_of_admin() {
     let c = reqwest::Client::new();
     for path in [
         "/admin/workspaces", "/admin/environments", "/admin/nodes", "/admin/quota-requests",
-        "/admin/quota/karthik", "/admin/regions", "/admin/usage",
+        "/admin/quota/karthik", "/admin/regions", "/admin/owners",
     ] {
         let code = c.get(format!("{}{path}", s.base)).bearer_auth(token(&s.jwt, "karthik")).send().await.unwrap().status();
         assert_eq!(code, 404, "{path}");
