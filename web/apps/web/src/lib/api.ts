@@ -1,5 +1,6 @@
 import "server-only";
 import { cache } from "react";
+import { fetchRetrying } from "./fetch-retry";
 import type { Commit } from "@/lib/browse";
 import type { SnapshotState } from "@/lib/snapshot-state";
 import type { QuotaDim, QuotaReport } from "@/lib/quota";
@@ -92,7 +93,7 @@ async function callAgainst<T>(
     // Bounded: a hung api pod must not pin a render, or every refresh stacks another one until
     // the heap is gone. A timeout is the same answer as an unreachable server. Callers that do
     // real work upstream (a compare, a commit) pass a longer `signal`.
-    res = await fetch(`${base}${path}`, {
+    res = await fetchRetrying(`${base}${path}`, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
       ...init,
       headers,

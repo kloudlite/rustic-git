@@ -330,7 +330,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
     if let Some(c) = &caller {
         up = up.header(kloudlite_core::peer::OWNER_HEADER, c);
     }
-    let r = match up.send().await {
+    let r = match crate::forward::send_retrying(up).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(repo = %repo, error = %e, "upstream.request.failed");
