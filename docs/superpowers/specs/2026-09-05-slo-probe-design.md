@@ -217,10 +217,13 @@ Every caller-shaped value in the SQL goes through `series::ident` or a typed par
   `slo-weekly` `0 2 * * 0`; `slo-monthly` `0 3 * * 0` with the binary exiting 0 and doing
   nothing when the day of month is past 7. All three: `KLOUDLITE_GIT_LOG_FORMAT=json`,
   `prometheus.io/scrape: "false"`, `restartPolicy: Never`, `backoffLimit: 0`.
-- Env: `KLOUDLITE_GIT_SLO_ADMIN_URL` (the admin Service), `KLOUDLITE_GIT_SLO_API_URL`,
-  `KLOUDLITE_GIT_SLO_WEB_URL`, `KLOUDLITE_GIT_SLO_GIT_URL`, `KLOUDLITE_GIT_SLO_REGISTRY`,
-  `KLOUDLITE_GIT_SLO_SSH_HOST`, `KLOUDLITE_GIT_SLO_REGION` (the k3s region the workspace
-  goes to), `KLOUDLITE_GIT_SLO_HOSTS` (comma list for the edge checks), `KUBECONFIG`.
+- Env (the names `bins/slo/src/config.rs` reads are the contract): `KLOUDLITE_GIT_ADMIN_API_URL`,
+  `KLOUDLITE_GIT_API_URL`, `KLOUDLITE_GIT_WEB_URL`, `KLOUDLITE_GIT_URL` (git over HTTP),
+  `KLOUDLITE_GIT_SLO_REGISTRY`, `KLOUDLITE_GIT_SLO_SSH_HOST`, `KLOUDLITE_GIT_SLO_REGION` (the k3s
+  region the workspace goes to), `KLOUDLITE_GIT_SLO_HOSTS` (comma list for the edge checks),
+  `KLOUDLITE_GIT_JWT_SECRET`, `KUBECONFIG`; optional `KLOUDLITE_GIT_SLO_SSH_HOSTKEY` and
+  `KLOUDLITE_GIT_SLO_CANARY_DIGEST` (unset → the dependent ids skip). Shared across the three
+  CronJobs through `ConfigMap/kloudlite-git-slo-env`.
 - Secret `kloudlite-git-slo`: `ssh_key` (the probe user's private key, generated once by the
   operator, its public half registered by the run itself), nothing else.
 - Admin Deployment: `KLOUDLITE_GIT_SLO_WEBHOOK` optional.
