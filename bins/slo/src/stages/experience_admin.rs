@@ -54,7 +54,7 @@ const NOTE: &str = "slo probe";
 pub(crate) fn probe_quota() -> Value {
     json!({
         "workspaces": 10,
-        "environments": 5,
+        "environments": 6,
         "snapshots": 20,
         "diskGb": 40,
         "cpu": 48,

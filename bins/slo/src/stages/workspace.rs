@@ -166,12 +166,20 @@ const EXEC_SCRIPT: &str = r#"echo slo
 stat -f -c %T /home/kl 2>/dev/null || true
 awk '$2 == "/home/kl" { print $3 }' /proc/mounts 2>/dev/null || true"#;
 
-/// The exec said `slo`, and its home is the shared export rather than an empty local directory.
+/// The exec said `slo`, and `/home/kl` is a MOUNT rather than the container's own filesystem.
 ///
-/// A pure function so the one judgement this id turns on is testable without a cluster. NFS is the
-/// only accepted answer: `mount_homes` mounts `{pool}/homes` over NFS 4.1 on every node, so
-/// anything else under `/home/kl` — an overlay, a tmpfs, a local btrfs subvolume — is the pod
-/// having come up before its node's mount and hostPathing an empty directory.
+/// A pure function so the one judgement this id turns on is testable without a cluster.
+///
+/// What is asserted is the failure mode, not one spelling of the success: a pod that came up
+/// before its node's NFS mount hostPaths an EMPTY LOCAL DIRECTORY, and that directory is part of
+/// the container's rootfs — an overlay, or no mount line at all. What a healthy pod shows depends
+/// on the sandbox: `runc` sees the export as `nfs`/`nfs4`, and gVisor (`runtimeClass`) passes it
+/// through its gofer, where the same mount reads as `v9fs`/`9p`. Requiring "nfs" failed every
+/// run on a gVisor node while the export was mounted perfectly well.
+///
+/// That the bytes are really the SHARED home — not merely some mount — is `home.persists`' job
+/// (hourly): a file written in one workspace read back from a fresh one, possibly on another node,
+/// which no single-pod check can stand in for.
 fn home_is_shared(out: &str) -> Result<()> {
     let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
     if lines.next() != Some("slo") {
@@ -181,13 +189,21 @@ fn home_is_shared(out: &str) -> Result<()> {
     if rest.is_empty() {
         return Err(anyhow!("the pod could not say what /home/kl is"));
     }
-    if rest.iter().any(|l| l.contains("nfs")) {
+    // The rootfs filesystems: a home on one of these is the empty local directory the mount
+    // should have covered.
+    const LOCAL: [&str; 5] = ["overlay", "tmpfs", "rootfs", "ext4", "btrfs"];
+    if rest.iter().any(|l| LOCAL.contains(l)) {
+        return Err(anyhow!("/home/kl is {rest:?} — the container's own filesystem, not a mount"));
+    }
+    // A mount of its own, whatever the sandbox calls it.
+    const MOUNTED: [&str; 4] = ["nfs", "nfs4", "v9fs", "9p"];
+    if rest.iter().any(|l| MOUNTED.contains(l)) {
         return Ok(());
     }
-    Err(anyhow!("/home/kl is {rest:?}, not the shared NFS export"))
+    Err(anyhow!("/home/kl is {rest:?}, which is not a mounted export"))
 }
 
-/// `homes.rw.p95`: write, `sync`, read back on the shared NFS home, timed INSIDE the pod.
+/// `homes.rw.p95`:/// `homes.rw.p95`: write, `sync`, read back on the shared NFS home, timed INSIDE the pod.
 ///
 /// The ms the pod prints is the sample, not the step's own elapsed time: the step's clock includes
 /// the exec handshake with the API server, which is tens of milliseconds against a 200 ms target —
@@ -592,9 +608,13 @@ mod tests {
     fn the_exec_check_wants_the_output_and_a_shared_home() {
         assert!(home_is_shared("slo\nnfs\nnfs4\n").is_ok());
         assert!(home_is_shared("slo\nnfs4\n").is_ok());
+        // gVisor passes the very same export through its gofer, where it reads as 9p. Requiring
+        // "nfs" failed every run on a sandboxed node while the mount was perfectly healthy.
+        assert!(home_is_shared("slo\nv9fs\n9p\n").is_ok());
         // The failure this exists for: a local filesystem under /home/kl.
         assert!(home_is_shared("slo\nbtrfs\n").is_err());
         assert!(home_is_shared("slo\noverlay\n").is_err());
+        assert!(home_is_shared("slo\ntmpfs\n").is_err());
         // And the ordinary weak check: an exec that connected and said nothing useful.
         assert!(home_is_shared("").is_err());
         assert!(home_is_shared("slo\n").is_err());

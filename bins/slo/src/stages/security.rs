@@ -23,6 +23,12 @@ const REFUSAL_CEILING: Duration = Duration::from_secs(10);
 /// The agent's identity, exactly as `deploy/k3s/agent-rbac.yaml` declares it.
 const AGENT_SA: &str = "system:serviceaccount:kube-system:kloudlite-agent";
 
+/// What a real git client announces on `info/refs`. The server speaks upload-pack v2 ONLY, and
+/// answers 400 to anything that does not say so.
+fn git_protocol_v2() -> (&'static str, String) {
+    ("git-protocol", "version=2".to_string())
+}
+
 /// The statuses that mean "refused" — `allowed` names which ones this caller accepts. A 5xx is
 /// never one of them: the SLI is that the platform says no, and a tier that is down says nothing
 /// at all.
@@ -112,7 +118,13 @@ async fn visibility(c: &mut Ctx) {
                 // Recorded, NOT judged here: whether a public repo reads is a positive, and this
                 // id is at 100 % — where only refusals belong, because a 100 % budget cannot
                 // absorb one flake. `repo.visibility.public` is the id that judges it.
-                let (status, body) = raw(c, reqwest::Method::GET, &refs, &other, None, &[]).await?;
+                // `git-protocol: version=2` — what every git 2.26+ client sends, and what the
+                // front door REQUIRES for git-upload-pack (`bins/server/src/router/git.rs:346`).
+                // The refusal halves never reach that check (auth answers first), which is why
+                // only the successful read needs it; without it a public repo answers 400 and this
+                // id reported the probe's own missing header as the fleet refusing a read.
+                let (status, body) =
+                    raw(c, reqwest::Method::GET, &refs, &other, None, &[git_protocol_v2()]).await?;
                 *public.lock().expect("lock") = Some(match status.is_success() {
                     true => String::new(),
                     false => format!("{status}: {}", body.chars().take(200).collect::<String>()),
@@ -336,7 +348,18 @@ async fn agent_spec_allowed(c: &mut Ctx, volume: Option<String>) {
             let api: kube::Api<crd::Volume> = kube::Api::all(as_agent);
             let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
             for (field, patch) in [
-                ("spec.restoreTo", serde_json::json!({ "spec": { "restoreTo": "" } })),
+                // A `RestoreWish`, not a string: `crd::VolumeSpec::restore_to` is an object with
+                // a `snapshotId`, a `volume` and a `requestedAt`, and a bare string is a 422 from
+                // the SCHEMA — which is the probe sending a bad patch, not the policy deciding
+                // anything. Dry-run, so the wish is never recorded.
+                (
+                    "spec.restoreTo",
+                    serde_json::json!({ "spec": { "restoreTo": {
+                        "snapshotId": "slo-probe-dry-run",
+                        "volume": volume,
+                        "requestedAt": "2026-01-01T00:00:00Z",
+                    }}}),
+                ),
                 ("spec.quotaGb", serde_json::json!({ "spec": { "quotaGb": 1 } })),
             ] {
                 match api.patch(&volume, &params, &kube::api::Patch::Merge(&patch)).await {

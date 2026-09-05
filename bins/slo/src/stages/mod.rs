@@ -382,7 +382,11 @@ const KINDS: &[Kind] = &[
     Kind { kind: "volume", list: "/v1/volumes", name_field: "display_name", id_field: "name", del: |n, _| format!("/v1/volumes/{n}") },
     Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |n, owner| format!("/v1/repos/{owner}/{n}") },
     Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |id, _| format!("/v1/tokens/{id}") },
-    Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id, _| format!("/v1/keys/{id}") },
+    // The id is escaped, not interpolated: an ssh credential's id is its `SHA256:<base64>`
+    // fingerprint and base64 contains `/`, so the plain `format!` built a three-segment path that
+    // matched no route and fell through to the GET-only fallback as a 405 — every probe key this
+    // sweep ever tried to delete was left standing.
+    Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id, _| format!("/v1/keys/{}", experience_gaps::path_seg(id)) },
     // `id.cli.flow` mints a real 30-day CLI token every five minutes. Its own collection, because
     // a CLI token is not listed by `/v1/tokens` — without this the probe would leak one credential
     // per run forever, which is a worse thing to own than the SLO is to measure.

@@ -110,8 +110,10 @@ async fn passkey(c: &mut Ctx, name: &str) {
             let checks = async {
                 out?;
                 let listed = get(c, &base, &jwt).await.context("could not list the passkeys")?;
+                // `_id`, not `id`: `directory::Passkey` renames its credential id for Mongo, so
+                // that is the field both the create's answer and the listing carry.
                 let there = listed.as_array().is_some_and(|rows| {
-                    rows.iter().any(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+                    rows.iter().any(|r| r.get("_id").and_then(|v| v.as_str()) == Some(id.as_str()))
                 });
                 if !there {
                     return Err(anyhow!("the passkey was accepted but is not listed"));

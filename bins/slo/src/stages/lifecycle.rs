@@ -65,6 +65,13 @@ const DELETE_IDS: [&str; 2] = ["wt.delete", "snap.delete"];
 /// target inverts the rule every stage here states — a slow-but-passing delete would be cut off
 /// instead of measured as the breach it is. Target plus slack, like everything else.
 const DELETE_CEILING: Duration = Duration::from_secs(75);
+/// Each of the THREE waits inside `wt.delete` gets a slice, never the step's whole ceiling.
+///
+/// They used to be handed `DELETE_CEILING` each, which meant the step's own timeout always fired
+/// first and every failure read "timed out after 75000 ms" — naming none of the three, so a run
+/// could not say whether the worktree, the environment or the volume was the slow one. A slice
+/// each makes the step report WHICH, and three of them still fit inside the ceiling.
+const WAIT: Duration = Duration::from_secs(22);
 const SNAP_DELETE_CEILING: Duration = Duration::from_secs(25);
 
 pub async fn run(c: &mut Ctx) {
@@ -121,8 +128,8 @@ async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>)
                 // Already gone is the state this half wants, and `detached_restorable` may well
                 // have taken it: a 404 from the delete is not a failure.
                 let _ = super::call(c, reqwest::Method::DELETE, &ws, &jwt, None).await;
-                gone(c, &ws, &jwt, DELETE_CEILING, "the clone's worktree").await?;
-                gone(c, &api(c, &format!("/v1/volumes/{clone}")), &jwt, DELETE_CEILING, "the clone's volume with no snapshot")
+                gone(c, &ws, &jwt, WAIT, "the clone's worktree").await?;
+                gone(c, &api(c, &format!("/v1/volumes/{clone}")), &jwt, WAIT, "the clone's volume with no snapshot")
                     .await?;
             }
             // The environment direction: a snapshot still references the Volume, so the worktree
@@ -130,7 +137,7 @@ async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>)
             super::call(c, reqwest::Method::DELETE, &env_url, &jwt, None)
                 .await
                 .context("could not delete the environment")?;
-            gone(c, &env_url, &jwt, DELETE_CEILING, "the environment's worktree").await?;
+            gone(c, &env_url, &jwt, WAIT, "the environment's worktree").await?;
             get(c, &vol_url, &jwt)
                 .await
                 .context("the volume was taken with the environment even though a snapshot remains")

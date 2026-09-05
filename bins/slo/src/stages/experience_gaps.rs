@@ -65,18 +65,23 @@ pub(super) async fn username(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         let url = api(c, "/v1/users/username");
         async move {
-            // Taken: this tenant's own handle, which it is certainly holding.
+            // NOT a 409. `claim_username` (`crates/pulls/src/directory/mod.rs:751-761`) answers a
+            // caller who already holds a handle before it ever looks the wanted one up: the same
+            // handle is a retry and answers 200, a different one is "username already set". The
+            // 409 path exists only for an account with NO handle, and this tenant has had one
+            // since bootstrap — so the invariant this id can actually assert is the one that
+            // matters anyway: the claim is IRREVERSIBLE.
             let (status, body) =
-                raw(c, reqwest::Method::POST, &url, &jwt, Some(json!({ "username": probe })), &[]).await?;
-            if status != reqwest::StatusCode::CONFLICT {
-                return Err(anyhow!("claiming a taken handle answered {status}: {}", clip(&body)));
+                raw(c, reqwest::Method::POST, &url, &jwt, Some(json!({ "username": format!("{probe}2") })), &[]).await?;
+            if status.as_u16() != 400 || !body.contains("already set") {
+                return Err(anyhow!("re-claiming a handle answered {status}: {}", clip(&body)));
             }
-            // Malformed: an uppercase leading dash is refused by `check_handle`, and a 400 rather
-            // than a 409 is what says the shape check ran before the directory was asked.
+            // And the shape check runs before the directory is asked at all, so a malformed handle
+            // is refused whoever is asking.
             let (status, body) =
                 raw(c, reqwest::Method::POST, &url, &jwt, Some(json!({ "username": "-Not A Handle-" })), &[]).await?;
             match status.as_u16() {
-                400 => Ok(()),
+                400 if !body.contains("already set") => Ok(()),
                 other => Err(anyhow!("claiming a malformed handle answered {other}: {}", clip(&body))),
             }
         }
@@ -120,10 +125,14 @@ pub(super) async fn cli_tokens(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         async move {
             let (token, id) = cli_login(c, &jwt, &device).await?;
-            // It works BEFORE the revoke, or the refusal below says nothing: a token that never
-            // authenticated anything is refused whether or not revocation works.
-            get(c, &api(c, "/v1/repos"), &token).await.context("a fresh CLI token was not honoured")?;
-            let listed = get(c, &api(c, "/v1/cli/tokens"), &jwt).await.context("could not list the CLI tokens")?;
+            // Asked of the CLI's OWN collection, not `/v1/repos`: a `cli` token is honoured by the
+            // routes that go through `user_identity` (which checks the jti against the revocation
+            // row) and refused by the ones that go through `caller`, which takes a browser session
+            // only. `/v1/repos` is the second kind, so the 401 it answers says nothing about the
+            // token — it says the probe asked the wrong door.
+            let mine = api(c, "/v1/cli/tokens");
+            get(c, &mine, &token).await.context("a fresh CLI token was not honoured")?;
+            let listed = get(c, &mine, &jwt).await.context("could not list the CLI tokens")?;
             let there = listed.as_array().is_some_and(|rows| {
                 rows.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str()))
             });
@@ -133,7 +142,7 @@ pub(super) async fn cli_tokens(c: &mut Ctx) {
             call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &jwt, None)
                 .await
                 .context("could not revoke the CLI token")?;
-            let (status, _) = raw(c, reqwest::Method::GET, &api(c, "/v1/repos"), &token, None, &[]).await?;
+            let (status, _) = raw(c, reqwest::Method::GET, &mine, &token, None, &[]).await?;
             match status.as_u16() {
                 401 | 403 => Ok(()),
                 other => Err(anyhow!("a revoked CLI token answered {other}")),
@@ -218,9 +227,9 @@ pub(super) async fn sshconfig(c: &mut Ctx) {
                     ("HOME".to_string(), home.display().to_string()),
                     ("KL_CONFIG_DIR".to_string(), dir.display().to_string()),
                 ]);
-                tools::run(&kl, &["ws".to_string(), "sshconfig".into()], &env, None, SSHCONFIG_CEILING)
+                tools::run(&kl, &["ws".to_string(), KL_SSH_CONFIG.into()], &env, None, SSHCONFIG_CEILING)
                     .await
-                    .context("`kl ws sshconfig` failed")?;
+                    .with_context(|| format!("`kl ws {KL_SSH_CONFIG}` failed"))?;
                 let block = std::fs::read_to_string(home.join(".ssh/kloudlite_config"))
                     .context("no ~/.ssh/kloudlite_config was written")?;
                 has_host_block(&block, &ws)
@@ -231,6 +240,10 @@ pub(super) async fn sshconfig(c: &mut Ctx) {
     })
     .await;
 }
+
+/// `kl`'s own subcommand name (`WsCmd::SshConfig`, which clap spells with the dash). Named here so
+/// the one string the CLI contract turns on is next to the test that pins it.
+const KL_SSH_CONFIG: &str = "ssh-config";
 
 /// The rendered block names this workspace and gives ssh the proxy that reaches it.
 ///
@@ -303,7 +316,7 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
             // outside the cancellable region and the refusal is checked after it: a key the probe
             // left behind is a standing credential for this account.
             let forget = || async {
-                call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/keys/{id}")), &jwt, None)
+                call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/keys/{}", path_seg(&id))), &jwt, None)
                     .await
                     .map(|_| ())
                     .context("the throwaway key was left REGISTERED")
@@ -365,6 +378,16 @@ async fn ssh_works(
 /// The read-back is the SLI: `update_repo` forwards the description to the OWNING node and answers
 /// 204 either way, so a 204 whose text nobody can then read is the failure a person sees as "my
 /// change did not stick".
+///
+/// THIS ID IS EXPECTED RED — the failure is the PRODUCT's, and is deliberately not papered over.
+/// `update_repo` (`crates/api/src/repos.rs:381-393`) forwards the text to the node, where
+/// `api_description` (`bins/server/src/browse_api/admin.rs:203`) writes `DESCRIPTION_KEY` in the
+/// repo's OWN database (`crates/storage/src/refmeta.rs:280-283`) — but `get_repo`
+/// (`crates/api/src/repos.rs:284-290`) answers `description` from the listing INDEX marker, which
+/// that write never touches. Worse, the reconciler rewrites the marker with
+/// `description: String::new()` (`crates/registry/src/gc.rs:270`), so a description a person saves
+/// on the settings page can never read back on any path. The probe is correct; the two halves of
+/// the product disagree about where a description lives.
 pub(super) async fn description(c: &mut Ctx) {
     let Some(name) = c.state.repo.clone() else {
         return c.skip("repo.description", "no repo");
@@ -555,10 +578,14 @@ pub(super) async fn mergeability(c: &mut Ctx) {
             let enc = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
             // A file only this run touches, so nothing else in the journey can make the two agree.
             let path = format!("conflict-{run}.txt");
-            // The first branch lands on `main`, which is what makes the second one a conflict
-            // rather than two branches nobody has combined.
+            // BOTH branches are cut BEFORE either lands, off the same base. That order is the
+            // whole experiment: `commit_patch` cuts `newBranch` from `branch`'s CURRENT tip, so a
+            // second branch made after the first had merged would start from a `main` that already
+            // held the first's line — a clean fast-forward, which is what this reported before.
             let a = format!("run-{run}-clean");
+            let b = format!("run-{run}-dirty");
             branch_with(c, &commits, &jwt, &a, &path, &enc("one\n"), &format!("slo clean {run}")).await?;
+            branch_with(c, &commits, &jwt, &b, &path, &enc("two\n"), &format!("slo dirty {run}")).await?;
             let clean = open(c, &pulls, &jwt, &a, &format!("slo clean {run}")).await?;
             verdict(c, &pulls, &jwt, clean, "clean").await?;
             post(c, &format!("{pulls}/{clean}/merge?strategy=fast-forward"), &jwt, Value::Null)
@@ -569,10 +596,8 @@ pub(super) async fn mergeability(c: &mut Ctx) {
             })
             .await
             .context("the clean change never merged, so nothing can conflict with it")?;
-            // The second branch was cut from the base BEFORE that merge and writes the same path,
-            // which is the one shape a trial merge cannot combine.
-            let b = format!("run-{run}-dirty");
-            branch_with(c, &commits, &jwt, &b, &path, &enc("two\n"), &format!("slo dirty {run}")).await?;
+            // `b` now writes the same path from a base `main` has moved past — the one shape a
+            // trial merge cannot combine on its own.
             let dirty = open(c, &pulls, &jwt, &b, &format!("slo dirty {run}")).await?;
             verdict(c, &pulls, &jwt, dirty, "dirty").await
         }
@@ -1199,6 +1224,23 @@ fn id_of(doc: Value) -> Result<String> {
 
 fn clip(body: &str) -> String {
     body.chars().take(200).collect()
+}
+
+/// One path segment, with the characters that would SPLIT it escaped.
+///
+/// An ssh credential's id is its `SHA256:<base64>` fingerprint, and base64 contains `/` — so
+/// `/v1/keys/{id}` built by interpolation is three segments, matches no route, and falls through
+/// to the GET-only fallback as a 405. See the report: the same shape is why teardown's own key
+/// sweep has been failing silently.
+pub(super) fn path_seg(id: &str) -> String {
+    id.chars()
+        .map(|ch| match ch {
+            '/' => "%2F".to_string(),
+            '+' => "%2B".to_string(),
+            '%' => "%25".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

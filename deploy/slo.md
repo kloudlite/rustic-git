@@ -153,7 +153,7 @@ a superadmin grant or a quota with the five-minute suite underneath it.
 | `superadmin.grant` | Security | Granting superadmin adds the account to the roster and revoking takes it off | 100 % | hourly | 14 · Experience |
 | `feed.experience` | Pull requests | The feed shows the team and repo events of this run | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `home.persists` | Workspaces | A file written in one workspace is read from a fresh workspace's home, with the cache and state directories still local | 99.9 % | hourly | 14 · Experience |
-| `id.username` | Identity | Claiming a username succeeds once and the second claim is refused | 99.9 % | hourly | 14 · Experience |
+| `id.username` | Identity | A second username claim is refused as already set, and a malformed handle is rejected | 99.9 % | hourly | 14 · Experience |
 | `id.cli.tokens` | Identity | A CLI token is listed and, once revoked, is refused | 99.9 % | hourly | 14 · Experience |
 | `id.profile.upsert` | Identity | A profile upsert is saved and read back | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |
 | `id.cli.sshconfig` | Identity | `kl ws sshconfig` writes a host block naming a running workspace | 99.9 % ≤ 15000 ms | hourly | 14 · Experience |

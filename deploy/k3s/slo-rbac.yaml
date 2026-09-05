@@ -9,6 +9,8 @@
 # | volume history, orphan collection             | volumes, snapshots: get, list                      |
 # | exec the home write, read /home/kl on 2nd node| pods: get, list · pods/exec: create, get           |
 # | wait for an environment's service replica     | statefulsets: get, list                            |
+# | ws.replicated names the peer that holds a cut | volumereplicas: get, list                          |
+# | env.attach.pair reads the attach-{ws} policy  | networkpolicies: get, list                         |
 # | cordon (weekly), taint (monthly)              | nodes: get, list, patch                            |
 # | dead-node drill deletes ONE agent pod         | pods: delete in kube-system, DaemonSet's pods only |
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
@@ -27,8 +29,11 @@ kind: ClusterRole
 metadata:
   name: kloudlite-slo
 rules:
+  # `volumereplicas`: `ws.replicated` reads the peer's OWN claim — `status.branches[worktree]`
+  # naming the cut — rather than trusting the owner's `Replicated` condition, because that field is
+  # what `may_claim` reads before it lets a stopped worktree start elsewhere.
   - apiGroups: ["kloudlite.io"]
-    resources: ["workspaces", "environments", "volumes", "snapshots"]
+    resources: ["workspaces", "environments", "volumes", "snapshots", "volumereplicas"]
     verbs: ["get", "list"]
   # The dry-run spec patch in `sec.agent.spec` is issued while impersonating the agent, so the
   # verb the probe itself needs on workspaces is `patch` — the admission policy is what refuses
@@ -50,6 +55,13 @@ rules:
     # the API server authorizes it as `get` on pods/exec — `create` alone answers 403.
     resources: ["pods/exec"]
     verbs: ["create", "get"]
+  # The environment-side half of an attachment is a NetworkPolicy in the environment's own
+  # namespace, and `env.attach.pair` is the id that says `delete_ws` removes it — there is no API
+  # anywhere that reports one, so it has to be read from Kubernetes. Read-only, and cluster-wide
+  # for the same reason `pods/exec` is: `env-{id}` is a namespace that exists for one run.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]

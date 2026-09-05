@@ -28,9 +28,11 @@ spec:
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
   # sweep clears by `run-{id}` prefix.
-  # Five: `admin.delete.workload` holds one of its own beside the fast run's environment, its
-  # clone and its restore. (`team.environment`'s is billed to the team, not to this owner.)
-  environments: 5
+  # Six, from the first live hourly run: at `admin.delete.workload` the owner already holds five —
+  # the fast journey's environment, its clone (`env.clone.p95`) and its restore (`env.restore`),
+  # plus Experience's two-service one and that one's clone — and the create for the delete is the
+  # sixth. (`team.environment`'s is billed to the team, not to this owner.)
+  environments: 6
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
@@ -90,9 +92,11 @@ spec:
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
   # sweep clears by `run-{id}` prefix.
-  # Five: `admin.delete.workload` holds one of its own beside the fast run's environment, its
-  # clone and its restore. (`team.environment`'s is billed to the team, not to this owner.)
-  environments: 5
+  # Six, from the first live hourly run: at `admin.delete.workload` the owner already holds five —
+  # the fast journey's environment, its clone (`env.clone.p95`) and its restore (`env.restore`),
+  # plus Experience's two-service one and that one's clone — and the create for the delete is the
+  # sixth. (`team.environment`'s is billed to the team, not to this owner.)
+  environments: 6
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
@@ -148,9 +152,11 @@ spec:
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
   # sweep clears by `run-{id}` prefix.
-  # Five: `admin.delete.workload` holds one of its own beside the fast run's environment, its
-  # clone and its restore. (`team.environment`'s is billed to the team, not to this owner.)
-  environments: 5
+  # Six, from the first live hourly run: at `admin.delete.workload` the owner already holds five —
+  # the fast journey's environment, its clone (`env.clone.p95`) and its restore (`env.restore`),
+  # plus Experience's two-service one and that one's clone — and the create for the delete is the
+  # sixth. (`team.environment`'s is billed to the team, not to this owner.)
+  environments: 6
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.

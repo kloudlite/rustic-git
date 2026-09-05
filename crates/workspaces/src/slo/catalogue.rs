@@ -330,7 +330,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "home.persists", feature: "Workspaces", sli: "A file written in one workspace is read from a fresh workspace's home, with the cache and state directories still local", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     // The 2026-09-05 coverage review's remaining verbs. Each sits in the Experience stage because
     // its nearest existing twin does — every one of them is a whole flow rather than a request.
-    Slo { id: "id.username", feature: "Identity", sli: "Claiming a username succeeds once and the second claim is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "id.username", feature: "Identity", sli: "A second username claim is refused as already set, and a malformed handle is rejected", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.cli.tokens", feature: "Identity", sli: "A CLI token is listed and, once revoked, is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.profile.upsert", feature: "Identity", sli: "A profile upsert is saved and read back", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.cli.sshconfig", feature: "Identity", sli: "`kl ws sshconfig` writes a host block naming a running workspace", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
