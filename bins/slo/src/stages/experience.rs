@@ -53,6 +53,9 @@ pub const IDS: &[&str] = &[
     "home.persists",
 ];
 
+/// One arm per id, walked in `IDS` order. An id whose arm is still `_` skips, which is what keeps
+/// the run exactly-once complete while the stage is half-filled — and what lets four implementers
+/// land their own ids without editing each other's lines.
 pub async fn run(c: &mut Ctx) {
     for id in IDS {
         match *id {
@@ -63,6 +66,19 @@ pub async fn run(c: &mut Ctx) {
             "ws.seeded" => super::experience_ws::seeded(c).await,
             "key.platform.regenerate" => super::experience_ws::platform_key(c).await,
             "home.persists" => super::experience_ws::home_persists(c).await,
+            "team.create" => super::experience_teams::create(c).await,
+            "team.invite.accept" => super::experience_teams::invite_accept(c).await,
+            "team.role.set" => super::experience_teams::role_set(c).await,
+            "team.repo.shared" => super::experience_teams::repo_shared(c).await,
+            "team.workspace" => super::experience_teams::workspace(c).await,
+            "team.member.remove" => super::experience_teams::member_remove(c).await,
+            "team.delete" => super::experience_teams::delete(c).await,
+            "repo.protection" => super::experience_teams::protection(c).await,
+            "repo.commit.patch" => super::experience_teams::commit_patch(c).await,
+            "repo.compare" => super::experience_teams::compare(c).await,
+            "pr.comment" => super::experience_teams::comment(c).await,
+            "pr.close" => super::experience_teams::close(c).await,
+            "commit.verify" => super::experience_teams::verify(c).await,
             _ => c.skip(id, "not implemented yet"),
         }
     }
