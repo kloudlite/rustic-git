@@ -274,7 +274,11 @@ pub async fn serve(
         .route("/v1/tokens", axum::routing::post(create_token).get(list_tokens))
         .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
         .route("/v1/keys", axum::routing::post(add_key).get(list_keys))
-        .route("/v1/keys/{id}", axum::routing::delete(remove_key))
+        // Wildcard, not `{id}`: an ssh credential's id is its `SHA256:<base64>` fingerprint and
+        // base64 contains `/`, so the raw id is several segments and matched no route at all —
+        // it fell through to the GET-only fallback as a 405. The tail also accepts the
+        // percent-encoded spelling the web sends, which axum decodes for us.
+        .route("/v1/keys/{*id}", axum::routing::delete(remove_key))
         // The CLI login handshake. `code` is anonymous on purpose — it is what a machine with
         // no credentials asks for; nothing it returns is usable until a signed-in person
         // approves that code in the browser.

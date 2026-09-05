@@ -712,6 +712,30 @@ async fn credential_routes_refuse_an_anonymous_caller() {
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "credentials never involve the fleet");
 }
 
+/// An ssh credential's id is its `SHA256:<base64>` fingerprint, and base64 contains `/`: the id
+/// is several path segments, so `/v1/keys/{id}` matched nothing and the delete fell through to
+/// the GET-only fallback as a 405. Both spellings — raw and percent-encoded — must reach the
+/// handler, which then fails on the database this test does not have.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_is_deletable_by_its_real_fingerprint() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINxV6+UwZnuBqA7QLRKcK+IGceBsP5Mm9XMoqci9UHe7 probe@example";
+    let fp = kloudlite_core::sshkeys::ssh_fingerprint(line).unwrap();
+    assert!(fp.contains('/'), "this key was picked because its fingerprint splits: {fp}");
+    for id in [fp.clone(), fp.replace('/', "%2F")] {
+        let r = reqwest::Client::new()
+            .delete(format!("{base}/v1/keys/{id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 503, "DELETE /v1/keys/{id} must reach the handler");
+    }
+}
+
 /// A malformed public key is refused before anything is written. Without this the
 /// index would carry a row describing a key the fleet never accepted, which reads
 /// as "you have access" and is not true.
