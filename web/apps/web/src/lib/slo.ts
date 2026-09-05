@@ -1,4 +1,4 @@
-import type { SloStatus, SloStep } from "@/lib/api";
+import type { SloJourneyStage, SloRunState, SloStatus, SloStep } from "@/lib/api";
 import type { Tone } from "@/lib/console";
 
 /** How much of the error budget is left, as the console words it. The api reports a fraction and
@@ -55,15 +55,100 @@ export function groupByFeature(slos: SloStatus[]): { feature: string; slos: SloS
   return groups;
 }
 
-/** The journey's stages, in the order the run walked them. Grouped by CONSECUTIVE stage rather
- *  than by name: a probe that comes back to a stage later ran it twice, and folding the two into
- *  one row would put steps next to each other that minutes apart. */
-export function stagesOf(steps: SloStep[]): { stage: string; steps: SloStep[] }[] {
-  const out: { stage: string; steps: SloStep[] }[] = [];
+export function runTone(state: SloRunState): Tone {
+  return state === "failed" ? "critical" : state === "passed" ? "ok" : "info";
+}
+
+/** A duration, in the largest unit that still says something: a step is milliseconds, a stage is
+ *  seconds and a whole run is minutes, and one column has to hold all three. Fixed shapes
+ *  (`3.2 s`, `1 m 04 s`) so the column stays a column when the numbers change under a poll. */
+export function msLabel(ms: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  if (ms < 1_000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`;
+  const m = Math.floor(ms / 60_000);
+  return `${m} m ${String(Math.round((ms - m * 60_000) / 1_000)).padStart(2, "0")} s`;
+}
+
+/** The latency ceiling out of a catalogue target, which the api renders as a sentence
+ *  ("95 % ≤ 2000 ms"). An availability-only SLO has none, and then a step's ms is a fact with
+ *  nothing to be over — never a red number for want of a target. */
+export function targetMs(target: string | undefined): number | null {
+  const m = /≤\s*(\d+)\s*ms/.exec(target ?? "");
+  return m ? Number(m[1]) : null;
+}
+
+export type StageState = "pending" | "running" | "passed" | "failed" | "skipped";
+
+export type StepNode = { id: string; step: SloStep | null };
+
+export type StageNode = {
+  name: string;
+  state: StageState;
+  steps: StepNode[];
+  /** Steps that ran and were good, over what the stage will report in total. */
+  ok: number;
+  total: number;
+  ms: number;
+  /** The first step's timestamp, which is what a running stage clocks its elapsed from. */
+  startedTs: string | null;
+};
+
+/** The journey as a tree: every stage the suite will walk, every step it will report, and the
+ *  ones that have happened filled in. Built from the JOURNEY rather than from the steps, so the
+ *  reader sees what is still to come instead of a list that grows a row at a time.
+ *
+ *  Stage state is derived, never reported: a stage with a failed step failed; one whose steps are
+ *  all skipped was skipped; one that has reported some but not all of its ids is still running;
+ *  an empty stage after a failure is skipped, and otherwise has not started. That last rule is
+ *  why this needs no run state — a finished failed run and a running one read alike, correctly. */
+export function treeOf(journey: SloJourneyStage[], steps: SloStep[]): StageNode[] {
+  const byStage = new Map<string, SloStep[]>();
   for (const s of steps) {
-    const tail = out[out.length - 1];
-    if (tail && tail.stage === s.stage) tail.steps.push(s);
-    else out.push({ stage: s.stage, steps: [s] });
+    const at = byStage.get(s.stage);
+    if (at) at.push(s);
+    else byStage.set(s.stage, [s]);
   }
-  return out;
+  let failedEarlier = false;
+  return journey.map((stage) => {
+    const reported = byStage.get(stage.name) ?? [];
+    // Extra ids the catalogue does not list still belong to the stage that reported them: a
+    // console that drops a step the probe measured hides the one thing worth seeing.
+    const ids = [...stage.ids, ...reported.map((s) => s.slo_id).filter((id) => !stage.ids.includes(id))];
+    const seen = new Map(reported.map((s) => [s.slo_id, s]));
+    const failed = reported.some((s) => !s.ok && !s.skipped);
+    const state: StageState = failed
+      ? "failed"
+      : reported.length === 0
+        ? failedEarlier
+          ? "skipped"
+          : "pending"
+        : reported.every((s) => s.skipped)
+          ? "skipped"
+          : reported.length < ids.length
+            ? "running"
+            : "passed";
+    failedEarlier = failedEarlier || failed;
+    return {
+      name: stage.name,
+      state,
+      steps: ids.map((id) => ({ id, step: seen.get(id) ?? null })),
+      ok: reported.filter((s) => s.ok && !s.skipped).length,
+      total: ids.length,
+      ms: reported.reduce((a, s) => a + s.ms, 0),
+      startedTs: reported.length > 0 ? reported[0].ts : null,
+    };
+  });
+}
+
+/** Steps done over steps the journey holds — the number the progress bar draws. A skipped step is
+ *  done: nothing more will happen to it. */
+export function progressOf(tree: StageNode[]): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  for (const s of tree) {
+    total += s.steps.length;
+    done += s.steps.filter((x) => x.step).length;
+  }
+  return { done, total };
 }

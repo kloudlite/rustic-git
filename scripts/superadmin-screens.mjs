@@ -42,8 +42,9 @@ const ROUTES = [
   ["clusters", "/superadmin/clusters"],
   ["cluster", "/superadmin/clusters/centralindia-k3s"],
   ["monitoring", "/superadmin/monitoring"],
-  ["slo", "/superadmin/slo"],
-  ["slo-run", "/superadmin/slo/runs/latest-failed"], // under fixtures any id answers with the failed run
+  ["slo-running", "/superadmin/slo"], // the fixtures always hold a run in flight
+  ["slo-idle", "/superadmin/slo?idle=1"], // fixtures-only flag: the panel falls back to the last run
+  ["slo-failed", "/superadmin/slo/runs/latest-failed"], // under fixtures any id answers with the failed run
 
   ["audit", "/superadmin/audit"],
   ["access", "/superadmin/access"],

@@ -1550,9 +1550,25 @@ export type SloStatus = {
   state: "ok" | "burning" | "breaching" | "unknown";
 };
 
-export type SloOverview = { slos: SloStatus[]; running: SloRun | null; runs: SloRun[]; generated: string };
+/** One stage of the journey the probe walks, in journey order, derived from the catalogue's
+ *  "Journey step" column. `ids` is what the stage WILL report, which is the only way the console
+ *  can draw a step that has not happened yet — a run's own steps say nothing about what is left.
+ *  A stage with no ids (boot, teardown) is real: it takes time and can fail. */
+export type SloJourneyStage = { name: string; ids: string[] };
 
-export type SloRunDetail = SloRun & { steps: SloStep[] };
+/** Per suite, because weekly and monthly walk the fast journey plus their own stage. */
+export type SloJourney = { fast: SloJourneyStage[]; weekly: SloJourneyStage[]; monthly: SloJourneyStage[] };
+
+export type SloOverview = {
+  slos: SloStatus[];
+  running: SloRun | null;
+  runs: SloRun[];
+  journey: SloJourney;
+  generated: string;
+};
+
+/** `journey` here is the one for THIS run's suite, already picked by the api. */
+export type SloRunDetail = SloRun & { steps: SloStep[]; journey: SloJourneyStage[] };
 
 /** The whole area in one call — the console polls it every 10 s, and three requests would be
  *  three chances for the page to render halves of different moments. */

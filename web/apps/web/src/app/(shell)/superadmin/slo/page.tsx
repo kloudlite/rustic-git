@@ -4,14 +4,14 @@ import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { when } from "@/lib/time";
-import { budgetLabel } from "@/lib/slo";
+import { budgetLabel, msLabel } from "@/lib/slo";
 import { PageHeader } from "../page-header";
 import { Section } from "../ui/section";
 import { KpiStrip, KpiTile } from "../ui/kpi";
 import { EmptyState } from "../ui/data-table";
 import { SloTable } from "./slo-table";
 import { RunsTable } from "./runs-table";
-import { RunTracker, seconds } from "./run-tracker";
+import { RunTree } from "./run-tree";
 
 export const metadata: Metadata = { title: "SLOs" };
 
@@ -24,7 +24,7 @@ export const metadata: Metadata = { title: "SLOs" };
  *
  *  With no ClickHouse the whole area is `503 history unavailable`, exactly like `/admin/history/*`:
  *  a placeholder saying so, never a page of zeroes that would read as a probe reporting success. */
-export default async function SloPage() {
+export default async function SloPage({ searchParams }: { searchParams: Promise<{ idle?: string }> }) {
   const { token } = await requireSuperadmin("/superadmin/slo");
   const o = await api.adminSlo(token);
   if (!o.ok) {
@@ -37,8 +37,14 @@ export default async function SloPage() {
       </div>
     );
   }
-  const { slos, running, runs } = o.value;
-  const detail = running ? await api.adminSloRun(token, running.run_id) : null;
+  const { slos, runs } = o.value;
+  // The idle panel is otherwise unreachable for review: the fixtures always have a run in flight.
+  // Fixtures only — against a real admin api this flag does nothing.
+  const idle = process.env.KLOUDLITE_GIT_ADMIN_FIXTURES === "1" && (await searchParams).idle === "1";
+  const running = idle ? null : o.value.running;
+  // Idle is never an empty box: the panel falls back to the last finished run, collapsed.
+  const shown = running ?? runs.find((r) => r.state !== "running") ?? null;
+  const detail = shown ? await api.adminSloRun(token, shown.run_id) : null;
 
   const burning = slos.filter((s) => s.state === "burning" || s.state === "breaching");
   // "Today" is the calendar day the operator is looking at, in their own zone — the same day a
@@ -59,7 +65,7 @@ export default async function SloPage() {
         <KpiTile
           label="Running now"
           value={running ? running.stage : "idle"}
-          sub={running ? `${running.suite} · ${seconds(running.duration_ms)} so far` : last ? `last run ${last.state} ${when(new Date(last.started).getTime())}` : "no run has reported yet"}
+          sub={running ? `${running.suite} · ${msLabel(running.duration_ms)} so far` : last ? `last run ${last.state} ${when(new Date(last.started).getTime())}` : "no run has reported yet"}
         />
         <KpiTile
           label="Runs failed today"
@@ -78,25 +84,27 @@ export default async function SloPage() {
         />
       </KpiStrip>
 
-      {/* Hidden when idle: an empty tracker is a row of nothing that reads as a broken probe. */}
-      {running && (
+      {/* The journey the probe walks, live while it walks it — and when nothing is in flight, the
+          last run's own tree rather than an empty box that reads as a broken probe. */}
+      {shown && (
         <Section
           eyebrow="Probe"
-          title={`Running · ${running.suite}`}
-          count={`${running.steps_total} steps`}
+          title={running ? `Running · ${running.suite}` : `Last run · ${shown.suite}`}
+          count={running ? undefined : `${shown.state} ${when(new Date(shown.started).getTime())}`}
+          bare
           toolbar={
             <Link
-              href={`/superadmin/slo/runs/${encodeURIComponent(running.run_id)}`}
+              href={`/superadmin/slo/runs/${encodeURIComponent(shown.run_id)}`}
               className="text-caption text-primary underline-offset-4 hover:underline"
             >
               Open run
             </Link>
           }
         >
-          {detail?.ok && detail.value.steps.length > 0 ? (
-            <RunTracker run={running} steps={detail.value.steps} />
+          {detail?.ok ? (
+            <RunTree run={shown} steps={detail.value.steps} journey={detail.value.journey} slos={slos} />
           ) : (
-            <EmptyState>{running.stage} has not reported a step yet.</EmptyState>
+            <EmptyState>{shown.stage} has not reported a step yet.</EmptyState>
           )}
         </Section>
       )}

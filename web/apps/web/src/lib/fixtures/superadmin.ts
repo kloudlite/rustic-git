@@ -12,9 +12,12 @@ import type {
   RequestDoc,
   SettingsSchema,
   SignalsResponse,
+  SloJourney,
+  SloJourneyStage,
   SloOverview,
   SloRun,
   SloRunDetail,
+  SloStatus,
   SloStep,
   SuperAdmin,
   WorkloadDoc,
@@ -407,135 +410,252 @@ const REGION_SCALE: Record<string, number> = { "westeurope-k3s": 0.55 };
 
 
 // ── SLO probe ────────────────────────────────────────────────────────────────
-// Every id, SLI sentence, target, suite and stage below is copied from `deploy/slo.md`, which is
-// the catalogue's human twin and is held equal to the Rust `CATALOGUE` by a test. An invented id
-// here would render a screen nobody can find in the catalogue, and would hide exactly the bug
-// worth catching — a console row whose id does not exist.
+// The catalogue below is `deploy/slo.md` verbatim — every id, feature, SLI sentence, target,
+// suite and journey stage — because it is what the api derives both the SLO table and the
+// journey from, and an invented id here would render a screen nobody can find in the catalogue.
+// The manual rows (no id) are not probed and so are not here.
 //
 // One passing run, one failed run and one in flight, because those are the three shapes the
 // screens have to render and a seed of only green runs proves nothing about the red path.
 
 const mins = (m: number) => new Date(now - m * 60_000).toISOString();
 
-const slo = (
-  id: string,
-  feature: string,
-  sli: string,
-  target: string,
-  suite: string,
-  state: SloOverview["slos"][number]["state"],
-  attainment: number | null,
-  budget: number | null,
-  burn: [number | null, number | null],
-  windows: [number, number],
-  ms: number,
-): SloOverview["slos"][number] => ({
-  id,
-  feature,
-  sli,
-  target,
-  suite,
-  attainment_30d: attainment,
-  total_30d: attainment == null ? 0 : 8_640,
-  budget_left: budget,
-  burn_short: burn[0],
-  burn_long: burn[1],
-  window_short_secs: windows[0],
-  window_long_secs: windows[1],
-  last: attainment == null ? null : { ts: mins(3), ok: state !== "breaching", ms },
-  state,
+/** id, feature, SLI, target, suite, journey stage. */
+const CATALOGUE: [string, string, string, string, string, string][] = [
+  ["id.signin", "Identity", "Sign-in over HTTP succeeds", "99.9 %", "fast", "1 · Identity"],
+  ["id.token.mint", "Identity", "Minting a user JWT succeeds", "99.9 %", "fast", "1 · Identity"],
+  ["id.key.usable", "Identity", "A freshly minted platform SSH key is usable", "99.9 % ≤ 30000 ms", "fast", "1 · Identity"],
+  ["id.cli.flow", "Identity", "The kl CLI's login-to-command flow completes", "99.9 % ≤ 15000 ms", "fast", "1 · Identity"],
+  ["id.jwt.tiers", "Identity", "A JWT is honoured across every tier", "99.9 %", "fast", "1 · Identity"],
+  ["git.push.ok", "Git hosting", "Push of one commit over HTTP succeeds", "99.9 %", "fast", "2 · Git"],
+  ["git.push.p95", "Git hosting", "Push of one commit over HTTP completes", "95 % ≤ 3000 ms", "fast", "2 · Git"],
+  ["git.clone.ok", "Git hosting", "Clone over HTTP succeeds", "99.9 %", "fast", "2 · Git"],
+  ["git.clone.p95", "Git hosting", "Clone over HTTP completes", "95 % ≤ 2000 ms", "fast", "2 · Git"],
+  ["ssh.clone.ok", "Git hosting", "Clone over SSH succeeds", "99.9 %", "fast", "2 · Git"],
+  ["ssh.hostkey", "Git hosting", "The SSH host key served matches the pinned fingerprint", "100 %", "fast", "2 · Git"],
+  ["ssh.unregistered.refused", "Git hosting", "SSH from an unregistered key is refused", "99.9 %", "fast", "2 · Git"],
+  ["browse.p95", "Git hosting", "The Browse API renders a repo page", "95 % ≤ 500 ms", "fast", "2 · Git"],
+  ["browse.commit.visible", "Git hosting", "A pushed commit becomes visible in Browse", "99.9 % ≤ 5000 ms", "fast", "2 · Git"],
+  ["web.repo.page", "Git hosting", "The web app's repo page loads", "95 % ≤ 1500 ms", "fast", "2 · Git"],
+  ["pr.merge.p95", "Pull requests", "A pull request merge completes", "95 % ≤ 60000 ms", "fast", "3 · Pull request"],
+  ["feed.latency", "Pull requests", "A PR event reaches the activity feed", "99.9 % ≤ 30000 ms", "fast", "3 · Pull request"],
+  ["reg.token.p95", "Container registry", "Minting a registry bearer token completes", "95 % ≤ 300 ms", "fast", "4 · Registry"],
+  ["reg.push.ok", "Container registry", "Pushing an image succeeds", "99.9 %", "fast", "4 · Registry"],
+  ["reg.manifest.p95", "Container registry", "Fetching a manifest completes", "95 % ≤ 500 ms", "fast", "4 · Registry"],
+  ["reg.tags.visible", "Container registry", "A pushed tag becomes visible in the tag list", "99.9 % ≤ 5000 ms", "fast", "4 · Registry"],
+  ["reg.shared.layer", "Container registry", "A shared layer is not re-uploaded by a sibling image", "100 %", "fast", "4 · Registry"],
+  ["reg.canary", "Container registry", "The registry canary image pulls successfully", "100 %", "fast", "4 · Registry"],
+  ["reg.visibility", "Container registry", "Image visibility (public vs. private) is enforced", "100 %", "fast", "4 · Registry"],
+  ["ws.create.p95", "Workspaces", "Creating a workspace completes", "95 % ≤ 90000 ms", "fast", "5 · Workspace"],
+  ["ws.exec.ok", "Workspaces", "Exec into a running workspace pod succeeds", "99.9 %", "fast", "5 · Workspace"],
+  ["homes.rw.p95", "Workspaces", "A read/write round trip on the shared home completes", "95 % ≤ 200 ms", "fast", "5 · Workspace"],
+  ["gw.tunnel.p95", "Workspaces", "Opening a gateway SSH tunnel completes", "95 % ≤ 3000 ms", "fast", "5 · Workspace"],
+  ["gw.unregistered.refused", "Workspaces", "The gateway refuses an unregistered key", "99.9 %", "fast", "5 · Workspace"],
+  ["ws.push.p95", "Workspaces", "Pushing a workspace snapshot completes", "95 % ≤ 60000 ms", "fast", "5 · Workspace"],
+  ["ws.clone.p95", "Workspaces", "Cloning a workspace completes", "95 % ≤ 60000 ms", "fast", "5 · Workspace"],
+  ["quota.refused", "Workspaces", "An over-quota create is refused with 409", "100 %", "fast", "5 · Workspace"],
+  ["env.create.p95", "Environments", "Creating an environment completes", "95 % ≤ 120000 ms", "fast", "6 · Environment"],
+  ["env.dns", "Environments", "Service-to-service DNS resolves inside an environment's namespace", "99.9 %", "fast", "6 · Environment"],
+  ["env.attach", "Environments", "Attaching a workspace to an environment takes effect", "99.9 % ≤ 10000 ms", "fast", "6 · Environment"],
+  ["env.detach", "Environments", "Detaching a workspace from an environment takes effect", "99.9 % ≤ 10000 ms", "fast", "6 · Environment"],
+  ["env.push.p95", "Environments", "Pushing an environment snapshot completes", "95 % ≤ 90000 ms", "fast", "6 · Environment"],
+  ["ws.stop.p95", "Workspace lifecycle", "Stopping a workspace completes", "95 % ≤ 15000 ms", "fast", "7 · Lifecycle"],
+  ["ws.replicated", "Workspace lifecycle", "A stopped workspace's final sync point reaches a replica", "99.9 % ≤ 300000 ms", "fast", "7 · Lifecycle"],
+  ["ws.start.p95", "Workspace lifecycle", "Starting a workspace completes", "95 % ≤ 30000 ms", "fast", "7 · Lifecycle"],
+  ["ws.restore", "Workspace lifecycle", "Restoring a workspace from a past snapshot succeeds", "99.9 %", "fast", "7 · Lifecycle"],
+  ["vol.refusals", "Workspace lifecycle", "Deleting a sync point or a running worktree's base snapshot is refused", "100 %", "fast", "7 · Lifecycle"],
+  ["vol.detached.restorable", "Workspace lifecycle", "A detached volume's snapshot can still be restored", "99.9 %", "fast", "7 · Lifecycle"],
+  ["vol.orphan.collected", "Workspace lifecycle", "An orphaned volume directory is collected", "99.9 % ≤ 300000 ms", "fast", "7 · Lifecycle"],
+  ["req.queue", "Admin", "A Request CR is queued and answerable by an admin", "99.9 % ≤ 5000 ms", "fast", "8 · Admin"],
+  ["audit.row", "Admin", "Every admin write produces an audit row", "100 %", "fast", "8 · Admin"],
+  ["signals.fresh", "Admin", "The Signals table reflects a rule transition", "99.9 % ≤ 120000 ms", "fast", "8 · Admin"],
+  ["history.api", "Admin", "The history API answers a chart query", "99.9 %", "fast", "8 · Admin"],
+  ["sec.private.repo", "Security", "A private repo is unreadable to a non-collaborator", "100 %", "fast", "9 · Security"],
+  ["sec.cross.owner", "Security", "One owner's objects are invisible to another owner", "100 %", "fast", "9 · Security"],
+  ["sec.admin.claim", "Security", "An admin route refuses a token without the superadmin claim", "100 %", "fast", "9 · Security"],
+  ["sec.user.process", "Security", "The ordinary API process has no admin route mounted", "100 %", "fast", "9 · Security"],
+  ["sec.agent.spec", "Security", "The admission policy refuses a spec write outside the allowed fields", "100 %", "fast", "9 · Security"],
+  ["id.token.revoked", "Security", "A revoked token is refused", "99.9 %", "fast", "9 · Security"],
+  ["edge.dns", "Edge and pipeline", "The public hostname resolves", "99.99 %", "fast", "10 · Edge"],
+  ["edge.cert", "Edge and pipeline", "The TLS certificate is valid for the public hostname", "99.9 %", "fast", "10 · Edge"],
+  ["edge.origin", "Edge and pipeline", "Cloudflare reaches the origin", "99.9 %", "fast", "10 · Edge"],
+  ["edge.ssh.lb", "Edge and pipeline", "The SSH load balancer accepts a connection", "99.9 %", "fast", "10 · Edge"],
+  ["tel.log.latency", "Edge and pipeline", "A structured log line reaches HyperDX", "99.9 % ≤ 60000 ms", "fast", "10 · Edge"],
+  ["tel.pod.coverage", "Edge and pipeline", "Every pod is scraped by the region's collector", "99.9 % ≤ 60000 ms", "fast", "10 · Edge"],
+  ["tel.stream.lag", "Edge and pipeline", "The Redis events stream consumer lag stays low", "99.9 % ≤ 60000 ms", "fast", "10 · Edge"],
+  ["tel.ch.disk", "Edge and pipeline", "ClickHouse disk usage is reported", "99.9 % ≤ 60000 ms", "fast", "10 · Edge"],
+  ["git.push.large", "Git hosting", "Push of a large commit over HTTP succeeds", "99.9 %", "weekly", "12 · Weekly"],
+  ["reg.push.large", "Container registry", "Pushing a large image layer succeeds", "99.9 %", "weekly", "12 · Weekly"],
+  ["ws.cold.profile", "Workspaces", "A cold package profile builds successfully", "99.9 %", "weekly", "12 · Weekly"],
+  ["ws.profile.reuse", "Workspaces", "A repeat package set is published from the profile index, not rebuilt", "99.9 %", "weekly", "12 · Weekly"],
+  ["ws.cross.node", "Workspaces", "A workspace started on a peer node reads its replica correctly", "99.9 %", "weekly", "12 · Weekly"],
+  ["homes.cross.node", "Workspaces", "The shared home is consistent across nodes", "99.9 %", "weekly", "12 · Weekly"],
+  ["cp.failover", "Control plane", "The leader lease fails over to another pod", "99.9 % ≤ 30000 ms", "weekly", "12 · Weekly"],
+  ["settings.live", "Control plane", "A live settings change takes effect on the next beat", "99.9 % ≤ 60000 ms", "weekly", "12 · Weekly"],
+  ["bak.tarball.age", "Backups", "The latest backup tarball is recent", "99.9 %", "monthly", "13 · Monthly"],
+  ["bak.daily.slots", "Backups", "Every daily backup slot is present", "99.9 %", "monthly", "13 · Monthly"],
+  ["bak.versioning", "Backups", "Backup versioning is enabled and retains history", "99.9 %", "monthly", "13 · Monthly"],
+  ["bak.cosmos", "Backups", "The Cosmos backup for HyperDX succeeds", "99.9 %", "monthly", "13 · Monthly"],
+  ["drill.dead.node", "Resilience drills", "A dead-node drill heals every replica onto a live node", "99.9 %", "monthly", "13 · Monthly"],
+  ["drill.drain", "Resilience drills", "A drain drill succeeds without interrupting a running worktree", "99.9 %", "monthly", "13 · Monthly"],
+  ["drill.redis.down", "Resilience drills", "The system keeps operating correctly with Redis down", "99.9 %", "monthly", "13 · Monthly"],
+];
+
+/** The journey in order. Boot and teardown report no SLO and are stages all the same: they take
+ *  time and they can fail, and a tree that hid them would show a run starting at its second act. */
+const STAGES = [
+  "0 · Boot",
+  "1 · Identity",
+  "2 · Git",
+  "3 · Pull request",
+  "4 · Registry",
+  "5 · Workspace",
+  "6 · Environment",
+  "7 · Lifecycle",
+  "8 · Admin",
+  "9 · Security",
+  "10 · Edge",
+  "11 · Teardown",
+];
+
+const stage = (name: string, suites: string[]): SloJourneyStage => ({
+  name,
+  ids: CATALOGUE.filter((c) => c[5] === name && suites.includes(c[4])).map((c) => c[0]),
 });
+
+const FAST_JOURNEY = STAGES.map((s) => stage(s, ["fast"]));
+const WEEKLY_JOURNEY = [...FAST_JOURNEY, stage("12 · Weekly", ["weekly"])];
+const JOURNEY: SloJourney = {
+  fast: FAST_JOURNEY,
+  weekly: WEEKLY_JOURNEY,
+  monthly: [...WEEKLY_JOURNEY, stage("13 · Monthly", ["monthly"])],
+};
+
+/** The numbers the eleven interesting rows carry: attainment, budget left, both burn rates and the
+ *  last measured ms. Everything else in the catalogue is a healthy row, because a table where every
+ *  row is on fire is as useless a fixture as one where none is. */
+const TUNED: Record<string, [number | null, number | null, [number | null, number | null], number]> = {
+  "id.signin": [0.9994, 0.4, [0.3, 0.5], 640],
+  "git.push.ok": [0.9982, 0.12, [4.1, 1.9], 2_310],
+  "git.clone.p95": [0.9712, 0.44, [0.6, 0.7], 1_840],
+  "reg.push.ok": [0.9971, -0.3, [7.4, 3.2], 5_120],
+  "reg.manifest.p95": [0.9834, 0.66, [0.2, 0.3], 410],
+  "ws.create.p95": [0.9683, 0.36, [0.6, 0.8], 61_400],
+  "ws.push.p95": [null, null, [null, null], 0],
+  "gw.tunnel.p95": [0.9761, 0.52, [0.4, 0.6], 2_120],
+  "env.create.p95": [0.9604, 0.21, [1.2, 0.9], 96_800],
+  "tel.log.latency": [0.9962, 0.62, [0.4, 0.4], 12_800],
+  "cp.failover": [0.9941, 0.55, [null, 0.9], 14_200],
+};
+const STATES: Record<string, SloStatus["state"]> = {
+  "git.push.ok": "burning",
+  "reg.push.ok": "breaching",
+  "ws.push.p95": "unknown",
+};
 
 /** The two window pairs the api reports: 1 h / 6 h for a suite that runs every 5 min, and
- *  4 w / 12 w for a weekly one, whose short column is a "—" because a 1 h window over a weekly
+ *  4 w / 12 w for the slower ones, whose short column is a "—" because a 1 h window over a weekly
  *  sample could only ever be empty. */
 const FAST: [number, number] = [3_600, 21_600];
-const WEEKLY: [number, number] = [2_419_200, 7_257_600];
+const SLOW: [number, number] = [2_419_200, 7_257_600];
 
-const SLOS = [
-  slo("id.signin", "Identity", "Sign-in over HTTP succeeds", "99.9 %", "fast", "ok", 0.9994, 0.4, [0.3, 0.5], FAST, 640),
-  slo("git.push.ok", "Git hosting", "Push of one commit over HTTP succeeds", "99.9 %", "fast", "burning", 0.9982, 0.12, [4.1, 1.9], FAST, 2_310),
-  slo("git.clone.p95", "Git hosting", "Clone over HTTP completes", "95 % ≤ 2000 ms", "fast", "ok", 0.9712, 0.44, [0.6, 0.7], FAST, 1_840),
-  slo("reg.push.ok", "Container registry", "Pushing an image succeeds", "99.9 %", "fast", "breaching", 0.9971, -0.3, [7.4, 3.2], FAST, 5_120),
-  slo("reg.manifest.p95", "Container registry", "Fetching a manifest completes", "95 % ≤ 500 ms", "fast", "ok", 0.9834, 0.66, [0.2, 0.3], FAST, 410),
-  slo("ws.create.p95", "Workspaces", "Creating a workspace completes", "95 % ≤ 90000 ms", "fast", "ok", 0.9683, 0.36, [0.6, 0.8], FAST, 61_400),
-  slo("ws.push.p95", "Workspaces", "Pushing a workspace snapshot completes", "95 % ≤ 60000 ms", "fast", "unknown", null, null, [null, null], FAST, 0),
-  slo("gw.tunnel.p95", "Workspaces", "Opening a gateway SSH tunnel completes", "95 % ≤ 3000 ms", "fast", "ok", 0.9761, 0.52, [0.4, 0.6], FAST, 2_120),
-  slo("env.create.p95", "Environments", "Creating an environment completes", "95 % ≤ 120000 ms", "fast", "ok", 0.9604, 0.21, [1.2, 0.9], FAST, 96_800),
-  slo("tel.log.latency", "Edge and pipeline", "A structured log line reaches HyperDX", "99.9 % ≤ 60000 ms", "fast", "ok", 0.9962, 0.62, [0.4, 0.4], FAST, 12_800),
-  slo("cp.failover", "Control plane", "The leader lease fails over to another pod", "99.9 % ≤ 30000 ms", "weekly", "ok", 0.9941, 0.55, [null, 0.9], WEEKLY, 14_200),
-];
+/** A stable pseudo-latency per id, so a step's ms and its SLO's last sample agree and neither
+ *  moves between two screenshots of the same page. */
+function msOf(id: string): number {
+  const tuned = TUNED[id];
+  if (tuned && tuned[3] > 0) return tuned[3];
+  let h = 0;
+  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) % 9_973;
+  const ceiling = /≤ (\d+) ms/.exec(CATALOGUE.find((c) => c[0] === id)?.[3] ?? "");
+  return ceiling ? Math.round(Number(ceiling[1]) * (0.4 + (h % 50) / 100)) : 120 + (h % 900);
+}
 
-const step = (slo_id: string, stage: string, ok: boolean, ms: number, at: number, detail = "", skipped = false): SloStep => ({
-  slo_id,
-  stage,
-  ts: mins(at),
-  ok,
-  ms,
-  skipped,
-  detail,
+const SLOS: SloStatus[] = CATALOGUE.map(([id, feature, sli, target, suite, ,]) => {
+  const [attainment, budget, burn, ms] = TUNED[id] ?? [0.9991, 0.71, [0.3, 0.4], msOf(id)];
+  const state = STATES[id] ?? "ok";
+  const windows = suite === "fast" ? FAST : SLOW;
+  return {
+    id,
+    feature,
+    sli,
+    target,
+    suite,
+    attainment_30d: attainment,
+    total_30d: attainment == null ? 0 : suite === "fast" ? 8_640 : 12,
+    budget_left: budget,
+    burn_short: suite === "fast" ? burn[0] : null,
+    burn_long: burn[1],
+    window_short_secs: windows[0],
+    window_long_secs: windows[1],
+    last: attainment == null ? null : { ts: mins(3), ok: state !== "breaching", ms },
+    state,
+  };
 });
 
-const FAILED_STEPS: SloStep[] = [
-  step("id.signin", "1 · identity", true, 612, 74),
-  step("git.push.ok", "2 · git", true, 2_260, 73),
-  step("git.clone.p95", "2 · git", true, 1_820, 73),
-  step("reg.manifest.p95", "4 · registry", true, 402, 72),
-  step("reg.push.ok", "4 · registry", false, 5_004, 72, "manifest PUT answered 500 after 5.0 s (image img/acme/api)"),
-  step("ws.create.p95", "5 · workspace", false, 0, 71, "skipped: the registry stage failed", true),
-  step("env.create.p95", "6 · environment", false, 0, 71, "skipped: the registry stage failed", true),
-];
+/** A run's steps, walked out of the catalogue itself: every id of every stage through `through`,
+ *  in journey order, each stamped with the instant it would have finished at. After `failAt` every
+ *  remaining step is SKIPPED rather than absent — that is what the probe reports, and it is the
+ *  difference between "the registry broke the run" and "the run stopped for no stated reason". */
+function walk(through: string, startedMins: number, suites: string[], failAt?: string): SloStep[] {
+  const order = [...STAGES, "12 · Weekly", "13 · Monthly"];
+  const out: SloStep[] = [];
+  let t = now - startedMins * 60_000;
+  let broke = "";
+  for (const name of order.slice(0, order.indexOf(through) + 1)) {
+    for (const [id, , , , suite, at] of CATALOGUE) {
+      if (at !== name || !suites.includes(suite)) continue;
+      const skipped = broke !== "";
+      const ok = !skipped && id !== failAt;
+      const ms = skipped ? 0 : msOf(id);
+      out.push({
+        slo_id: id,
+        stage: name,
+        ts: new Date((t += ms + 300)).toISOString(),
+        ok,
+        ms,
+        skipped,
+        detail: skipped
+          ? `skipped: the ${broke} stage failed`
+          : ok
+            ? ""
+            : "manifest PUT answered 500 after 5.0 s (image img/acme/api, node kl-1); the layer upload before it succeeded, so the blob is in the store and the tag is not",
+      });
+      if (id === failAt) broke = name;
+    }
+  }
+  return out;
+}
 
-const RUNNING_STEPS: SloStep[] = [
-  step("id.signin", "1 · identity", true, 598, 2),
-  step("git.push.ok", "2 · git", true, 2_118, 2),
-  step("git.clone.p95", "2 · git", true, 1_744, 1),
-  step("reg.manifest.p95", "4 · registry", true, 388, 1),
-];
+const PASSED_STEPS = walk("11 · Teardown", 190, ["fast"]);
+const FAILED_STEPS = walk("11 · Teardown", 74, ["fast"], "reg.push.ok");
+// Mid stage 5: the panel's whole point is a run caught in the act, half a stage in.
+const RUNNING_STEPS = walk("5 · Workspace", 3, ["fast"]).slice(0, 28);
+const WEEKLY_STEPS = walk("12 · Weekly", 190, ["fast", "weekly"]);
 
-const PASSED_STEPS: SloStep[] = [
-  step("id.signin", "1 · identity", true, 604, 190),
-  step("git.push.ok", "2 · git", true, 2_204, 189),
-  step("git.clone.p95", "2 · git", true, 1_790, 189),
-  step("reg.manifest.p95", "4 · registry", true, 396, 188),
-  step("reg.push.ok", "4 · registry", true, 1_402, 188),
-  step("ws.create.p95", "5 · workspace", true, 60_900, 187),
-  step("gw.tunnel.p95", "5 · workspace", true, 2_040, 186),
-  step("env.create.p95", "6 · environment", true, 91_800, 185),
-  step("tel.log.latency", "10 · edge", true, 12_400, 183),
-];
+const total = (steps: SloStep[]) => steps.reduce((a, s) => a + s.ms + 300, 0);
 
 /** The probe's own shape: the suite it ran and the unix second it started at. */
 const runId = (suite: string, startedMins: number) => `${suite}-${Math.floor((now - startedMins * 60_000) / 1000)}`;
 
-const run = (
-  suite: string,
-  state: SloRun["state"],
-  stage: string,
-  startedMins: number,
-  duration_ms: number,
-  steps: SloStep[],
-): SloRun => ({
+const run = (suite: string, state: SloRun["state"], at: string, startedMins: number, steps: SloStep[]): SloRun => ({
   run_id: runId(suite, startedMins),
   suite,
   region: "centralindia-k3s",
   started: mins(startedMins),
-  finished: state === "running" ? null : mins(startedMins - duration_ms / 60_000),
+  finished: state === "running" ? null : new Date(now - startedMins * 60_000 + total(steps)).toISOString(),
   state,
-  stage,
+  stage: at,
   steps_total: steps.length,
   steps_failed: steps.filter((s) => !s.ok && !s.skipped).length,
   failed_step: steps.find((s) => !s.ok && !s.skipped)?.slo_id ?? "",
   failed_detail: steps.find((s) => !s.ok && !s.skipped)?.detail ?? "",
-  duration_ms,
+  duration_ms: total(steps),
 });
 
-const RUNNING_RUN = run("fast", "running", "4 · registry", 2, 128_000, RUNNING_STEPS);
-const FAILED_RUN = run("fast", "failed", "4 · registry", 74, 214_000, FAILED_STEPS);
-const WEEKLY_RUN = run("weekly", "passed", "weekly · failover", 190, 342_000, PASSED_STEPS);
-const FAST_RUNS: SloRun[] = [12, 27, 42, 57].map((m, i) =>
-  run("fast", "passed", "10 · edge", m, 41_000 + i * 900, PASSED_STEPS.slice(0, 6)),
-);
+const RUNNING_RUN = run("fast", "running", "5 · Workspace", 3, RUNNING_STEPS);
+const FAILED_RUN = run("fast", "failed", "4 · Registry", 74, FAILED_STEPS);
+const WEEKLY_RUN = run("weekly", "passed", "12 · Weekly", 190, WEEKLY_STEPS);
+const FAST_RUNS: SloRun[] = [12, 27, 42, 57].map((m) => run("fast", "passed", "11 · Teardown", m, PASSED_STEPS));
 
 const SLO_RUNS: SloRun[] = [RUNNING_RUN, ...FAST_RUNS, FAILED_RUN, WEEKLY_RUN];
 
@@ -543,6 +663,7 @@ const SLO_OVERVIEW: SloOverview = {
   slos: SLOS,
   running: RUNNING_RUN,
   runs: SLO_RUNS,
+  journey: JOURNEY,
   generated: new Date(now).toISOString(),
 };
 
@@ -550,9 +671,12 @@ const SLO_DETAILS: Record<string, SloRunDetail> = Object.fromEntries(
   [
     [RUNNING_RUN, RUNNING_STEPS] as const,
     [FAILED_RUN, FAILED_STEPS] as const,
-    [WEEKLY_RUN, PASSED_STEPS] as const,
-    ...FAST_RUNS.map((r) => [r, PASSED_STEPS.slice(0, 6)] as const),
-  ].map(([r, steps]) => [r.run_id, { ...r, steps }]),
+    [WEEKLY_RUN, WEEKLY_STEPS] as const,
+    ...FAST_RUNS.map((r) => [r, PASSED_STEPS] as const),
+  ].map(([r, steps]) => [
+    r.run_id,
+    { ...r, steps, journey: r.suite === "weekly" ? JOURNEY.weekly : r.suite === "monthly" ? JOURNEY.monthly : JOURNEY.fast },
+  ]),
 );
 
 
