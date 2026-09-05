@@ -23,18 +23,10 @@ jobs:
       contents: read
       # audit-check posts its findings as a check run on the commit.
       checks: write
-    # The `/v1` handlers sit behind a concrete Mongo struct, so their tests need a real Mongo
-    # (tests/common::mongo). This job runs ON the runner rather than in a container, so the
-    # service is reached through its published port on localhost — `mongo:27017` would only
-    # resolve for a container job. Without the variable the tests keep their gate half and skip
-    # the handler half, which is what a laptop gets.
-    services:
-      mongo:
-        image: mongo:7
-        ports:
-          - 27017:27017
+    # No Mongo service here: six of `tests/api_server.rs`'s checks need the real directory behind
+    # the handler and SKIP without `KLOUDLITE_TEST_MONGO_URI` (they say so on stderr); the owner
+    # chose a lean pipeline over those six. Run them locally with the variable set.
     env:
-      KLOUDLITE_TEST_MONGO_URI: mongodb://localhost:27017
       # One target dir shared by both runner slots on build-0, so whichever slot takes this job
       # finds the last run's compiled tests instead of starting cold.
       CARGO_TARGET_DIR: /home/azureuser/ci-target-test
