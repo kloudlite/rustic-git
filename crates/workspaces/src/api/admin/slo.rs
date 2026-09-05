@@ -277,6 +277,8 @@ pub struct BootstrapUser {
     pub email: String,
     pub name: String,
     pub username: String,
+    #[serde(default)]
+    pub superadmin: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -301,7 +303,14 @@ pub async fn bootstrap(State(state): State<Arc<ApiState>>, Json(body): Json<Boot
         if let Err(e) = dir.ensure_user(&u.email, &u.name, &u.username).await {
             return (StatusCode::BAD_REQUEST, format!("{}: {e}", u.username)).into_response();
         }
-        tracing::info!(username = %u.username, "slo.bootstrap.ensured");
+        // `require_superadmin` on the roster routes reads the caller's ROW, not the claim the probe
+        // mints for itself, so the probe's grant-and-revoke step needs its admin identity seated here.
+        if u.superadmin {
+            if let Err(e) = dir.add_superadmin(&u.email, "slo bootstrap").await {
+                return (StatusCode::BAD_REQUEST, format!("{}: {e}", u.username)).into_response();
+            }
+        }
+        tracing::info!(username = %u.username, superadmin = u.superadmin, "slo.bootstrap.ensured");
     }
     StatusCode::NO_CONTENT.into_response()
 }

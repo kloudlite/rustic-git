@@ -246,8 +246,12 @@ async fn bootstrap(cfg: Config) -> i32 {
     // suites with no accounts at all until somebody ran it again with a different env.
     let users: Vec<_> = SUITE_TENANTS
         .iter()
-        .flat_map(|(p, o)| [(*p, "SLO probe"), (*o, "SLO other")])
-        .map(|(user, name)| serde_json::json!({ "email": email_of(user), "name": name, "username": user }))
+        // The PRIMARY of each pair is seated on the superadmin roster: the probe mints itself an
+        // admin token, but the roster routes read the caller's ROW, not the claim.
+        .flat_map(|(p, o)| [(*p, "SLO probe", true), (*o, "SLO other", false)])
+        .map(|(user, name, superadmin)| {
+            serde_json::json!({ "email": email_of(user), "name": name, "username": user, "superadmin": superadmin })
+        })
         .collect();
     let body = serde_json::json!({ "users": users });
     match c.http.post(&url).header("authorization", c.bearer(&c.admin_jwt)).json(&body).send().await {
