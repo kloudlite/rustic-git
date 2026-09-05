@@ -1595,7 +1595,7 @@ data:
   #   kubectl -n kloudlite-git exec kloudlite-git-srv-0 -- \
   #     ssh-keygen -lf /etc/kloudlite-git/host_key.pub
   # and paste the `ssh-ed25519 AAAA…` line (no host prefix) here.
-  KLOUDLITE_GIT_SLO_SSH_HOSTKEY: ""
+  KLOUDLITE_GIT_SLO_SSH_HOSTKEY: "SHA256:43Ar7kuu4ypa+e2Y/7e6bhBuwdq6AzDyyZe7wahe3Ws"
   # OPTIONAL. The digest `slo-probe/canary` must resolve to, so `reg.canary` fails on a SUBSTITUTED
   # image rather than merely a missing one. Unset, the check only requires the pull to succeed.
   # To obtain it, after `kloudlite-git-slo bootstrap` has pushed the canary:
@@ -1603,7 +1603,7 @@ data:
   KLOUDLITE_GIT_SLO_CANARY_DIGEST: ""
   # The ingress controller's public IP, for `edge.origin` (curl with --resolve past Cloudflare).
   # Empty: that id skips. `kubectl -n ingress-nginx get svc` shows it.
-  KLOUDLITE_GIT_SLO_ORIGIN_IP: ""
+  KLOUDLITE_GIT_SLO_ORIGIN_IP: "4.224.189.61"
 ---
 # The fast suite, every five minutes. `Forbid`: a run that overshoots its window is a symptom, and
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.
