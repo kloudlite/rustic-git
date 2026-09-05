@@ -24,6 +24,10 @@ pub struct State {
     /// The clone of `workspace`, which is a second object teardown must find.
     pub clone: Option<String>,
     pub environment: Option<String>,
+    /// The `Volume` CR behind `workspace`, and the push that stage 7 restores from. Both are
+    /// stage 5's outputs and stage 7's inputs, which is the whole reason they live here.
+    pub volume: Option<String>,
+    pub snapshot: Option<String>,
     pub token: Option<String>,
     /// The token's VALUE, not its id — stage 4 logs in to the registry with it. Held in memory
     /// only: it is never reported, never logged, and dies with the process.

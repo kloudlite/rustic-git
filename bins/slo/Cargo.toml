@@ -31,7 +31,10 @@ tracing = { workspace = true }
 metrics = { workspace = true }
 # The drills exec into pods and taint nodes; the client is on `Ctx` so every stage shares one
 # connection rather than building its own.
-kube = { workspace = true }
+# `ws`: `Api::<Pod>::exec` is a websocket subresource, and `ws.exec.ok`/`homes.rw.p95`/`env.dns`
+# are all questions only answerable from inside a pod.
+kube = { workspace = true, features = ["ws"] }
+k8s-openapi = { workspace = true }
 # `reqwest` is pinned `rustls-no-provider` workspace-wide, so main() must install a provider
 # explicitly — with `ring` and `aws-lc-rs` both reachable rustls 0.23 refuses to choose.
 rustls = { workspace = true }

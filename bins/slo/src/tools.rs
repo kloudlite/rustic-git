@@ -32,11 +32,14 @@ pub struct Programs {
     pub ssh_keygen: String,
     pub ssh_keyscan: String,
     pub crane: String,
+    pub ssh: String,
+    /// The CLI, which the gateway steps run as ssh's ProxyCommand.
+    pub kl: String,
 }
 
 impl Default for Programs {
     fn default() -> Self {
-        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into() }
+        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into(), ssh: "ssh".into(), kl: "kl".into() }
     }
 }
 

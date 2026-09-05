@@ -9,10 +9,13 @@ use serde_json::Value;
 
 use crate::ctx::{Ctx, PROBE_USER};
 
+pub mod environment;
 pub mod git;
 pub mod identity;
+pub mod lifecycle;
 pub mod pr;
 pub mod registry;
+pub mod workspace;
 
 /// The journey stages this file's neighbours implement, named as the catalogue's "Journey
 /// step" column names them. Stamped onto every step, so a failed run reads as a place in the
@@ -21,6 +24,9 @@ pub const IDENTITY: &str = "1 · Identity";
 pub const GIT: &str = "2 · Git";
 pub const PULL_REQUEST: &str = "3 · Pull request";
 pub const REGISTRY: &str = "4 · Registry";
+pub const WORKSPACE: &str = "5 · Workspace";
+pub const ENVIRONMENT: &str = "6 · Environment";
+pub const LIFECYCLE: &str = "7 · Lifecycle";
 
 /// One HTTP call, with the body carried into the error.
 ///

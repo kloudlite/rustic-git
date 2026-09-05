@@ -34,6 +34,9 @@ fn fast() -> Vec<Stage> {
         Stage { name: stages::GIT, run: |c| Box::pin(stages::git::run(c)) },
         Stage { name: stages::PULL_REQUEST, run: |c| Box::pin(stages::pr::run(c)) },
         Stage { name: stages::REGISTRY, run: |c| Box::pin(stages::registry::run(c)) },
+        Stage { name: stages::WORKSPACE, run: |c| Box::pin(stages::workspace::run(c)) },
+        Stage { name: stages::ENVIRONMENT, run: |c| Box::pin(stages::environment::run(c)) },
+        Stage { name: stages::LIFECYCLE, run: |c| Box::pin(stages::lifecycle::run(c)) },
     ]
 }
 
