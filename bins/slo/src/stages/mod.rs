@@ -12,13 +12,15 @@ use crate::ctx::{Ctx, PROBE_USER};
 pub mod git;
 pub mod identity;
 pub mod pr;
+pub mod registry;
 
-/// The three journey stages this file's neighbours implement, named as the catalogue's "Journey
+/// The journey stages this file's neighbours implement, named as the catalogue's "Journey
 /// step" column names them. Stamped onto every step, so a failed run reads as a place in the
 /// journey rather than an id.
 pub const IDENTITY: &str = "1 · Identity";
 pub const GIT: &str = "2 · Git";
 pub const PULL_REQUEST: &str = "3 · Pull request";
+pub const REGISTRY: &str = "4 · Registry";
 
 /// One HTTP call, with the body carried into the error.
 ///
@@ -190,9 +192,7 @@ async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
         }
     }
     gone += deny_requests(c, &matches).await;
-    // Images are not a `/v1` collection — they are deleted through the server tier's browse API,
-    // which stage 4 is the first thing to need. Until then this is honestly nothing.
-    tracing::info!(kind = "image", reason = "needs the browse API stage 4 introduces", "slo.teardown.skipped");
+    gone += sweep_images(c, &matches).await;
     gone
 }
 
@@ -223,6 +223,37 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
             }
             Ok(r) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %r.status(), "slo.teardown.failed"),
             Err(e) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %e, "slo.teardown.failed"),
+        }
+    }
+    gone
+}
+
+/// Images are not a `/v1` collection: they are listed and deleted through the server tier's
+/// browse API, which the api process proxies at `/api/{owner}/…`. A delete is a POST with no body
+/// (`crates/api/src/images.rs`), not a DELETE, which is why this cannot be another `Kind`.
+async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
+    let url = api(c, &format!("/api/{PROBE_USER}/images"));
+    let rows: Vec<serde_json::Value> = match get(c, &url, &c.probe_jwt.clone()).await {
+        Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(kind = "image", op = "list", error = %format!("{e:#}"), "slo.teardown.failed");
+            return 0;
+        }
+    };
+    let mut gone = 0;
+    let names: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|n| matches(n))
+        .collect();
+    for name in names {
+        let del = api(c, &format!("/api/{PROBE_USER}/{name}/imagedelete"));
+        match post(c, &del, &c.probe_jwt.clone(), Value::Null).await {
+            Ok(_) => {
+                gone += 1;
+                tracing::info!(kind = "image", name = %name, "slo.teardown.deleted");
+            }
+            Err(e) => tracing::warn!(kind = "image", op = "delete", name = %name, error = %format!("{e:#}"), "slo.teardown.failed"),
         }
     }
     gone

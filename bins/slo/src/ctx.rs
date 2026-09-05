@@ -28,6 +28,9 @@ pub struct State {
     pub clone: Option<String>,
     pub environment: Option<String>,
     pub token: Option<String>,
+    /// The token's VALUE, not its id — stage 4 logs in to the registry with it. Held in memory
+    /// only: it is never reported, never logged, and dies with the process.
+    pub token_value: Option<String>,
     /// The CLI token `id.cli.flow` minted. Held so teardown can revoke it by id even when the
     /// name sweep cannot see it.
     pub cli_token: Option<String>,

@@ -23,6 +23,7 @@ pub async fn ctx() -> Ctx {
         jwt_secret: "0123456789abcdef0123456789abcdef".into(),
         ssh_key_path: "/dev/null".into(),
         ssh_hostkey: String::new(),
+        canary_digest: None,
     };
     Ctx::new(cfg, Suite::Fast, None).await.expect("ctx")
 }

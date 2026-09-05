@@ -35,6 +35,12 @@ kube = { workspace = true }
 # `reqwest` is pinned `rustls-no-provider` workspace-wide, so main() must install a provider
 # explicitly — with `ring` and `aws-lc-rs` both reachable rustls 0.23 refuses to choose.
 rustls = { workspace = true }
+# The probe builds its own OCI layouts: a digest over the bytes it wrote, a Basic header for
+# `/v2/token`, and one random layer. `crates/registry`'s `Digest` would do the first, but taking
+# that crate as a dependency would pull SlateDB into a client that must never open a database.
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

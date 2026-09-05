@@ -3713,6 +3713,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "futures",
@@ -3720,10 +3721,12 @@ dependencies = [
  "kloudlite-git-workspaces",
  "kube",
  "metrics",
+ "rand 0.8.7",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
 ]

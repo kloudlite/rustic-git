@@ -31,11 +31,12 @@ pub struct Programs {
     pub git: String,
     pub ssh_keygen: String,
     pub ssh_keyscan: String,
+    pub crane: String,
 }
 
 impl Default for Programs {
     fn default() -> Self {
-        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into() }
+        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into() }
     }
 }
 
@@ -53,7 +54,10 @@ pub fn scrub(s: &str) -> String {
         let lower = line.to_ascii_lowercase();
         // The earliest marker on the line wins: a line can carry both spellings, and cutting at
         // the later one would leave the first credential in place.
-        let cut = ["authorization:", "bearer ", "authorization="]
+        // `-p` and `--password` are `crane auth login`'s, and `"auth":` is the docker config
+        // document crane writes and echoes back in some failures — both carry the probe's
+        // personal token, which is a credential for the whole registry namespace.
+        let cut = ["authorization:", "bearer ", "authorization=", "-p ", "--password ", "--password=", "\"auth\":"]
             .iter()
             .filter_map(|m| lower.find(m).map(|at| at + m.len()))
             .min();
@@ -124,6 +128,23 @@ mod tests {
         let out = scrub("ok\nAuthorization: Bearer abc\nBearer def");
         assert!(!out.contains("abc") && !out.contains("def"), "{out}");
         assert!(out.starts_with("ok\n"), "{out}");
+    }
+
+    /// `crane auth login … -p {token}` is the one argv in the probe that carries a credential
+    /// crane itself echoes back on some failures — the personal token, which is a credential for
+    /// the whole registry namespace, not one image.
+    #[test]
+    fn a_crane_password_never_survives_the_scrubber() {
+        let secret = "kl_tokensecretvalue";
+        for line in [
+            format!("Error: logging in: crane auth login cr.example -u slo-probe -p {secret}"),
+            format!("--password {secret}"),
+            format!("--password={secret}"),
+            format!(r#"{{"auths":{{"cr.example":{{"auth":"{secret}"}}}}}}"#),
+        ] {
+            let out = scrub(&line);
+            assert!(!out.contains(secret), "{out}");
+        }
     }
 
     #[tokio::test]

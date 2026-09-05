@@ -6,6 +6,7 @@
 //! system it measures is an SLO that passes while the front door is shut.
 
 pub mod config;
+pub mod crane;
 pub mod ctx;
 pub mod report;
 pub mod stages;

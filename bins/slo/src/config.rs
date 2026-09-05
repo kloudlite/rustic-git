@@ -31,6 +31,11 @@ pub struct Config {
     /// would report `ssh.hostkey` green through the exact substitution the SLO exists to catch.
     /// Empty means the operator has not pinned one, and `ssh.hostkey` skips rather than passing.
     pub ssh_hostkey: String,
+    /// The digest `bootstrap` recorded for `slo-probe/canary`. PINNED for the same reason
+    /// `ssh_hostkey` is: a probe that trusted whatever the registry answered would report
+    /// `reg.canary` green through the substitution it exists to catch. `None` means unpinned,
+    /// and the step skips rather than passing.
+    pub canary_digest: Option<String>,
 }
 
 fn req(k: &str) -> Result<String> {
@@ -61,6 +66,7 @@ impl Config {
             jwt_secret: req("KLOUDLITE_GIT_JWT_SECRET")?,
             ssh_key_path: opt("KLOUDLITE_GIT_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
             ssh_hostkey: opt("KLOUDLITE_GIT_SLO_SSH_HOSTKEY", ""),
+            canary_digest: Some(opt("KLOUDLITE_GIT_SLO_CANARY_DIGEST", "")).filter(|d| !d.is_empty()),
         })
     }
 }

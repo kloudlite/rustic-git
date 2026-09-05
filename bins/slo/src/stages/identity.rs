@@ -47,9 +47,11 @@ pub async fn run(c: &mut Ctx) {
             c.state.token = out.pointer("/_id").and_then(|v| v.as_str()).map(str::to_string);
             // The one time it is readable, and it is never logged: a token in a step detail would
             // outlive the run in ClickHouse.
-            out.get("token")
-                .and_then(|v| v.as_str())
-                .filter(|t| !t.is_empty())
+            // Kept, not printed: `reg.push.ok` logs in to the registry with this exact value.
+            c.state.token_value =
+                out.get("token").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).map(str::to_string);
+            c.state.token_value
+                .as_ref()
                 .map(|_| ())
                 .ok_or_else(|| anyhow!("the answer carried no token"))
         }

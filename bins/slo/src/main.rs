@@ -221,8 +221,14 @@ async fn bootstrap(cfg: Config) -> i32 {
             }
         }
     }
-    // The registry canary (`slo-probe/canary`) is pushed with `crane`, which stage 4 is the first
-    // thing to need — until it exists there is nothing honest to do here.
-    tracing::info!(kind = "canary", reason = "needs crane, which stage 4 introduces", "slo.bootstrap.skipped");
+    // The digest is printed, never stored: `reg.canary` reads it from the environment, so a human
+    // pins it into the CronJob's yaml deliberately rather than the probe trusting its own registry.
+    match stages::registry::ensure_canary(&c).await {
+        Ok(digest) => tracing::info!(kind = "canary", digest = %digest, "slo.bootstrap.completed"),
+        Err(e) => {
+            tracing::error!(kind = "canary", error = %format!("{e:#}"), "slo.bootstrap.failed");
+            code = EXIT_FAILED;
+        }
+    }
     code
 }
