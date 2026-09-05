@@ -53,12 +53,12 @@ const NOTE: &str = "slo probe";
 /// else in the object is a leftover, and teardown writes this on every run whatever the step did.
 pub(crate) fn probe_quota() -> Value {
     json!({
-        "workspaces": 8,
-        "environments": 4,
+        "workspaces": 10,
+        "environments": 5,
         "snapshots": 20,
         "diskGb": 40,
-        "cpu": 40,
-        "memoryGb": 80,
+        "cpu": 48,
+        "memoryGb": 96,
     })
 }
 

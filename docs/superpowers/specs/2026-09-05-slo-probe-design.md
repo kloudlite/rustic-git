@@ -346,3 +346,70 @@ environment ids their samples, and vice versa. The added fast ceilings sum to 29
 fast suite's 720 s budget beside a ~2 min run. The fast run now holds the environment, its clone
 and a restore at once, so `environments` goes from 3 to 4 in `deploy/k3s/quotas-slo.yaml` and in
 `probe_quota()` (the parity test) for the three primary tenants.
+
+## Addendum, 2026-09-05: the coverage review's thirty-six ids
+
+`.superpowers/sdd/2026-09-05-slo-probe/coverage-review.md` walked all 118 capability rows and found
+39 gaps and 9 SLIs weaker than the feature they name. The owner's ruling was to close every one.
+Each new id sits in the same suite and stage as its nearest existing twin, and folds into objects a
+stage already holds wherever one exists.
+
+| id | Suite · stage | Target |
+| --- | --- | --- |
+| `id.signin.passkey` | fast · 1 · Identity | 99.9 % |
+| `repo.lifecycle` | fast · 2 · Git | 99.9 % ≤ 10 s |
+| `git.push.ssh` | fast · 2 · Git | 99.9 % |
+| `web.org.page` | fast · 2 · Git | 95 % ≤ 1.5 s |
+| `web.repo.settings` | fast · 2 · Git | 95 % ≤ 1.5 s |
+| `web.workspaces.page` | fast · 2 · Git | 95 % ≤ 1.5 s |
+| `reg.image.delete` | fast · 4 · Registry | 99.9 % ≤ 10 s |
+| `reg.catalogue` | fast · 4 · Registry | 99.9 % ≤ 5 s |
+| `env.quota.refused` | fast · 5 · Workspace | 99.9 % |
+| `wt.delete` | fast · 7 · Lifecycle | 99.9 % ≤ 60 s |
+| `snap.delete` | fast · 7 · Lifecycle | 99.9 % |
+| `repo.visibility` | fast · 9 · Security | 100 % |
+| `id.username`, `id.profile.upsert`, `id.cli.tokens`, `id.cli.sshconfig`, `key.ssh.lifecycle` | hourly · 14 · Experience | 99.9 %, some bounded |
+| `repo.description`, `pr.merge.strategies`, `pr.mergeability` | hourly · 14 · Experience | 99.9 %, some bounded |
+| `team.invite.revoke`, `team.environment`, `env.attach.pair`, `vol.list` | hourly · 14 · Experience | 100 % / 95 % ≤ 180 s / bounded |
+| `admin.stop.environment`, `admin.delete.workload`, `admin.screens`, `admin.workloads.read`, `audit.export`, `req.decide.kinds`, `req.legacy.union`, `region.status` | hourly · 14 · Experience | bounded |
+| `settings.revert`, `settings.roll`, `reg.gc.sweep` | weekly · 12 · Weekly | bounded / 99.9 % |
+| `cluster.decommission` | monthly · 13 · Monthly | 99.9 % |
+
+**Four proposals are implemented differently from the review's wording, each because the code says
+so.** `id.signin.passkey` cannot walk a sign-in: WebAuthn is verified in the web app, which holds
+the relying-party identity and the challenge, and the api holds no verifier — so the SLI is the
+half this tier owns (the row goes in, lists back, and the lookup a sign-in makes stays peer-only).
+`id.username` cannot claim a free handle, because `claim_username` RENAMES the caller and would
+rename `slo-probe`; it measures the two refusals the route owes instead. `id.profile.upsert` cannot
+upsert, because `POST /v1/users` is peer-only precisely so a session cannot renew itself — which is
+the invariant it now measures. `reg.gc.sweep` can only prove the keep-biased half: `BLOB_GRACE` is
+a fixed hour and the weekly CronJob's `activeDeadlineSeconds` is 3600, so no run can watch an
+unreferenced blob be reclaimed in band. **Region CREATE is deliberately not probed at all**: a
+`Region` has no delete on any tier, so a probe region would be permanent shared state.
+
+**The nine weak SLIs, and what each now asserts.** `ws.exec.ok`: the command's output AND that
+`/home/kl` is the NFS export, not the empty local directory a pod started before its node's mount
+would hostPath. `vol.orphan.collected`: the Volume has no owner entry before it is watched away, so
+a sweep that took an OWNED volume cannot pass as a collection. `ws.replicated`: a `VolumeReplica`
+names the worktree's cut BY NAME, which is what `may_claim` reads, not only the owner's condition.
+`quota.refused`: the refusal sentence names the dimension, what is used and the limit.
+`audit.row`: the same write also reaches `kloudlite.events` as `admin.request.denied` (a 503 is
+tolerated — no ClickHouse is a supported deployment). `signals.fresh`: a rule whose window has no
+samples reads `unknown`, never `ok`. `sec.agent.spec`: the two spec writes the ClusterRole DOES
+allow still succeed, so a policy tightened into refusing everything cannot pass. `home.persists`:
+`XDG_CACHE_HOME`, `CARGO_TARGET_DIR` and `~/.local/state` still resolve into the local homecache.
+`env.dns`: a sibling is CONNECTED to, not merely resolved.
+
+`env.restore` no longer stops at the accept: it waits for `running` with its services ready, like
+`ws.restore`, and its ceiling goes 45 s → 90 s to allow for it.
+
+**Budget.** The twelve added fast ceilings sum to 250 s of worst case, of which 60 s is
+`drill::UNDO_SLACK` on `env.quota.refused` — reachable only by an undo that hangs, never by a slow
+fleet. The effective addition is 190 s, plus `env.restore`'s 45 s, against the 240 s the 780 s wall
+budget had spare beside a ~3 min run.
+
+**Quota.** The hourly suite now holds two more working copies at once (`env.attach.pair`'s attached
+workspace and `admin.delete.workload`'s, each deleted inside its own step) and one more
+environment, so the three primary tenants go `workspaces: 8 → 10`, `environments: 4 → 5`,
+`cpu: 40 → 48`, `memoryGb: 80 → 96` in `deploy/k3s/quotas-slo.yaml` and in `probe_quota()`, which
+the parity test holds equal. `deploy/k3s/quotas-slo.yaml` is applied BY HAND on the region.

@@ -20,12 +20,17 @@ spec:
   # The hourly Experience suite runs on top of the fast run's objects and holds more at once: a
   # team workspace and a seeded workspace beside the fast journey's three working copies, and a
   # second environment (the two-service one, plus its clone) beside the fast run's one.
-  workspaces: 8
+  # Ten, not eight: the 2026-09-05 coverage batch adds two more working copies the hourly suite
+  # holds at once — `env.attach.pair`'s attached workspace and `admin.delete.workload`'s, each
+  # deleted inside its own step but alive beside the fast journey's four and Experience's three.
+  workspaces: 10
   # Four, not three: the fast run now walks the environment through the same lifecycle as the
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
   # sweep clears by `run-{id}` prefix.
-  environments: 4
+  # Five: `admin.delete.workload` holds one of its own beside the fast run's environment, its
+  # clone and its restore. (`team.environment`'s is billed to the team, not to this owner.)
+  environments: 5
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
@@ -39,8 +44,10 @@ spec:
   # `quota.refused` is unaffected — it refuses on diskGb, which no amount of cpu headroom widens.
   # Raised with the counts above for the hourly suite's extra workspace and environment, and these
   # are the values `request.approve` writes back after it has raised and used the quota.
-  cpu: 40
-  memoryGb: 80
+  # A probe workspace costs 4 vCPU / 8 GiB whatever it asks for (`PodResources::default`), so ten
+  # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
+  cpu: 48
+  memoryGb: 96
 ---
 # The second tenant. It exists ONLY to be refused: `sec.cross.owner` proves one owner cannot read
 # another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any
@@ -75,12 +82,17 @@ spec:
   # The hourly Experience suite runs on top of the fast run's objects and holds more at once: a
   # team workspace and a seeded workspace beside the fast journey's three working copies, and a
   # second environment (the two-service one, plus its clone) beside the fast run's one.
-  workspaces: 8
+  # Ten, not eight: the 2026-09-05 coverage batch adds two more working copies the hourly suite
+  # holds at once — `env.attach.pair`'s attached workspace and `admin.delete.workload`'s, each
+  # deleted inside its own step but alive beside the fast journey's four and Experience's three.
+  workspaces: 10
   # Four, not three: the fast run now walks the environment through the same lifecycle as the
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
   # sweep clears by `run-{id}` prefix.
-  environments: 4
+  # Five: `admin.delete.workload` holds one of its own beside the fast run's environment, its
+  # clone and its restore. (`team.environment`'s is billed to the team, not to this owner.)
+  environments: 5
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
@@ -94,8 +106,10 @@ spec:
   # `quota.refused` is unaffected — it refuses on diskGb, which no amount of cpu headroom widens.
   # Raised with the counts above for the hourly suite's extra workspace and environment, and these
   # are the values `request.approve` writes back after it has raised and used the quota.
-  cpu: 40
-  memoryGb: 80
+  # A probe workspace costs 4 vCPU / 8 GiB whatever it asks for (`PodResources::default`), so ten
+  # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
+  cpu: 48
+  memoryGb: 96
 
 ---
 # The hourly suite's second tenant, all zero for the same reason as `slo-other`.
@@ -126,12 +140,17 @@ spec:
   # The hourly Experience suite runs on top of the fast run's objects and holds more at once: a
   # team workspace and a seeded workspace beside the fast journey's three working copies, and a
   # second environment (the two-service one, plus its clone) beside the fast run's one.
-  workspaces: 8
+  # Ten, not eight: the 2026-09-05 coverage batch adds two more working copies the hourly suite
+  # holds at once — `env.attach.pair`'s attached workspace and `admin.delete.workload`'s, each
+  # deleted inside its own step but alive beside the fast journey's four and Experience's three.
+  workspaces: 10
   # Four, not three: the fast run now walks the environment through the same lifecycle as the
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
   # sweep clears by `run-{id}` prefix.
-  environments: 4
+  # Five: `admin.delete.workload` holds one of its own beside the fast run's environment, its
+  # clone and its restore. (`team.environment`'s is billed to the team, not to this owner.)
+  environments: 5
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
@@ -145,8 +164,10 @@ spec:
   # `quota.refused` is unaffected — it refuses on diskGb, which no amount of cpu headroom widens.
   # Raised with the counts above for the hourly suite's extra workspace and environment, and these
   # are the values `request.approve` writes back after it has raised and used the quota.
-  cpu: 40
-  memoryGb: 80
+  # A probe workspace costs 4 vCPU / 8 GiB whatever it asks for (`PodResources::default`), so ten
+  # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
+  cpu: 48
+  memoryGb: 96
 
 ---
 # The drills' second tenant, all zero for the same reason as `slo-other`.
