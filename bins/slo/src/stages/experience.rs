@@ -55,7 +55,16 @@ pub const IDS: &[&str] = &[
 
 pub async fn run(c: &mut Ctx) {
     for id in IDS {
-        c.skip(id, "not implemented yet");
+        match *id {
+            // Owned by `experience_ws`. `ws.packages.add` creates the workspace the pair runs
+            // against and `ws.packages.remove` follows it, so one call covers both ids.
+            "ws.packages.add" => super::experience_ws::packages(c).await,
+            "ws.packages.remove" => {}
+            "ws.seeded" => super::experience_ws::seeded(c).await,
+            "key.platform.regenerate" => super::experience_ws::platform_key(c).await,
+            "home.persists" => super::experience_ws::home_persists(c).await,
+            _ => c.skip(id, "not implemented yet"),
+        }
     }
 }
 

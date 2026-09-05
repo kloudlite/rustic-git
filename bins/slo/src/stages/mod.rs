@@ -13,6 +13,7 @@ pub mod admin;
 pub mod edge;
 pub mod environment;
 pub mod experience;
+pub mod experience_ws;
 pub mod git;
 pub mod identity;
 pub mod lifecycle;

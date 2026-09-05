@@ -43,6 +43,11 @@ pub struct State {
     /// name sweep cannot see it.
     pub cli_token: Option<String>,
     pub key: Option<String>,
+    /// The Experience stage's own workspace (`run-{id}-x`): `ws.packages.*` create it and
+    /// `home.persists` writes the file it later reads from a fresh one. Every workspace that
+    /// stage creates is named `run-{run_id}-…`, so teardown's prefix sweep finds them by name
+    /// whether or not the stage got as far as deleting them itself.
+    pub ux_workspace: Option<String>,
     pub request: Option<String>,
 }
 
