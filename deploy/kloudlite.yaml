@@ -1706,6 +1706,112 @@ spec:
                 secretName: kloudlite-slo-k3s-kubeconfig
                 defaultMode: 0400
 ---
+# The hourly Experience suite: the fast journey plus stage 14, which walks every remaining verb a
+# person can perform (packages, teams, invitations, branch protection, a two-service environment,
+# an approved quota request). `:07` so it never shares a minute with the fast suite's own tick.
+# `activeDeadlineSeconds: 2400`: the fast journey plus ~25 more steps, several of which wait out a
+# workspace start or an environment with two services.
+# two probes racing would delete each other's `run-{id}` objects and report both as broken.
+# `activeDeadlineSeconds: 2400`: every step's ceiling sits at or above its catalogue target so a
+# slow answer is recorded as a breach with a number rather than cut off, and those ceilings sum
+# past one schedule on a bad day. `Forbid` skips the next tick while a run is still going, so a
+# slow run costs one missed sample, never two probes on one cluster.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kloudlite-slo-hourly
+  namespace: kloudlite
+spec:
+  # SUSPENDED on arrival: stage 14 is a scaffold that skips every id, and an unsuspended CronJob
+  # would file 28 skips an hour and burn an hour of cluster time on a fast run nobody asked for.
+  # The owner unsuspends it once the Experience stage is implemented.
+  suspend: true
+  schedule: "7 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 2400
+      # No retry. A failed journey is a SAMPLE, already reported and already counted against the
+      # budget; running it again would file a second run under a second id and quietly halve the
+      # measured failure rate.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: { app: kloudlite-slo, suite: hourly }
+          annotations:
+            # The probe writes its results to ClickHouse through the admin process; its own
+            # /metrics is never up long enough to scrape, and a scrape target that is absent 99 %
+            # of the time is an alert nobody can act on.
+            prometheus.io/scrape: "false"
+        spec:
+          serviceAccountName: kloudlite-slo
+          automountServiceAccountToken: true
+          # Never restarted in place: the parent process files the final report and exits with the
+          # code that says what happened (0 passed, 1 a step failed, 2 unusable config, 3 the
+          # report never landed). A restart would overwrite that with a second run's story.
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+          containers:
+            - name: slo
+              image: ghcr.io/kloudlite/kloudlite-slo:8924e9849b3fc3d91774160216d05a6c0836bec1@sha256:5af5e16043c7ae2bdffa6cdb9794d5ecadb440a366485155a3ae61972b08de3e
+              args: ["run", "--suite", "hourly"]
+              envFrom:
+                - configMapRef: { name: kloudlite-slo-env }
+              env:
+                # The probe holds no password: it MINTS its own user and admin tokens with this
+                # key, which is why it needs the same Secret the server tier signs with.
+                - name: KLOUDLITE_JWT_SECRET
+                  valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
+                # The workspace CRDs and the pods to exec into live in the k3s cluster, so the
+                # mounted kubeconfig is what stages 5-7 and the drills talk to — the projected
+                # ServiceAccount token above reaches only THIS cluster's pods.
+                - name: KUBECONFIG
+                  value: /etc/kloudlite/k3s/config
+                # git, ssh and crane all write under $HOME, and the root filesystem is read-only.
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
+                - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+          volumes:
+            # The git clones, the crane blobs and the run's own steps.json. 2Gi because the weekly
+            # suite pushes a large pack and a large layer through here.
+            - name: tmp
+              emptyDir:
+                sizeLimit: 2Gi
+            # The probe user's private key, generated ONCE by the operator; the run registers its
+            # public half itself. Not optional: without it every SSH step fails and the git tier
+            # looks broken. See deploy/k3s/README.md for the recipe.
+            - name: ssh-key
+              secret:
+                secretName: kloudlite-slo
+                defaultMode: 0400
+                items:
+                  # The filename is config.rs's KLOUDLITE_SLO_SSH_KEY default. `fsGroup: 1001`
+                  # makes the projected file root:1001 0440 whatever `defaultMode` says, and
+                  # OpenSSH's unprotected-key refusal only fires when the file's OWNER uid is the
+                  # caller's — it is not, so the group bit is never what stops us. 0400 is here as
+                  # the narrowest mode that still works, not as a fix for that check.
+                  - { key: ssh_key, path: id_ed25519 }
+            - name: k3s-kubeconfig
+              secret:
+                secretName: kloudlite-slo-k3s-kubeconfig
+                defaultMode: 0400
+---
 # The weekly suite: the fast journey plus the heavy checks (large push, cold nix profile,
 # cross-node start) and the control-plane failover drill. 02:00 Sunday UTC — off the fast suite's
 # :00 slot by a schedule Kubernetes will not overlap anyway, and outside anyone's working hours.

@@ -1,0 +1,83 @@
+//! Stage 14 · Experience: every remaining verb a person can perform, walked once an hour.
+//!
+//! A SCAFFOLD. The catalogue, the windows, the CronJob and the teardown sweeps are in place; the
+//! steps themselves are not, and every id skips with "not implemented yet" until they are. That is
+//! deliberate rather than an empty stage: a run is exactly-once complete — every id in the suite
+//! reports on every path — so the console renders the stage as grey rather than as a run that
+//! silently reported 77 of 105 ids, and `SloProbeMissing` stays honest for the fast ids the hourly
+//! run does produce.
+//!
+//! `IDS` is the order the stage will run in, which is the addendum's own table order: identity and
+//! packages, then teams (create → invite → role → shared repo → workspace → remove → delete), then
+//! the repo and PR verbs, then environments, then the volume/quota/admin reads, and the two
+//! whole-journey observations (`feed.experience`, `home.persists`) last, because both assert
+//! something about what everything BEFORE them did.
+//!
+//! ponytail: skips only, no probe code — the second implementer fills `run` in id order and
+//! deletes this note when the last skip is gone.
+
+use crate::ctx::Ctx;
+
+/// The catalogue's stage name, verbatim.
+pub const EXPERIENCE: &str = "14 · Experience";
+
+/// Every id this stage owns, in the order it will probe them.
+pub const IDS: &[&str] = &[
+    "ws.packages.add",
+    "ws.packages.remove",
+    "ws.seeded",
+    "key.platform.regenerate",
+    "team.create",
+    "team.invite.accept",
+    "team.role.set",
+    "team.repo.shared",
+    "team.workspace",
+    "team.member.remove",
+    "team.delete",
+    "repo.protection",
+    "repo.commit.patch",
+    "repo.compare",
+    "pr.comment",
+    "pr.close",
+    "commit.verify",
+    "env.services.multi",
+    "env.clone",
+    "env.restore.inplace",
+    "env.stop.start",
+    "vol.history",
+    "quota.view",
+    "request.approve",
+    "admin.stop.workspace",
+    "superadmin.grant",
+    "feed.experience",
+    "home.persists",
+];
+
+pub async fn run(c: &mut Ctx) {
+    for id in IDS {
+        c.skip(id, "not implemented yet");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kloudlite_workspaces::slo::catalogue::{journey, Suite};
+
+    /// The stage reports exactly the ids the catalogue says it owns — no more, no fewer, and none
+    /// twice. The whole point of the scaffold is that the run stays complete while it is empty.
+    #[test]
+    fn ids_are_the_catalogues_experience_stage() {
+        let (_, catalogued) = journey(Suite::Hourly)
+            .into_iter()
+            .find(|(name, _)| *name == EXPERIENCE)
+            .expect("the hourly journey walks Experience");
+        let mut mine = IDS.to_vec();
+        mine.sort_unstable();
+        let mut theirs = catalogued;
+        theirs.sort_unstable();
+        assert_eq!(mine, theirs);
+        mine.dedup();
+        assert_eq!(mine.len(), IDS.len(), "an id is listed twice");
+    }
+}

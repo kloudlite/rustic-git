@@ -13,6 +13,12 @@ A latency SLO ("Target" has a `≤ N ms") is "good" only when the step both succ
 under that ceiling; an availability-only SLO ("Target" is a bare percentage) is good whenever the
 step succeeded. `SloBurn` and `SloProbeMissing` (`deploy/alerts.md`) evaluate every row below.
 
+The hourly suite (`14 · Experience`) is the owner's addendum: everything a person does that the
+five-minute run has no room for — packages, teams and invitations, branch protection, a
+two-service environment, an approved quota request. It runs the fast journey first, so every
+hourly run is also a fast sample, and its burn pair is 24 h / 4 h because one sample an hour
+cannot fill a five-minute window.
+
 | id | Feature | SLI | Target | Suite | Journey step |
 | --- | --- | --- | --- | --- | --- |
 | `id.signin` | Identity | Sign-in over HTTP succeeds | 99.9 % | fast | 1 · Identity |
@@ -92,6 +98,34 @@ step succeeded. `SloBurn` and `SloProbeMissing` (`deploy/alerts.md`) evaluate ev
 | `drill.dead.node` | Resilience drills | A dead-node drill heals every replica onto a live node | 99.9 % | monthly | 13 · Monthly |
 | `drill.drain` | Resilience drills | A drain drill succeeds without interrupting a running worktree | 99.9 % | monthly | 13 · Monthly |
 | `drill.redis.down` | Resilience drills | The system keeps operating correctly with Redis down | 99.9 % | monthly | 13 · Monthly |
+| `ws.packages.add` | Workspaces | Adding a package to a running workspace makes it runnable (`which`) | 95 % ≤ 180000 ms | hourly | 14 · Experience |
+| `ws.packages.remove` | Workspaces | Removing it makes it disappear from the profile | 95 % ≤ 120000 ms | hourly | 14 · Experience |
+| `ws.seeded` | Workspaces | A workspace created from a repo and branch has that clone checked out | 95 % ≤ 180000 ms | hourly | 14 · Experience |
+| `key.platform.regenerate` | Identity | Regenerating the platform key keeps seeding working | 99.9 % | hourly | 14 · Experience |
+| `team.create` | Teams | A team can be created by a person | 99.9 % | hourly | 14 · Experience |
+| `team.invite.accept` | Teams | An invite is created, previewed and accepted once | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |
+| `team.role.set` | Teams | A member's role changes and is reflected in the profile | 99.9 % | hourly | 14 · Experience |
+| `team.repo.shared` | Teams | A member clones a team repo; a non-member is refused | 99.9 % | hourly | 14 · Experience |
+| `team.workspace` | Teams | A team workspace lands in the team namespace and starts | 95 % ≤ 90000 ms | hourly | 14 · Experience |
+| `team.member.remove` | Teams | A removed member loses access to the team repo | 99.9 % | hourly | 14 · Experience |
+| `team.delete` | Teams | Deleting the team removes its profile and refuses its slug | 99.9 % | hourly | 14 · Experience |
+| `repo.protection` | Git hosting | A protected branch refuses a direct push and still merges via a PR | 99.9 % | hourly | 14 · Experience |
+| `repo.commit.patch` | Git hosting | An edit made through the web commit endpoint lands in the log | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |
+| `repo.compare` | Git hosting | Comparing two branches lists the right commits | 99.9 % ≤ 1000 ms | hourly | 14 · Experience |
+| `pr.comment` | Pull requests | A comment on a PR is readable back | 99.9 % | hourly | 14 · Experience |
+| `pr.close` | Pull requests | A closed PR is refused a merge | 99.9 % | hourly | 14 · Experience |
+| `commit.verify` | Git hosting | The signature endpoint answers for a pushed commit | 99.9 % ≤ 1000 ms | hourly | 14 · Experience |
+| `env.services.multi` | Environments | An environment with two services has both ready and resolving each other | 95 % ≤ 180000 ms | hourly | 14 · Experience |
+| `env.clone` | Environments | A stopped environment clones with all services ready | 95 % ≤ 180000 ms | hourly | 14 · Experience |
+| `env.restore.inplace` | Environments | Restore in place brings a service's data back | 99.9 % | hourly | 14 · Experience |
+| `env.stop.start` | Environments | Stop then start round trip | 95 % ≤ 120000 ms | hourly | 14 · Experience |
+| `vol.history` | Workspace lifecycle | History lists pushes newest first with their messages; refs answer | 99.9 % ≤ 1000 ms | hourly | 14 · Experience |
+| `quota.view` | Admin | `GET /v1/quota` reflects the objects the run holds | 99.9 % | hourly | 14 · Experience |
+| `request.approve` | Admin | An approved quota request raises the quota and unblocks the refused create | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
+| `admin.stop.workspace` | Admin | An admin stop is visible to the owner as `stopped` | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
+| `superadmin.grant` | Security | Granting and revoking superadmin flips `/admin/overview` between 200 and 403 | 100 % | hourly | 14 · Experience |
+| `feed.experience` | Pull requests | The feed shows the team and repo events of this run | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
+| `home.persists` | Workspaces | A file written in one workspace is read from a fresh workspace's home | 99.9 % | hourly | 14 · Experience |
 | — | Identity | A person can reset access via the email magic link | — | manual | manual · email link |
 | — | Identity | A person can register a new passkey | — | manual | manual · passkey registration |
 | — | Backups | A full backup restore rebuilds a working cluster | — | manual | manual · restore drill |

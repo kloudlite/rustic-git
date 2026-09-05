@@ -73,6 +73,7 @@ fn journey_of(suite: Suite) -> Vec<JourneyStage> {
 #[derive(serde::Serialize)]
 struct Journeys {
     fast: Vec<JourneyStage>,
+    hourly: Vec<JourneyStage>,
     weekly: Vec<JourneyStage>,
     monthly: Vec<JourneyStage>,
 }
@@ -98,6 +99,7 @@ pub(crate) async fn overview(State(s): State<Arc<ApiState>>) -> Result<Response,
         runs: slo::runs(h, None, 20).await.map_err(bad_gateway)?,
         journey: Journeys {
             fast: journey_of(Suite::Fast),
+            hourly: journey_of(Suite::Hourly),
             weekly: journey_of(Suite::Weekly),
             monthly: journey_of(Suite::Monthly),
         },

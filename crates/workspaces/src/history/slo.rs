@@ -171,7 +171,7 @@ fn burning(short: Option<f64>, long: Option<f64>, threshold: f64) -> bool {
 
 pub fn validate(r: &RunReport) -> Result<(), String> {
     let suite = match r.suite.as_str() {
-        s @ ("fast" | "weekly" | "monthly") => s,
+        s @ ("fast" | "hourly" | "weekly" | "monthly") => s,
         other => return Err(format!("unknown suite {other:?}")),
     };
     // `{suite}-{digits}` and nothing else: `run_id` is the ReplacingMergeTree key AND is
@@ -267,6 +267,9 @@ fn windows(suite: Suite) -> (u64, u64, u64, u64, u64) {
     const D: u64 = 86_400;
     match suite {
         Suite::Fast => (30 * D, 6 * H, 1_800, H, 300),
+        // Hourly produces one sample an hour, so a 1 h short window would hold a single sample and
+        // a 5 m companion none at all: the long pair alone, like weekly and monthly.
+        Suite::Hourly => (30 * D, 24 * H, 4 * H, 0, 0),
         Suite::Weekly => (30 * D, 28 * D, 7 * D, 0, 0),
         Suite::Monthly => (30 * D, 180 * D, 60 * D, 0, 0),
     }
@@ -513,7 +516,7 @@ pub async fn runs(h: &History, suite: Option<&str>, limit: usize) -> Result<Vec<
 
 fn runs_sql(suite: Option<&str>, limit: usize) -> String {
     let filter = match suite {
-        Some(s @ ("fast" | "weekly" | "monthly")) => format!("WHERE suite = '{s}'"),
+        Some(s @ ("fast" | "hourly" | "weekly" | "monthly")) => format!("WHERE suite = '{s}'"),
         // An unknown suite filters everything out rather than silently listing all of them.
         Some(_) => "WHERE 1 = 0".to_string(),
         None => String::new(),
@@ -644,7 +647,8 @@ mod tests {
     fn validate_rejects_bad_ids_and_unknown_slos() {
         assert!(validate(&report("fast-1", "fast", vec![step("git.push.ok")])).is_ok());
         assert!(validate(&report("fast-abc", "fast", vec![])).is_err());
-        assert!(validate(&report("hourly-1", "hourly", vec![])).is_err());
+        assert!(validate(&report("hourly-1", "hourly", vec![])).is_ok());
+        assert!(validate(&report("nightly-1", "nightly", vec![])).is_err());
         assert!(validate(&report("fast-1", "fast", vec![step("nope")])).is_err());
         let many = (0..201).map(|_| step("git.push.ok")).collect();
         assert!(validate(&report("fast-1", "fast", many)).is_err());
@@ -704,7 +708,7 @@ mod tests {
     fn sql_joins_the_catalogue_instead_of_inlining_it() {
         for sql in [statuses_sql(), burn_sql()] {
             assert!(!sql.contains("multiIf"), "the catalogue is inlined again: {sql}");
-            assert!(sql.len() < 6_000, "{} bytes of SQL", sql.len());
+            assert!(sql.len() < 8_000, "{} bytes of SQL", sql.len());
         }
     }
 }

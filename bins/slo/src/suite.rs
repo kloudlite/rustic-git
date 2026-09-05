@@ -48,6 +48,11 @@ pub fn suite(kind: Suite) -> Vec<Stage> {
     // Weekly and monthly are the fast journey PLUS their own stage, appended in that order —
     // monthly is weekly plus one, never a third journey, which is the same rule `journey()` in the
     // catalogue is built on.
+    // Hourly is the fast journey plus Experience and nothing else — it never walks the weekly or
+    // monthly stages, which is why this is its own arm rather than another step in the ladder.
+    if kind == Suite::Hourly {
+        stages.push(Stage { name: stages::EXPERIENCE, run: |c| Box::pin(stages::experience::run(c)) });
+    }
     if matches!(kind, Suite::Weekly | Suite::Monthly) {
         stages.push(Stage { name: stages::WEEKLY, run: |c| Box::pin(stages::weekly::run(c)) });
     }

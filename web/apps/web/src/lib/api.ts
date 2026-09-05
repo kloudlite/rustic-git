@@ -1556,8 +1556,14 @@ export type SloStatus = {
  *  A stage with no ids (boot, teardown) is real: it takes time and can fail. */
 export type SloJourneyStage = { name: string; ids: string[] };
 
-/** Per suite, because weekly and monthly walk the fast journey plus their own stage. */
-export type SloJourney = { fast: SloJourneyStage[]; weekly: SloJourneyStage[]; monthly: SloJourneyStage[] };
+/** Per suite, because every other suite walks the fast journey plus its own stage — hourly adds
+ *  Experience alone, weekly adds Weekly, monthly adds both. */
+export type SloJourney = {
+  fast: SloJourneyStage[];
+  hourly: SloJourneyStage[];
+  weekly: SloJourneyStage[];
+  monthly: SloJourneyStage[];
+};
 
 export type SloOverview = {
   slos: SloStatus[];

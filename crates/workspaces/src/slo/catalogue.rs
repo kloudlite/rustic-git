@@ -11,6 +11,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suite {
     Fast,
+    Hourly,
     Weekly,
     Monthly,
 }
@@ -21,6 +22,7 @@ impl Suite {
     pub fn period_secs(&self) -> u64 {
         match self {
             Suite::Fast => 300,
+            Suite::Hourly => 3_600,
             Suite::Weekly => 604_800,
             Suite::Monthly => 2_592_000,
         }
@@ -32,6 +34,7 @@ impl Suite {
     pub fn parse(s: &str) -> Option<Suite> {
         match s {
             "fast" => Some(Suite::Fast),
+            "hourly" => Some(Suite::Hourly),
             "weekly" => Some(Suite::Weekly),
             "monthly" => Some(Suite::Monthly),
             _ => None,
@@ -43,6 +46,7 @@ impl Suite {
     pub fn as_str(&self) -> &'static str {
         match self {
             Suite::Fast => "fast",
+            Suite::Hourly => "hourly",
             Suite::Weekly => "weekly",
             Suite::Monthly => "monthly",
         }
@@ -109,21 +113,29 @@ pub const STAGES: &[&str] = &[
     "11 · Teardown",
     "12 · Weekly",
     "13 · Monthly",
+    "14 · Experience",
 ];
 
 /// Every stage `suite` walks, with the ids it probes. Weekly is the fast journey plus its own
 /// stage and monthly is weekly plus its own — never a different journey, the same rule
 /// `suite::fast()` is built on.
 pub fn journey(suite: Suite) -> Vec<(&'static str, Vec<&'static str>)> {
-    let last = match suite {
-        Suite::Fast => "11 · Teardown",
-        Suite::Weekly => "12 · Weekly",
-        Suite::Monthly => "13 · Monthly",
+    // Hourly is the ONE suite whose extra stage is not the next entry in `STAGES`: it is the fast
+    // journey plus Experience, and it never walks the weekly or monthly stages. So the walk is a
+    // prefix plus an explicit tail rather than a slice — appending Experience before Weekly to
+    // keep the slice trick would have renumbered two stages that are already stored in ClickHouse.
+    let (last, tail) = match suite {
+        Suite::Fast => ("11 · Teardown", None),
+        Suite::Hourly => ("11 · Teardown", Some("14 · Experience")),
+        Suite::Weekly => ("12 · Weekly", None),
+        Suite::Monthly => ("13 · Monthly", None),
     };
     let upto = STAGES.iter().position(|s| *s == last).map(|i| i + 1).unwrap_or(STAGES.len());
     STAGES[..upto]
         .iter()
-        .map(|name| (*name, CATALOGUE.iter().filter(|s| s.stage == *name).map(|s| s.id).collect()))
+        .copied()
+        .chain(tail)
+        .map(|name| (name, CATALOGUE.iter().filter(|s| s.stage == name).map(|s| s.id).collect()))
         .collect()
 }
 
@@ -233,6 +245,37 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "tel.stream.lag", feature: "Edge and pipeline", sli: "The Redis events stream consumer lag stays low", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "tel.ch.disk", feature: "Edge and pipeline", sli: "ClickHouse disk usage is reported", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
 
+    // Hourly · Experience. The owner's addendum: every remaining verb a person can perform, walked
+    // once an hour on top of the fast journey — so an hourly run is also a fast sample.
+    Slo { id: "ws.packages.add", feature: "Workspaces", sli: "Adding a package to a running workspace makes it runnable (`which`)", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.packages.remove", feature: "Workspaces", sli: "Removing it makes it disappear from the profile", target: p95(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.seeded", feature: "Workspaces", sli: "A workspace created from a repo and branch has that clone checked out", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "key.platform.regenerate", feature: "Identity", sli: "Regenerating the platform key keeps seeding working", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.create", feature: "Teams", sli: "A team can be created by a person", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.invite.accept", feature: "Teams", sli: "An invite is created, previewed and accepted once", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.role.set", feature: "Teams", sli: "A member's role changes and is reflected in the profile", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.repo.shared", feature: "Teams", sli: "A member clones a team repo; a non-member is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.workspace", feature: "Teams", sli: "A team workspace lands in the team namespace and starts", target: p95(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.member.remove", feature: "Teams", sli: "A removed member loses access to the team repo", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.delete", feature: "Teams", sli: "Deleting the team removes its profile and refuses its slug", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "repo.protection", feature: "Git hosting", sli: "A protected branch refuses a direct push and still merges via a PR", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "repo.commit.patch", feature: "Git hosting", sli: "An edit made through the web commit endpoint lands in the log", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "repo.compare", feature: "Git hosting", sli: "Comparing two branches lists the right commits", target: bound(1_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "pr.comment", feature: "Pull requests", sli: "A comment on a PR is readable back", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "pr.close", feature: "Pull requests", sli: "A closed PR is refused a merge", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "commit.verify", feature: "Git hosting", sli: "The signature endpoint answers for a pushed commit", target: bound(1_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.services.multi", feature: "Environments", sli: "An environment with two services has both ready and resolving each other", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.clone", feature: "Environments", sli: "A stopped environment clones with all services ready", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.restore.inplace", feature: "Environments", sli: "Restore in place brings a service's data back", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.stop.start", feature: "Environments", sli: "Stop then start round trip", target: p95(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "vol.history", feature: "Workspace lifecycle", sli: "History lists pushes newest first with their messages; refs answer", target: bound(1_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "quota.view", feature: "Admin", sli: "`GET /v1/quota` reflects the objects the run holds", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "request.approve", feature: "Admin", sli: "An approved quota request raises the quota and unblocks the refused create", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "admin.stop.workspace", feature: "Admin", sli: "An admin stop is visible to the owner as `stopped`", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "superadmin.grant", feature: "Security", sli: "Granting and revoking superadmin flips `/admin/overview` between 200 and 403", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "feed.experience", feature: "Pull requests", sli: "The feed shows the team and repo events of this run", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "home.persists", feature: "Workspaces", sli: "A file written in one workspace is read from a fresh workspace's home", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+
     // Weekly
     Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit over HTTP succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "reg.push.large", feature: "Container registry", sli: "Pushing a large image layer succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -263,7 +306,20 @@ mod tests {
         let rows: Vec<Vec<String>> = md
             .lines()
             .filter(|l| l.starts_with("| ") && !l.starts_with("| id") && !l.starts_with("| ---"))
-            .map(|l| l.trim_matches('|').split('|').map(|c| c.trim().trim_matches('`').to_string()).collect())
+            // Only the id column is fenced in the doc. Stripping backticks from every cell used to
+            // be harmless and is not any more: an SLI may legitimately start or end with one
+            // (`` `GET /v1/quota` reflects … ``), and trimming it there compared two different
+            // strings and blamed the catalogue.
+            .map(|l| {
+                l.trim_matches('|')
+                    .split('|')
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let c = c.trim();
+                        if i == 0 { c.trim_matches('`') } else { c }.to_string()
+                    })
+                    .collect()
+            })
             .collect();
         let probed: Vec<&Vec<String>> = rows.iter().filter(|r| r[4] != "manual").collect();
         assert_eq!(probed.len(), CATALOGUE.len(), "row count");
@@ -288,17 +344,27 @@ mod tests {
         let ids = |j: &[(&'static str, Vec<&'static str>)]| -> Vec<&'static str> {
             j.iter().flat_map(|(_, ids)| ids.clone()).collect()
         };
-        let (fast, weekly, monthly) =
-            (journey(Suite::Fast), journey(Suite::Weekly), journey(Suite::Monthly));
-        assert_eq!(names(&monthly), STAGES);
-        assert_eq!(names(&fast), &STAGES[..STAGES.len() - 2]);
+        let (fast, hourly, weekly, monthly) = (
+            journey(Suite::Fast),
+            journey(Suite::Hourly),
+            journey(Suite::Weekly),
+            journey(Suite::Monthly),
+        );
+        // Monthly is the only suite that walks every stage; Experience is hourly's alone, which is
+        // why the stage list is not simply a prefix of `STAGES` for every suite.
+        assert_eq!(names(&monthly), &STAGES[..STAGES.len() - 1]);
+        assert_eq!(*names(&fast).last().unwrap(), "11 · Teardown");
         assert!(names(&weekly).starts_with(&names(&fast)));
         assert!(names(&monthly).starts_with(&names(&weekly)));
+        assert_eq!(names(&hourly), [names(&fast), vec!["14 · Experience"]].concat());
         // Boot and Teardown probe nothing and are still there.
         assert!(fast.iter().any(|(n, ids)| *n == "0 · Boot" && ids.is_empty()));
         assert!(fast.iter().any(|(n, ids)| *n == "11 · Teardown" && ids.is_empty()));
-        // Every id exactly once, and every stage a catalogue row names is one of `STAGES`.
+        // Every id exactly once across the two journeys that between them cover every stage, and
+        // every stage a catalogue row names is one of `STAGES`.
         let mut all = ids(&monthly);
+        let experience: Vec<&str> = ids(&hourly).into_iter().filter(|id| !all.contains(id)).collect();
+        all.extend(experience);
         all.sort_unstable();
         let mut want: Vec<&str> = CATALOGUE.iter().map(|s| s.id).collect();
         want.sort_unstable();

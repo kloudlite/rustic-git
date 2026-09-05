@@ -15,21 +15,26 @@ spec:
   # its objects until the next boot sweep (one hour), so the count fits two runs, not one;
   # `quota.refused` therefore refuses on diskGb (a create asking for more than 20 GiB), never on the
   # count. Leftovers from a crashed run are swept by `run-{id}` prefix on the next run's boot.
-  workspaces: 6
-  environments: 1
+  # The hourly Experience suite runs on top of the fast run's objects and holds more at once: a
+  # team workspace and a seeded workspace beside the fast journey's three working copies, and a
+  # second environment (the two-service one, plus its clone) beside the fast run's one.
+  workspaces: 8
+  environments: 3
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
-  snapshots: 10
-  diskGb: 20
+  snapshots: 20
+  diskGb: 40
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
   # journey holds three working copies at once (the workspace, its clone and a restore) plus the
   # one-service environment (2 vCPU / 4 GiB): 14 vCPU and 28 GiB at peak, rounded up for headroom.
   # `quota.refused` is unaffected — it refuses on diskGb, which no amount of cpu headroom widens.
-  cpu: 24
-  memoryGb: 48
+  # Raised with the counts above for the hourly suite's extra workspace and environment, and these
+  # are the values `request.approve` writes back after it has raised and used the quota.
+  cpu: 40
+  memoryGb: 80
 ---
 # The second tenant. It exists ONLY to be refused: `sec.cross.owner` proves one owner cannot read
 # another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any

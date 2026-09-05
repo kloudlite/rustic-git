@@ -7,11 +7,12 @@ use anyhow::{anyhow, Result};
 use kloudlite_workspaces::slo::catalogue::Suite;
 use serde_json::Value;
 
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::{Ctx, OTHER_USER, PROBE_USER};
 
 pub mod admin;
 pub mod edge;
 pub mod environment;
+pub mod experience;
 pub mod git;
 pub mod identity;
 pub mod lifecycle;
@@ -40,6 +41,9 @@ pub const EDGE: &str = "10 · Edge";
 /// fast journey plus their own stage, never a different journey.
 pub const WEEKLY: &str = "12 · Weekly";
 pub const MONTHLY: &str = "13 · Monthly";
+/// Hourly's own stage. Numbered after monthly because the stage numbers are stored in ClickHouse
+/// and renumbering two of them to keep the list contiguous would rewrite history for nothing.
+pub use experience::EXPERIENCE;
 
 /// One HTTP call, with the body carried into the error.
 ///
@@ -160,7 +164,8 @@ pub async fn boot(c: &mut Ctx) {
     if let Err(e) = std::fs::create_dir_all(&c.tmp) {
         tracing::error!(op = "mkdir", name = %c.tmp.display(), error = %e, "slo.boot.failed");
     }
-    let swept = sweep(c, |name| stale(name, chrono::Utc::now().timestamp())).await;
+    let now = chrono::Utc::now().timestamp();
+    let swept = sweep_all(c, move |name| stale(name, now)).await;
     tracing::info!(count = swept, "slo.boot.completed");
 }
 
@@ -171,7 +176,7 @@ pub async fn teardown(c: &mut Ctx) {
     undo_drills(c).await;
     hide(c).await;
     let prefix = c.prefix();
-    let mut swept = sweep(c, move |name| name.starts_with(&prefix)).await;
+    let mut swept = sweep_all(c, move |name| name.starts_with(&prefix)).await;
     swept += drop_env_volume(c).await;
     tracing::info!(count = swept, "slo.teardown.completed");
 }
@@ -219,7 +224,7 @@ async fn hide(c: &mut Ctx) {
         }
     }
     let prefix = c.prefix();
-    for name in images(c, &|n: &str| n.starts_with(&prefix)).await {
+    for name in images(c, PROBE_USER, &c.probe_jwt.clone(), &|n: &str| n.starts_with(&prefix)).await {
         let url = api(c, &format!("/api/{PROBE_USER}/{name}/imagevisibility?visibility=private"));
         match post(c, &url, &c.probe_jwt.clone(), Value::Null).await {
             Ok(_) => tracing::info!(kind = "image", name = %name, "slo.teardown.hidden"),
@@ -266,37 +271,49 @@ struct Kind {
     /// What the delete path takes. Often the same field; `_id` for a credential, whose name is
     /// not unique.
     id_field: &'static str,
-    del: fn(&str) -> String,
+    /// `(id, owner)`. The owner matters for repos only, which are addressed under theirs — every
+    /// other collection is addressed by id alone and ignores it.
+    del: fn(&str, &str) -> String,
 }
 
 /// Order matters at exactly one point: a volume is reference-counted, so its workspace and
 /// environment must be gone before a volume delete can succeed at all.
 const KINDS: &[Kind] = &[
-    Kind { kind: "workspace", list: "/v1/workspaces", name_field: "name", id_field: "id", del: |id| format!("/v1/workspaces/{id}") },
-    Kind { kind: "environment", list: "/v1/environments", name_field: "name", id_field: "id", del: |id| format!("/v1/environments/{id}") },
+    Kind { kind: "workspace", list: "/v1/workspaces", name_field: "name", id_field: "id", del: |id, _| format!("/v1/workspaces/{id}") },
+    Kind { kind: "environment", list: "/v1/environments", name_field: "name", id_field: "id", del: |id, _| format!("/v1/environments/{id}") },
     // `display_name`, not `name`: a volume's `name` is the ws/env id (`ws-a1b2…`), which carries no
     // run prefix at all — the caller-chosen name only survives on `display_name`, so matching on
     // `name` swept nothing and every probe volume leaked.
-    Kind { kind: "volume", list: "/v1/volumes", name_field: "display_name", id_field: "name", del: |n| format!("/v1/volumes/{n}") },
-    Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |n| format!("/v1/repos/{PROBE_USER}/{n}") },
-    Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |id| format!("/v1/tokens/{id}") },
-    Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id| format!("/v1/keys/{id}") },
+    Kind { kind: "volume", list: "/v1/volumes", name_field: "display_name", id_field: "name", del: |n, _| format!("/v1/volumes/{n}") },
+    Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |n, owner| format!("/v1/repos/{owner}/{n}") },
+    Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |id, _| format!("/v1/tokens/{id}") },
+    Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id, _| format!("/v1/keys/{id}") },
     // `id.cli.flow` mints a real 30-day CLI token every five minutes. Its own collection, because
     // a CLI token is not listed by `/v1/tokens` — without this the probe would leak one credential
     // per run forever, which is a worse thing to own than the SLO is to measure.
-    Kind { kind: "cli-token", list: "/v1/cli/tokens", name_field: "name", id_field: "id", del: |id| format!("/v1/cli/tokens/{id}") },
+    Kind { kind: "cli-token", list: "/v1/cli/tokens", name_field: "name", id_field: "id", del: |id, _| format!("/v1/cli/tokens/{id}") },
 ];
 
-/// List every probe-owned object and delete the ones `matches` claims. Returns how many went.
-async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
+/// Both tenants. The Experience suite makes the second user a real participant — it is invited to a
+/// team, clones a team repo and is refused one — so `slo-other` can now own `run-*` objects of its
+/// own (a key, a token, an accepted invite's membership), and a sweep that only ever ran as
+/// `slo-probe` would leak every one of them.
+async fn sweep_all<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
+    let mut gone = sweep(c, PROBE_USER, c.probe_jwt.clone(), &matches).await;
+    gone += sweep(c, OTHER_USER, c.other_jwt.clone(), &matches).await;
+    gone
+}
+
+/// List every object one owner holds and delete the ones `matches` claims. Returns how many went.
+async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: String, matches: &M) -> usize {
     let mut gone = 0;
     for k in KINDS {
-        for (name, id) in list(c, k).await {
+        for (name, id) in list(c, k, owner, &jwt).await {
             if !matches(&name) {
                 continue;
             }
-            let url = format!("{}{}", c.cfg.api_url.trim_end_matches('/'), (k.del)(&id));
-            match c.http.delete(&url).header("authorization", c.bearer(&c.probe_jwt)).send().await {
+            let url = format!("{}{}", c.cfg.api_url.trim_end_matches('/'), (k.del)(&id, owner));
+            match c.http.delete(&url).header("authorization", c.bearer(&jwt)).send().await {
                 Ok(r) if r.status().is_success() => {
                     gone += 1;
                     tracing::info!(kind = k.kind, name = %name, "slo.teardown.deleted");
@@ -308,19 +325,70 @@ async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
             }
         }
     }
-    gone += deny_requests(c, &matches).await;
-    gone += sweep_images(c, &matches).await;
+    gone += deny_requests(c, owner, &jwt, matches).await;
+    gone += sweep_images(c, owner, &jwt, matches).await;
+    gone += sweep_teams(c, &jwt, matches).await;
     gone
+}
+
+/// Teams, last: a team is deleted only by an OWNER (`crates/api/src/teams.rs`, `delete_team`), and
+/// the delete is refused with 409 while the team still owns repositories — so the team's own repos
+/// go first, under the same prefix rule. `/v1/teams` lists the teams the CALLER is in, which is why
+/// this is per-JWT rather than per-owner: the second user sees the same team while its membership
+/// lasts and must not try to delete it (it is not the owner) — the 403 is logged and harmless.
+async fn sweep_teams<M: Fn(&str) -> bool>(c: &mut Ctx, jwt: &str, matches: &M) -> usize {
+    let mut gone = 0;
+    let teams = list(
+        c,
+        &Kind { kind: "team", list: "/v1/teams", name_field: "_id", id_field: "_id", del: |s, _| format!("/v1/teams/{s}") },
+        "",
+        jwt,
+    )
+    .await;
+    for (slug, _) in teams {
+        if !matches(&slug) {
+            continue;
+        }
+        // The team's repositories, which block the delete. Same prefix, the team as the owner.
+        for (name, _) in
+            list(c, &Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |_, _| String::new() }, &slug, jwt)
+                .await
+        {
+            if matches(&name) {
+                gone += del(c, "repo", &name, &api(c, &format!("/v1/repos/{slug}/{name}")), jwt).await as usize;
+            }
+        }
+        gone += del(c, "team", &slug, &api(c, &format!("/v1/teams/{slug}")), jwt).await as usize;
+    }
+    gone
+}
+
+/// One best-effort DELETE, logged the way every other line in teardown logs. `true` when it went.
+async fn del(c: &Ctx, kind: &'static str, name: &str, url: &str, jwt: &str) -> bool {
+    match c.http.delete(url).header("authorization", c.bearer(jwt)).send().await {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!(kind, name = %name, "slo.teardown.deleted");
+            true
+        }
+        Ok(r) => {
+            tracing::warn!(kind, op = "delete", name = %name, error = %r.status(), "slo.teardown.failed");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(kind, op = "delete", name = %name, error = %e, "slo.teardown.failed");
+            false
+        }
+    }
 }
 
 /// `Request` has no delete on any tier — only a superadmin decision — so the sweep DENIES a
 /// leftover instead. That is what teardown actually needs: a pending request blocks the next
 /// run's `req.queue` step (one pending per owner per kind), and a denied one does not.
-async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
+async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str, matches: &M) -> usize {
     let mut gone = 0;
     // The reason, not the name: the id is a server-generated `req-…` that no prefix can match.
     for (reason, id) in
-        list(c, &Kind { kind: "request", list: "/v1/requests", name_field: "reason", id_field: "id", del: |_| String::new() }).await
+        list(c, &Kind { kind: "request", list: "/v1/requests", name_field: "reason", id_field: "id", del: |_, _| String::new() }, owner, jwt).await
     {
         if !matches(&reason) {
             continue;
@@ -350,11 +418,11 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
 /// Images are not a `/v1` collection: they are listed and deleted through the server tier's
 /// browse API, which the api process proxies at `/api/{owner}/…`. A delete is a POST with no body
 /// (`crates/api/src/images.rs`), not a DELETE, which is why this cannot be another `Kind`.
-async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
+async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str, matches: &M) -> usize {
     let mut gone = 0;
-    for name in images(c, matches).await {
-        let del = api(c, &format!("/api/{PROBE_USER}/{name}/imagedelete"));
-        match post(c, &del, &c.probe_jwt.clone(), Value::Null).await {
+    for name in images(c, owner, jwt, matches).await {
+        let del = api(c, &format!("/api/{owner}/{name}/imagedelete"));
+        match post(c, &del, jwt, Value::Null).await {
             Ok(_) => {
                 gone += 1;
                 tracing::info!(kind = "image", name = %name, "slo.teardown.deleted");
@@ -367,9 +435,9 @@ async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
 
 /// The probe-owned image names `matches` claims. A listing that fails is an empty list, like every
 /// other read in teardown.
-async fn images<M: Fn(&str) -> bool + ?Sized>(c: &Ctx, matches: &M) -> Vec<String> {
-    let url = api(c, &format!("/api/{PROBE_USER}/images"));
-    let rows: Vec<serde_json::Value> = match get(c, &url, &c.probe_jwt.clone()).await {
+async fn images<M: Fn(&str) -> bool + ?Sized>(c: &Ctx, owner: &str, jwt: &str, matches: &M) -> Vec<String> {
+    let url = api(c, &format!("/api/{owner}/images"));
+    let rows: Vec<serde_json::Value> = match get(c, &url, jwt).await {
         Ok(v) => serde_json::from_value(v).unwrap_or_default(),
         Err(e) => {
             tracing::warn!(kind = "image", op = "list", error = %format!("{e:#}"), "slo.teardown.failed");
@@ -384,12 +452,12 @@ async fn images<M: Fn(&str) -> bool + ?Sized>(c: &Ctx, matches: &M) -> Vec<Strin
 
 /// `(name, id)` for every object of one kind under the probe's owner. A list that fails is an
 /// empty list: teardown cannot fix an unreachable API, and the next run tries again.
-async fn list(c: &Ctx, k: &Kind) -> Vec<(String, String)> {
-    let url = format!("{}{}?owner={PROBE_USER}", c.cfg.api_url.trim_end_matches('/'), k.list);
+async fn list(c: &Ctx, k: &Kind, owner: &str, jwt: &str) -> Vec<(String, String)> {
+    let url = format!("{}{}?owner={owner}", c.cfg.api_url.trim_end_matches('/'), k.list);
     let rows: Vec<serde_json::Value> = match c
         .http
         .get(&url)
-        .header("authorization", c.bearer(&c.probe_jwt))
+        .header("authorization", c.bearer(jwt))
         .timeout(Duration::from_secs(30))
         .send()
         .await
