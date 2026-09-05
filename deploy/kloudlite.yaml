@@ -1729,10 +1729,10 @@ metadata:
   name: kloudlite-slo-hourly
   namespace: kloudlite
 spec:
-  # Suspended until the first hand-run hourly job has passed on the cluster (deploy/k3s/README.md):
-  # the Experience suite holds a team, two environments and a seeded workspace at once, so its
-  # first run is watched, not scheduled. Unsuspended by hand after that.
-  suspend: true
+  # Live since 2026-09-05 (the sixth hand run passed 89/89 in 128 s). The Experience suite holds a
+  # team, two environments and a seeded workspace at once; a fast run that starts while it is in
+  # flight yields (`suite::hourly_in_flight`) rather than fight it for a node's cpu.
+  suspend: false
   schedule: "7 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
