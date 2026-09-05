@@ -856,10 +856,16 @@ pub fn git_init_container(
             // The key volume is 0444 on purpose (`user_key_volume`), which ssh accepts from `kl`
             // and refuses from ROOT — and this container is root. A private copy at 0600 is the
             // one form both callers accept; the root filesystem here is writable, so /tmp exists.
+            // Retried IN PLACE, re-reading the key each time, for two minutes: right after a
+            // platform-key rotation the kubelet's secret cache still serves the old key for up to
+            // a minute, and a crash-looping init container backs off past the window in which
+            // the mount refreshes. A clone the server refused is wiped before the next attempt.
             format!(
-                "set -e; [ \"$(ls -A {SEED_DIR})\" ] || {{ install -m 600 {USER_KEY_PATH}/id_ed25519 /tmp/seed_key; \
+                "set -e; [ \"$(ls -A {SEED_DIR})\" ] && exit 0; \
+                 for i in $(seq 1 24); do install -m 600 {USER_KEY_PATH}/id_ed25519 /tmp/seed_key; \
                  GIT_SSH_COMMAND=\"ssh -i /tmp/seed_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\" \
-                 git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR}; }}"
+                 git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR} && exit 0; \
+                 rm -rf {SEED_DIR}/* {SEED_DIR}/.[!.]* 2>/dev/null || true; sleep 5; done; exit 1"
             ),
         ]),
         env: Some(vec![
