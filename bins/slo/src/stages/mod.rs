@@ -220,11 +220,22 @@ async fn undo_drills(c: &mut Ctx) {
 /// neither has a name teardown's prefix sweep could ever match. A raised quota is allocation
 /// nobody decided on; a second superadmin is the whole authorization model.
 async fn undo_grants(c: &mut Ctx) {
-    let url = admin(c, &format!("/admin/quota/{PROBE_USER}"));
-    let body = serde_json::json!({ "spec": experience_admin::probe_quota(), "note": "slo probe quota restore" });
-    match call(c, reqwest::Method::PUT, &url, &c.admin_jwt.clone(), Some(body)).await {
-        Ok(_) => tracing::info!(kind = "quota", name = PROBE_USER, "slo.teardown.restored"),
-        Err(e) => tracing::warn!(kind = "quota", op = "restore", error = %format!("{e:#}"), "slo.teardown.failed"),
+    // Read first, for the same reason as the roster below: the PUT files an audit row, and the
+    // fast suite never touches the quota, so every five minutes would otherwise log a restore of
+    // a limit that was never moved. Only the six limits are compared — `regions` is a grant this
+    // probe never writes and the PUT body never mentions.
+    let want = experience_admin::probe_quota();
+    let detail = admin(c, &format!("/admin/owners/{PROBE_USER}"));
+    let same = get(c, &detail, &c.admin_jwt.clone()).await.ok().and_then(|v| v.get("limit").cloned()).is_some_and(|have| {
+        want.as_object().unwrap().iter().all(|(k, v)| have.get(k) == Some(v))
+    });
+    if !same {
+        let url = admin(c, &format!("/admin/quota/{PROBE_USER}"));
+        let body = serde_json::json!({ "spec": want, "note": "slo probe quota restore" });
+        match call(c, reqwest::Method::PUT, &url, &c.admin_jwt.clone(), Some(body)).await {
+            Ok(_) => tracing::info!(kind = "quota", name = PROBE_USER, "slo.teardown.restored"),
+            Err(e) => tracing::warn!(kind = "quota", op = "restore", error = %format!("{e:#}"), "slo.teardown.failed"),
+        }
     }
     // Read first: the DELETE is an admin write with an audit row of its own, and filing one per
     // run for an account that is not on the roster is noise in the log a human reads.

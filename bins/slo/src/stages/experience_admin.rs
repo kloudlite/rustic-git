@@ -531,3 +531,18 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod quota_yaml {
+    /// `probe_quota` is a hand copy of the `slo-probe` object in deploy/k3s/quotas-slo.yaml; an
+    /// edit to one without the other makes teardown quietly restore the wrong limits.
+    #[test]
+    fn the_probe_quota_matches_the_yaml_applied_on_the_region() {
+        let yaml = include_str!("../../../../deploy/k3s/quotas-slo.yaml");
+        let probe = yaml.split("name: slo-other").next().unwrap();
+        for (k, v) in super::probe_quota().as_object().unwrap() {
+            let line = format!("\n  {k}: {v}\n");
+            assert!(probe.contains(&line), "quotas-slo.yaml slo-probe lacks `{}`", line.trim());
+        }
+    }
+}
