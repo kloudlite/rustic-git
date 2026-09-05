@@ -363,6 +363,24 @@ async fn an_unmarked_repo_gains_a_private_marker() {
     assert!(!m.public, "a repo discovered with no marker must fail closed to private");
 }
 
+/// A repo marker's body is never rewritten by this sweep — case (a) only ever invents a marker
+/// for a repo that HAS none. A blank re-create over a live marker is how a description would be
+/// emptied, so the sweep re-reads the marker objects before deciding one is missing rather than
+/// trusting the listing it was handed.
+#[tokio::test]
+async fn the_sweep_keeps_a_repo_description() {
+    let e = common::env_cached().await;
+    e.store.db_for("acme", "web").await.unwrap();
+    let m = index::Marker { description: "the widget".into(), ..marker("web", false, 0, 0) };
+    index::put_in_place(&e.store, Kind::Repo, "acme", &m).await.unwrap();
+
+    let n = gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
+    assert_eq!(n, 0, "nothing structural is wrong here");
+
+    let got = index::read(&e.store.os, Kind::Repo, "acme", "web").await.unwrap();
+    assert_eq!(got.description, "the widget", "the sweep must never blank a live marker");
+}
+
 #[tokio::test]
 async fn a_marker_for_a_deleted_repo_is_removed() {
     let e = common::env().await;

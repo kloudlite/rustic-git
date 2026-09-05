@@ -549,6 +549,19 @@ async fn create_and_edit_write_repo_meta() {
     assert_eq!(m.created_by, "alice@example.com");
     assert_eq!(m.created_at_ms, 1234567890);
 
+    // ...and the edit also lands in the owner's index marker, which is what every listing and
+    // `GET /v1/repos/{owner}/{name}` on the api tier actually read. Without this the description
+    // was written to the repo DB and never read back anywhere.
+    let marker = kloudlite_storage::index::read(
+        &e.store.os,
+        kloudlite_storage::index::Kind::Repo,
+        "alice",
+        "widget",
+    )
+    .await
+    .expect("marker after edit");
+    assert_eq!(marker.description, "second cut");
+
     // A description edit on a repo that does not exist must not conjure a database for it.
     let s = post_as(&router, "alice", "/api/alice/ghost/description?description=x").await;
     assert_eq!(s, StatusCode::NOT_FOUND);

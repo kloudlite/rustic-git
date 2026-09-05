@@ -167,6 +167,13 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     let missing_stats = stats_of(store, owner, &missing_names).await;
     for (name, stat) in missing.into_iter().zip(missing_stats) {
         let Ok((count, newest)) = stat else { continue };
+        // `markers` came from a listing that is cached for `LIST_TTL_SECS`, so a marker written
+        // seconds ago can be absent from it. Re-read the objects themselves before deciding one
+        // is missing: without this the repair overwrites a live marker with a blank one, which
+        // is how descriptions were being emptied.
+        if index::read(&store.os, Kind::Img, owner, name).await.is_some() {
+            continue;
+        }
         let now = crate::ownership::now_ms() as i64;
         let m = Marker {
             name: name.clone(),
@@ -262,6 +269,11 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
     // moment — same reasoning as case (c) below.
     let marker_names: HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
     for name in repo_set.iter().filter(|n| !marker_names.contains(*n)) {
+        // Same re-read as case (a) above, same reason: the listing is cached, and recreating a
+        // marker that already exists blanks its description.
+        if index::read(&store.os, Kind::Repo, owner, name).await.is_some() {
+            continue;
+        }
         let m = Marker {
             name: name.clone(),
             public: false,

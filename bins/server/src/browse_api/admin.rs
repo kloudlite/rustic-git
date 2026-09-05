@@ -61,7 +61,7 @@ pub(super) async fn api_visibility(
     }
     match app.store.set_public(&owner, &name, public).await {
         Ok(()) => {
-            write_marker(&app, &owner, &name, public, None).await;
+            write_marker(&app, &owner, &name, public, None, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
@@ -83,12 +83,23 @@ pub(super) async fn api_visibility(
 /// would empty the description out of every listing. A marker write failure is logged and
 /// swallowed — the marker is a view, never the source of truth, so it must never fail the
 /// caller's actual create/flip/delete.
-async fn write_marker(app: &App, owner: &str, name: &str, public: bool, meta: Option<(&str, &str, i64)>) {
+async fn write_marker(
+    app: &App,
+    owner: &str,
+    name: &str,
+    public: bool,
+    meta: Option<(&str, &str, i64)>,
+    // A description edit: everything else about the marker is preserved, this one field is not.
+    description: Option<&str>,
+) {
     let existing = crate::index::read(&app.store.os, crate::index::Kind::Repo, owner, name).await;
     let (description, created_by, created_ms) = match meta {
         Some((d, by, at)) => (d.to_string(), by.to_string(), at),
         None => (
-            existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            description
+                .map(str::to_string)
+                .or_else(|| existing.as_ref().map(|m| m.description.clone()))
+                .unwrap_or_default(),
             existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
             existing.as_ref().map(|m| m.created_ms).unwrap_or_else(|| crate::ownership::now_ms() as i64),
         ),
@@ -174,7 +185,7 @@ pub(super) async fn api_create(
     if let Err(e) = app.store.set_repo_meta(&owner, &name, description, created_by, created_at_ms).await {
         return internal(e);
     }
-    write_marker(&app, &owner, &name, public, Some((description, created_by, created_at_ms))).await;
+    write_marker(&app, &owner, &name, public, Some((description, created_by, created_at_ms)), None).await;
     StatusCode::CREATED.into_response()
 }
 
@@ -200,8 +211,17 @@ pub(super) async fn api_description(
     if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
         return hidden();
     }
+    // Serialized against a concurrent visibility flip, which rewrites the same marker.
+    let lock = app.store.keyed_lock(&crate::index::lock_key(crate::index::Kind::Repo, &owner, &name));
+    let _guard = lock.lock().await;
     match app.store.set_repo_description(&owner, &name, &description).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        // The repo DB is the truth, but every listing and `GET /v1/repos/{owner}/{name}` reads
+        // the marker — so a description that only landed in the DB never read back anywhere.
+        Ok(()) => {
+            let public = app.store.is_public(&owner, &name).await.unwrap_or(false);
+            write_marker(&app, &owner, &name, public, None, Some(&description)).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => internal(e),
     }
 }
