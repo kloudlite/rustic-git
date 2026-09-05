@@ -126,11 +126,18 @@ pub(crate) async fn poll_json(
     want: impl Fn(&Value) -> bool,
 ) -> Result<()> {
     let start = std::time::Instant::now();
+    // Two seconds inside the caller's ceiling, so a poll that never sees what it wants reports
+    // WHAT it last saw instead of the step's own bare "timed out" swallowing the evidence.
+    let cap = cap.saturating_sub(Duration::from_secs(2));
     let mut why;
     loop {
         match get(c, url, token).await {
             Ok(v) if want(&v) => return Ok(()),
-            Ok(_) => why = "the answer does not have it yet".into(),
+            Ok(v) => {
+                let seen = v.to_string();
+                let cut = seen.char_indices().nth(160).map_or(seen.len(), |(i, _)| i);
+                why = format!("the answer does not have it yet; last answer: {}", &seen[..cut]);
+            }
             Err(e) => why = format!("{e:#}"),
         }
         if start.elapsed() >= cap {
@@ -141,7 +148,7 @@ pub(crate) async fn poll_json(
 }
 
 /// A leftover this old cannot belong to a run still in flight — the fast suite's own
-/// `activeDeadlineSeconds` is 540 — so boot may sweep it. Without the age test, two overlapping
+/// `activeDeadlineSeconds` is 900 — so boot may sweep it. Without the age test, two overlapping
 /// runs would delete each other's live objects, which is a far worse failure than a leak.
 const STALE_SECS: i64 = 3600;
 
