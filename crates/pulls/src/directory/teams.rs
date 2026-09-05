@@ -2,7 +2,7 @@
 //! impl-block boundary — everything else about the directory (people, repos, credentials,
 //! passkeys) lives there.
 
-use super::{check_handle, is_duplicate_key, Directory, HandleKind, Member, Role, User};
+use super::{check_handle, is_duplicate_key, Backend, Directory, HandleKind, Member, Role, User};
 use mongodb::bson::{doc, to_bson, DateTime};
 use kloudlite_core::{err, Result};
 use serde::{Deserialize, Serialize};
@@ -123,37 +123,62 @@ impl Directory {
             members: vec![Member { user: creator.to_string(), role: Role::Owner, joined_at: now }],
             ..Default::default()
         };
-        match self.teams.insert_one(&team).await {
-            Ok(_) => Ok(Some(team)),
-            // The reservation already decided uniqueness; reaching here means the
-            // team document itself failed, so give the handle back.
-            Err(e) => {
-                let _ = self.release(slug).await;
-                if is_duplicate_key(&e) {
-                    return Ok(None);
+        match &self.backend {
+            Backend::Mongo(m) => match m.teams.insert_one(&team).await {
+                Ok(_) => Ok(Some(team)),
+                // The reservation already decided uniqueness; reaching here means the
+                // team document itself failed, so give the handle back.
+                Err(e) => {
+                    let _ = self.release(slug).await;
+                    if is_duplicate_key(&e) {
+                        return Ok(None);
+                    }
+                    Err(err(format!("mongo: {e}")))
                 }
-                Err(err(format!("mongo: {e}")))
+            },
+            Backend::Memory(s) => {
+                s.lock().unwrap().teams.insert(team.slug.clone(), team.clone());
+                Ok(Some(team))
             }
         }
     }
 
     pub async fn get(&self, slug: &str) -> Result<Option<Team>> {
-        self.teams
-            .find_one(doc! { "_id": slug })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .teams
+                .find_one(doc! { "_id": slug })
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s.lock().unwrap().teams.get(slug).cloned()),
+        }
     }
 
     /// Every team `user` belongs to, newest first.
     pub async fn for_user(&self, user: &str) -> Result<Vec<Team>> {
         use futures::TryStreamExt;
-        let cursor = self
-            .teams
-            .find(doc! { "members.user": user })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let cursor = m
+                    .teams
+                    .find(doc! { "members.user": user })
+                    .sort(doc! { "createdAt": -1 })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+            }
+            Backend::Memory(s) => {
+                let found = s
+                    .lock()
+                    .unwrap()
+                    .teams
+                    .values()
+                    .filter(|t| t.members.iter().any(|m| m.user == user))
+                    .cloned()
+                    .collect();
+                Ok(super::newest_first(found, |t| t.created_at))
+            }
+        }
     }
 
     /// Only the slugs, for the caller that asks on every request and wants nothing else —
@@ -165,16 +190,27 @@ impl Directory {
             #[serde(rename = "_id")]
             slug: String,
         }
-        self.teams
-            .clone_with_type::<Id>()
-            .find(doc! { "members.user": user })
-            .projection(doc! { "_id": 1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?
-            .map_ok(|i| i.slug)
-            .try_collect()
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .teams
+                .clone_with_type::<Id>()
+                .find(doc! { "members.user": user })
+                .projection(doc! { "_id": 1 })
+                .await
+                .map_err(|e| err(format!("mongo: {e}")))?
+                .map_ok(|i| i.slug)
+                .try_collect()
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s
+                .lock()
+                .unwrap()
+                .teams
+                .values()
+                .filter(|t| t.members.iter().any(|m| m.user == user))
+                .map(|t| t.slug.clone())
+                .collect()),
+        }
     }
 
     /// The team and the people in it, names resolved — one query for the members, not one per
@@ -184,12 +220,19 @@ impl Directory {
         use futures::TryStreamExt;
         let Some(team) = self.get(slug).await? else { return Ok(None) };
         let emails: Vec<&str> = team.members.iter().map(|m| m.user.as_str()).collect();
-        let cursor = self
-            .users
-            .find(doc! { "_id": { "$in": &emails } })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        let users: Vec<User> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
+        let users: Vec<User> = match &self.backend {
+            Backend::Mongo(m) => {
+                let cursor = m
+                    .users
+                    .find(doc! { "_id": { "$in": &emails } })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?
+            }
+            Backend::Memory(s) => {
+                s.lock().unwrap().users.values().filter(|u| emails.contains(&u.email.as_str())).cloned().collect()
+            }
+        };
         Ok(Some((team, users)))
     }
 
@@ -207,15 +250,27 @@ impl Directory {
         if name.is_empty() {
             return Err(super::invalid("team name required"));
         }
-        let r = self
-            .teams
-            .update_one(
-                doc! { "_id": slug },
-                doc! { "$set": { "name": name, "description": description.trim() } },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(r.matched_count == 1)
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let r = m
+                    .teams
+                    .update_one(
+                        doc! { "_id": slug },
+                        doc! { "$set": { "name": name, "description": description.trim() } },
+                    )
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                Ok(r.matched_count == 1)
+            }
+            Backend::Memory(s) => match s.lock().unwrap().teams.get_mut(slug) {
+                Some(t) => {
+                    t.name = name.to_string();
+                    t.description = description.trim().to_string();
+                    Ok(true)
+                }
+                None => Ok(false),
+            },
+        }
     }
 
     /// Add an existing person. There is no invitation state: the person has to have signed in
@@ -230,15 +285,27 @@ impl Directory {
         // The filter carries the duplicate check, so two concurrent adds of the same person
         // cannot both push: the second finds no document whose members lack them.
         let member = Member { user: email.clone(), role, joined_at: DateTime::now() };
-        let r = self
-            .teams
-            .update_one(
-                doc! { "_id": slug, "members.user": { "$ne": &email } },
-                doc! { "$push": { "members": to_bson(&member).map_err(|e| err(format!("bson: {e}")))? } },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        if r.matched_count == 1 {
+        let matched = match &self.backend {
+            Backend::Mongo(m) => {
+                let r = m
+                    .teams
+                    .update_one(
+                        doc! { "_id": slug, "members.user": { "$ne": &email } },
+                        doc! { "$push": { "members": to_bson(&member).map_err(|e| err(format!("bson: {e}")))? } },
+                    )
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                r.matched_count == 1
+            }
+            Backend::Memory(s) => match s.lock().unwrap().teams.get_mut(slug) {
+                Some(t) if !t.members.iter().any(|m| m.user == email) => {
+                    t.members.push(member);
+                    true
+                }
+                _ => false,
+            },
+        };
+        if matched {
             return Ok(AddMember::Added);
         }
         // Matched nothing: either no such team, or they are already in. Tell them apart.
@@ -255,24 +322,46 @@ impl Directory {
         let email = email.trim().to_lowercase();
         let Some(team) = self.get(slug).await? else { return Ok(Membership::NoSuchTeam) };
         let Some(current) = Self::role_of(&team, &email) else { return Ok(Membership::NotAMember) };
-        if current == Role::Owner && role != Role::Owner && Self::owner_count(&team) == 1 {
+        let demoting = current == Role::Owner && role != Role::Owner;
+        if demoting && Self::owner_count(&team) == 1 {
             return Ok(Membership::LastOwner);
         }
         // The owner check above read a snapshot; the filter here re-asserts it, so two
         // concurrent demotions cannot both pass the count and strand the team.
-        let mut filter = doc! { "_id": slug, "members.user": &email };
-        if current == Role::Owner && role != Role::Owner {
-            filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email } } });
-        }
-        let r = self
-            .teams
-            .update_one(
-                filter,
-                doc! { "$set": { "members.$.role": to_bson(&role).map_err(|e| err(format!("bson: {e}")))? } },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(if r.matched_count == 1 { Membership::Done } else { Membership::LastOwner })
+        let matched = match &self.backend {
+            Backend::Mongo(m) => {
+                let mut filter = doc! { "_id": slug, "members.user": &email };
+                if demoting {
+                    filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email } } });
+                }
+                let r = m
+                    .teams
+                    .update_one(
+                        filter,
+                        doc! { "$set": { "members.$.role": to_bson(&role).map_err(|e| err(format!("bson: {e}")))? } },
+                    )
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                r.matched_count == 1
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                match s.teams.get_mut(slug) {
+                    Some(t)
+                        if t.members.iter().any(|m| m.user == email)
+                            && (!demoting
+                                || t.members.iter().any(|m| m.role == Role::Owner && m.user != email)) =>
+                    {
+                        for m in t.members.iter_mut().filter(|m| m.user == email) {
+                            m.role = role;
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+        Ok(if matched { Membership::Done } else { Membership::LastOwner })
     }
 
     /// Remove a member. Same last-owner rule as `set_role`, for the same reason.
@@ -280,19 +369,38 @@ impl Directory {
         let email = email.trim().to_lowercase();
         let Some(team) = self.get(slug).await? else { return Ok(Membership::NoSuchTeam) };
         let Some(current) = Self::role_of(&team, &email) else { return Ok(Membership::NotAMember) };
-        let mut filter = doc! { "_id": slug };
-        if current == Role::Owner {
-            if Self::owner_count(&team) == 1 {
-                return Ok(Membership::LastOwner);
-            }
-            filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email } } });
+        let last_owner_risk = current == Role::Owner;
+        if last_owner_risk && Self::owner_count(&team) == 1 {
+            return Ok(Membership::LastOwner);
         }
-        let r = self
-            .teams
-            .update_one(filter, doc! { "$pull": { "members": { "user": &email } } })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(if r.matched_count == 1 { Membership::Done } else { Membership::LastOwner })
+        let matched = match &self.backend {
+            Backend::Mongo(m) => {
+                let mut filter = doc! { "_id": slug };
+                if last_owner_risk {
+                    filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email } } });
+                }
+                let r = m
+                    .teams
+                    .update_one(filter, doc! { "$pull": { "members": { "user": &email } } })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                r.matched_count == 1
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                match s.teams.get_mut(slug) {
+                    Some(t)
+                        if !last_owner_risk
+                            || t.members.iter().any(|m| m.role == Role::Owner && m.user != email) =>
+                    {
+                        t.members.retain(|m| m.user != email);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+        Ok(if matched { Membership::Done } else { Membership::LastOwner })
     }
 
     /// Delete the team and give its handle back. Refused while the team still owns repositories:
@@ -303,20 +411,28 @@ impl Directory {
     /// workspaces and environments live in the object store and the cluster. Extend the gate
     /// when there is one place that can count all four.
     pub async fn delete_team(&self, slug: &str) -> Result<DeleteTeam> {
-        let repos = self
-            .repos
-            .count_documents(doc! { "owner": slug })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        if repos > 0 {
-            return Ok(DeleteTeam::StillOwns { repos });
-        }
-        let r = self
-            .teams
-            .delete_one(doc! { "_id": slug })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        if r.deleted_count == 0 {
+        let deleted = match &self.backend {
+            Backend::Mongo(m) => {
+                let repos = m
+                    .repos
+                    .count_documents(doc! { "owner": slug })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                if repos > 0 {
+                    return Ok(DeleteTeam::StillOwns { repos });
+                }
+                let r = m
+                    .teams
+                    .delete_one(doc! { "_id": slug })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                r.deleted_count > 0
+            }
+            // No `repos` rows to count: nothing has written one since repos became truth in
+            // their own database, so the gate is vacuous rather than skipped.
+            Backend::Memory(s) => s.lock().unwrap().teams.remove(slug).is_some(),
+        };
+        if !deleted {
             return Ok(DeleteTeam::NoSuchTeam);
         }
         self.release(slug).await?;
@@ -324,22 +440,38 @@ impl Directory {
     }
 
     pub async fn update_profile(&self, slug: &str, p: &TeamProfile) -> Result<bool> {
-        let r = self
-            .teams
-            .update_one(
-                doc! { "_id": slug },
-                doc! { "$set": {
-                    "public": p.public,
-                    "tagline": p.tagline.trim(),
-                    "location": p.location.trim(),
-                    "website": p.website.trim(),
-                    "email": p.email.trim(),
-                    "pins": to_bson(&p.pins).map_err(|e| err(format!("bson: {e}")))?,
-                } },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(r.matched_count == 1)
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let r = m
+                    .teams
+                    .update_one(
+                        doc! { "_id": slug },
+                        doc! { "$set": {
+                            "public": p.public,
+                            "tagline": p.tagline.trim(),
+                            "location": p.location.trim(),
+                            "website": p.website.trim(),
+                            "email": p.email.trim(),
+                            "pins": to_bson(&p.pins).map_err(|e| err(format!("bson: {e}")))?,
+                        } },
+                    )
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                Ok(r.matched_count == 1)
+            }
+            Backend::Memory(s) => match s.lock().unwrap().teams.get_mut(slug) {
+                Some(t) => {
+                    t.public = p.public;
+                    t.tagline = p.tagline.trim().to_string();
+                    t.location = p.location.trim().to_string();
+                    t.website = p.website.trim().to_string();
+                    t.email = p.email.trim().to_string();
+                    t.pins = p.pins.clone();
+                    Ok(true)
+                }
+                None => Ok(false),
+            },
+        }
     }
 
     fn owner_count(team: &Team) -> usize {
@@ -355,11 +487,18 @@ impl Directory {
     /// Record an invitation. `id` is the caller's hash of the token; the directory does not
     /// choose the token so that it never holds anything a link could be rebuilt from.
     pub async fn create_invite(&self, invite: &Invite) -> Result<()> {
-        self.invites
-            .insert_one(invite)
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .invites
+                .insert_one(invite)
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().invites.insert(invite.id.clone(), invite.clone());
+                Ok(())
+            }
+        }
     }
 
     /// Open invitations for a team, newest first. Expired ones are filtered here rather than
@@ -368,32 +507,64 @@ impl Directory {
     /// ponytail: expired rows accumulate; sweep them if the collection ever matters.
     pub async fn invites_for(&self, team: &str) -> Result<Vec<Invite>> {
         use futures::TryStreamExt;
-        let cursor = self
-            .invites
-            .find(doc! { "team": team, "expiresAt": { "$gt": DateTime::now() } })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+        let now = DateTime::now();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let cursor = m
+                    .invites
+                    .find(doc! { "team": team, "expiresAt": { "$gt": now } })
+                    .sort(doc! { "createdAt": -1 })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+            }
+            Backend::Memory(s) => {
+                let found = s
+                    .lock()
+                    .unwrap()
+                    .invites
+                    .values()
+                    .filter(|i| i.team == team && i.expires_at > now)
+                    .cloned()
+                    .collect();
+                Ok(super::newest_first(found, |i| i.created_at))
+            }
+        }
     }
 
     /// Withdraw an invitation. Scoped to the team in the filter so a caller who may act on
     /// team A cannot revoke team B's invitation by knowing its id.
     pub async fn revoke_invite(&self, team: &str, id: &str) -> Result<bool> {
-        let r = self
-            .invites
-            .delete_one(doc! { "_id": id, "team": team })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(r.deleted_count == 1)
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let r = m
+                    .invites
+                    .delete_one(doc! { "_id": id, "team": team })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                Ok(r.deleted_count == 1)
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                match s.invites.get(id) {
+                    Some(i) if i.team == team => Ok(s.invites.remove(id).is_some()),
+                    _ => Ok(false),
+                }
+            }
+        }
     }
 
     /// The invitation behind a token hash, if it is still open.
     pub async fn invite(&self, id: &str) -> Result<Option<Invite>> {
-        self.invites
-            .find_one(doc! { "_id": id, "expiresAt": { "$gt": DateTime::now() } })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
+        let now = DateTime::now();
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .invites
+                .find_one(doc! { "_id": id, "expiresAt": { "$gt": now } })
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s.lock().unwrap().invites.get(id).filter(|i| i.expires_at > now).cloned()),
+        }
     }
 
     /// Accept: the signed-in person joins with the invited role, and the invitation is spent.
@@ -408,12 +579,18 @@ impl Directory {
         if !inv.email.eq_ignore_ascii_case(&email) {
             return Ok(AcceptInvite::WrongEmail);
         }
-        let r = self
-            .invites
-            .delete_one(doc! { "_id": id })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        if r.deleted_count == 0 {
+        let spent = match &self.backend {
+            Backend::Mongo(m) => {
+                let r = m
+                    .invites
+                    .delete_one(doc! { "_id": id })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                r.deleted_count > 0
+            }
+            Backend::Memory(s) => s.lock().unwrap().invites.remove(id).is_some(),
+        };
+        if !spent {
             return Ok(AcceptInvite::Gone);
         }
         Ok(match self.add_member(&inv.team, &email, inv.role).await? {

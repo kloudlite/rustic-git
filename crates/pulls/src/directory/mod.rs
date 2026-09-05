@@ -319,7 +319,21 @@ pub fn check_handle(h: &str) -> Result<()> {
 
 #[derive(Clone)]
 pub struct Directory {
-    pub(crate) teams: Collection<Team>,
+    pub(crate) backend: Backend,
+}
+
+/// Where the rows live. Mongo in every deployment; the in-memory arm exists so the `/v1`
+/// handlers can be tested without a database — a Mongo the CI runner has to provide is a
+/// dependency the six directory-backed tests used to skip themselves over.
+#[derive(Clone)]
+pub(crate) enum Backend {
+    Mongo(Box<MongoCollections>),
+    Memory(std::sync::Arc<std::sync::Mutex<MemoryState>>),
+}
+
+#[derive(Clone)]
+pub(crate) struct MongoCollections {
+    teams: Collection<Team>,
     /// Migration only, both of these: repos and pull requests are truth in the owning repo's own
     /// database now. `repos` survives as `delete_team`'s "still owns repositories" count,
     /// `pulls_for` seeds a repo's pull history once. Read, never written.
@@ -333,6 +347,32 @@ pub struct Directory {
     signins: Collection<SignInLink>,
     cli_logins: Collection<CliLogin>,
     superadmins: Collection<SuperAdmin>,
+}
+
+/// The same rows, keyed the way Mongo keys them (`_id`), under one lock.
+/// ponytail: one mutex over every collection, and every list is a full scan — a test fixture
+/// holds tens of rows. If this ever backs anything but tests, it needs indexes and a real store,
+/// which is what the Mongo arm already is.
+#[derive(Default)]
+pub(crate) struct MemoryState {
+    teams: std::collections::BTreeMap<String, Team>,
+    credentials: std::collections::BTreeMap<String, Credential>,
+    passkeys: std::collections::BTreeMap<String, Passkey>,
+    users: std::collections::BTreeMap<String, User>,
+    handles: std::collections::BTreeMap<String, Handle>,
+    invites: std::collections::BTreeMap<String, Invite>,
+    signins: std::collections::BTreeMap<String, SignInLink>,
+    cli_logins: std::collections::BTreeMap<String, CliLogin>,
+    superadmins: std::collections::BTreeMap<String, SuperAdmin>,
+    // `repos` and `pulls` have no in-memory arm on purpose: both Mongo collections are
+    // read-only migration leftovers that nothing writes any more, so the answers are
+    // "no repos" and "no pull rows" — which is exactly what an empty collection gives.
+}
+
+/// Newest first, the way every `sort(createdAt: -1)` in this file asks for it.
+fn newest_first<T>(mut v: Vec<T>, at: impl Fn(&T) -> DateTime) -> Vec<T> {
+    v.sort_by_key(|x| std::cmp::Reverse(at(x).timestamp_millis()));
+    v
 }
 
 /// A magic sign-in link, keyed by the HASH of its token — same shape as an invitation, for
@@ -387,7 +427,7 @@ impl Directory {
         opts.command_event_handler = Some(mongodb::event::EventHandler::callback(on_command));
         let client = Client::with_options(opts).map_err(|e| err(format!("mongo: {e}")))?;
         let db = client.database(db);
-        let dir = Directory {
+        let m = MongoCollections {
             teams: db.collection("teams"),
             repos: db.collection("repos"),
             credentials: db.collection("credentials"),
@@ -400,12 +440,13 @@ impl Directory {
             cli_logins: db.collection("cli_logins"),
             superadmins: db.collection("superadmins"),
         };
-        dir.ensure_indexes().await?;
-        match dir.lowercase_signing_fingerprints().await {
+        m.ensure_indexes().await?;
+        match m.lowercase_signing_fingerprints().await {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "directory.repair.completed"),
             Err(e) => tracing::warn!(error = %e, "directory.repair.failed"),
         }
+        let dir = Directory { backend: Backend::Mongo(Box::new(m)) };
         // Cosmos's TTL is on `_ts`, not on a field of ours, so expiry is swept from here. Every
         // process that opens the directory sweeps hourly, first pass at boot; the delete is
         // idempotent and indexed, so replicas overlapping costs nothing but an empty round trip.
@@ -424,37 +465,78 @@ impl Directory {
         Ok(dir)
     }
 
+    /// A directory that keeps its rows in this process. For tests only: nothing is persisted and
+    /// nothing is shared between processes, so the `/v1` handlers can be exercised end to end
+    /// without a Mongo to point them at.
+    #[doc(hidden)]
+    pub fn in_memory() -> Directory {
+        Directory { backend: Backend::Memory(Default::default()) }
+    }
+
     /// Delete the rows every read already ignores: spent-or-stale sign-in links, CLI login
     /// codes nobody collected, invitations past their date. `cli_logins` is fed by an anonymous
     /// endpoint and would otherwise grow at whatever rate the internet pokes it.
     pub async fn sweep_expired(&self) -> Result<u64> {
-        let gone = doc! { "expiresAt": { "$lt": DateTime::now() } };
-        let mut n = 0;
-        n += self.signins.delete_many(gone.clone()).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
-        n += self.cli_logins.delete_many(gone.clone()).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
-        n += self.invites.delete_many(gone).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
-        Ok(n)
+        let now = DateTime::now();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let gone = doc! { "expiresAt": { "$lt": now } };
+                let mut n = 0;
+                n += m.signins.delete_many(gone.clone()).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
+                n += m.cli_logins.delete_many(gone.clone()).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
+                n += m.invites.delete_many(gone).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
+                Ok(n)
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                let before = s.signins.len() + s.cli_logins.len() + s.invites.len();
+                s.signins.retain(|_, l| l.expires_at >= now);
+                s.cli_logins.retain(|_, l| l.expires_at >= now);
+                s.invites.retain(|_, i| i.expires_at >= now);
+                Ok((before - (s.signins.len() + s.cli_logins.len() + s.invites.len())) as u64)
+            }
+        }
     }
 
     // ── people ──────────────────────────────────────────────────────────────
 
     pub async fn create_signin(&self, link: &SignInLink) -> Result<()> {
-        self.signins
-            .insert_one(link)
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .signins
+                .insert_one(link)
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().signins.insert(link.id.clone(), link.clone());
+                Ok(())
+            }
+        }
     }
 
     /// The email behind a link, spending it. `None` for spent, expired or made up alike.
     /// Expiry is checked in the delete filter itself, so an expired row can never be redeemed
     /// by racing the read; `sweep_expired` removes the leftovers.
     pub async fn redeem_signin(&self, id: &str) -> Result<Option<String>> {
-        self.signins
-            .find_one_and_delete(doc! { "_id": id, "expiresAt": { "$gt": DateTime::now() } })
-            .await
-            .map(|r| r.map(|l| l.email))
-            .map_err(|e| err(format!("mongo: {e}")))
+        let now = DateTime::now();
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .signins
+                .find_one_and_delete(doc! { "_id": id, "expiresAt": { "$gt": now } })
+                .await
+                .map(|r| r.map(|l| l.email))
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                // Expiry is part of the delete, exactly as the Mongo filter has it: an expired
+                // row is left in place for the sweep rather than spent.
+                match s.signins.get(id) {
+                    Some(l) if l.expires_at > now => Ok(s.signins.remove(id).map(|l| l.email)),
+                    _ => Ok(None),
+                }
+            }
+        }
     }
 
     // ── cli logins ──────────────────────────────────────────────────────────
@@ -462,52 +544,108 @@ impl Directory {
     // Every read filters on `expiresAt`, so a stale row is inert; `sweep_expired` removes it.
 
     pub async fn create_cli_login(&self, l: &CliLogin) -> Result<()> {
-        self.cli_logins
-            .insert_one(l)
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .cli_logins
+                .insert_one(l)
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().cli_logins.insert(l.code.clone(), l.clone());
+                Ok(())
+            }
+        }
     }
 
     /// A code still waiting for approval. `None` for approved, expired and unknown alike —
     /// callers answer all three the same way, so a guesser learns nothing.
     pub async fn cli_login_pending(&self, code: &str) -> Result<Option<CliLogin>> {
-        self.cli_logins
-            .find_one(doc! { "_id": code, "expiresAt": { "$gt": DateTime::now() }, "token": null })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
+        let now = DateTime::now();
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .cli_logins
+                .find_one(doc! { "_id": code, "expiresAt": { "$gt": now }, "token": null })
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s
+                .lock()
+                .unwrap()
+                .cli_logins
+                .get(code)
+                .filter(|l| l.expires_at > now && l.token.is_none())
+                .cloned()),
+        }
     }
 
     /// Attach the minted token to a waiting code. `false` means it was not waiting — unknown,
     /// expired, or approved already by someone else's click. The whole check is the update's
     /// own filter, so two approvals of one code cannot both win.
     pub async fn approve_cli_login(&self, code: &str, token: &str, exp: u64) -> Result<bool> {
-        self.cli_logins
-            .find_one_and_update(
-                doc! { "_id": code, "expiresAt": { "$gt": DateTime::now() }, "token": null },
-                doc! { "$set": { "token": token, "tokenExp": exp as i64 } },
-            )
-            .await
-            .map(|r| r.is_some())
-            .map_err(|e| err(format!("mongo: {e}")))
+        let now = DateTime::now();
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .cli_logins
+                .find_one_and_update(
+                    doc! { "_id": code, "expiresAt": { "$gt": now }, "token": null },
+                    doc! { "$set": { "token": token, "tokenExp": exp as i64 } },
+                )
+                .await
+                .map(|r| r.is_some())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                // The lock stands in for the update's own filter: the check and the write are
+                // one step, so a second approval of one code cannot also win.
+                match s.cli_logins.get_mut(code) {
+                    Some(l) if l.expires_at > now && l.token.is_none() => {
+                        l.token = Some(token.to_string());
+                        l.token_exp = exp;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            }
+        }
     }
 
     /// What the CLI polls. `Ok(None)` is a poll id that names nothing live; `Some(row)` with no
     /// token is "still waiting"; `Some(row)` with a token is the token, exactly once — the
     /// delete IS the read, so a second poller finds nothing.
     pub async fn take_cli_login(&self, poll: &str) -> Result<Option<CliLogin>> {
-        let live = doc! { "poll": poll, "expiresAt": { "$gt": DateTime::now() } };
-        let mut approved = live.clone();
-        approved.insert("token", doc! { "$ne": null });
-        if let Some(row) = self
-            .cli_logins
-            .find_one_and_delete(approved)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?
-        {
-            return Ok(Some(row));
+        let now = DateTime::now();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let live = doc! { "poll": poll, "expiresAt": { "$gt": now } };
+                let mut approved = live.clone();
+                approved.insert("token", doc! { "$ne": null });
+                if let Some(row) = m
+                    .cli_logins
+                    .find_one_and_delete(approved)
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?
+                {
+                    return Ok(Some(row));
+                }
+                m.cli_logins.find_one(live).await.map_err(|e| err(format!("mongo: {e}")))
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                let Some(code) = s
+                    .cli_logins
+                    .values()
+                    .find(|l| l.poll == poll && l.expires_at > now)
+                    .map(|l| l.code.clone())
+                else {
+                    return Ok(None);
+                };
+                // Approved rows are taken exactly once — the delete IS the read.
+                if s.cli_logins[&code].token.is_some() {
+                    return Ok(s.cli_logins.remove(&code));
+                }
+                Ok(s.cli_logins.get(&code).cloned())
+            }
         }
-        self.cli_logins.find_one(live).await.map_err(|e| err(format!("mongo: {e}")))
     }
 
     /// Record that this person exists and has just been seen. Called on every
@@ -520,18 +658,43 @@ impl Directory {
         }
         let name = if name.trim().is_empty() { email.split('@').next().unwrap_or(&email) } else { name.trim() };
         let now = DateTime::now();
-        self.users
-            .update_one(
-                doc! { "_id": &email },
-                doc! {
-                    "$set": { "name": name, "lastSeenAt": now },
-                    // Only on insert: a returning user keeps the date they joined.
-                    "$setOnInsert": { "createdAt": now },
-                },
-            )
-            .upsert(true)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
+        match &self.backend {
+            Backend::Mongo(m) => {
+                m.users
+                    .update_one(
+                        doc! { "_id": &email },
+                        doc! {
+                            "$set": { "name": name, "lastSeenAt": now },
+                            // Only on insert: a returning user keeps the date they joined.
+                            "$setOnInsert": { "createdAt": now },
+                        },
+                    )
+                    .upsert(true)
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                match s.users.get_mut(&email) {
+                    Some(u) => {
+                        u.name = name.to_string();
+                        u.last_seen_at = now;
+                    }
+                    None => {
+                        s.users.insert(
+                            email.clone(),
+                            User {
+                                email: email.clone(),
+                                name: name.to_string(),
+                                username: None,
+                                created_at: now,
+                                last_seen_at: now,
+                            },
+                        );
+                    }
+                }
+            }
+        }
         self.user(&email)
             .await?
             .ok_or_else(|| err("user vanished immediately after upsert"))
@@ -546,19 +709,37 @@ impl Directory {
             held_by: held_by.to_string(),
             created_at: DateTime::now(),
         };
-        match self.handles.insert_one(&doc).await {
-            Ok(_) => Ok(true),
-            Err(e) if is_duplicate_key(&e) => Ok(false),
-            Err(e) => Err(err(format!("mongo: {e}"))),
+        match &self.backend {
+            Backend::Mongo(m) => match m.handles.insert_one(&doc).await {
+                Ok(_) => Ok(true),
+                Err(e) if is_duplicate_key(&e) => Ok(false),
+                Err(e) => Err(err(format!("mongo: {e}"))),
+            },
+            Backend::Memory(s) => {
+                // `_id` uniqueness, which is what makes the insert the gate.
+                let mut s = s.lock().unwrap();
+                if s.handles.contains_key(handle) {
+                    return Ok(false);
+                }
+                s.handles.insert(handle.to_string(), doc);
+                Ok(true)
+            }
         }
     }
 
     pub(crate) async fn release(&self, handle: &str) -> Result<()> {
-        self.handles
-            .delete_one(doc! { "_id": handle })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .handles
+                .delete_one(doc! { "_id": handle })
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().handles.remove(handle);
+                Ok(())
+            }
+        }
     }
 
     /// Claim a username. `Ok(None)` means the handle is taken.
@@ -584,15 +765,28 @@ impl Directory {
         // Conditional on the handle still being unset: two claims for one user can both pass the
         // read above, and an unconditional `$set` would let the second overwrite the first, whose
         // reservation is then held by nobody forever. Zero matched means somebody won first.
-        let set = self
-            .users
-            .update_one(
-                doc! { "_id": &email, "username": { "$exists": false } },
-                doc! { "$set": { "username": &handle } },
-            )
-            .await;
+        let set = match &self.backend {
+            Backend::Mongo(m) => m
+                .users
+                .update_one(
+                    doc! { "_id": &email, "username": { "$exists": false } },
+                    doc! { "$set": { "username": &handle } },
+                )
+                .await
+                .map(|r| r.matched_count == 1),
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                Ok(match s.users.get_mut(&email) {
+                    Some(u) if u.username.is_none() => {
+                        u.username = Some(handle.clone());
+                        true
+                    }
+                    _ => false,
+                })
+            }
+        };
         match set {
-            Ok(r) if r.matched_count == 1 => self.user(&email).await,
+            Ok(true) => self.user(&email).await,
             Ok(_) => {
                 let _ = self.release(&handle).await;
                 Err(invalid("username already set"))
@@ -608,19 +802,357 @@ impl Directory {
 
     /// The person behind a handle — what a workspace needs to sign commits as them.
     pub async fn user_by_handle(&self, handle: &str) -> Result<Option<User>> {
-        self.users
-            .find_one(doc! { "username": handle.trim().to_lowercase() })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
+        let handle = handle.trim().to_lowercase();
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .users
+                .find_one(doc! { "username": handle })
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                Ok(s.lock().unwrap().users.values().find(|u| u.username.as_deref() == Some(&handle)).cloned())
+            }
+        }
     }
 
     pub async fn user(&self, email: &str) -> Result<Option<User>> {
-        self.users
-            .find_one(doc! { "_id": email.trim().to_lowercase() })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
+        let email = email.trim().to_lowercase();
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .users
+                .find_one(doc! { "_id": email })
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s.lock().unwrap().users.get(&email).cloned()),
+        }
     }
 
+
+    // ── credentials ─────────────────────────────────────────────────────────
+
+    /// Record a credential. `Ok(None)` means this exact credential is already
+    /// registered — which for an ssh key means the same key, and is worth saying
+    /// rather than silently re-adding.
+    pub async fn add_credential(&self, c: &Credential) -> Result<Option<()>> {
+        match &self.backend {
+            Backend::Mongo(m) => match m.credentials.insert_one(c).await {
+                Ok(_) => Ok(Some(())),
+                Err(e) if is_duplicate_key(&e) => Ok(None),
+                Err(e) => Err(err(format!("mongo: {e}"))),
+            },
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                if s.credentials.contains_key(&c.id) {
+                    return Ok(None);
+                }
+                s.credentials.insert(c.id.clone(), c.clone());
+                Ok(Some(()))
+            }
+        }
+    }
+
+    pub async fn credentials_for(&self, owner: &str, kind: CredentialKind) -> Result<Vec<Credential>> {
+        use futures::TryStreamExt;
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let kind = mongodb::bson::to_bson(&kind).map_err(|e| err(format!("bson: {e}")))?;
+                let cursor = m
+                    .credentials
+                    .find(doc! { "owner": owner, "kind": kind })
+                    .sort(doc! { "createdAt": -1 })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+            }
+            Backend::Memory(s) => {
+                let found = s
+                    .lock()
+                    .unwrap()
+                    .credentials
+                    .values()
+                    .filter(|c| c.owner == owner && c.kind == kind)
+                    .cloned()
+                    .collect();
+                Ok(newest_first(found, |c| c.created_at))
+            }
+        }
+    }
+
+    /// Look one up to check its owner before revoking it. Revocation is authorized
+    /// against the credential's OWNER, not against whoever holds the id — an id is
+    /// a digest, and a digest is guessable in principle if the secret is known.
+    pub async fn credential(&self, id: &str) -> Result<Option<Credential>> {
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .credentials
+                .find_one(doc! { "_id": id })
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s.lock().unwrap().credentials.get(id).cloned()),
+        }
+    }
+
+    /// A signing key by ANY of the fingerprints or key ids it answers to.
+    ///
+    /// A commit is normally signed by a subkey, and older signatures name their
+    /// issuer by key id — the last eight bytes of a fingerprint — rather than
+    /// the full fingerprint. Rather than match that as a suffix here (which
+    /// would need a scan), `fingerprints_of` stores each key's 16-hex key-id
+    /// suffix alongside its full fingerprint at registration, so this stays an
+    /// exact, indexed `$in`.
+    pub async fn signer_by_any(&self, candidates: &[String]) -> Result<Option<Credential>> {
+        use futures::TryStreamExt;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
+                    .map_err(|e| err(format!("bson: {e}")))?;
+                let any: Vec<mongodb::bson::Bson> = candidates
+                    .iter()
+                    .map(|c| mongodb::bson::Bson::String(c.to_lowercase()))
+                    .collect();
+                let cursor = m
+                    .credentials
+                    .find(doc! { "kind": kind, "fingerprints": { "$in": any } })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                let found: Vec<Credential> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
+                Ok(found.into_iter().next())
+            }
+            Backend::Memory(s) => {
+                let any: Vec<String> = candidates.iter().map(|c| c.to_lowercase()).collect();
+                Ok(s.lock()
+                    .unwrap()
+                    .credentials
+                    .values()
+                    .find(|c| {
+                        c.kind == CredentialKind::SigningKey
+                            && c.fingerprints.iter().any(|f| any.contains(f))
+                    })
+                    .cloned())
+            }
+        }
+    }
+
+    pub async fn forget_credential(&self, id: &str) -> Result<()> {
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .credentials
+                .delete_one(doc! { "_id": id })
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().credentials.remove(id);
+                Ok(())
+            }
+        }
+    }
+
+    // ── passkeys ────────────────────────────────────────────────────────────
+
+    /// `Ok(None)` means this credential id is already registered — which means the
+    /// same authenticator was enrolled twice, not that anything is wrong.
+    pub async fn add_passkey(&self, p: &Passkey) -> Result<Option<()>> {
+        match &self.backend {
+            Backend::Mongo(m) => match m.passkeys.insert_one(p).await {
+                Ok(_) => Ok(Some(())),
+                Err(e) if is_duplicate_key(&e) => Ok(None),
+                Err(e) => Err(err(format!("mongo: {e}"))),
+            },
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                if s.passkeys.contains_key(&p.id) {
+                    return Ok(None);
+                }
+                s.passkeys.insert(p.id.clone(), p.clone());
+                Ok(Some(()))
+            }
+        }
+    }
+
+    /// By credential id — the lookup a sign-in makes, before it knows who is
+    /// signing in. That is the whole point of a discoverable credential: the
+    /// authenticator names the account.
+    pub async fn passkey(&self, id: &str) -> Result<Option<Passkey>> {
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .passkeys
+                .find_one(doc! { "_id": id })
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s.lock().unwrap().passkeys.get(id).cloned()),
+        }
+    }
+
+    pub async fn passkeys_for(&self, user: &str) -> Result<Vec<Passkey>> {
+        use futures::TryStreamExt;
+        let user = user.trim().to_lowercase();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let cursor = m
+                    .passkeys
+                    .find(doc! { "user": user })
+                    .sort(doc! { "createdAt": -1 })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+            }
+            Backend::Memory(s) => {
+                let found = s.lock().unwrap().passkeys.values().filter(|p| p.user == user).cloned().collect();
+                Ok(newest_first(found, |p| p.created_at))
+            }
+        }
+    }
+
+    /// Record that a passkey was just used. The counter is what detects a cloned
+    /// authenticator, so it is stored on every successful sign-in rather than only
+    /// when convenient.
+    pub async fn advance_passkey(&self, id: &str, counter: i64) -> Result<()> {
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .passkeys
+                .update_one(doc! { "_id": id }, doc! { "$set": { "counter": counter } })
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                if let Some(p) = s.lock().unwrap().passkeys.get_mut(id) {
+                    p.counter = counter;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    // ── pull requests ───────────────────────────────────────────────────────
+
+    /// The ONLY surviving reader of the Mongo `pulls` collection: `pulls::ensure_migrated` uses
+    /// it as its row source, which is what makes pull requests opened before the per-repo
+    /// databases existed survive. Nothing else may grow a caller — new pull reads and writes
+    /// live in the owning repo's own database.
+    pub async fn pulls_for(&self, repo: &str) -> Result<Vec<PullRequest>> {
+        use futures::TryStreamExt;
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let cursor = m
+                    .pulls
+                    .find(doc! { "repo": repo })
+                    .sort(doc! { "createdAt": -1 })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+            }
+            // Nothing writes these rows any more, so there is nothing to migrate from here.
+            Backend::Memory(_) => Ok(vec![]),
+        }
+    }
+
+    pub async fn forget_passkey(&self, id: &str) -> Result<()> {
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .passkeys
+                .delete_one(doc! { "_id": id })
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().passkeys.remove(id);
+                Ok(())
+            }
+        }
+    }
+
+    // ── superadmins ─────────────────────────────────────────────────────────
+
+    pub async fn is_superadmin(&self, user: &str) -> Result<bool> {
+        let user = user.trim().to_lowercase();
+        match &self.backend {
+            Backend::Mongo(m) => Ok(m
+                .superadmins
+                .find_one(doc! { "_id": user })
+                .await
+                .map_err(|e| err(format!("mongo: {e}")))?
+                .is_some()),
+            Backend::Memory(s) => Ok(s.lock().unwrap().superadmins.contains_key(&user)),
+        }
+    }
+
+    pub async fn superadmins(&self) -> Result<Vec<SuperAdmin>> {
+        use futures::TryStreamExt;
+        match &self.backend {
+            Backend::Mongo(m) => m
+                .superadmins
+                .find(doc! {})
+                .await
+                .map_err(|e| err(format!("mongo: {e}")))?
+                .try_collect()
+                .await
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => Ok(s.lock().unwrap().superadmins.values().cloned().collect()),
+        }
+    }
+
+    /// Idempotent: granting twice is not an error, and it must not rewrite who granted it first.
+    pub async fn add_superadmin(&self, user: &str, by: &str) -> Result<()> {
+        let user = user.trim().to_lowercase();
+        let row = SuperAdmin { user: user.clone(), added_at: DateTime::now(), added_by: by.to_string() };
+        match &self.backend {
+            Backend::Mongo(m) => {
+                m.superadmins
+                    .update_one(
+                        doc! { "_id": &user },
+                        doc! { "$setOnInsert": mongodb::bson::to_document(&row).map_err(|e| err(format!("bson: {e}")))? },
+                    )
+                    .upsert(true)
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+            }
+            // `$setOnInsert`: an existing row keeps the `addedBy` it was granted with.
+            Backend::Memory(s) => {
+                s.lock().unwrap().superadmins.entry(user).or_insert(row);
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn remove_superadmin(&self, user: &str) -> Result<()> {
+        let user = user.trim().to_lowercase();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                m.superadmins
+                    .delete_one(doc! { "_id": user })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+            }
+            Backend::Memory(s) => {
+                s.lock().unwrap().superadmins.remove(&user);
+            }
+        }
+        Ok(())
+    }
+
+    /// The `KLOUDLITE_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
+    /// is a way to get the first administrator into an empty cluster, not the list itself, so
+    /// removing an email from it must not silently revoke someone the list has since granted.
+    pub async fn ensure_superadmins(&self, emails: &[String]) -> Result<usize> {
+        let mut n = 0;
+        for e in emails {
+            if !self.is_superadmin(e).await? {
+                self.add_superadmin(e, "bootstrap").await?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// Index creation and the one-shot repair, both of which are about the Mongo collections
+/// themselves rather than about the directory's semantics — so they live here and
+/// `connect` is their only caller.
+impl MongoCollections {
     /// Cosmos will not sort or filter on a field it has no index for — it answers
     /// "the index path corresponding to the specified order-by item is excluded"
     /// rather than sorting in memory the way MongoDB does for small results. So
@@ -719,205 +1251,6 @@ impl Directory {
             fixed += 1;
         }
         Ok(fixed)
-    }
-
-    // ── credentials ─────────────────────────────────────────────────────────
-
-    /// Record a credential. `Ok(None)` means this exact credential is already
-    /// registered — which for an ssh key means the same key, and is worth saying
-    /// rather than silently re-adding.
-    pub async fn add_credential(&self, c: &Credential) -> Result<Option<()>> {
-        match self.credentials.insert_one(c).await {
-            Ok(_) => Ok(Some(())),
-            Err(e) if is_duplicate_key(&e) => Ok(None),
-            Err(e) => Err(err(format!("mongo: {e}"))),
-        }
-    }
-
-    pub async fn credentials_for(&self, owner: &str, kind: CredentialKind) -> Result<Vec<Credential>> {
-        use futures::TryStreamExt;
-        let kind = mongodb::bson::to_bson(&kind).map_err(|e| err(format!("bson: {e}")))?;
-        let cursor = self
-            .credentials
-            .find(doc! { "owner": owner, "kind": kind })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Look one up to check its owner before revoking it. Revocation is authorized
-    /// against the credential's OWNER, not against whoever holds the id — an id is
-    /// a digest, and a digest is guessable in principle if the secret is known.
-    pub async fn credential(&self, id: &str) -> Result<Option<Credential>> {
-        self.credentials
-            .find_one(doc! { "_id": id })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// A signing key by ANY of the fingerprints or key ids it answers to.
-    ///
-    /// A commit is normally signed by a subkey, and older signatures name their
-    /// issuer by key id — the last eight bytes of a fingerprint — rather than
-    /// the full fingerprint. Rather than match that as a suffix here (which
-    /// would need a scan), `fingerprints_of` stores each key's 16-hex key-id
-    /// suffix alongside its full fingerprint at registration, so this stays an
-    /// exact, indexed `$in`.
-    pub async fn signer_by_any(&self, candidates: &[String]) -> Result<Option<Credential>> {
-        use futures::TryStreamExt;
-        if candidates.is_empty() {
-            return Ok(None);
-        }
-        let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
-            .map_err(|e| err(format!("bson: {e}")))?;
-        let any: Vec<mongodb::bson::Bson> = candidates
-            .iter()
-            .map(|c| mongodb::bson::Bson::String(c.to_lowercase()))
-            .collect();
-        let cursor = self
-            .credentials
-            .find(doc! { "kind": kind, "fingerprints": { "$in": any } })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        let found: Vec<Credential> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(found.into_iter().next())
-    }
-
-    pub async fn forget_credential(&self, id: &str) -> Result<()> {
-        self.credentials
-            .delete_one(doc! { "_id": id })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    // ── passkeys ────────────────────────────────────────────────────────────
-
-    /// `Ok(None)` means this credential id is already registered — which means the
-    /// same authenticator was enrolled twice, not that anything is wrong.
-    pub async fn add_passkey(&self, p: &Passkey) -> Result<Option<()>> {
-        match self.passkeys.insert_one(p).await {
-            Ok(_) => Ok(Some(())),
-            Err(e) if is_duplicate_key(&e) => Ok(None),
-            Err(e) => Err(err(format!("mongo: {e}"))),
-        }
-    }
-
-    /// By credential id — the lookup a sign-in makes, before it knows who is
-    /// signing in. That is the whole point of a discoverable credential: the
-    /// authenticator names the account.
-    pub async fn passkey(&self, id: &str) -> Result<Option<Passkey>> {
-        self.passkeys
-            .find_one(doc! { "_id": id })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn passkeys_for(&self, user: &str) -> Result<Vec<Passkey>> {
-        use futures::TryStreamExt;
-        let cursor = self
-            .passkeys
-            .find(doc! { "user": user.trim().to_lowercase() })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Record that a passkey was just used. The counter is what detects a cloned
-    /// authenticator, so it is stored on every successful sign-in rather than only
-    /// when convenient.
-    pub async fn advance_passkey(&self, id: &str, counter: i64) -> Result<()> {
-        self.passkeys
-            .update_one(doc! { "_id": id }, doc! { "$set": { "counter": counter } })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    // ── pull requests ───────────────────────────────────────────────────────
-
-    /// The ONLY surviving reader of the Mongo `pulls` collection: `pulls::ensure_migrated` uses
-    /// it as its row source, which is what makes pull requests opened before the per-repo
-    /// databases existed survive. Nothing else may grow a caller — new pull reads and writes
-    /// live in the owning repo's own database.
-    pub async fn pulls_for(&self, repo: &str) -> Result<Vec<PullRequest>> {
-        use futures::TryStreamExt;
-        let cursor = self
-            .pulls
-            .find(doc! { "repo": repo })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn forget_passkey(&self, id: &str) -> Result<()> {
-        self.passkeys
-            .delete_one(doc! { "_id": id })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    // ── superadmins ─────────────────────────────────────────────────────────
-
-    pub async fn is_superadmin(&self, user: &str) -> Result<bool> {
-        Ok(self
-            .superadmins
-            .find_one(doc! { "_id": user.trim().to_lowercase() })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?
-            .is_some())
-    }
-
-    pub async fn superadmins(&self) -> Result<Vec<SuperAdmin>> {
-        use futures::TryStreamExt;
-        self.superadmins
-            .find(doc! {})
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Idempotent: granting twice is not an error, and it must not rewrite who granted it first.
-    pub async fn add_superadmin(&self, user: &str, by: &str) -> Result<()> {
-        let user = user.trim().to_lowercase();
-        let row = SuperAdmin { user: user.clone(), added_at: DateTime::now(), added_by: by.to_string() };
-        self.superadmins
-            .update_one(
-                doc! { "_id": &user },
-                doc! { "$setOnInsert": mongodb::bson::to_document(&row).map_err(|e| err(format!("bson: {e}")))? },
-            )
-            .upsert(true)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(())
-    }
-
-    pub async fn remove_superadmin(&self, user: &str) -> Result<()> {
-        self.superadmins
-            .delete_one(doc! { "_id": user.trim().to_lowercase() })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(())
-    }
-
-    /// The `KLOUDLITE_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
-    /// is a way to get the first administrator into an empty cluster, not the list itself, so
-    /// removing an email from it must not silently revoke someone the list has since granted.
-    pub async fn ensure_superadmins(&self, emails: &[String]) -> Result<usize> {
-        let mut n = 0;
-        for e in emails {
-            if !self.is_superadmin(e).await? {
-                self.add_superadmin(e, "bootstrap").await?;
-                n += 1;
-            }
-        }
-        Ok(n)
     }
 }
 

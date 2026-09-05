@@ -330,27 +330,30 @@ pub async fn seed_blobs(e: &TestEnv, owner: &str, contents: &[&[u8]]) {
 
 // ── a real directory ────────────────────────────────────────────────────────
 //
-// The directory is a concrete Mongo struct, so the `/v1` handlers behind it can only be reached
-// with a Mongo behind them. A trait and an in-memory double would be ~40 methods of bson-shaped
-// signatures for one test dependency, so the tests run against a real server instead: CI provides
-// one (`image.yml`'s `test` job), and a laptop without `KLOUDLITE_TEST_MONGO_URI` skips the
-// handler half and keeps only the gate half, which needs no database at all.
+// The directory is a concrete Mongo struct, so the `/v1` handlers behind it used to be reachable
+// only with a Mongo behind them, and every test of the handler half skipped itself on a machine
+// without one. `Directory` now carries an in-memory backend for exactly this: the same public
+// methods with the same semantics, over `BTreeMap`s. A `KLOUDLITE_TEST_MONGO_URI` still wins when
+// it is set — the Mongo arm is what production runs, and these tests are the only thing that
+// exercises it — but nothing skips any more.
 
-/// A `Directory` on a database of this test's own, dropped when the fixture is.
+/// A `Directory` for one test: a throwaway Mongo database when `KLOUDLITE_TEST_MONGO_URI` names a
+/// server, an in-process one otherwise. `mongo` is `Some` either way.
 pub struct TestDirectory {
     pub dir: Arc<kloudlite_pulls::directory::Directory>,
-    client: mongodb::Client,
-    name: String,
+    /// The client and database name to drop on the way out — `None` for the in-memory backend,
+    /// which is dropped with the fixture.
+    mongo: Option<(mongodb::Client, String)>,
 }
 
-/// `Some` when `KLOUDLITE_TEST_MONGO_URI` names a Mongo, `None` — with a printed reason — when
-/// it does not. `what` names the test, so a skipped run says which coverage was not taken.
+/// `what` names the test; it is only used in the line explaining which backend it took.
 pub async fn mongo(what: &str) -> Option<TestDirectory> {
     let uri = match std::env::var("KLOUDLITE_TEST_MONGO_URI") {
         Ok(u) if !u.is_empty() => u,
         _ => {
-            eprintln!("skipping the handler half of {what}: KLOUDLITE_TEST_MONGO_URI is unset");
-            return None;
+            eprintln!("{what}: no KLOUDLITE_TEST_MONGO_URI, using the in-memory directory");
+            let dir = kloudlite_pulls::directory::Directory::in_memory();
+            return Some(TestDirectory { dir: Arc::new(dir), mongo: None });
         }
     };
     // pid and clock keep two concurrent `cargo test` runs (or two CI jobs on one server) apart;
@@ -367,12 +370,12 @@ pub async fn mongo(what: &str) -> Option<TestDirectory> {
     );
     let dir = kloudlite_pulls::directory::Directory::connect(&uri, &name).await.unwrap();
     let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
-    Some(TestDirectory { dir: Arc::new(dir), client, name })
+    Some(TestDirectory { dir: Arc::new(dir), mongo: Some((client, name)) })
 }
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        let (client, name) = (self.client.clone(), self.name.clone());
+        let Some((client, name)) = self.mongo.clone() else { return };
         // `Drop` cannot await. Every test that takes this fixture is `multi_thread`, so the
         // runtime can spare a thread for the one round trip that throws the database away.
         tokio::task::block_in_place(|| {
