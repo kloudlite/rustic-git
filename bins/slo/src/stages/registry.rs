@@ -17,7 +17,16 @@ use rand::RngCore;
 use super::{api, poll_json, post};
 use crate::crane::Crane;
 use crate::ctx::{Ctx, PROBE_USER};
-use crate::step::DEFAULT_TIMEOUT;
+/// Per-step ceilings. Each is well above its catalogue target — a slow answer must be a BREACH
+/// with a number, not a step the probe cut off — and the sum is under the fast suite's own budget
+/// so a wedged registry cannot cost the later stages their samples.
+const TOKEN_CEILING: Duration = Duration::from_secs(20);
+const PUSH_CEILING: Duration = Duration::from_secs(90);
+const MANIFEST_CEILING: Duration = Duration::from_secs(20);
+const TAGS_CEILING: Duration = Duration::from_secs(15);
+const SHARED_CEILING: Duration = Duration::from_secs(90);
+const VISIBILITY_CEILING: Duration = Duration::from_secs(60);
+const CANARY_CEILING: Duration = Duration::from_secs(30);
 
 /// `reg.tags.visible` is bounded at 5 s by the catalogue, and that bound IS the wait: a tag that
 /// took longer has failed the SLI whether the probe keeps looking or not.
@@ -33,29 +42,26 @@ const AFTER_PUSH: [&str; 4] =
     ["reg.manifest.p95", "reg.tags.visible", "reg.shared.layer", "reg.visibility"];
 
 pub async fn run(c: &mut Ctx) {
-    // The canary is a pull of an image somebody else pushed, so it needs no credential of ours and
-    // runs whatever the rest of the stage does.
+    // Every id here needs the personal token, the canary included: `slo-probe/canary` is PRIVATE
+    // (bootstrap pushes it and never makes it public), so pulling it is an authenticated pull.
     let Some(secret) = c.state.token_value.clone() else {
-        let why = "no registry credential: the token was never minted";
-        c.skip("reg.token.p95", why);
-        c.skip("reg.push.ok", why);
+        c.skip("reg.token.p95", "no personal token");
+        c.skip("reg.push.ok", "no personal token");
         for id in AFTER_PUSH {
-            c.skip(id, why);
+            c.skip(id, "no personal token");
         }
-        canary(c).await;
+        c.skip("reg.canary", "no personal token");
         return;
     };
 
     let (a, b) = (format!("{}-a", c.prefix()), format!("{}-b", c.prefix()));
     token(c, &secret, &a).await;
 
-    match push(c, &secret, &a, &b).await {
+    match push(c, &secret, &a).await {
         Ok(layer) => {
-            c.state.image = Some(a.clone());
-            c.state.sibling_image = Some(b.clone());
             manifest(c, &secret, &a).await;
             tags(c, &secret, &a).await;
-            shared_layer(c, &a, &b, &layer).await;
+            shared_layer(c, &secret, &a, &b, &layer).await;
             visibility(c, &a).await;
         }
         Err(e) => {
@@ -65,12 +71,12 @@ pub async fn run(c: &mut Ctx) {
             }
         }
     }
-    canary(c).await;
+    canary(c, &secret).await;
 }
 
 /// `reg.token.p95`: the `/v2/token` exchange every spec-following client makes before it pulls.
 async fn token(c: &mut Ctx, secret: &str, image: &str) {
-    c.step("reg.token.p95", DEFAULT_TIMEOUT, |c| {
+    c.step("reg.token.p95", TOKEN_CEILING, |c| {
         let (secret, scope) = (secret.to_string(), pull_scope(image));
         async move {
             bearer(c, Some(&secret), &scope).await.map(|_| ())
@@ -80,32 +86,26 @@ async fn token(c: &mut Ctx, secret: &str, image: &str) {
     .await;
 }
 
-/// `reg.push.ok`: both images, one shared layer. Returns the layer's digest, which is what
-/// `reg.shared.layer` is checked against.
+/// `reg.push.ok`: image A, and the layer digest the shared-layer check is built on.
 ///
-/// Untimed as a pair on purpose: the SLI is "pushing an image succeeds", and the second push is
-/// there for the shared-layer check rather than to double the sample.
-async fn push(c: &mut Ctx, secret: &str, a: &str, b: &str) -> Result<String> {
+/// The layouts are built INSIDE the step, not before it. A tmp tree that cannot be written is not
+/// the registry's fault, but it is still `reg.push.ok` that did not happen — dropping the id
+/// entirely would report a green run with no push in it. Image B is built here and pushed by
+/// `reg.shared.layer`, whose whole assertion is about what B's push does NOT re-upload.
+async fn push(c: &mut Ctx, secret: &str, a: &str) -> Result<String> {
     let layer = random_layer();
     let digest = sha256(&layer);
-    let dir_a = c.tmp.join("img-a");
-    let dir_b = c.tmp.join("img-b");
-    // Built before the step so a full disk is not reported as a registry failure — the SLI is the
-    // registry's, and the probe's own tmp is not part of it.
-    write_layout(&dir_a, &layer, a).context("could not build image a")?;
-    write_layout(&dir_b, &layer, b).context("could not build image b")?;
-
     let host = host(c);
+    let (dir_a, dir_b) = (c.tmp.join("img-a"), c.tmp.join("img-b"));
     let ok = {
-        let (secret, a, b) = (secret.to_string(), a.to_string(), b.to_string());
-        let (host, dir_a, dir_b) = (host.clone(), dir_a.clone(), dir_b.clone());
-        c.step("reg.push.ok", Duration::from_secs(180), move |c| {
+        let (secret, a, b) = (secret.to_string(), a.to_string(), format!("{}-b", c.prefix()));
+        c.step("reg.push.ok", PUSH_CEILING, move |c| {
             let crane = authed(c);
             async move {
+                write_layout(&dir_a, &layer, &a).context("could not build image a")?;
+                write_layout(&dir_b, &layer, &b).context("could not build image b")?;
                 crane.login(&host, PROBE_USER, &secret).await.context("could not log in")?;
-                crane.push(&dir_a, &format!("{host}/{PROBE_USER}/{a}:latest")).await?;
-                crane.push(&dir_b, &format!("{host}/{PROBE_USER}/{b}:latest")).await?;
-                Ok(())
+                crane.push(&dir_a, &format!("{host}/{PROBE_USER}/{a}:latest")).await
             }
             .boxed()
         })
@@ -128,7 +128,7 @@ async fn manifest(c: &mut Ctx, secret: &str, image: &str) {
         Err(e) => return c.skip("reg.manifest.p95", &format!("no registry token: {e:#}")),
     };
     let url = format!("{}/v2/{PROBE_USER}/{image}/manifests/latest", base(c));
-    c.step("reg.manifest.p95", DEFAULT_TIMEOUT, move |c| {
+    c.step("reg.manifest.p95", MANIFEST_CEILING, move |c| {
         async move {
             let (status, body) = super::raw(
                 c,
@@ -165,7 +165,7 @@ async fn tags(c: &mut Ctx, secret: &str, image: &str) {
     let tags_url = format!("{}/v2/{PROBE_USER}/{image}/tags/list", base(c));
     let catalog_url = format!("{}/v2/_catalog", base(c));
     let want = format!("{PROBE_USER}/{image}");
-    c.step("reg.tags.visible", TAGS_CAP + Duration::from_secs(10), move |c| {
+    c.step("reg.tags.visible", TAGS_CEILING, move |c| {
         async move {
             let start = Instant::now();
             poll_json(c, &tags_url, &bearer, TAGS_CAP, |v| has(v, "tags", "latest"))
@@ -181,19 +181,34 @@ async fn tags(c: &mut Ctx, secret: &str, image: &str) {
     .await;
 }
 
-/// `reg.shared.layer`: delete the sibling, pull the survivor, and check the shared blob came back.
+/// `reg.shared.layer`: the sibling does not re-upload the layer, and deleting the sibling does not
+/// take it away.
 ///
-/// This is the one SLO that catches the worst registry bug there is — a manifest path deleting a
-/// blob a sibling image still references (`crates/registry/src/gc.rs`'s "only two things ever
-/// delete a blob"). Both images carry the SAME layer, so if deleting B took the blob with it, A's
-/// pull fails or comes back with different bytes.
-async fn shared_layer(c: &mut Ctx, a: &str, b: &str, layer: &str) {
+/// Two facts, one step, first failure wins — because either one alone is worthless. `HEAD` on B's
+/// blob endpoint BEFORE B is pushed is the "not re-uploaded" half: blobs are per-owner
+/// (`blobs/{owner}/{algo}/{hex}`), so a 200 there means B's push will mount the layer rather than
+/// send a megabyte again. The delete-and-pull half is the one that catches the worst registry bug
+/// there is — a manifest path deleting a blob a sibling still references (`crates/registry/src/gc.rs`'s
+/// "only two things ever delete a blob").
+async fn shared_layer(c: &mut Ctx, secret: &str, a: &str, b: &str, layer: &str) {
+    let bearer = match bearer(c, Some(secret), &pull_scope(b)).await {
+        Ok(t) => t,
+        Err(e) => return c.skip("reg.shared.layer", &format!("no registry token: {e:#}")),
+    };
     let dest = c.tmp.join("pull-a");
+    let dir_b = c.tmp.join("img-b");
+    let head = format!("{}/v2/{PROBE_USER}/{b}/blobs/{layer}", base(c));
     let (host, a, b, layer) = (host(c), a.to_string(), b.to_string(), layer.to_string());
-    c.step("reg.shared.layer", Duration::from_secs(120), move |c| {
+    c.step("reg.shared.layer", SHARED_CEILING, move |c| {
         let crane = authed(c);
         let (jwt, del) = (c.probe_jwt.clone(), api(c, &format!("/api/{PROBE_USER}/{b}/imagedelete")));
         async move {
+            let (status, _) =
+                super::raw(c, reqwest::Method::HEAD, &head, &bearer, None, &[]).await?;
+            if !status.is_success() {
+                return Err(anyhow!("the layer image a pushed is not there for b to mount: {status}"));
+            }
+            crane.push(&dir_b, &format!("{host}/{PROBE_USER}/{b}:latest")).await.context("could not push the sibling")?;
             post(c, &del, &jwt, serde_json::Value::Null).await.context("could not delete the sibling")?;
             let _ = std::fs::remove_dir_all(&dest);
             crane.pull(&format!("{host}/{PROBE_USER}/{a}:latest"), &dest).await.context("could not pull")?;
@@ -216,7 +231,7 @@ async fn shared_layer(c: &mut Ctx, a: &str, b: &str, layer: &str) {
 async fn visibility(c: &mut Ctx, image: &str) {
     let host = host(c);
     let dest = c.tmp.join("pull-anon");
-    c.step("reg.visibility", Duration::from_secs(120), move |c| {
+    c.step("reg.visibility", VISIBILITY_CEILING, move |c| {
         let anon = anonymous(c);
         let (jwt, image) = (c.probe_jwt.clone(), image.to_string());
         let flip = api(c, &format!("/api/{PROBE_USER}/{image}/imagevisibility?visibility=public"));
@@ -238,17 +253,24 @@ async fn visibility(c: &mut Ctx, image: &str) {
 
 /// `reg.canary`: the long-lived image `bootstrap` pushed still pulls, and is still the same image.
 ///
-/// The digest is PINNED in the environment rather than read from the registry, for the same reason
-/// `ssh.hostkey` is pinned: a probe that trusted whatever the registry answered would report green
-/// through exactly the substitution this exists to catch. Unset means no pin, and the step skips.
-async fn canary(c: &mut Ctx) {
+/// AUTHENTICATED: the canary is private, like every other image this probe owns, so the pull needs
+/// the personal token. The digest is PINNED in the environment rather than read from the registry,
+/// for the same reason `ssh.hostkey` is pinned: a probe that trusted whatever the registry answered
+/// would report green through exactly the substitution this exists to catch. Unset means no pin,
+/// and the step skips.
+async fn canary(c: &mut Ctx, secret: &str) {
     let Some(want) = c.cfg.canary_digest.clone() else {
         return c.skip("reg.canary", "KLOUDLITE_GIT_SLO_CANARY_DIGEST is not set");
     };
-    let reference = format!("{}/{PROBE_USER}/canary:latest", host(c));
-    c.step("reg.canary", DEFAULT_TIMEOUT, move |c| {
+    let host = host(c);
+    let reference = format!("{host}/{PROBE_USER}/canary:latest");
+    let secret = secret.to_string();
+    c.step("reg.canary", CANARY_CEILING, move |c| {
         let crane = authed(c);
         async move {
+            // Repeated rather than assumed: a canary that only passed after `reg.push.ok` had
+            // logged in would go red for the wrong reason the day the push fails.
+            crane.login(&host, PROBE_USER, &secret).await.context("could not log in")?;
             let got = crane.digest(&reference).await?;
             if got != want {
                 return Err(anyhow!("the canary is {got}, not the pinned {want}"));
@@ -269,12 +291,11 @@ pub async fn ensure_canary(c: &Ctx) -> Result<String> {
     let host = host(c);
     let reference = format!("{host}/{PROBE_USER}/canary:latest");
     let crane = authed(c);
-    if let Ok(d) = crane.digest(&reference).await {
-        return Ok(d);
-    }
     // A token of its own, minted and revoked here: the registry's Basic auth takes a personal
     // token and nothing else (`registry::auth::caller`), and bootstrap runs before any run has
-    // one. Leaving it behind would be a standing credential nobody owns.
+    // one. Leaving it behind would be a standing credential nobody owns. It is minted before the
+    // digest probe rather than after, because the canary is private — an unauthenticated `crane
+    // digest` fails whether the image is there or not, and bootstrap would re-push every deploy.
     let minted = post(
         c,
         &api(c, "/v1/tokens"),
@@ -289,16 +310,23 @@ pub async fn ensure_canary(c: &Ctx) -> Result<String> {
         .ok_or_else(|| anyhow!("the answer carried no token"))?
         .to_string();
     let out = push_canary(c, &crane, &host, &reference, &secret).await;
-    if let Some(id) = minted.get("_id").and_then(|v| v.as_str()) {
-        let url = api(c, &format!("/v1/tokens/{id}"));
-        // Best effort, and never allowed to mask the push's own outcome.
-        if let Err(e) = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await {
-            tracing::warn!(op = "revoke", error = %format!("{e:#}"), "slo.bootstrap.failed");
+    match minted.get("_id").and_then(|v| v.as_str()) {
+        Some(id) => {
+            let url = api(c, &format!("/v1/tokens/{id}"));
+            // Best effort, and never allowed to mask the push's own outcome.
+            if let Err(e) = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await {
+                tracing::warn!(op = "revoke", error = %format!("{e:#}"), "slo.bootstrap.failed");
+            }
         }
+        // Nothing to revoke it BY: a live credential is now unowned, and that must be visible.
+        None => tracing::error!(reason = "token id missing", "slo.bootstrap.failed"),
     }
     out
 }
 
+/// Log in, then push only if what is there is not already this exact image. The layer is FIXED
+/// bytes, so the digest a fresh push would produce is knowable without pushing: a re-run on every
+/// deploy must not move the digest a human pinned into the CronJob.
 async fn push_canary(
     c: &Ctx,
     crane: &Crane,
@@ -309,7 +337,10 @@ async fn push_canary(
     crane.login(host, PROBE_USER, secret).await.context("could not log in")?;
     let dir = c.tmp.join("canary");
     std::fs::create_dir_all(&c.tmp)?;
-    write_layout(&dir, &vec![0x5c; LAYER_BYTES], "canary")?;
+    let want = write_layout(&dir, &vec![0x5c; LAYER_BYTES], "canary")?;
+    if crane.digest(reference).await.ok().as_deref() == Some(want.as_str()) {
+        return Ok(want);
+    }
     crane.push(&dir, reference).await.context("could not push the canary")?;
     crane.digest(reference).await
 }
@@ -505,6 +536,29 @@ mod tests {
         let path = root.join("a/blobs/sha256").join(layer_a.trim_start_matches("sha256:"));
         assert_eq!(std::fs::read(path).expect("layer blob").len(), layer.len());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A tmp tree that cannot be written is not the registry's fault, but it is still
+    /// `reg.push.ok` that did not happen — and a dropped id reports a green run with no push in
+    /// it. The four ids the push is a precondition for are skipped, never counted twice.
+    #[tokio::test]
+    async fn a_layout_that_cannot_be_written_fails_the_push_id_rather_than_vanishing() {
+        let mut c = crate::testkit::ctx().await;
+        // A file where the stage wants a directory: every `create_dir_all` under it fails.
+        let blocked = std::env::temp_dir().join(format!("slo-blocked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&blocked);
+        std::fs::write(&blocked, b"not a directory").expect("blocker");
+        c.tmp = blocked.join("tmp");
+        c.state.token_value = Some("t".into());
+        run(&mut c).await;
+        let push = c.steps.iter().find(|s| s.slo_id == "reg.push.ok").expect("reg.push.ok");
+        assert!(!push.ok && !push.skipped, "{push:?}");
+        assert!(push.detail.contains("could not build image a"), "{}", push.detail);
+        for id in AFTER_PUSH {
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
+            assert!(s.skipped, "{id} should be skipped, not counted twice");
+        }
+        let _ = std::fs::remove_file(&blocked);
     }
 
     #[test]

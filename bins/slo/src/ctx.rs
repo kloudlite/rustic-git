@@ -20,9 +20,6 @@ use crate::config::Config;
 #[derive(Debug, Default, Clone)]
 pub struct State {
     pub repo: Option<String>,
-    pub image: Option<String>,
-    /// The sibling image that shares a layer with `image` (`reg.shared.layer`).
-    pub sibling_image: Option<String>,
     pub workspace: Option<String>,
     /// The clone of `workspace`, which is a second object teardown must find.
     pub clone: Option<String>,
