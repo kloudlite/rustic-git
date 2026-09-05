@@ -1,13 +1,13 @@
 # Workspace restructure — design
 
-**Goal:** cut the single `kloudlite_git` library into a Cargo workspace so each of the three
+**Goal:** cut the single `kloudlite` library into a Cargo workspace so each of the three
 binaries links only what it uses, incremental builds rebuild one crate instead of everything,
 and the eight files over 700 lines become focused modules.
 
 **Non-goals:** independent versioning/publishing; image-per-component (one image, three
 binaries, unchanged deploy yamls); splitting files under 700 lines; any behavior change at all.
 
-**Migration strategy (approved: A):** bottom-up, crate-at-a-time. The old `kloudlite_git` lib
+**Migration strategy (approved: A):** bottom-up, crate-at-a-time. The old `kloudlite` lib
 shrinks step by step and re-exports every moved module (`pub use …`) so the binaries and all
 integration tests compile green after every extraction. The facade is deleted in the final
 step, when consumers' imports are rewritten once. Every step ships alone; `cargo test` and
@@ -74,8 +74,8 @@ the composed server; per-crate tests migrate only where they clearly test one cr
 
 ## Expected wins
 
-- `kloudlite-git-api` binary: drops gix*, russh, pgp/gpg, flate2, imara-diff, registry code.
-- `kloudlite-git-worker`: drops russh, pgp/gpg, gix-pack/traverse (keeps object-store/slatedb).
+- `kloudlite-api` binary: drops gix*, russh, pgp/gpg, flate2, imara-diff, registry code.
+- `kloudlite-worker`: drops russh, pgp/gpg, gix-pack/traverse (keeps object-store/slatedb).
 - Touching `registry/` rebuilds `registry` + two bins, not the world; touching web of course
   unchanged.
 - Eight focused module trees instead of monoliths.
@@ -86,7 +86,7 @@ the composed server; per-crate tests migrate only where they clearly test one cr
   `store` method returning a `protocol` type). Resolution defaults: move the item to the lower
   crate or introduce a narrow trait in `core`; upgrade to a design conversation if a seam
   refuses both.
-- The facade period means `kloudlite_git` temporarily depends on every extracted crate — build
+- The facade period means `kloudlite` temporarily depends on every extracted crate — build
   times get *worse* until the final step removes it. Accepted; each extraction still lands green.
 - `pulls` model/check seam is the one place behavior could shift if the split moves code across
   an `await` boundary; the worker_merges suite (37 tests) is the guard.

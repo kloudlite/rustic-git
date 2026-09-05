@@ -3,7 +3,7 @@
 //! run for real on the btrfs review VM. Fixture copied from `engine_ops.rs`'s `LoopbackPool`:
 //! integration test files cannot share code across `tests/*.rs`.
 
-use kloudlite_git_workspaces::engine::{Engine, Pool, have_btrfs};
+use kloudlite_workspaces::engine::{Engine, Pool, have_btrfs};
 
 struct LoopbackPool {
     pool: Pool,
@@ -374,7 +374,7 @@ fn set_quota_picks_the_arm_by_the_layout_actually_on_disk() {
 /// two renames left one behind indefinitely.
 #[test]
 fn a_swap_leaves_no_worktree_shaped_leftovers() {
-    use kloudlite_git_workspaces::engine::snapshot::{before_restore_name, restoring_name};
+    use kloudlite_workspaces::engine::snapshot::{before_restore_name, restoring_name};
     // Build the two names the swap uses and assert the scanner skips them.
     for n in [restoring_name("ws-1"), before_restore_name("ws-1")] {
         assert!(n.starts_with('.'), "{n} must be skipped by the worktree scanners");

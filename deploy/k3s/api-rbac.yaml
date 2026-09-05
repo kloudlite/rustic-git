@@ -1,23 +1,23 @@
-# What `kloudlite-git-api` may do in this cluster.
+# What `kloudlite-api` may do in this cluster.
 #
 # The API tier runs elsewhere and reaches this cluster with a kubeconfig, so this is the whole of
 # its authority here.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kloudlite-git-api
+  name: kloudlite-api
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-api
+  name: kloudlite-api
 rules:
   # Spec is the API's to write. It never writes status — that is the controller's, and the split is
   # what stops the two overwriting each other's view of the same object. No `watch`: nothing in the
   # API watches — every read is a one-shot list on a request. No `update`: every write is a
   # server-side `patch`, never a whole-object replace.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "create", "patch", "delete"]
   # A push, the history/refs listings behind it, and `DELETE /v1/volumes/{name}/snapshots/{id}` —
@@ -25,7 +25,7 @@ rules:
   # `watch`: nothing in the API watches — every read is a one-shot list on a request. `create` and
   # `delete` but deliberately NO `/status`: the outcome of a push is the agent's to write, and an
   # API that could write it could report a push that never happened.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["snapshots"]
     verbs: ["get", "list", "create", "delete"]
   # Reads for projections, plus `delete` — and `delete` ONLY because a volume can now outlive
@@ -35,34 +35,34 @@ rules:
   # while a live parent names it. `create` stays with the agent (a controller owns the children it
   # authors); the API's parent delete is still one call to the Workspace. `ownerbindings` are gone
   # from this file entirely: the claiming agent creates them now.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["volumes"]
     verbs: ["get", "list", "delete"]
   # Read for enforcement (`guard_alloc` needs the owner's effective limit) and for `GET /v1/quota`;
   # no create, patch or delete — writing a Quota is the admin role's alone.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list"]
   # A person or a team admin may open a request for themselves; deciding it is not a /v1 verb.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "create"]
   # The generic request queue. Same reach as `quotarequests` and for the same reason: a person or
   # a team admin may OPEN one for themselves, and deciding it is not a /v1 verb — no `patch`, and
   # no `requests/status` at all, so this role cannot mark its own request approved.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["requests"]
     verbs: ["get", "list", "create"]
   # Read-only, for ONE question: cloning an INTERRUPTED workspace. Its node is down, so nothing can
   # be cut there and the clone has to graft onto a sync point some OTHER node already holds — and
   # `status.branches` is the only record of who holds what. `get`/`list` and nothing else: the
   # replica row is the pulling agent's to write, always.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["volumereplicas"]
     verbs: ["get", "list"]
   # Read-only: registering a region is `POST /admin/regions` now, and `/v1/regions` keeps only the
   # active-region GET every workspace/environment create already calls to validate `region`.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["regions"]
     verbs: ["get", "list"]
   # One policy, one moment: deleting an ATTACHED workspace. Nothing stamps a finalizer on a
@@ -82,13 +82,13 @@ rules:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kloudlite-git-admin
+  name: kloudlite-admin
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-admin
+  name: kloudlite-admin
 rules:
   # `watch` on every read below is the history layer's, not the console's: `history::watch` runs
   # one reflector per kind per region in the admin process and turns the transitions it sees into
@@ -100,13 +100,13 @@ rules:
   # The only role that may create, patch or delete a Quota, a QuotaRequest or a Region — the
   # design doc's whole point: RBAC, not a claim check inside a shared process, is what stops the
   # user-role process writing one of these, because that process's ServiceAccount cannot.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests/status"]
     verbs: ["patch", "update"]
   # Deciding a request: `patch`/`update` on the status subresource, which is where every decision
@@ -114,29 +114,29 @@ rules:
   # authors a Request per legacy QuotaRequest. No `patch` or `delete` on the object itself — no
   # route edits or removes a request's spec, and a decision that could rewrite what was asked for
   # is not a decision.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["requests"]
     verbs: ["get", "list", "watch", "create"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["requests/status"]
     verbs: ["patch", "update"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["regions"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # No `delete`: `ClusterSettings` is never removed, only its fields reset to defaults by
   # omission — the object itself (named `default`) is expected to always exist once created.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["clustersettings"]
     verbs: ["get", "list", "watch", "create", "patch"]
   # The decommission view and the cross-owner list/stop/delete surfaces both need the full object,
   # not the read the user role keeps for its own owner-scoped routes.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch", "delete"]
   # Read-only, and not optional: Owners, Clusters and Overview all compute their numbers from
   # these on the request path (usage is never a cached counter), so without this rule those three
   # areas answer 403 rather than degrading.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["volumes", "snapshots", "volumereplicas"]
     verbs: ["get", "list", "watch"]
   # `patch` is the Clusters area's drain / undrain / decommission: the decommission LABEL, the
@@ -148,30 +148,30 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch"]
-  # admin::workloads' per-region half: rolling this region's own kloudlite-git-agent DaemonSet
-  # (kube-system) and kloudlite-git-gateway Deployment (kloudlite-git-system, deploy/k3s/gateway.yaml).
-  # No `create`/`delete` — same reasoning as the central Role in deploy/kloudlite-git.yaml, a roll
+  # admin::workloads' per-region half: rolling this region's own kloudlite-agent DaemonSet
+  # (kube-system) and kloudlite-gateway Deployment (kloudlite-system, deploy/k3s/gateway.yaml).
+  # No `create`/`delete` — same reasoning as the central Role in deploy/kloudlite.yaml, a roll
   # only ever patches an object that already exists.
   - apiGroups: ["apps"]
     resources: ["daemonsets"]
-    resourceNames: ["kloudlite-git-agent"]
+    resourceNames: ["kloudlite-agent"]
     verbs: ["get", "list", "patch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    resourceNames: ["kloudlite-git-gateway"]
+    resourceNames: ["kloudlite-gateway"]
     verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kloudlite-git-admin
+  name: kloudlite-admin
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kloudlite-git-admin
+  name: kloudlite-admin
 subjects:
   - kind: ServiceAccount
-    name: kloudlite-git-admin
+    name: kloudlite-admin
     namespace: kube-system
 ---
 # Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
@@ -187,7 +187,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-api-secrets
+  name: kloudlite-api-secrets
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -214,12 +214,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kloudlite-git-api
+  name: kloudlite-api
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kloudlite-git-api
+  name: kloudlite-api
 subjects:
   - kind: ServiceAccount
-    name: kloudlite-git-api
+    name: kloudlite-api
     namespace: kube-system

@@ -80,7 +80,7 @@ async fn facts(client: &kube::Client, region: &str) -> Result<RegionFacts, Respo
 /// The region's agent DaemonSet, or zeros. A region whose agent has never been deployed is a fact
 /// worth showing on the row, not a 5xx that hides every other region with it.
 async fn agent_counts(s: &ApiState, region: &str) -> (i64, i64) {
-    match super::super::workloads::workload_doc(s, &super::super::workloads::Scope::Region(region.to_string()), "kloudlite-git-agent")
+    match super::super::workloads::workload_doc(s, &super::super::workloads::Scope::Region(region.to_string()), "kloudlite-agent")
         .await
     {
         Ok(d) => (d.ready, d.desired),
@@ -295,7 +295,7 @@ pub(crate) async fn set_region_status(
         action,
         &region,
         (!note.is_empty()).then(|| note.clone()),
-        api.patch(&region, &PatchParams::apply("kloudlite-git-api").force(), &Patch::Apply(&apply)).await.map_err(kube_err),
+        api.patch(&region, &PatchParams::apply("kloudlite-api").force(), &Patch::Apply(&apply)).await.map_err(kube_err),
     )
     .await?;
     audit(&s, &c.name, action, &region, (!note.is_empty()).then_some(note), "ok").await;

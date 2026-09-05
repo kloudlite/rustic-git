@@ -61,7 +61,7 @@ otel-collector:
       cert-manager.io/cluster-issuer: letsencrypt
       # Cloudflare fronts this host in Flexible mode and fetches the origin over plain HTTP, so
       # nginx's default redirect-to-https loops (308 to itself) — the same trap the registry
-      # ingress in deploy/kloudlite-git.yaml documents. TLS is the edge's; the origin cert only
+      # ingress in deploy/kloudlite.yaml documents. TLS is the edge's; the origin cert only
       # exists so the record can go Full later without a second change.
       nginx.ingress.kubernetes.io/ssl-redirect: "false"
     hosts:
@@ -87,7 +87,7 @@ otel-collector:
           cert-manager.io/cluster-issuer: letsencrypt
           # Cloudflare fronts this host in Flexible mode and fetches the origin over plain HTTP, so
           # nginx's default redirect-to-https loops (308 to itself) — the same trap the registry
-          # ingress in deploy/kloudlite-git.yaml documents. TLS is the edge's; the origin cert only
+          # ingress in deploy/kloudlite.yaml documents. TLS is the edge's; the origin cert only
           # exists so the record can go Full later without a second change.
           nginx.ingress.kubernetes.io/ssl-redirect: "false"
           # Without this nginx downgrades the connection and every export fails with a protocol
@@ -128,7 +128,7 @@ hyperdx:
       cert-manager.io/cluster-issuer: letsencrypt
       # Cloudflare fronts this host in Flexible mode and fetches the origin over plain HTTP, so
       # nginx's default redirect-to-https loops (308 to itself) — the same trap the registry
-      # ingress in deploy/kloudlite-git.yaml documents. TLS is the edge's; the origin cert only
+      # ingress in deploy/kloudlite.yaml documents. TLS is the edge's; the origin cert only
       # exists so the record can go Full later without a second change.
       nginx.ingress.kubernetes.io/ssl-redirect: "false"
       # No basic auth in front: HyperDX's own login is the gate. The first account was created
@@ -158,7 +158,7 @@ hyperdx:
 
 mongodb:
   # HyperDX's own state (saved searches, dashboards, alert definitions) lives in a `hyperdx`
-  # database on the platform's existing Cosmos DB for MongoDB account (`kloudlite-kloudlite-git`,
+  # database on the platform's existing Cosmos DB for MongoDB account (`kloudlite-kloudlite`,
   # MongoDB API 7.0, serverless) rather than in the chart's in-cluster MongoDBCommunity: the AKS
   # nodes are Standard_B2s and the mongod pod plus its agent sidecar was the 800 MB that kept
   # ClickHouse from scheduling. Same account as the directory, separate database — nothing in

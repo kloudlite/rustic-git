@@ -1,11 +1,11 @@
 [package]
-name = "kloudlite-git-workspaces"
+name = "kloudlite-workspaces"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_workspaces"
+name = "kloudlite_workspaces"
 
 [dependencies]
 tracing = { workspace = true }
@@ -13,8 +13,8 @@ metrics = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 schemars = { workspace = true }
-kloudlite-git-core = { path = "../core" }
-kloudlite-git-storage = { path = "../storage" }
+kloudlite-core = { path = "../core" }
+kloudlite-storage = { path = "../storage" }
 slatedb = { workspace = true }
 axum = { workspace = true }
 rand = { workspace = true }
@@ -42,7 +42,7 @@ http-body-util = { version = "0.1", optional = true }
 testkit = ["dep:tower", "dep:http", "dep:http-body-util"]
 
 [dev-dependencies]
-kloudlite-git-workspaces = { path = ".", features = ["testkit"] }
+kloudlite-workspaces = { path = ".", features = ["testkit"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 rand = { workspace = true }
@@ -51,4 +51,4 @@ futures = { workspace = true }
 # Cyclic dev-dependency (bins/server depends on this crate normally) — fine in Cargo, dev-deps
 # aren't part of the graph used to build the library itself. Lets engine_ops.rs boot the real
 # vol-agent router in-process as the registry, same as bins/agent/tests/loop.rs does.
-kloudlite-git-server = { path = "../../bins/server" }
+kloudlite-server = { path = "../../bins/server" }

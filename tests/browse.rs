@@ -1,6 +1,6 @@
 
 mod common;
-use kloudlite_git_git::browse;
+use kloudlite_vcs::browse;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_a_tree_a_blob_and_a_diff() {
@@ -356,32 +356,32 @@ async fn a_gpg_signed_commit_verifies_against_its_key() {
     let odb = repo.odb().unwrap();
     let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
     let signed = browse::signature_of(&odb, head).unwrap().expect("signed");
-    assert!(kloudlite_git_api::gpg::is_pgp(&signed.signature), "a pgp signature");
+    assert!(kloudlite_api::gpg::is_pgp(&signed.signature), "a pgp signature");
 
     // The signature names its issuer, and the key answers to that name.
-    let sig = kloudlite_git_api::gpg::parse_signature(&signed.signature).unwrap();
-    let key = kloudlite_git_api::gpg::parse_key(&armoured).unwrap();
-    let issuers = kloudlite_git_api::gpg::issuers(&sig);
-    let known = kloudlite_git_api::gpg::fingerprints_of(&key);
+    let sig = kloudlite_api::gpg::parse_signature(&signed.signature).unwrap();
+    let key = kloudlite_api::gpg::parse_key(&armoured).unwrap();
+    let issuers = kloudlite_api::gpg::issuers(&sig);
+    let known = kloudlite_api::gpg::fingerprints_of(&key);
     assert!(
         issuers.iter().any(|i| known.iter().any(|k| k.ends_with(i) || i.ends_with(k))),
         "the issuer resolves to this key: issuers={issuers:?} known={known:?}",
     );
-    assert!(kloudlite_git_api::gpg::verified_emails(&key).contains(&"t@t".to_string()));
+    assert!(kloudlite_api::gpg::verified_emails(&key).contains(&"t@t".to_string()));
 
     // The whole judgement.
-    let reason = kloudlite_git_api::gpg::verify(&armoured, &sig, &signed.payload, "t@t");
-    assert_eq!(reason, kloudlite_git_api::gpg::Reason::Valid, "a good signature by the author's key");
+    let reason = kloudlite_api::gpg::verify(&armoured, &sig, &signed.payload, "t@t");
+    assert_eq!(reason, kloudlite_api::gpg::Reason::Valid, "a good signature by the author's key");
 
     // Same signature, different author: good maths, wrong person.
-    let reason = kloudlite_git_api::gpg::verify(&armoured, &sig, &signed.payload, "someone@else");
-    assert_eq!(reason, kloudlite_git_api::gpg::Reason::BadEmail);
+    let reason = kloudlite_api::gpg::verify(&armoured, &sig, &signed.payload, "someone@else");
+    assert_eq!(reason, kloudlite_api::gpg::Reason::BadEmail);
 
     // Tampered payload.
     let mut altered = signed.payload.clone();
     altered.extend(b"\n");
-    let reason = kloudlite_git_api::gpg::verify(&armoured, &sig, &altered, "t@t");
-    assert_eq!(reason, kloudlite_git_api::gpg::Reason::Invalid, "the bytes must match");
+    let reason = kloudlite_api::gpg::verify(&armoured, &sig, &altered, "t@t");
+    assert_eq!(reason, kloudlite_api::gpg::Reason::Invalid, "the bytes must match");
 }
 
 /// A blob past the diff ceiling is refused from its HEADER, never inflated: inflating it to find

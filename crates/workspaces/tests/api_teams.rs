@@ -2,13 +2,13 @@
 //! and heavy to spin up for a unit test — see `ApiState::directory`'s doc), against
 //! a mocked API server for the objects the handlers write.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{router, ApiState, Directory};
-use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{router, ApiState, Directory};
+use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 const NODE: &str = "node-a";
 
 /// `karthik` is the only member of team `acme`.
@@ -27,12 +27,12 @@ impl Directory for StubMembership {
     }
 
     // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
-    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
     }
 
     // Not exercised here — this file's cases are about membership, not rank.
-    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_git_workspaces::api::TeamRole> {
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None
     }
 
@@ -54,8 +54,8 @@ struct Server {
 /// lives in status; the spec names none.
 fn env_obj(name: &str, owner: &str, node: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Environment",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "services": [],
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -65,14 +65,14 @@ fn env_obj(name: &str, owner: &str, node: &str) -> Value {
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 /// Creates check the region against the registered ones, so every fixture that creates gets
 /// this route folded into it below rather than repeating it per test.
 fn region_obj(id: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Region",
         "metadata": {"name": id},
         "spec": {"name": id, "status": "active"}
     })
@@ -145,7 +145,7 @@ async fn member_can_create_a_team_environment_owned_by_the_team() {
     let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
     assert!(e["spec"].get("nodeName").is_none(), "{e}");
     assert_eq!(e["spec"]["owner"], "acme");
-    assert_eq!(e["metadata"]["labels"]["kloudlite-git.io/owner"], "acme");
+    assert_eq!(e["metadata"]["labels"]["kloudlite.io/owner"], "acme");
 }
 
 #[tokio::test]
@@ -258,12 +258,12 @@ async fn member_can_clone_a_team_environment() {
 async fn personal_workspace_unaffected_by_membership() {
     // A create lists the person's workspaces in the target team first, to refuse a taken name.
     let mut routes = vec![
-        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
-        get(format!("{API}/environments"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
+        get(format!("{API}/environments"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
         post(
         format!("{API}/workspaces"),
         json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": "ws-new"},
             "spec": {
                 "owner": "karthik", "name": "web", "region": "centralindia", "image": "nginx:alpine",
@@ -294,6 +294,6 @@ async fn personal_workspace_unaffected_by_membership() {
 #[test]
 fn the_owner_set_selector_drops_slugs_that_are_not_segments() {
     let owners = vec!["alice".to_string(), "bad,slug".to_string(), "ok-team".to_string(), "no)paren".to_string()];
-    let sel = kloudlite_git_workspaces::api::owner_set_selector(&owners);
-    assert_eq!(sel, "kloudlite-git.io/owner in (alice,ok-team)", "only validated segments");
+    let sel = kloudlite_workspaces::api::owner_set_selector(&owners);
+    assert_eq!(sel, "kloudlite.io/owner in (alice,ok-team)", "only validated segments");
 }

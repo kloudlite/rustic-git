@@ -113,7 +113,7 @@ the part most likely to be underestimated.
 
 ### 6. Node changes
 
-`Role::Writer`/`Role::Reader` and `KLOUDLITE_GIT_ROLE` go away. A node's role for a repo is its Raft
+`Role::Writer`/`Role::Reader` and `KLOUDLITE_ROLE` go away. A node's role for a repo is its Raft
 role, which is dynamic. A node opens a repo's RocksDB when it is a replica for it, and answers
 requests only when it is leader — otherwise it replies with the current leader.
 
@@ -176,7 +176,7 @@ Automatic rebalancing, backpressure on snapshot transfer, and draining a node ar
 ## What this replaces
 
 - SlateDB, `slatedb` dependency, and the S3-backed metadata path.
-- `Role::Writer`/`Role::Reader`, `KLOUDLITE_GIT_ROLE`, and `DbReader` follower reads.
+- `Role::Writer`/`Role::Reader`, `KLOUDLITE_ROLE`, and `DbReader` follower reads.
 - The remaining shard/lease vocabulary in `README.md`, which still documents the deleted design.
 
 ## Migration

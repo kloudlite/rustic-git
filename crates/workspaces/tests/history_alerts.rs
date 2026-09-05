@@ -2,7 +2,7 @@
 //! rather than plumbing, and the property that matters most is the one the previous, scrape-based
 //! evaluator could not hold: a rule whose window is not fully covered says `unknown`, never `ok`.
 
-use kloudlite_git_workspaces::history::alerts::{alert_row, evaluate_once, state_of, Tier, CATALOGUE};
+use kloudlite_workspaces::history::alerts::{alert_row, evaluate_once, state_of, Tier, CATALOGUE};
 use std::collections::HashMap;
 
 /// One bucket per `step`, newest last, as `[ts, breached]` — the shape every catalogue query
@@ -137,7 +137,7 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
             &["dependency_request_duration_seconds_count", "Attributes['dep']", "INTERVAL 300 SECOND", "total >= 20", "> 0.05"]),
         // The web tier reports NUMERIC statuses, not the `class` label the Rust services emit.
         ("WebErrorRate", "otel_metrics_sum", "http_requests_total",
-            &["kloudlite-git-web", "toUInt16OrZero(Attributes['status']) >= 500", "route", "total >= 20", "> 0.05"]),
+            &["kloudlite-web", "toUInt16OrZero(Attributes['status']) >= 500", "route", "total >= 20", "> 0.05"]),
         // The two SLO rules read our own `kloudlite` tables, not the collector's, and carry the
         // whole multiwindow decision inside the SQL — see `slo_burn_sql_names_both_pairs`.
         ("SloBurn", "kloudlite.slo_results", "burning",
@@ -292,7 +292,7 @@ fn an_alert_row_is_keyed_so_a_retried_write_collapses() {
 #[tokio::test]
 async fn current_signals_maps_stored_rows_onto_the_response_shape() {
     use axum::{routing::post, Router};
-    use kloudlite_git_workspaces::history::{alerts::current_signals, History};
+    use kloudlite_workspaces::history::{alerts::current_signals, History};
 
     let app = Router::new().route(
         "/",

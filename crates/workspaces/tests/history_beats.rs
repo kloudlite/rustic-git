@@ -2,9 +2,9 @@
 //! earlier row (CLAUDE.md), so what is tested here is the ROW SHAPE — six dimensions per owner,
 //! every one carrying both the used value and the limit it was measured against.
 
-use kloudlite_git_workspaces::crd::QuotaSpec;
-use kloudlite_git_workspaces::history::beats::{fleet_rows, usage_rows, FleetInput, UsageInput};
-use kloudlite_git_workspaces::quota::Usage;
+use kloudlite_workspaces::crd::QuotaSpec;
+use kloudlite_workspaces::history::beats::{fleet_rows, usage_rows, FleetInput, UsageInput};
+use kloudlite_workspaces::quota::Usage;
 
 fn ts() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339("2026-09-04T10:00:00Z").unwrap().into()
@@ -90,14 +90,14 @@ fn an_empty_fold_writes_nothing() {
 
 mod tick {
     use axum::{routing::post, Router};
-    use kloudlite_git_core::jwt::Jwt;
-    use kloudlite_git_workspaces::api::ApiState;
-    use kloudlite_git_workspaces::history::{beats::tick_once, History};
-    use kloudlite_git_workspaces::kube_test::{get, mock_client, Route};
+    use kloudlite_core::jwt::Jwt;
+    use kloudlite_workspaces::api::ApiState;
+    use kloudlite_workspaces::history::{beats::tick_once, History};
+    use kloudlite_workspaces::kube_test::{get, mock_client, Route};
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
 
-    const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+    const API: &str = "/apis/kloudlite.io/v1alpha1";
 
     /// A canned ClickHouse: records the body of every `INSERT`, answers 200 to all of them.
     async fn canned_clickhouse() -> (String, Arc<Mutex<Vec<String>>>) {
@@ -120,11 +120,11 @@ mod tick {
     }
 
     fn list_of(kind: &str, items: Vec<Value>) -> Value {
-        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
     }
 
     fn ws_obj() -> Value {
-        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
                "metadata": {"name": "w1"},
                "spec": {"owner": "acme", "team": "", "name": "w1", "region": "r1", "image": "img:1",
                         "desiredState": "running", "packages": [],
@@ -134,7 +134,7 @@ mod tick {
     }
 
     fn region_obj() -> Value {
-        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Region",
                "metadata": {"name": "r1"}, "spec": {"name": "Region one", "status": "active"}})
     }
 
@@ -147,7 +147,7 @@ mod tick {
 
     fn agent_ds() -> Value {
         json!({"apiVersion": "apps/v1", "kind": "DaemonSet",
-               "metadata": {"name": "kloudlite-git-agent", "namespace": "kube-system"},
+               "metadata": {"name": "kloudlite-agent", "namespace": "kube-system"},
                "spec": {"selector": {}, "template": {"metadata": {}, "spec": {"containers": [{"name": "agent", "image": "agent:1"}]}}},
                "status": {"numberReady": 1, "desiredNumberScheduled": 1, "currentNumberScheduled": 1,
                           "numberMisscheduled": 0, "numberUnavailable": 0}})
@@ -174,8 +174,8 @@ mod tick {
             get(format!("{API}/regions"), list_of("Region", vec![region_obj()])),
             get(format!("{API}/regions/r1"), region_obj()),
             get("/api/v1/nodes", json!({"apiVersion": "v1", "kind": "NodeList", "metadata": {}, "items": [node_obj()]})),
-            get("/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-git-agent", agent_ds()),
-            get(format!("{API}/clustersettings/default"), json!({"apiVersion": "kloudlite-git.io/v1alpha1",
+            get("/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-agent", agent_ds()),
+            get(format!("{API}/clustersettings/default"), json!({"apiVersion": "kloudlite.io/v1alpha1",
                 "kind": "ClusterSettings", "metadata": {"name": "default"}, "spec": {}, "status": {}})),
         ];
         let (client, _rec) = mock_client(routes);

@@ -196,8 +196,8 @@ pub(crate) async fn create_ws(
             // covers a Volume written by any path that is not this handler.
             let ok = repo
                 .split_once('/')
-                .is_some_and(|(o, n)| kloudlite_git_storage::store::valid_owner(o)
-                    && kloudlite_git_storage::store::valid_segment(n));
+                .is_some_and(|(o, n)| kloudlite_storage::store::valid_owner(o)
+                    && kloudlite_storage::store::valid_segment(n));
             if !ok {
                 return Err((StatusCode::BAD_REQUEST, "repo must be owner/name").into_response());
             }
@@ -328,7 +328,7 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,
-            &kube::api::PatchParams::apply("kloudlite-git-api").force(),
+            &kube::api::PatchParams::apply("kloudlite-api").force(),
             &kube::api::Patch::Apply(&secret),
         )
         .await

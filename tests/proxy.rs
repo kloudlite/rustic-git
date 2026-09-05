@@ -1,6 +1,6 @@
 //! Forwarding against a stub peer, so this covers the mechanics only.
 use axum::{routing::any, Router};
-use kloudlite_git_core::peer::{Forwarder, HOPS_HEADER, OWNER_HEADER, PEER_HEADER};
+use kloudlite_core::peer::{Forwarder, HOPS_HEADER, OWNER_HEADER, PEER_HEADER};
 
 const SECRET: &str = "s3cret";
 

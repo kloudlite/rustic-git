@@ -6,17 +6,17 @@
 
 **Architecture:** Telemetry is **not ours to write**. The official ClickStack Helm charts run ClickHouse, a gateway OTel collector and HyperDX on AKS; an `opentelemetry-collector-contrib` agent collector in every cluster scrapes the pods already annotated `prometheus.io/scrape`, reads node/pod resource usage from `kubeletstats`/`k8s_cluster`, ships pod logs, stamps `region`, and exports OTLP to the gateway, which writes the exporter's standard tables in the `default` database (`otel_metrics_gauge`, `otel_metrics_sum`, `otel_metrics_histogram`, `otel_logs`, `otel_traces`). We add nothing to that path — no monitor binary, no ingest routes, no metrics tables of our own.
 
-What *is* ours is the `kloudlite` database, and the admin process (`bins/api`, `KLOUDLITE_GIT_API_ROLE=admin`) is its only writer: it migrates the schema at boot, consumes the Redis `events` stream in a second consumer group, turns per-region Kubernetes watch transitions into `events` rows with idempotent ids, dual-writes every audit row, runs hourly `usage_hourly`/`fleet_hourly` beats folded fresh from the CRDs, and evaluates `deploy/alerts.md` every 30 s as SQL over `otel_metrics_*` with real `for` windows, writing transitions to `kloudlite.alerts`. `kloudlite-git-agent` gains a small stats beat for the two gauges only it can know (btrfs pool bytes, running working copies); CPU, memory and load come from `kubeletstats`. Everything is optional: without `KLOUDLITE_GIT_CLICKHOUSE_URL` every process runs exactly as today and the history routes answer `503 history unavailable`.
+What *is* ours is the `kloudlite` database, and the admin process (`bins/api`, `KLOUDLITE_API_ROLE=admin`) is its only writer: it migrates the schema at boot, consumes the Redis `events` stream in a second consumer group, turns per-region Kubernetes watch transitions into `events` rows with idempotent ids, dual-writes every audit row, runs hourly `usage_hourly`/`fleet_hourly` beats folded fresh from the CRDs, and evaluates `deploy/alerts.md` every 30 s as SQL over `otel_metrics_*` with real `for` windows, writing transitions to `kloudlite.alerts`. `kloudlite-agent` gains a small stats beat for the two gauges only it can know (btrfs pool bytes, running working copies); CPU, memory and load come from `kubeletstats`. Everything is optional: without `KLOUDLITE_CLICKHOUSE_URL` every process runs exactly as today and the history routes answer `503 history unavailable`.
 
-**Tech Stack:** Rust (axum 0.8, reqwest 0.13, tokio, kube-rs, chrono, serde_json), ClickHouse HTTP interface, ClickStack Helm charts (`clickstack-operators`, `clickstack`), `opentelemetry-collector-contrib`, HyperDX, Redis streams (existing `Cache` helpers), Kubernetes CRDs (`kloudlite-git.io/v1alpha1`).
+**Tech Stack:** Rust (axum 0.8, reqwest 0.13, tokio, kube-rs, chrono, serde_json), ClickHouse HTTP interface, ClickStack Helm charts (`clickstack-operators`, `clickstack`), `opentelemetry-collector-contrib`, HyperDX, Redis streams (existing `Cache` helpers), Kubernetes CRDs (`kloudlite.io/v1alpha1`).
 
 **Spec:** `docs/superpowers/specs/2026-09-04-history-and-console-v2-design.md` (§A "History layer — on ClickStack" and §"Not doing"; §B and §C are separate plans)
 
 ## Global Constraints
 
-- **Two databases, one writer each.** `default` belongs to the OTel collector — we only ever SELECT from it. `kloudlite` is ours and **the admin process is its only writer** (`bins/api`, `KLOUDLITE_GIT_API_ROLE=admin`). No other binary opens a ClickHouse connection at all.
+- **Two databases, one writer each.** `default` belongs to the OTel collector — we only ever SELECT from it. `kloudlite` is ours and **the admin process is its only writer** (`bins/api`, `KLOUDLITE_API_ROLE=admin`). No other binary opens a ClickHouse connection at all.
 - **We write no telemetry pipeline.** No monitor binary, no `/ingest/*` routes, no `samples` table. Metrics, logs and traces arrive through OpenTelemetry. If a number is missing, the fix is collector config, not Rust.
-- **`KLOUDLITE_GIT_CLICKHOUSE_URL` is optional everywhere.** A process without it runs exactly as today; history routes answer `503 history unavailable`, which the web renders as a flat placeholder, never an error page. `KLOUDLITE_GIT_HYPERDX_URL` is optional the same way — an unset value means no "Open in HyperDX" link rather than a dead one.
+- **`KLOUDLITE_CLICKHOUSE_URL` is optional everywhere.** A process without it runs exactly as today; history routes answer `503 history unavailable`, which the web renders as a flat placeholder, never an error page. `KLOUDLITE_HYPERDX_URL` is optional the same way — an unset value means no "Open in HyperDX" link rather than a dead one.
 - **The Redis `events` stream is a nudge, never the record** (CLAUDE.md). If Redis is down the `history` consumer idles and the kube watches and hourly beats keep writing. No ClickHouse row may depend on a stream entry having arrived.
 - **Usage is computed from the CRDs on every run and never cached.** The hourly beats re-fold `owners::fleet` and the clusters fold; never derive a row from an earlier row.
 - **`spec.owner` is truth, labels are a view.** Never authorize or attribute on a label.
@@ -49,7 +49,7 @@ What *is* ours is the `kloudlite` database, and the admin process (`bins/api`, `
 - `crates/workspaces/src/lib.rs`, `crates/workspaces/src/api/mod.rs`, `crates/workspaces/src/api/admin.rs`.
 - `crates/workspaces/src/api/admin/{owners,clusters}.rs` (expose the folds `pub(crate)`), `monitoring.rs` (scrape code deleted, reads `kloudlite.alerts`).
 - `bins/api/src/main.rs`, `bins/agent/src/lib.rs`.
-- `deploy/kloudlite-git.yaml`, `deploy/k3s/agent-peer.yaml`, `deploy/k3s/README.md`, `deploy/alerts.md`, `CLAUDE.md`, `tests/ws_e2e.sh`.
+- `deploy/kloudlite.yaml`, `deploy/k3s/agent-peer.yaml`, `deploy/k3s/README.md`, `deploy/alerts.md`, `CLAUDE.md`, `tests/ws_e2e.sh`.
 
 No new binary, no workspace member, no Dockerfile or CI change: nothing in this plan compiles a new executable.
 
@@ -85,7 +85,7 @@ Create `crates/workspaces/tests/history_client.rs`:
 //! the console quietly lie.
 
 use axum::{routing::post, Router};
-use kloudlite_git_workspaces::history::{schema, History, HistoryError};
+use kloudlite_workspaces::history::{schema, History, HistoryError};
 use std::sync::{Arc, Mutex};
 
 type Seen = Arc<Mutex<Vec<String>>>;
@@ -172,7 +172,7 @@ async fn a_server_error_is_an_error_not_an_empty_result() {
 
 #[tokio::test]
 async fn from_env_is_none_without_a_url() {
-    std::env::remove_var("KLOUDLITE_GIT_CLICKHOUSE_URL");
+    std::env::remove_var("KLOUDLITE_CLICKHOUSE_URL");
     assert!(History::from_env().is_none());
 }
 
@@ -212,7 +212,7 @@ fn every_migration_version_is_unique_and_ordered() {
 
 /// The one test that talks to a real ClickHouse. Run it against a local ClickStack or a plain
 /// `docker run -p 8123:8123 clickhouse/clickhouse-server`:
-/// `KLOUDLITE_GIT_CLICKHOUSE_URL=http://localhost:8123 cargo test -p kloudlite-git-workspaces \
+/// `KLOUDLITE_CLICKHOUSE_URL=http://localhost:8123 cargo test -p kloudlite-workspaces \
 ///   --test history_client -- --ignored`
 ///
 /// The two materialized views over `otel_metrics_*` are skipped when those tables do not exist —
@@ -222,7 +222,7 @@ fn every_migration_version_is_unique_and_ordered() {
 #[ignore]
 async fn migrations_apply_against_a_real_clickhouse() {
     let Some(h) = History::from_env() else {
-        panic!("KLOUDLITE_GIT_CLICKHOUSE_URL must be set to run this test");
+        panic!("KLOUDLITE_CLICKHOUSE_URL must be set to run this test");
     };
     assert!(h.healthy().await, "ClickHouse did not answer");
     schema::migrate(&h).await.expect("first migrate");
@@ -247,8 +247,8 @@ async fn migrations_apply_against_a_real_clickhouse() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_client`
-Expected: FAIL — `unresolved import kloudlite_git_workspaces::history`.
+Run: `cargo test -p kloudlite-workspaces --test history_client`
+Expected: FAIL — `unresolved import kloudlite_workspaces::history`.
 
 - [ ] **Step 3: Write the client**
 
@@ -262,7 +262,7 @@ Create `crates/workspaces/src/history/mod.rs`:
 //! written by the exporter and read here for charts and alert evaluation — we never write it, and
 //! its schema is the exporter's to change. `kloudlite` is ours: `events`, `usage_hourly`,
 //! `fleet_hourly`, `alerts`, plus the `metrics_5m` rollup, and the ADMIN process (`bins/api` with
-//! `KLOUDLITE_GIT_API_ROLE=admin`) is its only writer. Nothing else in the fleet constructs a
+//! `KLOUDLITE_API_ROLE=admin`) is its only writer. Nothing else in the fleet constructs a
 //! `History`.
 //!
 //! Deliberately a `reqwest` call and a format string, not a client crate. Two verbs cover every
@@ -270,7 +270,7 @@ Create `crates/workspaces/src/history/mod.rs`:
 //! crate would buy connection pooling we do not need (writes are batched on beats) at the cost of
 //! a dependency that has to track the server version.
 //!
-//! Optional by design: `from_env` answers `None` when `KLOUDLITE_GIT_CLICKHOUSE_URL` is unset, and
+//! Optional by design: `from_env` answers `None` when `KLOUDLITE_CLICKHOUSE_URL` is unset, and
 //! every caller treats that as "history unavailable" rather than an error, so a deployment without
 //! ClickStack behaves exactly as it did before this module existed.
 
@@ -328,9 +328,9 @@ impl History {
     /// `None` is a supported configuration, not a failure: see the module doc. The credentials come
     /// from the ClickStack chart's own ClickHouse Secret (`deploy/clickstack/README.md`).
     pub fn from_env() -> Option<History> {
-        let url = std::env::var("KLOUDLITE_GIT_CLICKHOUSE_URL").ok().filter(|u| !u.is_empty())?;
-        let user = std::env::var("KLOUDLITE_GIT_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
-        let password = std::env::var("KLOUDLITE_GIT_CLICKHOUSE_PASSWORD").unwrap_or_default();
+        let url = std::env::var("KLOUDLITE_CLICKHOUSE_URL").ok().filter(|u| !u.is_empty())?;
+        let user = std::env::var("KLOUDLITE_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
+        let password = std::env::var("KLOUDLITE_CLICKHOUSE_PASSWORD").unwrap_or_default();
         Some(History::new(&url, &user, &password))
     }
 
@@ -582,10 +582,10 @@ pub mod history;
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_client`
+Run: `cargo test -p kloudlite-workspaces --test history_client`
 Expected: PASS (8 tests; the `#[ignore]`d real-ClickHouse test is reported as ignored).
 
-Run: `cargo clippy -p kloudlite-git-workspaces --all-targets -- -D warnings`
+Run: `cargo clippy -p kloudlite-workspaces --all-targets -- -D warnings`
 Expected: no warnings.
 
 - [ ] **Step 7: Verify the exporter's columns against a live collector (documentation step)**
@@ -593,7 +593,7 @@ Expected: no warnings.
 Once a ClickStack is reachable (Task 10 stands one up; a `docker run` collector works too), confirm migrations 6 and 7 match reality before trusting a chart built on them:
 
 ```bash
-curl -s "$KLOUDLITE_GIT_CLICKHOUSE_URL" --data-binary "DESCRIBE TABLE default.otel_metrics_gauge FORMAT JSONCompact"
+curl -s "$KLOUDLITE_CLICKHOUSE_URL" --data-binary "DESCRIBE TABLE default.otel_metrics_gauge FORMAT JSONCompact"
 ```
 
 Expected: `TimeUnix`, `MetricName`, `Value`, `Attributes`, `ResourceAttributes` all present. If a column is named differently in the deployed exporter version, fix migrations 6 and 7 **as new migrations 8 and 9** (`DROP VIEW IF EXISTS` + `CREATE`), never by editing 6 and 7 in place.
@@ -629,9 +629,9 @@ Create `crates/workspaces/tests/history_state.rs`:
 //! `history` is optional state: a process without ClickStack must still build, route and answer —
 //! the console renders a flat placeholder, never an error page.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::ApiState;
-use kloudlite_git_workspaces::history::History;
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::ApiState;
+use kloudlite_workspaces::history::History;
 use std::sync::Arc;
 
 fn jwt() -> Arc<Jwt> {
@@ -652,7 +652,7 @@ fn with_history_attaches_it() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_state`
+Run: `cargo test -p kloudlite-workspaces --test history_state`
 Expected: FAIL — `no field 'history' on type 'ApiState'`.
 
 - [ ] **Step 3: Add the state field**
@@ -661,7 +661,7 @@ In `crates/workspaces/src/api/mod.rs`, add to `pub struct ApiState` after `peer`
 
 ```rust
     /// ClickHouse (ClickStack's), holding the collector's `default` telemetry and our own `kloudlite`
-    /// database. `None` when `KLOUDLITE_GIT_CLICKHOUSE_URL` is unset — a supported configuration, not
+    /// database. `None` when `KLOUDLITE_CLICKHOUSE_URL` is unset — a supported configuration, not
     /// a degraded one: history routes answer `503 history unavailable` and the console renders a
     /// flat placeholder. Only the ADMIN process ever sets this; the user role never constructs one,
     /// which is what makes "the admin process is the only writer of `kloudlite`" a fact about the
@@ -703,13 +703,13 @@ In `bins/api/src/main.rs`, after the existing `if role == "admin"` block that ca
             // /admin/history route answers 503, and nothing is recorded — exactly how the
             // deployment behaved before ClickStack existed.
             if role == "admin" {
-                match kloudlite_git_workspaces::history::History::from_env() {
+                match kloudlite_workspaces::history::History::from_env() {
                     Some(h) => {
                         // Migrations at boot, so a fresh ClickStack becomes usable with no manual
                         // step. A failure is LOGGED, not fatal: quota decisions and node drains
                         // must not be held hostage by an analytics store, and the next restart
                         // retries an idempotent set of statements.
-                        match kloudlite_git_workspaces::history::schema::migrate(&h).await {
+                        match kloudlite_workspaces::history::schema::migrate(&h).await {
                             Ok(0) => tracing::info!("clickhouse schema up to date"),
                             Ok(n) => tracing::info!(applied = n, "clickhouse migrations applied"),
                             Err(e) => tracing::error!(error = %e, "clickhouse migrations failed; history will be incomplete until the next restart"),
@@ -717,7 +717,7 @@ In `bins/api/src/main.rs`, after the existing `if role == "admin"` block that ca
                         state = state.with_history(Arc::new(h));
                     }
                     None => tracing::warn!(
-                        "KLOUDLITE_GIT_CLICKHOUSE_URL unset: /admin/history answers 503 and nothing is recorded"
+                        "KLOUDLITE_CLICKHOUSE_URL unset: /admin/history answers 503 and nothing is recorded"
                     ),
                 }
             }
@@ -725,7 +725,7 @@ In `bins/api/src/main.rs`, after the existing `if role == "admin"` block that ca
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_state && cargo build -p kloudlite-git-api`
+Run: `cargo test -p kloudlite-workspaces --test history_state && cargo build -p kloudlite-api`
 Expected: PASS, and the binary builds.
 
 - [ ] **Step 7: Commit**
@@ -761,7 +761,7 @@ Create `crates/workspaces/tests/history_events.rs`:
 //! The event row shape and the audit dual write. The object-store audit log stays the append-only
 //! legal record; this is the queryable copy, and a failure to write the copy must never affect it.
 
-use kloudlite_git_workspaces::history::events::{audit_event, EventRow};
+use kloudlite_workspaces::history::events::{audit_event, EventRow};
 
 #[test]
 fn a_row_serializes_in_the_shape_the_events_table_takes() {
@@ -807,8 +807,8 @@ fn a_bad_timestamp_falls_back_to_now_rather_than_dropping_the_row() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_events`
-Expected: FAIL — `unresolved import kloudlite_git_workspaces::history::events`.
+Run: `cargo test -p kloudlite-workspaces --test history_events`
+Expected: FAIL — `unresolved import kloudlite_workspaces::history::events`.
 
 - [ ] **Step 3: Write the event row**
 
@@ -916,7 +916,7 @@ In `crates/workspaces/src/api/admin.rs`, at the end of `pub(crate) async fn audi
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_events && cargo clippy -p kloudlite-git-workspaces --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-workspaces --test history_events && cargo clippy -p kloudlite-workspaces --all-targets -- -D warnings`
 Expected: PASS, no warnings.
 
 - [ ] **Step 6: Commit**
@@ -937,18 +937,18 @@ git commit -m "Copy every admin audit row into the history events table"
 - Test: `crates/workspaces/tests/history_events.rs` (extend)
 
 **Interfaces:**
-- Consumes: `EventRow`, `write_events` (Task 3); `kloudlite_git_storage::cache::Cache` and its `xgroup_create_mkstream` / `xreadgroup` / `xautoclaim` / `xack`; `kloudlite_git_storage::events::from_fields`.
+- Consumes: `EventRow`, `write_events` (Task 3); `kloudlite_storage::cache::Cache` and its `xgroup_create_mkstream` / `xreadgroup` / `xautoclaim` / `xack`; `kloudlite_storage::events::from_fields`.
 - Produces:
   - `pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<EventRow>`
-  - `pub async fn consume_forever(cache: Arc<kloudlite_git_storage::cache::Cache>, history: Arc<History>)`
-  - `ApiState.cache: Option<Arc<kloudlite_git_storage::cache::Cache>>` and `with_cache`
+  - `pub async fn consume_forever(cache: Arc<kloudlite_storage::cache::Cache>, history: Arc<History>)`
+  - `ApiState.cache: Option<Arc<kloudlite_storage::cache::Cache>>` and `with_cache`
 
 - [ ] **Step 1: Write the failing test**
 
 Append to `crates/workspaces/tests/history_events.rs`:
 
 ```rust
-use kloudlite_git_workspaces::history::events::stream_event;
+use kloudlite_workspaces::history::events::stream_event;
 
 fn field(k: &str, v: &str) -> (String, String) {
     (k.to_string(), v.to_string())
@@ -1005,7 +1005,7 @@ fn a_malformed_repo_yields_an_empty_owner_rather_than_a_panic() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_events`
+Run: `cargo test -p kloudlite-workspaces --test history_events`
 Expected: FAIL — `cannot find function stream_event`.
 
 - [ ] **Step 3: Write the mapper and the consumer**
@@ -1015,7 +1015,7 @@ Append to `crates/workspaces/src/history/events.rs`:
 ```rust
 use std::sync::Arc;
 
-/// The one stream every repo's events multiplex onto (`kloudlite_git_storage::events`), and OUR
+/// The one stream every repo's events multiplex onto (`kloudlite_storage::events`), and OUR
 /// consumer group on it — separate from the merge worker's, so the two never steal each other's
 /// entries and neither depends on the other running.
 const STREAM: &str = "events";
@@ -1037,7 +1037,7 @@ const BATCH: usize = 64;
 /// same row and the ReplacingMergeTree collapses it, which is what lets the consumer ack AFTER the
 /// insert without ever double-counting.
 pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<EventRow> {
-    let e = kloudlite_git_storage::events::from_fields(fields)?;
+    let e = kloudlite_storage::events::from_fields(fields)?;
     // `owner/name` — a repo key that is not of that shape is a producer bug, not a reason to drop
     // the event: keep the row, leave the owner empty rather than inventing an attribution.
     let owner = e.repo.split_once('/').map(|(o, _)| o.to_string()).unwrap_or_default();
@@ -1064,10 +1064,10 @@ pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<Even
 /// The stream stays a nudge, never the record (CLAUDE.md): with Redis absent `xreadgroup` answers
 /// empty and this loop simply idles — the kube watches and the hourly beats keep writing, and no
 /// row anywhere depends on an entry having arrived.
-pub async fn consume_forever(cache: Arc<kloudlite_git_storage::cache::Cache>, history: Arc<History>) {
+pub async fn consume_forever(cache: Arc<kloudlite_storage::cache::Cache>, history: Arc<History>) {
     if !cache.connected() {
         // Loud once, at startup: "the activity feed stopped filling in" is much harder to diagnose
-        // than a missing KLOUDLITE_GIT_REDIS_URL named in the logs.
+        // than a missing KLOUDLITE_REDIS_URL named in the logs.
         tracing::warn!("no Redis: the history consumer will idle; kube watches and hourly beats still write");
     }
     cache.xgroup_create_mkstream(STREAM, GROUP).await;
@@ -1109,16 +1109,16 @@ In `crates/workspaces/src/api/mod.rs`, add to `ApiState` after `history`:
 
 ```rust
     /// Redis, for the `history` consumer group only — no request path reads it. `None` in dev and
-    /// wherever `KLOUDLITE_GIT_REDIS_URL` is unset; the consumer then never spawns, which costs the
+    /// wherever `KLOUDLITE_REDIS_URL` is unset; the consumer then never spawns, which costs the
     /// activity feed its PR half and nothing else (CLAUDE.md: the stream is a nudge, never the
     /// record).
-    pub cache: Option<Arc<kloudlite_git_storage::cache::Cache>>,
+    pub cache: Option<Arc<kloudlite_storage::cache::Cache>>,
 ```
 
 Add `cache: None,` to `ApiState::new`, and:
 
 ```rust
-    pub fn with_cache(mut self, cache: Arc<kloudlite_git_storage::cache::Cache>) -> Self {
+    pub fn with_cache(mut self, cache: Arc<kloudlite_storage::cache::Cache>) -> Self {
         self.cache = Some(cache);
         self
     }
@@ -1130,7 +1130,7 @@ In `bins/api/src/main.rs`, inside the admin-role block, right after `state = sta
 
 ```rust
                     Some(h) => {
-                        match kloudlite_git_workspaces::history::schema::migrate(&h).await {
+                        match kloudlite_workspaces::history::schema::migrate(&h).await {
                             Ok(0) => tracing::info!("clickhouse schema up to date"),
                             Ok(n) => tracing::info!(applied = n, "clickhouse migrations applied"),
                             Err(e) => tracing::error!(error = %e, "clickhouse migrations failed; history will be incomplete until the next restart"),
@@ -1141,7 +1141,7 @@ In `bins/api/src/main.rs`, inside the admin-role block, right after `state = sta
                         let consumer_cache = Arc::new(cache.clone());
                         let consumer_history = h.clone();
                         tokio::spawn(async move {
-                            kloudlite_git_workspaces::history::events::consume_forever(
+                            kloudlite_workspaces::history::events::consume_forever(
                                 consumer_cache,
                                 consumer_history,
                             )
@@ -1153,10 +1153,10 @@ In `bins/api/src/main.rs`, inside the admin-role block, right after `state = sta
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_events && cargo build -p kloudlite-git-api`
+Run: `cargo test -p kloudlite-workspaces --test history_events && cargo build -p kloudlite-api`
 Expected: PASS, and the binary builds.
 
-Run: `cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-api --all-targets -- -D warnings`
+Run: `cargo clippy -p kloudlite-workspaces -p kloudlite-api --all-targets -- -D warnings`
 Expected: no warnings.
 
 - [ ] **Step 7: Commit**
@@ -1202,8 +1202,8 @@ Create `crates/workspaces/tests/history_watch.rs`:
 
 use k8s_openapi::api::core::v1::{Node, NodeCondition, NodeStatus};
 use kube::api::ObjectMeta;
-use kloudlite_git_workspaces::crd::{self, Phase};
-use kloudlite_git_workspaces::history::watch::{event_id, node_events, snapshot_events, workspace_events};
+use kloudlite_workspaces::crd::{self, Phase};
+use kloudlite_workspaces::history::watch::{event_id, node_events, snapshot_events, workspace_events};
 
 fn meta(name: &str, uid: &str, rv: &str) -> ObjectMeta {
     ObjectMeta {
@@ -1320,8 +1320,8 @@ fn a_node_that_goes_notready_and_cordoned_at_once_produces_both() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_watch`
-Expected: FAIL — `unresolved import kloudlite_git_workspaces::history::watch`.
+Run: `cargo test -p kloudlite-workspaces --test history_watch`
+Expected: FAIL — `unresolved import kloudlite_workspaces::history::watch`.
 
 - [ ] **Step 3: Write the mappers**
 
@@ -1340,7 +1340,7 @@ Create `crates/workspaces/src/history/watch.rs`:
 //! may put a wall-clock timestamp or a random value in the id.
 //!
 //! `spec.owner` is truth (CLAUDE.md): every `owner` field below reads the spec, never the
-//! `kloudlite-git.io/owner` label, which is a view maintained for label selectors.
+//! `kloudlite.io/owner` label, which is a view maintained for label selectors.
 
 use super::{events::EventRow, History};
 use crate::crd::{self, Phase};
@@ -1575,8 +1575,8 @@ pub fn node_events(prev: Option<&Node>, next: &Node, region: &str) -> Vec<EventR
     // the first word is the state, and only the two we name are events.
     let status_word = |n: &Node| {
         n.labels()
-            .get("kloudlite-git.io/decommission-status")
-            .or_else(|| n.annotations().get("kloudlite-git.io/decommission-status"))
+            .get("kloudlite.io/decommission-status")
+            .or_else(|| n.annotations().get("kloudlite.io/decommission-status"))
             .and_then(|v| v.split_whitespace().next())
             .map(str::to_string)
     };
@@ -1682,26 +1682,26 @@ In `bins/api/src/main.rs`, in the admin arm right after the consumer spawn:
                         // where `Region` objects live — the same split every admin handler already
                         // makes, reused rather than a second client to keep in step.
                         if let Some(k) = state.kube.clone() {
-                            let region = std::env::var("KLOUDLITE_GIT_REGION").unwrap_or_else(|_| "default".into());
+                            let region = std::env::var("KLOUDLITE_REGION").unwrap_or_else(|_| "default".into());
                             let h = h.clone();
                             tokio::spawn(async move {
-                                kloudlite_git_workspaces::history::watch::watch_region(k, region, h).await
+                                kloudlite_workspaces::history::watch::watch_region(k, region, h).await
                             });
                         }
                         if let Some(k) = state.aks.clone() {
                             let h = h.clone();
                             tokio::spawn(async move {
-                                kloudlite_git_workspaces::history::watch::watch_region(k, "central".into(), h).await
+                                kloudlite_workspaces::history::watch::watch_region(k, "central".into(), h).await
                             });
                         }
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_watch && cargo build -p kloudlite-git-api`
+Run: `cargo test -p kloudlite-workspaces --test history_watch && cargo build -p kloudlite-api`
 Expected: PASS, and the binary builds.
 
-Run: `cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-api --all-targets -- -D warnings`
+Run: `cargo clippy -p kloudlite-workspaces -p kloudlite-api --all-targets -- -D warnings`
 Expected: no warnings.
 
 - [ ] **Step 7: Commit**
@@ -1741,9 +1741,9 @@ Create `crates/workspaces/tests/history_beats.rs`:
 //! earlier row (CLAUDE.md), so what is tested here is the ROW SHAPE — six dimensions per owner,
 //! every one carrying both the used value and the limit it was measured against.
 
-use kloudlite_git_workspaces::crd::QuotaSpec;
-use kloudlite_git_workspaces::history::beats::{fleet_rows, usage_rows, FleetInput, UsageInput};
-use kloudlite_git_workspaces::quota::Usage;
+use kloudlite_workspaces::crd::QuotaSpec;
+use kloudlite_workspaces::history::beats::{fleet_rows, usage_rows, FleetInput, UsageInput};
+use kloudlite_workspaces::quota::Usage;
 
 fn ts() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339("2026-09-04T10:00:00Z").unwrap().into()
@@ -1809,8 +1809,8 @@ fn an_empty_fold_writes_nothing() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_beats`
-Expected: FAIL — `unresolved import kloudlite_git_workspaces::history::beats`.
+Run: `cargo test -p kloudlite-workspaces --test history_beats`
+Expected: FAIL — `unresolved import kloudlite_workspaces::history::beats`.
 
 - [ ] **Step 3: Write the beats**
 
@@ -2022,7 +2022,7 @@ In `bins/api/src/main.rs`, after `let workspaces_router = …` where the `Arc<Ap
     if role == "admin" {
         if let Some(ws) = workspaces.clone() {
             if ws.history.is_some() {
-                tokio::spawn(kloudlite_git_workspaces::history::beats::run_beats(ws));
+                tokio::spawn(kloudlite_workspaces::history::beats::run_beats(ws));
             }
         }
     }
@@ -2036,10 +2036,10 @@ pub mod beats;
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_beats && cargo test -p kloudlite-git-workspaces --test api_admin_clusters`
+Run: `cargo test -p kloudlite-workspaces --test history_beats && cargo test -p kloudlite-workspaces --test api_admin_clusters`
 Expected: PASS — the second run proves the `ClusterRow` widening did not change the clusters page's own contract.
 
-Run: `cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-api --all-targets -- -D warnings`
+Run: `cargo clippy -p kloudlite-workspaces -p kloudlite-api --all-targets -- -D warnings`
 Expected: no warnings.
 
 - [ ] **Step 7: Commit**
@@ -2059,7 +2059,7 @@ git commit -m "Record hourly usage and fleet folds in history"
 - Test: `bins/agent/tests/stats.rs`
 
 **Interfaces:**
-- Consumes: `kloudlite_git_core::metrics` (the recorder is already installed by the agent's `main`); `Engine`/`Pool` for the pool path.
+- Consumes: `kloudlite_core::metrics` (the recorder is already installed by the agent's `main`); `Engine`/`Pool` for the pool path.
 - Produces:
   - `pub fn parse_btrfs_usage(text: &str) -> Option<(u64, u64)>` — `(used, total)` bytes from `btrfs filesystem usage -b`.
   - `pub fn statvfs_usage(path: &str) -> Option<(u64, u64)>` — the fallback.
@@ -2077,7 +2077,7 @@ Create `bins/agent/tests/stats.rs`:
 //! point at which allocations start failing (which is exactly what `PoolAlmostFull` exists to
 //! catch). Untrusted text: this runs on whatever the installed btrfs-progs prints.
 
-use kloudlite_git_agent::stats::{parse_btrfs_usage, statvfs_usage};
+use kloudlite_agent::stats::{parse_btrfs_usage, statvfs_usage};
 
 const USAGE: &str = "\
 Overall:
@@ -2132,8 +2132,8 @@ fn statvfs_of_a_missing_path_is_none() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-agent --test stats`
-Expected: FAIL — `unresolved import kloudlite_git_agent::stats`.
+Run: `cargo test -p kloudlite-agent --test stats`
+Expected: FAIL — `unresolved import kloudlite_agent::stats`.
 
 - [ ] **Step 3: Write the stats beat**
 
@@ -2221,7 +2221,7 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
             // Working copies RUNNING on this node, from this node's own objects — the same
             // `status.nodeName` the controller converges on, so the gauge and the placement can
             // never disagree.
-            let api = kube::Api::<kloudlite_git_workspaces::crd::Workspace>::all(client.clone());
+            let api = kube::Api::<kloudlite_workspaces::crd::Workspace>::all(client.clone());
             let params = kube::api::ListParams::default().fields(&format!("status.nodeName={node}"));
             if let Ok(list) = api.list(&params).await {
                 let running = list
@@ -2230,8 +2230,8 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
                     .filter(|w| {
                         matches!(
                             w.status.as_ref().map(|s| s.phase),
-                            Some(kloudlite_git_workspaces::crd::Phase::Ready)
-                                | Some(kloudlite_git_workspaces::crd::Phase::Running)
+                            Some(kloudlite_workspaces::crd::Phase::Ready)
+                                | Some(kloudlite_workspaces::crd::Phase::Running)
                         )
                     })
                     .count();
@@ -2256,7 +2256,7 @@ Note: `cfg.pool` and `cfg.node` are moved into `Ctx::new` on the line below, so 
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-agent --test stats && cargo clippy -p kloudlite-git-agent --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-agent --test stats && cargo clippy -p kloudlite-agent --all-targets -- -D warnings`
 Expected: PASS, no warnings.
 
 - [ ] **Step 6: Commit**
@@ -2299,7 +2299,7 @@ Create `crates/workspaces/tests/history_alerts.rs`:
 //! rather than plumbing, and the property that matters most is the one the previous, scrape-based
 //! evaluator could not hold: a rule whose window is not fully covered says `unknown`, never `ok`.
 
-use kloudlite_git_workspaces::history::alerts::{alert_row, state_of, CATALOGUE};
+use kloudlite_workspaces::history::alerts::{alert_row, state_of, CATALOGUE};
 
 /// One bucket per `step`, newest last, as `[ts, breached]` — the shape every catalogue query
 /// returns so `state_of` is the single decision for all of them.
@@ -2376,8 +2376,8 @@ fn an_alert_row_is_keyed_so_a_retried_write_collapses() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_alerts`
-Expected: FAIL — `unresolved import kloudlite_git_workspaces::history::alerts`.
+Run: `cargo test -p kloudlite-workspaces --test history_alerts`
+Expected: FAIL — `unresolved import kloudlite_workspaces::history::alerts`.
 
 - [ ] **Step 3: Write the evaluator**
 
@@ -2764,7 +2764,7 @@ struct SignalsResponse {
     pods_listed: usize,
     /// `"monitor"` when at least one rule has a recorded state, `"none"` when nothing is reporting.
     source: &'static str,
-    /// Only when `KLOUDLITE_GIT_HYPERDX_URL` is set: a dead link on a monitoring page is worse than
+    /// Only when `KLOUDLITE_HYPERDX_URL` is set: a dead link on a monitoring page is worse than
     /// no link.
     #[serde(skip_serializing_if = "Option::is_none")]
     hyperdx_url: Option<String>,
@@ -2792,7 +2792,7 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
     }
 
     let client = aks(&s)?;
-    let pods = Api::<Pod>::namespaced(client.clone(), "kloudlite-git")
+    let pods = Api::<Pod>::namespaced(client.clone(), "kloudlite")
         .list(&ListParams::default())
         .await
         .map_err(kube_err)?;
@@ -2816,7 +2816,7 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
         scrape_failures: Vec::new(),
         pods_listed: pods.items.len(),
         source,
-        hyperdx_url: std::env::var("KLOUDLITE_GIT_HYPERDX_URL").ok().filter(|u| !u.is_empty()),
+        hyperdx_url: std::env::var("KLOUDLITE_HYPERDX_URL").ok().filter(|u| !u.is_empty()),
     })
     .into_response())
 }
@@ -2833,10 +2833,10 @@ Replace `crates/workspaces/tests/api_admin_monitoring.rs` entirely — its parse
 //! the contract the web depends on: the response shape survives, a region nothing reports for shows
 //! every rule `unknown` rather than an empty table, and no ClickHouse is a 503, never an error page.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, ApiState};
-use kloudlite_git_workspaces::history::alerts::CATALOGUE;
-use kloudlite_git_workspaces::kube_test::{get, mock_client};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, ApiState};
+use kloudlite_workspaces::history::alerts::CATALOGUE;
+use kloudlite_workspaces::kube_test::{get, mock_client};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -2855,7 +2855,7 @@ fn jwt() -> Arc<Jwt> {
 #[tokio::test]
 async fn without_clickhouse_the_page_gets_a_503_not_an_error() {
     let pods = json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []});
-    let (client, _rec) = mock_client(vec![get("/api/v1/namespaces/kloudlite-git/pods", pods)]);
+    let (client, _rec) = mock_client(vec![get("/api/v1/namespaces/kloudlite/pods", pods)]);
     let (base, jwt) = serve(ApiState::new(jwt()).with_aks(client)).await;
     let resp = reqwest::Client::new()
         .get(format!("{base}/admin/monitoring/signals"))
@@ -2884,8 +2884,8 @@ In `bins/api/src/main.rs`, next to the beats spawn from Task 6:
     if role == "admin" {
         if let Some(ws) = workspaces.clone() {
             if ws.history.is_some() {
-                tokio::spawn(kloudlite_git_workspaces::history::alerts::evaluate_forever(ws.clone()));
-                tokio::spawn(kloudlite_git_workspaces::history::beats::run_beats(ws));
+                tokio::spawn(kloudlite_workspaces::history::alerts::evaluate_forever(ws.clone()));
+                tokio::spawn(kloudlite_workspaces::history::beats::run_beats(ws));
             }
         }
     }
@@ -2895,10 +2895,10 @@ In `bins/api/src/main.rs`, next to the beats spawn from Task 6:
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_alerts --test api_admin_monitoring`
+Run: `cargo test -p kloudlite-workspaces --test history_alerts --test api_admin_monitoring`
 Expected: PASS.
 
-Run: `cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-api --all-targets -- -D warnings`
+Run: `cargo clippy -p kloudlite-workspaces -p kloudlite-api --all-targets -- -D warnings`
 Expected: no warnings — in particular no `unused` left over from the deleted scrape.
 
 - [ ] **Step 8: Commit**
@@ -2936,7 +2936,7 @@ Create `crates/workspaces/tests/history_series.rs`:
 //! statements are built from an ALLOW-LIST — a range, a step and a series name that came off the
 //! wire must never reach a query as text.
 
-use kloudlite_git_workspaces::history::series::{parse_range, parse_step, sql_for, summarize, SeriesQuery};
+use kloudlite_workspaces::history::series::{parse_range, parse_step, sql_for, summarize, SeriesQuery};
 
 fn q() -> SeriesQuery {
     SeriesQuery { range: "7d".into(), step: "1h".into(), region: None, owner: None, dimension: None }
@@ -3016,8 +3016,8 @@ fn an_empty_series_summarizes_to_zeros() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_series`
-Expected: FAIL — `unresolved import kloudlite_git_workspaces::history::series`.
+Run: `cargo test -p kloudlite-workspaces --test history_series`
+Expected: FAIL — `unresolved import kloudlite_workspaces::history::series`.
 
 - [ ] **Step 3: Write the series catalogue**
 
@@ -3380,13 +3380,13 @@ In `crates/workspaces/src/api/admin.rs`, add `mod history;` and, in `router`, ne
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test history_series`
+Run: `cargo test -p kloudlite-workspaces --test history_series`
 Expected: PASS.
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_admin`
+Run: `cargo test -p kloudlite-workspaces --test api_admin`
 Expected: PASS — `every_admin_path_refuses_without_the_claim` must still hold with the two new routes, proving they are behind the gate.
 
-Run: `cargo clippy -p kloudlite-git-workspaces --all-targets -- -D warnings`
+Run: `cargo clippy -p kloudlite-workspaces --all-targets -- -D warnings`
 Expected: no warnings.
 
 - [ ] **Step 6: Commit**
@@ -3403,10 +3403,10 @@ git commit -m "Serve the console's history series and event pages"
 **Files:**
 - Create: `deploy/clickstack/README.md`, `deploy/clickstack/operators-values.yaml`, `deploy/clickstack/clickstack-values.yaml`
 - Create: `deploy/k3s/otel-agent.yaml`
-- Modify: `deploy/kloudlite-git.yaml`, `deploy/k3s/agent-peer.yaml`, `deploy/k3s/README.md`, `deploy/alerts.md`, `CLAUDE.md`, `tests/ws_e2e.sh`
+- Modify: `deploy/kloudlite.yaml`, `deploy/k3s/agent-peer.yaml`, `deploy/k3s/README.md`, `deploy/alerts.md`, `CLAUDE.md`, `tests/ws_e2e.sh`
 
 **Interfaces:**
-- Consumes: everything above. `KLOUDLITE_GIT_CLICKHOUSE_URL`, `KLOUDLITE_GIT_CLICKHOUSE_USER`, `KLOUDLITE_GIT_CLICKHOUSE_PASSWORD`, `KLOUDLITE_GIT_HYPERDX_URL` on the admin Deployment; `KLOUDLITE_GIT_REGION` for the watch's region label.
+- Consumes: everything above. `KLOUDLITE_CLICKHOUSE_URL`, `KLOUDLITE_CLICKHOUSE_USER`, `KLOUDLITE_CLICKHOUSE_PASSWORD`, `KLOUDLITE_HYPERDX_URL` on the admin Deployment; `KLOUDLITE_REGION` for the watch's region label.
 - Produces: a deployable stack. No Rust changes, so this task's gate is the e2e script and a real apply.
 
 - [ ] **Step 1: Write the Helm value files**
@@ -3487,7 +3487,7 @@ hyperdx:
 
 mongodb:
   # HyperDX's own state (saved searches, dashboards, alert definitions). Small, and unrelated to
-  # the platform's Mongo — do NOT point it at `kloudlite-git-mongo`.
+  # the platform's Mongo — do NOT point it at `kloudlite-mongo`.
   enabled: true
   persistence:
     enabled: true
@@ -3535,9 +3535,9 @@ HyperDX mints the key the collectors authenticate with; nothing in a values file
 3. Put it where the agent collectors read it, in **every** cluster:
 
 ```sh
-kubectl -n kube-system create secret generic kloudlite-git-otel \
+kubectl -n kube-system create secret generic kloudlite-otel \
   --from-literal=key='<ingestion key>'          # each k3s region
-kubectl -n kloudlite-git create secret generic kloudlite-git-otel \
+kubectl -n kloudlite create secret generic kloudlite-otel \
   --from-literal=key='<ingestion key>'          # AKS
 ```
 
@@ -3551,13 +3551,13 @@ rm auth
 
 ## Wiring the admin process
 
-`deploy/kloudlite-git.yaml` reads the chart's ClickHouse Secret. Confirm the names before rolling:
+`deploy/kloudlite.yaml` reads the chart's ClickHouse Secret. Confirm the names before rolling:
 
 ```sh
 kubectl -n clickstack get secret -l app.kubernetes.io/name=clickhouse
 ```
 
-`KLOUDLITE_GIT_CLICKHOUSE_URL` is `http://clickstack-clickhouse.clickstack.svc:8123`. The user needs
+`KLOUDLITE_CLICKHOUSE_URL` is `http://clickstack-clickhouse.clickstack.svc:8123`. The user needs
 `CREATE`/`INSERT`/`SELECT` on `kloudlite` and `SELECT` on `default`:
 
 ```sql
@@ -3592,7 +3592,7 @@ Create `deploy/k3s/otel-agent.yaml`:
 # the ClickStack gateway on AKS. One replica — this is a scraper, not a sidecar, and two would
 # double every sample.
 #
-# What `kloudlite-git-otel-agent` may do in this cluster (the header table IS the role):
+# What `kloudlite-otel-agent` may do in this cluster (the header table IS the role):
 #
 # | Resource                | Verbs            | Why                                                 |
 # |-------------------------|------------------|-----------------------------------------------------|
@@ -3603,18 +3603,18 @@ Create `deploy/k3s/otel-agent.yaml`:
 # | namespaces, replicasets | get,list,watch   | k8sattributes resolves a pod's workload through them |
 # | services, endpoints     | get,list,watch   | prometheus service discovery's other half            |
 #
-# NOT granted, deliberately: anything in `kloudlite-git.io` (the CRDs are the API's and the agent's,
+# NOT granted, deliberately: anything in `kloudlite.io` (the CRDs are the API's and the agent's,
 # and telemetry has no business reading a workspace's spec), any write verb at all, and secrets.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
 rules:
   - apiGroups: [""]
     resources: ["pods", "nodes", "namespaces", "services", "endpoints"]
@@ -3632,20 +3632,20 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
 subjects:
   - kind: ServiceAccount
-    name: kloudlite-git-otel-agent
+    name: kloudlite-otel-agent
     namespace: kube-system
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
   namespace: kube-system
 data:
   config.yaml: |
@@ -3684,7 +3684,7 @@ data:
       k8s_cluster:
         collection_interval: 30s
       # Pod logs, so HyperDX has logs beside metrics. Our binaries keep plain tracing output;
-      # `KLOUDLITE_GIT_LOG_FORMAT=json` makes them structured here without changing the code.
+      # `KLOUDLITE_LOG_FORMAT=json` makes them structured here without changing the code.
       filelog:
         include: [/var/log/pods/*/*/*.log]
         include_file_path: true
@@ -3702,7 +3702,7 @@ data:
       # here, per cluster, because nothing in the telemetry itself knows which region it is in.
       resource:
         attributes:
-          - { key: region, value: "${env:KLOUDLITE_GIT_REGION}", action: upsert }
+          - { key: region, value: "${env:KLOUDLITE_REGION}", action: upsert }
       batch:
         timeout: 10s
         send_batch_size: 1024
@@ -3732,17 +3732,17 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
   namespace: kube-system
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: kloudlite-git-otel-agent }
+    matchLabels: { app: kloudlite-otel-agent }
   template:
     metadata:
-      labels: { app: kloudlite-git-otel-agent }
+      labels: { app: kloudlite-otel-agent }
     spec:
-      serviceAccountName: kloudlite-git-otel-agent
+      serviceAccountName: kloudlite-otel-agent
       containers:
         - name: collector
           image: otel/opentelemetry-collector-contrib:0.109.0
@@ -3750,11 +3750,11 @@ spec:
           env:
             - name: K8S_NODE_NAME
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
-            - name: KLOUDLITE_GIT_REGION
+            - name: KLOUDLITE_REGION
               # Edit per region before applying — this is the value every console query filters on.
               value: westeurope-k3s
             - name: OTEL_INGESTION_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-git-otel, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-otel, key: key } }
           volumeMounts:
             - { name: conf, mountPath: /conf }
             - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
@@ -3763,7 +3763,7 @@ spec:
             limits: { memory: 512Mi }
       volumes:
         - name: conf
-          configMap: { name: kloudlite-git-otel-agent }
+          configMap: { name: kloudlite-otel-agent }
         - name: varlogpods
           hostPath: { path: /var/log/pods }
 ```
@@ -3785,7 +3785,7 @@ In `deploy/k3s/agent-peer.yaml`, the metrics rule currently admits a namespace l
               kubernetes.io/metadata.name: kube-system
           podSelector:
             matchLabels:
-              app: kloudlite-git-otel-agent
+              app: kloudlite-otel-agent
       ports:
         - protocol: TCP
           port: 9464
@@ -3793,26 +3793,26 @@ In `deploy/k3s/agent-peer.yaml`, the metrics rule currently admits a namespace l
 
 - [ ] **Step 5: Wire the admin Deployment and the AKS collector**
 
-In `deploy/kloudlite-git.yaml`, on the `kloudlite-git-admin` Deployment's `env` list:
+In `deploy/kloudlite.yaml`, on the `kloudlite-admin` Deployment's `env` list:
 
 ```yaml
             # ClickStack. Optional by design: without these the admin process runs exactly as
             # before and every /admin/history route answers 503 (crates/workspaces/src/history).
-            - name: KLOUDLITE_GIT_CLICKHOUSE_URL
+            - name: KLOUDLITE_CLICKHOUSE_URL
               value: http://clickstack-clickhouse.clickstack.svc:8123
-            - name: KLOUDLITE_GIT_CLICKHOUSE_USER
-              valueFrom: { secretKeyRef: { name: kloudlite-git-clickhouse, key: user, optional: true } }
-            - name: KLOUDLITE_GIT_CLICKHOUSE_PASSWORD
-              valueFrom: { secretKeyRef: { name: kloudlite-git-clickhouse, key: password, optional: true } }
+            - name: KLOUDLITE_CLICKHOUSE_USER
+              valueFrom: { secretKeyRef: { name: kloudlite-clickhouse, key: user, optional: true } }
+            - name: KLOUDLITE_CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: kloudlite-clickhouse, key: password, optional: true } }
             # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
-            - name: KLOUDLITE_GIT_HYPERDX_URL
+            - name: KLOUDLITE_HYPERDX_URL
               value: https://hyperdx-dev.kloudlite.io
             # The region label the per-region watches stamp on their event rows.
-            - name: KLOUDLITE_GIT_REGION
+            - name: KLOUDLITE_REGION
               value: westeurope-k3s
 ```
 
-Then copy `deploy/k3s/otel-agent.yaml` into `deploy/kloudlite-git.yaml` as the AKS collector, changed in exactly three ways, each called out in a comment above the copy: namespace `kloudlite-git`, `KLOUDLITE_GIT_REGION: central`, and `endpoint: http://clickstack-otel-collector.clickstack.svc:4318` (in-cluster, so it does not leave through the ingress).
+Then copy `deploy/k3s/otel-agent.yaml` into `deploy/kloudlite.yaml` as the AKS collector, changed in exactly three ways, each called out in a comment above the copy: namespace `kloudlite`, `KLOUDLITE_REGION: central`, and `endpoint: http://clickstack-otel-collector.clickstack.svc:4318` (in-cluster, so it does not leave through the ingress).
 
 - [ ] **Step 6: Document the catalogue's second evaluator**
 
@@ -3852,7 +3852,7 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/otel-agent.yaml
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-peer.yaml
 # 3. AKS: the admin Deployment's new env, after the ClickHouse user exists — the process logs
 #    `clickhouse migrations applied` once and then `clickhouse schema up to date` on every restart.
-kubectl -n kloudlite-git apply -f deploy/kloudlite-git.yaml
+kubectl -n kloudlite apply -f deploy/kloudlite.yaml
 ```
 
 `agent-peer.yaml`'s metrics rule previously admitted a namespace named `monitoring` that never
@@ -3875,7 +3875,7 @@ agent in every cluster (`deploy/k3s/otel-agent.yaml`) scrapes the pods already a
 database. **We write no metrics pipeline**; if a number is missing the fix is collector config.
 
 What IS ours is the `kloudlite` database, and **the admin process is its only writer** (`bins/api`
-with `KLOUDLITE_GIT_API_ROLE=admin`, `crates/workspaces/src/history/`): `events` (the record, no TTL),
+with `KLOUDLITE_API_ROLE=admin`, `crates/workspaces/src/history/`): `events` (the record, no TTL),
 `usage_hourly` and `fleet_hourly` (2 y), `alerts` (400 d) and the `metrics_5m` rollup over the
 collector's tables (400 d, because the exporter drops raw metrics at 30). It migrates the schema at
 boot, consumes the Redis `events` stream in a **second** consumer group (`history`) that acks only
@@ -3891,7 +3891,7 @@ recomputed from the CRDs every time, never from an earlier row. `events` and `al
 windows, writing only state TRANSITIONS to `kloudlite.alerts`. A window the samples do not cover is
 `unknown`, never `ok` — that rule is why the old on-request scrape was retired, since a point-in-
 time scrape could not compute a `for 5m` and left nine of ten rules permanently unknown.
-`GET /admin/monitoring/signals` now only reads that table. `KLOUDLITE_GIT_CLICKHOUSE_URL` is optional
+`GET /admin/monitoring/signals` now only reads that table. `KLOUDLITE_CLICKHOUSE_URL` is optional
 everywhere: without it every process runs exactly as today and `/admin/history/*` answers
 `503 history unavailable`, which the web renders as a flat placeholder.
 ```
@@ -3902,7 +3902,7 @@ In `tests/ws_e2e.sh`, after the existing superadmin console block (the audit-row
 
 ```sh
 # --- history layer -----------------------------------------------------------------------------
-# Skipped rather than failed when the admin process has no ClickHouse: `KLOUDLITE_GIT_CLICKHOUSE_URL`
+# Skipped rather than failed when the admin process has no ClickHouse: `KLOUDLITE_CLICKHOUSE_URL`
 # is optional by design, and a laptop run without ClickStack must still pass the rest of this file.
 HISTORY_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN_BASE/admin/history/live_workspaces" \
   -H "Authorization: Bearer $ADMIN_TOKEN")
@@ -3958,7 +3958,7 @@ Expected: the history block runs rather than skipping, and the summary line ends
 - [ ] **Step 11: Commit**
 
 ```bash
-git add deploy/clickstack deploy/k3s/otel-agent.yaml deploy/k3s/agent-peer.yaml deploy/k3s/README.md deploy/kloudlite-git.yaml deploy/alerts.md CLAUDE.md tests/ws_e2e.sh
+git add deploy/clickstack deploy/k3s/otel-agent.yaml deploy/k3s/agent-peer.yaml deploy/k3s/README.md deploy/kloudlite.yaml deploy/alerts.md CLAUDE.md tests/ws_e2e.sh
 git commit -m "Deploy ClickStack and the region collectors for the history layer"
 ```
 
@@ -3974,8 +3974,8 @@ git commit -m "Deploy ClickStack and the region collectors for the history layer
 | A1: `default` = OTel tables, `kloudlite` = ours, admin process the only writer | 1, 2 |
 | A1: `kloudlite` tables `events` / `usage_hourly` / `fleet_hourly` / `alerts` with their TTLs | 1 |
 | A1: `kloudlite.metrics_5m` rollup, 400 d | 1 (migrations 5–7) |
-| A1: `KLOUDLITE_GIT_CLICKHOUSE_URL` optional everywhere; reqwest, JSONEachRow/JSONCompact, no new crate | 1, 2 |
-| A2: gateway collector, ingestion key in Secret `kloudlite-git-otel`, `otel-dev.kloudlite.io` | 10 |
+| A1: `KLOUDLITE_CLICKHOUSE_URL` optional everywhere; reqwest, JSONEachRow/JSONCompact, no new crate | 1, 2 |
+| A2: gateway collector, ingestion key in Secret `kloudlite-otel`, `otel-dev.kloudlite.io` | 10 |
 | A2: agent collectors per cluster — prometheus, k8s_cluster, kubeletstats, k8sattributes, resource(`region`), batch, otlphttp; RBAC header table | 10 |
 | A2: logs via `filelog` | 10 |
 | A2: agent node gauges (pool bytes, running copies) | 7 |
@@ -3987,8 +3987,8 @@ git commit -m "Deploy ClickStack and the region collectors for the history layer
 | A4: hourly `usage_hourly` / `fleet_hourly` from CRDs every run | 6 |
 | A5: `GET /admin/history/{series}` with the twelve names + `usage`, one SQL each, 404 unknown, 503 no ClickHouse | 9 |
 | A5: `GET /admin/history/events` paged | 9 |
-| A5: "Open in HyperDX" via `KLOUDLITE_GIT_HYPERDX_URL` | 8 (field), 10 (env) |
-| A6: `deploy/clickstack/`, `deploy/kloudlite-git.yaml`, `deploy/k3s/otel-agent.yaml`, NetworkPolicy, `deploy/alerts.md` | 10 |
+| A5: "Open in HyperDX" via `KLOUDLITE_HYPERDX_URL` | 8 (field), 10 (env) |
+| A6: `deploy/clickstack/`, `deploy/kloudlite.yaml`, `deploy/k3s/otel-agent.yaml`, NetworkPolicy, `deploy/alerts.md` | 10 |
 | §Not doing: no Prometheus/Grafana, no multi-node ClickHouse, no retention below the TTLs | honoured throughout |
 
 **Placeholder scan:** every code step carries real code; no "TBD", no "similar to Task N", no "add error handling". Two steps are deliberately prose because they are documentation, not code (Task 10 steps 6 and 8), and both quote the exact text to write. Task 1 step 7 and Task 10 step 10 are verification steps with the exact command and expected output.

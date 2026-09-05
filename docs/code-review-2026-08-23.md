@@ -1,4 +1,4 @@
-# kloudlite-git full code review — 2026-08-23
+# kloudlite full code review — 2026-08-23
 
 Scope: all of `src/`, `tests/`, `web/apps/web`, `deploy/`, CI, Dockerfiles, docs. Five independent
 passes (HTTP/auth/api, registry/GC/worker, git core/storage, web app, ops/CI/tests). Every finding
@@ -21,7 +21,7 @@ Clippy: 15 pre-existing `--all-targets` warnings (list at the end).
 | 6 | High | `src/registry/manifests.rs:49-164` | Manifest PUT never verifies referenced blobs exist (no `MANIFEST_BLOB_UNKNOWN`). Combined with the 1h `blob_grace` sweep, slow pushes of big images lose early layers and still return 201. |
 | 7 | High | `src/registry/blobs.rs:79` | `refresh_blob_mtime` = `copy(path, path)`; real S3 rejects same-key copy without metadata directive, error swallowed → the "mount race" is only closed on `mem://`/`file://`. |
 | 8 | High | `src/registry/{blobs,uploads}.rs` | Blob bodies are buffered as `Bytes` up to `max_layer` (10 GiB); PATCH re-reads + rewrites the whole staging object. Memory O(layer) per request, OOM with a few concurrent multi-GB pushes. |
-| 9 | High | `deploy/kloudlite-git.yaml` + root `Dockerfile` | Rust workloads run as **root with all caps** (no `securityContext`, no `USER`); web pod already has the hardened pattern. |
+| 9 | High | `deploy/kloudlite.yaml` + root `Dockerfile` | Rust workloads run as **root with all caps** (no `securityContext`, no `USER`); web pod already has the hardened pattern. |
 | 10 | High | `.github/workflows/image.yml` | **`cargo test`/clippy/fmt never run in CI.** Images ship untested. |
 
 ---
@@ -29,17 +29,17 @@ Clippy: 15 pre-existing `--all-targets` warnings (list at the end).
 ## 1. Security
 
 ### High
-- **Root containers** — `deploy/kloudlite-git.yaml` (leader, srv, api, worker) and `Dockerfile:28-43`. Copy `kloudlite-git-web.yaml:105-108` securityContext + add `USER`; chown cache/data dirs.
+- **Root containers** — `deploy/kloudlite.yaml` (leader, srv, api, worker) and `Dockerfile:28-43`. Copy `kloudlite-web.yaml:105-108` securityContext + add `USER`; chown cache/data dirs.
 - **SSH push unbounded** — see Top 10 #5. Wrap input in a counting reader capped at `max_body`.
-- **Registry ingress** `deploy/kloudlite-git.yaml:744-750` routes `/` (whole git surface + `/healthz`) on `cr.khost.dev`, with `ssl-redirect: "false"` on a host *not* behind Cloudflare → plain-HTTP Basic creds accepted. Path `/v2` + ssl-redirect true on this ingress.
-- **`kloudlite-git-lb`** (`:460-476`) exposes HTTP :80 directly, bypassing ingress/TLS. Drop the port or document why.
+- **Registry ingress** `deploy/kloudlite.yaml:744-750` routes `/` (whole git surface + `/healthz`) on `cr.khost.dev`, with `ssl-redirect: "false"` on a host *not* behind Cloudflare → plain-HTTP Basic creds accepted. Path `/v2` + ssl-redirect true on this ingress.
+- **`kloudlite-lb`** (`:460-476`) exposes HTTP :80 directly, bypassing ingress/TLS. Drop the port or document why.
 
 ### Medium
 - **Leaked session JWT renews forever** — `src/api/teams.rs:84-118`. `upsert_user` accepts a Bearer and mints a fresh 12h token if `body.email == sub`. Reject Bearer on this route (peer-secret only).
 - **"PEER ONLY" passkey routes reachable with any session** — `src/api/passkeys.rs:125-174`. Any user can read another's passkey pubkey/email and set `counter` arbitrarily (breaks victim's next login via clone detection). Add a `peer_only()` caller variant.
 - **Self-hosted runner** on `workflow_dispatch` workflow with persistent docker cache and GHCR write token (`image.yml:12`). Acceptable for solo repo; document; prune cache on schedule.
 - **Actions pinned by tag not SHA** (`image.yml`, `web.yml`).
-- `KLOUDLITE_GIT_JWT_SECRET` is `optional: true` in yaml (`:86,303`; web `:113`). Make required.
+- `KLOUDLITE_JWT_SECRET` is `optional: true` in yaml (`:86,303`; web `:113`). Make required.
 
 ### Low
 - `src/jwt.rs:70-110` — session claims have no `typ`/`aud`; rejection of registry tokens relies on serde requiring `name`. Add `typ: "session"`.
@@ -145,8 +145,8 @@ Clippy: 15 pre-existing `--all-targets` warnings (list at the end).
 ## 5. Quality / best practice
 
 - **Stale docs/comments** (all verified wrong): README leader derivation & "scaling is replicas alone" (`README:25,49,200`); yaml leader comment blocks (`:29-33`, `:245-250`); `ownership.rs:227-246` "compaction off"; `events.rs:1-6` "scan Mongo"; `cache.rs:326` "claims against Mongo"; `receive.rs:246` "fork network shares pool"; `main.rs:634-666` "no routed endpoint" (one exists: `imagevisibility`); `registry/store.rs:286` `ponytail:` comment placed between doc comment and fn.
-- Undocumented env: `KLOUDLITE_GIT_LEADER`, `KLOUDLITE_GIT_REPLICAS`, `KLOUDLITE_GIT_SERVER_PREFIX`, `KLOUDLITE_GIT_UPLOAD_GRACE_SECS`, `KLOUDLITE_GIT_WORKER_CONCURRENCY`.
-- `main.rs:104-107` — `KLOUDLITE_GIT_REPLICAS` silently defaults to 1 in fleet mode → leader hands everything to `srv-0`. Require it when `PEER_SVC` set.
+- Undocumented env: `KLOUDLITE_LEADER`, `KLOUDLITE_REPLICAS`, `KLOUDLITE_SERVER_PREFIX`, `KLOUDLITE_UPLOAD_GRACE_SECS`, `KLOUDLITE_WORKER_CONCURRENCY`.
+- `main.rs:104-107` — `KLOUDLITE_REPLICAS` silently defaults to 1 in fleet mode → leader hands everything to `srv-0`. Require it when `PEER_SVC` set.
 - `main.rs:577-583` — `admin add-token/add-key` accept any owner string.
 - `auth.rs:42-100` — `Mutex::lock().unwrap()` on auth cache: poisoned lock = panic every request.
 - `main.rs:745,775` — clippy `await_holding_lock`: std Mutex guard held across `.await`.

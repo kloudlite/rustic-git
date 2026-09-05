@@ -6,7 +6,7 @@
 
 **Architecture:** Three tiers, unchanged. `crates/workspaces` holds the CRDs, the pod/policy builders and `/v1`; `bins/agent` is the node-scoped controller (one DaemonSet pod per btrfs node) plus three background beats (pull, sync, janitor); `bins/api` serves `/v1`. This plan adds exactly one new module, `bins/agent/src/listing.rs` (the shared per-beat listing), and one new directory, `bins/agent/src/controller/` (a pure file split — no logic moves). Everything else is an edit in place.
 
-**Tech Stack:** Rust 2021, `kube`/`kube-runtime` + `k8s-openapi`, `axum` for the peer listener and `/v1`, `tokio` (`spawn_blocking` for every blocking syscall), `serde_json` for the CRD JSON shapes, `kloudlite_git_workspaces::kube_test::{mock_client, Route, Recorder}` for every API-server test.
+**Tech Stack:** Rust 2021, `kube`/`kube-runtime` + `k8s-openapi`, `axum` for the peer listener and `/v1`, `tokio` (`spawn_blocking` for every blocking syscall), `serde_json` for the CRD JSON shapes, `kloudlite_workspaces::kube_test::{mock_client, Route, Recorder}` for every API-server test.
 
 **Spec:** docs/superpowers/reviews/2026-09-02-codebase-review.md (details: docs/superpowers/reviews/2026-09-02-details/workspaces-agent.md)
 
@@ -19,7 +19,7 @@
 - Commit subjects: imperative sentence case, no tool attribution, no trailers.
 - Every controller-split task is a PURE MOVE: `cargo test` output unchanged, `git diff --stat` shows only deletions in `controller.rs` and additions in the new file (plus `mod`/`use` lines).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` must pass; the bar in test targets is no NEW warnings in files you touch.
-- Package names: `-p kloudlite-git-agent-bin` (bins/agent), `-p kloudlite-git-workspaces` (crates/workspaces).
+- Package names: `-p kloudlite-agent-bin` (bins/agent), `-p kloudlite-workspaces` (crates/workspaces).
 
 ---
 
@@ -37,7 +37,7 @@ Closes detail findings 1 and 2, summary High #5, the `spec.owner` Medium and Arc
 **Interfaces:**
 - Produces `pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ws_id: &str, ctx: &PodContext, init: Option<Container>) -> Result<Pod, String>` (was `-> Pod`).
 - Produces `pub fn validate_ws_spec(spec: &crd::WorkspaceSpec) -> Result<(), String>` in `crates/workspaces/src/model.rs`.
-- Consumes existing `model::valid_ws_name` (`model.rs:182`) and `kloudlite_git_storage::store::valid_owner`.
+- Consumes existing `model::valid_ws_name` (`model.rs:182`) and `kloudlite_storage::store::valid_owner`.
 - Consumed by Task 21 (the hostile-name test) and by the controller split (Task 14 moves the call site verbatim).
 
 - [ ] **Step 1: Write the failing test** — append to `crates/workspaces/src/k8s.rs`'s `mod tests`:
@@ -96,25 +96,25 @@ Closes detail findings 1 and 2, summary High #5, the `spec.owner` Medium and Arc
 #[tokio::test]
 async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_directory() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status")]);
+    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok("/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status")]);
     let w: crd::Workspace = serde_json::from_value(serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
         "spec": {"owner": "../../etc", "team": "", "name": "ws", "region": "r1",
                  "image": "", "packages": [], "desiredState": "running"},
     }))
     .unwrap();
 
-    let action = kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent, never retried");
-    let sent = rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status");
+    let sent = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status");
     let reason = sent.last().expect("a status write")["status"]["conditions"][0]["reason"].clone();
     assert_eq!(reason, "InvalidSpec");
     assert!(!tmp.path().join("homes").exists(), "nothing under the pool root was created");
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces workspace_pod_refuses` fails to compile with `error[E0599]: no method named 'is_err' found for struct 'Pod'`; `cargo test -p kloudlite-git-agent-bin a_workspace_with_a_traversing_owner` fails on `assertion 'left == right' failed: left: String("HomeNotReady")` (or a mock 404), never `InvalidSpec`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-workspaces workspace_pod_refuses` fails to compile with `error[E0599]: no method named 'is_err' found for struct 'Pod'`; `cargo test -p kloudlite-agent-bin a_workspace_with_a_traversing_owner` fails on `assertion 'left == right' failed: left: String("HomeNotReady")` (or a mock 404), never `InvalidSpec`.
 
 - [ ] **Step 3: Implement** — in `crates/workspaces/src/model.rs`, after `valid_ws_name` (`:190`):
 
@@ -131,7 +131,7 @@ pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> 
         return Err(format!("workspace name {:?} is not a name", spec.name));
     }
     validate_owner(&spec.owner)?;
-    if !spec.team.is_empty() && !kloudlite_git_storage::store::valid_segment(&spec.team) {
+    if !spec.team.is_empty() && !kloudlite_storage::store::valid_segment(&spec.team) {
         return Err(format!("team {:?} is not a segment", spec.team));
     }
     crate::packages::validate_list(&spec.packages)
@@ -141,7 +141,7 @@ pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> 
 /// chowned by a privileged process (`ensure_shared_home`, `ensure_homecache`), so a traversal here
 /// is a root-run `mkdir`/`chown` outside the pool.
 pub fn validate_owner(owner: &str) -> Result<(), String> {
-    match kloudlite_git_storage::store::valid_owner(owner) {
+    match kloudlite_storage::store::valid_owner(owner) {
         true => Ok(()),
         false => Err(format!("owner {owner:?} is not an owner name")),
     }
@@ -254,7 +254,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             create_if_absent(&pods, &pod).await?;
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-workspaces && cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-workspaces && cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add crates/workspaces/src/model.rs crates/workspaces/src/k8s.rs bins/agent/src/controller.rs bins/agent/tests/reconcile.rs && git commit -m "Validate a workspace spec at the agent before it becomes a path or an argv"`
 
 ---
@@ -277,7 +277,7 @@ Detail finding 4, summary Medium. `ensure_shared_home` (`controller.rs:2006`) ru
 #[tokio::test(flavor = "current_thread")]
 async fn a_workspace_reconcile_never_blocks_the_reactor() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status")]);
+    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok("/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status")]);
     let w = workspace_json_running("ws-1");
     let w: crd::Workspace = serde_json::from_value(w).unwrap();
 
@@ -287,7 +287,7 @@ async fn a_workspace_reconcile_never_blocks_the_reactor() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
     });
-    let _ = kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await;
+    let _ = kloudlite_agent::controller::apply_workspace(&w, &ctx).await;
     timer.await.unwrap();
     assert!(ticked.load(std::sync::atomic::Ordering::SeqCst), "the reactor made no progress during the reconcile");
 }
@@ -295,7 +295,7 @@ async fn a_workspace_reconcile_never_blocks_the_reactor() {
 
   (Add the `workspace_json_running` fixture beside the existing workspace fixtures in the file if one does not already exist, mirroring `volume_json`.)
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin a_workspace_reconcile_never_blocks_the_reactor` — before the fix the test is a regression guard that passes only by luck on a fast fs; treat the real gate as the `git diff` review plus clippy. Expected failure on a machine where `/etc/resolv.conf` is slow: `the reactor made no progress during the reconcile`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin a_workspace_reconcile_never_blocks_the_reactor` — before the fix the test is a regression guard that passes only by luck on a fast fs; treat the real gate as the `git diff` review plus clippy. Expected failure on a machine where `/etc/resolv.conf` is slow: `the reactor made no progress during the reconcile`.
 
 - [ ] **Step 3: Implement** — replace `controller.rs:2006`:
 
@@ -322,7 +322,7 @@ async fn a_workspace_reconcile_never_blocks_the_reactor() {
         .map_err(|e| ReconcileErr(e.to_string()))??;
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/controller.rs bins/agent/tests/reconcile.rs && git commit -m "Run the shared-home mount check and the resolv.conf write off the reactor"`
 
 ---
@@ -344,13 +344,13 @@ Detail finding 3, summary Medium. `crates/workspaces/src/api.rs:1465` is `if let
 #[tokio::test]
 async fn delete_env_lists_only_the_owner_s_workspaces() {
     let (app, rec) = api_with_kube(vec![
-        kloudlite_git_workspaces::kube_test::get(
-            "/apis/kloudlite-git.io/v1alpha1/environments/env-1",
+        kloudlite_workspaces::kube_test::get(
+            "/apis/kloudlite.io/v1alpha1/environments/env-1",
             env_json("env-1", "alice"),
         ),
-        Route { method: "DELETE", path: "/apis/kloudlite-git.io/v1alpha1/environments/env-1".into(), status: 200, body: env_json("env-1", "alice") },
-        kloudlite_git_workspaces::kube_test::get(
-            "/apis/kloudlite-git.io/v1alpha1/workspaces",
+        Route { method: "DELETE", path: "/apis/kloudlite.io/v1alpha1/environments/env-1".into(), status: 200, body: env_json("env-1", "alice") },
+        kloudlite_workspaces::kube_test::get(
+            "/apis/kloudlite.io/v1alpha1/workspaces",
             serde_json::json!({"apiVersion": "v1", "kind": "WorkspaceList", "items": []}),
         ),
     ])
@@ -361,13 +361,13 @@ async fn delete_env_lists_only_the_owner_s_workspaces() {
     let listed = rec
         .requests()
         .into_iter()
-        .find(|r| r.starts_with("GET /apis/kloudlite-git.io/v1alpha1/workspaces?"))
+        .find(|r| r.starts_with("GET /apis/kloudlite.io/v1alpha1/workspaces?"))
         .expect("the attachment sweep listed workspaces");
-    assert!(listed.contains("kloudlite-git.io%2Fowner%3Dalice") || listed.contains("kloudlite-git.io/owner=alice"), "{listed}");
+    assert!(listed.contains("kloudlite.io%2Fowner%3Dalice") || listed.contains("kloudlite.io/owner=alice"), "{listed}");
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces --test api_user delete_env_lists_only` fails with `the attachment sweep listed workspaces` unmatched on the selector assertion (the request carries no `labelSelector` at all).
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-workspaces --test api_user delete_env_lists_only` fails with `the attachment sweep listed workspaces` unmatched on the selector assertion (the request carries no `labelSelector` at all).
 
 - [ ] **Step 3: Implement** — replace `crates/workspaces/src/api.rs:1464-1473`:
 
@@ -392,7 +392,7 @@ async fn delete_env_lists_only_the_owner_s_workspaces() {
     }
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-workspaces && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-workspaces && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add crates/workspaces/src/api.rs crates/workspaces/tests/api_user.rs && git commit -m "Scope the environment delete's attachment sweep to the owner and log its errors"`
 
 ---
@@ -420,7 +420,7 @@ Detail finding 9, summary Medium. `flush_gate` (`controller.rs:3002`) lists EVER
             "VolumeReplica" => &[".spec.node", ".status.phase", ".spec.volume"],
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces --test crd_yaml` fails with `VolumeReplica must select on .spec.volume`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-workspaces --test crd_yaml` fails with `VolumeReplica must select on .spec.volume`.
 
 - [ ] **Step 3: Implement** — in `crates/workspaces/src/crd.rs`, add one line to the `VolumeReplica` `#[kube(...)]` attribute after `selectable = ".status.phase",` (`:282`):
 
@@ -431,7 +431,7 @@ Detail finding 9, summary Medium. `flush_gate` (`controller.rs:3002`) lists EVER
     selectable = ".spec.volume",
 ```
 
-  Regenerate: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`.
+  Regenerate: `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml`.
 
   Replace `bins/agent/src/controller.rs:2994-3003` (the comment block and the list):
 
@@ -458,7 +458,7 @@ Detail finding 9, summary Medium. `flush_gate` (`controller.rs:3002`) lists EVER
 
   Add to `deploy/k3s/README.md`, in the apply section: `crds.yaml` must be applied before the agent image that reads `.spec.volume` on `VolumeReplica` (added 2026-09-02); an agent ahead of the CRD gets a 400 on every stop's flush gate.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-workspaces && cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-workspaces && cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add crates/workspaces/src/crd.rs crates/workspaces/tests/crd_yaml.rs deploy/k3s/crds.yaml deploy/k3s/README.md bins/agent/src/controller.rs bins/agent/src/peer.rs && git commit -m "Select volume replicas by spec.volume instead of scanning the cluster"`
 
 ---
@@ -501,8 +501,8 @@ impl Parent { pub fn is_live_worktree(&self) -> bool; }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kloudlite_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use kloudlite_git_workspaces::kube_test::{mock_client, Recorder, Route};
+    use kloudlite_workspaces::engine::{Engine, Pool as EnginePool};
+    use kloudlite_workspaces::kube_test::{mock_client, Recorder, Route};
 
     struct NoopNix;
     #[async_trait::async_trait]
@@ -516,7 +516,7 @@ mod tests {
 
     fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
         let (client, rec) = mock_client(routes);
-        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-git-workspace:deadbeef");
+        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-workspace:deadbeef");
         (
             Arc::new(Ctx::new(
                 client,
@@ -537,14 +537,14 @@ mod tests {
         serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
     }
 
-    const VOLUMES: &str = "/apis/kloudlite-git.io/v1alpha1/volumes";
-    const VOLREPLICAS: &str = "/apis/kloudlite-git.io/v1alpha1/volumereplicas";
-    const WORKSPACES: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces";
-    const ENVIRONMENTS: &str = "/apis/kloudlite-git.io/v1alpha1/environments";
+    const VOLUMES: &str = "/apis/kloudlite.io/v1alpha1/volumes";
+    const VOLREPLICAS: &str = "/apis/kloudlite.io/v1alpha1/volumereplicas";
+    const WORKSPACES: &str = "/apis/kloudlite.io/v1alpha1/workspaces";
+    const ENVIRONMENTS: &str = "/apis/kloudlite.io/v1alpha1/environments";
 
     fn ws(name: &str, node: &str, volume: &str) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
             "metadata": {"name": name, "uid": format!("{name}-uid")},
             "spec": {"owner": "alice", "team": "", "name": name, "region": "r1",
                      "image": "", "packages": [], "desiredState": "running"},
@@ -602,7 +602,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin --lib listing::` fails to compile: `error[E0425]: cannot find function 'beat' in this scope`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin --lib listing::` fails to compile: `error[E0425]: cannot find function 'beat' in this scope`.
 
 - [ ] **Step 3: Implement** — the body of `bins/agent/src/listing.rs`, above the test module:
 
@@ -624,7 +624,7 @@ use crate::controller::Ctx;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::ListParams;
 use kube::{Api, ResourceExt};
-use kloudlite_git_workspaces::crd;
+use kloudlite_workspaces::crd;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -758,7 +758,7 @@ pub async fn beat(ctx: &Arc<Ctx>) -> Option<Beat> {
 
   In `bins/agent/src/lib.rs`, add `pub mod listing;` beside the other module declarations.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/listing.rs bins/agent/src/lib.rs && git commit -m "Add the one per-beat listing of this node's parents and the cluster's volumes"`
 
 ---
@@ -791,7 +791,7 @@ Detail finding 7 / summary High #6, the consumer half. `pull_beat_with` (`peer.r
     async fn a_pull_beat_lists_each_kind_once_for_the_beat() {
         let tmp = tempfile::tempdir().unwrap();
         let volume = serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "v1"},
             "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 1},
             "status": {"phase": "ready"},
@@ -816,7 +816,7 @@ Detail finding 7 / summary High #6, the consumer half. `pull_beat_with` (`peer.r
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin a_pull_beat_lists_each_kind_once` fails with `assertion 'left == right' failed: left: 3, right: 1` on `VOLUMES`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin a_pull_beat_lists_each_kind_once` fails with `assertion 'left == right' failed: left: 3, right: 1` on `VOLUMES`.
 
 - [ ] **Step 3: Implement** — in `bins/agent/src/peer.rs`:
 
@@ -947,7 +947,7 @@ async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, live: &[String
 
   (the remainder of `retire_pass` is unchanged; `vols`/`rows` are now slices, so `for v in vols` and `rows.iter()` replace the owned iterations.)
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/peer.rs && git commit -m "Thread one listing through the pull beat instead of re-listing every kind"`
 
 ---
@@ -975,7 +975,7 @@ Detail finding 8, summary High #6's second half. `peer.rs:532` calls `agent_pod_
             ready_snapshot("v1-cccc", "v1", "v1-bbbb"),
         ];
         let replica_b = serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": "v1.node-b", "uid": "uid-b"},
             "spec": {"volume": "v1", "node": "node-b"},
             "status": {"phase": "Synced", "branches": {}},
@@ -995,7 +995,7 @@ Detail finding 8, summary High #6's second half. `peer.rs:532` calls `agent_pod_
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin pull_volume_resolves_a_source_address_once` fails with `assertion 'left == right' failed: left: 3, right: 1`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin pull_volume_resolves_a_source_address_once` fails with `assertion 'left == right' failed: left: 3, right: 1`.
 
 - [ ] **Step 3: Implement** — after the `sources` vector is built (`peer.rs:516`), insert:
 
@@ -1022,7 +1022,7 @@ Detail finding 8, summary High #6's second half. `peer.rs:532` calls `agent_pod_
 
   (delete the per-iteration `let addr = match agent_pod_addr(...)` block; `pull_one`'s call becomes `…, addr, secret, …` since `addr` is now a `&String`.)
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/peer.rs && git commit -m "Resolve each pull source's peer address once per volume, not per commit"`
 
 ---
@@ -1045,7 +1045,7 @@ Detail finding 13's third bullet. `sync::live_worktrees` (`sync.rs:69-105`) is t
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![Route {
             method: "GET",
-            path: "/apis/kloudlite-git.io/v1alpha1/workspaces".into(),
+            path: "/apis/kloudlite.io/v1alpha1/workspaces".into(),
             status: 500,
             body: serde_json::json!({}),
         }];
@@ -1055,7 +1055,7 @@ Detail finding 13's third bullet. `sync::live_worktrees` (`sync.rs:69-105`) is t
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin a_failed_parent_listing_cuts_no_sync_points` fails to compile: `error[E0425]: cannot find function 'test_ctx' in this scope` until the harness is copied from `peer.rs:1079-1096`, then fails on the `sync_beat` signature.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin a_failed_parent_listing_cuts_no_sync_points` fails to compile: `error[E0425]: cannot find function 'test_ctx' in this scope` until the harness is copied from `peer.rs:1079-1096`, then fails on the `sync_beat` signature.
 
 - [ ] **Step 3: Implement** — replace `sync.rs:55-105`:
 
@@ -1072,7 +1072,7 @@ pub async fn sync_beat(ctx: &Arc<Ctx>) {
 
   Delete `live_worktrees` and the local `struct Live`; change `sync_one`'s signature to `async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent)` — every field it reads (`live.volume`, `live.worktree` → `live.name`, `live.owner`, `live.owner_ref`) keeps its meaning, so only `live.worktree` is renamed to `live.name` throughout the body.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/sync.rs && git commit -m "Read the sync beat's worktrees from the shared parent listing"`
 
 ---
@@ -1096,8 +1096,8 @@ Detail finding 10, summary Medium. `snapshot::worktree_heads` (`:215` and `:231`
     async fn worktree_heads_selects_by_owner() {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![
-            Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/workspaces".into(), status: 200, body: list_of("Workspace", vec![]) },
-            Route { method: "GET", path: "/apis/kloudlite-git.io/v1alpha1/environments".into(), status: 200, body: list_of("Environment", vec![]) },
+            Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/workspaces".into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/environments".into(), status: 200, body: list_of("Environment", vec![]) },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
@@ -1110,7 +1110,7 @@ Detail finding 10, summary Medium. `snapshot::worktree_heads` (`:215` and `:231`
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin worktree_heads_selects_by_owner` fails with `workspaces: ` (an empty match — the request carries no `labelSelector`).
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin worktree_heads_selects_by_owner` fails with `workspaces: ` (an empty match — the request carries no `labelSelector`).
 
 - [ ] **Step 3: Implement** — in `snapshot.rs`, change the signature and both listings:
 
@@ -1124,7 +1124,7 @@ async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str, owner: &str) -> Result<std
     // cluster scan of both parent kinds each time. A volume's worktrees all belong to one owner,
     // and the owner comes from the snapshot list the caller already has. NOT node-scoped: a head
     // must stay protected while its worktree is claimed on another node mid-takeover.
-    let mine = ListParams::default().labels(&format!("{}={owner}", kloudlite_git_workspaces::k8s::OWNER_LABEL));
+    let mine = ListParams::default().labels(&format!("{}={owner}", kloudlite_workspaces::k8s::OWNER_LABEL));
     let prefix = format!("{volume}-");
     let mut heads = std::collections::HashSet::new();
     for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await?.items {
@@ -1139,7 +1139,7 @@ async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str, owner: &str) -> Result<std
     let heads = match worktree_heads(ctx, volume, &owner).await {
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/snapshot.rs && git commit -m "Scope retention's worktree head scan to the volume's owner"`
 
 ---
@@ -1154,8 +1154,8 @@ Detail finding 12 / Architecture #2, first seam. Pure move — the shared, kind-
 
 **Interfaces:** Produces `pub(crate) mod stop` exporting `StopPush`, `stop_name`, `stop_push`, `flush_timeout`. Consumes `Ctx`, `ReconcileErr`, `crd`, `crate::peer::pool_nodes` — all imported at the top of the new file. Consumed unchanged by `stop_workspace` (`:1767`) and `stop_environment` (`:2473`).
 
-- [ ] **Step 1: Write the failing test** — no new test: a pure move is verified by the EXISTING suite being unchanged. Record the baseline first: `cargo test -p kloudlite-git-agent-bin 2>&1 | tail -20 > /tmp/before.txt`.
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin` must pass at HEAD before the move (this is the baseline, not a red test); after creating the file and before adding the `mod` line it fails with `error[E0433]: failed to resolve: use of undeclared crate or module 'stop'`.
+- [ ] **Step 1: Write the failing test** — no new test: a pure move is verified by the EXISTING suite being unchanged. Record the baseline first: `cargo test -p kloudlite-agent-bin 2>&1 | tail -20 > /tmp/before.txt`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin` must pass at HEAD before the move (this is the baseline, not a red test); after creating the file and before adding the `mod` line it fails with `error[E0433]: failed to resolve: use of undeclared crate or module 'stop'`.
 - [ ] **Step 3: Implement** — `git mv`-equivalent by hand: create `bins/agent/src/controller/stop.rs` with this header, then move the eight items verbatim (no edits to their bodies beyond `pub(crate)` on the items `controller.rs` still calls):
 
 ```rust
@@ -1167,7 +1167,7 @@ Detail finding 12 / Architecture #2, first seam. Pure move — the shared, kind-
 
 use super::{Ctx, ReconcileErr};
 use kube::{Api, ResourceExt};
-use kloudlite_git_workspaces::crd;
+use kloudlite_workspaces::crd;
 use std::sync::Arc;
 use std::time::Duration;
 ```
@@ -1180,7 +1180,7 @@ pub(crate) mod stop;
 pub(crate) use stop::{flush_timeout, stop_name, stop_push, StopPush};
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin 2>&1 | tail -20 > /tmp/after.txt && diff /tmp/before.txt /tmp/after.txt` (must be empty), then `git diff --stat` (must show only `controller.rs` deletions and `controller/stop.rs` additions), then `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin 2>&1 | tail -20 > /tmp/after.txt && diff /tmp/before.txt /tmp/after.txt` (must be empty), then `git diff --stat` (must show only `controller.rs` deletions and `controller/stop.rs` additions), then `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 - [ ] **Step 5: Commit** — `git add bins/agent/src/controller.rs bins/agent/src/controller/stop.rs && git commit -m "Move the shared stop gate into controller/stop.rs"`
 
 ---
@@ -1193,7 +1193,7 @@ Second seam. Pure move.
 
 **Interfaces:** Produces `pub(crate) mod status` re-exported flat into `controller` so no call site changes: `pub(crate) use status::{conditions_eq, create_if_absent, delete_ignoring_404, ensure, forget_applied, patch_status, replace_status, settle, write_status, Outcome};`.
 
-- [ ] **Step 1: Write the failing test** — none; pure move. Baseline: `cargo test -p kloudlite-git-agent-bin 2>&1 | tail -20 > /tmp/before.txt`.
+- [ ] **Step 1: Write the failing test** — none; pure move. Baseline: `cargo test -p kloudlite-agent-bin 2>&1 | tail -20 > /tmp/before.txt`.
 - [ ] **Step 2: Run it, expect failure** — after creating the file and deleting the originals, before the `mod`/`use` lines: `error[E0425]: cannot find function 'settle' in this scope`.
 - [ ] **Step 3: Implement** — the new file's header:
 
@@ -1209,7 +1209,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Api, Resource, ResourceExt};
-use kloudlite_git_workspaces::crd;
+use kloudlite_workspaces::crd;
 use std::sync::Arc;
 ```
 
@@ -1232,7 +1232,7 @@ Third and fourth seams. Pure move.
 **Interfaces:** Produces `pub mod run` re-exported as `pub use run::{run, running_contains, wake_on_finish};` — `bins/agent/src/main.rs` calls `controller::run`, so the re-export keeps its path.
 
 - [ ] **Step 1: Write the failing test** — none; pure move. Baseline `/tmp/before.txt` as before.
-- [ ] **Step 2: Run it, expect failure** — `error[E0432]: unresolved import 'kloudlite_git_agent::controller::run'` from `main.rs` until the re-export lands.
+- [ ] **Step 2: Run it, expect failure** — `error[E0432]: unresolved import 'kloudlite_agent::controller::run'` from `main.rs` until the re-export lands.
 - [ ] **Step 3: Implement** — `run.rs`'s header:
 
 ```rust
@@ -1245,7 +1245,7 @@ use futures::StreamExt;
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::watcher;
 use kube::{Api, Resource, ResourceExt};
-use kloudlite_git_workspaces::crd;
+use kloudlite_workspaces::crd;
 use std::sync::Arc;
 use std::time::Duration;
 ```
@@ -1265,10 +1265,10 @@ Fifth seam. Pure move.
 
 `heal_labels` and `owner_ref_of_kind` move here because `resolve_volume` and both parent files call them; they are re-exported (`pub(crate)`) from `mod.rs`. Note `listing.rs` (Task 5) calls `controller::owner_ref_of_kind` — the re-export keeps that path.
 
-**Interfaces:** Produces `pub(crate) mod volume` and `pub(crate) use volume::{apply_volume, cleanup_volume, heal_labels, owner_ref_of_kind, reconcile_volume, resolve_volume, Resolved};` plus `pub use volume::apply_volume;` (the integration tests in `bins/agent/tests/reconcile.rs` call `kloudlite_git_agent::controller::apply_volume`).
+**Interfaces:** Produces `pub(crate) mod volume` and `pub(crate) use volume::{apply_volume, cleanup_volume, heal_labels, owner_ref_of_kind, reconcile_volume, resolve_volume, Resolved};` plus `pub use volume::apply_volume;` (the integration tests in `bins/agent/tests/reconcile.rs` call `kloudlite_agent::controller::apply_volume`).
 
 - [ ] **Step 1: Write the failing test** — none; pure move. Baseline `/tmp/before.txt`.
-- [ ] **Step 2: Run it, expect failure** — `error[E0425]: cannot find function 'apply_volume' in module 'kloudlite_git_agent::controller'` from `tests/reconcile.rs` until the re-export lands.
+- [ ] **Step 2: Run it, expect failure** — `error[E0425]: cannot find function 'apply_volume' in module 'kloudlite_agent::controller'` from `tests/reconcile.rs` until the re-export lands.
 - [ ] **Step 3: Implement** — header:
 
 ```rust
@@ -1281,8 +1281,8 @@ use super::{Ctx, Done, InFlight, Outcome, ReconcileErr, Work, RETRY, TICK};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use kloudlite_git_workspaces::crd::{self, Phase, VolumeSource};
-use kloudlite_git_workspaces::engine::Engine;
+use kloudlite_workspaces::crd::{self, Phase, VolumeSource};
+use kloudlite_workspaces::engine::Engine;
 use std::sync::Arc;
 ```
 
@@ -1315,9 +1315,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use kloudlite_git_workspaces::crd::{self, DesiredState, VolumeSource};
-use kloudlite_git_workspaces::k8s;
-use kloudlite_git_workspaces::model;
+use kloudlite_workspaces::crd::{self, DesiredState, VolumeSource};
+use kloudlite_workspaces::k8s;
+use kloudlite_workspaces::model;
 use std::sync::Arc;
 ```
 
@@ -1351,9 +1351,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use kloudlite_git_workspaces::crd::{self, DesiredState};
-use kloudlite_git_workspaces::k8s;
-use kloudlite_git_workspaces::model;
+use kloudlite_workspaces::crd::{self, DesiredState};
+use kloudlite_workspaces::k8s;
+use kloudlite_workspaces::model;
 use std::sync::Arc;
 ```
 
@@ -1371,7 +1371,7 @@ Detail finding 14, summary Lows. `Done::lineage_tip` is written `None` at its on
 **Interfaces:** Produces `pub struct Done { pub phase: Phase, pub restored_to: Option<String>, pub quota_unenforced: Option<String> }` — one field fewer. `bins/agent/tests/reconcile.rs` constructs `Done` with `..Done::default()`, so no test changes.
 
 - [ ] **Step 1: Write the failing test** — none: deleting a field the compiler proves unread is verified by the build. Confirm the premise first: `grep -rn 'lineage_tip\|WS_PEER_RECV_TIMEOUT_SECS' bins crates deploy` must return exactly the three lines named above.
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin` passes at HEAD; after deleting only the struct field it fails with `error[E0560]: struct 'Done' has no field named 'lineage_tip'` at the producer, which is the second edit.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin` passes at HEAD; after deleting only the struct field it fails with `error[E0560]: struct 'Done' has no field named 'lineage_tip'` at the producer, which is the second edit.
 - [ ] **Step 3: Implement** — delete `controller/mod.rs`'s `pub lineage_tip: Option<String>,` and `controller/volume.rs`'s `lineage_tip: None,`. In `peer.rs`, fix the `send_timeout` doc:
 
 ```rust
@@ -1380,7 +1380,7 @@ Detail finding 14, summary Lows. `Done::lineage_tip` is written `None` at its on
 /// no timeout knob of its own — the sender's is the only bound on a transfer.
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src && git commit -m "Delete the unread lineage tip and a doc reference to a variable that never existed"`
 
 ---
@@ -1406,7 +1406,7 @@ The lazy fix is the second option the review names: have `namespace_ready` verif
 async fn the_namespace_gate_asks_about_this_workspace_s_own_namespace() {
     let tmp = tempfile::tempdir().unwrap();
     let binding = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "OwnerBinding",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerBinding",
         "metadata": {"name": "r1-alice", "uid": "b-uid", "generation": 1},
         "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"},
         "status": {"observedGeneration": 1,
@@ -1414,17 +1414,17 @@ async fn the_namespace_gate_asks_about_this_workspace_s_own_namespace() {
                                    "message": "", "lastTransitionTime": "2000-01-01T00:00:00Z"}]},
     });
     let routes = vec![
-        kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/ownerbindings/r1-alice", binding),
-        kloudlite_git_workspaces::kube_test::not_found("/api/v1/namespaces/wt-alice-eng"),
+        kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings/r1-alice", binding),
+        kloudlite_workspaces::kube_test::not_found("/api/v1/namespaces/wt-alice-eng"),
     ];
     let (ctx, _rec) = ctx(tmp.path(), routes);
 
-    assert!(!kloudlite_git_agent::binding::namespace_ready(&ctx, "r1", "alice", "eng").await.unwrap(),
+    assert!(!kloudlite_agent::binding::namespace_ready(&ctx, "r1", "alice", "eng").await.unwrap(),
             "a True condition from another node must not pass a namespace this node has not made");
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin the_namespace_gate_asks_about` fails to compile (`this function takes 3 arguments but 4 were supplied`), and once the argument is added, on the assertion: the condition alone answers `true`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin the_namespace_gate_asks_about` fails to compile (`this function takes 3 arguments but 4 were supplied`), and once the argument is added, on the assertion: the condition alone answers `true`.
 
 - [ ] **Step 3: Implement** — replace `binding.rs:137-145`:
 
@@ -1449,7 +1449,7 @@ pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str, team: &s
 
   At the call site (ex-`controller.rs:1976`): `if !binding::namespace_ready(ctx, &w.spec.region, &w.spec.owner, &w.spec.team).await? {`.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/binding.rs bins/agent/src/controller bins/agent/tests/reconcile.rs && git commit -m "Gate a workspace on its own namespace existing, not on a cluster-wide condition"`
 
 ---
@@ -1470,14 +1470,14 @@ Detail finding 6, summary Low. `crates/workspaces/src/api.rs:1739`: `format!("{O
 #[test]
 fn the_owner_set_selector_drops_slugs_that_are_not_segments() {
     let owners = vec!["alice".to_string(), "bad,slug".to_string(), "ok-team".to_string(), "no)paren".to_string()];
-    let sel = kloudlite_git_workspaces::api::owner_set_selector(&owners);
+    let sel = kloudlite_workspaces::api::owner_set_selector(&owners);
     assert_eq!(sel, format!("{}=in (alice,ok-team)", ""), "only validated segments");
 }
 ```
 
   (Adjust the expected string to the exact `format!` the implementation below produces; the assertion that matters is that `bad,slug` and `no)paren` are absent.)
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces --test api_teams the_owner_set_selector` fails to compile: `error[E0425]: cannot find function 'owner_set_selector'`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-workspaces --test api_teams the_owner_set_selector` fails to compile: `error[E0425]: cannot find function 'owner_set_selector'`.
 
 - [ ] **Step 3: Implement** — in `crates/workspaces/src/api.rs`, above `live_parents`:
 
@@ -1490,14 +1490,14 @@ fn the_owner_set_selector_drops_slugs_that_are_not_segments() {
 /// and this one now does too.
 pub fn owner_set_selector(owners: &[String]) -> String {
     let safe: Vec<&str> =
-        owners.iter().filter(|o| kloudlite_git_storage::store::valid_owner(o)).map(String::as_str).collect();
+        owners.iter().filter(|o| kloudlite_storage::store::valid_owner(o)).map(String::as_str).collect();
     format!("{OWNER_LABEL} in ({})", safe.join(","))
 }
 ```
 
   and at `:1739`: `let lp = ListParams::default().labels(&owner_set_selector(owners));`
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-workspaces && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-workspaces && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add crates/workspaces/src/api.rs crates/workspaces/tests/api_teams.rs && git commit -m "Build the owner-set label selector from validated slugs only"`
 
 ---
@@ -1550,7 +1550,7 @@ Test gap 1 — the review's "single most valuable untested invariant in the crat
             rule["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
             GATEWAY_NAMESPACE
         );
-        assert_eq!(rule["from"][0]["podSelector"]["matchLabels"]["app"], "kloudlite-git-gateway");
+        assert_eq!(rule["from"][0]["podSelector"]["matchLabels"]["app"], "kloudlite-gateway");
     }
 
     /// `169.254.0.0/16` is the one that matters: on Azure `169.254.169.254` hands out the NODE's
@@ -1571,9 +1571,9 @@ Test gap 1 — the review's "single most valuable untested invariant in the crat
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-workspaces every_grant_ands_its` — these pass at HEAD (they pin correct behaviour). Prove they bite: temporarily split `attach_ingress`'s single `from` peer into two elements and re-run; expected `attach_ingress: two peers is an OR, not an AND`. Revert before Step 3.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-workspaces every_grant_ands_its` — these pass at HEAD (they pin correct behaviour). Prove they bite: temporarily split `attach_ingress`'s single `from` peer into two elements and re-run; expected `attach_ingress: two peers is an OR, not an AND`. Revert before Step 3.
 - [ ] **Step 3: Implement** — no production change; this task is the assertion. Confirm the deliberate break in Step 2 was reverted (`git diff crates/workspaces/src/k8s.rs` shows only the test additions).
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-workspaces && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-workspaces && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add crates/workspaces/src/k8s.rs && git commit -m "Assert every network grant ANDs its selectors in one peer"`
 
 ---
@@ -1603,11 +1603,11 @@ fn rewriting_a_resolv_conf_keeps_the_same_inode() {
         return;
     }
 
-    kloudlite_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
-    let path = kloudlite_git_workspaces::k8s::attach_file(&pool, "ws-1");
+    kloudlite_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
+    let path = kloudlite_workspaces::k8s::attach_file(&pool, "ws-1");
     let before = std::fs::metadata(&path).unwrap().ino();
 
-    kloudlite_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", Some("env-abc")).unwrap();
+    kloudlite_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", Some("env-abc")).unwrap();
     let after = std::fs::metadata(&path).unwrap();
     assert_eq!(before, after.ino(), "the file was replaced, not truncated: every running pod now reads the old inode");
     assert!(std::fs::read_to_string(&path).unwrap().contains("env-abc"), "and the new content did land");
@@ -1623,17 +1623,17 @@ fn a_directory_left_by_the_old_subpath_mount_is_replaced_by_the_file() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let pool = tmp.path().to_string_lossy().to_string();
-    let path = kloudlite_git_workspaces::k8s::attach_file(&pool, "ws-1");
+    let path = kloudlite_workspaces::k8s::attach_file(&pool, "ws-1");
     std::fs::create_dir_all(&path).unwrap();
 
-    kloudlite_git_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
+    kloudlite_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
     assert!(std::fs::metadata(&path).unwrap().is_file());
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin rewriting_a_resolv_conf` fails with `error[E0603]: function 'write_resolv_conf' is private`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin rewriting_a_resolv_conf` fails with `error[E0603]: function 'write_resolv_conf' is private`.
 - [ ] **Step 3: Implement** — in `bins/agent/src/controller/workspace.rs`, change `pub(crate) fn write_resolv_conf` to `pub fn write_resolv_conf` and add `pub use workspace::write_resolv_conf;` to `controller/mod.rs`'s re-export list, with the comment: `// pub so the inode invariant is assertable from the integration suite — see reconcile.rs.`
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/controller bins/agent/tests/reconcile.rs && git commit -m "Assert the attach resolv.conf is rewritten in place, never replaced"`
 
 ---
@@ -1688,9 +1688,9 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin --lib a_traversing_folder_makes_no_directory` — passes at HEAD (`mkdir_env_mounts` already calls `validate_mount`). Prove it bites by commenting out the `model::validate_mount(m)?;` line: expected `accepted "../../etc"`. Restore it before Step 3.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin --lib a_traversing_folder_makes_no_directory` — passes at HEAD (`mkdir_env_mounts` already calls `validate_mount`). Prove it bites by commenting out the `model::validate_mount(m)?;` line: expected `accepted "../../etc"`. Restore it before Step 3.
 - [ ] **Step 3: Implement** — no production change; confirm the deliberate break was reverted (`git diff bins/agent/src/controller/environment.rs` shows only the test module).
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/controller/environment.rs && git commit -m "Assert the controller refuses a traversing environment mount folder"`
 
 ---
@@ -1747,9 +1747,9 @@ Test gap 5. `janitor.rs:287` deletes worktree subvolumes on any non-owner node; 
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin --lib an_unowned_volume_keeps_every_worktree` — passes at HEAD. Prove it bites by deleting the `owner.is_empty() ||` half of the guard at `janitor.rs:288`: expected `an unowned volume's worktree is not stale`. Restore before Step 3.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin --lib an_unowned_volume_keeps_every_worktree` — passes at HEAD. Prove it bites by deleting the `owner.is_empty() ||` half of the guard at `janitor.rs:288`: expected `an unowned volume's worktree is not stale`. Restore before Step 3.
 - [ ] **Step 3: Implement** — no production change; confirm the deliberate break was reverted.
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/janitor.rs && git commit -m "Assert stale worktrees are dropped only on a node that does not own the volume"`
 
 ---
@@ -1767,7 +1767,7 @@ Test gap 6. `snapshot.rs:283-296` deletes "every other transient of this worktre
 ```rust
     fn snap(name: &str, volume: &str, worktree: &str, transient: bool, parent: &str) -> serde_json::Value {
         serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": name, "uid": format!("{name}-uid")},
             "spec": {"volume": volume, "owner": "alice", "worktree": worktree,
                      "parent": parent, "pinned": false, "transient": transient},
@@ -1789,7 +1789,7 @@ Test gap 6. `snapshot.rs:283-296` deletes "every other transient of this worktre
         ];
         let routes = vec![Route {
             method: "GET",
-            path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(),
+            path: "/apis/kloudlite.io/v1alpha1/snapshots".into(),
             status: 200,
             body: list_of("Snapshot", items),
         }];
@@ -1798,7 +1798,7 @@ Test gap 6. `snapshot.rs:283-296` deletes "every other transient of this worktre
         retain(&ctx, "v1", "v1-newsync").await;
 
         let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(deleted, vec!["DELETE /apis/kloudlite-git.io/v1alpha1/snapshots/v1-oldsync".to_string()], "{deleted:?}");
+        assert_eq!(deleted, vec!["DELETE /apis/kloudlite.io/v1alpha1/snapshots/v1-oldsync".to_string()], "{deleted:?}");
     }
 
     /// Keep-bias: a snapshot list this pass could not make deletes nothing at all.
@@ -1807,7 +1807,7 @@ Test gap 6. `snapshot.rs:283-296` deletes "every other transient of this worktre
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![Route {
             method: "GET",
-            path: "/apis/kloudlite-git.io/v1alpha1/snapshots".into(),
+            path: "/apis/kloudlite.io/v1alpha1/snapshots".into(),
             status: 500,
             body: serde_json::json!({}),
         }];
@@ -1817,9 +1817,9 @@ Test gap 6. `snapshot.rs:283-296` deletes "every other transient of this worktre
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-agent-bin --lib the_transient_arm_spares` — passes at HEAD. Prove it bites by removing `&& s.spec.worktree == worktree` from `snapshot.rs:293`: expected the `deleted` vector to gain `v1-otherws`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-agent-bin --lib the_transient_arm_spares` — passes at HEAD. Prove it bites by removing `&& s.spec.worktree == worktree` from `snapshot.rs:293`: expected the `deleted` vector to gain `v1-otherws`.
 - [ ] **Step 3: Implement** — no production change; confirm the deliberate break was reverted.
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent-bin && cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] **Step 5: Commit** — `git add bins/agent/src/snapshot.rs && git commit -m "Assert retention's sync-point arm spares commits and other worktrees"`
 
 ---

@@ -1,4 +1,4 @@
-# Security audit — kloudlite-git
+# Security audit — kloudlite
 
 Scope: every HTTP surface (server public+peer listeners, `/v1` on `bins/api`, `/v2` registry, gateway `/tunnel`, web app), JWT (`crates/core/src/jwt.rs`), credential storage, secrets in logs/argv, path/digest/name validation, SSRF, body limits, transport, k8s RBAC/pod security/NetworkPolicy, workspace sshd/prelude, Cloudflare origin lock, Cosmos/Mongo, Cargo/bun deps, CI. Code was read, not comments; the four highest-ranked code findings were re-verified by hand. No files modified.
 
@@ -16,7 +16,7 @@ Effort: S (code) / M (migration)
 
 ### [S-2] Cloudflare "Flexible" SSL: every credential crosses edge→origin in cleartext
 Severity: high
-Location: `deploy/kloudlite-git-web.yaml:127-141`, `deploy/kloudlite-git.yaml:914-918,935-937`, `deploy/k3s/gateway.yaml:5-6`
+Location: `deploy/kloudlite-web.yaml:127-141`, `deploy/kloudlite.yaml:914-918,935-937`, `deploy/k3s/gateway.yaml:5-6`
 What: All three public hostnames (app, registry, workspace gateway) terminate TLS at Cloudflare and reach the origin over plain HTTP (`ssl-redirect: "false"`, gateway on hostPort 80). The registry ingress already has a cert-manager cert that Cloudflare never uses. `deploy/k3s/README.md:111-113` documents the Full-strict + Origin CA path for the gateway; it is not applied and AKS has no equivalent.
 Why it matters: Git Basic-auth passwords, registry bearer tokens, Auth.js session cookies, the region agent token (`/vol-agent`) and gateway ssh-session JWTs are all observable on the edge→Azure LB hop. The origin lock limits who can connect, not who can observe.
 Fix: Zone SSL mode → Full (strict); Cloudflare Origin CA cert in the two AKS ingress `tls:` blocks (registry's secret slot exists) with `ssl-redirect: "true"`; create `gateway-tls` and set `GATEWAY_TLS_DIR`.
@@ -32,9 +32,9 @@ Effort: M
 
 ### [S-4] Cloudflare origin lock is a hand-run, unversioned `kubectl patch` with no drift check
 Severity: high
-Location: `deploy/ingress-nginx-origin-lock.md:10-11`, `deploy/kloudlite-git.yaml:864-868`, `deploy/ingress-nginx-config.yaml:19-21`
+Location: `deploy/ingress-nginx-origin-lock.md:10-11`, `deploy/kloudlite.yaml:864-868`, `deploy/ingress-nginx-config.yaml:19-21`
 What: The only thing stopping direct-to-LB traffic is `spec.loadBalancerSourceRanges` patched by hand onto `svc/ingress-nginx-controller`, which is not in the repo. Nothing asserts it is set.
-Why it matters: Without it, WAF/rate limits are bypassed and `X-Real-IP` becomes attacker-chosen — which is what the registry rate-limit whitelist (`kloudlite-git.yaml:932`) and the `/vol-agent` region source binding (`bins/server/src/vol_agent.rs:110`) trust. A Helm upgrade or reinstall of ingress-nginx silently drops it.
+Why it matters: Without it, WAF/rate limits are bypassed and `X-Real-IP` becomes attacker-chosen — which is what the registry rate-limit whitelist (`kloudlite.yaml:932`) and the `/vol-agent` region source binding (`bins/server/src/vol_agent.rs:110`) trust. A Helm upgrade or reinstall of ingress-nginx silently drops it.
 Fix: Commit `deploy/ingress-nginx-service.yaml` (or a Helm values file) carrying `loadBalancerSourceRanges` generated from `cloudflare-ips-v4.txt`; add one line to the deploy notes: `kubectl -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.spec.loadBalancerSourceRanges}'` must be non-empty before a roll.
 Effort: S
 
@@ -65,9 +65,9 @@ Effort: S
 ### [S-8] Agent DaemonSet SA can rewrite Workspace/Environment spec and read any Secret cluster-wide
 Severity: medium
 Location: `deploy/k3s/agent-rbac.yaml:34-36,79-81,92-101`
-What: `patch` on the main `workspaces`/`environments` resources (for `heal_labels`), not just `/status`; `secrets: get, create` cluster-wide with no `resourceNames`; `create rolebindings` anywhere and `bind` on `kloudlite-git-api-secrets`. The yaml's own comments (`:10-11,31-33`) acknowledge both.
-Why it matters: The pod is privileged so a compromise owns its node regardless — but with this RBAC one compromised node can `get secret kloudlite-git-jwt` (gateway signing key) and the api's credentials, i.e. every node and every tenant. CLAUDE.md's "RBAC — not convention — stops a controller editing desired state" is not currently true.
-Fix: (a) `ValidatingAdmissionPolicy` rejecting any patch from `kube-system:kloudlite-git-agent` that touches anything outside `metadata.labels`/`metadata.finalizers` (named in the comment at `:31-33`). (b) VAP restricting `get secrets` to names with prefix `ws-ssh-`, or generate host keys inside the workspace namespace under the per-namespace Role that already exists.
+What: `patch` on the main `workspaces`/`environments` resources (for `heal_labels`), not just `/status`; `secrets: get, create` cluster-wide with no `resourceNames`; `create rolebindings` anywhere and `bind` on `kloudlite-api-secrets`. The yaml's own comments (`:10-11,31-33`) acknowledge both.
+Why it matters: The pod is privileged so a compromise owns its node regardless — but with this RBAC one compromised node can `get secret kloudlite-jwt` (gateway signing key) and the api's credentials, i.e. every node and every tenant. CLAUDE.md's "RBAC — not convention — stops a controller editing desired state" is not currently true.
+Fix: (a) `ValidatingAdmissionPolicy` rejecting any patch from `kube-system:kloudlite-agent` that touches anything outside `metadata.labels`/`metadata.finalizers` (named in the comment at `:31-33`). (b) VAP restricting `get secrets` to names with prefix `ws-ssh-`, or generate host keys inside the workspace namespace under the per-namespace Role that already exists.
 Effort: M
 
 ### [S-9] `region` is free text on create; drives object names and the gateway URL
@@ -88,23 +88,23 @@ Effort: M
 
 ### [S-11] AKS has no NetworkPolicy enforcement; the peer listener is protected by one static secret shared across four tiers
 Severity: medium
-Location: `deploy/kloudlite-git.yaml:113-114,363-364,578-579`; `crates/core/src/peer.rs:11-13`
-What: The manifest states `networkPolicy: none`; `kloudlite-git-peers-only` is decorative. Peer ports 8081/8082 (ref moves, merge claims, ownership map, unthrottled `/api/`) are reachable from every pod in the cluster, gated by `KLOUDLITE_GIT_PEER_SECRET`, which lives in web, api, worker and server pods.
+Location: `deploy/kloudlite.yaml:113-114,363-364,578-579`; `crates/core/src/peer.rs:11-13`
+What: The manifest states `networkPolicy: none`; `kloudlite-peers-only` is decorative. Peer ports 8081/8082 (ref moves, merge claims, ownership map, unthrottled `/api/`) are reachable from every pod in the cluster, gated by `KLOUDLITE_PEER_SECRET`, which lives in web, api, worker and server pods.
 Why it matters: RCE in the Next.js tier (widest surface) is one `curl` from moving a ref on any repository; rotation means restarting every tier.
-Fix: Enable network policy on the AKS cluster (`az aks update --network-policy azure` / Cilium) so the existing policy takes effect; add default-deny in the `kloudlite-git` namespace.
+Fix: Enable network policy on the AKS cluster (`az aks update --network-policy azure` / Cilium) so the existing policy takes effect; add default-deny in the `kloudlite` namespace.
 Effort: M
 
 ### [S-12] `client_ip` falls back to the client-controlled first `X-Forwarded-For` hop
 Severity: medium
 Location: `bins/server/src/vol_agent.rs:246-252`, used by `authorized_for` at `:110`; test at `:323` asserts the forgeable behaviour
 What: Prefers `X-Real-IP` (nginx-set) but falls back to the first XFF element, which Cloudflare and ingress-nginx (`use-forwarded-headers: "true"`) both append to, never replace.
-Why it matters: Dead code on the ingress path today, but any path reaching the public listener without nginx (NodePort, in-cluster Service, second ingress, S-4 lapsing) makes `KLOUDLITE_GIT_AGENT_SOURCES` a one-header bypass for a leaked region token.
+Why it matters: Dead code on the ingress path today, but any path reaching the public listener without nginx (NodePort, in-cluster Service, second ingress, S-4 lapsing) makes `KLOUDLITE_AGENT_SOURCES` a one-header bypass for a leaked region token.
 Fix: Delete the `.or_else(x-forwarded-for ..)` branch; `None` already fails closed for bound regions (`:256-258`). Flip the test.
 Effort: S
 
 ### [S-13] Web app sends no security response headers
 Severity: medium
-Location: `web/apps/web/next.config.ts:3-21` (no `headers()`), `deploy/kloudlite-git-web.yaml:140-159`
+Location: `web/apps/web/next.config.ts:3-21` (no `headers()`), `deploy/kloudlite-web.yaml:140-159`
 What: No CSP, no `X-Frame-Options`/`frame-ancestors`, no `X-Content-Type-Options`, no `Referrer-Policy`, no HSTS; `X-Powered-By: Next.js` emitted. Confirmed live against a dev build.
 Why it matters: Passkey-approve, CLI-approve and delete buttons are frameable (clickjacking); a future XSS has no CSP backstop; HSTS depends entirely on Cloudflare config nothing in the repo asserts.
 Fix: `headers()` in `next.config.ts` returning `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `Content-Security-Policy: frame-ancestors 'none'; object-src 'none'; base-uri 'self'`; `poweredByHeader: false`.
@@ -122,7 +122,7 @@ Effort: S
 Severity: low
 Location: `crates/workspaces/src/upstream.rs:58,86,96,122`; callers `crates/workspaces/src/api.rs:1783,1800,1813,1845`
 What: axum percent-decodes `Path`; reqwest/url resolves `..`, so `snapshot = "..%2F..%2F<x>%2Fvolumedelete"` turns `DELETE .../snapshotdelete/{snapshot}` into `DELETE /api/{owner}/<x>/volumedelete`. `OWNER_HEADER` is the caller's verified owner, so no cross-tenant reach, but every peer route becomes callable through `/v1` with a surprise handler.
-Fix: In `volume_owner`, `delete_snapshot`, `find_snapshot` refuse anything failing `kloudlite_git_storage::store::valid_segment` before calling `Upstream`.
+Fix: In `volume_owner`, `delete_snapshot`, `find_snapshot` refuse anything failing `kloudlite_storage::store::valid_segment` before calling `Upstream`.
 Effort: S
 
 ### [S-16] Environment `name`, service names, env-var keys and ports are unvalidated
@@ -226,20 +226,20 @@ Effort: S
 ### [S-30] Control-plane backup bundles cluster CA + node token under fixed names with a long-lived SAS
 Severity: low
 Location: `deploy/k3s/backup-controlplane.sh:29-36,45,60`
-What: `identity.tgz` (server CA, SA signing key, join token) uploaded hourly to fixed blob names; the SAS at `/etc/kloudlite-git/k3s-backup.sas` and restore docs put it in argv.
+What: `identity.tgz` (server CA, SA signing key, join token) uploaded hourly to fixed blob names; the SAS at `/etc/kloudlite/k3s-backup.sas` and restore docs put it in argv.
 Fix: SAS with `create`+`write` only; enable blob versioning/soft-delete; pass the SAS via `curl -K`.
 Effort: S
 
 ### [S-31] Default ServiceAccount tokens automounted into AKS pods that never use the AKS API
 Severity: low
-Location: `deploy/kloudlite-git.yaml:34,285,629,779`; `deploy/kloudlite-git-web.yaml:24`
+Location: `deploy/kloudlite.yaml:34,285,629,779`; `deploy/kloudlite-web.yaml:24`
 Fix: `automountServiceAccountToken: false` on each pod spec (tenant pods already do, `k8s.rs:700`).
 Effort: S
 
 ### [S-32] Web pod lacks pod-level `runAsNonRoot`
 Severity: low
-Location: `deploy/kloudlite-git-web.yaml:24-31,112-115`
-Fix: Copy the `securityContext` block from `kloudlite-git.yaml:630-634`.
+Location: `deploy/kloudlite-web.yaml:24-31,112-115`
+Fix: Copy the `securityContext` block from `kloudlite.yaml:630-634`.
 Effort: S
 
 ### [S-33] Registry bearer and cross-node auth cache outlive token revocation
@@ -284,7 +284,7 @@ Effort: S
 
 ### [S-39] Undocumented IP in registry rate-limit whitelist
 Severity: low
-Location: `deploy/kloudlite-git.yaml:932` (`4.224.42.0/32`)
+Location: `deploy/kloudlite.yaml:932` (`4.224.42.0/32`)
 Fix: Comment what it is or remove.
 Effort: S
 
@@ -299,11 +299,11 @@ Effort: S
 ## Verified good (do not re-audit)
 
 **JWT / peer auth**
-- HS256 pinned on every verify path; `alg: none` refused (tested); secret ≥ 32 bytes enforced; `typ` separation between `session`/`registry`/`cli`/`ssh-session` enforced by rule, with tests in both directions. Fleet mode refuses to boot without `KLOUDLITE_GIT_JWT_SECRET` (`crates/core/src/err.rs:19`).
+- HS256 pinned on every verify path; `alg: none` refused (tested); secret ≥ 32 bytes enforced; `typ` separation between `session`/`registry`/`cli`/`ssh-session` enforced by rule, with tests in both directions. Fleet mode refuses to boot without `KLOUDLITE_JWT_SECRET` (`crates/core/src/err.rs:19`).
 - CLI tokens: `jti` revocation enforced on `/v1` (`api.rs:223-233`); a missing directory refuses CLI tokens rather than accepting them unrevokable. Admin routes gate on the email allowlist and accept session tokens only.
 - Usernames are immutable once claimed (`directory/mod.rs:507-535`) and share one `handles` collection with team slugs, so a token's `username` claim cannot go stale or be re-taken, and a team cannot shadow a user.
 - Peer secret: `secret_eq` constant-time at all three check sites (`route.rs:537`, `git/proxy.rs:56`, `api/src/lib.rs:369`); empty secret never authenticates; api refuses to boot with an empty secret.
-- Public listener 404s `/api/` and strips `x-kloudlite-git-{hops,owner,peer}` (`trust_nobody`); hops bounded by `MAX_HOPS`.
+- Public listener 404s `/api/` and strips `x-kloudlite-{hops,owner,peer}` (`trust_nobody`); hops bounded by `MAX_HOPS`.
 
 **Routing / names / digests**
 - Routing before auth on both listeners; `every_browse_route_is_routable`; nonexistent repos are never claimed, so anonymous scans cannot write the ownership map.
@@ -323,7 +323,7 @@ Effort: S
 **Workspaces / k8s**
 - Every `/v1` workspace/env/volume route: `caller()` then `spec.owner` comparison (never labels); refusals are 404; listing selectors built only from the verified caller or `may_act_on`-confirmed teams; `heal_labels` re-stamps from spec.
 - Gateway: token binds `ws`+`region`+`jti`; target resolved from `status.podRef` → pod IP, port fixed 22; frame sizes capped; token never logged; SA is `get` only.
-- Tenant pods: no hostPath, `privileged: false`, `allowPrivilegeEscalation: false`, drop ALL, `RuntimeDefault` seccomp, `automountServiceAccountToken: false`, PSA `baseline` enforced, ephemeral-storage limits, `LimitRange`. Default-deny both directions; egress excludes RFC1918 + `169.254/16` (blocks k8s API and metadata); sshd ingress only from `kube-system` + `app=kloudlite-git-gateway` in a single AND'd peer.
+- Tenant pods: no hostPath, `privileged: false`, `allowPrivilegeEscalation: false`, drop ALL, `RuntimeDefault` seccomp, `automountServiceAccountToken: false`, PSA `baseline` enforced, ephemeral-storage limits, `LimitRange`. Default-deny both directions; egress excludes RFC1918 + `169.254/16` (blocks k8s API and metadata); sshd ingress only from `kube-system` + `app=kloudlite-gateway` in a single AND'd peer.
 - sshd: `PermitRootLogin no`, `AllowUsers kl`, `PasswordAuthentication no`; host key generated once, stored only in a per-workspace Secret, pinned by the CLI. Git seed: owner/name re-validated, branch refuses `-`/`..`, argv via env + `--`, key mounted RO, no copy on disk.
 - All `btrfs`/`mount`/`losetup`/`nix`/`ssh-keygen` calls are argv, never shell; volume ids are server-minted hex; Nix attribute grammar validated twice; `validate_mount` enforced at API, StatefulSet build and before `create_dir_all`.
 - api SA RBAC: spec verbs only, no `/status`; `escalate`/`impersonate`/wildcards absent; the one `bind` is `resourceNames`-scoped.

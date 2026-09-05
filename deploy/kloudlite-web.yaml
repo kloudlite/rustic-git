@@ -7,20 +7,20 @@
 # It is NOT exposed publicly here. Two reasons, both worth clearing before adding an
 # Ingress: no OAuth provider is configured yet (nothing can sign in), and the browse
 # API it will read from is itself still ClusterIP pending the Cloudflare restriction
-# noted in kloudlite-git.yaml. Reach it with:
-#   kubectl -n kloudlite-git port-forward svc/kloudlite-git-web 3000:80
+# noted in kloudlite.yaml. Reach it with:
+#   kubectl -n kloudlite port-forward svc/kloudlite-web 3000:80
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kloudlite-git-web
-  namespace: kloudlite-git
+  name: kloudlite-web
+  namespace: kloudlite
 spec:
   replicas: 2
   selector:
-    matchLabels: { app: kloudlite-git-web }
+    matchLabels: { app: kloudlite-web }
   template:
     metadata:
-      labels: { app: kloudlite-git-web }
+      labels: { app: kloudlite-web }
       annotations:
         # Scraped on the container port directly, which is also the only way /api/metrics
         # answers: the handler refuses anything carrying the ingress's x-forwarded-* headers
@@ -33,7 +33,7 @@ spec:
       # No imagePullSecrets: the package is public, and ghcr-secret's token is not
       # scoped to it — supplying a credential that is refused makes the pull 403
       # rather than falling back to anonymous. Add one back only alongside a token
-      # that can actually read ghcr.io/kloudlite/kloudlite-git-web.
+      # that can actually read ghcr.io/kloudlite/kloudlite-web.
       #
       # The pod never talks to the API server; a projected token is a credential with no user.
       automountServiceAccountToken: false
@@ -50,11 +50,11 @@ spec:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:
-                labelSelector: { matchLabels: { app: kloudlite-git-web } }
+                labelSelector: { matchLabels: { app: kloudlite-web } }
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: web
-          image: ghcr.io/kloudlite/kloudlite-git-web:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:2296b0b31ad8c8dd01495903be03dc17b4b676fcc47666007cc9a1aec8c60c3a
+          image: ghcr.io/kloudlite/kloudlite-web:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:2296b0b31ad8c8dd01495903be03dc17b4b676fcc47666007cc9a1aec8c60c3a
           ports:
             - { name: http, containerPort: 3000 }
           env:
@@ -63,7 +63,7 @@ spec:
             - name: NODE_OPTIONS
               value: "--max-old-space-size=384"
             - name: AUTH_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-git-web, key: auth-secret } }
+              valueFrom: { secretKeyRef: { name: kloudlite-web, key: auth-secret } }
             # Auth.js builds provider callback URLs from this; it must match the address
             # the browser actually used, or the OAuth round trip returns to the wrong host.
             - name: AUTH_URL
@@ -80,53 +80,53 @@ spec:
             # HTTPS is served by the ingress, so this must be a hostname whose
             # DNS lands here. Becomes kloudlite.io once that name points at this
             # cluster — today it resolves to a different origin and 404s.
-            - name: KLOUDLITE_GIT_CLONE_HOST
+            - name: KLOUDLITE_CLONE_HOST
               value: dev.kloudlite.io
             # The registry is a different hostname from the app: docker pull lines on the
             # Container Images pages must name it, while clone URLs keep the app's host.
-            - name: KLOUDLITE_GIT_REGISTRY_HOST
+            - name: KLOUDLITE_REGISTRY_HOST
               value: cr.khost.dev
             # SSH cannot go through Cloudflare's proxy, so it has its own name,
             # DNS-only, straight at the git load balancer.
-            - name: KLOUDLITE_GIT_SSH_HOST
+            - name: KLOUDLITE_SSH_HOST
               value: git.khost.dev
-            - name: KLOUDLITE_GIT_SSH_PORT
+            - name: KLOUDLITE_SSH_PORT
               value: "22"
-            - name: KLOUDLITE_GIT_API_URL
-              value: http://kloudlite-git-api
+            - name: KLOUDLITE_API_URL
+              value: http://kloudlite-api
             # The admin surface (`/admin`) is a separate process on a separate host — never the
             # same URL as above, or an admin page would silently reach ordinary `/v1` instead.
-            - name: KLOUDLITE_GIT_ADMIN_API_URL
-              value: http://kloudlite-git-admin
-            - name: KLOUDLITE_GIT_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
+            - name: KLOUDLITE_ADMIN_API_URL
+              value: http://kloudlite-admin
+            - name: KLOUDLITE_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-peer, key: secret } }
             # The "Open in HyperDX" links on /superadmin. Same value as the admin Deployment's —
             # they are two readers of one console, and a mismatch sends half the links elsewhere.
             # Unset means no link rather than a dead one.
-            - name: KLOUDLITE_GIT_HYPERDX_URL
+            - name: KLOUDLITE_HYPERDX_URL
               value: https://hyperdx-dev.kloudlite.io
             # Team invitations go out through Resend. Both optional: unset, the invite is still
             # created and the inviter is shown the link to pass on by hand, rather than the app
             # pretending an email went out. `from` must be on a domain verified in Resend.
             - name: RESEND_API_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-git-mail, key: resend-api-key, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-mail, key: resend-api-key, optional: true } }
             - name: RESEND_FROM
-              valueFrom: { secretKeyRef: { name: kloudlite-git-mail, key: from, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-mail, key: from, optional: true } }
             # Email + password sign-in exists only while both of these are set.
             - name: AUTH_ALLOWED_EMAILS
-              valueFrom: { secretKeyRef: { name: kloudlite-git-web, key: allowed-emails, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-web, key: allowed-emails, optional: true } }
             - name: AUTH_SHARED_PASSWORD
-              valueFrom: { secretKeyRef: { name: kloudlite-git-web, key: shared-password, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-web, key: shared-password, optional: true } }
             # Providers are registered only when both halves are present, so with these
             # unset the sign-in page simply offers none rather than erroring.
             - name: AUTH_GITHUB_ID
-              valueFrom: { secretKeyRef: { name: kloudlite-git-web, key: github-id, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-web, key: github-id, optional: true } }
             - name: AUTH_GITHUB_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-git-web, key: github-secret, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-web, key: github-secret, optional: true } }
             - name: AUTH_GOOGLE_ID
-              valueFrom: { secretKeyRef: { name: kloudlite-git-web, key: google-id, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-web, key: google-id, optional: true } }
             - name: AUTH_GOOGLE_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-git-web, key: google-secret, optional: true } }
+              valueFrom: { secretKeyRef: { name: kloudlite-web, key: google-secret, optional: true } }
           readinessProbe:
             httpGet: { path: /api/health, port: http }
             periodSeconds: 10
@@ -153,20 +153,20 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: kloudlite-git-web
-  namespace: kloudlite-git
+  name: kloudlite-web
+  namespace: kloudlite
 spec:
   minAvailable: 1
   selector:
-    matchLabels: { app: kloudlite-git-web }
+    matchLabels: { app: kloudlite-web }
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: kloudlite-git-web
-  namespace: kloudlite-git
+  name: kloudlite-web
+  namespace: kloudlite
 spec:
-  selector: { app: kloudlite-git-web }
+  selector: { app: kloudlite-web }
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
@@ -181,8 +181,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: kloudlite-git-web
-  namespace: kloudlite-git
+  name: kloudlite-web
+  namespace: kloudlite
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
     # Git paths are matched as regexes so they can be told apart from app routes.
@@ -218,7 +218,7 @@ spec:
             pathType: ImplementationSpecific
             backend:
               service:
-                name: kloudlite-git-http
+                name: kloudlite-http
                 port:
                   number: 80
           # `/v1/...` is the api server's own surface, and the CLI talks to it directly —
@@ -227,18 +227,18 @@ spec:
           # The rate-limit annotations above are ingress-wide and cover this path too.
           #
           # Only the three prefixes the CLI actually calls: the REST of `/v1` is peer-only —
-          # routes authenticated with KLOUDLITE_GIT_PEER_SECRET, which the Next.js server holds and
+          # routes authenticated with KLOUDLITE_PEER_SECRET, which the Next.js server holds and
           # the internet must not be able to reach. `/v1/(.*)` published all of them.
           - path: /v1/(cli|workspaces|keys)(/.*)?$
             pathType: ImplementationSpecific
             backend:
               service:
-                name: kloudlite-git-api
+                name: kloudlite-api
                 port:
                   number: 80
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: kloudlite-git-web
+                name: kloudlite-web
                 port: { name: http }

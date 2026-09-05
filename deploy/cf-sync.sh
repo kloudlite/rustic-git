@@ -83,7 +83,7 @@ else
 cf-sync: DRIFT — the files above were rewritten. Commit them, then re-apply the copies that live
 outside git (each is a hand step, on purpose — this script touches no cluster):
   kubectl apply --server-side --force-conflicts -f $SVC -f $CM
-  az network nsg rule update -g kloudlite-git-k3s --nsg-name k3s-nsg -n gateway-cloudflare \\
+  az network nsg rule update -g kloudlite-k3s --nsg-name k3s-nsg -n gateway-cloudflare \\
     --source-address-prefixes ${cidrs[*]}
   CF_CIDRS='$joined' on each pool node via harden-node.sh (deploy/k3s/README.md, Gateway step 6)
 EOF

@@ -4,7 +4,7 @@
 //! keyed on the probe's own coordinates, so a lost PUT is repaired by the next one and there is
 //! no partial state to reconcile on either side.
 
-use kloudlite_git_workspaces::history::slo::{RunReport, RunState};
+use kloudlite_workspaces::history::slo::{RunReport, RunState};
 
 use crate::ctx::Ctx;
 

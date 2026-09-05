@@ -11,7 +11,7 @@
 # ServiceAccount does, but this refuses a future bug in the pod builders too, not just today's
 # caller).
 #
-# The `namespaceSelector` scopes this to namespaces carrying `kloudlite-git.io/kind`
+# The `namespaceSelector` scopes this to namespaces carrying `kloudlite.io/kind`
 # (`workspace`/`environment`) — a VIEW label, same as everywhere else in this repo, selecting scope
 # here rather than authorizing anything. If a namespace ever lacked the label this policy would
 # simply not apply to it — but the same code path (`k8s::namespace`, server-side applied on every
@@ -20,15 +20,15 @@
 # `hostPath` by PSA. The label is not the fence; PSA-or-this-policy is.
 #
 # What this does NOT match: `kube-system` (the agent's own DaemonSet — privileged, hostPath, by
-# design) and `kloudlite-git-system` (the gateway, `hostPort` on the node — see `gateway.yaml`).
-# Neither carries `kloudlite-git.io/kind`, so the namespaceSelector excludes them by construction.
+# design) and `kloudlite-system` (the gateway, `hostPort` on the node — see `gateway.yaml`).
+# Neither carries `kloudlite.io/kind`, so the namespaceSelector excludes them by construction.
 #
 # The prefixes are deliberately ASYMMETRIC. `/nix` is allowed EXACTLY, because `k8s::nix_volume`
 # mounts `NIX_ROOT` itself and picks the store and the profile out of it by `subPath` — a
 # `startsWith('/nix/')` rule alone rejects every workspace pod this cluster builds. `/wspool-prod`
 # is NOT allowed exactly, only its four known subtrees: `vol/` (worktrees), `attach/` (the rendered
 # resolv.conf), `homes/` and `homecache/`. The last two are additionally scoped to the pod's own
-# `kloudlite-git.io/owner` label, because those two paths are keyed BY OWNER — a builder bug naming
+# `kloudlite.io/owner` label, because those two paths are keyed BY OWNER — a builder bug naming
 # another owner is a whole other person's dotfiles and shell history. `vol/` and `attach/` are keyed
 # by volume and workspace id, not by owner, so CEL has nothing to compare there and the pod builders
 # remain the only thing keeping tenants apart on those two; that residual is deliberate and known.
@@ -44,7 +44,7 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: kloudlite-git-workspace-pod-fence
+  name: kloudlite-workspace-pod-fence
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -74,7 +74,7 @@ spec:
     # opaque. ponytail: the fix is `{pool}/vol/{owner}/{id}`, at which point this line becomes
     # the same comparison the two below already make.
     - expression: >-
-        has(object.metadata.labels) && 'kloudlite-git.io/owner' in object.metadata.labels
+        has(object.metadata.labels) && 'kloudlite.io/owner' in object.metadata.labels
           && (has(object.spec.volumes) ? object.spec.volumes : [])
             .all(v, !has(v.hostPath)
                     || (!v.hostPath.path.contains('..')
@@ -82,13 +82,13 @@ spec:
                             || v.hostPath.path.startsWith('/nix/')
                             || v.hostPath.path.startsWith('/wspool-prod/vol/')
                             || v.hostPath.path.startsWith('/wspool-prod/attach/')
-                            || v.hostPath.path == '/wspool-prod/homes/' + object.metadata.labels['kloudlite-git.io/owner']
-                            || v.hostPath.path.startsWith('/wspool-prod/homes/' + object.metadata.labels['kloudlite-git.io/owner'] + '/')
-                            || v.hostPath.path == '/wspool-prod/homecache/' + object.metadata.labels['kloudlite-git.io/owner']
-                            || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['kloudlite-git.io/owner'] + '/'))))
+                            || v.hostPath.path == '/wspool-prod/homes/' + object.metadata.labels['kloudlite.io/owner']
+                            || v.hostPath.path.startsWith('/wspool-prod/homes/' + object.metadata.labels['kloudlite.io/owner'] + '/')
+                            || v.hostPath.path == '/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner']
+                            || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner'] + '/'))))
       message: "workspace/environment hostPath volumes must be /nix, under /nix/, under /wspool-prod/vol|attach/, or this owner's own homes/homecache directory"
     # gVisor is what makes tenant isolation three independent things instead of two. It is live —
-    # `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-git-agent` Secret, read into `PodContext.runtime_class`
+    # `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-agent` Secret, read into `PodContext.runtime_class`
     # — but until this validation existed the kernel boundary rested on that one env var: unset it
     # (a Secret edit, a restored backup, a fresh cluster) and every tenant pod silently drops back to
     # runc, sharing the host kernel, with no alert anywhere. Now the FENCE holds it, and an agent
@@ -114,13 +114,13 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: kloudlite-git-workspace-pod-fence
+  name: kloudlite-workspace-pod-fence
 spec:
-  policyName: kloudlite-git-workspace-pod-fence
+  policyName: kloudlite-workspace-pod-fence
   validationActions: ["Deny"]
   matchResources:
     namespaceSelector:
       matchExpressions:
-        - key: kloudlite-git.io/kind
+        - key: kloudlite.io/kind
           operator: In
           values: ["workspace", "environment"]

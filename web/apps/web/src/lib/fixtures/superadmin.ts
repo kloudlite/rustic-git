@@ -26,7 +26,7 @@ import type { AuditEntry, AuditPage } from "@/lib/audit";
 import type { HistoryEvent, HistorySeries } from "@/lib/history";
 import type { QuotaDim, QuotaReport } from "@/lib/quota";
 
-/** Offline seed for `KLOUDLITE_GIT_ADMIN_FIXTURES=1`.
+/** Offline seed for `KLOUDLITE_ADMIN_FIXTURES=1`.
  *
  *  The console's gate is "every screen renders with realistic data", and it is checked by
  *  screenshot before merge — which needs a fleet nobody has on a laptop. So the numbers here are
@@ -198,7 +198,7 @@ const GENERIC_REQUESTS: RequestDoc[] = [
 
 const AUDIT: AuditEntry[] = [
   { ts: ago(2), actor: "karthik", action: "quota.set", target: "Quota/priya", reason: "Approved qr-priya-snap.", result: "ok" },
-  { ts: ago(4), actor: "karthik", action: "workload.roll", target: "Deployment/kloudlite-git-api", reason: "Rotate the peer secret before the drain.", result: "ok" },
+  { ts: ago(4), actor: "karthik", action: "workload.roll", target: "Deployment/kloudlite-api", reason: "Rotate the peer secret before the drain.", result: "ok" },
   { ts: ago(8), actor: "karthik", action: "node.drain", target: "session-3", reason: "Host is being resized to D16s v5.", result: "ok" },
   { ts: ago(22), actor: "meera", action: "workspace.stop", target: "ws-acme-checkout", reason: "Idle for six days and holding 40 GiB.", result: "ok" },
   { ts: ago(26), actor: "karthik", action: "quota.set", target: "Quota/acme", reason: "Interim raise while qr-acme-ws is decided.", result: "ok" },
@@ -211,19 +211,19 @@ const AUDIT: AuditEntry[] = [
 
 const EVENTS: HistoryEvent[] = [
   { id: "e1", ts: ago(2), kind: "request.approved", actor: "karthik", owner: "priya", target: "Quota/priya", region: null, attrs: { detail: "snapshots 20 → 40", note: "Cheap; snapshots are refcounted." } },
-  { id: "e2", ts: ago(4), kind: "workload.roll", actor: "karthik", owner: null, target: "Deployment/kloudlite-git-api", region: "centralindia-k3s", attrs: { note: "Rotate the peer secret before the drain." } },
+  { id: "e2", ts: ago(4), kind: "workload.roll", actor: "karthik", owner: null, target: "Deployment/kloudlite-api", region: "centralindia-k3s", attrs: { note: "Rotate the peer secret before the drain." } },
   { id: "e3", ts: ago(8), kind: "node.drain", actor: "karthik", owner: null, target: "session-3", region: "centralindia-k3s", attrs: { note: "Host is being resized to D16s v5." } },
   { id: "e4", ts: ago(22), kind: "workspace.stop", actor: "meera", owner: "acme", target: "ws-acme-checkout", region: "centralindia-k3s", attrs: { detail: "idle 6 days" } },
   { id: "e5", ts: ago(32), kind: "quota.set", actor: "karthik", owner: "ops-lab", target: "Quota/ops-lab", region: null, attrs: { detail: "cpu 24 → 32" } },
 ];
 
 const WORKLOADS: WorkloadDoc[] = [
-  { scope: "central", name: "kloudlite-git-srv", kind: "statefulset", image: "ghcr.io/kloudlite/kloudlite-git:f87fddb1", ready: 3, desired: 3, rolloutState: "Stable", lastRoll: null },
-  { scope: "central", name: "kloudlite-git-api", kind: "deployment", image: "ghcr.io/kloudlite/kloudlite-git-api:f87fddb1", ready: 1, desired: 2, rolloutState: "RollingOut", lastRoll: { by: "karthik", at: ago(4), reason: "Rotate the peer secret before the drain." } },
-  { scope: "central", name: "kloudlite-git-worker", kind: "deployment", image: "ghcr.io/kloudlite/kloudlite-git-worker:f87fddb1", ready: 2, desired: 2, rolloutState: "Stable", lastRoll: null },
-  { scope: "central", name: "kloudlite-git-gateway", kind: "deployment", image: "ghcr.io/kloudlite/kloudlite-git-gateway:f87fddb1", ready: 2, desired: 2, rolloutState: "Stable", lastRoll: null },
-  { scope: "centralindia-k3s", name: "kloudlite-git-agent", kind: "daemonset", image: "ghcr.io/kloudlite/kloudlite-git-agent:f87fddb1", ready: 3, desired: 3, rolloutState: "Stable", lastRoll: { by: "karthik", at: ago(122), reason: "Pick up the volume takeover build." } },
-  { scope: "westeurope-k3s", name: "kloudlite-git-agent", kind: "daemonset", image: "ghcr.io/kloudlite/kloudlite-git-agent:5319f67d", ready: 1, desired: 2, rolloutState: "RollingOut", lastRoll: { by: "karthik", at: ago(5), reason: "Repin the EU region to the node-death build." } },
+  { scope: "central", name: "kloudlite-srv", kind: "statefulset", image: "ghcr.io/kloudlite/kloudlite:f87fddb1", ready: 3, desired: 3, rolloutState: "Stable", lastRoll: null },
+  { scope: "central", name: "kloudlite-api", kind: "deployment", image: "ghcr.io/kloudlite/kloudlite-api:f87fddb1", ready: 1, desired: 2, rolloutState: "RollingOut", lastRoll: { by: "karthik", at: ago(4), reason: "Rotate the peer secret before the drain." } },
+  { scope: "central", name: "kloudlite-worker", kind: "deployment", image: "ghcr.io/kloudlite/kloudlite-worker:f87fddb1", ready: 2, desired: 2, rolloutState: "Stable", lastRoll: null },
+  { scope: "central", name: "kloudlite-gateway", kind: "deployment", image: "ghcr.io/kloudlite/kloudlite-gateway:f87fddb1", ready: 2, desired: 2, rolloutState: "Stable", lastRoll: null },
+  { scope: "centralindia-k3s", name: "kloudlite-agent", kind: "daemonset", image: "ghcr.io/kloudlite/kloudlite-agent:f87fddb1", ready: 3, desired: 3, rolloutState: "Stable", lastRoll: { by: "karthik", at: ago(122), reason: "Pick up the volume takeover build." } },
+  { scope: "westeurope-k3s", name: "kloudlite-agent", kind: "daemonset", image: "ghcr.io/kloudlite/kloudlite-agent:5319f67d", ready: 1, desired: 2, rolloutState: "RollingOut", lastRoll: { by: "karthik", at: ago(5), reason: "Repin the EU region to the node-death build." } },
 ];
 
 const CLUSTERS: AdminClusterRow[] = [
@@ -278,10 +278,10 @@ const SIGNALS: SignalsResponse = {
     { alert: "NodeDiskAlmostFull", state: "unknown", why: "node-exporter was not scrapeable on eu-2.", detail: null, region: "westeurope-k3s" },
   ],
   restarts: [
-    { workload: "kloudlite-git-srv", restarts: 0 },
-    { workload: "kloudlite-git-api", restarts: 3 },
-    { workload: "kloudlite-git-worker", restarts: 1 },
-    { workload: "kloudlite-git-gateway", restarts: 0 },
+    { workload: "kloudlite-srv", restarts: 0 },
+    { workload: "kloudlite-api", restarts: 3 },
+    { workload: "kloudlite-worker", restarts: 1 },
+    { workload: "kloudlite-gateway", restarts: 0 },
   ],
   scrape_failures: [["eu-2", "connect timed out after 2s"]],
   pods_listed: 17,
@@ -295,7 +295,7 @@ const OVERVIEW: Overview = {
     { kind: "critical", detail: "acme is at its workspace ceiling — 20 of 20 in use", href: "/superadmin/owners/acme" },
     { kind: "not_ready", detail: "eu-2 has been not ready for 22 minutes", href: "/superadmin/clusters/westeurope-k3s" },
     { kind: "draining", detail: "session-3 is draining — 2 running, 4 copies left", href: "/superadmin/clusters/centralindia-k3s" },
-    { kind: "rolling", detail: "kloudlite-git-api is 1 of 2 ready", href: "/superadmin/monitoring" },
+    { kind: "rolling", detail: "kloudlite-api is 1 of 2 ready", href: "/superadmin/monitoring" },
   ],
   recentAudit: AUDIT.slice(0, 5),
   fleet: {
@@ -353,18 +353,18 @@ function ownerDetail(slug: string): OwnerDetail | undefined {
 
 const SCHEMA: SettingsSchema = {
   central: [
-    { name: "maxBody", description: "Largest git push body the server accepts.", unit: "bytes", range: { min: 1_048_576, max: 4_294_967_296 }, mark: "live", readers: ["kloudlite-git-srv"], default: 2_147_483_648, env: "KLOUDLITE_GIT_MAX_BODY" },
-    { name: "maxLayer", description: "Largest registry blob accepted in one request.", unit: "bytes", range: { min: 1_048_576, max: 5_368_709_120 }, mark: "live", readers: ["kloudlite-git-srv"], default: 5_368_709_120, env: "KLOUDLITE_GIT_MAX_LAYER" },
-    { name: "mergeConcurrency", description: "Merges the worker runs at once per pod.", unit: "jobs", range: { min: 1, max: 16 }, mark: "live", readers: ["kloudlite-git-worker"], default: 4, env: "KLOUDLITE_GIT_MERGE_CONCURRENCY" },
-    { name: "maxTunnels", description: "Open workspace tunnels per gateway pod.", unit: "tunnels", range: { min: 100, max: 5000 }, mark: "live", readers: ["kloudlite-git-gateway"], default: 1000, env: "KLOUDLITE_GIT_MAX_TUNNELS" },
-    { name: "cloneHost", description: "Hostname handed out in clone URLs.", unit: "", range: null, mark: "boot", readers: ["kloudlite-git-srv", "kloudlite-git-api"], default: "git.kloudlite.io", env: "KLOUDLITE_GIT_CLONE_HOST" },
+    { name: "maxBody", description: "Largest git push body the server accepts.", unit: "bytes", range: { min: 1_048_576, max: 4_294_967_296 }, mark: "live", readers: ["kloudlite-srv"], default: 2_147_483_648, env: "KLOUDLITE_MAX_BODY" },
+    { name: "maxLayer", description: "Largest registry blob accepted in one request.", unit: "bytes", range: { min: 1_048_576, max: 5_368_709_120 }, mark: "live", readers: ["kloudlite-srv"], default: 5_368_709_120, env: "KLOUDLITE_MAX_LAYER" },
+    { name: "mergeConcurrency", description: "Merges the worker runs at once per pod.", unit: "jobs", range: { min: 1, max: 16 }, mark: "live", readers: ["kloudlite-worker"], default: 4, env: "KLOUDLITE_MERGE_CONCURRENCY" },
+    { name: "maxTunnels", description: "Open workspace tunnels per gateway pod.", unit: "tunnels", range: { min: 100, max: 5000 }, mark: "live", readers: ["kloudlite-gateway"], default: 1000, env: "KLOUDLITE_MAX_TUNNELS" },
+    { name: "cloneHost", description: "Hostname handed out in clone URLs.", unit: "", range: null, mark: "boot", readers: ["kloudlite-srv", "kloudlite-api"], default: "git.kloudlite.io", env: "KLOUDLITE_CLONE_HOST" },
   ],
   cluster: [
-    { name: "syncSecs", description: "How often a running worktree is cut a sync point.", unit: "seconds", range: { min: 30, max: 3600 }, mark: "live", readers: ["kloudlite-git-agent"], default: 300, env: "WS_SYNC_SECS" },
-    { name: "nodeDeadSecs", description: "Silence after which a node is unplaceable.", unit: "seconds", range: { min: 60, max: 1800 }, mark: "live", readers: ["kloudlite-git-agent"], default: 180, env: "WS_NODE_DEAD_SECS" },
-    { name: "decommissionSecs", description: "Drain beat on a node that is leaving.", unit: "seconds", range: { min: 10, max: 300 }, mark: "live", readers: ["kloudlite-git-agent"], default: 30, env: "WS_DECOMMISSION_SECS" },
-    { name: "retainSyncPoints", description: "Ready sync points kept per worktree.", unit: "cuts", range: { min: 1, max: 5 }, mark: "live", readers: ["kloudlite-git-agent"], default: 1, env: null },
-    { name: "workspaceImage", description: "Image a workspace runs unless it names its own.", unit: "", range: null, mark: "boot", readers: ["kloudlite-git-agent"], default: "ghcr.io/kloudlite/kl-base:2026-08-21", env: "WS_IMAGE" },
+    { name: "syncSecs", description: "How often a running worktree is cut a sync point.", unit: "seconds", range: { min: 30, max: 3600 }, mark: "live", readers: ["kloudlite-agent"], default: 300, env: "WS_SYNC_SECS" },
+    { name: "nodeDeadSecs", description: "Silence after which a node is unplaceable.", unit: "seconds", range: { min: 60, max: 1800 }, mark: "live", readers: ["kloudlite-agent"], default: 180, env: "WS_NODE_DEAD_SECS" },
+    { name: "decommissionSecs", description: "Drain beat on a node that is leaving.", unit: "seconds", range: { min: 10, max: 300 }, mark: "live", readers: ["kloudlite-agent"], default: 30, env: "WS_DECOMMISSION_SECS" },
+    { name: "retainSyncPoints", description: "Ready sync points kept per worktree.", unit: "cuts", range: { min: 1, max: 5 }, mark: "live", readers: ["kloudlite-agent"], default: 1, env: null },
+    { name: "workspaceImage", description: "Image a workspace runs unless it names its own.", unit: "", range: null, mark: "boot", readers: ["kloudlite-agent"], default: "ghcr.io/kloudlite/kl-base:2026-08-21", env: "WS_IMAGE" },
   ],
 };
 

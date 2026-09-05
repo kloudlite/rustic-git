@@ -4,7 +4,7 @@ Date: 2026-08-29. Status: draft for review. Audit item I-2.
 
 ## Problem
 
-`kloudlite-git-leader-0` is the leader by name. It alone writes the ownership map (one SlateDB
+`kloudlite-leader-0` is the leader by name. It alone writes the ownership map (one SlateDB
 database at `cluster/ownership`, opened as the writer), every srv node forwards claims,
 renewals and releases to it over `/own/*`, and `/healthz` on every srv pod goes un-ready when it
 has not answered within `LEADER_SILENCE` (60 s). It runs in its own StatefulSet with
@@ -47,7 +47,7 @@ Every srv pod runs the election loop:
 3. Otherwise: remember the holder as the leader name and sleep `LEADER_RENEW`.
 
 Ties are broken by the store, never by ordinal; there is no preference for a particular pod.
-`KLOUDLITE_GIT_LEADER` and `leader_of(self_name)` are deleted; `App::leader()` becomes the name
+`KLOUDLITE_LEADER` and `leader_of(self_name)` are deleted; `App::leader()` becomes the name
 read from the lease, updated by the loop (`set_leader` already exists).
 
 ### Promotion and demotion
@@ -87,17 +87,17 @@ With any pod able to lead, that carve-out goes: the leader serves like every oth
 
 ### Deploy
 
-`kloudlite-git-leader.yaml` and its PDB are deleted; `kloudlite-git-srv` keeps
+`kloudlite-leader.yaml` and its PDB are deleted; `kloudlite-srv` keeps
 `minAvailable`-style PDB (already there) and its ordinals are all candidates. `roll.sh`
 becomes one `kubectl apply` plus `rollout status` — the two-phase order existed only for the
 name-based leader. The headless Service keeps `publishNotReadyAddresses: true` (peer DNS
-before readiness) and stops selecting a leader role. `KLOUDLITE_GIT_LEADER` disappears from both
+before readiness) and stops selecting a leader role. `KLOUDLITE_LEADER` disappears from both
 manifests and `pin.sh`'s comment.
 
 Rollout: the new build must start with the old leader still running. The old leader holds
 the SlateDB writer but knows nothing about the lease; the first new pod takes the lease and
 opens the writer, fencing the old leader, whose `/own/*` handlers then return errors until it
-is rolled away. Order for the one migration: roll `kloudlite-git-srv` to the new build first,
+is rolled away. Order for the one migration: roll `kloudlite-srv` to the new build first,
 then delete the leader StatefulSet. Written into `deploy/RECOVERY.md` and the commit.
 
 ### Failure modes

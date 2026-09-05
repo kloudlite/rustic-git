@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use kloudlite_git_workspaces::slo::catalogue::Suite;
+use kloudlite_workspaces::slo::catalogue::Suite;
 use serde_json::Value;
 
 use crate::ctx::{Ctx, PROBE_USER};
@@ -193,7 +193,7 @@ async fn undo_drills(c: &mut Ctx) {
     match crate::drill::incluster() {
         Ok(k) => {
             use crate::drill::Cluster;
-            if let Err(e) = k.netpol("kloudlite-git", crate::stages::monthly::NETPOL, None).await {
+            if let Err(e) = k.netpol("kloudlite", crate::stages::monthly::NETPOL, None).await {
                 tracing::warn!(kind = "netpol", error = %format!("{e:#}"), "slo.drill.sweep.failed");
             }
         }

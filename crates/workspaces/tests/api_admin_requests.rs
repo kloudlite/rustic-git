@@ -1,16 +1,16 @@
 //! `GET /admin/requests` — one queue over `Request` and the legacy `QuotaRequest` CRD, so a
 //! console never has to know whether the migration to the generic CRD has run.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, ApiState, Directory, GrantAccess, TeamRole};
-use kloudlite_git_workspaces::kube_test::{
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, ApiState, Directory, GrantAccess, TeamRole};
+use kloudlite_workspaces::kube_test::{
     conflict as route_conflict, get as route_get, mock_client, not_found, patch as route_patch,
     post as route_post, Recorder, Route,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 /// `grant` is what `grant_access` answers and `granted` is what it was asked — the access arm's
 /// whole contract is "which outcome maps to which status, and who was the grant for", and neither
@@ -70,7 +70,7 @@ impl Directory for StubMembership {
         false
     }
 
-    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
     }
 
@@ -125,7 +125,7 @@ async fn get(url: &str, token: &str) -> reqwest::Response {
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 /// The queue is one list over two CRDs while the legacy objects still exist: a console must not

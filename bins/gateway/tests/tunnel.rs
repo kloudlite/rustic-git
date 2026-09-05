@@ -1,19 +1,19 @@
 //! The gateway's authorization path and its pump, against a mocked API server
-//! (`kloudlite_git_workspaces::kube_test`) and a local TCP echo standing in for the pod's sshd.
+//! (`kloudlite_workspaces::kube_test`) and a local TCP echo standing in for the pod's sshd.
 //!
 //! Everything the gateway decides happens BEFORE the upgrade, so these tests are mostly about
 //! which HTTP status a bad connect gets — the one test that upgrades proves the bytes actually
 //! cross, which is the only thing the pump can get wrong that a type does not catch.
 
-use kloudlite_git_core::jwt::{Jwt, SshSessionClaims};
-use kloudlite_git_gateway::tunnel::Gateway;
-use kloudlite_git_workspaces::kube_test::{get, mock_client, Route};
+use kloudlite_core::jwt::{Jwt, SshSessionClaims};
+use kloudlite_gateway::tunnel::Gateway;
+use kloudlite_workspaces::kube_test::{get, mock_client, Route};
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite;
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
 const REGION: &str = "centralindia-k3s";
-const WS: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1";
+const WS: &str = "/apis/kloudlite.io/v1alpha1/workspaces/ws-1";
 const POD: &str = "/api/v1/namespaces/ws-alice/pods/ws-1-abc";
 
 fn workspace(phase: &str, pod_ref: Option<&str>) -> serde_json::Value {
@@ -22,7 +22,7 @@ fn workspace(phase: &str, pod_ref: Option<&str>) -> serde_json::Value {
         status["podRef"] = serde_json::json!(r);
     }
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1",
+        "apiVersion": "kloudlite.io/v1alpha1",
         "kind": "Workspace",
         "metadata": { "name": "ws-1" },
         "spec": {
@@ -70,7 +70,7 @@ async fn serve(routes: Vec<Route>, ssh_port: u16) -> String {
     let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(l, kloudlite_git_gateway::tunnel::app(gw)).await.unwrap() });
+    tokio::spawn(async move { axum::serve(l, kloudlite_gateway::tunnel::app(gw)).await.unwrap() });
     format!("ws://{addr}")
 }
 
@@ -132,7 +132,7 @@ async fn an_unready_workspace_is_409() {
     assert_eq!(connect(&base, "ws-1", &token("ws-1", REGION)).await.err(), Some(409));
 
     // No such workspace at all is a 404, not a 409: the caller can tell "gone" from "wait".
-    let gone = serve(vec![kloudlite_git_workspaces::kube_test::not_found(WS)], 22).await;
+    let gone = serve(vec![kloudlite_workspaces::kube_test::not_found(WS)], 22).await;
     assert_eq!(connect(&gone, "ws-1", &token("ws-1", REGION)).await.err(), Some(404));
 }
 

@@ -69,7 +69,7 @@ Files this plan creates or modifies, and what each is responsible for:
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: policy `kloudlite-git-agent-tenant-namespaces-only` now matches `DELETE` on `services`, `pods`, `statefulsets`, `networkpolicies`, with a SECOND validation entry keyed on `request.operation`. Task 2 edits the same directory but a different file.
+- Produces: policy `kloudlite-agent-tenant-namespaces-only` now matches `DELETE` on `services`, `pods`, `statefulsets`, `networkpolicies`, with a SECOND validation entry keyed on `request.operation`. Task 2 edits the same directory but a different file.
 
 - [ ] **Step 1: Capture the current server-side behaviour as the failing check**
 
@@ -77,14 +77,14 @@ The "test" here is the cluster's own CEL compiler plus a live delete. Record the
 
 ```bash
 KUBECONFIG=.local/k3s.yaml kubectl auth can-i delete services \
-  --as=system:serviceaccount:kube-system:kloudlite-git-agent -n kube-system
+  --as=system:serviceaccount:kube-system:kloudlite-agent -n kube-system
 ```
 
 Expected now: `yes` — and no admission policy stands in the way, which is the finding. If the cluster is unreachable, note it and continue; the dry-run in Step 4 is then also skipped and must be reported as skipped.
 
 - [ ] **Step 2: Add the DELETE resourceRules**
 
-In `deploy/k3s/agent-admission.yaml`, inside the `kloudlite-git-agent-tenant-namespaces-only` policy's `spec.matchConstraints.resourceRules`, append these four rules after the existing CREATE/UPDATE ones. Do NOT add `DELETE` to the existing rules' `operations` — the existing validation dereferences `object.kind`, which is null on a delete.
+In `deploy/k3s/agent-admission.yaml`, inside the `kloudlite-agent-tenant-namespaces-only` policy's `spec.matchConstraints.resourceRules`, append these four rules after the existing CREATE/UPDATE ones. Do NOT add `DELETE` to the existing rules' `operations` — the existing validation dereferences `object.kind`, which is null on a delete.
 
 ```yaml
       # DELETE is matched separately from CREATE/UPDATE: `object` is null on a delete and
@@ -121,7 +121,7 @@ In the same policy's `spec.validations`, insert this entry BEFORE the existing `
           || oldObject.metadata.namespace.startsWith('ws-')
           || oldObject.metadata.namespace.startsWith('wt-')
           || oldObject.metadata.namespace.startsWith('env-')
-      message: "kloudlite-git-agent may only delete namespaced objects in ws-/wt-/env- namespaces"
+      message: "kloudlite-agent may only delete namespaced objects in ws-/wt-/env- namespaces"
 ```
 
 And guard the existing expression so it is inert on a delete — one clause at its head, so the two entries are symmetric and neither depends on the resourceRules staying split:
@@ -166,7 +166,7 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-admission.yaml
 # A delete the agent must still be able to make: a pod in a tenant namespace (dry-run so
 # nothing is actually removed).
 KUBECONFIG=.local/k3s.yaml kubectl auth can-i delete pods \
-  --as=system:serviceaccount:kube-system:kloudlite-git-agent -n ws-alice
+  --as=system:serviceaccount:kube-system:kloudlite-agent -n ws-alice
 ```
 Expected: `yes` (RBAC still allows it; the policy only refuses at admission time in a non-tenant namespace). The policy itself is proven by the dry run's CEL compile plus the expression's shape; a destructive live test against `kube-system` is not worth running.
 
@@ -191,7 +191,7 @@ Body: state that `oldObject` is what a DELETE carries, that the entry is separat
 
 **Interfaces:**
 - Consumes: nothing from Task 1 (different file).
-- Produces: ClusterRole `kloudlite-git-agent` no longer holds any `apps/deployments` verb.
+- Produces: ClusterRole `kloudlite-agent` no longer holds any `apps/deployments` verb.
 
 - [ ] **Step 1: Prove the grant is dead**
 
@@ -254,7 +254,7 @@ Add one line to the `services` and `networkpolicies` table rows' notes, since Ta
 - [ ] **Step 6: Dry run and apply**
 
 Run: `KUBECONFIG=.local/k3s.yaml kubectl apply --dry-run=server -f deploy/k3s/agent-rbac.yaml`
-Expected: `clusterrole.rbac.authorization.k8s.io/kloudlite-git-agent configured (server dry run)` with no error. Then apply for real; removing a verb the code never calls cannot break a running agent, and the next reconcile proves it (`kubectl -n kube-system logs ds/kloudlite-git-agent --tail=50` shows no `403` lines).
+Expected: `clusterrole.rbac.authorization.k8s.io/kloudlite-agent configured (server dry run)` with no error. Then apply for real; removing a verb the code never calls cannot break a running agent, and the next reconcile proves it (`kubectl -n kube-system logs ds/kloudlite-agent --tail=50` shows no `403` lines).
 
 - [ ] **Step 7: Commit**
 
@@ -297,8 +297,8 @@ async fn a_claim_outlives_an_operation_longer_than_the_lease() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim(&repo).await.unwrap();
 
     // Longer than LEASE_TTL (10 s), which is what a loaded box's git fixture work costs.
@@ -369,7 +369,7 @@ Move every line that touches the filesystem — the tempdir, `work`, the `git` c
 
 - [ ] **Step 6: Same move in the ssh test**
 
-In `a_real_ssh_clone_works_through_a_forwarding_node` (`tests/routing.rs:1080`), the same shape: `a.app.claim(&repo)` is followed by `gen_host_key`, an ssh listener bind, a spawn, and a whole clone/commit/push seed cycle over A's public port. Move the ssh key generation, the host key, the listener bind and the seed clone/commit/push ABOVE the `claim()` call. The `tokio::spawn` of `kloudlite_git_git::ssh::serve` and everything after may stay. Carry the same comment as Step 5.
+In `a_real_ssh_clone_works_through_a_forwarding_node` (`tests/routing.rs:1080`), the same shape: `a.app.claim(&repo)` is followed by `gen_host_key`, an ssh listener bind, a spawn, and a whole clone/commit/push seed cycle over A's public port. Move the ssh key generation, the host key, the listener bind and the seed clone/commit/push ABOVE the `claim()` call. The `tokio::spawn` of `kloudlite::ssh::serve` and everything after may stay. Carry the same comment as Step 5.
 
 Note: the seed push targets `a.public`, which opens the repo on A anyway — after the move it opens A's copy before the claim, which is fine: `claim` on a repo this node already has open is a no-op re-assert, and the beat covers it from then on.
 
@@ -505,7 +505,7 @@ Body: `/v1` writes `Snapshot` CRs, so nothing writes the volume registry; `brows
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `route_class` no longer returns `"vol-agent"`; ClusterRole `kloudlite-git-api` no longer holds `watch`/`update` on `workspaces`/`environments`.
+- Produces: `route_class` no longer returns `"vol-agent"`; ClusterRole `kloudlite-api` no longer holds `watch`/`update` on `workspaces`/`environments`.
 
 - [ ] **Step 1 (Minor 9): Prove `/vol-agent/` is dead, then delete the branch**
 
@@ -523,7 +523,7 @@ Delete from `route_class`:
 
 - [ ] **Step 2 (Minor 9): Test**
 
-Run: `cargo test -p kloudlite-git-core; echo exit=$?`
+Run: `cargo test -p kloudlite-core; echo exit=$?`
 Expected: `exit=0`. If a unit test asserts the `"vol-agent"` class, delete that assertion too — it is testing a dead route.
 
 - [ ] **Step 3 (Minor 7): Prove `watch` and `update` are unused, then drop them**
@@ -552,7 +552,7 @@ Expected: `configured (server dry run)`. Then apply; removing an unused verb can
 
 - [ ] **Step 5 (Minor 6): Say why `vol/` is not owner-scoped**
 
-`deploy/k3s/workspace-admission.yaml:77` admits anything under `/wspool-prod/vol/` while `:79-82` pin `homes`/`homecache` to the pod's `kloudlite-git.io/owner` label. Making `vol/` symmetric needs the owner in the pool path (`{pool}/vol/{owner}/{id}`) — a layout change across the agent, out of this review's scope. Until then, write the ceiling down. Add above the expression:
+`deploy/k3s/workspace-admission.yaml:77` admits anything under `/wspool-prod/vol/` while `:79-82` pin `homes`/`homecache` to the pod's `kloudlite.io/owner` label. Making `vol/` symmetric needs the owner in the pool path (`{pool}/vol/{owner}/{id}`) — a layout change across the agent, out of this review's scope. Until then, write the ceiling down. Add above the expression:
 
 ```yaml
     # `vol/` is deliberately NOT owner-scoped, unlike `homes`/`homecache` below: the volume pool
@@ -614,7 +614,7 @@ git commit -m "Write down the vol hostPath ceiling and the flannel join step"
 
 **Files:**
 - Modify: `deploy/pin.sh`
-- Modify (by running it): `deploy/kloudlite-git.yaml:58,398,579`, `deploy/k3s/agent-daemonset.yaml:114`, `deploy/k3s/gateway.yaml:131`, `deploy/kloudlite-git-web.yaml:49`
+- Modify (by running it): `deploy/kloudlite.yaml:58,398,579`, `deploy/k3s/agent-daemonset.yaml:114`, `deploy/k3s/gateway.yaml:131`, `deploy/kloudlite-web.yaml:49`
 
 **Interfaces:**
 - Consumes: Task 1's admission fence must be APPLIED to the cluster before the agent image that deletes Services rolls. Do not run this task before Task 1 and Task 2 are applied.
@@ -670,7 +670,7 @@ Expected: non-zero, with the existing "no package for that SHA" message. A red c
 - [ ] **Step 6: Commit the pins**
 
 ```bash
-git add deploy/pin.sh deploy/kloudlite-git.yaml deploy/kloudlite-git-web.yaml deploy/k3s/agent-daemonset.yaml deploy/k3s/gateway.yaml
+git add deploy/pin.sh deploy/kloudlite.yaml deploy/kloudlite-web.yaml deploy/k3s/agent-daemonset.yaml deploy/k3s/gateway.yaml
 git commit -m "Pin first-party images by digest and repin every tier to HEAD"
 ```
 
@@ -690,7 +690,7 @@ Per `CLAUDE.md`'s deploy flow and `deploy/k3s/README.md`: the admission policy a
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: call sites name the real crates — `kloudlite_git_core::httpx::bearer_token`, `kloudlite_git_storage::auth::authorize`, `kloudlite_git_core::peer::PEER_HEADER`, `kloudlite_git_storage::store::Store`, and so on. Nothing named `crate::auth`, `crate::proxy`, `crate::store`, `crate::index`, `crate::directory` remains in this crate.
+- Produces: call sites name the real crates — `kloudlite_core::httpx::bearer_token`, `kloudlite_storage::auth::authorize`, `kloudlite_core::peer::PEER_HEADER`, `kloudlite_storage::store::Store`, and so on. Nothing named `crate::auth`, `crate::proxy`, `crate::store`, `crate::index`, `crate::directory` remains in this crate.
 
 - [ ] **Step 1: Inventory the call sites**
 
@@ -712,43 +712,43 @@ Run from the repo root. Order matters: the longest prefixes first, so `crate::au
 cd crates/api/src
 # The axum-dependent header helpers live in core::httpx; the pure ones in storage::auth.
 grep -rl 'crate::auth::' . | xargs sed -i '' \
-  -e 's/crate::auth::bearer_token/kloudlite_git_core::httpx::bearer_token/g' \
-  -e 's/crate::auth::basic_token/kloudlite_git_core::httpx::basic_token/g' \
-  -e 's/crate::auth::basic_user_names/kloudlite_git_core::httpx::basic_user_names/g' \
-  -e 's/crate::auth::unauthorized/kloudlite_git_core::httpx::unauthorized/g' \
-  -e 's/crate::auth::/kloudlite_git_storage::auth::/g'
-grep -rl 'crate::proxy::' . | xargs sed -i '' -e 's/crate::proxy::/kloudlite_git_core::peer::/g'
+  -e 's/crate::auth::bearer_token/kloudlite_core::httpx::bearer_token/g' \
+  -e 's/crate::auth::basic_token/kloudlite_core::httpx::basic_token/g' \
+  -e 's/crate::auth::basic_user_names/kloudlite_core::httpx::basic_user_names/g' \
+  -e 's/crate::auth::unauthorized/kloudlite_core::httpx::unauthorized/g' \
+  -e 's/crate::auth::/kloudlite_storage::auth::/g'
+grep -rl 'crate::proxy::' . | xargs sed -i '' -e 's/crate::proxy::/kloudlite_core::peer::/g'
 grep -rl 'crate::' . | xargs sed -i '' \
-  -e 's/crate::cache::/kloudlite_git_storage::cache::/g' \
-  -e 's/crate::events::/kloudlite_git_storage::events::/g' \
-  -e 's/crate::index::/kloudlite_git_storage::index::/g' \
-  -e 's/crate::ownership::/kloudlite_git_storage::ownership::/g' \
-  -e 's/crate::store::/kloudlite_git_storage::store::/g' \
-  -e 's/crate::directory::/kloudlite_git_pulls::directory::/g' \
-  -e 's/crate::jwt::/kloudlite_git_core::jwt::/g' \
-  -e 's/crate::hex::/kloudlite_git_core::hex::/g' \
-  -e 's/crate::err(/kloudlite_git_core::err(/g'
+  -e 's/crate::cache::/kloudlite_storage::cache::/g' \
+  -e 's/crate::events::/kloudlite_storage::events::/g' \
+  -e 's/crate::index::/kloudlite_storage::index::/g' \
+  -e 's/crate::ownership::/kloudlite_storage::ownership::/g' \
+  -e 's/crate::store::/kloudlite_storage::store::/g' \
+  -e 's/crate::directory::/kloudlite_pulls::directory::/g' \
+  -e 's/crate::jwt::/kloudlite_core::jwt::/g' \
+  -e 's/crate::hex::/kloudlite_core::hex::/g' \
+  -e 's/crate::err(/kloudlite_core::err(/g'
 ```
 
-`crate::Result` is a bare type name, not a path prefix — handle it by hand: replace the `pub(crate) use kloudlite_git_core::{… Result}` with a `use kloudlite_git_core::Result;` at the top of each of the four files that name it, or spell it `kloudlite_git_core::Result` inline. Whichever reads better in that file; do not introduce a new alias.
+`crate::Result` is a bare type name, not a path prefix — handle it by hand: replace the `pub(crate) use kloudlite_core::{… Result}` with a `use kloudlite_core::Result;` at the top of each of the four files that name it, or spell it `kloudlite_core::Result` inline. Whichever reads better in that file; do not introduce a new alias.
 
 - [ ] **Step 3: Delete the shims**
 
 Remove from `crates/api/src/lib.rs`:
 
 ```rust
-pub(crate) use kloudlite_git_core::{err, hex, jwt, Result};
-pub(crate) use kloudlite_git_storage::{cache, events, index, ownership, store};
-pub(crate) use kloudlite_git_pulls::directory;
+pub(crate) use kloudlite_core::{err, hex, jwt, Result};
+pub(crate) use kloudlite_storage::{cache, events, index, ownership, store};
+pub(crate) use kloudlite_pulls::directory;
 ```
 
 the whole `pub(crate) mod auth { … }` block with its comment, and:
 
 ```rust
-pub(crate) use kloudlite_git_core::peer as proxy;
+pub(crate) use kloudlite_core::peer as proxy;
 ```
 
-with its comment. The comments explained the indirection; with the indirection gone they explain nothing, so they go too. `use crate::cache::Cache;`, `use crate::events::Kind;` and `use crate::store::Store;` further down become `use kloudlite_git_storage::cache::Cache;` etc.
+with its comment. The comments explained the indirection; with the indirection gone they explain nothing, so they go too. `use crate::cache::Cache;`, `use crate::events::Kind;` and `use crate::store::Store;` further down become `use kloudlite_storage::cache::Cache;` etc.
 
 - [ ] **Step 4: Confirm nothing is left**
 
@@ -759,7 +759,7 @@ Expected: empty. `crate::` still legitimately names this crate's OWN modules (`c
 
 - [ ] **Step 5: Build and test**
 
-Run: `cargo test -p kloudlite-git-api; echo exit=$?`
+Run: `cargo test -p kloudlite-api; echo exit=$?`
 Expected: `exit=0`. Then the full gate:
 Run: `cargo test --workspace -- --test-threads=1; echo exit=$?`
 Expected: `exit=0`.
@@ -781,7 +781,7 @@ Body: the shims existed to keep call sites unchanged after code moved to `core`/
 
 **Spec:** audit.md — "`examples/views_bench.rs` and `examples/tree_bench.rs` — referenced by no CI job, script, doc or CLAUDE.md; they compile on every `cargo test`."
 
-**Decision, made by reading them** (the scope note asked for one): delete. Both are 35–37 line `fn main()`s that take a repo path and a commit oid as argv, call `kloudlite_git_git::browse::{files_at, last_changes, log}` and `println!` a `Instant::elapsed`. They are not benchmarks in any harness sense — no criterion, no baseline, no threshold, nothing that can fail. They answered a one-off question in `views_bench.rs`'s own words ("this is what decides whether the work belongs on a server or in the browser"), and that question is decided: the work is on the server. Wiring them into a documented `cargo bench` would mean adding criterion (a new dependency), a `[[bench]]` section and a CI job for numbers nobody reads. Git keeps them if the question comes back.
+**Decision, made by reading them** (the scope note asked for one): delete. Both are 35–37 line `fn main()`s that take a repo path and a commit oid as argv, call `kloudlite::browse::{files_at, last_changes, log}` and `println!` a `Instant::elapsed`. They are not benchmarks in any harness sense — no criterion, no baseline, no threshold, nothing that can fail. They answered a one-off question in `views_bench.rs`'s own words ("this is what decides whether the work belongs on a server or in the browser"), and that question is decided: the work is on the server. Wiring them into a documented `cargo bench` would mean adding criterion (a new dependency), a `[[bench]]` section and a CI job for numbers nobody reads. Git keeps them if the question comes back.
 
 **Files:**
 - Delete: `examples/views_bench.rs`, `examples/tree_bench.rs`
@@ -869,7 +869,7 @@ Replace the "Every method defaults to the UNWIRED answer…" paragraph in the tr
 
 - [ ] **Step 2: Run the build and let the compiler list the stubs**
 
-Run: `cargo test -p kloudlite-git-workspaces --no-run; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --no-run; echo exit=$?`
 Expected: FAIL, `error[E0046]: not all trait items implemented` at each of the six stub sites. That list IS the work item for Step 3.
 
 - [ ] **Step 3: Fill in each stub explicitly**
@@ -892,7 +892,7 @@ Adjust the comment per stub to name that stub's actual case (`StubMembership`, `
 
 - [ ] **Step 4: Test**
 
-Run: `cargo test -p kloudlite-git-workspaces; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces; echo exit=$?`
 Expected: `exit=0`. A test that now FAILS is the finding paying off — it was relying on a default that lied. Read what it asserts before changing the stub's answer: if it wanted "no teams", `Vec::new()` is right; if it wanted "no directory", the `ApiState.directory` should have been `None` in the first place.
 
 - [ ] **Step 5: Full gate**
@@ -921,7 +921,7 @@ Two unrelated one-file cuts, batched because neither carries its own test cycle.
 - Modify: `crates/api/src/credentials.rs:677`
 - Modify: `crates/api/Cargo.toml` (add `chrono = { workspace = true }` if absent)
 - Delete: `bins/gateway/src/lib.rs`
-- Modify: `bins/gateway/src/main.rs` and any other caller of `kloudlite_git_gateway::{app, Gateway}`
+- Modify: `bins/gateway/src/main.rs` and any other caller of `kloudlite_gateway::{app, Gateway}`
 - Not modified: `src/lib.rs` — see Step 6
 
 **Interfaces:**
@@ -944,7 +944,7 @@ fn rfc3339_formats_epoch_millis_and_survives_a_nonsense_input() {
 
 - [ ] **Step 2: Run it against the current bson implementation**
 
-Run: `cargo test -p kloudlite-git-api rfc3339_formats -- --nocapture; echo exit=$?`
+Run: `cargo test -p kloudlite-api rfc3339_formats -- --nocapture; echo exit=$?`
 Expected: it may PASS or FAIL depending on bson's exact spelling (`+00:00` vs `Z`). Record the actual output — that is the contract the replacement must match. If bson emits `Z`, change the assertion to `Z` and make chrono match by formatting with `to_rfc3339_opts(SecondsFormat::Secs, true)`. **Do not change what the API answers**; the web app parses these.
 
 - [ ] **Step 3: Replace the implementation**
@@ -970,7 +970,7 @@ Add `chrono = { workspace = true }` to `crates/api/Cargo.toml` if it is not alre
 
 - [ ] **Step 4: Test**
 
-Run: `cargo test -p kloudlite-git-api; echo exit=$?`
+Run: `cargo test -p kloudlite-api; echo exit=$?`
 Expected: `exit=0`, with the assertion matching the string Step 2 recorded.
 
 - [ ] **Step 5: Delete the gateway's lib shim**
@@ -987,14 +987,14 @@ pub use tunnel::{app, Gateway};
 Find the callers first:
 
 ```bash
-grep -rn "kloudlite_git_gateway::" --include=*.rs . | grep -v "^./target"
+grep -rn "kloudlite_gateway::" --include=*.rs . | grep -v "^./target"
 ```
 
-If every caller is inside `bins/gateway` itself, delete `lib.rs`, declare `mod resolve; mod tunnel;` in `main.rs`, and name `tunnel::app` / `tunnel::Gateway` at the two call sites. If a test binary or another crate imports `kloudlite_git_gateway::app`, keep `lib.rs` with only `pub mod resolve; pub mod tunnel;` and change that caller to `kloudlite_git_gateway::tunnel::app` — the re-export goes either way; the module declarations may have to stay.
+If every caller is inside `bins/gateway` itself, delete `lib.rs`, declare `mod resolve; mod tunnel;` in `main.rs`, and name `tunnel::app` / `tunnel::Gateway` at the two call sites. If a test binary or another crate imports `kloudlite_gateway::app`, keep `lib.rs` with only `pub mod resolve; pub mod tunnel;` and change that caller to `kloudlite_gateway::tunnel::app` — the re-export goes either way; the module declarations may have to stay.
 
 - [ ] **Step 6: Leave `src/lib.rs` alone**
 
-The audit names `src/lib.rs` (a one-line doc comment) in the same item. It exists so the root package `kloudlite-git-tests` has a lib target to host `tests/*.rs`, which is the whole integration suite. Cargo needs a target there; deleting the file would move every integration test. Not a cut — record the decision in the commit body and take no action.
+The audit names `src/lib.rs` (a one-line doc comment) in the same item. It exists so the root package `kloudlite-tests` has a lib target to host `tests/*.rs`, which is the whole integration suite. Cargo needs a target there; deleting the file would move every integration test. Not a cut — record the decision in the commit body and take no action.
 
 - [ ] **Step 7: Full gate**
 
@@ -1017,16 +1017,16 @@ git commit -m "Name the gateway's tunnel module directly"
 
 ### Task 11: Document each tunable's real setter
 
-**Spec:** audit.md — "tunables with a default, one reader and no setter anywhere in `deploy/` — `KLOUDLITE_GIT_MAX_LAYER`, `KLOUDLITE_GIT_ALLOW_MEM_FLEET`, `WS_BASE_PACKAGES`, `KLOUDLITE_GIT_LOG_FORMAT`. Inline the constant; add the env read back the day someone needs to change it."
+**Spec:** audit.md — "tunables with a default, one reader and no setter anywhere in `deploy/` — `KLOUDLITE_MAX_LAYER`, `KLOUDLITE_ALLOW_MEM_FLEET`, `WS_BASE_PACKAGES`, `KLOUDLITE_LOG_FORMAT`. Inline the constant; add the env read back the day someone needs to change it."
 
 **The audit's premise does not survive the grep — and the scope note said to decide per item.** Each of the four HAS a setter; three of them just are not in a Deployment's `env:` block. So the cut is not deletion, it is naming the setter at the read, so the next audit does not re-file this:
 
 | Tunable | Setter found | Action |
 |---|---|---|
-| `KLOUDLITE_GIT_MAX_LAYER` | `tests/registry_limits.rs:11` sets it — its own test binary exists BECAUSE `max_layer()` is a process-wide `OnceLock` | Keep the read; name the test at the read |
-| `KLOUDLITE_GIT_ALLOW_MEM_FLEET` | `crates/storage/src/config.rs:191-195` (its own unit test) and the in-process test fleet the refusal message names | Keep; name it |
+| `KLOUDLITE_MAX_LAYER` | `tests/registry_limits.rs:11` sets it — its own test binary exists BECAUSE `max_layer()` is a process-wide `OnceLock` | Keep the read; name the test at the read |
+| `KLOUDLITE_ALLOW_MEM_FLEET` | `crates/storage/src/config.rs:191-195` (its own unit test) and the in-process test fleet the refusal message names | Keep; name it |
 | `WS_BASE_PACKAGES` | `deploy/k3s/agent-daemonset.yaml:192` — it IS set in `deploy/`, so the audit item is simply wrong here | Keep; note the daemonset |
-| `KLOUDLITE_GIT_LOG_FORMAT` | `deploy/alerts.md:5` documents `KLOUDLITE_GIT_LOG_FORMAT=json` on any pod as the way to get structured logs | Keep; note alerts.md |
+| `KLOUDLITE_LOG_FORMAT` | `deploy/alerts.md:5` documents `KLOUDLITE_LOG_FORMAT=json` on any pod as the way to get structured logs | Keep; note alerts.md |
 
 **Files:**
 - Modify (doc comments only): `crates/registry/src/blobs.rs:22-23`, `crates/storage/src/config.rs:130-137`, `bins/agent/src/nix.rs:56-63`, `crates/core/src/log.rs:13`
@@ -1037,7 +1037,7 @@ git commit -m "Name the gateway's tunnel module directly"
 - [ ] **Step 1: Re-run the evidence yourself before writing it down**
 
 ```bash
-grep -rn "KLOUDLITE_GIT_MAX_LAYER\|ALLOW_MEM_FLEET\|WS_BASE_PACKAGES\|KLOUDLITE_GIT_LOG_FORMAT" \
+grep -rn "KLOUDLITE_MAX_LAYER\|ALLOW_MEM_FLEET\|WS_BASE_PACKAGES\|KLOUDLITE_LOG_FORMAT" \
   --include=*.rs --include=*.yaml --include=*.sh --include=*.md . \
   | grep -v "^./target" | grep -v "^./docs/superpowers"
 ```
@@ -1049,7 +1049,7 @@ Expected: the four setters in the table above. If any one of them turns out to h
 
 ```rust
 /// Largest single layer accepted, checked against the body's size BEFORE it is stored: an
-/// unbounded push must not be able to fill a node's disk. `KLOUDLITE_GIT_MAX_LAYER` overrides it and
+/// unbounded push must not be able to fill a node's disk. `KLOUDLITE_MAX_LAYER` overrides it and
 /// has exactly one setter — `tests/registry_limits.rs`, which is its own test binary precisely
 /// because this is a process-wide `OnceLock`. No Deployment sets it; the default is the ceiling
 /// in production and changing it means a code change, which is the intent.
@@ -1072,7 +1072,7 @@ Expected: the four setters in the table above. If any one of them turns out to h
 `crates/core/src/log.rs:13`, on the module doc:
 
 ```rust
-//! `KLOUDLITE_GIT_LOG_FORMAT=json` switches every binary to one JSON object per line, so a log
+//! `KLOUDLITE_LOG_FORMAT=json` switches every binary to one JSON object per line, so a log
 //! aggregator gets fields instead of a string. Not set by any manifest by default —
 //! `deploy/alerts.md` documents setting it on a pod when someone is debugging one.
 ```

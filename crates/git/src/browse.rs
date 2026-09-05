@@ -444,7 +444,7 @@ fn is_binary(data: &[u8]) -> bool {
     data.iter().take(8000).any(|b| *b == 0)
 }
 
-pub use kloudlite_git_gitbase::{merge_base, MergeBase};
+pub use kloudlite_gitbase::{merge_base, MergeBase};
 
 /// What a proposed change contains: the commits on `head` that `base` does not
 /// have, and one diff of the whole thing.

@@ -16,7 +16,7 @@ anything but Cloudflare can reach.
 
 Each workspace pod runs **`sshd`** from its Nix profile as the container's process, with a
 per-workspace host key and the owner's registered public keys authorized. A **gateway** per
-region (`kloudlite-git-gateway`, a small Rust service in the k3s cluster) accepts WebSocket
+region (`kloudlite-gateway`, a small Rust service in the k3s cluster) accepts WebSocket
 connections, authorizes them against the api, and pumps bytes to the workspace pod's port 22.
 The gateway is reached **only through Cloudflare**: it serves TLS on the region nodes' public
 interface with a Cloudflare Origin CA certificate, `ws-<region>.khost.dev` is a proxied hostname,
@@ -40,7 +40,7 @@ mints the session token, the data path is user → nearest Cloudflare PoP → re
 | Component | Where | What it does |
 |---|---|---|
 | `sshd` in the workspace pod | every workspace pod (k3s) | `/nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config` as the container command for the default image; config + host keys from a per-workspace Secret; `authorized_keys` from the owner's registered keys. |
-| `kloudlite-git-gateway` | `bins/gateway`, Deployment in k3s (`kube-system`, 2 replicas) | HTTP server: `GET /tunnel/{ws-id}` upgrades to WebSocket; validates the session token with the api; resolves the pod IP from the Workspace's status; dials `pod:22`; pumps. No shell, no auth of its own, no state. |
+| `kloudlite-gateway` | `bins/gateway`, Deployment in k3s (`kube-system`, 2 replicas) | HTTP server: `GET /tunnel/{ws-id}` upgrades to WebSocket; validates the session token with the api; resolves the pod IP from the Workspace's status; dials `pod:22`; pumps. No shell, no auth of its own, no state. |
 | Cloudflare | edge | Proxied A records for `ws-<region>.khost.dev` → the region nodes' public IPs; Origin CA certificate on the gateway; SSL mode Full (strict); WAF managed rules; rate limiting on `/tunnel/*`. |
 | api (`bins/api`) | AKS | `POST /v1/workspaces/{id}/ssh-session` (mint), `GET /v1/ssh-sessions/{token}` (gateway validation), SSH key material stored on credentials, `authorized_keys` written into the `user-key` Secret; `/v1` made public (path rule on `dev.kloudlite.io`). |
 | agent (`bins/agent`) | k3s | Per-workspace `ws-ssh-{id}` Secret (host keys + `sshd_config`), pod command/mounts, NetworkPolicy allowing 22 from the gateway only. |
@@ -121,7 +121,7 @@ release 1; `spec.ssh: true` for custom images is a follow-up. The pod runs as ro
 `PermitRootLogin prohibit-password` is what makes that acceptable; a `dev` user is release 2.
 
 **NetworkPolicy**: the namespace's default-deny ingress gains one rule — port 22 from pods with
-label `app=kloudlite-git-gateway` in `kube-system`. Nothing else in the cluster can reach a
+label `app=kloudlite-gateway` in `kube-system`. Nothing else in the cluster can reach a
 workspace's sshd, including other tenants and other workspaces of the same tenant.
 
 ### Gateway
@@ -183,7 +183,7 @@ kl logout
 ### api: public `/v1`
 
 Today `/v1` is reachable only inside AKS. The web ingress gets a path rule
-`/v1/(.*) → kloudlite-git-api` on `dev.kloudlite.io` (regex already enabled), with the same
+`/v1/(.*) → kloudlite-api` on `dev.kloudlite.io` (regex already enabled), with the same
 per-IP rate limit as the app. `/v1/cli/*` and `/v1/workspaces/{id}/ssh-session` are the routes
 the CLI uses; everything else on `/v1` is what the web already calls server-side, now also
 callable by the CLI with the same bearer semantics.

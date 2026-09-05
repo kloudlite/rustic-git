@@ -5,7 +5,7 @@ read against `CLAUDE.md` ("Workspaces and environments"),
 `docs/superpowers/specs/2026-09-03-stop-interrupt-decommission-design.md` and
 `docs/superpowers/specs/2026-09-03-durable-snapshots-design.md`.
 
-`cargo clippy -p kloudlite-git-agent-bin -- -D warnings` is **clean** at this commit.
+`cargo clippy -p kloudlite-agent-bin -- -D warnings` is **clean** at this commit.
 
 Counts: **3 Critical, 6 Important, 7 Minor, 9 Cleanup.**
 
@@ -243,9 +243,9 @@ that leaks nothing useful, so this is correct as written — noted only so a fut
 
 ### M7. `agent_pod_addr` trusts a label in `kube-system`
 `peer.rs:250-260` — the peer address for a node is whichever pod in `kube-system` carries
-`app=kloudlite-git-agent` and `spec.nodeName={node}`. Anyone who can create a pod in `kube-system`
+`app=kloudlite-agent` and `spec.nodeName={node}`. Anyone who can create a pod in `kube-system`
 can redirect a pull. That is already a cluster-admin-adjacent capability, so this is an
-observation, not a hole; a `spec.serviceAccountName == "kloudlite-git-agent"` check on the pod would
+observation, not a hole; a `spec.serviceAccountName == "kloudlite-agent"` check on the pod would
 close it for one line.
 
 ---
@@ -295,7 +295,7 @@ the spec's four dropped fields. Two sentences.
 
 ### K8. Four near-identical `NoopNix` + `test_ctx` fixtures
 `listing.rs:205-232`, `claim.rs:347-379`, `peer.rs:758-790`, `sync.rs:168-199`, `decommission.rs:137-168`,
-`controller/volume.rs` — five copies of the same 30 lines. `kloudlite_git_workspaces::kube_test`
+`controller/volume.rs` — five copies of the same 30 lines. `kloudlite_workspaces::kube_test`
 already exists as the shared test-support module; one `agent_test_ctx(pool, node, routes)` there
 deletes ~150 lines.
 

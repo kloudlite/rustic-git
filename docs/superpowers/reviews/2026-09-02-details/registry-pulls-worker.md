@@ -147,6 +147,6 @@ assertion in `deleting_a_manifest_by_digest_drops_its_media_type_row`: `head(blo
   exported item in both crates has a caller in `bins/` or `tests/`.
 - The `merge_worker` `local()`/`networked()` split is the strongest thing here; it is one rule, it
   is testable, and it is tested. Worth copying anywhere else a credential enters an argv.
-- Config that nobody sets: `KLOUDLITE_GIT_MERGE_CMD_TIMEOUT`/`_JOB_TIMEOUT`,
-  `KLOUDLITE_GIT_UPLOAD_GRACE_SECS`, `KLOUDLITE_GIT_MAX_LAYER` are all absent from `deploy/`. That is
+- Config that nobody sets: `KLOUDLITE_MERGE_CMD_TIMEOUT`/`_JOB_TIMEOUT`,
+  `KLOUDLITE_UPLOAD_GRACE_SECS`, `KLOUDLITE_MAX_LAYER` are all absent from `deploy/`. That is
   fine for escape hatches — but `max_layer`'s default is the one that is actually wrong (M1).

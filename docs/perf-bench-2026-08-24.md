@@ -1,8 +1,8 @@
 # Post-deploy performance bench — 2026-08-24
 
-Measured against `kolomi-cluster` / `kloudlite-git` after the perf-fix roll (master `7ef3e60`, both
+Measured against `kolomi-cluster` / `kloudlite` after the perf-fix roll (master `7ef3e60`, both
 images repinned). Method matches the 2026-08-23 baseline: an in-cluster `curlimages/curl` pod
-against `http://kloudlite-git-http.kloudlite-git.svc:80` for registry work, laptop-side `git` and the
+against `http://kloudlite-http.kloudlite.svc:80` for registry work, laptop-side `git` and the
 api tier (port-forwarded) for the rest. Random `/dev/urandom` payloads, never a dedupe hit.
 
 ## Registry — in cluster

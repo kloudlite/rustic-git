@@ -13,7 +13,7 @@
 //! copy of the same fact.
 //!
 //! `spec.owner` is truth (CLAUDE.md): every `owner` field below reads the spec, never the
-//! `kloudlite-git.io/owner` label, which is a view maintained for label selectors.
+//! `kloudlite.io/owner` label, which is a view maintained for label selectors.
 
 use super::events::{write_events, EventRow};
 use super::History;

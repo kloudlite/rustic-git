@@ -56,7 +56,7 @@ One ZeroFS process per region — SlateDB is single-writer (writer-epoch fencing
 invariant as this platform's repo databases), so one instance per bucket prefix, never one per
 node. Nodes are plain NFS clients of it.
 
-- Runs as a k8s Deployment, one replica, in `kloudlite-git-system`, resource requests pinned.
+- Runs as a k8s Deployment, one replica, in `kloudlite-system`, resource requests pinned.
   Ruled: accept the availability window — if it is down, `/home/kl` hangs (hard NFS mount) on
   every node until it reschedules. Today a node failure costs one node's workspaces; this trades
   that for a region-wide but short hang. Revisit only if it hurts in practice.

@@ -99,7 +99,7 @@ In `tests/routing.rs`, append:
 fn v2_paths_derive_the_image_key() {
     // repo_of is private, so assert through the public helper the middleware uses.
     assert_eq!(
-        kloudlite_git::registry::image_route("/v2/acme/nginx/blobs/sha256:ab").map(|(o, n)| kloudlite_git::registry::routing_key(o, n)),
+        kloudlite::registry::image_route("/v2/acme/nginx/blobs/sha256:ab").map(|(o, n)| kloudlite::registry::routing_key(o, n)),
         Some("img/acme/nginx".to_string())
     );
 }
@@ -269,7 +269,7 @@ git commit -m "Route a registry path without letting it become a repo's"
 
 ```rust
 mod common;
-use kloudlite_git::registry::{store as rstore, Digest};
+use kloudlite::registry::{store as rstore, Digest};
 
 #[test]
 fn digests_parse_strictly() {
@@ -541,7 +541,7 @@ pub async fn serve_public() -> (String, TestEnv) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, kloudlite_git::http::router(app)).await.unwrap();
+        axum::serve(l, kloudlite::http::router(app)).await.unwrap();
     });
     (base, e)
 }
@@ -554,7 +554,7 @@ pub async fn serve_peer() -> (String, TestEnv) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, kloudlite_git::http::peer_router(app)).await.unwrap();
+        axum::serve(l, kloudlite::http::peer_router(app)).await.unwrap();
     });
     (base, e)
 }
@@ -562,7 +562,7 @@ pub async fn serve_peer() -> (String, TestEnv) {
 pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{base}{path}"))
-        .header(kloudlite_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(kloudlite::proxy::PEER_HEADER, "test-peer-secret")
         .send()
         .await
         .unwrap()
@@ -619,7 +619,7 @@ async fn errors_use_the_oci_envelope() {
 #[tokio::test]
 async fn a_stranger_cannot_read_a_private_image() {
     let (base, e) = serve().await;
-    e.store.put_tag("acme", "nginx", "latest", &kloudlite_git::registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &kloudlite::registry::Digest::of(b"m")).await.unwrap();
     let other = e.store.create_token("other").await.unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v2/acme/nginx/tags/list"))
@@ -683,7 +683,7 @@ use base64::Engine;
 fn realm() -> String {
     // The externally reachable base URL. The challenge must name a URL the CLIENT can reach, not
     // this pod's address, so it is configuration rather than something derived from the request.
-    std::env::var("KLOUDLITE_GIT_EXTERNAL_URL").unwrap_or_else(|_| "http://localhost:8080".into())
+    std::env::var("KLOUDLITE_EXTERNAL_URL").unwrap_or_else(|_| "http://localhost:8080".into())
 }
 
 pub fn challenge(scope: Option<&str>) -> Response {
@@ -983,7 +983,7 @@ pub fn verify_registry_token(app: &App, jwt: &str) -> Option<String> {
 
 Register it: `.route("/v2/token", get(token))`.
 
-If `App` has no `jwt` field, add one — `pub jwt: Arc<crate::jwt::Jwt>`, built in `App::new` from `KLOUDLITE_GIT_JWT_SECRET` and, when unset, from a per-process random secret (tokens then die with the process, which is correct for a dev run and visible in a fleet as "log in again").
+If `App` has no `jwt` field, add one — `pub jwt: Arc<crate::jwt::Jwt>`, built in `App::new` from `KLOUDLITE_JWT_SECRET` and, when unset, from a per-process random secret (tokens then die with the process, which is correct for a dev run and visible in a fleet as "log in again").
 
 - [ ] **Step 5: Run the tests**
 
@@ -1012,7 +1012,7 @@ git commit -m "Exchange a token for a bearer the way the spec says"
   - `GET|HEAD /v2/{o}/{n}/blobs/{digest}`
   - `POST /v2/{o}/{n}/blobs/uploads/?digest=` (single-request push)
   - `POST /v2/{o}/{n}/blobs/uploads/` then `PUT .../{uuid}?digest=` (two-request push)
-  - `registry::blobs::max_layer() -> u64` — from `KLOUDLITE_GIT_MAX_LAYER`, default 10 GiB
+  - `registry::blobs::max_layer() -> u64` — from `KLOUDLITE_MAX_LAYER`, default 10 GiB
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1021,7 +1021,7 @@ git commit -m "Exchange a token for a bearer the way the spec says"
 ```rust
 mod common;
 use axum::http::StatusCode;
-use kloudlite_git::registry::Digest;
+use kloudlite::registry::Digest;
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
     let (base, e) = common::serve_public().await;
@@ -1140,9 +1140,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Largest single layer accepted, checked against Content-Length BEFORE any byte is read: an
-/// unbounded push must not be able to fill a node's disk. Override with KLOUDLITE_GIT_MAX_LAYER.
+/// unbounded push must not be able to fill a node's disk. Override with KLOUDLITE_MAX_LAYER.
 pub fn max_layer() -> u64 {
-    std::env::var("KLOUDLITE_GIT_MAX_LAYER").ok().and_then(|v| v.parse().ok())
+    std::env::var("KLOUDLITE_MAX_LAYER").ok().and_then(|v| v.parse().ok())
         .unwrap_or(10 * 1024 * 1024 * 1024)
 }
 
@@ -1350,7 +1350,7 @@ git commit -m "Push a layer and pull it back"
 ```rust
 mod common;
 use axum::http::StatusCode;
-use kloudlite_git::registry::Digest;
+use kloudlite::registry::Digest;
 
 #[tokio::test]
 async fn a_layer_uploads_in_chunks() {
@@ -1874,7 +1874,7 @@ git commit -m "Mount a layer a team already has, and let one be deleted"
 ```rust
 mod common;
 use axum::http::StatusCode;
-use kloudlite_git::registry::Digest;
+use kloudlite::registry::Digest;
 
 const MEDIA: &str = "application/vnd.oci.image.manifest.v1+json";
 
@@ -2680,7 +2680,7 @@ git commit -m "Answer who refers to a manifest, and what a team has pushed"
 
 ```rust
 mod common;
-use kloudlite_git::registry::{gc, store::blob_path, Digest};
+use kloudlite::registry::{gc, store::blob_path, Digest};
 use slatedb::object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::time::Duration;
 
@@ -2701,7 +2701,7 @@ async fn an_unreferenced_blob_is_swept_and_a_referenced_one_is_not() {
     }).to_string().into_bytes();
     let md = Digest::of(&manifest);
     e.store.os
-        .put(&kloudlite_git::registry::store::manifest_path("acme", "nginx", &md), PutPayload::from(manifest))
+        .put(&kloudlite::registry::store::manifest_path("acme", "nginx", &md), PutPayload::from(manifest))
         .await.unwrap();
     e.store.put_tag("acme", "nginx", "latest", &md).await.unwrap();
 
@@ -2737,7 +2737,7 @@ async fn a_layer_two_images_share_survives_one_of_them_being_emptied() {
         }).to_string().into_bytes();
         let md = Digest::of(&m);
         e.store.os
-            .put(&kloudlite_git::registry::store::manifest_path("acme", image, &md), PutPayload::from(m))
+            .put(&kloudlite::registry::store::manifest_path("acme", image, &md), PutPayload::from(m))
             .await.unwrap();
         e.store.put_tag("acme", image, "latest", &md).await.unwrap();
     }
@@ -2850,7 +2850,7 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
 
 If `chrono` is not already a dependency, compare with `m.last_modified` in whatever type `object_store` uses in this pin (it is `chrono::DateTime<Utc>` in every recent version, and SlateDB pulls chrono in transitively — check `cargo tree -p chrono` before adding it to `Cargo.toml`).
 
-Wire it into `src/bin/worker.rs` next to the existing repo maintenance pass: one sweep per owner per cycle, with the grace window from `KLOUDLITE_GIT_BLOB_GRACE_SECS` (default 3600), logging how many it deleted.
+Wire it into `src/bin/worker.rs` next to the existing repo maintenance pass: one sweep per owner per cycle, with the grace window from `KLOUDLITE_BLOB_GRACE_SECS` (default 3600), logging how many it deleted.
 
 - [ ] **Step 4: Run the tests**
 
@@ -2892,8 +2892,8 @@ Append to `tests/registry_http.rs`:
 async fn the_browse_api_lists_a_teams_images() {
     // The peer listener is where browse routes live; mirror tests/browse_http.rs's harness.
     let (base, e) = common::serve_peer().await;
-    e.store.put_tag("acme", "nginx", "latest", &kloudlite_git::registry::Digest::of(b"m")).await.unwrap();
-    e.store.put_tag("acme", "nginx", "v1", &kloudlite_git::registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &kloudlite::registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "v1", &kloudlite::registry::Digest::of(b"m")).await.unwrap();
     let r = common::peer_get(&base, "/api/acme/images").await;
     assert_eq!(r.status(), StatusCode::OK);
     let b: serde_json::Value = r.json().await.unwrap();
@@ -3042,7 +3042,7 @@ Record which groups pass in the README section; do not leave a claim of conforma
 
 - [ ] **Step 4: Document it**
 
-Add a Container Images section to `README.md`: what the registry serves, `docker login`, push, pull, that images are their own namespace, and the env knobs this plan introduced — `KLOUDLITE_GIT_EXTERNAL_URL`, `KLOUDLITE_GIT_MAX_LAYER`, `KLOUDLITE_GIT_BLOB_GRACE_SECS`, `KLOUDLITE_GIT_JWT_SECRET`.
+Add a Container Images section to `README.md`: what the registry serves, `docker login`, push, pull, that images are their own namespace, and the env knobs this plan introduced — `KLOUDLITE_EXTERNAL_URL`, `KLOUDLITE_MAX_LAYER`, `KLOUDLITE_BLOB_GRACE_SECS`, `KLOUDLITE_JWT_SECRET`.
 
 - [ ] **Step 5: Commit**
 

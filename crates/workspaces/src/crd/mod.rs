@@ -1,4 +1,4 @@
-//! The `kloudlite-git.io/v1alpha1` custom resources — the reconcile substrate for workspaces and
+//! The `kloudlite.io/v1alpha1` custom resources — the reconcile substrate for workspaces and
 //! environments.
 //!
 //! These types ARE the source of truth. `/v1` writes spec, each node's controller reconciles the
@@ -35,27 +35,27 @@ pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 mod names;
 pub use names::*;
 
-pub const GROUP: &str = "kloudlite-git.io";
+pub const GROUP: &str = "kloudlite.io";
 pub const VERSION: &str = "v1alpha1";
 /// The controller writes status under its own manager; a server-side-apply conflict against it
 /// therefore means another controller, not `/v1`.
-pub const AGENT_FIELD_MANAGER: &str = "kloudlite-git-agent";
+pub const AGENT_FIELD_MANAGER: &str = "kloudlite-agent";
 /// The admin process's own field manager on the settings routes — distinct from
 /// `AGENT_FIELD_MANAGER` so a settings write and the agent's own status writes are never
 /// attributed to the same manager in a server-side-apply conflict.
-pub const AGENT_FIELD_MANAGER_ADMIN: &str = "kloudlite-git-admin";
+pub const AGENT_FIELD_MANAGER_ADMIN: &str = "kloudlite-admin";
 /// `ClusterSettings`' history annotation: the previous ten specs, newest first, JSON — parallel to
 /// `StoredCentralSettings.history` but as an annotation rather than a struct field, since the CRD
 /// spec is what server-side apply owns field-by-field and a growing history array there would be a
 /// moving target for every other writer of the spec (there are none today, but the annotation
 /// keeps the spec itself exactly the shape `ClusterSettingsSpec` declares).
-pub const SETTINGS_HISTORY_ANNOTATION: &str = "kloudlite-git.io/settings-history";
-pub const SETTINGS_UPDATED_BY_ANNOTATION: &str = "kloudlite-git.io/updated-by";
-pub const SETTINGS_UPDATED_AT_ANNOTATION: &str = "kloudlite-git.io/updated-at";
+pub const SETTINGS_HISTORY_ANNOTATION: &str = "kloudlite.io/settings-history";
+pub const SETTINGS_UPDATED_BY_ANNOTATION: &str = "kloudlite.io/updated-by";
+pub const SETTINGS_UPDATED_AT_ANNOTATION: &str = "kloudlite.io/updated-at";
 /// Held while a subvolume exists on a node. The object must outlive the delete request until the
 /// controller has actually reclaimed the bytes — otherwise the record of what to reclaim is gone
 /// before the reclaim happens.
-pub const SUBVOLUME_FINALIZER: &str = "kloudlite-git.io/subvolume";
+pub const SUBVOLUME_FINALIZER: &str = "kloudlite.io/subvolume";
 /// Held on a shared-volume clone workspace. A workspace that is a
 /// shared-volume clone (`spec.storage.source` is `CloneOf { commit: Some(_), .. }`) checks out a
 /// worktree under the SOURCE volume's `live/`, not its own — it owns no `Volume` child, so
@@ -64,7 +64,7 @@ pub const SUBVOLUME_FINALIZER: &str = "kloudlite-git.io/subvolume";
 /// avoid distinguishing the two cases before the spec's `source` is known to be gone at delete
 /// time), but its cleanup is a no-op: the owned `Volume`'s own `SUBVOLUME_FINALIZER` already
 /// deletes the whole voldir, worktree included.
-pub const WORKTREE_FINALIZER: &str = "kloudlite-git.io/worktree";
+pub const WORKTREE_FINALIZER: &str = "kloudlite.io/worktree";
 
 /// What the operator asked for, independent of what is currently true.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -139,7 +139,7 @@ pub struct RestoreWish {
 
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Volume",
     plural = "volumes",
@@ -203,7 +203,7 @@ pub struct VolumeStatus {
     #[serde(default)]
     pub subvolume_present: bool,
     // No `lastSnapshot` and no `lastPush`: "the newest snapshot of this volume" is a query over
-    // `Snapshot` CRs by the `kloudlite-git.io/volume` label. A second controller writing this
+    // `Snapshot` CRs by the `kloudlite.io/volume` label. A second controller writing this
     // status object would prune the first one's fields — `patch_status` applies FORCED under one
     // `AGENT_FIELD_MANAGER`, and server-side apply removes fields a manager previously owned and no
     // longer sets, so the Volume reconciler's very next pass would delete whatever the snapshot
@@ -221,7 +221,7 @@ pub struct VolumeStatus {
 /// retired region stops being offered while its existing workspaces keep running.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Region",
     plural = "regions",
@@ -251,7 +251,7 @@ pub struct RegionStatus {}
 /// task has since deleted — this is the only push record left.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Snapshot",
     plural = "snapshots",
@@ -403,7 +403,7 @@ pub struct SnapshotStatus {
 /// for longer than `WS_NODE_DEAD_SECS`.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "VolumeReplica",
     plural = "volumereplicas",
@@ -489,7 +489,7 @@ pub fn short_hex() -> String {
     use rand::RngCore;
     let mut b = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut b);
-    kloudlite_git_core::hex(&b)
+    kloudlite_core::hex(&b)
 }
 
 /// Requests and limits for a workspace pod, as plain strings in Kubernetes quantity form.
@@ -589,7 +589,7 @@ impl Phase {
 
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Workspace",
     plural = "workspaces",
@@ -711,7 +711,7 @@ pub struct ServiceStatus {
 
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Environment",
     plural = "environments",
@@ -793,7 +793,7 @@ pub struct EnvironmentStatus {
 /// node-scoped (it once pinned an owner to a node; that pin is gone).
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "OwnerBinding",
     plural = "ownerbindings",
@@ -841,7 +841,7 @@ pub struct OwnerBindingStatus {
 /// on every request (`quota::usage`), so no field of this object can drift from the truth.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Quota",
     plural = "quotas",
@@ -954,7 +954,7 @@ pub struct RequestedQuota {
 /// deleted by the system; the record of who asked for what, and who said yes, is the point.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "QuotaRequest",
     plural = "quotarequests",
@@ -1026,7 +1026,7 @@ impl RequestKind {
 
 /// Join a team, or move to a different role in one. `role` is the directory's own word
 /// (`member` / `admin` / `owner`) rather than an enum, because the directory's `Role` lives in
-/// `kloudlite-git-pulls` and this crate deliberately does not depend on it; `validate` is what stops
+/// `kloudlite-pulls` and this crate deliberately does not depend on it; `validate` is what stops
 /// a typo reaching the grant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1058,7 +1058,7 @@ pub struct OtherAsk {
 /// nowhere else to live.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Request",
     plural = "requests",
@@ -1143,30 +1143,30 @@ pub struct RequestStatus {
 /// The label a `Snapshot` carries so `/v1/volumes/{id}/history` is one indexed list
 /// call rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
 /// authorization.
-pub const VOLUME_LABEL: &str = "kloudlite-git.io/volume";
+pub const VOLUME_LABEL: &str = "kloudlite.io/volume";
 
-/// Set on a `Node` by an operator (`kubectl label node <n> kloudlite-git.io/decommission=true`) to
+/// Set on a `Node` by an operator (`kubectl label node <n> kloudlite.io/decommission=true`) to
 /// retire it. A LABEL and not an annotation because it is a selector-worthy fact about the node,
 /// and because removing it is the documented abort. Only the exact value `"true"` counts: a
 /// half-typed label must never drain a node.
-pub const DECOMMISSION_LABEL: &str = "kloudlite-git.io/decommission";
+pub const DECOMMISSION_LABEL: &str = "kloudlite.io/decommission";
 
 /// The drain's one progress window, written by the draining node's own agent and read by the
 /// admin console's decommission gate. Lives here, next to the label, so the tier that WRITES it
 /// and the tier that READS it can never spell it differently.
-pub const DECOMMISSION_STATUS: &str = "kloudlite-git.io/decommission-status";
+pub const DECOMMISSION_STATUS: &str = "kloudlite.io/decommission-status";
 
 /// The sticky stamp `DECOMMISSION_STATUS` carries once a node holds nothing — the prefix the
 /// console gates decommission on.
 pub const DRAINED_PREFIX: &str = "drained ";
 
 /// Labels every `Snapshot`/`VolumeReplica` create site stamps: `spec.volume`/`spec.owner` restated
-/// as labels so a watch or a list (the e2e's `-l kloudlite-git.io/volume=...`, `/v1`'s own reads) can
+/// as labels so a watch or a list (the e2e's `-l kloudlite.io/volume=...`, `/v1`'s own reads) can
 /// select on them — a label cannot be queried out of an arbitrary spec field. A VIEW, same rule as
 /// every other label in this file: `spec` stays the truth, this is never read for authorization.
 pub fn snapshot_labels(owner: &str, volume: &str) -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::from([
-        ("kloudlite-git.io/owner".to_string(), owner.to_string()),
+        ("kloudlite.io/owner".to_string(), owner.to_string()),
         (VOLUME_LABEL.to_string(), volume.to_string()),
     ])
 }
@@ -1174,7 +1174,7 @@ pub fn snapshot_labels(owner: &str, volume: &str) -> std::collections::BTreeMap<
 /// Names the Environment a `stop-{env}` request belongs to, so the environments controller can
 /// watch only those instead of every push in the cluster. Also a view: the ownerReference is the
 /// link the mapper reads, and this label exists only because a watch cannot select on one.
-pub const STOP_LABEL: &str = "kloudlite-git.io/stop-of";
+pub const STOP_LABEL: &str = "kloudlite.io/stop-of";
 
 /// Has the Volume already granted this exact wish?
 ///
@@ -1250,7 +1250,7 @@ pub mod defaults {
 /// object per region's k3s, not per namespace.
 #[derive(CustomResource, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "ClusterSettings",
     plural = "clustersettings",
@@ -1312,7 +1312,7 @@ pub struct ClusterSettingsSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_gb_ceiling: Option<u32>,
     /// Tenant workspace pod image. **Boot** — the agent reads this at pod-template render
-    /// time, not per reconcile; a change rolls `kloudlite-git-agent` (Task 5). `None` = keep
+    /// time, not per reconcile; a change rolls `kloudlite-agent` (Task 5). `None` = keep
     /// today's env value, so an admin who never opens this row cannot blank a required image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_image: Option<String>,
@@ -1338,25 +1338,25 @@ pub struct ClusterSettingsStatus {
 /// here). A test (`cluster_setting_meta_is_exhaustive`) asserts this table's field names equal
 /// `ClusterSettingsSpec`'s schemars property names, so a field added to the struct without an
 /// entry here fails loudly instead of shipping unreadable.
-pub const CLUSTER_SETTING_META: &[(&str, kloudlite_git_core::settings::Mark, &[&str])] = &[
-    ("syncSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("replicaSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("decommissionSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("nodeDeadSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("peerSendTimeoutSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("peerServeTimeoutSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("peerReceiveSlack", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("stopFlushTimeoutSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("nixTimeoutSecs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("nixpkgs", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("basePackages", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("defaultReplicas", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("maxPerOwner", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("homeCacheGb", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("quotaGbCeiling", kloudlite_git_core::settings::Mark::Live, &[]),
-    ("defaultImage", kloudlite_git_core::settings::Mark::Boot, &["kloudlite-git-agent"]),
-    ("gitInitImage", kloudlite_git_core::settings::Mark::Boot, &["kloudlite-git-agent"]),
-    ("runtimeClass", kloudlite_git_core::settings::Mark::Boot, &["kloudlite-git-agent"]),
+pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str])] = &[
+    ("syncSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("replicaSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("decommissionSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("nodeDeadSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("peerSendTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("peerServeTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("peerReceiveSlack", kloudlite_core::settings::Mark::Live, &[]),
+    ("stopFlushTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("nixTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("nixpkgs", kloudlite_core::settings::Mark::Live, &[]),
+    ("basePackages", kloudlite_core::settings::Mark::Live, &[]),
+    ("defaultReplicas", kloudlite_core::settings::Mark::Live, &[]),
+    ("maxPerOwner", kloudlite_core::settings::Mark::Live, &[]),
+    ("homeCacheGb", kloudlite_core::settings::Mark::Live, &[]),
+    ("quotaGbCeiling", kloudlite_core::settings::Mark::Live, &[]),
+    ("defaultImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
+    ("gitInitImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
+    ("runtimeClass", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
 ];
 
 /// Every CRD this repo owns, for YAML generation and for a startup precondition check.
@@ -1454,7 +1454,7 @@ fn condition_now(kind: &str, status: bool, reason: &str, message: &str, generati
 /// agent that writes it and `/v1` — which must order the same transients to pick a clone's parent
 /// — read it, and two copies of the ordering key is how two tiers disagree about which cut is
 /// newest.
-pub const SYNCED_GENERATION: &str = "kloudlite-git.io/synced-generation";
+pub const SYNCED_GENERATION: &str = "kloudlite.io/synced-generation";
 
 /// Public so the replica writer can apply the SAME key to the subset it actually holds on disk.
 pub fn transient_generation_of(s: &Snapshot) -> u64 {
@@ -1568,7 +1568,7 @@ mod tests {
     fn a_push_is_a_snapshot_but_a_sync_point_or_a_baseline_is_not() {
         let snap = |spec: serde_json::Value| -> Snapshot {
             serde_json::from_value(serde_json::json!({
-                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
                 "metadata": {"name": "v-aaaaaaaa"}, "spec": spec,
             }))
             .unwrap()

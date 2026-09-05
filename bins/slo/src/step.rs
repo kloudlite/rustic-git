@@ -11,7 +11,7 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 // The admin API's own ceiling, imported rather than repeated: a copy here would silently stop
 // matching the day the validator's changed, and the whole report would start being refused.
-use kloudlite_git_workspaces::history::slo::{StepReport, MAX_DETAIL};
+use kloudlite_workspaces::history::slo::{StepReport, MAX_DETAIL};
 
 use crate::ctx::Ctx;
 

@@ -35,7 +35,7 @@ one FNV-1a pass. Concatenation looked right and was reviewed six times, but FNV'
 sensitivity let the peer-name suffix dominate the top bits: measured over 30 000 repos at three
 nodes, one node owned exactly half of them. A distribution test caught what reading did not.
 
-The hash key is the peer's **stable name** (`kloudlite-git-0`, `kloudlite-git-1`, …), never its IP. A
+The hash key is the peer's **stable name** (`kloudlite-0`, `kloudlite-1`, …), never its IP. A
 StatefulSet pod keeps its name across restarts but gets a new IP each time, so hashing on IP would
 make every restarted pod a *new* peer: over one rolling restart nearly every repo would move at
 least twice. Hashing on the name means a restart moves nothing — the same pod comes back owning
@@ -56,8 +56,8 @@ Properties that matter here:
 
 A StatefulSet behind a headless Service already names its members: `replicas: N` means the peers
 are `{app}-0 … {app}-{N-1}`, and those names survive every restart, reschedule and IP change. So
-membership is configuration — `KLOUDLITE_GIT_SELF` (downward API) gives the app name and this node's
-hash key, `KLOUDLITE_GIT_REPLICAS` gives the count, and each peer's address is
+membership is configuration — `KLOUDLITE_SELF` (downward API) gives the app name and this node's
+hash key, `KLOUDLITE_REPLICAS` gives the count, and each peer's address is
 `{app}-{i}.{headless-svc}:{peer-port}`, a hostname the OS resolves when a connection is actually
 made. Nothing is polled, cached, or able to go stale. The earlier design resolved the Service's A
 records every couple of seconds, which conflated membership with readiness: a restarting pod left
@@ -65,7 +65,7 @@ the endpoint list and therefore left the peer set, so the fleet re-ranked its re
 while it still held them — fencing it, one burst of 503s per roll. Liveness is a separate question
 with its own answer: peers probe `/healthz` on the peer port, and a member that is briefly
 unreachable is handled by the two-vantage rule below (refuse, do not take over). Scaling now means
-changing `replicas` and `KLOUDLITE_GIT_REPLICAS` together and rolling — the cost of never being wrong
+changing `replicas` and `KLOUDLITE_REPLICAS` together and rolling — the cost of never being wrong
 about who the members are.
 
 ### Failing over past an unreachable candidate
@@ -238,14 +238,14 @@ the edge and is not re-presented.
 Peer traffic gets **its own listeners on their own ports**, published by no Service and reachable
 only from inside the cluster network:
 
-* `KLOUDLITE_GIT_PEER_ADDR` (default `0.0.0.0:8081`) — HTTP, for forwarded HTTP client requests.
+* `KLOUDLITE_PEER_ADDR` (default `0.0.0.0:8081`) — HTTP, for forwarded HTTP client requests.
 * One port above it (`8082`) — the byte pipe, for forwarded SSH sessions. Derived, not configured:
   peers are addressed by their HTTP peer port everywhere else, and a second list would be a second
   thing to keep in agreement.
 
 The public listeners on 8080 and 2222 never honour an identity claim at all.
 
-    X-Kloudlite-Git-Owner: <authenticated owner>   # honoured on the peer HTTP listener only
+    X-Kloudlite-Owner: <authenticated owner>   # honoured on the peer HTTP listener only
     <secret> <service> <repo> <owner> <hops>\n  # the peer stream's first line
 
 Trust is positional first: a request that arrived on the peer port came from inside the cluster,
@@ -254,10 +254,10 @@ and the failure mode of forgetting to publish a port is an outage, not a breach 
 you want a mistake to fall.
 
 It is not positional *only*. Pod networking is flat, so anything else running in the cluster can
-reach the peer ports, and the natural fix — a NetworkPolicy restricting them to `kloudlite-git` pods
+reach the peer ports, and the natural fix — a NetworkPolicy restricting them to `kloudlite` pods
 — is silently ignored on this cluster: `kolomi-cluster` was created with `networkPolicy: none`,
 so the policy object is accepted and enforces nothing. So every forwarded request also carries a
-shared secret (`X-Kloudlite-Git-Peer`, and the first token of the stream header) from a Kubernetes
+shared secret (`X-Kloudlite-Peer`, and the first token of the stream header) from a Kubernetes
 Secret, checked on the peer listeners only. Wrong or missing, the request is refused before
 anything else is read.
 
@@ -352,7 +352,7 @@ is a unit test with scripted reachability.
 * **Forwarding.** Two servers in one process over an in-memory store. A request to the non-owner
   is served correctly, and the *owner* is the node that opened the database — asserted through the
   pool's warm count, so the test fails if both nodes open it.
-* **Peer auth.** `X-Kloudlite-Git-Owner` sent to the *public* listener is ignored and the request is
+* **Peer auth.** `X-Kloudlite-Owner` sent to the *public* listener is ignored and the request is
   authenticated normally — the test that matters, since it is the bypass a client would attempt.
   The same header on the peer listener is honoured, and that request is served locally regardless
   of the hash.
@@ -394,20 +394,20 @@ is a unit test with scripted reachability.
 
 ## Deployment changes
 
-Removed: the Ingress and its `upstream-hash-by` annotations, and the `kloudlite-git-http` Service.
+Removed: the Ingress and its `upstream-hash-by` annotations, and the `kloudlite-http` Service.
 
-Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `KLOUDLITE_GIT_PEER_SVC`,
-`KLOUDLITE_GIT_REPLICAS`, `KLOUDLITE_GIT_SELF` (the pod name, from the downward API) and
-`KLOUDLITE_GIT_PEER_SECRET` (from a Secret) on the StatefulSet with the peer container ports,
+Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `KLOUDLITE_PEER_SVC`,
+`KLOUDLITE_REPLICAS`, `KLOUDLITE_SELF` (the pod name, from the downward API) and
+`KLOUDLITE_PEER_SECRET` (from a Secret) on the StatefulSet with the peer container ports,
 published by no Service; a `preStop` sleep (15 s) so a terminating pod leaves the load balancer's
 endpoints before it stops answering; and a NetworkPolicy allowing 8081 and 8082 only from pods
-labelled `app: kloudlite-git`, kept for a cluster that enforces one.
+labelled `app: kloudlite`, kept for a cluster that enforces one.
 
-The server refuses to start with `KLOUDLITE_GIT_PEER_SVC` set but any of `KLOUDLITE_GIT_REPLICAS`,
-`KLOUDLITE_GIT_SELF` or `KLOUDLITE_GIT_PEER_SECRET` missing. A default for any of them would be a
+The server refuses to start with `KLOUDLITE_PEER_SVC` set but any of `KLOUDLITE_REPLICAS`,
+`KLOUDLITE_SELF` or `KLOUDLITE_PEER_SECRET` missing. A default for any of them would be a
 phantom peer, a wrongly sized fleet, or an open port, and all fail silently.
 
-`KLOUDLITE_GIT_REPLICAS` must match `spec.replicas`: it *is* the peer set. Scaling means editing both
+`KLOUDLITE_REPLICAS` must match `spec.replicas`: it *is* the peer set. Scaling means editing both
 and rolling.
 
 ## Not in scope

@@ -4,7 +4,7 @@
 //! the console quietly lie.
 
 use axum::{routing::post, Router};
-use kloudlite_git_workspaces::history::{schema, History, HistoryError};
+use kloudlite_workspaces::history::{schema, History, HistoryError};
 use std::sync::{Arc, Mutex};
 
 type Seen = Arc<Mutex<Vec<String>>>;
@@ -91,7 +91,7 @@ async fn a_server_error_is_an_error_not_an_empty_result() {
 
 #[tokio::test]
 async fn from_env_is_none_without_a_url() {
-    std::env::remove_var("KLOUDLITE_GIT_CLICKHOUSE_URL");
+    std::env::remove_var("KLOUDLITE_CLICKHOUSE_URL");
     assert!(History::from_env().is_none());
 }
 
@@ -131,7 +131,7 @@ fn every_migration_version_is_unique_and_ordered() {
 
 /// The one test that talks to a real ClickHouse. Run it against a local ClickStack or a plain
 /// `docker run -p 8123:8123 clickhouse/clickhouse-server`:
-/// `KLOUDLITE_GIT_CLICKHOUSE_URL=http://localhost:8123 cargo test -p kloudlite-git-workspaces \
+/// `KLOUDLITE_CLICKHOUSE_URL=http://localhost:8123 cargo test -p kloudlite-workspaces \
 ///   --test history_client -- --ignored`
 ///
 /// The two materialized views over `otel_metrics_*` are skipped when those tables do not exist —
@@ -141,7 +141,7 @@ fn every_migration_version_is_unique_and_ordered() {
 #[ignore]
 async fn migrations_apply_against_a_real_clickhouse() {
     let Some(h) = History::from_env() else {
-        panic!("KLOUDLITE_GIT_CLICKHOUSE_URL must be set to run this test");
+        panic!("KLOUDLITE_CLICKHOUSE_URL must be set to run this test");
     };
     assert!(h.healthy().await, "ClickHouse did not answer");
     schema::migrate(&h).await.expect("first migrate");

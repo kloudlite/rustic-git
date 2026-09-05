@@ -58,7 +58,7 @@ pub async fn run(c: &mut Ctx) {
 async fn dns(c: &mut Ctx) {
     let hosts = c.cfg.hosts.clone();
     if hosts.is_empty() {
-        return c.skip("edge.dns", "KLOUDLITE_GIT_SLO_HOSTS names no hostname");
+        return c.skip("edge.dns", "KLOUDLITE_SLO_HOSTS names no hostname");
     }
     c.step("edge.dns", DNS_CEILING, move |c| {
         let dig = c.programs.dig.clone();
@@ -82,7 +82,7 @@ async fn dns(c: &mut Ctx) {
 async fn cert(c: &mut Ctx) {
     let hosts = c.cfg.hosts.clone();
     if hosts.is_empty() {
-        return c.skip("edge.cert", "KLOUDLITE_GIT_SLO_HOSTS names no hostname");
+        return c.skip("edge.cert", "KLOUDLITE_SLO_HOSTS names no hostname");
     }
     c.step("edge.cert", CERT_CEILING, move |c| {
         let (bash, openssl) = (c.programs.bash.clone(), c.programs.openssl.clone());
@@ -112,13 +112,13 @@ async fn cert(c: &mut Ctx) {
 /// connection failure is the outage this SLI is about.
 async fn origin(c: &mut Ctx) {
     let (Some(ip), Some(host)) = (c.cfg.origin_ip.clone(), c.cfg.hosts.first().cloned()) else {
-        return c.skip("edge.origin", "no KLOUDLITE_GIT_SLO_ORIGIN_IP, or no hostname to pin");
+        return c.skip("edge.origin", "no KLOUDLITE_SLO_ORIGIN_IP, or no hostname to pin");
     };
     c.step("edge.origin", ORIGIN_CEILING, move |_| {
         async move {
             let addr: std::net::SocketAddr = format!("{ip}:443")
                 .parse()
-                .with_context(|| format!("KLOUDLITE_GIT_SLO_ORIGIN_IP {ip:?} is not an address"))?;
+                .with_context(|| format!("KLOUDLITE_SLO_ORIGIN_IP {ip:?} is not an address"))?;
             let client = reqwest::Client::builder()
                 .resolve(&host, addr)
                 .timeout(ORIGIN_CEILING)
@@ -186,7 +186,7 @@ async fn log_latency(c: &mut Ctx) {
 ///
 /// Matched on the `{workload}-` prefix rather than anywhere in the string: `service.instance.id`
 /// is a pod name, which is the workload's name plus a hash, and a substring match would let
-/// `kloudlite-git-api` be "covered" by a `kloudlite-git-api-admin` pod. A workload with at least
+/// `kloudlite-api` be "covered" by a `kloudlite-api-admin` pod. A workload with at least
 /// one instance reporting is the strongest claim the two lists can make together, and it catches
 /// the failure that matters (a collector that stopped seeing a whole workload).
 async fn pod_coverage(c: &mut Ctx) {

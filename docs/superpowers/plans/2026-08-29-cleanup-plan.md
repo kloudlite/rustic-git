@@ -193,7 +193,7 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       per commit; export `lib/time.ts`'s pinned `ABSOLUTE` and reuse it, so the list and the
       detail page cannot disagree.
 - [x] Five env knobs read in code but set in no manifest, test or script → `const`:
-      `KLOUDLITE_GIT_BLOB_GRACE_SECS`, `_SLATEDB_BLOCK_CACHE_MB`, `_META_CACHE_MB`,
+      `KLOUDLITE_BLOB_GRACE_SECS`, `_SLATEDB_BLOCK_CACHE_MB`, `_META_CACHE_MB`,
       `_FLUSH_INTERVAL_MS`, `_MAX_CONCURRENT_RECEIVE`, `_MERGE_CACHE_BYTES`.
 - [x] Deduplicate `scheme`/`user_names`/`GIT_PLACEHOLDER`, which exist in both
       `crates/storage/src/auth.rs` and `crates/core/src/httpx.rs`. The doc's "keep storage
@@ -236,7 +236,7 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       for + the `ci` entry in `sections()`. Delete only if those tabs are not shipping soon —
       this is a product call, not a code one.
 - [ ] **Root package + `default-members`.** `[workspace].default-members` repeats the 15-entry
-      `members` list verbatim; it can go only if the root `kloudlite-git-tests` package and its
+      `members` list verbatim; it can go only if the root `kloudlite-tests` package and its
       one-line `src/lib.rs` stub go too, and `tests/` moves under a real crate. Bigger change
       than its payoff unless the root package is being touched anyway.
 
@@ -319,7 +319,7 @@ Done in this pass:
 Investigated and deliberately NOT done, with the reason:
 
 - **The root package and `default-members`.** The duplicate 15-entry list can only go if the root
-  `kloudlite-git-tests` package moves into its own member directory. That means relocating 24 Rust
+  `kloudlite-tests` package moves into its own member directory. That means relocating 24 Rust
   test files while `tests/registry_e2e.sh` and `tests/ws_e2e.sh` must stay where CLAUDE.md
   documents them — splitting the suite across two directories, and re-introducing the footgun the
   `default-members` comment exists to prevent (bare `cargo build` at the root, which is the deploy
@@ -341,7 +341,7 @@ Investigated and deliberately NOT done, with the reason:
   or assertions. Kept.
 
 One assertion was deleted, deliberately and reported: `keys_generate_in_the_cache_dir_and_nowhere_else`
-asserted that key generation *fails* when `KLOUDLITE_GIT_CACHE_DIR` points at an unwritable directory —
+asserted that key generation *fails* when `KLOUDLITE_CACHE_DIR` points at an unwritable directory —
 a property that existed only because `ssh-keygen -f` needed a scratch file. With no filesystem in
 the path it cannot hold. The format half of the test survives as `keys_are_openssh_format`.
 

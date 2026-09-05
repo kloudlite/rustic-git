@@ -4,7 +4,7 @@
 
 **Goal:** Central Cosmos-backed control plane + per-region agents for btrfs workspaces (snapshot/fork/clone, layers in region-local Azure Blob) and compose-style environments.
 
-**Architecture:** New `crates/workspaces` (models, store trait with mem+Cosmos impls, scheduler, snapshot engine ported from the POC) + new `bins/agent` (`kloudlite-git-agent`: long-polls the API, executes jobs). User+agent routes mount in the existing `kloudlite-git-api` binary.
+**Architecture:** New `crates/workspaces` (models, store trait with mem+Cosmos impls, scheduler, snapshot engine ported from the POC) + new `bins/agent` (`kloudlite-agent`: long-polls the API, executes jobs). User+agent routes mount in the existing `kloudlite-api` binary.
 
 **Tech Stack:** Rust workspace (axum, tokio, object_store 0.14 aws+azure, zstd zstdmt, sha2, libc), azure_data_cosmos, btrfs-progs on agent VMs.
 
@@ -90,7 +90,7 @@ pub enum StoreErr { CasFailed, NotFound, Conflict, Other(String) }
 `MemStore`: `Mutex<HashMap<..>>` per container, etag = a `u64` counter serialized to string, bumped on every replace; `replace_*` compares etags and returns `CasFailed`.
 
 - [ ] **Step 3: Tests** in `crates/workspaces/src/store.rs` `#[cfg(test)]`: round-trip each doc type through MemStore; CAS test — two clones of a job doc, first replace wins, second gets `CasFailed`; `queued_jobs` filters by region and state.
-- [ ] **Step 4:** `cargo test -p kloudlite-git-workspaces && cargo clippy --workspace -- -D warnings`
+- [ ] **Step 4:** `cargo test -p kloudlite-workspaces && cargo clippy --workspace -- -D warnings`
 - [ ] **Step 5: Commit** `feat: add workspaces crate with domain models and store trait`
 
 ### Task 2: Cosmos implementation of MetaStore
@@ -105,7 +105,7 @@ pub enum StoreErr { CasFailed, NotFound, Conflict, Other(String) }
 
 - [ ] **Step 1:** Implement with `azure_data_cosmos` `CosmosClient::with_key`. `replace_*` passes `if_match_etag`; map the 412 response to `StoreErr::CasFailed`, 404 to `NotFound`, 409 to `Conflict`. `queued_jobs`: query `SELECT * FROM c WHERE c.state = 'queued'` with partition key = region.
 - [ ] **Step 2: Tests.** Gated: `fn cosmos_env() -> Option<(String,String)>` reads `COSMOS_ENDPOINT`/`COSMOS_KEY`; tests return early (skip) when unset. Same suite as MemStore's, run against a `wstest-{uuid}` database dropped at the end.
-- [ ] **Step 3:** `cargo test -p kloudlite-git-workspaces` (skips cosmos without env) + clippy. Run once WITH real Cosmos env against the account the operator provides; paste results in the report.
+- [ ] **Step 3:** `cargo test -p kloudlite-workspaces` (skips cosmos without env) + clippy. Run once WITH real Cosmos env against the account the operator provides; paste results in the report.
 - [ ] **Step 4: Commit** `feat: add the Cosmos MetaStore implementation`
 
 ### Task 3: Snapshot engine — pool, lineage, blob IO (POC port, part 1)
@@ -121,7 +121,7 @@ pub enum StoreErr { CasFailed, NotFound, Conflict, Other(String) }
 - [ ] **Step 1:** Copy the corresponding functions from the POC file into the three modules; replace `Entry` with `LineageEntry` helpers; keep every comment that explains a WHY (multipart timeout, latch, graft).
 - [ ] **Step 2:** Add `pub fn have_btrfs() -> bool` (runs `btrfs --version` + geteuid==0 check) to `engine/mod.rs`.
 - [ ] **Step 3: Tests** (`engine_pool.rs`, all behind `have_btrfs()` + a loopback pool fixture that creates/mounts a 2 GB image under `tempfile` and cleans up): subvolume create + RO snapshot + `spawn_send` full stream decodes via `receive_into` into a second pool fixture; `upload_stream`→`get_bytes` round-trip against `mem://`-style local S3 (use `object_store::memory::InMemory` injected directly — no MinIO needed) verifying sha and the `z`/`r` mode byte both ways (text payload ⇒ `z`; `/dev/urandom` payload ⇒ `r`).
-- [ ] **Step 4:** `cargo test -p kloudlite-git-workspaces --test engine_pool` on a Linux VM with btrfs (operator provides; skips locally) + clippy everywhere.
+- [ ] **Step 4:** `cargo test -p kloudlite-workspaces --test engine_pool` on a Linux VM with btrfs (operator provides; skips locally) + clippy everywhere.
 - [ ] **Step 5: Commit** `feat: port the snapshot engine pool and blob layers from the POC`
 
 ### Task 4: Snapshot engine — push, auto-squash, pull, fork, clone (POC port, part 2)
@@ -144,7 +144,7 @@ impl Engine {
     pub async fn squash(&self, ws: &Workspace) -> Result<(), EngErr>;      // called by the detached child
 }
 ```
-The detached squash child is `kloudlite-git-agent squash <ws-id>` (Task 7 wires the subcommand; here spawn `std::env::current_exe()` with those args exactly like the POC).
+The detached squash child is `kloudlite-agent squash <ws-id>` (Task 7 wires the subcommand; here spawn `std::env::current_exe()` with those args exactly like the POC).
 
 - [ ] **Step 1:** Port `push/pull/squash(+_inner graft)/fork/clone` from the POC, swapping ref/record IO to `MetaStore` (`put_snapshot` + `replace_ws` CAS for the ref move; on `CasFailed` re-read and retry once, then error). Squash thresholds from `Engine` config fields `squash_mb`/`chain_max` (env-var defaults 256/50).
 - [ ] **Step 2: Tests** (btrfs-gated, `MemStore` + `InMemory` object store; this is the POC suite as Rust tests): push 200 files <1 s and drops sha-carrying entry; 7-layer cold pull into second pool byte-identical (walk + hash helper in the test file); no-op pull fetches 0; fork zero-fetch + isolation; size and chain triggers fire (thresholds 1 MB / 3 for test speed), latch blocks the second, lineage after settle = block+grafted streams and cold pull identical; corrupt a blob in the InMemory store → pull errors with sha mismatch; clone under a writer thread: locked window < 2 s, clone identical to frozen source.
@@ -178,7 +178,7 @@ The detached squash child is `kloudlite-git-agent squash <ws-id>` (Task 7 wires 
 
 - [ ] **Step 1:** Implement handlers; fork = new `Workspace` doc with `ref` copied from src's current ref + `WsFork` job; clone = new doc + `WsClone` job with `{src}` payload.
 - [ ] **Step 2: Tests** with MemStore behind an in-process axum server (copy the shape of existing `serve_public()` in `tests/common/mod.rs`): create ws → 202, doc queued job exists; fork copies ref; unauthorized owner 403; region create requires admin.
-- [ ] **Step 3:** `cargo test -p kloudlite-git-workspaces --test api_user`, clippy. **Commit** `feat: add the workspaces and environments user API`
+- [ ] **Step 3:** `cargo test -p kloudlite-workspaces --test api_user`, clippy. **Commit** `feat: add the workspaces and environments user API`
 
 ### Task 7: Agent API — register, long-poll leasing, done/failed + requeue sweep
 
@@ -210,16 +210,16 @@ The detached squash child is `kloudlite-git-agent squash <ws-id>` (Task 7 wires 
 ### Task 9: The agent binary
 
 **Files:**
-- Create: `bins/agent/Cargo.toml` (bin name `kloudlite-git-agent`), `bins/agent/src/main.rs`
+- Create: `bins/agent/Cargo.toml` (bin name `kloudlite-agent`), `bins/agent/src/main.rs`
 - Modify: root `Cargo.toml` (members + default-members += `bins/agent`), `Dockerfile` is NOT touched (agents run on VMs, installed by script)
 
 **Interfaces:**
 - Consumes: `Engine` (Task 4), agent HTTP API (Task 7) via `reqwest`.
-- Produces: `kloudlite-git-agent run` with env config `WS_API_URL, WS_REGION, WS_AGENT_TOKEN, WS_POOL, AZURE_ACCOUNT/KEY/CONTAINER`; also the hidden `kloudlite-git-agent squash <ws-id>` subcommand the engine's detached spawn uses (constructs Engine from the same env and calls `squash`).
+- Produces: `kloudlite-agent run` with env config `WS_API_URL, WS_REGION, WS_AGENT_TOKEN, WS_POOL, AZURE_ACCOUNT/KEY/CONTAINER`; also the hidden `kloudlite-agent squash <ws-id>` subcommand the engine's detached spawn uses (constructs Engine from the same env and calls `squash`).
 
 - [ ] **Step 1:** Implement: register (id persisted at `{pool}/agent-id`), then loop `GET work` → match kind → engine call (`WsCreate`→init, `WsFork`→fork, `WsClone`→clone_running with stop/start = `docker compose stop/start` of envs mounting the src (v1: payload carries the compose project names; empty list ⇒ hooks are no-ops), `WsDelete`→subvolume delete + doc update via `done` payload, `WsPush`→push, `EnvUp`/`EnvDown`→Task 10 stubs returning Failed until then) → `POST done|failed`. One tokio task per job, per-workspace serialization already enforced by the engine's flock.
 - [ ] **Step 2: Test:** integration test `bins/agent/tests/loop.rs` gated on `have_btrfs()`: in-process axum app (MemStore) + real agent loop as a spawned task + a `WsCreate` then `WsPush` job; assert docs reach `ready` and a snapshot record exists.
-- [ ] **Step 3:** btrfs VM run + clippy. **Commit** `feat: add the kloudlite-git-agent binary`
+- [ ] **Step 3:** btrfs VM run + clippy. **Commit** `feat: add the kloudlite-agent binary`
 
 ### Task 10: Environments — compose up/down
 
@@ -274,7 +274,7 @@ blobs, WHY-comments, clippy green).
   POST /vol-agent/{owner}/{name}/commits (append commit records), POST .../ref (move ref,
   single-writer CAS), GET .../history (lineage reads). Auth: per-region agent token —
   region docs are in Cosmos, so the server verifies via a shared-secret env fallback
-  KLOUDLITE_GIT_VOL_AGENT_TOKENS (comma list) in this task; Cosmos-backed lookup arrives with
+  KLOUDLITE_VOL_AGENT_TOKENS (comma list) in this task; Cosmos-backed lookup arrives with
   Task 14's Cosmos client. Constant-time compare.
 - Test: `bins/server/tests/vol_agent.rs` — in-process server (mem store): append commits to
   vol/alice/web, move ref, read history back; routing test: the new tails appear in
@@ -289,7 +289,7 @@ namespace with agent record routes`.
 - Modify: `bins/server/src/vol_agent.rs` (+ register/work/done/failed/scheduler/sweep),
   `bins/server/src/boot.rs` or main (construct the Cosmos-backed MetaStore when
   COSMOS_ENDPOINT set; spawn the sweep), root Cargo.toml (server depends on
-  kloudlite-git-workspaces), `crates/workspaces/src/api.rs` (DELETE the /v1/agent routes +
+  kloudlite-workspaces), `crates/workspaces/src/api.rs` (DELETE the /v1/agent routes +
   their tests move), `bins/api/src/main.rs` (drop the sweep spawn).
 - The handlers are the Task 7/8 code MOVED, not rewritten: register, long-poll lease (CAS),
   done/failed with ws/env state transitions, scheduler, lease sweep. Region agent_token

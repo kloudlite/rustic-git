@@ -13,10 +13,10 @@
 
 pub mod gpg;
 
-use kloudlite_git_core::Result;
-use kloudlite_git_storage::cache::Cache;
-use kloudlite_git_storage::events::Kind;
-use kloudlite_git_storage::store::Store;
+use kloudlite_core::Result;
+use kloudlite_storage::cache::Cache;
+use kloudlite_storage::events::Kind;
+use kloudlite_storage::store::Store;
 use axum::{
     extract::{Request, State},
     http::{header, HeaderMap, StatusCode},
@@ -74,7 +74,7 @@ pub const META: &str = "%00meta";
 
 /// Called after an ssh key is added or removed, with the owner whose keys changed. Boxed and
 /// dyn because the thing it does — rewriting Secrets in a Kubernetes namespace — lives two crates
-/// away in `kloudlite-git-workspaces`, and this crate must not depend on kube to hand it a name.
+/// away in `kloudlite-workspaces`, and this crate must not depend on kube to hand it a name.
 pub type KeysChanged = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
@@ -85,11 +85,11 @@ pub struct Api {
     /// `None` when no database is configured: the browse routes still answer, and
     /// only the team routes report that they are unavailable. A missing database
     /// must not take down reads that never needed it.
-    pub directory: Option<Arc<kloudlite_git_pulls::directory::Directory>>,
+    pub directory: Option<Arc<kloudlite_pulls::directory::Directory>>,
     /// Mints and verifies identity tokens. `None` leaves only the peer-header
     /// path, which is enough for internal calls but cannot issue a session.
-    pub jwt: Option<Arc<kloudlite_git_core::jwt::Jwt>>,
-    /// Base URL of the git peer Service, e.g. `http://kloudlite-git:8081`.
+    pub jwt: Option<Arc<kloudlite_core::jwt::Jwt>>,
+    /// Base URL of the git peer Service, e.g. `http://kloudlite:8081`.
     pub upstream: String,
     pub secret: String,
     pub client: reqwest::Client,
@@ -103,24 +103,24 @@ pub struct Api {
     /// — this tier's own copy, distinct from `App`'s on the git tier (this process has no `App`).
     /// `GET /v1/settings/central` reads the display fields off it for the web's clone menus;
     /// `/healthz` reports its version.
-    pub central: kloudlite_git_core::settings::LiveSettings<kloudlite_git_core::settings::CentralSettings>,
+    pub central: kloudlite_core::settings::LiveSettings<kloudlite_core::settings::CentralSettings>,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
     store: Arc<Store>,
     cache: Arc<Cache>,
-    directory: Option<Arc<kloudlite_git_pulls::directory::Directory>>,
-    jwt: Option<Arc<kloudlite_git_core::jwt::Jwt>>,
+    directory: Option<Arc<kloudlite_pulls::directory::Directory>>,
+    jwt: Option<Arc<kloudlite_core::jwt::Jwt>>,
     upstream: String,
     secret: String,
     listener: tokio::net::TcpListener,
     // Pre-built rather than an `ApiState`: which router (`api::router` vs `api::admin::router`)
-    // is `bins/api`'s call via `KLOUDLITE_GIT_API_ROLE`, made once at startup — this crate only
+    // is `bins/api`'s call via `KLOUDLITE_API_ROLE`, made once at startup — this crate only
     // merges whatever it is handed and never itself decides between a user and an admin surface.
     workspaces: Option<axum::Router>,
     on_keys_changed: Option<KeysChanged>,
-    // Same `KLOUDLITE_GIT_API_ROLE` read that picks `workspaces`' router: the superadmin roster
+    // Same `KLOUDLITE_API_ROLE` read that picks `workspaces`' router: the superadmin roster
     // routes are as admin-only as `/admin/*` is, so a user-role process must not compile them in
     // either, not just refuse them at auth time.
     admin_role: bool,
@@ -128,21 +128,21 @@ pub async fn serve(
     // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
     // an empty secret is a misconfiguration, not a valid deployment.
     if secret.is_empty() {
-        return Err(kloudlite_git_core::err("api peer secret must not be empty"));
+        return Err(kloudlite_core::err("api peer secret must not be empty"));
     }
-    let central = kloudlite_git_core::settings::LiveSettings::new(
-        kloudlite_git_core::settings::CentralSettings::from_env(),
+    let central = kloudlite_core::settings::LiveSettings::new(
+        kloudlite_core::settings::CentralSettings::from_env(),
     );
-    if let Some(bytes) = kloudlite_git_storage::config::get_central(&store.os).await {
+    if let Some(bytes) = kloudlite_storage::config::get_central(&store.os).await {
         match serde_json::from_slice(&bytes) {
             Ok(doc) => central.store(
-                kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+                kloudlite_core::settings::CentralSettings::from_env().merged_with(&doc),
             ),
             Err(e) => tracing::warn!(scope = "central", error = %e, "settings.invalid"),
         }
     }
-    tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
-        kloudlite_git_storage::config::central_fetch(store.os.clone()),
+    tokio::spawn(kloudlite_core::settings::refresh_central_beat(
+        kloudlite_storage::config::central_fetch(store.os.clone()),
         central.clone(),
     ));
     let api = Arc::new(Api {
@@ -164,10 +164,10 @@ pub async fn serve(
     // The anonymous write surfaces, bounded per client address and per address-in-the-body.
     // `N/SECONDS`: a burst of N, refilling evenly. The cli-code bucket is sized to the code's
     // own TTL so it doubles as the cap on pending rows one address can hold at a time.
-    let cli_code_limit = Arc::new(ratelimit::Limiter::from_env("KLOUDLITE_GIT_CLI_CODE_LIMIT", "20/600"));
-    let signin_ip_limit = Arc::new(ratelimit::Limiter::from_env("KLOUDLITE_GIT_SIGNIN_IP_LIMIT", "10/60"));
+    let cli_code_limit = Arc::new(ratelimit::Limiter::from_env("KLOUDLITE_CLI_CODE_LIMIT", "20/600"));
+    let signin_ip_limit = Arc::new(ratelimit::Limiter::from_env("KLOUDLITE_SIGNIN_IP_LIMIT", "10/60"));
     let signin_email_limit =
-        Arc::new(ratelimit::Limiter::from_env("KLOUDLITE_GIT_SIGNIN_EMAIL_LIMIT", "1/60"));
+        Arc::new(ratelimit::Limiter::from_env("KLOUDLITE_SIGNIN_EMAIL_LIMIT", "1/60"));
     let app = Router::new()
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
         // which would treat it as `/api/{owner}/{name}/...` and 404.
@@ -307,7 +307,7 @@ pub async fn serve(
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
         .layer(tower_http::compression::CompressionLayer::new())
-        .layer(axum::middleware::from_fn_with_state("api", kloudlite_git_core::metrics::http_metrics));
+        .layer(axum::middleware::from_fn_with_state("api", kloudlite_core::metrics::http_metrics));
     // Only the admin process compiles the superadmin roster routes in at all — same reasoning as
     // `workspaces_router` in `bins/api`'s main.rs: a user-role process must not be able to answer
     // them even if a future auth bug forgets to check the claim.
@@ -352,7 +352,7 @@ pub(crate) struct Identity {
 /// Verified ONCE per request: a handler that needs the display name as well as the email takes
 /// the whole `Identity` rather than paying for a second HMAC over the same token.
 pub(crate) fn identify(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<Identity, Response> {
-    if let Some(bearer) = kloudlite_git_core::httpx::bearer_token(headers) {
+    if let Some(bearer) = kloudlite_core::httpx::bearer_token(headers) {
         let jwt = api
             .jwt
             .as_deref()
@@ -375,7 +375,7 @@ pub(crate) async fn user_identity(
     api: &Api,
     headers: &axum::http::HeaderMap,
 ) -> std::result::Result<Identity, Response> {
-    let Some(bearer) = kloudlite_git_core::httpx::bearer_token(headers) else {
+    let Some(bearer) = kloudlite_core::httpx::bearer_token(headers) else {
         return identify(api, headers);
     };
     let jwt = api
@@ -388,7 +388,7 @@ pub(crate) async fn user_identity(
         // The row IS the revocation list: `DELETE /v1/cli/tokens/{id}` removes it, and a `cli`
         // token whose row is gone authenticates nothing until it expires on its own.
         match directory(api)?.credential(&jti).await {
-            Ok(Some(row)) if row.kind == kloudlite_git_pulls::directory::CredentialKind::CliToken => {}
+            Ok(Some(row)) if row.kind == kloudlite_pulls::directory::CredentialKind::CliToken => {}
             Ok(_) => return Err((StatusCode::UNAUTHORIZED, "this CLI login was revoked").into_response()),
             Err(e) => {
                 tracing::error!(reason = "cli-token", error = %e, "credential.read.failed");
@@ -412,19 +412,19 @@ pub(crate) fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result:
 /// secret that admits it.
 pub(crate) fn peer_only(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
     let peer = headers
-        .get(kloudlite_git_core::peer::PEER_HEADER)
+        .get(kloudlite_core::peer::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    if !kloudlite_git_core::peer::secret_eq(peer, &api.secret) {
+    if !kloudlite_core::peer::secret_eq(peer, &api.secret) {
         return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
     }
-    match headers.get(kloudlite_git_core::peer::OWNER_HEADER).and_then(|v| v.to_str().ok()) {
+    match headers.get(kloudlite_core::peer::OWNER_HEADER).and_then(|v| v.to_str().ok()) {
         Some(u) if !u.trim().is_empty() => Ok(u.trim().to_string()),
         _ => Err((StatusCode::BAD_REQUEST, "caller identity required").into_response()),
     }
 }
 
-pub(crate) fn directory(api: &Api) -> std::result::Result<&kloudlite_git_pulls::directory::Directory, Response> {
+pub(crate) fn directory(api: &Api) -> std::result::Result<&kloudlite_pulls::directory::Directory, Response> {
     api.directory
         .as_deref()
         .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "teams database not configured").into_response())
@@ -449,14 +449,14 @@ pub(crate) mod testing {
             client: reqwest::Client::new(),
             on_keys_changed: None,
             membership: crate::browse::Membership::default(),
-            central: kloudlite_git_core::settings::LiveSettings::new(
-                kloudlite_git_core::settings::CentralSettings::from_env(),
+            central: kloudlite_core::settings::LiveSettings::new(
+                kloudlite_core::settings::CentralSettings::from_env(),
             ),
         }
     }
 
-    pub(crate) fn test_marker(name: &str, public: bool) -> kloudlite_git_storage::index::Marker {
-        kloudlite_git_storage::index::Marker {
+    pub(crate) fn test_marker(name: &str, public: bool) -> kloudlite_storage::index::Marker {
+        kloudlite_storage::index::Marker {
             name: name.into(),
             public,
             created_by: "alice@example.com".into(),
@@ -492,8 +492,8 @@ mod tests {
     async fn empty_peer_secret_never_authenticates() {
         let api = test_api_with_secret("").await;
         let mut h = axum::http::HeaderMap::new();
-        h.insert(kloudlite_git_core::peer::PEER_HEADER, "".parse().unwrap());
-        h.insert(kloudlite_git_core::peer::OWNER_HEADER, "alice".parse().unwrap());
+        h.insert(kloudlite_core::peer::PEER_HEADER, "".parse().unwrap());
+        h.insert(kloudlite_core::peer::OWNER_HEADER, "alice".parse().unwrap());
         assert!(caller(&api, &h).is_err());
     }
 }

@@ -18,8 +18,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use kloudlite_git_core::httpx::bearer_token;
-use kloudlite_git_core::settings::{apply_patch, validate_stored, StoredCentralSettings, CENTRAL_SETTINGS_KEY};
+use kloudlite_core::httpx::bearer_token;
+use kloudlite_core::settings::{apply_patch, validate_stored, StoredCentralSettings, CENTRAL_SETTINGS_KEY};
 use slatedb::object_store::{path::Path as OsPath, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
@@ -103,7 +103,7 @@ pub(crate) async fn put_settings(
     // `SETTINGS_REFRESH_SECS` — the admin server that just wrote it may itself be forwarding on
     // behalf of a request that expects the change to be visible immediately.
     app.central.store(
-        kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&next),
+        kloudlite_core::settings::CentralSettings::from_env().merged_with(&next),
     );
     Json(next).into_response()
 }
@@ -137,7 +137,7 @@ pub(crate) async fn revert_settings(State(app): State<Arc<App>>, headers: Header
         return internal(e);
     }
     app.central.store(
-        kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&next),
+        kloudlite_core::settings::CentralSettings::from_env().merged_with(&next),
     );
     Json(next).into_response()
 }

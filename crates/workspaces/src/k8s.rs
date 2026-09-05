@@ -27,18 +27,18 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use serde_json::json;
 use std::collections::BTreeMap;
 
-pub const OWNER_LABEL: &str = "kloudlite-git.io/owner";
-pub const KIND_LABEL: &str = "kloudlite-git.io/kind";
+pub const OWNER_LABEL: &str = "kloudlite.io/owner";
+pub const KIND_LABEL: &str = "kloudlite.io/kind";
 /// The team a workspace was made in, empty for personal. Same rule as the other two: a listing
 /// view of `spec.team`, re-stamped by the controller, never authorization.
-pub const TEAM_LABEL: &str = "kloudlite-git.io/team";
+pub const TEAM_LABEL: &str = "kloudlite.io/team";
 /// A view of `Workspace.spec.attachedEnvironment`, same rule as the other three labels: `attach_ws`
 /// authorizes through `may_act_on` (team members included), so a plain `owner` selector on
 /// `delete_env`'s sweep misses a teammate's attached workspace — this label is what the sweep
 /// selects on instead. Stamped by `/v1`'s attach/detach handlers and re-stamped from spec by
 /// `heal_labels` on every reconcile; never a decision, only a listing shortcut.
-pub const ATTACHED_ENV_LABEL: &str = "kloudlite-git.io/attached-environment";
-pub const SERVICE_LABEL: &str = "kloudlite-git.io/service";
+pub const ATTACHED_ENV_LABEL: &str = "kloudlite.io/attached-environment";
+pub const SERVICE_LABEL: &str = "kloudlite.io/service";
 /// The container's writable layer and logs — NOT the tenant's data, which lives on their btrfs
 /// subvolume and is bounded by its own qgroup quota.
 ///
@@ -53,7 +53,7 @@ const EPHEMERAL_LIMIT: &str = "4Gi";
 /// The label naming which workspace a pod belongs to. Load-bearing since workspaces share a
 /// namespace: an attachment selects on it, so without it a grant would reach every workspace the
 /// user owns.
-pub const WORKSPACE_LABEL: &str = "kloudlite-git.io/workspace";
+pub const WORKSPACE_LABEL: &str = "kloudlite.io/workspace";
 
 pub struct PodContext<'a> {
     /// The btrfs pool root on the node, e.g. `/wspool-prod`. Every volume builder needs it: a
@@ -212,7 +212,7 @@ pub const USER_KEY_SECRET: &str = "user-key";
 
 /// Where that key is mounted. Deliberately not `~/.ssh`: workspace images bring their own user and
 /// home directory, and `GIT_SSH_COMMAND` points at an absolute path that works whatever they are.
-pub const USER_KEY_PATH: &str = "/etc/kloudlite-git/ssh";
+pub const USER_KEY_PATH: &str = "/etc/kloudlite/ssh";
 
 /// The owner's private key as a namespace Secret. Written by the API tier, which holds `secrets`
 /// only in namespaces the controller has vouched for — see `api_secret_binding`.
@@ -572,20 +572,20 @@ pub fn api_secret_binding(
     api_namespace: &str,
     owner_ref: Option<&OwnerReference>,
 ) -> RoleBinding {
-    secret_binding(ns, owner, "api-secrets", "kloudlite-git-api-secrets", api_service_account, api_namespace, owner_ref)
+    secret_binding(ns, owner, "api-secrets", "kloudlite-api-secrets", api_service_account, api_namespace, owner_ref)
 }
 
 /// The agent's OWN per-namespace Secret grant, for the `ws-ssh-{id}` host keys it reads and
 /// creates. The alternative was `secrets: get, create` cluster-wide on the agent's ClusterRole —
-/// which included `kloudlite-git-jwt` and the api's credentials in `kube-system`, so one compromised
+/// which included `kloudlite-jwt` and the api's credentials in `kube-system`, so one compromised
 /// node could read every tenant's signing key. Bound here, in the namespace this same reconciler
 /// just made, so the grant exists before the first workspace's `ensure_ssh` needs it
 /// (`namespace_ready` gates that). The ClusterRole is in `deploy/k3s/agent-rbac.yaml`; the
 /// admission policy beside it pins which roles this binding may name.
-pub const AGENT_SERVICE_ACCOUNT: &str = "kloudlite-git-agent";
+pub const AGENT_SERVICE_ACCOUNT: &str = "kloudlite-agent";
 pub const AGENT_NAMESPACE: &str = "kube-system";
 pub fn agent_secret_binding(ns: &str, owner: &str, owner_ref: &OwnerReference) -> RoleBinding {
-    secret_binding(ns, owner, "agent-secrets", "kloudlite-git-agent-ws-secrets", AGENT_SERVICE_ACCOUNT, AGENT_NAMESPACE, Some(owner_ref))
+    secret_binding(ns, owner, "agent-secrets", "kloudlite-agent-ws-secrets", AGENT_SERVICE_ACCOUNT, AGENT_NAMESPACE, Some(owner_ref))
 }
 
 fn secret_binding(
@@ -768,7 +768,7 @@ fn live_worktree_volume(pool: &str, volume: &str, ws: &str) -> Volume {
 /// the host there is no PV to carry it, and an unpinned pod would mount an empty directory on the
 /// wrong node. The toleration is not optional: the label without it schedules nothing.
 fn placement(spec: &mut PodSpec, role: &str, node: &str) {
-    // One label KEY per role (`kloudlite-git.io/session`, `kloudlite-git.io/env`) rather than one shared
+    // One label KEY per role (`kloudlite.io/session`, `kloudlite.io/env`) rather than one shared
     // key with the role as its value. A label key holds a single value, so `role=session` and
     // `role=env` are mutually exclusive and no node could ever serve both — which made a
     // single-node install impossible, and produced an unschedulable pod whose data was on one node
@@ -778,11 +778,11 @@ fn placement(spec: &mut PodSpec, role: &str, node: &str) {
     // Separate keys let a small or CI cluster put both roles on one box and a large one keep them
     // apart, with no change to this code.
     spec.node_selector = Some(BTreeMap::from([
-        (format!("kloudlite-git.io/{role}"), "true".to_string()),
+        (format!("kloudlite.io/{role}"), "true".to_string()),
         ("kubernetes.io/hostname".to_string(), node.to_string()),
     ]));
     spec.tolerations = Some(vec![Toleration {
-        key: Some(format!("kloudlite-git.io/{role}")),
+        key: Some(format!("kloudlite.io/{role}")),
         operator: Some("Exists".to_string()),
         effect: Some("NoSchedule".to_string()),
         ..Default::default()
@@ -830,7 +830,7 @@ pub fn git_init_container(
 ) -> Result<Option<Container>, String> {
     let crate::crd::VolumeSource::GitRepo { repo, branch } = source else { return Ok(None) };
     let ok = repo.split_once('/').is_some_and(|(o, n)| {
-        kloudlite_git_storage::store::valid_owner(o) && kloudlite_git_storage::store::valid_segment(n)
+        kloudlite_storage::store::valid_owner(o) && kloudlite_storage::store::valid_segment(n)
     });
     if !ok {
         return Err(format!("source repo {repo:?} is not owner/name"));
@@ -1317,14 +1317,14 @@ pub fn allow_internet_egress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
 /// The namespace `deploy/k3s/gateway.yaml` puts the gateway in. Its own, not `kube-system`: the
 /// gateway is the internet-facing process, and the namespace used to be chosen only so this
 /// policy's selector could name it — a `namespaceSelector` names any namespace just as well.
-pub const GATEWAY_NAMESPACE: &str = "kloudlite-git-system";
+pub const GATEWAY_NAMESPACE: &str = "kloudlite-system";
 
 /// The one hole in a workspace namespace's default-deny ingress: port 22, from the gateway pods in
 /// `GATEWAY_NAMESPACE` and nothing else.
 ///
 /// Both selectors sit in ONE peer, which is an AND. Written as two peers it would be an OR, and
 /// any pod in the cluster — including another tenant's workspace — could reach every sshd by
-/// labelling itself `app=kloudlite-git-gateway`.
+/// labelling itself `app=kloudlite-gateway`.
 pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
     policy(
         "allow-gateway-ssh",
@@ -1337,7 +1337,7 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
             "ingress": [{
                 "from": [{
                     "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": GATEWAY_NAMESPACE } },
-                    "podSelector": { "matchLabels": { "app": "kloudlite-git-gateway" } },
+                    "podSelector": { "matchLabels": { "app": "kloudlite-gateway" } },
                 }],
                 "ports": [{ "protocol": "TCP", "port": 22 }],
             }],
@@ -1497,7 +1497,7 @@ mod tests {
 
     fn owner_ref() -> OwnerReference {
         OwnerReference {
-            api_version: "kloudlite-git.io/v1alpha1".into(),
+            api_version: "kloudlite.io/v1alpha1".into(),
             kind: "Volume".into(),
             name: "vol-1".into(),
             uid: "uid-1".into(),
@@ -1562,7 +1562,7 @@ mod tests {
         let s = p.spec.unwrap();
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
-        assert_eq!(sel.get("kloudlite-git.io/session").map(String::as_str), Some("true"));
+        assert_eq!(sel.get("kloudlite.io/session").map(String::as_str), Some("true"));
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 
@@ -1574,7 +1574,7 @@ mod tests {
         let s = d.spec.unwrap().template.spec.unwrap();
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
-        assert_eq!(sel.get("kloudlite-git.io/env").map(String::as_str), Some("true"));
+        assert_eq!(sel.get("kloudlite.io/env").map(String::as_str), Some("true"));
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 
@@ -1607,7 +1607,7 @@ mod tests {
     }
 
     fn ctx() -> PodContext<'static> {
-        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-git-workspace:deadbeef" }
+        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef" }
     }
 
     fn svc(folder: &str, path: &str) -> model::Service {
@@ -1737,7 +1737,7 @@ mod tests {
         );
 
         // Unset means the host kernel, not a broken pod.
-        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-git-workspace:deadbeef" };
+        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef" };
         assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None).unwrap().spec.unwrap().runtime_class_name.is_none());
     }
 
@@ -1767,11 +1767,11 @@ mod tests {
         // A key per role, not a shared key with the role as its value: a node can then carry both
         // and a single-node install works.
         assert_eq!(
-            s.node_selector.as_ref().unwrap().get("kloudlite-git.io/session").map(String::as_str),
+            s.node_selector.as_ref().unwrap().get("kloudlite.io/session").map(String::as_str),
             Some("true")
         );
         // The label without the toleration schedules nothing.
-        assert_eq!(s.tolerations.as_ref().unwrap()[0].key.as_deref(), Some("kloudlite-git.io/session"));
+        assert_eq!(s.tolerations.as_ref().unwrap()[0].key.as_deref(), Some("kloudlite.io/session"));
 
         let c = &s.containers[0];
         let sc = c.security_context.as_ref().unwrap();
@@ -1863,7 +1863,7 @@ mod tests {
         let hard = rq.spec.unwrap().hard.unwrap();
         assert_eq!(hard["limits.cpu"].0, "8");
         assert_eq!(hard["limits.memory"].0, "32Gi");
-        assert_eq!(rq.metadata.labels.unwrap()["kloudlite-git.io/owner"], "alice");
+        assert_eq!(rq.metadata.labels.unwrap()["kloudlite.io/owner"], "alice");
         // No ownerReference, the same reason the namespace and the LimitRange have none: the cap
         // is shared by every workspace in here and must not vanish with any one of them.
         assert!(rq.metadata.owner_references.is_none());
@@ -1873,18 +1873,18 @@ mod tests {
     /// include every Secret in the cluster, the agent's own credentials among them.
     #[test]
     fn the_api_secret_grant_is_scoped_to_one_namespace() {
-        let rb = api_secret_binding("ws-alice", "alice", "kloudlite-git-api", "kube-system", None);
+        let rb = api_secret_binding("ws-alice", "alice", "kloudlite-api", "kube-system", None);
         assert_eq!(rb.metadata.namespace.as_deref(), Some("ws-alice"), "a RoleBinding, not a ClusterRoleBinding");
-        assert_eq!(rb.role_ref.name, "kloudlite-git-api-secrets");
+        assert_eq!(rb.role_ref.name, "kloudlite-api-secrets");
         assert_eq!(rb.role_ref.kind, "ClusterRole", "the rules are shared; only the scope is per namespace");
         let sub = &rb.subjects.unwrap()[0];
-        assert_eq!(sub.name, "kloudlite-git-api");
+        assert_eq!(sub.name, "kloudlite-api");
         assert_eq!(sub.namespace.as_deref(), Some("kube-system"));
         // Shared user namespace: deleting one workspace must not revoke the grant for its siblings.
         assert!(rb.metadata.owner_references.is_none());
         // The OwnerBinding, and only it, may own the grant: it has the same (owner, node) lifetime.
         let ob = OwnerReference { kind: "OwnerBinding".into(), name: "r1-alice".into(), ..Default::default() };
-        let owned = api_secret_binding("ws-alice", "alice", "kloudlite-git-api", "kube-system", Some(&ob));
+        let owned = api_secret_binding("ws-alice", "alice", "kloudlite-api", "kube-system", Some(&ob));
         assert_eq!(owned.metadata.owner_references.unwrap()[0].kind, "OwnerBinding");
     }
 
@@ -2081,7 +2081,7 @@ mod tests {
         // neither.
         // The accounts and chroot dir are the image's (Dockerfile `workspace`), not the prelude's.
         assert!(!cmd[2].contains("adduser"), "{}", cmd[2]);
-        assert_eq!(c.image.as_deref(), Some("ghcr.io/kloudlite/kloudlite-git-workspace:deadbeef"), "the pinned image, not the marker");
+        assert_eq!(c.image.as_deref(), Some("ghcr.io/kloudlite/kloudlite-workspace:deadbeef"), "the pinned image, not the marker");
         assert_eq!(c.ports.as_ref().unwrap()[0].container_port, 22);
 
         let vols = s.volumes.as_ref().unwrap();
@@ -2193,8 +2193,8 @@ mod tests {
         // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
         // does not reach an ssh session.
         assert!(line.contains("\"ZDOTDIR=/home/kl/.config/zsh\""), "{line}");
-        assert!(line.contains("\"GIT_SSH_COMMAND=ssh -i /etc/kloudlite-git/ssh/id_ed25519 "), "{line}");
-        assert!(line.contains("\"GIT_CONFIG_SYSTEM=/etc/kloudlite-git/ssh/gitconfig\""), "{line}");
+        assert!(line.contains("\"GIT_SSH_COMMAND=ssh -i /etc/kloudlite/ssh/id_ed25519 "), "{line}");
+        assert!(line.contains("\"GIT_CONFIG_SYSTEM=/etc/kloudlite/ssh/gitconfig\""), "{line}");
         // ...and the pod entrypoint sees the identical list.
         let names: Vec<&str> = c.env.as_ref().unwrap().iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"GIT_CONFIG_SYSTEM") && names.contains(&"PATH") && names.contains(&"GIT_SSH_COMMAND"), "{names:?}");
@@ -2239,7 +2239,7 @@ mod tests {
     }
 
     /// Port 22 is open to exactly one peer. Without the namespace half every tenant's own pods
-    /// could label themselves `app=kloudlite-git-gateway` and reach each other's sshd.
+    /// could label themselves `app=kloudlite-gateway` and reach each other's sshd.
     #[test]
     fn only_the_gateway_may_reach_port_22() {
         let p = allow_gateway_ingress("ws-alice", "alice", &owner_ref());
@@ -2252,9 +2252,9 @@ mod tests {
         assert_eq!(from.len(), 1, "one peer: namespace AND pod, not namespace OR pod");
         let ns = from[0].namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
         assert_eq!(ns["kubernetes.io/metadata.name"], GATEWAY_NAMESPACE);
-        assert_eq!(GATEWAY_NAMESPACE, "kloudlite-git-system", "deploy/k3s/gateway.yaml puts the gateway here; keep them equal");
+        assert_eq!(GATEWAY_NAMESPACE, "kloudlite-system", "deploy/k3s/gateway.yaml puts the gateway here; keep them equal");
         let pod = from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
-        assert_eq!(pod["app"], "kloudlite-git-gateway");
+        assert_eq!(pod["app"], "kloudlite-gateway");
     }
 
     /// The grant selects the POD, never the namespace: an owner's workspaces share a namespace, so
@@ -2332,7 +2332,7 @@ mod tests {
         // k8s-app=kube-dns (the agent, say) must not match. Two peers would OR them instead and
         // let exactly this pod through — the regression this test exists to catch.
         let ns_labels = std::collections::BTreeMap::from([("kubernetes.io/metadata.name".to_string(), "kube-system".to_string())]);
-        let other_pod_labels = std::collections::BTreeMap::from([("app".to_string(), "kloudlite-git-agent".to_string())]);
+        let other_pod_labels = std::collections::BTreeMap::from([("app".to_string(), "kloudlite-agent".to_string())]);
         let matches = |sel: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector, labels: &std::collections::BTreeMap<String, String>| {
             sel.match_labels.as_ref().unwrap().iter().all(|(k, v)| labels.get(k) == Some(v))
         };
@@ -2482,7 +2482,7 @@ mod tests {
             rule["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
             GATEWAY_NAMESPACE
         );
-        assert_eq!(rule["from"][0]["podSelector"]["matchLabels"]["app"], "kloudlite-git-gateway");
+        assert_eq!(rule["from"][0]["podSelector"]["matchLabels"]["app"], "kloudlite-gateway");
     }
 
     /// `169.254.0.0/16` is the one that matters: on Azure `169.254.169.254` hands out the NODE's

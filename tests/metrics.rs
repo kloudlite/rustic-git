@@ -5,7 +5,7 @@ mod common;
 
 #[tokio::test]
 async fn the_peer_listener_no_longer_serves_metrics() {
-    kloudlite_git_core::metrics::init();
+    kloudlite_core::metrics::init();
     let (base, _e) = common::serve_peer().await;
     let res = reqwest::get(format!("{base}/metrics")).await.unwrap();
     // `trust_peer` is the outermost layer and gates on the secret before any path is matched, so
@@ -19,7 +19,7 @@ async fn the_peer_listener_no_longer_serves_metrics() {
 async fn the_peer_listener_with_the_secret_still_has_no_metrics_route() {
     // The regression that matters isn't the auth gate above — it's someone re-merging
     // `metrics::routes()` into the peer router. A valid secret must still find nothing there.
-    kloudlite_git_core::metrics::init();
+    kloudlite_core::metrics::init();
     let (base, _e) = common::serve_peer().await;
     let res = common::peer_get(&base, "/metrics").await;
     assert_eq!(res.status(), 404, "metrics must not be routed on the peer listener");
@@ -27,7 +27,7 @@ async fn the_peer_listener_with_the_secret_still_has_no_metrics_route() {
 
 #[tokio::test]
 async fn the_metrics_listener_serves_prometheus_text_and_counts() {
-    kloudlite_git_core::metrics::init();
+    kloudlite_core::metrics::init();
     let (base, _e) = common::serve_peer().await;
     // One request through the middleware so the series exists before the scrape.
     assert_eq!(common::peer_get(&base, "/healthz").await.status(), 200);
@@ -35,7 +35,7 @@ async fn the_metrics_listener_serves_prometheus_text_and_counts() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(l, kloudlite_git_core::metrics::routes::<()>().with_state(())).await.unwrap();
+        axum::serve(l, kloudlite_core::metrics::routes::<()>().with_state(())).await.unwrap();
     });
     let res = reqwest::get(format!("http://{addr}/metrics")).await.unwrap();
     assert_eq!(res.status(), 200);

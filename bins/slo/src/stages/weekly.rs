@@ -351,7 +351,7 @@ async fn failover(c: &mut Ctx) {
         async move {
             let was = leader(c, &url, &jwt).await.context("nothing reports holding the lease")?;
             let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
-                kube::Api::namespaced(k.clone(), "kloudlite-git");
+                kube::Api::namespaced(k.clone(), "kloudlite");
             pods.delete(&was, &kube::api::DeleteParams::default())
                 .await
                 .map_err(|e| anyhow!("could not delete the leader: {e}"))?;

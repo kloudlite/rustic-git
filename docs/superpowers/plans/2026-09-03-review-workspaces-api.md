@@ -18,15 +18,15 @@
 - **Vocabulary (from the durable-snapshots design):** *workspace*, *environment*, *push*, *snapshot* (`spec.transient: false`), *sync point* (`spec.transient: true`), *volume*, *worktree*. There is no "commit". The one exception is `VolumeSource::CloneOf { commit }`, whose **field name is on stored CRs** and must not be renamed.
 - **Never authorize on a label.** A label selector is an index; the decision reads `spec.owner`. (CLAUDE.md.)
 - **`/v1` writes spec only, never status.** Status is the node controllers'.
-- **Manifest is generated:** any `crd.rs` change to a spec/status struct or a `#[kube(...)]` attribute requires `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml` and the regenerated `deploy/k3s/crds.yaml` in the same commit.
+- **Manifest is generated:** any `crd.rs` change to a spec/status struct or a `#[kube(...)]` attribute requires `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml` and the regenerated `deploy/k3s/crds.yaml` in the same commit.
 - **Gates, run unpiped, after every task:**
   ```
-  cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
   and, when `crd.rs` changed:
   ```
-  CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
+  CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
   ```
 - **Interfaces shared with the sibling plans** (do not implement them here, but do not contradict them):
   - `VolumeSource::RestoreOf` **disappears from the enum** (Task 11 here). The agent plan removes its match arms in `bins/agent/src/controller/volume.rs:268,269,593` and `engine::ops::RESTORE_OF_GONE` + the `RestoreMechanismGone` reason.
@@ -118,7 +118,7 @@ async fn a_foreign_snapshot_keeps_the_volume_after_my_last_snapshot_goes() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_volumes -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_volumes -- --test-threads=1; echo exit=$?`
 Expected: FAIL — the first gets 204 instead of 409, the second records a second `DELETE .../volumes/ws-1`.
 
 - [ ] **Step 3: Add the unfiltered listing and use it for the two destructive decisions**
@@ -170,7 +170,7 @@ In `delete_snapshot`, replace the post-delete `commit_model_snapshots_maybe_empt
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` then `cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` then `cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?`
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -207,8 +207,8 @@ Add to `crates/workspaces/tests/api_user.rs`:
 async fn creating_past_the_per_owner_cap_is_refused() {
     let many: Vec<Value> = (0..20).map(|i| ws_obj(&format!("ws-{i}"), "karthik")).collect();
     let s = server(vec![
-        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": many})),
-        get(format!("{API}/environments"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": many})),
+        get(format!("{API}/environments"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ])
     .await;
@@ -228,7 +228,7 @@ async fn creating_past_the_per_owner_cap_is_refused() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_user creating_past_the_per_owner_cap -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_user creating_past_the_per_owner_cap -- --test-threads=1; echo exit=$?`
 Expected: FAIL with `202` (or a taken-name 409), not 429.
 
 - [ ] **Step 3: Implement the cap**
@@ -284,8 +284,8 @@ Call it in all five create paths, immediately after the owner/team is resolved a
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?`
-Expected: exit=0. Existing create tests supply an empty `WorkspaceList`; those that do **not** already stub `GET {API}/environments` will now 404 on it — add `get(format!("{API}/environments"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))` to `create_routes()` in `api_user.rs` and to any per-test route list that creates.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?`
+Expected: exit=0. Existing create tests supply an empty `WorkspaceList`; those that do **not** already stub `GET {API}/environments` will now 404 on it — add `get(format!("{API}/environments"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))` to `create_routes()` in `api_user.rs` and to any per-test route list that creates.
 
 - [ ] **Step 5: Commit**
 
@@ -332,7 +332,7 @@ fn the_namespace_caps_aggregate_consumption_not_just_container_size() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --lib the_namespace_caps_aggregate -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --lib the_namespace_caps_aggregate -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `resource_quota` not found.
 
 - [ ] **Step 3: Write the generator and ensure it**
@@ -396,7 +396,7 @@ In `bins/agent/src/binding.rs`, directly after the `LimitRange` ensure:
                 owner,
                 "workspace",
                 &crd::PodResources::default(),
-                kloudlite_git_workspaces::model::max_per_owner(),
+                kloudlite_workspaces::model::max_per_owner(),
             ),
             ctx,
         )
@@ -411,7 +411,7 @@ In `deploy/k3s/agent-rbac.yaml`, add `resourcequotas` to the same rule as `limit
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and `cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and `cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?`
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -446,12 +446,12 @@ In `crates/workspaces/tests/api_user.rs`:
 async fn the_ssh_name_fallback_refuses_a_mislabelled_workspace() {
     let mut foreign = placed_ws("ws-bob", "bob");
     // The label says karthik; the spec says bob. The spec is the truth.
-    foreign["metadata"]["labels"]["kloudlite-git.io/owner"] = json!("karthik");
+    foreign["metadata"]["labels"]["kloudlite.io/owner"] = json!("karthik");
     foreign["spec"]["name"] = json!("target");
     foreign["status"]["sshHostKey"] = json!("ssh-ed25519 AAAA");
     let s = server(vec![
         get(format!("{API}/workspaces/target"), json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404})),
-        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign]})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign]})),
     ])
     .await;
     let resp = reqwest::Client::new()
@@ -467,10 +467,10 @@ async fn the_ssh_name_fallback_refuses_a_mislabelled_workspace() {
 #[tokio::test]
 async fn list_ws_drops_a_mislabelled_workspace() {
     let mut foreign = placed_ws("ws-bob", "bob");
-    foreign["metadata"]["labels"]["kloudlite-git.io/owner"] = json!("karthik");
+    foreign["metadata"]["labels"]["kloudlite.io/owner"] = json!("karthik");
     let s = server(vec![
-        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign, placed_ws("ws-mine", "karthik")]})),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign, placed_ws("ws-mine", "karthik")]})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ])
     .await;
     let resp = reqwest::Client::new()
@@ -493,7 +493,7 @@ In `crates/workspaces/tests/api_volumes.rs`:
 #[tokio::test]
 async fn list_volumes_drops_a_mislabelled_snapshot() {
     let mut foreign = push("ws-2-a", "ws-2", "alice", "2026-08-27T09:00:00Z");
-    foreign["metadata"]["labels"]["kloudlite-git.io/owner"] = json!("karthik");
+    foreign["metadata"]["labels"]["kloudlite.io/owner"] = json!("karthik");
     let s = server(vec![
         kget(SNAPS, snap_list(vec![push("ws-1-a", "ws-1", "karthik", "2026-08-27T09:00:00Z"), foreign])),
         kget(format!("{API}/workspaces"), ws_list(vec![])),
@@ -509,7 +509,7 @@ async fn list_volumes_drops_a_mislabelled_snapshot() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_user --test api_volumes -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_user --test api_volumes -- --test-threads=1; echo exit=$?`
 Expected: FAIL — the ssh test gets 201, both listings show the foreign row.
 
 - [ ] **Step 3: Add `Owned`/`mine` and route every listing through it**
@@ -557,7 +557,7 @@ Then:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -608,7 +608,7 @@ async fn a_restore_that_has_not_checked_out_yet_still_protects_its_base() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_volumes a_restore_that_has_not_checked_out -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_volumes a_restore_that_has_not_checked_out -- --test-threads=1; echo exit=$?`
 Expected: FAIL with 204 on the snapshot delete.
 
 - [ ] **Step 3: Carry the source snapshot on `Parent`**
@@ -666,7 +666,7 @@ In `delete_snapshot`'s refusal (`:2323`) and in `delete_volume`'s emptiness chec
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -715,7 +715,7 @@ async fn listing_regions_never_names_a_storage_account() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_user listing_regions_never_names -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_user listing_regions_never_names -- --test-threads=1; echo exit=$?`
 Expected: FAIL — both keys present.
 
 - [ ] **Step 3: Delete the fields**
@@ -740,7 +740,7 @@ Drop `storage_account`/`blob_container` from `NewRegion` and from `create_region
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -811,7 +811,7 @@ async fn the_delete_paths_select_on_the_volume_ref() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test crd_yaml --test api_volumes -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test crd_yaml --test api_volumes -- --test-threads=1; echo exit=$?`
 Expected: FAIL — the selector set does not match, and the listing carries no `fieldSelector`.
 
 - [ ] **Step 3: Declare the field and query on it**
@@ -887,8 +887,8 @@ fn on_volume(volume: &str, vref: Option<String>, name: String, storage: &Option<
 
 Run:
 ```
-CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 ```
 Expected: exit=0 all three, with `deploy/k3s/crds.yaml` modified.
@@ -925,8 +925,8 @@ is a schema declaration, and a query on an undeclared field is a 400."
 #[tokio::test]
 async fn a_workspace_restore_refuses_an_environment_snapshot() {
     let snap = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "env-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "env-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
         "spec": {"volume": "env-1", "owner": "karthik", "worktree": "env-1", "parent": "",
                  "state": {"kind": "environment", "services": [], "quotaGb": 20}},
         "status": {"phase": "ready", "readyAt": "2026-08-27T09:00:00Z"}
@@ -949,8 +949,8 @@ async fn a_workspace_restore_refuses_an_environment_snapshot() {
 #[tokio::test]
 async fn an_environment_restore_refuses_a_workspace_snapshot() {
     let snap = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "ws-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
         "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": "",
                  "state": {"kind": "workspace", "image": "alpine:3.20", "packages": [],
                            "resources": {}, "quotaGb": 20}},
@@ -971,7 +971,7 @@ async fn an_environment_restore_refuses_a_workspace_snapshot() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_user restore_refuses -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_user restore_refuses -- --test-threads=1; echo exit=$?`
 Expected: FAIL — both get 202 (or a later 4xx for the wrong reason).
 
 - [ ] **Step 3: Refuse the mismatch**
@@ -1012,7 +1012,7 @@ The mirror in `restore_env`:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -1033,7 +1033,7 @@ git commit -m "Refuse a restore of a snapshot cut from the other kind"
 - Modify: `crates/workspaces/src/model.rs` (drop `Region`)
 - Modify: `crates/workspaces/Cargo.toml` (drop `azure_data_cosmos`, `azure_core`, `reqwest012`, `futures` if it becomes unused), root `Cargo.toml` (drop the `azure_data_cosmos` workspace dep and its comment block)
 - Modify: `bins/api/src/main.rs:106-125`
-- Modify: `deploy/k3s/api-rbac.yaml`, `deploy/k3s/README.md`, `deploy/kloudlite-git.yaml:132-136,428-432`, `tests/ws_e2e.sh:69,105-108,146-151,222-256`, `.local/run-api.sh`, `CLAUDE.md`
+- Modify: `deploy/k3s/api-rbac.yaml`, `deploy/k3s/README.md`, `deploy/kloudlite.yaml:132-136,428-432`, `tests/ws_e2e.sh:69,105-108,146-151,222-256`, `.local/run-api.sh`, `CLAUDE.md`
 - Modify: every test `server*()` helper: `crates/workspaces/tests/api_user.rs:87-155`, `api_volumes.rs:74-83`, `api_teams.rs:69`, `api_commit_model.rs:91`
 - Delete: `crates/workspaces/src/cosmos.rs`, `crates/workspaces/src/store.rs`, `crates/workspaces/tests/meta_store.rs`
 - Test: `crates/workspaces/tests/api_user.rs`, `crates/workspaces/tests/crd_yaml.rs`
@@ -1044,7 +1044,7 @@ git commit -m "Refuse a restore of a snapshot cut from the other kind"
   ```rust
   // crd.rs
   #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-  #[kube(group = "kloudlite-git.io", version = "v1alpha1", kind = "Region", plural = "regions",
+  #[kube(group = "kloudlite.io", version = "v1alpha1", kind = "Region", plural = "regions",
          status = "RegionStatus", printcolumn = ...)]
   #[serde(rename_all = "camelCase")]
   pub struct RegionSpec { pub name: String, pub status: String }
@@ -1113,7 +1113,7 @@ with the fixture:
 ```rust
 fn region_obj(id: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Region",
         "metadata": {"name": id},
         "spec": {"name": id, "status": "active"}
     })
@@ -1122,7 +1122,7 @@ fn region_obj(id: &str) -> Value {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_user --test crd_yaml -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_user --test crd_yaml -- --test-threads=1; echo exit=$?`
 Expected: FAIL to compile (`crd::Region` does not exist).
 
 - [ ] **Step 3: Add the CRD**
@@ -1139,7 +1139,7 @@ In `crd.rs`, beside the other kinds:
 /// retired region stops being offered while its existing workspaces keep running.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Region",
     plural = "regions",
@@ -1211,7 +1211,7 @@ async fn create_region(
     // the same id must not be a 409.
     let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
     let saved = api
-        .patch(&body.id, &PatchParams::apply("kloudlite-git-api").force(), &Patch::Apply(&r))
+        .patch(&body.id, &PatchParams::apply("kloudlite-api").force(), &Patch::Apply(&r))
         .await
         .map_err(kube_err)?;
     Ok((StatusCode::CREATED, Json(region_doc(&saved))).into_response())
@@ -1263,18 +1263,18 @@ Delete `crates/workspaces/src/cosmos.rs`, `crates/workspaces/src/store.rs`, `cra
 ```yaml
   # `/v1/regions` is the only writer. `patch` because re-registering a region IS how one is
   # retired — there is no delete — and a create would 409 on the second POST of the same id.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["regions"]
     verbs: ["get", "list", "create", "patch"]
 ```
 
 `deploy/k3s/README.md`: note in the apply order that `crds.yaml` now carries `Region`, and that regions are registered with `POST /v1/regions` rather than being seeded into Cosmos.
 
-`deploy/kloudlite-git.yaml`: delete both `COSMOS_ENDPOINT`/`COSMOS_KEY`/`COSMOS_DB` env blocks (`:132-136`, `:428-432`).
+`deploy/kloudlite.yaml`: delete both `COSMOS_ENDPOINT`/`COSMOS_KEY`/`COSMOS_DB` env blocks (`:132-136`, `:428-432`).
 
 `tests/ws_e2e.sh`: delete the `COSMOS_ENDPOINT`/`COSMOS_KEY` precondition at `:69` and its `exit 77`, the `WS_E2E_COSMOS_DB` block at `:105-108`, the `az cosmosdb sql database delete` cleanup at `:146-151`, and the three `COSMOS_*` exports at `:232-234` and `:254-256`; change the two log lines to name the region CR instead of the Cosmos db, and register the test region with a `POST /v1/regions` as an admin before the first create.
 
-`.local/run-api.sh`: no change is needed for regions — it never set `COSMOS_*`. Verify the rest of what it needs is still true: `KLOUDLITE_GIT_MONGO_URI` (directory), `KLOUDLITE_GIT_JWT_SECRET`, `KLOUDLITE_GIT_S3_URL=mem://`, `KLOUDLITE_GIT_PEER_SECRET`, `KUBECONFIG=.local/k3s.yaml`. Add one line to its header comment: regions now live in the k3s cluster the `KUBECONFIG` points at, so a local API sees whatever regions that cluster holds.
+`.local/run-api.sh`: no change is needed for regions — it never set `COSMOS_*`. Verify the rest of what it needs is still true: `KLOUDLITE_MONGO_URI` (directory), `KLOUDLITE_JWT_SECRET`, `KLOUDLITE_S3_URL=mem://`, `KLOUDLITE_PEER_SECRET`, `KUBECONFIG=.local/k3s.yaml`. Add one line to its header comment: regions now live in the k3s cluster the `KUBECONFIG` points at, so a local API sees whatever regions that cluster holds.
 
 `CLAUDE.md`: rewrite the Cosmos sentence in "Workspaces and environments" to say `Region` is a cluster-scoped CRD written by `/v1/regions`, and drop `COSMOS_*` from the `ws_e2e.sh` prerequisites line.
 
@@ -1284,10 +1284,10 @@ Update every test `server*()` helper to `ApiState::new(jwt.clone(), admins)`, de
 
 Run:
 ```
-CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
-cargo tree -p kloudlite-git-workspaces | grep -c azure; echo "azure deps above must be 0"
+cargo tree -p kloudlite-workspaces | grep -c azure; echo "azure deps above must be 0"
 ```
 Expected: exit=0 on the first three, `0` azure lines.
 
@@ -1312,7 +1312,7 @@ image, then re-register each region with POST /v1/regions."
 
 **Interfaces:**
 - Consumes: `Owned`/`mine` (Task 4), `Parent`/`source_snapshot`/`on_volume` (Tasks 5, 7), `RegionDoc`/`ApiState::new(jwt, admins)` (Task 9).
-- Produces: no public API change. `kloudlite_git_workspaces::api::{router, ApiState, Directory, OwnerMaterial, refresh_user_keys, owner_set_selector, ATTACHED_ENV_LABEL, KIND_LABEL, OWNER_LABEL, TEAM_LABEL}` all still resolve — `mod.rs` re-exports whatever moved.
+- Produces: no public API change. `kloudlite_workspaces::api::{router, ApiState, Directory, OwnerMaterial, refresh_user_keys, owner_set_selector, ATTACHED_ENV_LABEL, KIND_LABEL, OWNER_LABEL, TEAM_LABEL}` all still resolve — `mod.rs` re-exports whatever moved.
 
 **Rule for this task: no behaviour change.** Move code, adjust visibility to `pub(crate)`, add module docs. If a move tempts you to fix something, stop and leave it — a later task or a later review takes it.
 
@@ -1359,7 +1359,7 @@ async fn every_v1_route_is_still_mounted() {
 
 - [ ] **Step 2: Run it to verify it passes before the split**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_user every_v1_route_is_still_mounted -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_user every_v1_route_is_still_mounted -- --test-threads=1; echo exit=$?`
 Expected: PASS. This one is a *characterization* test: it must be green before the move so its failure after the move means the move broke something. Commit it on its own first.
 
 ```bash
@@ -1401,7 +1401,7 @@ Head `scope.rs` with the rule the split exists for:
 
 - [ ] **Step 4: Run the tests to verify nothing moved but the code**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both, `every_v1_route_is_still_mounted` green, and `git diff --stat` shows no line count change beyond the new module headers.
 
 - [ ] **Step 5: Commit**
@@ -1422,7 +1422,7 @@ git commit -m "Split the /v1 handlers into one module per resource"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: **the variant simply disappears from the enum.** The agent plan removes `bins/agent/src/controller/volume.rs:268,269,593`, `engine::ops::RESTORE_OF_GONE` (`crates/workspaces/src/engine/ops.rs:18-23`) and the `RestoreMechanismGone` reason string. If that plan has not landed, this task's `cargo test -p kloudlite-git-agent-bin` gate fails to compile — in that case delete the agent's arms here too, in the same commit, and tell the agent plan's executor.
+- Produces: **the variant simply disappears from the enum.** The agent plan removes `bins/agent/src/controller/volume.rs:268,269,593`, `engine::ops::RESTORE_OF_GONE` (`crates/workspaces/src/engine/ops.rs:18-23`) and the `RestoreMechanismGone` reason string. If that plan has not landed, this task's `cargo test -p kloudlite-agent-bin` gate fails to compile — in that case delete the agent's arms here too, in the same commit, and tell the agent plan's executor.
 
 **Why it is safe:** `/v1` has not written the variant since Task 8 of the commit-model work; the cluster was created 2026-08-27 and every object was recreated on 2026-09-03, so no stored spec carries it. A tolerance protecting nothing is a match arm every future reader has to understand.
 
@@ -1442,7 +1442,7 @@ fn restore_of_is_gone_from_the_published_schema() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test crd_yaml restore_of_is_gone -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test crd_yaml restore_of_is_gone -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `restoreOf` is in the manifest.
 
 - [ ] **Step 3: Delete the variant**
@@ -1453,8 +1453,8 @@ Remove the `RestoreOf { … }` arm and its doc comment from `VolumeSource`. In `
 
 Run:
 ```
-CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 ```
 Expected: exit=0 all three.
@@ -1522,8 +1522,8 @@ async fn a_team_name_is_matched_case_insensitively() {
 async fn a_stop_response_reports_the_volume_it_has() {
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
-            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
+            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
                        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
                        "status": {"phase": "ready"}}]})),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
@@ -1574,7 +1574,7 @@ fn a_swap_leaves_no_worktree_shaped_leftovers() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -- --test-threads=1; echo exit=$?`
 Expected: FAIL on each of the new cases.
 
 - [ ] **Step 3: Make the changes**
@@ -1599,7 +1599,7 @@ Expected: FAIL on each of the new cases.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -1635,8 +1635,8 @@ git commit -m "Fix the /v1 minors: attach validation, team casing, volume in mut
 async fn a_workspace_doc_reports_its_volume_without_an_upstream() {
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
-            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
+            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
                        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
                        "status": {"phase": "ready"}}]})),
     ])
@@ -1654,7 +1654,7 @@ async fn a_workspace_doc_reports_its_volume_without_an_upstream() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_user a_workspace_doc_reports_its_volume -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_user a_workspace_doc_reports_its_volume -- --test-threads=1; echo exit=$?`
 Expected: FAIL — with no upstream configured the CRD fallback exists, but the assertion pins the behaviour this task makes unconditional; it fails once `with_upstream` is removed from `bins/api` unless the fallback becomes the only path.
 
 - [ ] **Step 3: Delete**
@@ -1662,12 +1662,12 @@ Expected: FAIL — with no upstream configured the CRD fallback exists, but the 
 - `upstream.rs`: delete `history` (`:81-88`), `Provenance` and its impl (`:92-134`), the `provenance_reads_past_unrelated_state_and_tolerates_none` test, and `VolumeRow.latest_ms` (`:26`).
 - `registry.rs`: trim `VolExt` to `vol_exists`, `history`, `volume_marker_prefix`; delete `append_commits`, `move_ref`, `ref_commit`, `commit`, `region`, and with them `volume_marker`, `REGION_KEY`, `ref_key`, `commit_key`. Leave the read half and the `volumes.rs:3-9` keep-until-drained ruling alone.
 - `api`: delete the `upstream` branch of `pushed_volumes` (keep the CRD path as the whole function, with `mine` from Task 4), `ApiState::upstream`, `with_upstream`, `upstream_err`.
-- `bins/api/src/main.rs`: delete the `with_upstream` call. `KLOUDLITE_GIT_UPSTREAM`/`KLOUDLITE_GIT_PEER_SECRET` are still needed by `kloudlite_git_api::serve` — leave them.
+- `bins/api/src/main.rs`: delete the `with_upstream` call. `KLOUDLITE_UPSTREAM`/`KLOUDLITE_PEER_SECRET` are still needed by `kloudlite_api::serve` — leave them.
 - tests: fold `server_with_registry` and `server_with_teams` into `server`/`server_with_teams(routes)`, deleting the `stub_registry` arguments; `kube_test::stub_registry` itself goes if nothing else uses it (grep first).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both.
 
 - [ ] **Step 5: Commit**
@@ -1714,7 +1714,7 @@ fn the_namespace_tail_is_unchanged_by_the_hex_swap() {
 async fn a_workspace_doc_has_no_live_state_field() {
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ])
     .await;
     let body: Value = reqwest::Client::new()
@@ -1732,7 +1732,7 @@ async fn a_workspace_doc_has_no_live_state_field() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -- --test-threads=1; echo exit=$?`
 Expected: FAIL on `a_workspace_doc_has_no_live_state_field`; the hash test passes and is the guard for step 3.
 
 - [ ] **Step 3: Make the four changes**
@@ -1744,7 +1744,7 @@ Expected: FAIL on `a_workspace_doc_has_no_live_state_field`; the hash test passe
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both — including the unchanged namespace tail, which is what proves the hex swap is a refactor.
 
 - [ ] **Step 5: Commit**
@@ -1776,7 +1776,7 @@ Record the list; every hit is either renamed or is a `commit` that genuinely mea
 
 - [ ] **Step 2: Rename, one identifier at a time, compiling between each**
 
-Run after each: `cargo check -p kloudlite-git-workspaces -p kloudlite-git-agent-bin; echo exit=$?`
+Run after each: `cargo check -p kloudlite-workspaces -p kloudlite-agent-bin; echo exit=$?`
 Expected: exit=0 each time.
 
 - [ ] **Step 3: Strip the sixteen `Task N` references (CL11)**
@@ -1785,7 +1785,7 @@ At `api.rs`'s six sites (now in `api/workspaces.rs` and `api/volumes.rs`), `crd.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
+Run: `cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?` and the clippy gate.
 Expected: exit=0 both, with the same number of tests passing as before the rename.
 
 - [ ] **Step 5: Commit**
@@ -1813,16 +1813,16 @@ Move `ws_namespace`, `env_namespace`, `binding_name`, `dns_label`, `pair_tail`, 
 
 - [ ] **Step 2: Re-export and compile**
 
-Run: `cargo check -p kloudlite-git-workspaces -p kloudlite-git-agent-bin; echo exit=$?`
+Run: `cargo check -p kloudlite-workspaces -p kloudlite-agent-bin; echo exit=$?`
 Expected: exit=0 with `pub use names::*;` in `crd/mod.rs`.
 
 - [ ] **Step 3: Run the tests**
 
 Run:
 ```
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
-CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
+CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
 ```
 Expected: exit=0 all three, `deploy/k3s/crds.yaml` unchanged (a pure move must not move the manifest).
 

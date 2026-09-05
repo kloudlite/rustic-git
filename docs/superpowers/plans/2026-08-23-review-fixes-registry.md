@@ -216,7 +216,7 @@ Append to `tests/registry_store.rs`:
 /// one-shot `of_algo` produces, for both algorithms `Digest::parse` accepts.
 #[test]
 fn an_incremental_hash_matches_the_one_shot_digest() {
-    use kloudlite_git::registry::store::Hasher;
+    use kloudlite::registry::store::Hasher;
     for algo in ["sha256", "sha512"] {
         let mut h = Hasher::new(algo).unwrap();
         h.update(b"layer ");
@@ -349,10 +349,10 @@ Append to `tests/common/mod.rs`:
 pub async fn seed_blobs(e: &TestEnv, owner: &str, contents: &[&[u8]]) {
     use slatedb::object_store::{ObjectStoreExt, PutPayload};
     for c in contents {
-        let d = kloudlite_git::registry::Digest::of(c);
+        let d = kloudlite::registry::Digest::of(c);
         e.store
             .os
-            .put(&kloudlite_git::registry::store::blob_path(owner, &d), PutPayload::from(c.to_vec()))
+            .put(&kloudlite::registry::store::blob_path(owner, &d), PutPayload::from(c.to_vec()))
             .await
             .unwrap();
     }
@@ -681,7 +681,7 @@ Two consequences to know about. `DefaultBodyLimit` does not apply to the `Body` 
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/registry_limits.rs`. It is its own binary on purpose: `max_layer()` is a process-wide `OnceLock` read from `KLOUDLITE_GIT_MAX_LAYER`, so a tiny cap cannot share a process with the other registry tests.
+Create `tests/registry_limits.rs`. It is its own binary on purpose: `max_layer()` is a process-wide `OnceLock` read from `KLOUDLITE_MAX_LAYER`, so a tiny cap cannot share a process with the other registry tests.
 
 ```rust
 //! `max_layer` is a process-global `OnceLock`, so these run in their own binary with a cap small
@@ -689,12 +689,12 @@ Create `tests/registry_limits.rs`. It is its own binary on purpose: `max_layer()
 //! second must agree.
 mod common;
 use axum::http::StatusCode;
-use kloudlite_git::registry::Digest;
+use kloudlite::registry::Digest;
 
 const CAP: &str = "16";
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
-    std::env::set_var("KLOUDLITE_GIT_MAX_LAYER", CAP);
+    std::env::set_var("KLOUDLITE_MAX_LAYER", CAP);
     let (base, e) = common::serve_public().await;
     let token = e.store.create_token("acme").await.unwrap();
     (base, e, reqwest::Client::new(), token)
@@ -1191,7 +1191,7 @@ Append to `tests/registry_gc.rs`:
 /// listens on; `Cache::connect` gives up on it in 250ms.
 #[tokio::test]
 async fn worker_lanes_are_inert_and_gc_still_sweeps_with_redis_down() {
-    let cache = kloudlite_git::cache::Cache::connect(Some("redis://127.0.0.1:1")).await;
+    let cache = kloudlite::cache::Cache::connect(Some("redis://127.0.0.1:1")).await;
     assert!(!cache.connected());
     cache.xgroup_create_mkstream("events", "merge-worker").await;
     assert!(cache.xreadgroup("events", "merge-worker", "t/0", 16).await.is_empty());
@@ -1222,7 +1222,7 @@ In `src/bin/worker.rs`, replace the tail of `run` (from the `// A lane that dies
     // Awaiting the handles in order would only notice lane N after lanes 0..N had finished,
     // which is never; this resolves on any of them, and the `Err` exits the process so the pod
     // restarts at full capacity instead of quietly running short.
-    Err(kloudlite_git::err(first_exit(tasks).await))
+    Err(kloudlite::err(first_exit(tasks).await))
 }
 
 async fn first_exit(tasks: Vec<tokio::task::JoinHandle<()>>) -> String {
@@ -1350,7 +1350,7 @@ async fn a_sweep_with_nothing_old_enough_reads_no_manifests() {
     e.store.os.put(&blob_path("acme", &Digest::of(&fresh)), PutPayload::from(fresh)).await.unwrap();
     let garbage = b"not json at all".to_vec();
     e.store.os
-        .put(&kloudlite_git::registry::store::manifest_path("acme", "broken", &Digest::of(&garbage)), PutPayload::from(garbage))
+        .put(&kloudlite::registry::store::manifest_path("acme", "broken", &Digest::of(&garbage)), PutPayload::from(garbage))
         .await.unwrap();
 
     let n = gc::sweep_owner(&e.store, "acme", Duration::from_secs(3600)).await.unwrap();
@@ -1449,7 +1449,7 @@ mod image_owners_tests {
     #[tokio::test]
     async fn owners_are_the_union_of_blobs_manifests_and_image_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = kloudlite_git::store::Store::open(Arc::new(InMemory::new()), tmp.path().join("cache"), false)
+        let store = kloudlite::store::Store::open(Arc::new(InMemory::new()), tmp.path().join("cache"), false)
             .await
             .unwrap();
         for p in ["blobs/alpha/sha256/aa", "manifests/beta/nginx/sha256/bb", "repo/img/gamma/nginx/manifest/0.sst"] {
@@ -1475,10 +1475,10 @@ Replace `blob_owners` (and its doc) in `src/bin/worker.rs` with:
 /// were all deleted but whose manifests remain, and one whose image database exists with nothing
 /// pushed yet — both still need their listing markers reconciled. A prefix that fails to list is
 /// logged and skipped: the others still get their turn.
-async fn image_owners(store: &kloudlite_git::store::Store) -> std::collections::BTreeSet<String> {
+async fn image_owners(store: &kloudlite::store::Store) -> std::collections::BTreeSet<String> {
     let mut owners = std::collections::BTreeSet::new();
     for prefix in ["blobs/", "manifests/", "repo/img/"] {
-        match kloudlite_git::registry::list_dir_names(&store.os, prefix).await {
+        match kloudlite::registry::list_dir_names(&store.os, prefix).await {
             Ok(o) => owners.extend(o),
             Err(e) => eprintln!("gc: listing {prefix}: {e}"), // ponytail: eprintln
         }

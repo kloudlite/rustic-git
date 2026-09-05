@@ -5,7 +5,7 @@
 #
 # Two independent halves:
 #   1. curl-only:  auth, blob round-trip, manifest round-trip, tag list, catalog. Needs only a
-#      running `kloudlite-git serve` — no container daemon. Always runs.
+#      running `kloudlite serve` — no container daemon. Always runs.
 #   2. docker/podman: build, push, pull, cross-tag mount. Needs a reachable daemon. Skipped with a
 #      loud, early message (not a mid-script failure) when one isn't reachable.
 #
@@ -17,7 +17,7 @@ set -euo pipefail
 
 REG="${REG:-localhost:8080}"
 OWNER="${OWNER:-acme}"
-TOKEN="${TOKEN:?run: cargo run --bin kloudlite-git -- admin add-token acme, and export TOKEN}"
+TOKEN="${TOKEN:?run: cargo run --bin kloudlite -- admin add-token acme, and export TOKEN}"
 CLI="${CLI:-docker}"
 
 echo "==> [1/2] curl-only half: auth, blobs, manifests, tags, catalog"

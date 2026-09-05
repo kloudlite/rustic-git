@@ -10,7 +10,7 @@ set -eu
 # nothing and runs nothing.
 main() {
 
-  REPO=${REPO:-kloudlite/kloudlite-git}
+  REPO=${REPO:-kloudlite/kloudlite}
   BIN_DIR=${BIN_DIR:-"$HOME/.local/bin"}
   # A release tag (`kl-v0.4.0`) pins the install; unset means the newest.
   VERSION=${KL_VERSION:-latest}

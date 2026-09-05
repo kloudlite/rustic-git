@@ -6,10 +6,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "volumes.kloudlite-git.io"
+        "name": "volumes.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "Volume",
           "plural": "volumes",
@@ -301,10 +301,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "workspaces.kloudlite-git.io"
+        "name": "workspaces.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "Workspace",
           "plural": "workspaces",
@@ -664,10 +664,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "environments.kloudlite-git.io"
+        "name": "environments.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "Environment",
           "plural": "environments",
@@ -1064,10 +1064,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "ownerbindings.kloudlite-git.io"
+        "name": "ownerbindings.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "OwnerBinding",
           "plural": "ownerbindings",
@@ -1191,10 +1191,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "snapshots.kloudlite-git.io"
+        "name": "snapshots.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "Snapshot",
           "plural": "snapshots",
@@ -1323,10 +1323,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "volumereplicas.kloudlite-git.io"
+        "name": "volumereplicas.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "VolumeReplica",
           "plural": "volumereplicas",
@@ -1433,10 +1433,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "regions.kloudlite-git.io"
+        "name": "regions.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "Region",
           "plural": "regions",
@@ -1501,10 +1501,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "quotas.kloudlite-git.io"
+        "name": "quotas.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "Quota",
           "plural": "quotas",
@@ -1664,10 +1664,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "quotarequests.kloudlite-git.io"
+        "name": "quotarequests.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "QuotaRequest",
           "plural": "quotarequests",
@@ -1812,10 +1812,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "requests.kloudlite-git.io"
+        "name": "requests.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "Request",
           "plural": "requests",
@@ -1858,7 +1858,7 @@
                     "description": "A person asking for something, and the decision on it. Supersedes `QuotaRequest`, which stays\nreadable until the one-shot migration has run everywhere and a later release retires it.\n\nLike `QuotaRequest`, this is the one shape whose STATUS the API tier writes rather than a\ncontroller: no controller reconciles a request — a person decides it — so the decision has\nnowhere else to live.",
                     "properties": {
                       "access": {
-                        "description": "Join a team, or move to a different role in one. `role` is the directory's own word\n(`member` / `admin` / `owner`) rather than an enum, because the directory's `Role` lives in\n`kloudlite-git-pulls` and this crate deliberately does not depend on it; `validate` is what stops\na typo reaching the grant.",
+                        "description": "Join a team, or move to a different role in one. `role` is the directory's own word\n(`member` / `admin` / `owner`) rather than an enum, because the directory's `Role` lives in\n`kloudlite-pulls` and this crate deliberately does not depend on it; `validate` is what stops\na typo reaching the grant.",
                         "nullable": true,
                         "properties": {
                           "role": {
@@ -2032,10 +2032,10 @@
       "apiVersion": "apiextensions.k8s.io/v1",
       "kind": "CustomResourceDefinition",
       "metadata": {
-        "name": "clustersettings.kloudlite-git.io"
+        "name": "clustersettings.kloudlite.io"
       },
       "spec": {
-        "group": "kloudlite-git.io",
+        "group": "kloudlite.io",
         "names": {
           "kind": "ClusterSettings",
           "plural": "clustersettings",
@@ -2065,7 +2065,7 @@
                         "type": "integer"
                       },
                       "defaultImage": {
-                        "description": "Tenant workspace pod image. **Boot** — the agent reads this at pod-template render\ntime, not per reconcile; a change rolls `kloudlite-git-agent` (Task 5). `None` = keep\ntoday's env value, so an admin who never opens this row cannot blank a required image.",
+                        "description": "Tenant workspace pod image. **Boot** — the agent reads this at pod-template render\ntime, not per reconcile; a change rolls `kloudlite-agent` (Task 5). `None` = keep\ntoday's env value, so an admin who never opens this row cannot blank a required image.",
                         "nullable": true,
                         "type": "string"
                       },

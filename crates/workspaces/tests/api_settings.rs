@@ -1,13 +1,13 @@
 //! `GET/PUT /admin/settings/central` and `/admin/settings/clusters/{region}` against a mocked
 //! kube API (and, for the central scope, a mocked server-tier peer route) — Task 6 Step 4.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, admin::PeerClient, ApiState};
-use kloudlite_git_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, admin::PeerClient, ApiState};
+use kloudlite_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 fn jwt() -> Arc<Jwt> {
     Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap())
@@ -17,10 +17,10 @@ fn admin_token(jwt: &Jwt) -> String {
     jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
-async fn keys_store() -> Arc<kloudlite_git_storage::store::Store> {
+async fn keys_store() -> Arc<kloudlite_storage::store::Store> {
     let tmp = tempfile::tempdir().unwrap();
     Arc::new(
-        kloudlite_git_storage::store::Store::open(
+        kloudlite_storage::store::Store::open(
             Arc::new(object_store::memory::InMemory::new()),
             tmp.path().join("cache"),
             false,
@@ -33,9 +33,9 @@ async fn keys_store() -> Arc<kloudlite_git_storage::store::Store> {
 /// A `keys_store` with `cluster/settings` pre-seeded — `revert_central` reads `history[0]`
 /// straight off the object store (`current_central`), same as `get_central` does, so a test that
 /// wants a non-empty history writes the document here rather than going through a PUT first.
-async fn keys_store_with(doc: &Value) -> Arc<kloudlite_git_storage::store::Store> {
+async fn keys_store_with(doc: &Value) -> Arc<kloudlite_storage::store::Store> {
     let store = keys_store().await;
-    let key = slatedb::object_store::path::Path::from(kloudlite_git_core::settings::CENTRAL_SETTINGS_KEY);
+    let key = slatedb::object_store::path::Path::from(kloudlite_core::settings::CENTRAL_SETTINGS_KEY);
     slatedb::object_store::ObjectStoreExt::put(
         store.os.as_ref(),
         &key,
@@ -52,7 +52,7 @@ struct Server {
     rec: Recorder,
 }
 
-async fn admin_server(routes: Vec<Route>, keys: Option<Arc<kloudlite_git_storage::store::Store>>, peer: Option<PeerClient>) -> Server {
+async fn admin_server(routes: Vec<Route>, keys: Option<Arc<kloudlite_storage::store::Store>>, peer: Option<PeerClient>) -> Server {
     let jwt = jwt();
     let mut state = ApiState::new(jwt.clone());
     let (client, rec) = mock_client(routes);
@@ -91,7 +91,7 @@ async fn peer_mock(secret: &str, respond: Value, status: u16) -> PeerMock {
     }
     async fn handler(State(s): State<S>, headers: HeaderMap, Json(body): Json<Value>) -> axum::response::Response {
         use axum::response::IntoResponse;
-        let peer_hdr = headers.get(kloudlite_git_core::peer::PEER_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let peer_hdr = headers.get(kloudlite_core::peer::PEER_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         s.seen.lock().unwrap().push((peer_hdr, body));
         (axum::http::StatusCode::from_u16(s.status).unwrap(), Json(s.respond)).into_response()
     }
@@ -99,7 +99,7 @@ async fn peer_mock(secret: &str, respond: Value, status: u16) -> PeerMock {
     // `Json<Value>` with an empty request body is a null `Value`, matched the same way.
     async fn revert_handler(State(s): State<S>, headers: HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
         use axum::response::IntoResponse;
-        let peer_hdr = headers.get(kloudlite_git_core::peer::PEER_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let peer_hdr = headers.get(kloudlite_core::peer::PEER_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let body: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(&body).unwrap_or_default() };
         s.seen.lock().unwrap().push((peer_hdr, body));
         (axum::http::StatusCode::from_u16(s.status).unwrap(), Json(s.respond)).into_response()
@@ -207,12 +207,12 @@ async fn revert_central_forwards_and_returns_the_peer_routes_body() {
 // ── cluster ──────────────────────────────────────────────────────────────
 
 fn region(id: &str) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region", "metadata": {"name": id}, "spec": {"name": id, "status": "active"}})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Region", "metadata": {"name": id}, "spec": {"name": id, "status": "active"}})
 }
 
 fn cluster_settings(annotations: Value) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "ClusterSettings",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "ClusterSettings",
         "metadata": {"name": "default", "annotations": annotations},
         "spec": {"syncSecs": 60},
     })
@@ -244,7 +244,7 @@ async fn put_cluster_out_of_range_is_422_and_writes_nothing() {
 /// rollout — `syncSecs` has no reader entry in `CLUSTER_SETTING_META` at all.
 #[tokio::test]
 async fn put_cluster_writes_annotations_and_history() {
-    let updated = cluster_settings(json!({"kloudlite-git.io/updated-by": CALLER}));
+    let updated = cluster_settings(json!({"kloudlite.io/updated-by": CALLER}));
     let s = admin_server(
         vec![
             get(format!("{API}/regions/us"), region("us")),
@@ -264,12 +264,12 @@ async fn put_cluster_writes_annotations_and_history() {
     let sent = s.rec.sent("PATCH", &format!("{API}/clustersettings/default"));
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["spec"]["syncSecs"], 120);
-    assert_eq!(sent[0]["metadata"]["annotations"]["kloudlite-git.io/updated-by"], CALLER);
-    let hist = &sent[0]["metadata"]["annotations"]["kloudlite-git.io/settings-history"];
+    assert_eq!(sent[0]["metadata"]["annotations"]["kloudlite.io/updated-by"], CALLER);
+    let hist = &sent[0]["metadata"]["annotations"]["kloudlite.io/settings-history"];
     assert!(hist.as_str().unwrap().contains("syncSecs"), "the OLD spec must be pushed onto history");
 }
 
-/// A `Mark::Boot` field (`defaultImage` → `kloudlite-git-agent`) mid-rollout is a 409, `{ready,
+/// A `Mark::Boot` field (`defaultImage` → `kloudlite-agent`) mid-rollout is a 409, `{ready,
 /// desired}`, and the CR is not touched — precheck-before-write for the cluster scope, same shape
 /// `roll_readers` already proves for the manual roll route.
 #[tokio::test]
@@ -279,10 +279,10 @@ async fn put_cluster_boot_field_conflicts_mid_rollout_and_writes_nothing() {
             get(format!("{API}/regions/us"), region("us")),
             get(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
             get(
-                "/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-git-agent",
+                "/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-agent",
                 json!({
                     "apiVersion": "apps/v1", "kind": "DaemonSet",
-                    "metadata": {"name": "kloudlite-git-agent", "namespace": "kube-system"},
+                    "metadata": {"name": "kloudlite-agent", "namespace": "kube-system"},
                     "spec": {"template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "img:1"}]}}},
                     "status": {"numberReady": 1, "desiredNumberScheduled": 2},
                 }),
@@ -309,7 +309,7 @@ async fn put_cluster_boot_field_conflicts_mid_rollout_and_writes_nothing() {
 #[tokio::test]
 async fn revert_cluster_restores_the_named_entry_and_grows_history_again() {
     let hist = json!([{"syncSecs": 30}]);
-    let current = cluster_settings(json!({"kloudlite-git.io/settings-history": hist.to_string()}));
+    let current = cluster_settings(json!({"kloudlite.io/settings-history": hist.to_string()}));
     let s = admin_server(
         vec![
             get(format!("{API}/regions/us"), region("us")),
@@ -329,7 +329,7 @@ async fn revert_cluster_restores_the_named_entry_and_grows_history_again() {
     let sent = s.rec.sent("PATCH", &format!("{API}/clustersettings/default"));
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["spec"]["syncSecs"], 30, "the reverted spec must carry the historical value");
-    let new_hist: Value = serde_json::from_str(sent[0]["metadata"]["annotations"]["kloudlite-git.io/settings-history"].as_str().unwrap()).unwrap();
+    let new_hist: Value = serde_json::from_str(sent[0]["metadata"]["annotations"]["kloudlite.io/settings-history"].as_str().unwrap()).unwrap();
     assert_eq!(new_hist[0]["syncSecs"], 60, "the CURRENT spec (pre-revert) is pushed onto history by the revert write");
 }
 
@@ -338,17 +338,17 @@ async fn revert_cluster_restores_the_named_entry_and_grows_history_again() {
 fn daemonset(ready: i32, desired: i32) -> Value {
     json!({
         "apiVersion": "apps/v1", "kind": "DaemonSet",
-        "metadata": {"name": "kloudlite-git-agent", "namespace": "kube-system"},
+        "metadata": {"name": "kloudlite-agent", "namespace": "kube-system"},
         "spec": {"template": {"metadata": {"annotations": {}}, "spec": {"containers": [{"name": "c", "image": "img:1"}]}}},
         "status": {"numberReady": ready, "desiredNumberScheduled": desired},
     })
 }
 
-const AGENT_DS: &str = "/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-git-agent";
-const GATEWAY_DEPLOY: &str = "/apis/apps/v1/namespaces/kloudlite-git-system/deployments/kloudlite-git-gateway";
+const AGENT_DS: &str = "/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-agent";
+const GATEWAY_DEPLOY: &str = "/apis/apps/v1/namespaces/kloudlite-system/deployments/kloudlite-gateway";
 
 /// A `Mark::Boot` field (`defaultImage`) whose one reader is settled: the CR is written AND
-/// `kloudlite-git-agent`'s DaemonSet is PATCHed with a fresh `kloudlite-git.io/restarted-at` — and
+/// `kloudlite-agent`'s DaemonSet is PATCHed with a fresh `kloudlite.io/restarted-at` — and
 /// nothing else is (the per-region gateway is never a reader of this field).
 #[tokio::test]
 async fn put_cluster_boot_field_rolls_only_its_reader() {
@@ -374,12 +374,12 @@ async fn put_cluster_boot_field_rolls_only_its_reader() {
     assert_eq!(s.rec.sent("PATCH", &format!("{API}/clustersettings/default")).len(), 1, "the CR must be written");
     let ds_patches = s.rec.sent("PATCH", AGENT_DS);
     assert_eq!(ds_patches.len(), 1, "the one reader must be rolled exactly once");
-    assert!(ds_patches[0]["spec"]["template"]["metadata"]["annotations"]["kloudlite-git.io/restarted-at"].is_string());
+    assert!(ds_patches[0]["spec"]["template"]["metadata"]["annotations"]["kloudlite.io/restarted-at"].is_string());
     assert!(s.rec.calls().iter().all(|c| !c.contains(GATEWAY_DEPLOY)), "the gateway is not a reader of defaultImage");
 }
 
 /// A LIVE field alone (`syncSecs`) writes the CR and rolls nothing — no PATCH to any workload at
-/// all, `kloudlite-git-agent` included.
+/// all, `kloudlite-agent` included.
 #[tokio::test]
 async fn put_cluster_live_field_rolls_nothing() {
     let s = admin_server(

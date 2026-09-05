@@ -27,11 +27,11 @@ helm upgrade --install clickstack-operators clickstack/clickstack-operators \
   -f deploy/clickstack/operators-values.yaml
 
 # 2. HyperDX's database: a `hyperdx` database on the platform's Cosmos DB for MongoDB account
-#    (kolomi-rg/kloudlite-kloudlite-git, MongoDB API 7.0, serverless). HyperDX creates it on first
+#    (kolomi-rg/kloudlite-kloudlite, MongoDB API 7.0, serverless). HyperDX creates it on first
 #    connect; the Secret carries the account's connection string with `/hyperdx` as the path.
 #    Runs on YOUR shell — it handles a credential.
 SUB=$(az account show --query id -o tsv)
-CS=$(az rest --method post --url "https://management.azure.com/subscriptions/$SUB/resourceGroups/kolomi-rg/providers/Microsoft.DocumentDB/databaseAccounts/kloudlite-kloudlite-git/listConnectionStrings?api-version=2024-05-15" --query 'connectionStrings[0].connectionString' -o tsv)
+CS=$(az rest --method post --url "https://management.azure.com/subscriptions/$SUB/resourceGroups/kolomi-rg/providers/Microsoft.DocumentDB/databaseAccounts/kloudlite-kloudlite/listConnectionStrings?api-version=2024-05-15" --query 'connectionStrings[0].connectionString' -o tsv)
 URI=$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); print(u.urlunsplit((p.scheme,p.netloc,"/hyperdx",p.query,"")))' "$CS")
 kubectl -n clickstack create secret generic hyperdx-mongo --from-literal=MONGO_URI="$URI"
 unset CS URI
@@ -60,9 +60,9 @@ HyperDX mints the key the collectors authenticate with; nothing in a values file
 3. Put it where the agent collectors read it, in **every** cluster:
 
 ```sh
-kubectl -n kube-system create secret generic kloudlite-git-otel \
+kubectl -n kube-system create secret generic kloudlite-otel \
   --from-literal=key='<ingestion key>'          # each k3s region
-kubectl -n kloudlite-git create secret generic kloudlite-git-otel \
+kubectl -n kloudlite create secret generic kloudlite-otel \
   --from-literal=key='<ingestion key>'          # AKS
 ```
 
@@ -92,13 +92,13 @@ GRANT CREATE, INSERT, SELECT, ALTER, DROP TABLE ON kloudlite.* TO kloudlite;   -
 Then, in the AKS namespace the admin process runs in:
 
 ```sh
-kubectl -n kloudlite-git create secret generic kloudlite-git-clickhouse \
+kubectl -n kloudlite create secret generic kloudlite-clickhouse \
   --from-literal=user=kloudlite --from-literal=password='<password>'
 ```
 
-`deploy/kloudlite-git.yaml` reads exactly that Secret for `KLOUDLITE_GIT_CLICKHOUSE_USER` /
-`KLOUDLITE_GIT_CLICKHOUSE_PASSWORD`, both `optional: true`, and hard-codes
-`KLOUDLITE_GIT_CLICKHOUSE_URL` as `http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123`
+`deploy/kloudlite.yaml` reads exactly that Secret for `KLOUDLITE_CLICKHOUSE_USER` /
+`KLOUDLITE_CLICKHOUSE_PASSWORD`, both `optional: true`, and hard-codes
+`KLOUDLITE_CLICKHOUSE_URL` as `http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123`
 — the operator's name for the Service, not the chart's fullname (`helm template` cannot show it;
 `kubectl -n clickstack get svc` did, on the first install). Re-check it after a chart or operator
 bump: a wrong host is a silent 503 on every /admin/history route.
@@ -118,7 +118,7 @@ Two rules are the exception, and the file's "HyperDX alert" column says so: **`S
 **`SloProbeMissing`** read `kloudlite.slo_results` and `kloudlite.slo_runs` — tables of OURS, not
 the collector's `otel_*` — so there is nothing on a HyperDX source to search and no definition to
 create. They are console only; the SQL evaluator IS the alert, and the admin process pages through
-`KLOUDLITE_GIT_SLO_WEBHOOK` (one JSON line per failed probe run and per `SloBurn` transition)
+`KLOUDLITE_SLO_WEBHOOK` (one JSON line per failed probe run and per `SloBurn` transition)
 rather than through HyperDX. Do not try to reproduce them here — a HyperDX rule that cannot see
 the data would sit permanently green beside a real breach.
 
@@ -130,11 +130,11 @@ one replica is enough.
 
 ## Azure Monitor: Cosmos and Redis
 
-The AKS cluster collector (`kloudlite-git-otel-cluster` in `deploy/kloudlite-git.yaml`) pulls the
+The AKS cluster collector (`kloudlite-otel-cluster` in `deploy/kloudlite.yaml`) pulls the
 two managed dependencies through the `azuremonitor` receiver — the directory's Cosmos account and
 the Redis every server and worker nudges through. It authenticates with the service principal
-`kloudlite-git-azuremonitor` (Monitoring Reader on kolomi-rg), whose credentials live in the
-Secret `kloudlite-git-azuremonitor` (`tenant`, `client-id`, `client-secret`, `subscription`).
+`kloudlite-azuremonitor` (Monitoring Reader on kolomi-rg), whose credentials live in the
+Secret `kloudlite-azuremonitor` (`tenant`, `client-id`, `client-secret`, `subscription`).
 Created 2026-09-04 with `az ad sp create-for-rbac --role "Monitoring Reader" --scopes <rg id>`;
 rotate by re-running that and replacing the Secret. Metrics land as `azure_<metric>_<aggregation>`
 (`azure_totalrequestunits_total`, `azure_usedmemorypercentage_maximum`, …) with `region=central`.

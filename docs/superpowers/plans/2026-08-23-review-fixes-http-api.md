@@ -451,7 +451,7 @@ async fn peer_only_routes_refuse_a_session_token() {
     let e = common::env().await;
     let secret = "0123456789012345678901234567890123456789";
     let base = api_with_jwt(&e, &up, secret).await;
-    let token = kloudlite_git::jwt::Jwt::new(secret)
+    let token = kloudlite::jwt::Jwt::new(secret)
         .unwrap()
         .mint("alice@example.com", "Alice", Some("alice"))
         .unwrap();
@@ -474,8 +474,8 @@ async fn peer_only_routes_refuse_a_session_token() {
         // own answer is 503 — which is the proof the gate let the right caller through.
         let r = c
             .post(format!("{base}{path}"))
-            .header(kloudlite_git::proxy::PEER_HEADER, "s")
-            .header(kloudlite_git::proxy::OWNER_HEADER, "alice@example.com")
+            .header(kloudlite::proxy::PEER_HEADER, "s")
+            .header(kloudlite::proxy::OWNER_HEADER, "alice@example.com")
             .header("content-type", "application/json")
             .body(body)
             .send()
@@ -602,7 +602,7 @@ Append to `tests/browse_http.rs` (after `a_private_repos_pulls_are_invisible_to_
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dot_git_suffix_browse_read_creates_no_ghost_database() {
     let e = common::env().await;
-    let router = kloudlite_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = kloudlite::http::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     let (s, list) = get_as(&router, "alice", "/api/alice/widget.git/pulls").await;
     assert_eq!(s, StatusCode::OK, "{list}");
@@ -703,11 +703,11 @@ async fn ssh_serves_after_a_stray_fence_when_still_the_owner() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = common::app(s.clone()).await;
-    tokio::spawn(async move { kloudlite_git::ssh::serve(app, l, host_key).await.unwrap() });
+    tokio::spawn(async move { kloudlite::ssh::serve(app, l, host_key).await.unwrap() });
 
     // This node holds the repo; a stray opener takes the writer epoch out from under it.
     let held = s.pool.get("alice", "proj").await.unwrap();
-    let stray = slatedb::Db::builder(kloudlite_git::pool::path("alice", "proj"), s.os.clone())
+    let stray = slatedb::Db::builder(kloudlite::pool::path("alice", "proj"), s.os.clone())
         .build()
         .await
         .unwrap();
@@ -747,7 +747,7 @@ async fn ssh_serves_after_a_stray_fence_when_still_the_owner() {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --test ssh_e2e ssh_serves_after_a_stray_fence_when_still_the_owner`
-Expected: FAIL — stderr carries `kloudlite-git: alice/proj fenced` and git exits non-zero. (If `ssh`/`git` are missing the test skips; run it on a machine that has them — this is the only coverage.)
+Expected: FAIL — stderr carries `kloudlite: alice/proj fenced` and git exits non-zero. (If `ssh`/`git` are missing the test skips; run it on a machine that has them — this is the only coverage.)
 
 - [ ] **Step 3: Add the helper on `App` in `src/lib.rs`** (directly after `on_fenced`)
 
@@ -807,29 +807,29 @@ git commit -m "Retry a fenced open once on SSH and the peer stream, as HTTP does
 
 ---
 
-### Task 5: Require `KLOUDLITE_GIT_REPLICAS` in fleet mode
+### Task 5: Require `KLOUDLITE_REPLICAS` in fleet mode
 
 **Files:**
 - Modify: `src/main.rs:104-107`
 
-**Context:** In fleet mode (`KLOUDLITE_GIT_PEER_SVC` set) a missing `KLOUDLITE_GIT_REPLICAS` silently defaults to 1, so the leader hands every repo to `srv-0`. Both StatefulSets in `deploy/kloudlite-git.yaml` already set it (lines 128 and 345), so requiring it breaks nothing deployed. No test: `serve()` binds real sockets; the check is a four-line `match` and `cargo build` is the gate.
+**Context:** In fleet mode (`KLOUDLITE_PEER_SVC` set) a missing `KLOUDLITE_REPLICAS` silently defaults to 1, so the leader hands every repo to `srv-0`. Both StatefulSets in `deploy/kloudlite.yaml` already set it (lines 128 and 345), so requiring it breaks nothing deployed. No test: `serve()` binds real sockets; the check is a four-line `match` and `cargo build` is the gate.
 
 - [ ] **Step 1: Replace the default**
 
 ```rust
     // Required with a fleet: defaulting to 1 made the leader hand every repo to `srv-0`, silently,
     // on any pod whose env lost the variable. Solo mode has nobody else to hand a repo to, so 1.
-    let replicas: u32 = match std::env::var("KLOUDLITE_GIT_REPLICAS").ok().filter(|v| !v.is_empty()) {
+    let replicas: u32 = match std::env::var("KLOUDLITE_REPLICAS").ok().filter(|v| !v.is_empty()) {
         Some(v) => v
             .parse()
             .ok()
             .filter(|n| *n >= 1)
-            .ok_or_else(|| kloudlite_git::err("KLOUDLITE_GIT_REPLICAS must be a positive integer"))?,
+            .ok_or_else(|| kloudlite::err("KLOUDLITE_REPLICAS must be a positive integer"))?,
         None if svc.is_empty() => 1,
         None => {
-            return Err(kloudlite_git::err(
-                "KLOUDLITE_GIT_REPLICAS is required with KLOUDLITE_GIT_PEER_SVC (the leader hands repos \
-                 to kloudlite-git-srv-{0..N-1})",
+            return Err(kloudlite::err(
+                "KLOUDLITE_REPLICAS is required with KLOUDLITE_PEER_SVC (the leader hands repos \
+                 to kloudlite-srv-{0..N-1})",
             ))
         }
     };
@@ -837,12 +837,12 @@ git commit -m "Retry a fenced open once on SSH and the peer stream, as HTTP does
 
 - [ ] **Step 2: Build, then commit**
 
-Run: `cargo build && cargo test --bin kloudlite-git`
+Run: `cargo build && cargo test --bin kloudlite`
 Expected: builds; main's tests pass.
 
 ```bash
 git add src/main.rs
-git commit -m "Require KLOUDLITE_GIT_REPLICAS when a peer Service is configured"
+git commit -m "Require KLOUDLITE_REPLICAS when a peer Service is configured"
 ```
 
 ---
@@ -862,7 +862,7 @@ Lines 745 and 775: `let _guard = ENV_LOCK.lock().await;`
 
 - [ ] **Step 2: Verify the warning is gone, then commit**
 
-Run: `cargo clippy --all-targets 2>&1 | grep -c await_holding_lock` → `0`; then `cargo test --bin kloudlite-git`.
+Run: `cargo clippy --all-targets 2>&1 | grep -c await_holding_lock` → `0`; then `cargo test --bin kloudlite`.
 
 ```bash
 git add src/main.rs
@@ -1029,7 +1029,7 @@ pub(crate) async fn text_bounded(r: reqwest::Response) -> String {
 - `forward.rs:92` (`tell_owner`): `let text = text_bounded(r).await;`
 - `signatures.rs:99` (`commit_patch`): `let text = text_bounded(r).await;`
 - `feed.rs:22` (`feed_get`): `read_bounded(res).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned())`
-- `main.rs:631`: `let body = kloudlite_git::api::read_bounded(res).await.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();`
+- `main.rs:631`: `let body = kloudlite::api::read_bounded(res).await.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();`
 
 - [ ] **Step 3: Build + suite, commit**
 
@@ -1346,20 +1346,20 @@ In `set_image_visibility_writes_it`, replace the final block (from `// An upstre
 ```rust
         // An upstream configured but no secret in this shell: must go to the fleet (the routed
         // `imagevisibility` endpoint) and fail loudly when it cannot reach it — never write here.
-        std::env::set_var("KLOUDLITE_GIT_UPSTREAM", "http://127.0.0.1:1");
+        std::env::set_var("KLOUDLITE_UPSTREAM", "http://127.0.0.1:1");
         let e = run(&["admin", "set-image-visibility", "acme/nginx", "public"], &store)
             .await
             .expect_err("an unreachable fleet must fail, not fall back to a direct write");
         assert!(!store.image_is_public("acme", "nginx").await.unwrap(), "nothing written here: {e}");
         assert!(e.to_string().contains("set-image-visibility"), "{e}");
-        std::env::remove_var("KLOUDLITE_GIT_UPSTREAM");
+        std::env::remove_var("KLOUDLITE_UPSTREAM");
 ```
 
 Also update that test's doc comment: drop "Unlike `set-visibility` there's no routed image endpoint, so "fleet configured" means refuse, not redirect" and say it mirrors `set-visibility` exactly.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test --bin kloudlite-git set_image_visibility_writes_it`
+Run: `cargo test --bin kloudlite set_image_visibility_writes_it`
 Expected: FAIL — the error text is the "no routed endpoint ... refusing" refusal, and it contains "set-image-visibility" — so make the assertion precise: `assert!(!e.to_string().contains("no routed endpoint"), "{e}")`. With that line the test fails before and passes after.
 
 - [ ] **Step 3: Factor the POST out of `set-visibility` and use it twice**
@@ -1378,25 +1378,25 @@ async fn post_to_owner(
     upstream: Option<String>,
     secret: Option<String>,
 ) -> Result<()> {
-    let upstream = upstream.unwrap_or_else(|| "http://kloudlite-git:8081".into());
+    let upstream = upstream.unwrap_or_else(|| "http://kloudlite:8081".into());
     let res = reqwest::Client::builder()
-        .timeout(kloudlite_git::api::UPSTREAM_TIMEOUT)
+        .timeout(kloudlite::api::UPSTREAM_TIMEOUT)
         .build()?
         .post(format!("{}{route}", upstream.trim_end_matches('/')))
-        .header(kloudlite_git::proxy::PEER_HEADER, secret.unwrap_or_default())
-        .header(kloudlite_git::proxy::OWNER_HEADER, owner)
+        .header(kloudlite::proxy::PEER_HEADER, secret.unwrap_or_default())
+        .header(kloudlite::proxy::OWNER_HEADER, owner)
         .send()
         .await
-        .map_err(|e| kloudlite_git::err(format!("{cmd}: {e}")))?;
+        .map_err(|e| kloudlite::err(format!("{cmd}: {e}")))?;
     let status = res.status();
     if status.is_success() {
         return Ok(());
     }
-    let body = kloudlite_git::api::read_bounded(res)
+    let body = kloudlite::api::read_bounded(res)
         .await
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
-    Err(kloudlite_git::err(format!("{cmd}: {status}: {body}")))
+    Err(kloudlite::err(format!("{cmd}: {status}: {body}")))
 }
 ```
 
@@ -1412,17 +1412,17 @@ Replace the whole `set-image-visibility` arm with:
         ["admin", "set-image-visibility", path, vis] => {
             let (o, n) = path.split_once('/').ok_or("owner/image")?;
             if !matches!(*vis, "public" | "private") {
-                return Err(kloudlite_git::err("visibility must be public or private"));
+                return Err(kloudlite::err("visibility must be public or private"));
             }
             // Mirrors `set-visibility` exactly: `imagevisibility` is a routed browse endpoint
             // (by the IMAGE key), so with a fleet configured the flip is delivered to the node
             // that owns the image's database rather than written here under a live writer.
             // Same either-variable test for "configured", for the same reason.
-            let upstream = std::env::var("KLOUDLITE_GIT_UPSTREAM").ok();
-            let secret = std::env::var("KLOUDLITE_GIT_PEER_SECRET").ok();
+            let upstream = std::env::var("KLOUDLITE_UPSTREAM").ok();
+            let secret = std::env::var("KLOUDLITE_PEER_SECRET").ok();
             if upstream.is_none() && secret.is_none() {
                 eprintln!(
-                    "set-image-visibility: no KLOUDLITE_GIT_UPSTREAM or KLOUDLITE_GIT_PEER_SECRET set — \
+                    "set-image-visibility: no KLOUDLITE_UPSTREAM or KLOUDLITE_PEER_SECRET set — \
                      writing {path} directly, assuming NO node is currently serving it. If one is, it \
                      keeps answering from its own view for several seconds."
                 ); // ponytail: eprintln
@@ -1443,7 +1443,7 @@ Fix the `fleet_guard` doc comment (lines 381-389): delete the clause "mirroring 
 
 - [ ] **Step 4: Run tests, commit**
 
-Run: `cargo test --bin kloudlite-git && cargo test`
+Run: `cargo test --bin kloudlite && cargo test`
 Expected: PASS.
 
 ```bash
@@ -1618,15 +1618,15 @@ git commit -m "Cache credential misses, bounded, and clear them on registration"
         ["admin", "add-token", owner] => {
             // Same rule the api tier applies: a credential for an owner no URL can name is a
             // credential nothing can use, and a reserved name (`api`, `v2`) would be worse.
-            if !kloudlite_git::store::valid_owner(owner) {
-                return Err(kloudlite_git::err(format!("{owner}: not a valid owner name")));
+            if !kloudlite::store::valid_owner(owner) {
+                return Err(kloudlite::err(format!("{owner}: not a valid owner name")));
             }
             println!("{}", store.create_token(owner).await?);
             Ok(())
         }
         ["admin", "add-key", owner, file] => {
-            if !kloudlite_git::store::valid_owner(owner) {
-                return Err(kloudlite_git::err(format!("{owner}: not a valid owner name")));
+            if !kloudlite::store::valid_owner(owner) {
+                return Err(kloudlite::err(format!("{owner}: not a valid owner name")));
             }
             store.add_ssh_key(owner, &std::fs::read_to_string(file)?).await
         }
@@ -1645,7 +1645,7 @@ git commit -m "Cache credential misses, bounded, and clear them on registration"
     }
 ```
 
-Run: `cargo test --bin kloudlite-git admin_credentials_refuse_an_invalid_owner` → PASS.
+Run: `cargo test --bin kloudlite admin_credentials_refuse_an_invalid_owner` → PASS.
 
 - [ ] **Step 3: Commit**
 
@@ -1722,7 +1722,7 @@ pub fn unauthorized() -> axum::response::Response {
     use axum::response::IntoResponse;
     (
         axum::http::StatusCode::UNAUTHORIZED,
-        [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"kloudlite-git\"")],
+        [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"kloudlite\"")],
         "auth required",
     )
         .into_response()
@@ -2011,7 +2011,7 @@ async fn a_revoked_token_is_refused_on_the_public_listener() {
     let e = common::env().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
-    let router = kloudlite_git::http::router(common::app(e.store.clone()).await);
+    let router = kloudlite::http::router(common::app(e.store.clone()).await);
     let get = |token: String| {
         let router = router.clone();
         async move {
@@ -2028,7 +2028,7 @@ async fn a_revoked_token_is_refused_on_the_public_listener() {
         }
     };
     assert_eq!(get(token.clone()).await, StatusCode::OK);
-    e.store.revoke_token_digest(&kloudlite_git::store::Store::token_digest(&token)).await.unwrap();
+    e.store.revoke_token_digest(&kloudlite::store::Store::token_digest(&token)).await.unwrap();
     assert_eq!(get(token).await, StatusCode::UNAUTHORIZED);
 }
 ```

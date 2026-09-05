@@ -2,7 +2,7 @@
 //! statements are built from an ALLOW-LIST — a range, a step and a series name that came off the
 //! wire must never reach a query as text.
 
-use kloudlite_git_workspaces::history::series::{
+use kloudlite_workspaces::history::series::{
     parse_range, parse_step, sql_for, summarize, SeriesQuery,
 };
 

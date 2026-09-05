@@ -22,8 +22,8 @@ each is captured once into a struct or a `OnceLock`.
 
 | scope | object | written by | read by |
 |---|---|---|---|
-| **central** | one document at object-store key `cluster/settings` (JSON) | the admin server, through a new peer-only route on the server tier (`PUT /api/admin/settings`, peer listener, superadmin JWT + peer secret) | `kloudlite-git` (server), `kloudlite-git-worker`, `kloudlite-git-gateway`, `kloudlite-git-api` (user role), web |
-| **cluster** (one per region) | a cluster-scoped `ClusterSettings` CR named `default` in that region's k3s | the admin server, through its region kube client | every `kloudlite-git-agent` in that cluster, and `kloudlite-git-api` for the per-owner cap |
+| **central** | one document at object-store key `cluster/settings` (JSON) | the admin server, through a new peer-only route on the server tier (`PUT /api/admin/settings`, peer listener, superadmin JWT + peer secret) | `kloudlite` (server), `kloudlite-worker`, `kloudlite-gateway`, `kloudlite-api` (user role), web |
+| **cluster** (one per region) | a cluster-scoped `ClusterSettings` CR named `default` in that region's k3s | the admin server, through its region kube client | every `kloudlite-agent` in that cluster, and `kloudlite-api` for the per-owner cap |
 
 Both scopes are the same Rust type family: a `Settings` struct per tier with `serde(default)` on
 every field, so a missing key means "the built-in default". The env var of each knob stays as the
@@ -83,7 +83,7 @@ keeps the old value until it finishes. Nothing is interrupted by a settings chan
   description in code (`#[doc]` on the struct field, exported to the UI as JSON schema via
   schemars — the same crate the CRDs already use). The admin server validates against the range
   before writing; a value outside it is a 422 naming the field and the range.
-- Every write records who and when: the CR carries `kloudlite-git.io/updated-by` and `/updated-at`
+- Every write records who and when: the CR carries `kloudlite.io/updated-by` and `/updated-at`
   annotations; the central document carries `updatedBy`/`updatedAt` fields; the last ten
   versions are kept (CR: an annotation with the previous spec; document: `cluster/settings.N`).
   "Revert" in the UI writes the previous version.
@@ -120,11 +120,11 @@ Every setting field declares its readers and its mark
 
 1. The admin server validates and writes the document / CR (§4).
 2. For every changed **boot** field it collects the readers, and rolls each one — the pod
-   template annotation `kloudlite-git.io/restarted-at: <RFC 3339>`, exactly what
+   template annotation `kloudlite.io/restarted-at: <RFC 3339>`, exactly what
    `kubectl rollout restart` does, so Kubernetes uses the workload's own strategy (the server
    StatefulSet one pod at a time, the agent DaemonSet node by node, Deployments by surge). The
    admin server never deletes a pod. A **live** field rolls nothing.
-3. The UI says what will happen BEFORE the save ("Save and roll: kloudlite-git-agent in
+3. The UI says what will happen BEFORE the save ("Save and roll: kloudlite-agent in
    centralindia-k3s"), and requires a second confirmation when the reader set includes the
    server StatefulSet, whose roll moves database ownership between nodes (see "Deploying" in
    CLAUDE.md).
@@ -133,8 +133,8 @@ A process reads its boot settings at start from the same `stored ?? env ?? defau
 rolled pod comes up with the new value and the manifest's env is only the fallback.
 
 - **A fixed list, never a free name.** The readers a field may name are the known workloads:
-  central `kloudlite-git-srv` (StatefulSet), `kloudlite-git-api`, `kloudlite-git-worker`,
-  `kloudlite-git-gateway`, `kloudlite-git-web`, `kloudlite-git-admin`; per region `kloudlite-git-agent`
+  central `kloudlite-srv` (StatefulSet), `kloudlite-api`, `kloudlite-worker`,
+  `kloudlite-gateway`, `kloudlite-web`, `kloudlite-admin`; per region `kloudlite-agent`
   (DaemonSet, `kube-system`) and the region gateway. `admin::workloads::KNOWN` is that list.
 - **Manual roll too**: `POST /admin/workloads/{scope}/{name}/roll` with a required `reason`, for
   a rotated secret or a stuck process. Same mechanism, same list.
@@ -142,7 +142,7 @@ rolled pod comes up with the new value and the manifest's env is only the fallba
   them with ready/desired; the settings write is NOT made, so the document never runs ahead of
   the pods. `GET /admin/workloads` lists every known workload with image, ready/desired, last
   roll (who, when, reason or the setting that caused it) and rollout state.
-- **Audit**: who, when and why go on the workload (`kloudlite-git.io/rolled-by`, `/rolled-at`,
+- **Audit**: who, when and why go on the workload (`kloudlite.io/rolled-by`, `/rolled-at`,
   `/roll-reason`: a free reason, or `setting:<field>`) and into the admin audit log.
 - **RBAC**: the admin ServiceAccount gains `get/list/patch` on exactly those Deployments and
   the StatefulSet in the central namespace, and on the agent DaemonSet in each region. Nothing
@@ -177,7 +177,7 @@ settings because they are what the agent hands to tenants, not what the agent ru
 | the web's clone host changed | clone menus show the new host on the next page load |
 | superadmin changes `defaultImage` (boot, reader: agent) for region A | CR written, then the agent DaemonSet in A rolls node by node; audit says `setting:defaultImage` |
 | superadmin changes `syncSecs` (live) | CR written, nothing rolls, agents pick it up next beat |
-| superadmin rolls `kloudlite-git-worker` manually with reason "rotate peer secret" | template annotation patched; Deployment surges; audit annotations written |
+| superadmin rolls `kloudlite-worker` manually with reason "rotate peer secret" | template annotation patched; Deployment surges; audit annotations written |
 | a boot save while its reader is still rolling | 409 naming the workload with ready/desired; nothing written |
 | roll requested while the previous roll is still progressing | 409 with ready/desired |
 | roll of a name not in the list | 404 |

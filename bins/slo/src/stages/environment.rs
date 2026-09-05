@@ -124,7 +124,7 @@ async fn dns(c: &mut Ctx, env: &str) {
 /// which one a base image ships has changed under us before.
 async fn resolves(c: &Ctx, env: &str, cap: Duration) -> Result<bool> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
-    let ns = kloudlite_git_workspaces::crd::env_namespace(env);
+    let ns = kloudlite_workspaces::crd::env_namespace(env);
     // `{service}-0`: one StatefulSet per service, one replica, so the ordinal is always zero.
     let pod = format!("{SERVICE}-0");
     let script = format!("getent hosts {SERVICE} || nslookup {SERVICE}");

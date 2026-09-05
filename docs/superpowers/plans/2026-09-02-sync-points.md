@@ -15,11 +15,11 @@
 - A transient NEVER enters a commit's `parent` chain and NEVER advances `status.head`. `push` semantics are byte-for-byte unchanged.
 - Retention: at most one `Ready` transient per worktree; the previous is deleted only AFTER the new one is `Ready` (keep-biased, as `retain` and `pull_volume` already are).
 - Defaults, verbatim: `WS_SYNC_SECS=60`, `WS_STOP_FLUSH_TIMEOUT_SECS=600`.
-- Naming: beat transients `sync-{worktree}-{8 hex}`; stop transients keep the existing fixed names `stop-{env}` / `stop-{ws}`. Generation annotation key: `kloudlite-git.io/synced-generation`.
+- Naming: beat transients `sync-{worktree}-{8 hex}`; stop transients keep the existing fixed names `stop-{env}` / `stop-{ws}`. Generation annotation key: `kloudlite.io/synced-generation`.
 - Every task: `cargo test --workspace --locked` green and `cargo clippy --workspace -- -D warnings` clean before its commit. btrfs-gated engine tests count only from a build-0 run (`0.00s` = skipped).
 - Record the test-function count of every crate touched before and after; name every disappeared test.
 - Comments explain WHY; deliberate shortcuts carry `// ponytail: <ceiling and upgrade path>`. Commit subjects imperative sentence case, no attribution trailers of any kind.
-- CRD schema changes regenerate `deploy/k3s/crds.yaml` via `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`.
+- CRD schema changes regenerate `deploy/k3s/crds.yaml` via `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml`.
 
 ---
 
@@ -64,7 +64,7 @@ Fix every `SnapshotSpec { .. }` literal (`api.rs::create_commit`, `controller.rs
 
 **Interfaces:**
 - Consumes: `Engine::generation(volume, ws)` (T1), `crd::SnapshotSpec.transient` (T1), `peer::interesting_volumes`-style listing of Workspaces/Environments with `status.nodeName == me`.
-- Produces: `pub async fn sync_beat(ctx: &Arc<Ctx>)`; `pub const SYNCED_GENERATION: &str = "kloudlite-git.io/synced-generation"`; pure `pub fn due(current: u64, recorded: Option<u64>) -> bool` (`recorded.is_none_or(|g| current > g)`); `pub fn sync_name(worktree: &str) -> String` = `format!("sync-{worktree}-{}", crd::short_hex())` (make `short_hex` `pub` if it is not).
+- Produces: `pub async fn sync_beat(ctx: &Arc<Ctx>)`; `pub const SYNCED_GENERATION: &str = "kloudlite.io/synced-generation"`; pure `pub fn due(current: u64, recorded: Option<u64>) -> bool` (`recorded.is_none_or(|g| current > g)`); `pub fn sync_name(worktree: &str) -> String` = `format!("sync-{worktree}-{}", crd::short_hex())` (make `short_hex` `pub` if it is not).
 
 - [ ] **Step 1: failing tests** (in sync.rs):
 ```rust
@@ -85,7 +85,7 @@ fn due_only_when_the_generation_moved() {
   5. Create `Snapshot` named `sync_name(&worktree)`: `transient: true`, `parent` = current transient's name or `""`, `message: None`, `pinned: false`, annotation `SYNCED_GENERATION = gen`, labels `commit_labels(owner, volume)`, ownerReference to the parent object (copy the shape `stop_push` uses). 409 = fine.
   Every per-object failure is `warn!` + `continue`; the beat never aborts.
 - [ ] **Step 4: `spawn_sync`** — copy `spawn_pull` verbatim with `sync_interval()` (`WS_SYNC_SECS`, default 60) and `crate::sync::sync_beat`. Call it right after `spawn_pull(ctx.clone())`.
-- [ ] **Step 5: reconcile.rs test** `the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved`: mock routes — one placed running Workspace, an empty Snapshot list, then a POST to `/apis/kloudlite-git.io/v1alpha1/snapshots` recorded; run `sync_beat` with an engine whose pool is a tmpdir. Because `generation` shells out to btrfs, gate the engine call the way `ensure_homecache` is gated (`Engine.has_btrfs`): when `!has_btrfs`, `generation` returns `Err`, so this test asserts the beat WARNS AND CREATES NOTHING on a generation error (keep-biased), and a second test with a fake `generation` seam is not required — the pure `due` test covers the decision. Say this explicitly in the test's doc comment.
+- [ ] **Step 5: reconcile.rs test** `the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved`: mock routes — one placed running Workspace, an empty Snapshot list, then a POST to `/apis/kloudlite.io/v1alpha1/snapshots` recorded; run `sync_beat` with an engine whose pool is a tmpdir. Because `generation` shells out to btrfs, gate the engine call the way `ensure_homecache` is gated (`Engine.has_btrfs`): when `!has_btrfs`, `generation` returns `Err`, so this test asserts the beat WARNS AND CREATES NOTHING on a generation error (keep-biased), and a second test with a fake `generation` seam is not required — the pure `due` test covers the decision. Say this explicitly in the test's doc comment.
 - [ ] **Step 6: gates; commit** `Cut a sync point whenever a live worktree's generation moves`.
 
 ### Task 3: Cutting a transient — no head, one-per-worktree retention
@@ -174,7 +174,7 @@ async fn a_working_previous_transient_is_never_deleted() { /* previous is Workin
 Known from the survey (verify each with a grep before deleting; if a caller exists, keep it and say so):
 - `crates/workspaces/src/model.rs:18` `Region.agent_token`, `api.rs:167` `/v1/regions/{id}/rotate-token` + `rotate_region_token`, `random_token` if caller-free, `api.rs:303/321-349` token minting on region create/re-register. The consumer (`bins/server/src/vol_agent.rs`) is already deleted. Update `api_*` tests that assert `agent_token`.
 - `deploy/k3s/rotate-agent-token.sh` (rotates that token) and its mentions in `deploy/RECOVERY.md`, `deploy/BACKUPS.md`, `deploy/k3s/README.md`.
-- `tests/ws_e2e.sh`: `KLOUDLITE_GIT_VOL_AGENT_TOKENS`, `VOL_AGENT_TOKEN`, the `/vol-agent` comments; `deploy/k3s/env.example.sh:30` and `deploy/k3s/env.sh:29` `WS_REGISTRY_URL` lines.
+- `tests/ws_e2e.sh`: `KLOUDLITE_VOL_AGENT_TOKENS`, `VOL_AGENT_TOKEN`, the `/vol-agent` comments; `deploy/k3s/env.example.sh:30` and `deploy/k3s/env.sh:29` `WS_REGISTRY_URL` lines.
 - Stale prose: `CLAUDE.md:131-132` (`vol/{owner}/{id}` in `vol_agent.rs`), `:180-182` (`/v1` writes a `SnapshotRequest`; history reads `done` SnapshotRequests), `:198` (`WS_REGISTRY_URL`); `README.md:42,88,110,138,198,207` (SnapshotRequest as a CRD, `/vol-agent`, `repo/vol/{owner}/{id}`). Rewrite to the commit model + sync points.
 - `deploy/k3s/agent-daemonset.yaml`: `RUST_BACKTRACE` and `XDG_CACHE_HOME` are set on the agent container and read by nothing there — delete; `NIX_REMOTE` stays only if the nix-daemon sidecar reads it (check `nix-conf.yaml`/the sidecar spec).
 - Reads with no writer — add each to the daemonset with its default and a one-line WHY, so config is discoverable: `WS_NODE_DEAD_SECS=600`, `WS_PEER_SEND_TIMEOUT_SECS`, `WS_SNAPSHOT_KEEP=10`; `WS_RUNTIME_CLASS` is deliberately unset (comment exists) — leave; `WS_PEER_SECRET` and `WS_REGION` come from the Secret — leave.
@@ -195,7 +195,7 @@ From the whole-repo audit (verified; rulings inline):
 - Ruling — REJECTED: "delete `VolumeReplicaStatus.last_sync_at`". True that nothing reads it today; Task 5's flush gate reads it. Keep.
 - Ruling — REJECTED: "yagni `runtimeclass.yaml` + `install-gvisor.sh`, `WS_RUNTIME_CLASS` unset". The daemonset (`agent-daemonset.yaml:145-152`) documents that unset is deliberate: tenant pods pick gvisor from the node label, and the env var is the operator override. Keep all three.
 - Ruling — the three unset agent knobs (`WS_NODE_DEAD_SECS`, `WS_PEER_SEND_TIMEOUT_SECS`, `WS_SNAPSHOT_KEEP`): the audit says inline the defaults and delete the readers; this plan sets them in the daemonset instead. Two of them are tuned during Task 9's node-death test, so they are operator knobs, not constants. Cost if wrong: three env lines.
-- Verified NOT dead, no action: `KLOUDLITE_GIT_METRICS_ADDR` (read via `metrics::init`), the web/nginx/build env vars, all test helpers in `tests/common` and per-crate `tests/*.rs`.
+- Verified NOT dead, no action: `KLOUDLITE_METRICS_ADDR` (read via `metrics::init`), the web/nginx/build env vars, all test helpers in `tests/common` and per-crate `tests/*.rs`.
 
 Audit's own estimate for its items: −410 lines, −2 deps.
 

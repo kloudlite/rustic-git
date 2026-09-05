@@ -1,22 +1,22 @@
 [package]
-name = "kloudlite-git-pulls"
+name = "kloudlite-pulls"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_pulls"
+name = "kloudlite_pulls"
 
 [features]
 # The mergeability check is a gix graph walk; the worker never runs it and must not link gix
 # to have the pull-request model. The server and the facade turn it on.
-check = ["dep:gix-hash", "dep:kloudlite-git-gitbase"]
+check = ["dep:gix-hash", "dep:kloudlite-gitbase"]
 
 [dependencies]
 tracing = { workspace = true }
-kloudlite-git-core = { path = "../core" }
-kloudlite-git-storage = { path = "../storage" }
-kloudlite-git-gitbase = { path = "../gitbase", optional = true }
+kloudlite-core = { path = "../core" }
+kloudlite-storage = { path = "../storage" }
+kloudlite-gitbase = { path = "../gitbase", optional = true }
 gix-hash = { workspace = true, optional = true }
 slatedb = { workspace = true }
 tokio = { workspace = true }

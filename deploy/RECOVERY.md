@@ -9,11 +9,11 @@ What survives a cluster loss, and is the input to this page:
 
 | Have | Where | Without it |
 | --- | --- | --- |
-| Blob container `kloudlite-git` (SlateDB, packs, registry, credentials, `index/`) | storage account (Secret `kloudlite-git-storage` named it; the portal still does) | nothing to recover — this is the product |
+| Blob container `kloudlite` (SlateDB, packs, registry, credentials, `index/`) | storage account (Secret `kloudlite-storage` named it; the portal still does) | nothing to recover — this is the product |
 | `wslayers*` containers, one per region | per-region storage accounts | workspace history is gone; live subvolumes on surviving pool nodes are not |
-| Cosmos `kloudlite-git-mongo` (directory, PRs) | Cosmos account | the directory cannot be rebuilt |
-| `k3s-backup` container (hourly encrypted control-plane bundles) | same account as `kloudlite-git` | the k3s region is rebuilt from `objects.yaml`-less scratch: subvolumes on the pool are orphans until re-adopted, and every `Region` CR (there is no other copy) must be re-registered by hand via `POST /v1/regions` (Part C) |
-| `/etc/kloudlite-git/k3s-backup.key` copy | password manager | every bundle in `k3s-backup` is noise |
+| Cosmos `kloudlite-mongo` (directory, PRs) | Cosmos account | the directory cannot be rebuilt |
+| `k3s-backup` container (hourly encrypted control-plane bundles) | same account as `kloudlite` | the k3s region is rebuilt from `objects.yaml`-less scratch: subvolumes on the pool are orphans until re-adopted, and every `Region` CR (there is no other copy) must be re-registered by hand via `POST /v1/regions` (Part C) |
+| `/etc/kloudlite/k3s-backup.key` copy | password manager | every bundle in `k3s-backup` is noise |
 | Cloudflare zones `kloudlite.io`, `khost.dev`; GitHub org (GHCR packages, Actions) | their consoles | — |
 
 Nothing else needs to exist beforehand. Every Secret is re-minted below; the values that cannot
@@ -41,9 +41,9 @@ marked **(cross)**.
 
 ```sh
 az aks get-credentials -g <rg> -n <cluster>
-kubectl create namespace kloudlite-git
+kubectl create namespace kloudlite
 # ingress-nginx, Helm, defaults. cert-manager, Helm, with CRDs. Then the issuer the registry
-# Ingress names (`cert-manager.io/cluster-issuer: letsencrypt` in deploy/kloudlite-git.yaml):
+# Ingress names (`cert-manager.io/cluster-issuer: letsencrypt` in deploy/kloudlite.yaml):
 kubectl apply -f - <<'EOF'
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -68,54 +68,54 @@ kubectl -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.spec.lo
 ```
 
 Redis is a managed instance (Azure Managed Redis), not a manifest. It MUST run
-`maxmemory-policy volatile-lru` — the comment above the `kloudlite-git-api` Service in
-`deploy/kloudlite-git.yaml` explains why an `allkeys-*` policy silently un-purges caches. Create
-it, set the policy, keep the connection URL for `kloudlite-git-redis` below.
+`maxmemory-policy volatile-lru` — the comment above the `kloudlite-api` Service in
+`deploy/kloudlite.yaml` explains why an `allkeys-*` policy silently un-purges caches. Create
+it, set the policy, keep the connection URL for `kloudlite-redis` below.
 
 ### A.2 Secrets
 
-All in namespace `kloudlite-git`. "Minted" means the value is invented here; "portal" means it
+All in namespace `kloudlite`. "Minted" means the value is invented here; "portal" means it
 exists in Azure and is copied. A `(cross)` Secret must hold the same value in both clusters.
 
 | Secret | Keys | Value | Consumers | Optional |
 | --- | --- | --- | --- | --- |
-| `kloudlite-git-storage` | `account`, `key` | portal: `az storage account keys list -n <acct> --query '[0].value' -o tsv` | srv, api, worker | no |
-| `kloudlite-git-jwt` **(cross)** | `secret` | minted: `openssl rand -hex 32`. Copied verbatim into k3s `kloudlite-git-system` (B.5) — the gateway verifies what the api mints | srv, api, k3s gateway | no — pods fail closed without it |
-| `kloudlite-git-peer` | `secret` | minted: `openssl rand -hex 32` | srv, api, worker, web | no |
-| `kloudlite-git-hostkey` | `host_key` | minted: `ssh-keygen -q -t ed25519 -N '' -f host_key` (the file, not `.pub`). One key fleet-wide — per-pod keys make every pod a different host. **Every user's `known_hosts` entry for `git.khost.dev` changes**; announce it | srv | no |
-| `kloudlite-git-mongo` | `uri` | portal: `az cosmosdb keys list -n kloudlite-git-mongo -g <rg> --type connection-strings` | srv, api, worker | no on srv (PRs orphan) |
-| `kloudlite-git-redis` | `url` | the managed instance's `rediss://` URL with its access key | srv, api, worker | yes — slower, never wrong |
-| `kloudlite-git-k3s-kubeconfig` **(cross)** | `config` | a kubeconfig whose user is the k3s `kloudlite-git-api` ServiceAccount token — B.3 mints it | api | no — /v1 workspace routes 503 |
-| `kloudlite-git-web` | `auth-secret` (required); `github-id`/`-secret`, `google-id`/`-secret`, `allowed-emails`, `shared-password` (optional) | `auth-secret` minted: `openssl rand -hex 32`; OAuth values from the provider consoles (callback `https://dev.kloudlite.io/api/auth/callback/<provider>`) | web | providers optional |
-| `kloudlite-git-mail` | `resend-api-key`, `from` | Resend console | web | yes — invites shown as links |
-| `kloudlite-git-slo` | `ssh_key` | minted: `ssh-keygen -t ed25519 -N '' -C slo-probe -f slo_ed25519` (the private file). The run registers the public half itself | slo CronJobs | no — every SSH step fails without it |
-| `kloudlite-git-slo-k3s-kubeconfig` **(cross)** | `config` | a second kubeconfig on the B.3 recipe, for the probe's own reads and the drills | slo CronJobs | no — stages 5–7 skip |
-| `kloudlite-git-slo-webhook` | `url` | the chat webhook the failed-run line goes to | admin | yes — console and HyperDX only |
+| `kloudlite-storage` | `account`, `key` | portal: `az storage account keys list -n <acct> --query '[0].value' -o tsv` | srv, api, worker | no |
+| `kloudlite-jwt` **(cross)** | `secret` | minted: `openssl rand -hex 32`. Copied verbatim into k3s `kloudlite-system` (B.5) — the gateway verifies what the api mints | srv, api, k3s gateway | no — pods fail closed without it |
+| `kloudlite-peer` | `secret` | minted: `openssl rand -hex 32` | srv, api, worker, web | no |
+| `kloudlite-hostkey` | `host_key` | minted: `ssh-keygen -q -t ed25519 -N '' -f host_key` (the file, not `.pub`). One key fleet-wide — per-pod keys make every pod a different host. **Every user's `known_hosts` entry for `git.khost.dev` changes**; announce it | srv | no |
+| `kloudlite-mongo` | `uri` | portal: `az cosmosdb keys list -n kloudlite-mongo -g <rg> --type connection-strings` | srv, api, worker | no on srv (PRs orphan) |
+| `kloudlite-redis` | `url` | the managed instance's `rediss://` URL with its access key | srv, api, worker | yes — slower, never wrong |
+| `kloudlite-k3s-kubeconfig` **(cross)** | `config` | a kubeconfig whose user is the k3s `kloudlite-api` ServiceAccount token — B.3 mints it | api | no — /v1 workspace routes 503 |
+| `kloudlite-web` | `auth-secret` (required); `github-id`/`-secret`, `google-id`/`-secret`, `allowed-emails`, `shared-password` (optional) | `auth-secret` minted: `openssl rand -hex 32`; OAuth values from the provider consoles (callback `https://dev.kloudlite.io/api/auth/callback/<provider>`) | web | providers optional |
+| `kloudlite-mail` | `resend-api-key`, `from` | Resend console | web | yes — invites shown as links |
+| `kloudlite-slo` | `ssh_key` | minted: `ssh-keygen -t ed25519 -N '' -C slo-probe -f slo_ed25519` (the private file). The run registers the public half itself | slo CronJobs | no — every SSH step fails without it |
+| `kloudlite-slo-k3s-kubeconfig` **(cross)** | `config` | a second kubeconfig on the B.3 recipe, for the probe's own reads and the drills | slo CronJobs | no — stages 5–7 skip |
+| `kloudlite-slo-webhook` | `url` | the chat webhook the failed-run line goes to | admin | yes — console and HyperDX only |
 
 ```sh
-kubectl -n kloudlite-git create secret generic kloudlite-git-storage --from-literal=account=<acct> --from-literal=key=<key>
-kubectl -n kloudlite-git create secret generic kloudlite-git-jwt   --from-literal=secret=$(openssl rand -hex 32)
-kubectl -n kloudlite-git create secret generic kloudlite-git-peer  --from-literal=secret=$(openssl rand -hex 32)
-ssh-keygen -q -t ed25519 -N '' -f host_key && kubectl -n kloudlite-git create secret generic kloudlite-git-hostkey --from-file=host_key && rm host_key host_key.pub
-kubectl -n kloudlite-git create secret generic kloudlite-git-mongo --from-literal=uri='<connection string>'
-kubectl -n kloudlite-git create secret generic kloudlite-git-redis --from-literal=url='rediss://:<key>@<host>:10000'
-kubectl -n kloudlite-git create secret generic kloudlite-git-k3s-kubeconfig --from-file=config=<kubeconfig from B.3>
-kubectl -n kloudlite-git create secret generic kloudlite-git-web --from-literal=auth-secret=$(openssl rand -hex 32) [--from-literal=github-id=... ...]
-kubectl -n kloudlite-git create secret generic kloudlite-git-mail --from-literal=resend-api-key=... --from-literal=from='...'
-ssh-keygen -q -t ed25519 -N '' -C slo-probe -f slo_ed25519 && kubectl -n kloudlite-git create secret generic kloudlite-git-slo --from-file=ssh_key=slo_ed25519 && shred -u slo_ed25519 slo_ed25519.pub
-kubectl -n kloudlite-git create secret generic kloudlite-git-slo-k3s-kubeconfig --from-file=config=<a second kubeconfig from B.3>
-kubectl -n kloudlite-git create secret generic kloudlite-git-slo-webhook --from-literal=url='<chat webhook>'   # optional
+kubectl -n kloudlite create secret generic kloudlite-storage --from-literal=account=<acct> --from-literal=key=<key>
+kubectl -n kloudlite create secret generic kloudlite-jwt   --from-literal=secret=$(openssl rand -hex 32)
+kubectl -n kloudlite create secret generic kloudlite-peer  --from-literal=secret=$(openssl rand -hex 32)
+ssh-keygen -q -t ed25519 -N '' -f host_key && kubectl -n kloudlite create secret generic kloudlite-hostkey --from-file=host_key && rm host_key host_key.pub
+kubectl -n kloudlite create secret generic kloudlite-mongo --from-literal=uri='<connection string>'
+kubectl -n kloudlite create secret generic kloudlite-redis --from-literal=url='rediss://:<key>@<host>:10000'
+kubectl -n kloudlite create secret generic kloudlite-k3s-kubeconfig --from-file=config=<kubeconfig from B.3>
+kubectl -n kloudlite create secret generic kloudlite-web --from-literal=auth-secret=$(openssl rand -hex 32) [--from-literal=github-id=... ...]
+kubectl -n kloudlite create secret generic kloudlite-mail --from-literal=resend-api-key=... --from-literal=from='...'
+ssh-keygen -q -t ed25519 -N '' -C slo-probe -f slo_ed25519 && kubectl -n kloudlite create secret generic kloudlite-slo --from-file=ssh_key=slo_ed25519 && shred -u slo_ed25519 slo_ed25519.pub
+kubectl -n kloudlite create secret generic kloudlite-slo-k3s-kubeconfig --from-file=config=<a second kubeconfig from B.3>
+kubectl -n kloudlite create secret generic kloudlite-slo-webhook --from-literal=url='<chat webhook>'   # optional
 ```
 
-Verify: `kubectl -n kloudlite-git get secrets` lists all twelve. Nothing else creates them.
+Verify: `kubectl -n kloudlite get secrets` lists all twelve. Nothing else creates them.
 
 ### A.3 Apply and roll
 
 The manifests are pinned to image SHAs that exist in GHCR (`deploy/pin.sh` refuses one that
 does not); a fresh cluster pulls them anonymously. Values that name the environment and may
-need editing on a rebuilt one, all in `deploy/kloudlite-git.yaml`: the registry Ingress
+need editing on a rebuilt one, all in `deploy/kloudlite.yaml`: the registry Ingress
 `limit-whitelist` (the pool nodes' public IPs — B.1 gives the new ones), and
-`KLOUDLITE_GIT_WORKSPACES_ADMINS`.
+`KLOUDLITE_WORKSPACES_ADMINS`.
 
 ```sh
 deploy/roll.sh          # one apply; the srv StatefulSet elects its own map writer
@@ -124,15 +124,15 @@ deploy/roll.sh          # one apply; the srv StatefulSet elects its own map writ
 Verify, in this order (each is a different failure):
 
 ```sh
-kubectl -n kloudlite-git get pods                                   # all Running, 0 restarts
-kubectl -n kloudlite-git logs -l role=server --tail=500 | grep -E 'lease.acquired|newer DB client'
+kubectl -n kloudlite get pods                                   # all Running, 0 restarts
+kubectl -n kloudlite logs -l role=server --tail=500 | grep -E 'lease.acquired|newer DB client'
 #   want exactly ONE pod logging "lease.acquired" (and "ownership.map.opened" with role=writer
 #   beside it), and NO
 #   "newer DB client" on a settled fleet — that line means a demoted leader wrote after it lost
 #   the lease, which the epoch check is supposed to stop first
-kubectl -n kloudlite-git get endpoints kloudlite-git-lb -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\n"}{end}'
+kubectl -n kloudlite get endpoints kloudlite-lb -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\n"}{end}'
 #   every srv pod
-kubectl -n kloudlite-git get svc kloudlite-git-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'  # → git.khost.dev (A.4)
+kubectl -n kloudlite get svc kloudlite-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'  # → git.khost.dev (A.4)
 kubectl -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}'  # → the two proxied names
 ```
 
@@ -144,9 +144,9 @@ is what the yaml comments were written against; a wrong mode is a redirect loop
 
 | Record | Points at | Proxied | Origin TLS | Why |
 | --- | --- | --- | --- | --- |
-| `dev.kloudlite.io` A | ingress-nginx LB IP | yes | none — SSL mode **Flexible**; the Ingress has `ssl-redirect: "false"` | `deploy/kloudlite-git-web.yaml`, comment on the Ingress |
-| `cr.khost.dev` A | ingress-nginx LB IP | yes (today — `dig` resolves to Cloudflare) | cert-manager cert at the origin, but the proxy fetches over HTTP; `ssl-redirect: "false"` for that reason | `deploy/kloudlite-git.yaml`, registry Ingress comment. If it ever goes DNS-only, flip the annotation to `"true"` |
-| `git.khost.dev` A | `kloudlite-git-lb` IP (SSH on 22, 2222 inside) | **no** — SSH cannot traverse the proxy | n/a | `deploy/kloudlite-git-web.yaml`, the SSH host comment |
+| `dev.kloudlite.io` A | ingress-nginx LB IP | yes | none — SSL mode **Flexible**; the Ingress has `ssl-redirect: "false"` | `deploy/kloudlite-web.yaml`, comment on the Ingress |
+| `cr.khost.dev` A | ingress-nginx LB IP | yes (today — `dig` resolves to Cloudflare) | cert-manager cert at the origin, but the proxy fetches over HTTP; `ssl-redirect: "false"` for that reason | `deploy/kloudlite.yaml`, registry Ingress comment. If it ever goes DNS-only, flip the annotation to `"true"` |
+| `git.khost.dev` A | `kloudlite-lb` IP (SSH on 22, 2222 inside) | **no** — SSH cannot traverse the proxy | n/a | `deploy/kloudlite-web.yaml`, the SSH host comment |
 | `ws-<region>.khost.dev` A ×N | each pool node's public IP | yes | Flexible today; Full (strict) needs the optional `gateway-tls` (B.5) | `deploy/k3s/gateway.yaml` header |
 
 Zone SSL/TLS mode is per zone, not per record: `kloudlite.io` Flexible; `khost.dev` currently
@@ -168,7 +168,7 @@ ssh -T git@git.khost.dev                                                        
 git ls-remote https://dev.kloudlite.io/<owner>/<repo>.git                                                                      # a repo that existed: its refs came back from the object store
 docker login cr.khost.dev && docker pull cr.khost.dev/<owner>/<image>:<tag>                                                    # layers came back from blobs/
 # after ~5 min, the ownership map's WAL health:
-kubectl -n kloudlite-git logs -l role=server | grep -iE 'checkpoint|shutdown.stalled' | tail -3   # want "ownership.checkpoint.completed"
+kubectl -n kloudlite logs -l role=server | grep -iE 'checkpoint|shutdown.stalled' | tail -3   # want "ownership.checkpoint.completed"
 #   (debug level — set RUST_LOG=debug if the deployment runs at info)
 ```
 
@@ -191,7 +191,7 @@ deploy/k3s/provision-azure.sh                    # idempotent; VNet, NSG (ssh + 
 ssh azureuser@<node> sudo bash -s -- /dev/disk/azure/scsi1/lun0 < deploy/k3s/format-pool.sh
 ```
 
-Note the pool nodes' new public IPs: they go into the registry `limit-whitelist` in `deploy/kloudlite-git.yaml` (A.3) — the registry's rate limit is lifted only for
+Note the pool nodes' new public IPs: they go into the registry `limit-whitelist` in `deploy/kloudlite.yaml` (A.3) — the registry's rate limit is lifted only for
 those addresses.
 
 ### B.2 The control plane — from the backup, or from scratch
@@ -203,10 +203,10 @@ the trailing comment of `deploy/k3s/backup-controlplane.sh`; in short:
 # on the new k3s-cp — install without starting a NEW cluster:
 curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.33.5+k3s1 INSTALL_K3S_SKIP_START=true sh -s - server
 # the key from the password manager, the newest bundle with a READ SAS (the backup SAS cannot read):
-sudo install -d -m700 /etc/kloudlite-git && sudo sh -c 'umask 077; cat > /etc/kloudlite-git/k3s-backup.key'
+sudo install -d -m700 /etc/kloudlite && sudo sh -c 'umask 077; cat > /etc/kloudlite/k3s-backup.key'
 echo 'url = "https://<acct>.blob.core.windows.net/k3s-backup/hourly-<HH>.tgz.enc?<read SAS>"' > /tmp/get.cfg
 curl -sS --fail -K /tmp/get.cfg -o /tmp/b.tgz.enc
-openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/kloudlite-git/k3s-backup.key -in /tmp/b.tgz.enc -out /tmp/b.tgz && tar -xzf /tmp/b.tgz -C /tmp
+openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/kloudlite/k3s-backup.key -in /tmp/b.tgz.enc -out /tmp/b.tgz && tar -xzf /tmp/b.tgz -C /tmp
 sudo install -m600 /tmp/state.db /var/lib/rancher/k3s/server/db/state.db
 sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/rancher/k3s/server/db/state.db-shm   # the step that bites
 sudo tar -xzf /tmp/identity.tgz -C /var/lib/rancher/k3s/server
@@ -217,7 +217,7 @@ sudo systemctl start k3s
 still joins workers. Workers: the k3s agent install with that token, then the labels:
 
 ```sh
-kubectl label node <node> kloudlite-git.io/pool=true kloudlite-git.io/session=true   # or env=true
+kubectl label node <node> kloudlite.io/pool=true kloudlite.io/session=true   # or env=true
 ```
 
 **No bundle, or a bundle the key cannot open** — a fresh cluster: install normally, then only
@@ -238,19 +238,19 @@ Verify: `kubectl get nodes` (all Ready, labels present); `kubectl get volumes,wo
 
 ```sh
 kubectl apply -f deploy/k3s/crds.yaml -f deploy/k3s/api-rbac.yaml
-TOKEN=$(kubectl -n kube-system create token kloudlite-git-api --duration=8760h)
+TOKEN=$(kubectl -n kube-system create token kloudlite-api --duration=8760h)
 CA=$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
 cat > k3s-api.kubeconfig <<EOF
 apiVersion: v1
 kind: Config
 clusters: [{ name: k3s, cluster: { server: https://<k3s-cp public IP>:6443, certificate-authority-data: $CA } }]
-users: [{ name: kloudlite-git-api, user: { token: $TOKEN } }]
-contexts: [{ name: k3s, context: { cluster: k3s, user: kloudlite-git-api } }]
+users: [{ name: kloudlite-api, user: { token: $TOKEN } }]
+contexts: [{ name: k3s, context: { cluster: k3s, user: kloudlite-api } }]
 current-context: k3s
 EOF
 ```
 
-That file is `kloudlite-git-k3s-kubeconfig`'s `config` key (A.2); delete the local copy after.
+That file is `kloudlite-k3s-kubeconfig`'s `config` key (A.2); delete the local copy after.
 `harden-node.sh`'s `API_CLIENTS` (B.6) must include the AKS api tier's egress IP or 6443 is
 closed to it. The token has an expiry — put a reminder where the JWT rotation one lives
 (`deploy/BACKUPS.md`, "Rotation").
@@ -264,7 +264,7 @@ kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-admission.yaml -
 ### B.5 Secrets and the agent
 
 The agent Secret is the one `deploy/k3s/README.md` says is "not in this directory". Keys, all
-in `kube-system/kloudlite-git-agent`:
+in `kube-system/kloudlite-agent`:
 
 | Key | Value |
 | --- | --- |
@@ -273,19 +273,19 @@ in `kube-system/kloudlite-git-agent`:
 | `WS_RUNTIME_CLASS` | only `gvisor`, only once every pool node has it (comment in `agent-daemonset.yaml`) |
 
 ```sh
-kubectl -n kube-system create secret generic kloudlite-git-agent --from-literal=WS_REGION=centralindia-k3s \
+kubectl -n kube-system create secret generic kloudlite-agent --from-literal=WS_REGION=centralindia-k3s \
   --from-literal=AZURE_ACCOUNT=... --from-literal=AZURE_KEY=... --from-literal=AZURE_CONTAINER=wslayers-k3s
 kubectl apply -f deploy/k3s/agent-daemonset.yaml
-kubectl -n kube-system rollout status ds/kloudlite-git-agent
+kubectl -n kube-system rollout status ds/kloudlite-agent
 # (cross) the gateway verifies session tokens with the api's key:
-kubectl -n kloudlite-git get secret kloudlite-git-jwt -o yaml | sed 's/namespace: kloudlite-git/namespace: kloudlite-git-system/' \
+kubectl -n kloudlite get secret kloudlite-jwt -o yaml | sed 's/namespace: kloudlite/namespace: kloudlite-system/' \
   | KUBECONFIG=.local/k3s.yaml kubectl apply -f -            # after gateway.yaml created the namespace, or create it first
 # optional, only for Full (strict) on ws-*: Cloudflare → SSL/TLS → Origin Server → Create Certificate
-kubectl -n kloudlite-git-system create secret tls gateway-tls --cert=<cert> --key=<key>
+kubectl -n kloudlite-system create secret tls gateway-tls --cert=<cert> --key=<key>
 kubectl apply -f deploy/k3s/gateway.yaml
 ```
 
-Verify: `kubectl -n kube-system logs -l app=kloudlite-git-agent --tail=50 | grep -E 'migration:|error'`
+Verify: `kubectl -n kube-system logs -l app=kloudlite-agent --tail=50 | grep -E 'migration:|error'`
 — the startup migration adopts every Volume it finds on the pool; then
 `kubectl get workspaces -o custom-columns=NAME:.metadata.name,NODE:.status.nodeName` shows a
 node on every row. Pushes fail at the registry until Part C replaces the placeholder token.
@@ -296,7 +296,7 @@ The pool NSG admits 80 from Cloudflare only, and `provision-azure.sh` does not c
 (`deploy/k3s/README.md`, Gateway step 5):
 
 ```sh
-az network nsg rule create -g kloudlite-git-k3s --nsg-name k3s-nsg -n gateway-cloudflare --priority 120 \
+az network nsg rule create -g kloudlite-k3s --nsg-name k3s-nsg -n gateway-cloudflare --priority 120 \
   --direction Inbound --access Allow --protocol Tcp --destination-port-ranges 80 \
   --source-address-prefixes $(tr '\n' ' ' < deploy/k3s/cloudflare-ips-v4.txt)
 ```
@@ -311,14 +311,14 @@ ssh azureuser@<node> "sudo CF_CIDRS='$CF_CIDRS' ADMIN_CIDR='<operator cidr>' API
 
 Verify from outside Cloudflare: `curl -m 5 http://<pool node IP>/` times out; from the operator
 CIDR `ssh` still works; `KUBECONFIG=k3s-api.kubeconfig kubectl get workspaces` works from
-inside an AKS api pod (`kubectl -n kloudlite-git exec deploy/kloudlite-git-api -- ...` has no kubectl —
+inside an AKS api pod (`kubectl -n kloudlite exec deploy/kloudlite-api -- ...` has no kubectl —
 the /v1 route test in Part C is the real check). gVisor, if the region had it:
 `deploy/k3s/install-gvisor.sh` per node, then the three enabling steps it prints.
 
 ### B.7 The backup timer
 
 Re-install it exactly as `deploy/k3s/README.md` "Control-plane backup" says: a new
-create+write SAS in `/etc/kloudlite-git/k3s-backup.sas`, the snitch URL in `k3s-backup.env`, the
+create+write SAS in `/etc/kloudlite/k3s-backup.sas`, the snitch URL in `k3s-backup.env`, the
 SAME key from the password manager in `k3s-backup.key` (a new key would strand every older
 bundle — generate a new one only if the old is compromised, and then keep both in the vault),
 then the units. Verify: `systemctl list-timers backup-controlplane.timer` and a fresh
@@ -331,7 +331,7 @@ then the units. Verify: `systemctl list-timers backup-controlplane.timer` and a 
 `Region` is a cluster-scoped CRD (`crd::Region`) — it lives in the k3s control plane, not Cosmos,
 so it comes back with the rest of the CRDs when `k3s-backup` is restored (Part B). Only re-register
 by hand if that backup is unavailable or the row is missing; this goes through the api tier
-(A.3 must be serving) as a workspaces admin (`KLOUDLITE_GIT_WORKSPACES_ADMINS`):
+(A.3 must be serving) as a workspaces admin (`KLOUDLITE_WORKSPACES_ADMINS`):
 
 ```sh
 ADMIN_JWT=<session token of an admin, from the web app's cookie or `kl` login>
@@ -362,10 +362,10 @@ five-minute schedule:
 
 ```sh
 # once, idempotent — claims the two usernames. `--from` takes no arg override, hence the jq.
-kubectl -n kloudlite-git create job slo-bootstrap --from=cronjob/kloudlite-git-slo-fast \
+kubectl -n kloudlite create job slo-bootstrap --from=cronjob/kloudlite-slo-fast \
   --dry-run=client -o json | jq '.spec.template.spec.containers[0].args=["bootstrap"]' | kubectl apply -f -
-kubectl -n kloudlite-git create job slo-now       --from=cronjob/kloudlite-git-slo-fast
-kubectl -n kloudlite-git logs -f job/slo-now
+kubectl -n kloudlite create job slo-now       --from=cronjob/kloudlite-slo-fast
+kubectl -n kloudlite logs -f job/slo-now
 ```
 
 Then `/superadmin/slo` in the web app: the run appears step by step while it is still running.

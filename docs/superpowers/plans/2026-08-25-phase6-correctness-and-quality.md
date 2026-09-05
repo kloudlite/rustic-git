@@ -178,7 +178,7 @@ landed", which is the same answer as "it did not".
       base and a head, merges the head into base with `commit_tree`, and asserts
       `landed_anyway(&dir, "", "", &job, &head)` is `Some(new_base)`; then asserts it is `None`
       for a head that was never merged.
-- [ ] **Step 2:** Run `cargo test -p kloudlite-git-pulls landed_anyway` and confirm it fails to
+- [ ] **Step 2:** Run `cargo test -p kloudlite-pulls landed_anyway` and confirm it fails to
       compile (no such function) — that is the failing state.
 - [ ] **Step 3:** Implement `landed_anyway` above `run`. Body: `fetch(dir, url, secret,
       &job.owner, &job.base, &job.head).ok()?` (skipped when `url` is empty so the test can drive
@@ -188,7 +188,7 @@ landed", which is the same answer as "it did not".
       resolve `refs/heads/{base}^{tree}` and compare it against `tree_merge(dir, &base,
       head_oid)`'s `Ok(Ok(t))` — equal trees ⇒ `Some(base)`. Comment WHY the squash arm is
       separate: a squash rewrites, so the head is never an ancestor of what landed.
-- [ ] **Step 4:** Run `cargo test -p kloudlite-git-pulls landed_anyway` — passes.
+- [ ] **Step 4:** Run `cargo test -p kloudlite-pulls landed_anyway` — passes.
 - [ ] **Step 5:** In `run`, replace the push-failure arm with:
 
       ```rust
@@ -213,7 +213,7 @@ landed", which is the same answer as "it did not".
 - [ ] **Step 6:** Add `a_lost_race_records_merged_not_refused` to `mod tests`: same fixture, but
       drive `run` against a bare "upstream" whose base has already been advanced by an
       equivalent merge, and assert `state == OutcomeState::Merged`.
-- [ ] **Step 7:** Run `cargo test -p kloudlite-git-pulls` and `cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 7:** Run `cargo test -p kloudlite-pulls` and `cargo clippy --workspace -- -D warnings`.
 - [ ] **Step 8:** Commit: `git commit -am "Record a merge that landed despite a lost lease as merged"`
 
 ---
@@ -233,14 +233,14 @@ author dates and the committer date follows them, so the ids are a pure function
 - [ ] **Step 1:** Add `#[test] a_rebase_is_byte_identical_when_replayed` to `mod tests`: build a
       bare repo, run `rebase(&dir, base, head)` twice (resetting nothing — the function is
       already idempotent on inputs), assert both calls return the same oid.
-- [ ] **Step 2:** Run `cargo test -p kloudlite-git-pulls a_rebase_is_byte_identical` — fails (the
+- [ ] **Step 2:** Run `cargo test -p kloudlite-pulls a_rebase_is_byte_identical` — fails (the
       two runs differ by committer timestamp, or flakily pass within one clock second; if it
       passes, insert a one-second sleep between the runs so the failure is deterministic).
 - [ ] **Step 3:** In `rebase`, add `"--committer-date-is-author-date"` to the `rebase` argv,
       immediately after `"rebase"`, with a WHY comment: the replayed commits already keep their
       authors, and pinning the committer date to match is what makes a retried rebase re-mint
       identical ids instead of new ones — the same determinism rule `commit_tree` states.
-- [ ] **Step 4:** Run `cargo test -p kloudlite-git-pulls a_rebase_is_byte_identical` — passes.
+- [ ] **Step 4:** Run `cargo test -p kloudlite-pulls a_rebase_is_byte_identical` — passes.
 - [ ] **Step 5:** Commit: `git commit -am "Pin the rebase committer date so a replay re-mints identical commits"`
 
 ---
@@ -304,10 +304,10 @@ the call sites; otherwise spell it out and skip the alias.
       test module: build a `Store`, poison the lock by panicking inside a
       `std::thread::spawn(|| { let _g = store.manifest_cache(); panic!() }).join()`, then assert
       `store.manifest_cache().len() == 0` does not panic.
-- [ ] **Step 2:** Run `cargo test -p kloudlite-git-registry a_poisoned_manifest_cache` — fails to
+- [ ] **Step 2:** Run `cargo test -p kloudlite-registry a_poisoned_manifest_cache` — fails to
       compile (no accessor).
 - [ ] **Step 3:** Add the `manifest_cache()` accessor next to the field, with the doc above.
-- [ ] **Step 4:** Run `cargo test -p kloudlite-git-registry a_poisoned_manifest_cache` — passes.
+- [ ] **Step 4:** Run `cargo test -p kloudlite-registry a_poisoned_manifest_cache` — passes.
 - [ ] **Step 5:** Replace every `manifest_cache.lock().unwrap()` with `manifest_cache()`:
       `manifests.rs` PUT invalidation, GET read, GET insert (the `c.len() >= 256` block — keep
       its existing ponytail marker verbatim), DELETE invalidation, and `store.rs`'s
@@ -353,7 +353,7 @@ fn structural_digests(v: &serde_json::Value) -> Vec<&str>;
 - [ ] **Step 2:** Add `a_malformed_layer_digest_is_still_structural`: a manifest whose
       `layers[0].digest` is `"sha256:zzz"`, asserting it IS returned (so the existing
       `Digest::parse` refusal still fires on it).
-- [ ] **Step 3:** Run `cargo test -p kloudlite-git-registry structural_digests` — fails to compile.
+- [ ] **Step 3:** Run `cargo test -p kloudlite-registry structural_digests` — fails to compile.
 - [ ] **Step 4:** Implement `structural_digests`: read `config.digest`, each `layers[].digest`,
       each `manifests[].digest`, and `subject.digest` as `&str`, in that order, skipping absent
       or non-string values. Comment WHY it is not `gc::collect`: GC stays unpruned because
@@ -364,7 +364,7 @@ fn structural_digests(v: &serde_json::Value) -> Vec<&str>;
       removal and the foreign/`urls` layer pruning exactly as they are — they operate on `v`
       before the walk and their reasoning is unchanged. Keep the `MANIFEST_INVALID` refusal for a
       structural digest that does not parse.
-- [ ] **Step 6:** Run `cargo test -p kloudlite-git-registry` and `cargo test --test registry_blobs`
+- [ ] **Step 6:** Run `cargo test -p kloudlite-registry` and `cargo test --test registry_blobs`
       and `cargo test --test registry_http` — all pass.
 - [ ] **Step 7:** Commit: `git commit -am "Check only structural digests when a manifest is pushed"`
 
@@ -383,13 +383,13 @@ looks lapsed and the claim is re-taken — the safe direction.
 - [ ] **Step 1:** Add `#[test] now_ms_never_panics` asserting `now_ms() > 0` under a normal clock
       (a smoke test; the panic path cannot be forced without moving the system clock — say so in
       a comment).
-- [ ] **Step 2:** Run `cargo test -p kloudlite-git-storage now_ms_never_panics` — passes trivially;
+- [ ] **Step 2:** Run `cargo test -p kloudlite-storage now_ms_never_panics` — passes trivially;
       the real change is the `.expect` removal, which the test guards against regressing.
 - [ ] **Step 3:** Replace `.expect("system clock before 1970")` with `.unwrap_or_default()` and
       extend the existing doc comment: a clock before the epoch yields 0, which every consumer
       reads as "infinitely stale" — a lease that looks lapsed is re-claimed, which is the safe
       direction, and far safer than a panic on the claim/renew path.
-- [ ] **Step 4:** Run `cargo test -p kloudlite-git-storage` and `cargo clippy --workspace -- -D warnings`.
+- [ ] **Step 4:** Run `cargo test -p kloudlite-storage` and `cargo clippy --workspace -- -D warnings`.
 - [ ] **Step 5:** Commit: `git commit -am "Answer zero rather than panic when the clock predates the epoch"`
 
 ---
@@ -408,7 +408,7 @@ token via `region_by_token`/`region_by_id` and are unchanged.
 
 Three behaviours must be preserved exactly: `PeerVouched` still short-circuits (a forwarded
 request cannot re-validate a region token without Cosmos, and vouches harder anyway); the
-`KLOUDLITE_GIT_VOL_AGENT_TOKENS` break-glass list still works fleet-wide (that is what break-glass
+`KLOUDLITE_VOL_AGENT_TOKENS` break-glass list still works fleet-wide (that is what break-glass
 IS — document it, do not scope it); and a node with no `MetaStore` configured keeps refusing.
 
 **Files:** `bins/server/src/vol_agent.rs`
@@ -427,7 +427,7 @@ async fn region_of_volume(store: &dyn MetaStore, owner: &str, name: &str) -> Opt
 ///
 /// A region's minted `agent_token` now authorizes only volumes in THAT region — a leaked token
 /// from one region can no longer rewrite another region's commit history or move its `main` ref.
-/// `KLOUDLITE_GIT_VOL_AGENT_TOKENS` stays fleet-wide by design: it is the break-glass path for
+/// `KLOUDLITE_VOL_AGENT_TOKENS` stays fleet-wide by design: it is the break-glass path for
 /// standing an agent up when Cosmos is unreachable, and scoping it would need the very lookup
 /// that is unavailable in that situation.
 ///
@@ -443,15 +443,15 @@ async fn authorized_for(jobs: &JobsState, headers: &HeaderMap, owner: &str, name
       `authorized_for(&jobs, &h_with("tok-x"), "alice", "w1")` is `false`.
 - [ ] **Step 2:** Add `an_environment_volume_scopes_the_same_way` (same shape, `create_env` in
       `r-x`, `tok-x` accepted, `tok-y` refused) and
-      `break_glass_still_reaches_any_volume` (`KLOUDLITE_GIT_VOL_AGENT_TOKENS=bg`, accepted for
+      `break_glass_still_reaches_any_volume` (`KLOUDLITE_VOL_AGENT_TOKENS=bg`, accepted for
       both volumes) and `an_unknown_volume_is_refused`.
-- [ ] **Step 3:** Run `cargo test -p kloudlite-git-server region_token` — fails to compile.
+- [ ] **Step 3:** Run `cargo test -p kloudlite-server region_token` — fails to compile.
 - [ ] **Step 4:** Implement `region_of_volume` (try `store.get_ws(owner, name)`, then
       `store.get_env(owner, name)`, mapping each to its `.region`) and `authorized_for`: presented
       token from `bearer_token(headers).or(WS_AGENT_HEADER)`; break-glass first (unchanged);
       otherwise `region_of_volume(...)` → `store.regions()` → find that one region → non-empty
       `agent_token` and `secret_eq`. No fallback to "any region".
-- [ ] **Step 5:** Run `cargo test -p kloudlite-git-server region_token` — passes.
+- [ ] **Step 5:** Run `cargo test -p kloudlite-server region_token` — passes.
 - [ ] **Step 6:** Point `commits`, `move_ref` and `history` at `authorized_for(&jobs, &headers,
       &owner, &name)` instead of `authorized(&jobs, &headers)`. Delete `authorized` if it now has
       no callers; keep `break_glass_matches`.
@@ -510,7 +510,7 @@ makes any future refactor that formats a networked argv into an error fail loudl
           assert!(!format!("{outcome:?}").contains(SECRET), "{outcome:?}");
       }
       ```
-- [ ] **Step 2:** Run `cargo test -p kloudlite-git-pulls a_networked_failure_never_names_the_secret`
+- [ ] **Step 2:** Run `cargo test -p kloudlite-pulls a_networked_failure_never_names_the_secret`
       and confirm it passes today (this test freezes existing behaviour rather than driving a
       change — say so in the commit body).
 - [ ] **Step 3:** Temporarily break it to prove it bites: add
@@ -519,7 +519,7 @@ makes any future refactor that formats a networked argv into an error fail loudl
       revert the scratch edit. Do not commit the scratch edit.
 - [ ] **Step 4:** If `tempfile` is not already a dev-dependency of `crates/pulls`, add it
       (`tempfile = { workspace = true }`, adding it to `[workspace.dependencies]` if absent).
-- [ ] **Step 5:** Run `cargo test -p kloudlite-git-pulls`.
+- [ ] **Step 5:** Run `cargo test -p kloudlite-pulls`.
 - [ ] **Step 6:** Commit: `git commit -am "Assert a networked git failure never names the peer secret"`
 
 ---
@@ -544,8 +544,8 @@ substantive change.
 /// Install the process's log subscriber. Called exactly once, first thing in each binary's
 /// `main`, before anything that can log.
 ///
-/// `RUST_LOG` is the only knob (standard `EnvFilter` syntax: `info`, `kloudlite_git_git=debug`,
-/// `warn,kloudlite_git_registry::gc=trace`). Default `info`: the fleet's normal volume, with the
+/// `RUST_LOG` is the only knob (standard `EnvFilter` syntax: `info`, `kloudlite=debug`,
+/// `warn,kloudlite_registry::gc=trace`). Default `info`: the fleet's normal volume, with the
 /// noisy dependency targets (`hyper`, `h2`, `slatedb`, `aws_*`, `reqwest`) pinned to `warn` so
 /// raising our own level to `debug` does not drown it.
 ///
@@ -575,9 +575,9 @@ CLAUDE.md's House style section):
       `#[test] init_is_idempotent` (two calls must not panic — use `try_init` internally and
       ignore the second's error, because tests call it too). Add `pub mod log;` to
       `crates/core/src/lib.rs`.
-- [ ] **Step 3:** Run `cargo test -p kloudlite-git-core log::` — passes.
-- [ ] **Step 4:** Call `kloudlite_git_core::log::init("kloudlite-git")` (and `"kloudlite-git-api"`,
-      `"kloudlite-git-worker"`, `"kloudlite-git-agent"`) as the first statement of each binary's `main`.
+- [ ] **Step 3:** Run `cargo test -p kloudlite-core log::` — passes.
+- [ ] **Step 4:** Call `kloudlite_core::log::init("kloudlite")` (and `"kloudlite-api"`,
+      `"kloudlite-worker"`, `"kloudlite-agent"`) as the first statement of each binary's `main`.
       Commit this scaffolding alone:
       `git commit -am "Add a tracing subscriber and initialise it in every binary"`
 - [ ] **Step 5:** Sweep crate by crate, ONE COMMIT PER CRATE so a bad conversion is bisectable.
@@ -648,15 +648,15 @@ tests assert (`BadVisibility`, `FleetUnreachable`) and assert on the variant.
       `is_busygroup` on a `RedisError` constructed from
       `(redis::ErrorKind::ExtensionError, "BUSYGROUP", "…".to_string())` and NOT on an unrelated
       error whose message happens to contain the word.
-- [ ] **Step 2 (A):** `cargo test -p kloudlite-git-storage busygroup` — fails to compile.
+- [ ] **Step 2 (A):** `cargo test -p kloudlite-storage busygroup` — fails to compile.
 - [ ] **Step 3 (A):** Implement `is_busygroup` and use it in place of
       `e.to_string().contains("BUSYGROUP")`. Run the test — passes.
 - [ ] **Step 4 (A):** Commit: `git commit -am "Recognise BUSYGROUP by its redis error code"`
 - [ ] **Step 5 (B):** Change the three `assert!(err.0.contains(...))` lines in `engine_ops.rs` to
-      assert the typed variant. Run `cargo test -p kloudlite-git-workspaces` — fails.
+      assert the typed variant. Run `cargo test -p kloudlite-workspaces` — fails.
 - [ ] **Step 6 (B):** Add `EngineFailure` and thread it through the three producing sites only.
       Every other engine error keeps its current boxed form and its current prose.
-      Run `cargo test -p kloudlite-git-workspaces` — passes.
+      Run `cargo test -p kloudlite-workspaces` — passes.
 - [ ] **Step 7 (B):** Commit: `git commit -am "Type the three engine failures the tests branch on"`
 - [ ] **Step 8 (C):** Same shape for `boot.rs`: change the two assertions first, watch them fail,
       add the typed error, watch them pass.
@@ -739,7 +739,7 @@ the audit called it out separately given the crypto surface (JWT, ssh, pgp, regi
 - [ ] **Step 5:** Update `crates/workspaces/src/engine/compose.rs`'s `serde_yaml::` paths to
       `serde_yml::`. The API is a drop-in; if any call does not compile, fix it at that call and
       note the difference in the commit body.
-- [ ] **Step 6:** Run `cargo test -p kloudlite-git-workspaces` — the compose parsing tests must pass
+- [ ] **Step 6:** Run `cargo test -p kloudlite-workspaces` — the compose parsing tests must pass
       unchanged — then `cargo test` and `cargo clippy --workspace -- -D warnings`.
 - [ ] **Step 7:** Run `cargo deny check` — now clean.
 - [ ] **Step 8:** Commit: `git commit -am "Gate CI on cargo-deny and move off the archived serde_yaml"`
@@ -750,7 +750,7 @@ the audit called it out separately given the crypto surface (JWT, ssh, pgp, regi
 
 The "Workspace layout" paragraph in `## Commands` omits `crates/workspaces` and `bins/agent`, and
 says "three deployed binaries" where four are built (`default-members` lists all four, and
-`bins/agent` produces `kloudlite-git-agent`).
+`bins/agent` produces `kloudlite-agent`).
 
 **Files:** `CLAUDE.md`
 
@@ -760,7 +760,7 @@ says "three deployed binaries" where four are built (`default-members` lists all
 
       > Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api,workspaces}`
       > are the library crates; `bins/{server,api,worker,agent}` build the four deployed binaries
-      > (`kloudlite-git`, `kloudlite-git-api`, `kloudlite-git-worker`, `kloudlite-git-agent` — the agent is
+      > (`kloudlite`, `kloudlite-api`, `kloudlite-worker`, `kloudlite-agent` — the agent is
       > root-only and runs one per btrfs-capable box, see "Workspaces and environments"); the root
       > package is `tests/`'s host only, not a facade.
 - [ ] **Step 3:** Check the rest of the file for the same staleness:
@@ -838,7 +838,7 @@ export function safeRepoPath(owner: string, repo: string): { owner: string; repo
       // An unset AUTH_URL behind a TLS proxy reads as http, which drops `Secure` from the
       // session cookie — the one failure mode here that is invisible in every environment where
       // it does not matter and catastrophic in the one where it does. In production it is a
-      // refusal, not a default: the deployment sets it (deploy/kloudlite-git-web.yaml), so an unset
+      // refusal, not a default: the deployment sets it (deploy/kloudlite-web.yaml), so an unset
       // value means a misconfigured rollout, and failing to boot is how that gets noticed.
       const authUrl = process.env.AUTH_URL ?? "";
       if (process.env.NODE_ENV === "production" && !authUrl) {

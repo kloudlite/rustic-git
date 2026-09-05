@@ -599,7 +599,7 @@ pub const CATALOGUE: &[Rule] = &[
                            greatest(max(Value) - min(Value), 0) AS d \
                     FROM default.otel_metrics_sum \
                     WHERE MetricName = 'http_requests_total' \
-                      AND ResourceAttributes['service.name'] = 'kloudlite-git-web' \
+                      AND ResourceAttributes['service.name'] = 'kloudlite-web' \
                       AND ResourceAttributes['region'] = '{region}' \
                       AND TimeUnix > now() - INTERVAL 300 SECOND \
                     GROUP BY route, bad, {SERIES}) \

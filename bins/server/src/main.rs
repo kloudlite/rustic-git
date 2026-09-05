@@ -1,9 +1,9 @@
-use kloudlite_git_server::boot::{host_key, run};
-use kloudlite_git_server::config::{env, open_store};
-use kloudlite_git_server::lanes::spawn_lease_tasks;
-use kloudlite_git_server::listeners;
-use kloudlite_git_server::store::Store;
-use kloudlite_git_server::{err, hex, require_jwt_secret_from_env, App, Result};
+use kloudlite_server::boot::{host_key, run};
+use kloudlite_server::config::{env, open_store};
+use kloudlite_server::lanes::spawn_lease_tasks;
+use kloudlite_server::listeners;
+use kloudlite_server::store::Store;
+use kloudlite_server::{err, hex, require_jwt_secret_from_env, App, Result};
 use std::sync::Arc;
 
 /// Start the server. This node opens whatever repo the balancer sends it and holds it warm
@@ -20,18 +20,18 @@ async fn serve() -> Result<()> {
     store.spawn_health_probe();
     // The registry's 401 challenge carries this URL in a header; a value that cannot be one
     // must fail here, not on the first anonymous pull.
-    kloudlite_git_server::registry::auth::check_external_url()?;
+    kloudlite_server::registry::auth::check_external_url()?;
 
-    let peer_addr = env("KLOUDLITE_GIT_PEER_ADDR", "0.0.0.0:8081");
+    let peer_addr = env("KLOUDLITE_PEER_ADDR", "0.0.0.0:8081");
     let peer_port: u16 = peer_addr
         .rsplit(':')
         .next()
         .and_then(|p| p.parse().ok())
-        .ok_or_else(|| err("KLOUDLITE_GIT_PEER_ADDR must be host:port"))?;
+        .ok_or_else(|| err("KLOUDLITE_PEER_ADDR must be host:port"))?;
     // Multi-node when a peer Service is configured, single node otherwise. Single node needs no
     // ownership map at all: with one node there is nothing to coordinate, so it claims everything
     // from an empty in-process map and never touches the ownership database.
-    let svc = std::env::var("KLOUDLITE_GIT_PEER_SVC").unwrap_or_default();
+    let svc = std::env::var("KLOUDLITE_PEER_SVC").unwrap_or_default();
     let (me, peer_secret, ownership) = if svc.is_empty() {
         // Random secret so nothing on the network can drive the peer port.
         use rand::RngCore;
@@ -39,32 +39,32 @@ async fn serve() -> Result<()> {
         rand::thread_rng().fill_bytes(&mut b);
         let secret = hex(&b);
         (
-            "kloudlite-git-0".to_string(),
+            "kloudlite-0".to_string(),
             secret,
-            kloudlite_git_server::ownership::OwnershipStore::solo(),
+            kloudlite_server::ownership::OwnershipStore::solo(),
         )
     } else {
         let need = |k: &str| {
             std::env::var(k)
                 .ok()
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| err(format!("{k} is required with KLOUDLITE_GIT_PEER_SVC")))
+                .ok_or_else(|| err(format!("{k} is required with KLOUDLITE_PEER_SVC")))
         };
         // Checked here, where fleet mode is decided: App::new falls back to a random
         // per-process secret, which in a fleet means each node rejects the others' tokens.
         require_jwt_secret_from_env()?;
         // The lease that elects the map's writer is a conditional put; a backend without them
         // cannot fence a stale leader, so it is refused here rather than found out in a failover.
-        kloudlite_git_server::config::fleet_store_ok(&env("KLOUDLITE_GIT_S3_URL", ""))?;
-        let me = need("KLOUDLITE_GIT_SELF")?;
-        let secret = need("KLOUDLITE_GIT_PEER_SECRET")?;
-        let store = kloudlite_git_server::ownership::OwnershipStore::open(store.os.clone());
+        kloudlite_server::config::fleet_store_ok(&env("KLOUDLITE_S3_URL", ""))?;
+        let me = need("KLOUDLITE_SELF")?;
+        let secret = need("KLOUDLITE_PEER_SECRET")?;
+        let store = kloudlite_server::ownership::OwnershipStore::open(store.os.clone());
         (me, secret, store)
     };
     // A node name resolves to its peer listener through the StatefulSet's own identity: no
     // lookup, nothing that can be stale.
     let svc_for_addr = svc.clone();
-    let addr_of: kloudlite_git_server::AddrOf = if svc.is_empty() {
+    let addr_of: kloudlite_server::AddrOf = if svc.is_empty() {
         std::sync::Arc::new(move |_: &str| format!("127.0.0.1:{peer_port}"))
     } else {
         std::sync::Arc::new(move |n: &str| format!("{n}.{svc_for_addr}:{peer_port}"))
@@ -74,32 +74,32 @@ async fn serve() -> Result<()> {
     // this node may own repos whose changes live only in Mongo, and recording them as migrated would
     // hide them for good. So it still serves git, but pull routes fail loudly until it is restarted
     // against a reachable directory.
-    let dir = match std::env::var("KLOUDLITE_GIT_MONGO_URI").ok().filter(|s| !s.is_empty()) {
+    let dir = match std::env::var("KLOUDLITE_MONGO_URI").ok().filter(|s| !s.is_empty()) {
         Some(uri) => {
-            match kloudlite_git_server::directory::Directory::connect(&uri, &env("KLOUDLITE_GIT_MONGO_DB", "kloudlite")).await {
-                Ok(d) => kloudlite_git_server::pulls::Source::Directory(Arc::new(d)),
+            match kloudlite_server::directory::Directory::connect(&uri, &env("KLOUDLITE_MONGO_DB", "kloudlite")).await {
+                Ok(d) => kloudlite_server::pulls::Source::Directory(Arc::new(d)),
                 Err(e) => {
                     tracing::warn!(error = %e, "directory.unavailable");
-                    kloudlite_git_server::pulls::Source::Unavailable
+                    kloudlite_server::pulls::Source::Unavailable
                 }
             }
         }
-        None => kloudlite_git_server::pulls::Source::Absent,
+        None => kloudlite_server::pulls::Source::Absent,
     };
     let app = Arc::new(App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, dir));
     // One synchronous GET before serving anything, so the first request already sees whatever an
     // admin has already set rather than waiting out the first `SETTINGS_REFRESH_SECS` beat.
     // Missing key or a corrupt document: keep the env-only default and let the beat try again.
-    if let Some(bytes) = kloudlite_git_server::config::get_central(&store.os).await {
+    if let Some(bytes) = kloudlite_server::config::get_central(&store.os).await {
         match serde_json::from_slice(&bytes) {
             Ok(doc) => app.central.store(
-                kloudlite_git_core::settings::CentralSettings::from_env().merged_with(&doc),
+                kloudlite_core::settings::CentralSettings::from_env().merged_with(&doc),
             ),
             Err(e) => tracing::warn!(scope = "central", error = %e, "settings.invalid"),
         }
     }
-    tokio::spawn(kloudlite_git_core::settings::refresh_central_beat(
-        kloudlite_git_server::config::central_fetch(store.os.clone()),
+    tokio::spawn(kloudlite_core::settings::refresh_central_beat(
+        kloudlite_server::config::central_fetch(store.os.clone()),
         app.central.clone(),
     ));
     if !svc.is_empty() {
@@ -116,13 +116,13 @@ async fn serve() -> Result<()> {
     // neither — nothing to release to, nothing that can take a lease away.
     if !svc.is_empty() {
         store.pool.set_release_hook(
-            Arc::downgrade(&app) as std::sync::Weak<dyn kloudlite_git_server::pool::ReleaseHook>
+            Arc::downgrade(&app) as std::sync::Weak<dyn kloudlite_server::pool::ReleaseHook>
         );
         spawn_lease_tasks(app.clone());
     }
 
     let l = listeners::bind(&peer_addr).await?;
-    let key = host_key(&env("KLOUDLITE_GIT_HOST_KEY", "./.local/host_key"))?;
+    let key = host_key(&env("KLOUDLITE_HOST_KEY", "./.local/host_key"))?;
     tracing::info!(listener = "http", addr = %l.http.local_addr()?, "listener.started");
     tracing::info!(listener = "ssh", addr = %l.ssh.local_addr()?, "listener.started");
     tracing::info!(listener = "peer", addr = %l.peer_http.local_addr()?, "listener.started");
@@ -226,9 +226,9 @@ async fn serve() -> Result<()> {
         }
     };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
-    let http_srv = axum::serve(l.http, kloudlite_git_server::router::router(a2))
+    let http_srv = axum::serve(l.http, kloudlite_server::router::router(a2))
         .with_graceful_shutdown(wait(term_rx.clone()));
-    let peer_srv = axum::serve(l.peer_http, kloudlite_git_server::router::peer_router(a3))
+    let peer_srv = axum::serve(l.peer_http, kloudlite_server::router::peer_router(a3))
         .with_graceful_shutdown(wait(term_rx.clone()));
     // Both HTTP servers as ONE select arm: select! returns when its first arm resolves, and if
     // each server were its own arm the first to finish draining would end the select and
@@ -236,8 +236,8 @@ async fn serve() -> Result<()> {
     tokio::select! {
         r = async { tokio::try_join!(http_srv, peer_srv) } => { r?; }
         _ = deadline => { tracing::warn!(step = "drain", timeout_s = DRAIN_DEADLINE.as_secs(), "process.shutdown.stalled"); }
-        r = kloudlite_git_server::proxy::serve_peer_streams(a4, l.peer_stream) => { r?; }
-        r = kloudlite_git_server::ssh::serve(app.clone(), l.ssh, key) => { r?; }
+        r = kloudlite_server::proxy::serve_peer_streams(a4, l.peer_stream) => { r?; }
+        r = kloudlite_server::ssh::serve(app.clone(), l.ssh, key) => { r?; }
     }
     // ponytail: the SSH and peer-stream listeners stop on select! exit without draining; the
     // preStop delay is what makes that rare (the pod has left DNS before it stops). Add per-session
@@ -261,8 +261,8 @@ async fn serve() -> Result<()> {
 /// listener for `Http5xxRate`/`MisdirectedWrites` — plus the two `op` values the git counters have,
 /// since a counter with a label has no unlabelled series to fall back on.
 fn register_metrics() {
-    use kloudlite_git_core::metrics::Kind::*;
-    let mut series: Vec<kloudlite_git_core::metrics::Series> = vec![
+    use kloudlite_core::metrics::Kind::*;
+    let mut series: Vec<kloudlite_core::metrics::Series> = vec![
         ("http_request_duration_seconds", Histogram, &[]),
         ("ownership_is_leader", Gauge, &[]),
         ("ownership_map_size", Gauge, &[]),
@@ -291,22 +291,22 @@ fn register_metrics() {
     ] {
         series.push(("http_requests_total", Counter, l));
     }
-    kloudlite_git_core::metrics::register(&series);
-    kloudlite_git_core::metrics::register_dependency("blob", kloudlite_git_storage::metered::OPS);
-    kloudlite_git_core::metrics::register_dependency("redis", kloudlite_git_storage::cache::OPS);
+    kloudlite_core::metrics::register(&series);
+    kloudlite_core::metrics::register_dependency("blob", kloudlite_storage::metered::OPS);
+    kloudlite_core::metrics::register_dependency("redis", kloudlite_storage::cache::OPS);
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    kloudlite_git_core::log::init();
-    kloudlite_git_core::metrics::init();
+    kloudlite_core::log::init();
+    kloudlite_core::metrics::init();
     // Its own listener, like every other binary's: the peer port is secret-gated, and metrics
     // text names every repository key this node has touched.
-    kloudlite_git_core::metrics::serve_if_configured().await;
+    kloudlite_core::metrics::serve_if_configured().await;
     register_metrics();
     // See config::install_crypto_provider — it must happen before any TLS, and
     // `admin` subcommands reach object storage without going through open_store.
-    kloudlite_git_server::config::install_crypto_provider();
+    kloudlite_server::config::install_crypto_provider();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::history::slo::StepReport;
-use kloudlite_git_workspaces::slo::catalogue::Suite;
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::history::slo::StepReport;
+use kloudlite_workspaces::slo::catalogue::Suite;
 
 use crate::config::Config;
 

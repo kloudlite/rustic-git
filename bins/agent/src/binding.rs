@@ -24,8 +24,8 @@ use k8s_openapi::api::rbac::v1::RoleBinding;
 use kube::api::{Api, ListParams};
 use kube::runtime::controller::Action;
 use kube::{Resource, ResourceExt};
-use kloudlite_git_workspaces::crd::{self, binding_name, ws_namespace};
-use kloudlite_git_workspaces::k8s;
+use kloudlite_workspaces::crd::{self, binding_name, ws_namespace};
+use kloudlite_workspaces::k8s;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -126,7 +126,7 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         .await?;
         // The owner's ceiling, projected. A TEAM namespace gets the TEAM's quota: the working
         // copies in it are the team's, so the team's number is the one that bounds them.
-        let q = kloudlite_git_workspaces::quota::effective(
+        let q = kloudlite_workspaces::quota::effective(
             &ctx.client,
             if team.is_empty() { owner } else { &team },
             !team.is_empty(),

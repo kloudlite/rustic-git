@@ -63,8 +63,8 @@ pub(crate) async fn commit_patch(
     let sent = api
         .client
         .post(url)
-        .header(kloudlite_git_core::peer::PEER_HEADER, &api.secret)
-        .header(kloudlite_git_core::peer::OWNER_HEADER, &owner)
+        .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
+        .header(kloudlite_core::peer::OWNER_HEADER, &owner)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .body(match serde_json::to_vec(&body) {
             Ok(b) => b,
@@ -118,8 +118,8 @@ pub(crate) async fn verify_commit(
     let r = match api
         .client
         .get(url)
-        .header(kloudlite_git_core::peer::PEER_HEADER, &api.secret)
-        .header(kloudlite_git_core::peer::OWNER_HEADER, &owner)
+        .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
+        .header(kloudlite_core::peer::OWNER_HEADER, &owner)
         .send()
         .await
     {
@@ -132,7 +132,7 @@ pub(crate) async fn verify_commit(
     if r.status() == reqwest::StatusCode::NOT_FOUND {
         return (StatusCode::NOT_FOUND, "no such commit").into_response();
     }
-    let body = match kloudlite_git_core::httpx::read_bounded(r).await {
+    let body = match kloudlite_core::httpx::read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
             tracing::error!(reason = "signature", error = %e, "upstream.body.failed");
@@ -177,7 +177,7 @@ fn unverified(code: &'static str, reason: &str) -> Verification {
 /// issuers resolved to — normally a subkey's owner, because a commit is signed by a subkey while
 /// the person is the primary key behind it; `signer_by_any` walks that back.
 pub(crate) fn judge_pgp(
-    known: Option<kloudlite_git_pulls::directory::Credential>,
+    known: Option<kloudlite_pulls::directory::Credential>,
     signed: &SignatureOf,
     payload: &[u8],
     sig: &pgp::composed::DetachedSignature,
@@ -221,7 +221,7 @@ pub(crate) fn judge_pgp(
 pub(crate) fn judge_ssh(
     sig: &russh::keys::ssh_key::SshSig,
     payload: &[u8],
-    known: Option<kloudlite_git_pulls::directory::Credential>,
+    known: Option<kloudlite_pulls::directory::Credential>,
     author_email: &str,
 ) -> Verification {
     let Some(known) = known else {
@@ -252,7 +252,7 @@ pub(crate) fn judge_ssh(
 /// Judge one signature: decode, ask the directory who holds the key, then judge. The lookup is
 /// the only async step and the only one that needs Mongo, which is why the judgement is split
 /// off — `judge_ssh`/`judge_pgp` are tested without a directory.
-pub(crate) async fn verify_signature(db: &kloudlite_git_pulls::directory::Directory, signed: &SignatureOf) -> Verification {
+pub(crate) async fn verify_signature(db: &kloudlite_pulls::directory::Directory, signed: &SignatureOf) -> Verification {
     use base64::Engine;
     let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(&signed.payload_base64)
     else {
@@ -296,7 +296,7 @@ pub(crate) async fn verify_signature(db: &kloudlite_git_pulls::directory::Direct
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kloudlite_git_pulls::directory::{Credential, CredentialKind};
+    use kloudlite_pulls::directory::{Credential, CredentialKind};
     use base64::Engine;
     use russh::keys::ssh_key::{LineEnding, SshSig};
 

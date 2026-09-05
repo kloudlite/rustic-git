@@ -5,10 +5,10 @@
 /// Catches: a missing `admin purge-cache` arm, which falls through to the usage error.
 #[test]
 fn purge_cache_is_a_command() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kloudlite-git"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kloudlite"))
         .args(["admin", "purge-cache", "alice/web"])
-        .env("KLOUDLITE_GIT_S3_URL", "mem://")
-        .env("KLOUDLITE_GIT_CACHE_DIR", tempfile::tempdir().unwrap().keep())
+        .env("KLOUDLITE_S3_URL", "mem://")
+        .env("KLOUDLITE_CACHE_DIR", tempfile::tempdir().unwrap().keep())
         .output()
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);

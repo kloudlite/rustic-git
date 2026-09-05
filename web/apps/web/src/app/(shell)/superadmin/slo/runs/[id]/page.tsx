@@ -15,8 +15,8 @@ export const metadata: Metadata = { title: "Probe run" };
 
 /** One run, every step in the order it ran, under the journey stage it ran in.
  *
- *  ponytail: the "Open in HyperDX" link needs `KLOUDLITE_GIT_HYPERDX_URL` on the WEB deployment —
- *  `deploy/kloudlite-git-web.yaml` does not set it today, so the link is simply absent there, the
+ *  ponytail: the "Open in HyperDX" link needs `KLOUDLITE_HYPERDX_URL` on the WEB deployment —
+ *  `deploy/kloudlite-web.yaml` does not set it today, so the link is simply absent there, the
  *  same way `/admin/monitoring` omits it when the admin process has none. Unset means no link,
  *  never a dead one. */
 export default async function RunPage({ params }: { params: Promise<{ id: string }> }) {
@@ -38,8 +38,8 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
   const run = r.value;
   const slos = overview.ok ? overview.value.slos : [];
   const tree = treeOf(run.journey, run.steps);
-  const hyperdx = process.env.KLOUDLITE_GIT_HYPERDX_URL;
-  const search = `service.name:kloudlite-git-slo run_id:${run.run_id}`;
+  const hyperdx = process.env.KLOUDLITE_HYPERDX_URL;
+  const search = `service.name:kloudlite-slo run_id:${run.run_id}`;
 
   return (
     <div className="space-y-4">

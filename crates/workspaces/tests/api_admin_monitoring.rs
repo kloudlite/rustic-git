@@ -2,10 +2,10 @@
 //! the contract the web depends on: the response shape survives, a region nothing reports for shows
 //! every rule `unknown` rather than an empty table, and no ClickHouse is a 503, never an error page.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, ApiState};
-use kloudlite_git_workspaces::history::alerts::CATALOGUE;
-use kloudlite_git_workspaces::kube_test::{get, mock_client};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, ApiState};
+use kloudlite_workspaces::history::alerts::CATALOGUE;
+use kloudlite_workspaces::kube_test::{get, mock_client};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ fn jwt() -> Arc<Jwt> {
 #[tokio::test]
 async fn without_clickhouse_the_page_gets_a_503_not_an_error() {
     let pods = json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []});
-    let (client, _rec) = mock_client(vec![get("/api/v1/namespaces/kloudlite-git/pods", pods)]);
+    let (client, _rec) = mock_client(vec![get("/api/v1/namespaces/kloudlite/pods", pods)]);
     let (base, jwt) = serve(ApiState::new(jwt()).with_aks(client)).await;
     let resp = reqwest::Client::new()
         .get(format!("{base}/admin/monitoring/signals"))

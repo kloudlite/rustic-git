@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
-use kloudlite_git_workspaces::crd;
+use kloudlite_workspaces::crd;
 use serde_json::Value;
 
 use super::{api, get, poll_json, post, raw};

@@ -7,19 +7,19 @@ pub fn err(msg: impl Into<String>) -> Error {
 
 /// Fleet mode may not fall back to a per-process JWT secret.
 ///
-/// `App::new` invents a random secret when `KLOUDLITE_GIT_JWT_SECRET` is unset. On one node that is
+/// `App::new` invents a random secret when `KLOUDLITE_JWT_SECRET` is unset. On one node that is
 /// harmless — tokens die with the process. Across a fleet each node invents a DIFFERENT one, so a
 /// token minted by `srv-0` is a forgery to `srv-1`: registry pulls fail on whichever node the load
 /// balancer picks next, intermittently, which is the worst possible way to learn about it. A fleet
-/// is exactly what `KLOUDLITE_GIT_PEER_SVC` marks, so that is the condition. Same shape as the
-/// `KLOUDLITE_GIT_S3_URL=file://` fleet check in main.rs: refuse to start, and name the variable.
+/// is exactly what `KLOUDLITE_PEER_SVC` marks, so that is the condition. Same shape as the
+/// `KLOUDLITE_S3_URL=file://` fleet check in main.rs: refuse to start, and name the variable.
 ///
 /// Takes its inputs rather than reading the environment so the rule is testable and so both
 /// binaries apply the same one.
 pub fn require_jwt_secret(peer_svc: &str, jwt_secret: &str) -> Result<()> {
     if !peer_svc.is_empty() && jwt_secret.is_empty() {
         return Err(err(
-            "KLOUDLITE_GIT_JWT_SECRET is required with KLOUDLITE_GIT_PEER_SVC (without it each node \
+            "KLOUDLITE_JWT_SECRET is required with KLOUDLITE_PEER_SVC (without it each node \
              mints tokens the others reject)",
         ));
     }
@@ -29,7 +29,7 @@ pub fn require_jwt_secret(peer_svc: &str, jwt_secret: &str) -> Result<()> {
 /// Reads the two variables `require_jwt_secret` judges, so a caller cannot get the pair wrong.
 pub fn require_jwt_secret_from_env() -> Result<()> {
     let var = |k: &str| std::env::var(k).unwrap_or_default();
-    require_jwt_secret(var("KLOUDLITE_GIT_PEER_SVC").trim(), var("KLOUDLITE_GIT_JWT_SECRET").trim())
+    require_jwt_secret(var("KLOUDLITE_PEER_SVC").trim(), var("KLOUDLITE_JWT_SECRET").trim())
 }
 
 /// Lowercase hex, the encoding every digest, fingerprint and token id in this crate uses on the
@@ -45,10 +45,10 @@ mod tests {
 
     #[test]
     fn fleet_mode_refuses_a_missing_jwt_secret() {
-        assert!(require_jwt_secret("kloudlite-git-peer", "").is_err());
+        assert!(require_jwt_secret("kloudlite-peer", "").is_err());
         // Solo mode has nobody to disagree with, so the per-process fallback stays.
         assert!(require_jwt_secret("", "").is_ok());
-        assert!(require_jwt_secret("kloudlite-git-peer", "s3cret").is_ok());
+        assert!(require_jwt_secret("kloudlite-peer", "s3cret").is_ok());
     }
 
     #[test]

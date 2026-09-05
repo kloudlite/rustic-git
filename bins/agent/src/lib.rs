@@ -1,4 +1,4 @@
-//! Process setup for `kloudlite-git-agent`: the local `Engine`, the storage janitor (`janitor.rs`),
+//! Process setup for `kloudlite-agent`: the local `Engine`, the storage janitor (`janitor.rs`),
 //! and the
 //! Kubernetes client the node controller (`controller/`) reconciles with. The work itself is
 //! there, not here — the CRD IS the work item, so there is no queue, no lease and no poll loop.
@@ -13,10 +13,10 @@
 //! short-circuit). If you change the engine so a path that used to return early now shells out,
 //! those tests keep passing here and fail on a node — run `tests/ws_e2e.sh` on the Linux VM.
 
-use kloudlite_git_core::settings::LiveSettings;
-use kloudlite_git_workspaces::crd;
-use kloudlite_git_workspaces::engine::{Engine, Pool};
-use kloudlite_git_workspaces::settings::AgentSettings;
+use kloudlite_core::settings::LiveSettings;
+use kloudlite_workspaces::crd;
+use kloudlite_workspaces::engine::{Engine, Pool};
+use kloudlite_workspaces::settings::AgentSettings;
 use std::sync::Arc;
 
 pub mod binding;
@@ -347,7 +347,7 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
     let labels = n.metadata.labels.unwrap_or_default();
     let roles: Vec<String> = ["session", "env"]
         .into_iter()
-        .filter(|r| labels.get(&format!("kloudlite-git.io/{r}")).map(String::as_str) == Some("true"))
+        .filter(|r| labels.get(&format!("kloudlite.io/{r}")).map(String::as_str) == Some("true"))
         .map(str::to_string)
         .collect();
     if roles.is_empty() {

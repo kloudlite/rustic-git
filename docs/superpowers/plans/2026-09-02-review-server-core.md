@@ -6,16 +6,16 @@
 
 **Architecture:** No structural change. Routing still runs before authentication and still refuses anything it cannot route; the lease/fence contract (one elected map writer, `writing_epoch` under `leader_lock`, SlateDB's writer fence as backstop) is untouched. Two of the fixes act on the review's structural note — "everything expensive happens before authentication" — by making the pre-auth work smaller, never by moving work after authentication: the negotiation body gets a route-sized cap instead of `max_body`, and `App::route` gains an existence gate that turns an invented name into a routed 404 instead of a leader write. `Route` gains one variant (`Missing`) so "nothing to route, nothing to claim" is a distinct answer from "nobody may serve this" — a repo that does not exist keeps answering 404, not 503.
 
-**Tech Stack:** Rust 2021 workspace, axum 0.8, SlateDB + `object_store`, `metrics`/`metrics-exporter-prometheus`, tokio; integration tests in the root `kloudlite-git-tests` package under `tests/`, unit tests in-crate.
+**Tech Stack:** Rust 2021 workspace, axum 0.8, SlateDB + `object_store`, `metrics`/`metrics-exporter-prometheus`, tokio; integration tests in the root `kloudlite-tests` package under `tests/`, unit tests in-crate.
 
 **Spec:** docs/superpowers/reviews/2026-09-02-codebase-review.md (details: docs/superpowers/reviews/2026-09-02-details/core-storage-server.md)
 
 ## Global Constraints
-- Upload-pack negotiation cap: `8 * 1024 * 1024` bytes (8 MiB), a `const` in `bins/server/src/router/git.rs`, no env override — a `want`/`have` pkt-line is ~50 bytes, so 8 MiB is over 150 000 lines, far past any real negotiation, and one fewer knob to misconfigure than `KLOUDLITE_GIT_MAX_BODY` was.
-- `max_body()` (2 GiB default, 512 MiB in `deploy/kloudlite-git.yaml:145`) stays exactly as it is on the receive-pack streamed path (`live_body`) — it is already correct there and its test at `tests/git_http_limits.rs:81` must keep passing unchanged.
+- Upload-pack negotiation cap: `8 * 1024 * 1024` bytes (8 MiB), a `const` in `bins/server/src/router/git.rs`, no env override — a `want`/`have` pkt-line is ~50 bytes, so 8 MiB is over 150 000 lines, far past any real negotiation, and one fewer knob to misconfigure than `KLOUDLITE_MAX_BODY` was.
+- `max_body()` (2 GiB default, 512 MiB in `deploy/kloudlite.yaml:145`) stays exactly as it is on the receive-pack streamed path (`live_body`) — it is already correct there and its test at `tests/git_http_limits.rs:81` must keep passing unchanged.
 - M2 design: **existence-gated claim**, not a token bucket (justification in Task 3). Exempt set is exactly: any request whose path is `/api/{owner}/{name}/create`, and any `/v2/` image-route request whose method is not `GET` and not `HEAD`. Everything else claims only when `pool.exists` says the prefix has an object; an `exists` error falls back to claiming, matching `force_claim` at `crates/app/src/lib.rs:519-523`.
-- M3 option chosen: **its own listener/port** — `KLOUDLITE_GIT_METRICS_ADDR=0.0.0.0:9464` via the already-written `kloudlite_git_core::metrics::serve_if_configured()`, and `/metrics` removed from the peer router. Reason in Task 4.
-- L3 single copy lives in `crates/core/src/sshkeys.rs` behind an optional `ssh` feature (optional `russh` dependency). `crates/storage` depends on `kloudlite-git-core` with no features, so its Cargo.toml keeps no ssh dependency.
+- M3 option chosen: **its own listener/port** — `KLOUDLITE_METRICS_ADDR=0.0.0.0:9464` via the already-written `kloudlite_core::metrics::serve_if_configured()`, and `/metrics` removed from the peer router. Reason in Task 4.
+- L3 single copy lives in `crates/core/src/sshkeys.rs` behind an optional `ssh` feature (optional `russh` dependency). `crates/storage` depends on `kloudlite-core` with no features, so its Cargo.toml keeps no ssh dependency.
 - Control characters rejected in a description: any `char` where `c.is_control()` is true (covers `\n`, `\r`, `\t`, NUL and the C1 range) — one predicate, no allow-list to drift.
 - Comments explain WHY only; deliberate ceilings keep or gain a `// ponytail:` marker naming the ceiling and upgrade path.
 - Every commit message: imperative sentence case subject, no attribution trailers of any kind.
@@ -29,7 +29,7 @@
 - Test `tests/git_http_limits.rs` (append after the existing push-cap test that ends at line 100)
 
 **Interfaces:**
-- Consumes: `axum::body::to_bytes`, `kloudlite_git_core::httpx::max_body` (unchanged, still used by `live_body`)
+- Consumes: `axum::body::to_bytes`, `kloudlite_core::httpx::max_body` (unchanged, still used by `live_body`)
 - Produces: `const MAX_NEGOTIATION: usize`; `async fn read_body(body: Body) -> Result<Bytes, Response>` (signature unchanged)
 
 - [ ] **Step 1: Write the failing test** — append to `tests/git_http_limits.rs`:
@@ -58,7 +58,7 @@ async fn an_oversized_upload_pack_negotiation_is_refused_anonymously() {
     // And a real-sized negotiation still gets through to the protocol, so the cap is not simply
     // refusing everything: a v2 command with no flush is a client error, never a 413.
     let mut body = Vec::new();
-    kloudlite_git_core::pktline::write_text(&mut body, "command=ls-refs").unwrap();
+    kloudlite_core::pktline::write_text(&mut body, "command=ls-refs").unwrap();
     let r = reqwest::Client::new()
         .post(format!("{base}/alice/web.git/git-upload-pack"))
         .header("content-type", "application/x-git-upload-pack-request")
@@ -95,9 +95,9 @@ async fn read_body(body: Body) -> Result<Bytes, Response> {
 }
 ```
 
-`use kloudlite_git_core::httpx::max_body;` at `git.rs:2` stays — `live_body` at `git.rs:139` still uses it.
+`use kloudlite_core::httpx::max_body;` at `git.rs:2` stays — `live_body` at `git.rs:139` still uses it.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test --test git_http_limits && cargo test -p kloudlite-git-server && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test --test git_http_limits && cargo test -p kloudlite-server && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add bins/server/src/router/git.rs tests/git_http_limits.rs && git commit -m "Cap the upload-pack negotiation body at 8 MiB"`
 
@@ -148,7 +148,7 @@ and in `crates/storage/src/index.rs`, inside `#[cfg(test)] pub(crate) mod tests`
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-api a_description_with_control_characters_is_refused` fails with `assertion failed: check_description("hi\ncreated_by=someone.else").is_err()`; `cargo test -p kloudlite-git-storage a_newline_in_a_description_cannot_forge_a_marker_field` fails with `assertion `left == right` failed\n  left: "someone.else"\n right: "alice@example.com"`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-api a_description_with_control_characters_is_refused` fails with `assertion failed: check_description("hi\ncreated_by=someone.else").is_err()`; `cargo test -p kloudlite-storage a_newline_in_a_description_cannot_forge_a_marker_field` fails with `assertion `left == right` failed\n  left: "someone.else"\n right: "alice@example.com"`.
 
 - [ ] **Step 3: Implement** — in `crates/api/src/repos.rs`, replace `check_description` (lines 60-68) with:
 
@@ -194,7 +194,7 @@ fn body(m: &Marker) -> Vec<u8> {
 }
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-api -p kloudlite-git-storage && cargo test --test browse && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-api -p kloudlite-storage && cargo test --test browse && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add crates/api/src/repos.rs crates/storage/src/index.rs && git commit -m "Refuse control characters in a repo description"`
 
@@ -214,7 +214,7 @@ fn body(m: &Marker) -> Vec<u8> {
 - Test `tests/routing.rs` (append after `a_claim_on_an_unowned_repo_is_granted_and_only_the_claimant_warms`, which ends at line 721)
 
 **Interfaces:**
-- Consumes: `kloudlite_git_storage::pool::Pool::exists(&self, owner: &str, name: &str) -> Result<bool>` (`crates/storage/src/pool/mod.rs:296`)
+- Consumes: `kloudlite_storage::pool::Pool::exists(&self, owner: &str, name: &str) -> Result<bool>` (`crates/storage/src/pool/mod.rs:296`)
 - Produces: `Route::Missing`; `App::route_for(&self, repo: &str, may_create: bool) -> Route`; `App::route(&self, repo: &str) -> Route` (unchanged signature, delegates with `false`); `route::may_create(method: &axum::http::Method, path: &str) -> bool`
 
 - [ ] **Step 1: Write the failing test** — append to `tests/routing.rs`:
@@ -229,7 +229,7 @@ async fn an_invented_repo_name_is_404_and_claims_nothing() {
     let token = e.store.create_token("alice").await.unwrap();
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     for i in 0..5 {
         let res = client().await
             .get(format!("http://{}/alice/nope{i}/info/refs?service=git-upload-pack", b.public))
@@ -246,7 +246,7 @@ async fn an_invented_repo_name_is_404_and_claims_nothing() {
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
         .send().await.unwrap();
     assert_eq!(res.status(), 200);
-    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-1");
 }
 
 /// `may_create` is the whole exempt set: the create route and registry writes claim an
@@ -254,7 +254,7 @@ async fn an_invented_repo_name_is_404_and_claims_nothing() {
 #[test]
 fn only_the_create_routes_may_claim_a_name_that_does_not_exist() {
     use axum::http::Method;
-    use kloudlite_git_server::router_test::may_create;
+    use kloudlite_server::router_test::may_create;
     assert!(may_create(&Method::POST, "/api/alice/web/create"));
     assert!(may_create(&Method::POST, "/v2/alice/web/blobs/uploads/"));
     assert!(may_create(&Method::PUT, "/v2/alice/web/manifests/v1"));
@@ -277,7 +277,7 @@ pub mod router_test {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test --test routing an_invented_repo_name_is_404_and_claims_nothing only_the_create_routes_may_claim_a_name_that_does_not_exist`. Expected: the second test fails to compile with ``error[E0432]: unresolved import `kloudlite_git_server::router_test` ``; after the module exists, the first fails with `assertion `left == right` failed\n  left: 404\n right: 404` passing but `assert_eq!(a.app.owner(...), None)` failing — `Some(Entry { node: "kloudlite-git-1", .. })`, the claim the fix removes.
+- [ ] **Step 2: Run it, expect failure** — `cargo test --test routing an_invented_repo_name_is_404_and_claims_nothing only_the_create_routes_may_claim_a_name_that_does_not_exist`. Expected: the second test fails to compile with ``error[E0432]: unresolved import `kloudlite_server::router_test` ``; after the module exists, the first fails with `assertion `left == right` failed\n  left: 404\n right: 404` passing but `assert_eq!(a.app.owner(...), None)` failing — `Some(Entry { node: "kloudlite-1", .. })`, the claim the fix removes.
 
 - [ ] **Step 3: Implement** —
 
@@ -407,18 +407,18 @@ In `crates/git/src/proxy.rs`, after the `Unavailable` arm at line 98:
 
 ### Task 4: Serve `/metrics` on its own listener instead of the peer port
 
-**Option chosen (M3): its own listener/port.** The other four options in the tree already do exactly this — `kloudlite_git_core::metrics::serve_if_configured()` and `KLOUDLITE_GIT_METRICS_ADDR=0.0.0.0:9464` are written, deployed and scraped for the api, worker, agent and gateway (`deploy/kloudlite-git.yaml:410`, `:570`, `deploy/k3s/agent-daemonset.yaml:130`). Reusing it costs one call in `main` and deletes the exemption instead of adding a credential to the scrape path, and unlike "accept the secret on `/metrics`" it needs no Prometheus-side secret to keep working; unlike "document it", it actually closes the hole, because a port of its own is something a NetworkPolicy can name.
+**Option chosen (M3): its own listener/port.** The other four options in the tree already do exactly this — `kloudlite_core::metrics::serve_if_configured()` and `KLOUDLITE_METRICS_ADDR=0.0.0.0:9464` are written, deployed and scraped for the api, worker, agent and gateway (`deploy/kloudlite.yaml:410`, `:570`, `deploy/k3s/agent-daemonset.yaml:130`). Reusing it costs one call in `main` and deletes the exemption instead of adding a credential to the scrape path, and unlike "accept the secret on `/metrics`" it needs no Prometheus-side secret to keep working; unlike "document it", it actually closes the hole, because a port of its own is something a NetworkPolicy can name.
 
 **Files:**
 - Modify `bins/server/src/router/mod.rs:39-40` (drop the `/metrics` merge from `peer_router`)
 - Modify `bins/server/src/router/route.rs:554-562` (drop the `trust_peer` early return)
 - Modify `bins/server/src/main.rs` (call `serve_if_configured` beside the existing `metrics::init()` at line 238)
-- Modify `deploy/kloudlite-git.yaml:31-33` (scrape port), `:145-150` (env + containerPort), `:308-341` (NetworkPolicy ingress)
+- Modify `deploy/kloudlite.yaml:31-33` (scrape port), `:145-150` (env + containerPort), `:308-341` (NetworkPolicy ingress)
 - Modify `deploy/alerts.md:3-4`
 - Test `tests/metrics.rs` (rewrite of the single test there)
 
 **Interfaces:**
-- Consumes: `kloudlite_git_core::metrics::serve_if_configured()`, `kloudlite_git_core::metrics::routes()`
+- Consumes: `kloudlite_core::metrics::serve_if_configured()`, `kloudlite_core::metrics::routes()`
 - Produces: no new symbols; `peer_router` no longer serves `/metrics`
 
 - [ ] **Step 1: Write the failing test** — replace the body of `tests/metrics.rs` with:
@@ -431,7 +431,7 @@ mod common;
 
 #[tokio::test]
 async fn the_peer_listener_no_longer_serves_metrics() {
-    kloudlite_git_core::metrics::init();
+    kloudlite_core::metrics::init();
     let (base, _e) = common::serve_peer().await;
     let res = reqwest::get(format!("{base}/metrics")).await.unwrap();
     assert_eq!(res.status(), 404, "metrics moved to their own listener");
@@ -439,7 +439,7 @@ async fn the_peer_listener_no_longer_serves_metrics() {
 
 #[tokio::test]
 async fn the_metrics_listener_serves_prometheus_text_and_counts() {
-    kloudlite_git_core::metrics::init();
+    kloudlite_core::metrics::init();
     let (base, _e) = common::serve_peer().await;
     // One request through the middleware so the series exists before the scrape.
     assert_eq!(common::peer_get(&base, "/healthz").await.status(), 200);
@@ -447,7 +447,7 @@ async fn the_metrics_listener_serves_prometheus_text_and_counts() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(l, kloudlite_git_core::metrics::routes::<()>().with_state(())).await.unwrap();
+        axum::serve(l, kloudlite_core::metrics::routes::<()>().with_state(())).await.unwrap();
     });
     let res = reqwest::get(format!("http://{addr}/metrics")).await.unwrap();
     assert_eq!(res.status(), 200);
@@ -464,34 +464,34 @@ async fn the_metrics_listener_serves_prometheus_text_and_counts() {
 
 - [ ] **Step 3: Implement** —
 
-`bins/server/src/router/mod.rs`: delete lines 39-40 (the comment and `.merge(kloudlite_git_core::metrics::routes())`) from `peer_router`, and amend the `peer_router` doc comment's last sentence to read:
+`bins/server/src/router/mod.rs`: delete lines 39-40 (the comment and `.merge(kloudlite_core::metrics::routes())`) from `peer_router`, and amend the `peer_router` doc comment's last sentence to read:
 
 ```rust
-/// `/metrics` is NOT here: it is a listener of its own (`KLOUDLITE_GIT_METRICS_ADDR`), because a
+/// `/metrics` is NOT here: it is a listener of its own (`KLOUDLITE_METRICS_ADDR`), because a
 /// scrape route inside the secret check cannot be scraped, and one outside it is an enumeration
 /// oracle for any pod on a cluster running `networkPolicy: none`.
 ```
 
 `bins/server/src/router/route.rs`: delete the early return at lines 554-562 (the comment plus `if req.uri().path() == "/metrics" { return next.run(req).await; }`), so `trust_peer` checks the secret on everything.
 
-`bins/server/src/main.rs`: after `kloudlite_git_core::metrics::init();` at line 238, add:
+`bins/server/src/main.rs`: after `kloudlite_core::metrics::init();` at line 238, add:
 
 ```rust
     // Its own listener, like every other binary's: the peer port is secret-gated, and metrics
     // text names every repository key this node has touched.
-    kloudlite_git_core::metrics::serve_if_configured().await;
+    kloudlite_core::metrics::serve_if_configured().await;
 ```
 
-`deploy/kloudlite-git.yaml`: at lines 31-33 change `prometheus.io/port: "8081"` to `"9464"`; in the server container's env block beside `KLOUDLITE_GIT_MAX_BODY` (line 145) add:
+`deploy/kloudlite.yaml`: at lines 31-33 change `prometheus.io/port: "8081"` to `"9464"`; in the server container's env block beside `KLOUDLITE_MAX_BODY` (line 145) add:
 
 ```yaml
             # Metrics on a port of their own: 8081 requires the peer secret, which Prometheus
             # cannot present, and the scrape text enumerates every repo this node has touched.
-            - name: KLOUDLITE_GIT_METRICS_ADDR
+            - name: KLOUDLITE_METRICS_ADDR
               value: 0.0.0.0:9464
 ```
 
-after line 150 add `            - { name: metrics, containerPort: 9464 }`; and in the `kloudlite-git-peers-only` NetworkPolicy add a final ingress rule (after the `8080`/`2222` block ending at line 341):
+after line 150 add `            - { name: metrics, containerPort: 9464 }`; and in the `kloudlite-peers-only` NetworkPolicy add a final ingress rule (after the `8080`/`2222` block ending at line 341):
 
 ```yaml
     # Prometheus presents no secret, so metrics have their own port — open it to the whole
@@ -500,11 +500,11 @@ after line 150 add `            - { name: metrics, containerPort: 9464 }`; and i
         - { protocol: TCP, port: 9464 }
 ```
 
-`deploy/alerts.md:3-4`: replace "the server tier serves `/metrics` on the peer port (8081)" with "every binary, the server tier included, serves `/metrics` on `KLOUDLITE_GIT_METRICS_ADDR` (9464)".
+`deploy/alerts.md:3-4`: replace "the server tier serves `/metrics` on the peer port (8081)" with "every binary, the server tier included, serves `/metrics` on `KLOUDLITE_METRICS_ADDR` (9464)".
 
 - [ ] **Step 4: Run tests and clippy** — `cargo test --test metrics --test routing && cargo test --workspace && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
-- [ ] **Step 5: Commit** — `git add bins/server/src/router/mod.rs bins/server/src/router/route.rs bins/server/src/main.rs deploy/kloudlite-git.yaml deploy/alerts.md tests/metrics.rs && git commit -m "Move server metrics off the peer listener onto their own port"`
+- [ ] **Step 5: Commit** — `git add bins/server/src/router/mod.rs bins/server/src/router/route.rs bins/server/src/main.rs deploy/kloudlite.yaml deploy/alerts.md tests/metrics.rs && git commit -m "Move server metrics off the peer listener onto their own port"`
 
 ---
 
@@ -516,7 +516,7 @@ after line 150 add `            - { name: metrics, containerPort: 9464 }`; and i
 
 **Interfaces:**
 - Consumes: `std::env::var`
-- Produces: `fleet_store_ok(url: &str) -> Result<()>` (signature unchanged); env `KLOUDLITE_GIT_ALLOW_MEM_FLEET`
+- Produces: `fleet_store_ok(url: &str) -> Result<()>` (signature unchanged); env `KLOUDLITE_ALLOW_MEM_FLEET`
 
 - [ ] **Step 1: Write the failing test** — in `crates/storage/src/config.rs`'s test module, beside the existing `fleet_store_ok` assertions:
 
@@ -526,17 +526,17 @@ after line 150 add `            - { name: metrics, containerPort: 9464 }`; and i
     /// exists to prevent. Allowed only when something says out loud that it is a test fleet.
     #[test]
     fn mem_is_not_a_fleet_store_unless_opted_into() {
-        std::env::remove_var("KLOUDLITE_GIT_ALLOW_MEM_FLEET");
+        std::env::remove_var("KLOUDLITE_ALLOW_MEM_FLEET");
         assert!(super::fleet_store_ok("mem://").is_err());
-        std::env::set_var("KLOUDLITE_GIT_ALLOW_MEM_FLEET", "1");
+        std::env::set_var("KLOUDLITE_ALLOW_MEM_FLEET", "1");
         assert!(super::fleet_store_ok("mem://").is_ok());
-        std::env::remove_var("KLOUDLITE_GIT_ALLOW_MEM_FLEET");
+        std::env::remove_var("KLOUDLITE_ALLOW_MEM_FLEET");
     }
 ```
 
 If `mem://` appears in the `for ok in [...]` loop at `config.rs:163-165`, remove it from that list.
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-storage mem_is_not_a_fleet_store_unless_opted_into` fails with `assertion failed: super::fleet_store_ok("mem://").is_err()`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-storage mem_is_not_a_fleet_store_unless_opted_into` fails with `assertion failed: super::fleet_store_ok("mem://").is_err()`.
 
 - [ ] **Step 3: Implement** — in `crates/storage/src/config.rs`, insert into `fleet_store_ok` after the `file://` branch:
 
@@ -545,10 +545,10 @@ If `mem://` appears in the `for ok in [...]` loop at `config.rs:163-165`, remove
     // lease, every pod is leader and every pod opens every database — the same two-writer bug the
     // `file://` refusal above exists for, with no URL scheme to give it away. The in-process test
     // fleet is the legitimate case, and it says so.
-    if url == "mem://" && std::env::var("KLOUDLITE_GIT_ALLOW_MEM_FLEET").is_err() {
+    if url == "mem://" && std::env::var("KLOUDLITE_ALLOW_MEM_FLEET").is_err() {
         return Err(crate::err(
-            "KLOUDLITE_GIT_S3_URL=mem:// cannot host a fleet: InMemory is per-process, so every pod \
-             would be its own leader and open every database; set KLOUDLITE_GIT_ALLOW_MEM_FLEET=1 \
+            "KLOUDLITE_S3_URL=mem:// cannot host a fleet: InMemory is per-process, so every pod \
+             would be its own leader and open every database; set KLOUDLITE_ALLOW_MEM_FLEET=1 \
              only for an in-process test fleet",
         ));
     }
@@ -556,7 +556,7 @@ If `mem://` appears in the `for ok in [...]` loop at `config.rs:163-165`, remove
 
 and drop the "use mem:// for a local fleet" clause from the `file://` error message so the two do not contradict each other, replacing it with "use s3:// / az://".
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-storage && cargo test --test routing && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-storage && cargo test --test routing && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add crates/storage/src/config.rs && git commit -m "Refuse mem:// as a fleet object store unless opted into"`
 
@@ -574,7 +574,7 @@ and drop the "use mem:// for a local fleet" clause from the `file://` error mess
 
 - [ ] **Step 1: Write the failing test** — the compiler is the test here; no behaviour changes. Assert the alias is gone by making the caller name the real method: edit `crates/git/src/gc.rs:135` first, from `forget_pack_public(` to `forget_pack(`, and let the build fail.
 
-- [ ] **Step 2: Run it, expect failure** — `cargo build -p kloudlite-git-git` fails with ``error[E0624]: method `forget_pack` is private``.
+- [ ] **Step 2: Run it, expect failure** — `cargo build -p kloudlite` fails with ``error[E0624]: method `forget_pack` is private``.
 
 - [ ] **Step 3: Implement** — in `crates/storage/src/store.rs`, delete lines 620-622:
 
@@ -594,7 +594,7 @@ and change the declaration at line 629 from `async fn forget_pack(` to `pub asyn
 
 ### Task 7: Keep one copy of `ssh_fingerprint`, in core behind an `ssh` feature
 
-**Where the single copy lives:** `crates/core/src/sshkeys.rs`, gated by a new optional `ssh` feature that pulls in `russh`. `crates/storage` already depends on `kloudlite-git-core` with no features (`crates/storage/Cargo.toml:12`), so its own manifest keeps no ssh dependency — the property CLAUDE.md asks for. `crates/git` would also do, but `crates/api` does not depend on it (`crates/api/Cargo.toml:12-15`), and both consumers already depend on core.
+**Where the single copy lives:** `crates/core/src/sshkeys.rs`, gated by a new optional `ssh` feature that pulls in `russh`. `crates/storage` already depends on `kloudlite-core` with no features (`crates/storage/Cargo.toml:12`), so its own manifest keeps no ssh dependency — the property CLAUDE.md asks for. `crates/git` would also do, but `crates/api` does not depend on it (`crates/api/Cargo.toml:12-15`), and both consumers already depend on core.
 
 **Files:**
 - Create `crates/core/src/sshkeys.rs`
@@ -604,7 +604,7 @@ and change the declaration at line 629 from `async fn forget_pack(` to `pub asyn
 
 **Interfaces:**
 - Consumes: `russh::keys::PublicKey::from_openssh`, `russh::keys::HashAlg::Sha256`
-- Produces: `kloudlite_git_core::sshkeys::ssh_fingerprint(line: &str) -> kloudlite_git_core::Result<String>`
+- Produces: `kloudlite_core::sshkeys::ssh_fingerprint(line: &str) -> kloudlite_core::Result<String>`
 
 - [ ] **Step 1: Write the failing test** — create `crates/core/src/sshkeys.rs` with its test module and nothing else yet:
 
@@ -626,7 +626,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-core --features ssh a_public_key_line_fingerprints_and_anything_else_is_refused` fails to compile: ``error[E0425]: cannot find function `ssh_fingerprint` in module `super` ``.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-core --features ssh a_public_key_line_fingerprints_and_anything_else_is_refused` fails to compile: ``error[E0425]: cannot find function `ssh_fingerprint` in module `super` ``.
 
 - [ ] **Step 3: Implement** —
 
@@ -665,27 +665,27 @@ pub fn ssh_fingerprint(line: &str) -> crate::Result<String> {
 }
 ```
 
-`bins/server/Cargo.toml:18`: `kloudlite-git-core = { path = "../../crates/core", features = ["ssh"] }`.
-`crates/api/Cargo.toml:12`: `kloudlite-git-core = { path = "../core", features = ["ssh"] }`.
+`bins/server/Cargo.toml:18`: `kloudlite-core = { path = "../../crates/core", features = ["ssh"] }`.
+`crates/api/Cargo.toml:12`: `kloudlite-core = { path = "../core", features = ["ssh"] }`.
 
 `bins/server/src/boot.rs`: delete lines 31-42 (the doc comment and `pub(crate) fn ssh_fingerprint`) and put in their place:
 
 ```rust
 /// One copy, in core: `crates/api` needs the same parse and `storage` must not carry the ssh
 /// dependency, so neither of those two is a home for it.
-pub(crate) use kloudlite_git_core::sshkeys::ssh_fingerprint;
+pub(crate) use kloudlite_core::sshkeys::ssh_fingerprint;
 ```
 
 `crates/api/src/credentials.rs`: delete lines 243-251 (the doc comment and `fn ssh_fingerprint`) and put in their place:
 
 ```rust
 // One copy, in core — this crate and the server binary both index keys by it.
-use kloudlite_git_core::sshkeys::ssh_fingerprint;
+use kloudlite_core::sshkeys::ssh_fingerprint;
 ```
 
 Callers at `credentials.rs:256` and `:878` need no change; if a call site's error type complains, map with `.map_err(|e| crate::err(e.to_string()))` at that site only.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-core --features ssh && cargo test --workspace && cargo clippy --workspace --all-targets --locked -- -D warnings`, plus `cargo tree -p kloudlite-git-storage -i russh` to confirm storage still pulls no ssh parse of its own (it may appear transitively through a sibling; the manifest is what the rule is about).
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-core --features ssh && cargo test --workspace && cargo clippy --workspace --all-targets --locked -- -D warnings`, plus `cargo tree -p kloudlite-storage -i russh` to confirm storage still pulls no ssh parse of its own (it may appear transitively through a sibling; the manifest is what the rule is about).
 
 - [ ] **Step 5: Commit** — `git add crates/core/Cargo.toml crates/core/src/lib.rs crates/core/src/sshkeys.rs bins/server/Cargo.toml bins/server/src/boot.rs crates/api/Cargo.toml crates/api/src/credentials.rs Cargo.lock && git commit -m "Keep one copy of ssh_fingerprint in core"`
 
@@ -729,7 +729,7 @@ Callers at `credentials.rs:256` and `:878` need no change; if a call site's erro
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-server the_only_other_kind_errors_answered_400_are_the_two_literals`. Expected failure: ``error: couldn't read `git.rs`: No such file or directory`` is NOT expected (the path is relative to this file); the expected first failure is `assertion failed: !fault(pipe)` if `BrokenPipe` were ever added to the matched set — otherwise the test passes on the first run, which is the acceptable outcome for a pinning test: keep it, and record in the commit message that it pins existing behaviour.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-server the_only_other_kind_errors_answered_400_are_the_two_literals`. Expected failure: ``error: couldn't read `git.rs`: No such file or directory`` is NOT expected (the path is relative to this file); the expected first failure is `assertion failed: !fault(pipe)` if `BrokenPipe` were ever added to the matched set — otherwise the test passes on the first run, which is the acceptable outcome for a pinning test: keep it, and record in the commit message that it pins existing behaviour.
 
 - [ ] **Step 3: Implement** — extend the `is_client_fault` doc comment at `git.rs:498-505` with the rule the test pins:
 
@@ -743,7 +743,7 @@ Callers at `credentials.rs:256` and `:878` need no change; if a call site's erro
 
 No behaviour change: the matched set at `git.rs:512-514` stays as it is.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-server && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-server && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add bins/server/src/router/git.rs && git commit -m "Pin which io error messages may reach a client"`
 
@@ -755,7 +755,7 @@ No behaviour change: the matched set at `git.rs:512-514` stays as it is.
 - Test `tests/http_e2e.rs` (a new helper beside `raw_get_with` at lines 25-44, and a new test)
 
 **Interfaces:**
-- Consumes: `open()` at `bins/server/src/router/git.rs:44-46` and `kloudlite_git_core::httpx::user_names` (no code change — this is the missing test in L6)
+- Consumes: `open()` at `bins/server/src/router/git.rs:44-46` and `kloudlite_core::httpx::user_names` (no code change — this is the missing test in L6)
 - Produces: `fn raw_get_as(port: u16, path: &str, user: &str, token: &str) -> String`
 
 - [ ] **Step 1: Write the failing test** — append to `tests/http_e2e.rs`:

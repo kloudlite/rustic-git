@@ -3,7 +3,7 @@
 Every `tracing` call in this repository emits an EVENT, not a sentence. The event name is the
 `message`; everything specific is a field. This is what makes a postmortem possible: one name per
 kind of thing that happens, the same field names everywhere, and a level that means the same thing
-in every crate. The collectors parse the JSON form (`KLOUDLITE_GIT_LOG_FORMAT=json`) into columns,
+in every crate. The collectors parse the JSON form (`KLOUDLITE_LOG_FORMAT=json`) into columns,
 so the name is what HyperDX's pattern view groups on and the fields are what you filter on.
 
 ## The name

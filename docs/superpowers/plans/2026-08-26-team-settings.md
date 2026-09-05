@@ -107,7 +107,7 @@ teams exist.
 - `POST /v1/teams/{slug}/invites`, `DELETE .../invites/{id}`, `GET /v1/invites/{token}`,
   `POST /v1/invites/{token}/accept`, `PATCH|DELETE .../members/{email}`.
 - Web: invite form, pending list with withdraw, role select, `/invite/{token}` accept page,
-  `lib/mail.ts` (Resend), `RESEND_API_KEY`/`RESEND_FROM` from the `kloudlite-git-mail` Secret.
+  `lib/mail.ts` (Resend), `RESEND_API_KEY`/`RESEND_FROM` from the `kloudlite-mail` Secret.
 
 **Verify:** invite, accept as the invited email, promote, demote, remove all round-trip; accept as
 another email is refused; the last owner cannot be demoted or removed.

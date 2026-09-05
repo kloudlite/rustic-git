@@ -2,14 +2,14 @@
 # Repin every image in deploy/ to one commit: `deploy/pin.sh <sha> [web-sha]`.
 #
 # THE CONTRACT. Six images, two SHAs, one edit:
-#   - kloudlite-git, kloudlite-git-agent, kloudlite-git-gateway, kloudlite-git-workspace, kloudlite-git-slo are five targets of ONE Dockerfile, built
+#   - kloudlite, kloudlite-agent, kloudlite-gateway, kloudlite-workspace, kloudlite-slo are five targets of ONE Dockerfile, built
 #     from ONE commit by image.yml. The server tier, the agent and the gateway therefore always
 #     pin the SAME sha — the agent speaks to the server's `vol/` surface, and two SHAs there is a
-#     wire-compatibility bet nobody placed. That is <sha>: kloudlite-git.yaml (srv, api, worker, the
+#     wire-compatibility bet nobody placed. That is <sha>: kloudlite.yaml (srv, api, worker, the
 #     three slo CronJobs), k3s/agent-daemonset.yaml, k3s/gateway.yaml. The probe rides the same SHA
 #     for the same reason: one pinned behind the fleet reports the previous release's journey.
-#   - kloudlite-git-web is built by web.yml, which runs only when web/** changes, so its SHA is
-#     usually older and is the optional second argument: kloudlite-git-web.yaml.
+#   - kloudlite-web is built by web.yml, which runs only when web/** changes, so its SHA is
+#     usually older and is the optional second argument: kloudlite-web.yaml.
 #   No kustomize, no envsubst: the manifests stay plain files kubectl applies as they are, and
 #   this script is the one place that knows where the pins live. Edit a pin by hand and the next
 #   run overwrites it.
@@ -43,11 +43,11 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite-git kloudlite-git-agent kloudlite-git-gateway kloudlite-git-workspace kloudlite-git-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-workspace kloudlite-slo; do
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
-  DIGEST[kloudlite-git-web]=$(digest_of kloudlite-git-web "$WEB") || { echo "ghcr.io/kloudlite/kloudlite-git-web:$WEB does not exist" >&2; exit 1; }
+  DIGEST[kloudlite-web]=$(digest_of kloudlite-web "$WEB") || { echo "ghcr.io/kloudlite/kloudlite-web:$WEB does not exist" >&2; exit 1; }
 fi
 
 # Match a bare :<sha> or an already digest-pinned :<sha>@sha256:<old-digest> and replace the
@@ -60,14 +60,14 @@ pin() {
   # `*` on the digest group also collapses a reference that already got doubled that way.
   perl -pi -e "s#(ghcr\.io/kloudlite/$1:)(?:[0-9a-f]{40}(?:\@sha256:[0-9a-f]{64})*|[A-Za-z0-9_.-]+)#\${1}$2\@$3#" "${@:4}"
 }
-pin 'kloudlite-git(?!-)' "$SHA" "${DIGEST[kloudlite-git]}" kloudlite-git.yaml
-pin 'kloudlite-git-agent' "$SHA" "${DIGEST[kloudlite-git-agent]}" k3s/agent-daemonset.yaml
-pin 'kloudlite-git-gateway' "$SHA" "${DIGEST[kloudlite-git-gateway]}" k3s/gateway.yaml
+pin 'kloudlite(?!-)' "$SHA" "${DIGEST[kloudlite]}" kloudlite.yaml
+pin 'kloudlite-agent' "$SHA" "${DIGEST[kloudlite-agent]}" k3s/agent-daemonset.yaml
+pin 'kloudlite-gateway' "$SHA" "${DIGEST[kloudlite-gateway]}" k3s/gateway.yaml
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
-pin 'kloudlite-git-workspace' "$SHA" "${DIGEST[kloudlite-git-workspace]}" k3s/agent-daemonset.yaml
-pin 'kloudlite-git-slo' "$SHA" "${DIGEST[kloudlite-git-slo]}" kloudlite-git.yaml
-[ -z "$WEB" ] || pin 'kloudlite-git-web' "$WEB" "${DIGEST[kloudlite-git-web]}" kloudlite-git-web.yaml
+pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daemonset.yaml
+pin 'kloudlite-slo' "$SHA" "${DIGEST[kloudlite-slo]}" kloudlite.yaml
+[ -z "$WEB" ] || pin 'kloudlite-web' "$WEB" "${DIGEST[kloudlite-web]}" kloudlite-web.yaml
 
 grep -rn --include='*.yaml' -E 'image: ghcr\.io/kloudlite/' . | sed 's/^\.\///'
 cat <<EOF

@@ -209,7 +209,7 @@ export function AccessTable({ rows, selfEmail }: { rows: SuperAdmin[]; selfEmail
         )}
         <p className="border-t border-border px-4 py-2 text-caption text-muted-foreground">
           The bootstrap list only seeds this collection at boot — removing an address from{" "}
-          <span className="font-mono">KLOUDLITE_GIT_WORKSPACES_ADMINS</span> revokes nobody. Remove them here.
+          <span className="font-mono">KLOUDLITE_WORKSPACES_ADMINS</span> revokes nobody. Remove them here.
         </p>
       </Section>
 

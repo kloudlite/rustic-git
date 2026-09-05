@@ -1,10 +1,10 @@
-# Sharded multi-node kloudlite-git
+# Sharded multi-node kloudlite
 
 Date: 2026-08-16 (follows the multi-node fencing test)
 
 ## Problem
 
-SlateDB allows one writer per database. Two `kloudlite-git serve` processes on one bucket fence each
+SlateDB allows one writer per database. Two `kloudlite serve` processes on one bucket fence each
 other: the loser fails every read and write (measured — see "Fencing" below). So the current design
 caps at one node, and that node carries all clone, fetch and push traffic.
 
@@ -26,9 +26,9 @@ without consulting the database first.
 
 ### Ownership and routing
 
-- `KLOUDLITE_GIT_SHARDS` — total shards, fixed for the deployment (default 1).
-- `KLOUDLITE_GIT_OWNED_SHARDS` — this node's shards, e.g. `0,1` (default: all).
-- `KLOUDLITE_GIT_SHARD_URLS` — `0=https://a.example,1=https://b.example`, used to redirect.
+- `KLOUDLITE_SHARDS` — total shards, fixed for the deployment (default 1).
+- `KLOUDLITE_OWNED_SHARDS` — this node's shards, e.g. `0,1` (default: all).
+- `KLOUDLITE_SHARD_URLS` — `0=https://a.example,1=https://b.example`, used to redirect.
 
 A request for a repo this node does not own gets `307` to the owning node. Git follows redirects on
 `info/refs` and re-bases the subsequent POST on the redirected URL, so a plain `git clone` works
@@ -55,7 +55,7 @@ created rarely; documented rather than engineered around.
 
 ### Read replicas (optional, composes with the above)
 
-`KLOUDLITE_GIT_SERVE_FOREIGN_READS=1` lets a node serve clone/fetch for shards it does not own, from
+`KLOUDLITE_SERVE_FOREIGN_READS=1` lets a node serve clone/fetch for shards it does not own, from
 its `DbReader`, instead of redirecting. This scales reads beyond the owning node, at the cost of
 refs lagging by the reader's refresh interval — a client can fetch and not see a commit pushed
 seconds ago. Off by default: read-after-write is what git users expect.
@@ -70,7 +70,7 @@ seconds ago. Off by default: read-after-write is what git users expect.
 
 ## Compatibility
 
-With `KLOUDLITE_GIT_SHARDS=1` (the default) the database path stays `slatedb`, exactly where existing
+With `KLOUDLITE_SHARDS=1` (the default) the database path stays `slatedb`, exactly where existing
 deployments have it. No migration for single-node installs.
 
 ## Fencing, measured

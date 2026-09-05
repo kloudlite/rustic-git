@@ -3,7 +3,7 @@
 //! them ends up exporting nothing while its dashboards stay green.
 //!
 //! Exposure is deliberately NOT on any public listener. Every binary, the server included, serves
-//! a dedicated listener via `serve_if_configured` on `KLOUDLITE_GIT_METRICS_ADDR`, unset in dev.
+//! a dedicated listener via `serve_if_configured` on `KLOUDLITE_METRICS_ADDR`, unset in dev.
 //! Metric text lists every repository key a node has touched — that is an enumeration oracle.
 
 use axum::{extract::Request, middleware::Next, response::Response, routing::get, Router};
@@ -41,14 +41,14 @@ pub fn routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
 }
 
 /// A whole listener for the binaries that have no internal one (worker, agent, gateway, api).
-/// Returns immediately when `KLOUDLITE_GIT_METRICS_ADDR` is unset; a bind failure is fatal
+/// Returns immediately when `KLOUDLITE_METRICS_ADDR` is unset; a bind failure is fatal
 /// because a pod annotated for scraping that silently serves nothing is the failure mode this
 /// module exists to prevent.
 pub async fn serve_if_configured() {
-    let Ok(addr) = std::env::var("KLOUDLITE_GIT_METRICS_ADDR") else { return };
+    let Ok(addr) = std::env::var("KLOUDLITE_METRICS_ADDR") else { return };
     let l = tokio::net::TcpListener::bind(&addr)
         .await
-        .unwrap_or_else(|e| panic!("binding KLOUDLITE_GIT_METRICS_ADDR={addr}: {e}"));
+        .unwrap_or_else(|e| panic!("binding KLOUDLITE_METRICS_ADDR={addr}: {e}"));
     tracing::info!(listener = "metrics", %addr, "listener.started");
     let app = routes().route("/healthz", get(|| async { "ok" }));
     tokio::spawn(async move {

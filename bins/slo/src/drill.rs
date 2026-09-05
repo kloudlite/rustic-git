@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 /// The drill taint. `NoExecute` because the drill is pretending the node died: a `NoSchedule` taint
 /// would leave every pod already on it running, which is the one thing a dead node does not do.
-pub const DRILL_TAINT: &str = "kloudlite-git.io/slo-drill";
+pub const DRILL_TAINT: &str = "kloudlite.io/slo-drill";
 
 /// The three fleet mutations a drill makes, and nothing else. Each takes `on`, so the undo is the
 /// same call with the flag flipped — a separate `untaint` method is a second place to get wrong.
@@ -303,7 +303,7 @@ pub(crate) mod tests {
         for out in [
             with_taint(&k, "node-a", cap, boom()).await,
             with_cordon(&k, &tmp, "node-a", cap, boom()).await,
-            with_netpol(&k, "kloudlite-git", "slo-drill-redis", json!({}), cap, boom()).await,
+            with_netpol(&k, "kloudlite", "slo-drill-redis", json!({}), cap, boom()).await,
         ] {
             // The BODY's failure is what comes back — the drill measured something and it failed.
             assert!(out.unwrap_err().to_string().contains("middle step"));
@@ -315,8 +315,8 @@ pub(crate) mod tests {
                 "taint node-a false",
                 "cordon node-a true",
                 "cordon node-a false",
-                "netpol kloudlite-git/slo-drill-redis true",
-                "netpol kloudlite-git/slo-drill-redis false",
+                "netpol kloudlite/slo-drill-redis true",
+                "netpol kloudlite/slo-drill-redis false",
             ]
         );
     }

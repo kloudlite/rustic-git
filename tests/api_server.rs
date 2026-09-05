@@ -40,7 +40,7 @@ async fn upstream(status: axum::http::StatusCode) -> Upstream {
 
 /// The api process, pointed at `up`, with the cache disabled.
 async fn api(e: &common::TestEnv, up: &Upstream) -> String {
-    api_with(e, up, Arc::new(kloudlite_git_storage::cache::Cache::connect(None).await)).await
+    api_with(e, up, Arc::new(kloudlite_storage::cache::Cache::connect(None).await)).await
 }
 
 /// The api process with a signing key but no database: enough to exercise the
@@ -49,10 +49,10 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
-    let cache = Arc::new(kloudlite_git_storage::cache::Cache::connect(None).await);
-    let jwt = Arc::new(kloudlite_git_core::jwt::Jwt::new(secret).unwrap());
+    let cache = Arc::new(kloudlite_storage::cache::Cache::connect(None).await);
+    let jwt = Arc::new(kloudlite_core::jwt::Jwt::new(secret).unwrap());
     tokio::spawn(async move {
-        kloudlite_git_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None, false)
+        kloudlite_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None, false)
             .await
             .unwrap()
     });
@@ -65,11 +65,11 @@ async fn api_with_dir(e: &common::TestEnv, up: &Upstream, d: &common::TestDirect
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
-    let cache = Arc::new(kloudlite_git_storage::cache::Cache::connect(None).await);
-    let jwt = Arc::new(kloudlite_git_core::jwt::Jwt::new(KEY).unwrap());
+    let cache = Arc::new(kloudlite_storage::cache::Cache::connect(None).await);
+    let jwt = Arc::new(kloudlite_core::jwt::Jwt::new(KEY).unwrap());
     let dir = d.dir.clone();
     tokio::spawn(async move {
-        kloudlite_git_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, false)
+        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, false)
             .await
             .unwrap()
     });
@@ -80,13 +80,13 @@ async fn api_with_dir(e: &common::TestEnv, up: &Upstream, d: &common::TestDirect
 async fn api_with(
     e: &common::TestEnv,
     up: &Upstream,
-    cache: Arc<kloudlite_git_storage::cache::Cache>,
+    cache: Arc<kloudlite_storage::cache::Cache>,
 ) -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
     tokio::spawn(async move {
-        kloudlite_git_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None, false)
+        kloudlite_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None, false)
             .await
             .unwrap()
     });
@@ -129,8 +129,8 @@ async fn a_forwarded_request_presents_the_peer_identity() {
     // has to arrive wearing both halves of a forwarding node's identity, or upstream refuses it.
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
     let seen = up.seen.lock().unwrap().clone();
-    assert_eq!(seen[kloudlite_git_core::peer::PEER_HEADER], "s");
-    assert_eq!(seen[kloudlite_git_core::peer::OWNER_HEADER], "alice");
+    assert_eq!(seen[kloudlite_core::peer::PEER_HEADER], "s");
+    assert_eq!(seen[kloudlite_core::peer::OWNER_HEADER], "alice");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -144,8 +144,8 @@ async fn an_anonymous_hit_is_public_and_carries_no_owner() {
     // authorization bypass — anyone could claim to be anyone.
     let r = reqwest::Client::new()
         .get(format!("{base}/api/alice/web/refs"))
-        .header(kloudlite_git_core::peer::OWNER_HEADER, "bob")
-        .header(kloudlite_git_core::peer::PEER_HEADER, "s")
+        .header(kloudlite_core::peer::OWNER_HEADER, "bob")
+        .header(kloudlite_core::peer::PEER_HEADER, "s")
         .send()
         .await
         .unwrap();
@@ -157,7 +157,7 @@ async fn an_anonymous_hit_is_public_and_carries_no_owner() {
         .seen
         .lock()
         .unwrap()
-        .contains_key(kloudlite_git_core::peer::OWNER_HEADER));
+        .contains_key(kloudlite_core::peer::OWNER_HEADER));
 
     let r = reqwest::get(format!("{base}/api/alice/web/tree/abc123"))
         .await
@@ -240,8 +240,8 @@ async fn a_public_cache_hit_never_touches_upstream() {
     // header on the hit path (the CDN would then re-ask for every id-addressed answer).
     let up = upstream(axum::http::StatusCode::OK).await;
     let e = common::env().await;
-    let cache = Arc::new(kloudlite_git_storage::cache::Cache::memory());
-    cache.put("alice/web", kloudlite_git_api::META, b"1", 30).await;
+    let cache = Arc::new(kloudlite_storage::cache::Cache::memory());
+    cache.put("alice/web", kloudlite_api::META, b"1", 30).await;
     cache.put("alice/web", "tree:abc", br#"["cached"]"#, 60).await;
     let base = api_with(&e, &up, cache).await;
 
@@ -259,7 +259,7 @@ async fn a_cached_private_body_is_never_served_to_a_stranger() {
     // upstream — and get upstream's 404, not the cached bytes.
     let up = upstream(axum::http::StatusCode::NOT_FOUND).await;
     let e = common::env().await;
-    let cache = Arc::new(kloudlite_git_storage::cache::Cache::memory());
+    let cache = Arc::new(kloudlite_storage::cache::Cache::memory());
     cache.put("alice/web", "refs", br#"["secret"]"#, 60).await;
     let base = api_with(&e, &up, cache).await;
 
@@ -332,7 +332,7 @@ async fn a_write_method_is_refused_rather_than_forwarded_as_a_read() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_purge_during_a_miss_discards_the_answer() {
     let e = common::env().await;
-    let cache = Arc::new(kloudlite_git_storage::cache::Cache::memory());
+    let cache = Arc::new(kloudlite_storage::cache::Cache::memory());
     // The purge happens INSIDE the upstream handler: structurally after the api process read the
     // generation and before it writes the answer back. No sleeps, so nothing here can flake.
     let c = cache.clone();
@@ -361,7 +361,7 @@ async fn a_purge_during_a_miss_discards_the_answer() {
 
     assert!(raw_get(&base, "/api/alice/web/blob/abc/x").await.contains("200"));
     assert_eq!(cache.get("alice/web", "blob:abc:x").await, None);
-    assert_eq!(cache.get("alice/web", kloudlite_git_api::META).await, None);
+    assert_eq!(cache.get("alice/web", kloudlite_api::META).await, None);
 }
 
 // ── identity ────────────────────────────────────────────────────────────────
@@ -379,7 +379,7 @@ async fn team_routes_refuse_an_anonymous_caller() {
 }
 
 /// The superadmin roster routes are compiled in only for the admin role (`bins/api`'s
-/// `KLOUDLITE_GIT_API_ROLE`) — `api_with_jwt` starts a user-role process, so a GET must 404 rather
+/// `KLOUDLITE_API_ROLE`) — `api_with_jwt` starts a user-role process, so a GET must 404 rather
 /// than reach the auth check and answer 401/403. GET, not POST: an unrouted path still falls
 /// through to the (GET-only) repo-browse fallback, which answers a non-GET method with 405
 /// rather than 404 — that fallback behavior is unrelated to this gate and not what this test
@@ -403,7 +403,7 @@ async fn a_token_signed_with_another_key_is_refused() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let forged = kloudlite_git_core::jwt::Jwt::new("abcdefghijabcdefghijabcdefghijabcdefghij")
+    let forged = kloudlite_core::jwt::Jwt::new("abcdefghijabcdefghijabcdefghijabcdefghij")
         .unwrap()
         .mint("attacker@example.com", "A", None)
         .unwrap();
@@ -423,7 +423,7 @@ async fn a_valid_token_identifies_the_caller() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("karthik@kloudlite.io", "K", Some("karthik")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("karthik@kloudlite.io", "K", Some("karthik")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/teams"))
         .header("authorization", format!("Bearer {token}"))
@@ -446,8 +446,8 @@ async fn the_peer_secret_still_identifies_an_internal_caller() {
     let c = reqwest::Client::new();
     let wrong = c
         .get(format!("{base}/v1/teams"))
-        .header("x-kloudlite-git-peer", "not-the-secret")
-        .header("x-kloudlite-git-owner", "karthik@kloudlite.io")
+        .header("x-kloudlite-peer", "not-the-secret")
+        .header("x-kloudlite-owner", "karthik@kloudlite.io")
         .send()
         .await
         .unwrap();
@@ -455,8 +455,8 @@ async fn the_peer_secret_still_identifies_an_internal_caller() {
 
     let right = c
         .get(format!("{base}/v1/teams"))
-        .header("x-kloudlite-git-peer", "s")
-        .header("x-kloudlite-git-owner", "karthik@kloudlite.io")
+        .header("x-kloudlite-peer", "s")
+        .header("x-kloudlite-owner", "karthik@kloudlite.io")
         .send()
         .await
         .unwrap();
@@ -472,8 +472,8 @@ async fn sign_in_refuses_a_body_that_disagrees_with_the_caller() {
     let base = api_with_jwt(&e, &up, KEY).await;
     let r = reqwest::Client::new()
         .post(format!("{base}/v1/users"))
-        .header("x-kloudlite-git-peer", "s")
-        .header("x-kloudlite-git-owner", "karthik@kloudlite.io")
+        .header("x-kloudlite-peer", "s")
+        .header("x-kloudlite-owner", "karthik@kloudlite.io")
         .header("content-type", "application/json")
         .body(r#"{"email":"someone@else.com","name":"X"}"#)
         .send()
@@ -505,7 +505,7 @@ async fn claiming_a_username_reaches_the_directory() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", None).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", None).unwrap();
     let r = reqwest::Client::new()
         .post(format!("{base}/v1/users/username"))
         .header("authorization", format!("Bearer {token}"))
@@ -545,7 +545,7 @@ async fn a_repo_name_that_could_address_another_route_never_reaches_the_fleet() 
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::CREATED).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     for name in ["..", "../../bob/private", "a/b", "", "a\\b"] {
         let r = reqwest::Client::new()
             .post(format!("{base}/v1/repos"))
@@ -568,7 +568,7 @@ async fn creating_a_repo_asks_the_directory_before_it_asks_the_fleet() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::CREATED).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .post(format!("{base}/v1/repos"))
         .header("authorization", format!("Bearer {token}"))
@@ -598,7 +598,7 @@ async fn getting_one_repo_asks_the_directory_before_anything_else() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/repos/alice/web"))
         .header("authorization", format!("Bearer {token}"))
@@ -639,7 +639,7 @@ async fn listing_repos_refuses_an_anonymous_caller_and_requires_an_owner() {
     let r = c.get(format!("{base}/v1/repos?owner=alice")).send().await.unwrap();
     assert_eq!(r.status(), 401);
 
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = c
         .get(format!("{base}/v1/repos"))
         .header("authorization", format!("Bearer {token}"))
@@ -666,7 +666,7 @@ async fn a_session_token_without_a_directory_browses_as_a_stranger() {
     let up = upstream(axum::http::StatusCode::OK).await;
     let e = common::env().await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/api/k/web/refs"))
         .header("authorization", format!("Bearer {token}"))
@@ -677,7 +677,7 @@ async fn a_session_token_without_a_directory_browses_as_a_stranger() {
     assert_eq!(r.status(), 200);
     let seen = up.seen.lock().unwrap().clone();
     assert!(
-        seen.get(kloudlite_git_core::peer::OWNER_HEADER).is_none(),
+        seen.get(kloudlite_core::peer::OWNER_HEADER).is_none(),
         "an unresolvable session must not be asserted as an owner"
     );
 }
@@ -739,7 +739,7 @@ async fn revoking_a_token_stops_it_working_and_is_idempotent() {
     let token = e.store.create_token("alice").await.unwrap();
     assert_eq!(e.store.owner_for_token(&token).await.unwrap().as_deref(), Some("alice"));
 
-    let digest = kloudlite_git_storage::store::Store::token_digest(&token);
+    let digest = kloudlite_storage::store::Store::token_digest(&token);
     e.store.revoke_token_digest(&digest).await.unwrap();
     assert_eq!(e.store.owner_for_token(&token).await.unwrap(), None, "a revoked token must not authenticate");
     e.store.revoke_token_digest(&digest).await.unwrap();
@@ -782,7 +782,7 @@ async fn settings_ask_the_directory_before_the_fleet() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::NO_CONTENT).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .delete(format!("{base}/v1/repos/alice/web"))
         .header("authorization", format!("Bearer {token}"))
@@ -834,11 +834,11 @@ async fn verifying_a_commit_tells_the_fleet_who_is_asking() {
     let up = upstream(axum::http::StatusCode::OK).await;
     // Peer identity, no directory: enough to reach the forward, which is the part
     // under test.
-    let base = api_with(&e, &up, Arc::new(kloudlite_git_storage::cache::Cache::connect(None).await)).await;
+    let base = api_with(&e, &up, Arc::new(kloudlite_storage::cache::Cache::connect(None).await)).await;
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/repos/alice/web/commits/abc/signature"))
-        .header(kloudlite_git_core::peer::PEER_HEADER, "s")
-        .header(kloudlite_git_core::peer::OWNER_HEADER, "alice@example.com")
+        .header(kloudlite_core::peer::PEER_HEADER, "s")
+        .header(kloudlite_core::peer::OWNER_HEADER, "alice@example.com")
         .send()
         .await
         .unwrap();
@@ -857,7 +857,7 @@ async fn pull_routes_ask_the_directory_before_the_fleet() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let c = reqwest::Client::new();
 
     for (method, path, body) in [
@@ -892,7 +892,7 @@ async fn peer_only_routes_refuse_a_session_token() {
     let e = common::env().await;
     let secret = "0123456789012345678901234567890123456789";
     let base = api_with_jwt(&e, &up, secret).await;
-    let token = kloudlite_git_core::jwt::Jwt::new(secret)
+    let token = kloudlite_core::jwt::Jwt::new(secret)
         .unwrap()
         .mint("alice@example.com", "Alice", Some("alice"))
         .unwrap();
@@ -915,8 +915,8 @@ async fn peer_only_routes_refuse_a_session_token() {
         // own answer is 503 — which is the proof the gate let the right caller through.
         let r = c
             .post(format!("{base}{path}"))
-            .header(kloudlite_git_core::peer::PEER_HEADER, "s")
-            .header(kloudlite_git_core::peer::OWNER_HEADER, "alice@example.com")
+            .header(kloudlite_core::peer::PEER_HEADER, "s")
+            .header(kloudlite_core::peer::OWNER_HEADER, "alice@example.com")
             .header("content-type", "application/json")
             .body(body)
             .send()
@@ -967,8 +967,8 @@ async fn a_second_sign_in_link_for_the_same_email_within_the_cooldown_is_refused
     let post = |ip: &'static str, email: &'static str| {
         c.post(format!("{base}/v1/signin/email"))
             .header("x-real-ip", ip)
-            .header(kloudlite_git_core::peer::PEER_HEADER, "s")
-            .header(kloudlite_git_core::peer::OWNER_HEADER, email)
+            .header(kloudlite_core::peer::PEER_HEADER, "s")
+            .header(kloudlite_core::peer::OWNER_HEADER, email)
             .header("content-type", "application/json")
             .body(format!(r#"{{"email":"{email}"}}"#))
             .send()
@@ -986,11 +986,11 @@ async fn a_second_sign_in_link_for_the_same_email_within_the_cooldown_is_refused
 // says the route is wired to the directory and nothing else. That leaves the handlers themselves
 // untested, so these run the same calls with a real database behind them and assert what the
 // handler actually answers. `common::mongo` prints a skip line and returns `None` when
-// `KLOUDLITE_GIT_TEST_MONGO_URI` is unset — the gate half above still runs either way.
+// `KLOUDLITE_TEST_MONGO_URI` is unset — the gate half above still runs either way.
 
 /// A session token for `email`, with `handle` as their claimed username.
 fn token_for(email: &str, handle: Option<&str>) -> String {
-    kloudlite_git_core::jwt::Jwt::new(KEY).unwrap().mint(email, "T", handle).unwrap()
+    kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint(email, "T", handle).unwrap()
 }
 
 /// The one team route a stranger may read, both ways round: an unknown slug and a private team
@@ -1013,7 +1013,7 @@ async fn a_public_team_profile_is_readable_and_nothing_else_is() {
         "a team is private until it says otherwise",
     );
 
-    let profile = kloudlite_git_pulls::directory::TeamProfile {
+    let profile = kloudlite_pulls::directory::TeamProfile {
         public: true,
         tagline: "we make things".into(),
         ..Default::default()

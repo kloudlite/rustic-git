@@ -1,18 +1,18 @@
 //! `GET /admin/overview` — one round trip composing pending requests, attention items, recent
 //! audit and fleet numbers, same harness shape `api_admin_owners.rs`/`api_admin_clusters.rs` use.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, ApiState};
-use kloudlite_git_workspaces::kube_test::{get, mock_client, Route};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, ApiState};
+use kloudlite_workspaces::kube_test::{get, mock_client, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 
-async fn keys_store() -> Arc<kloudlite_git_storage::store::Store> {
+async fn keys_store() -> Arc<kloudlite_storage::store::Store> {
     let tmp = tempfile::tempdir().unwrap();
     Arc::new(
-        kloudlite_git_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
+        kloudlite_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
             .await
             .unwrap(),
     )
@@ -23,7 +23,7 @@ struct Server {
     jwt: Arc<Jwt>,
 }
 
-async fn admin_server(routes: Vec<Route>, keys: Option<Arc<kloudlite_git_storage::store::Store>>) -> Server {
+async fn admin_server(routes: Vec<Route>, keys: Option<Arc<kloudlite_storage::store::Store>>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let mut state = ApiState::new(jwt.clone());
     let (client, _rec) = mock_client(routes);
@@ -43,11 +43,11 @@ fn admin_token(jwt: &Jwt) -> String {
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 fn region_obj(name: &str) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Region",
            "metadata": {"name": name}, "spec": {"name": name, "status": "active"}})
 }
 
@@ -61,8 +61,8 @@ fn node_obj(name: &str, ready: bool) -> Value {
 }
 
 fn ws_obj(name: &str, owner: &str, region: &str) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
-           "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+           "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
            "spec": {"owner": owner, "team": "", "name": name, "region": region, "image": "img:1",
                     "desiredState": "running", "packages": [],
                     "resources": {"cpuRequest": "1", "cpuLimit": "2", "memoryRequest": "1Gi", "memoryLimit": "2Gi"},
@@ -70,8 +70,8 @@ fn ws_obj(name: &str, owner: &str, region: &str) -> Value {
 }
 
 fn req_obj(name: &str, owner: &str, created: &str) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "QuotaRequest",
-           "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}, "creationTimestamp": created},
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "QuotaRequest",
+           "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}, "creationTimestamp": created},
            "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}})
 }
 
@@ -89,15 +89,15 @@ fn deployment(name: &str, ns: &str, ready: i32, desired: i32) -> Value {
            "status": {"readyReplicas": ready}})
 }
 
-/// `kloudlite-git-agent`/`kloudlite-git-gateway` for one region — every per-region workload
+/// `kloudlite-agent`/`kloudlite-gateway` for one region — every per-region workload
 /// `list_workloads` walks, so both must be mocked or the whole list (not just this region's row)
 /// comes back empty.
 fn workload_routes(agent_ready: i32, agent_desired: i32, gateway_ready: i32, gateway_desired: i32) -> Vec<Route> {
     vec![
-        get("/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-git-agent", daemonset("kloudlite-git-agent", agent_ready, agent_desired)),
+        get("/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-agent", daemonset("kloudlite-agent", agent_ready, agent_desired)),
         get(
-            "/apis/apps/v1/namespaces/kloudlite-git-system/deployments/kloudlite-git-gateway",
-            deployment("kloudlite-git-gateway", "kloudlite-git-system", gateway_ready, gateway_desired),
+            "/apis/apps/v1/namespaces/kloudlite-system/deployments/kloudlite-gateway",
+            deployment("kloudlite-gateway", "kloudlite-system", gateway_ready, gateway_desired),
         ),
     ]
 }
@@ -247,7 +247,7 @@ async fn overview_with_nothing_pending_still_returns_fleet_numbers() {
 
     assert_eq!(body["pendingRequests"].as_array().unwrap().len(), 0);
     // The one node is Ready and nothing is draining, so nothing NODE-shaped shows up (the region
-    // itself still flags zero-agents — no `kloudlite-git-agent` workload is mocked here).
+    // itself still flags zero-agents — no `kloudlite-agent` workload is mocked here).
     let attention = body["attention"].as_array().unwrap();
     assert!(!attention.iter().any(|a| a["kind"] == "node"));
     assert_eq!(body["fleet"]["workspaces"], 1);
@@ -257,8 +257,8 @@ async fn overview_with_nothing_pending_still_returns_fleet_numbers() {
     assert!(body["errors"].as_array().unwrap().iter().any(|e| e.as_str().unwrap().contains("audit")));
 }
 
-async fn audit_row(keys: &Arc<kloudlite_git_storage::store::Store>, actor: &str, action: &str, target: &str) {
-    let entry = kloudlite_git_workspaces::audit::AuditEntry {
+async fn audit_row(keys: &Arc<kloudlite_storage::store::Store>, actor: &str, action: &str, target: &str) {
+    let entry = kloudlite_workspaces::audit::AuditEntry {
         ts: chrono::Utc::now().to_rfc3339(),
         actor: actor.to_string(),
         action: action.to_string(),
@@ -266,5 +266,5 @@ async fn audit_row(keys: &Arc<kloudlite_git_storage::store::Store>, actor: &str,
         reason: None,
         result: "ok".into(),
     };
-    kloudlite_git_workspaces::audit::record(&keys.os, &entry).await.unwrap();
+    kloudlite_workspaces::audit::record(&keys.os, &entry).await.unwrap();
 }

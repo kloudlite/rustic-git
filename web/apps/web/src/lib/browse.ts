@@ -10,7 +10,7 @@ import { SLOW_TIMEOUT_MS, TIMEOUT_MS, type ApiResult } from "@/lib/api";
  * holds, keyed by object id, and every answer is immutable except `refs`.
  */
 
-const BASE = (process.env.KLOUDLITE_GIT_API_URL ?? "http://kloudlite-git-api").replace(/\/$/, "");
+const BASE = (process.env.KLOUDLITE_API_URL ?? "http://kloudlite-api").replace(/\/$/, "");
 
 export type Ref = { name: string; oid: string; kind: "branch" | "tag" };
 export type Entry = {

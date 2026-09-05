@@ -18,7 +18,7 @@
 - Takeover uses a JSON patch whose first op is `{"op":"test","path":"/spec/nodeName","value":""}`. No read-modify-write.
 - Every sweep and takeover is keep-biased: a list error clears nothing; a patch error takes nothing.
 - The sweep NEVER un-places a parent whose `spec.desiredState` is `Running`, and never clears a Volume pin while any parent naming that volume is `Running`.
-- CI gate: `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test -p kloudlite-git-agent -p kloudlite-git-workspaces`.
+- CI gate: `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test -p kloudlite-agent -p kloudlite-workspaces`.
 - Commit subjects imperative sentence case, no tool attribution, no trailers.
 - Comments say WHY, never what.
 
@@ -68,7 +68,7 @@
 
 Node-object helpers: the existing tests build Node JSON via `node_ready`/`node_dead`; add `_obj` variants that deserialize those into `k8s_openapi::api::core::v1::Node`. If no `ctx_on_node_with_routes` exists, add the node name as a parameter to the existing constructor.
 
-- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-git-agent -- live_nodes standby_count third_node` — FAIL.
+- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-agent -- live_nodes standby_count third_node` — FAIL.
 
 - [ ] **Step 3: Implement**
 
@@ -99,7 +99,7 @@ fn standby_count(owner_alive: bool, replicas: u32) -> usize {
 
 `pull_volume`'s "no longer a target" retirement pass must use the same live list — grep its `targets(` call (there is one more at ~line 1104's doc) and thread `live` through, or it retires the very copy the beat just made.
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-agent && cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS.
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-agent && cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -134,9 +134,9 @@ git commit -m "Place replicas over live nodes only so a dead node's copies heal 
     }
 ```
 
-And one harness test: node-b holds `v1` locally (create `engine.pool.voldir("v1")` under the test pool), Volume `v1` owned by node-a with `replicas: 2`, live `[a, b, c]` where `targets("v1","a",live,2) == ["c"]` (pick a volume id that hashes so; assert that in the test with `replicate::targets` first), a `VolumeReplica` row for `c` in `Synced`, no Workspace hosted on b: after `retire_pass`, the recorder saw `DELETE /apis/kloudlite-git.io/v1alpha1/volumereplicas/{replica_name("v1","node-b")}` and `voldir("v1")` is gone. Second harness test: same but `c`'s row `Syncing` — no DELETE, directory stays.
+And one harness test: node-b holds `v1` locally (create `engine.pool.voldir("v1")` under the test pool), Volume `v1` owned by node-a with `replicas: 2`, live `[a, b, c]` where `targets("v1","a",live,2) == ["c"]` (pick a volume id that hashes so; assert that in the test with `replicate::targets` first), a `VolumeReplica` row for `c` in `Synced`, no Workspace hosted on b: after `retire_pass`, the recorder saw `DELETE /apis/kloudlite.io/v1alpha1/volumereplicas/{replica_name("v1","node-b")}` and `voldir("v1")` is gone. Second harness test: same but `c`'s row `Syncing` — no DELETE, directory stays.
 
-- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-git-agent should_retire retire_pass` — FAIL.
+- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-agent should_retire retire_pass` — FAIL.
 
 - [ ] **Step 3: Implement**
 
@@ -222,12 +222,12 @@ Replace the Volume branch with:
                                 || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
              && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
           : object.spec == oldObject.spec
-      message: "kloudlite-git-agent writes status, not spec (exceptions: Volume.spec.restoreTo, and Volume.spec.nodeName only owned->'' or ''->node)"
+      message: "kloudlite-agent writes status, not spec (exceptions: Volume.spec.restoreTo, and Volume.spec.nodeName only owned->'' or ''->node)"
 ```
 
 - [ ] **Step 3: Verify the CRD still generates and tests pass**
 
-Run: `cargo test -p kloudlite-git-workspaces`
+Run: `cargo test -p kloudlite-workspaces`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -260,15 +260,15 @@ Beside the existing unclaim tests (same harness as the one at ~line 1224). Add h
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed("ws-run", "node-b")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
             Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-ws-run", "node-b")]) },
-            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-b") },
-            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-run/status".into(), status: 200, body: vol_owned("vol-ws-run", "node-b") },
+            Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-b") },
+            Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-run/status".into(), status: 200, body: vol_owned("vol-ws-run", "node-b") },
         ]);
         unclaim_dead_nodes(&ctx).await;
-        let ws = rec.body_of("PUT /apis/kloudlite-git.io/v1alpha1/workspaces/ws-run/status");
+        let ws = rec.body_of("PUT /apis/kloudlite.io/v1alpha1/workspaces/ws-run/status");
         assert_eq!(ws["status"]["nodeName"], "node-b", "a running worktree keeps its node");
         assert_eq!(ws["status"]["conditions"][0]["reason"], "NodeDead");
-        assert!(!rec.calls().iter().any(|c| c == "PATCH /apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-run"), "pin untouched");
-        let vol = rec.body_of("PUT /apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-run/status");
+        assert!(!rec.calls().iter().any(|c| c == "PATCH /apis/kloudlite.io/v1alpha1/volumes/vol-ws-run"), "pin untouched");
+        let vol = rec.body_of("PUT /apis/kloudlite.io/v1alpha1/volumes/vol-ws-run/status");
         assert_eq!(vol["status"]["phase"], "Unavailable");
     }
 
@@ -280,20 +280,20 @@ Beside the existing unclaim tests (same harness as the one at ~line 1224). Add h
             Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![ws_placed_stopped("ws-stop", "node-b")]) },
             Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
             Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![vol_owned("vol-ws-stop", "node-b"), vol_owned("vol-live", "node-a")]) },
-            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
-            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
-            Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop/status".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
+            Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
+            Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
+            Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop/status".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
         ]);
         unclaim_dead_nodes(&ctx).await;
-        let ws = rec.body_of("PUT /apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status");
+        let ws = rec.body_of("PUT /apis/kloudlite.io/v1alpha1/workspaces/ws-stop/status");
         assert_eq!(ws["status"]["nodeName"], "");
-        assert_eq!(rec.body_of("PATCH /apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop")["spec"]["nodeName"], "");
-        assert_eq!(rec.body_of("PUT /apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop/status")["status"]["phase"], "Unavailable");
+        assert_eq!(rec.body_of("PATCH /apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop")["spec"]["nodeName"], "");
+        assert_eq!(rec.body_of("PUT /apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop/status")["status"]["phase"], "Unavailable");
         assert!(!rec.calls().iter().any(|c| c.contains("/volumes/vol-live")));
     }
 ```
 
-- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-git-agent on_a_dead_node` — FAIL.
+- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-agent on_a_dead_node` — FAIL.
 
 - [ ] **Step 3: Implement**
 
@@ -361,7 +361,7 @@ async fn release_dead_volumes(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k
 
 If `VolumeStatus` has no `conditions`, add `#[serde(default)] pub conditions: Vec<Condition>` matching `WorkspaceStatus`'s. Import `kube::api::{Patch, PatchParams}` and `std::collections::HashSet` as needed. Existing unclaim tests that used a Running `ws_placed` and expected a cleared `nodeName` must flip to `ws_placed_stopped` — that expectation is what this task changes.
 
-- [ ] **Step 4: Run tests** — `cargo test -p kloudlite-git-agent` — PASS.
+- [ ] **Step 4: Run tests** — `cargo test -p kloudlite-agent` — PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -388,10 +388,10 @@ In the controller test module, using its fake-API harness:
     async fn take_volume_wins_with_a_test_op_on_an_empty_pin() {
         let rec = Recorder::default();
         let ctx = ctx_with_routes(&rec, vec![
-            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/v1".into(), status: 200, body: vol_owned("v1", "node-a") },
+            Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/v1".into(), status: 200, body: vol_owned("v1", "node-a") },
         ]);
         assert!(take_volume(&ctx, "v1", "node-a").await.unwrap());
-        let body = rec.body_of("PATCH /apis/kloudlite-git.io/v1alpha1/volumes/v1");
+        let body = rec.body_of("PATCH /apis/kloudlite.io/v1alpha1/volumes/v1");
         assert_eq!(body[0], serde_json::json!({"op":"test","path":"/spec/nodeName","value":""}));
         assert_eq!(body[1], serde_json::json!({"op":"replace","path":"/spec/nodeName","value":"node-a"}));
     }
@@ -400,13 +400,13 @@ In the controller test module, using its fake-API harness:
     async fn take_volume_loses_quietly_when_the_test_op_fails() {
         let rec = Recorder::default();
         let ctx = ctx_with_routes(&rec, vec![
-            Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/v1".into(), status: 422, body: status_failure("test failed") },
+            Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/v1".into(), status: 422, body: status_failure("test failed") },
         ]);
         assert!(!take_volume(&ctx, "v1", "node-a").await.unwrap());
     }
 ```
 
-- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-git-agent take_volume` — FAIL (function missing).
+- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-agent take_volume` — FAIL (function missing).
 
 - [ ] **Step 3: Implement**
 
@@ -451,7 +451,7 @@ Then, in `resolve_volume`, immediately before `if vol.spec.node_name != node_nam
 
 Then in the Volume reconciler's own pass (the arm that materializes a Volume whose `subvolume_present` is already true because it was a replica), make sure the phase moves from `Unavailable` to `Ready`: the existing `volume_is_ready` path writes `Ready` on every convergent pass — verify with `grep -n "Phase::Ready" bins/agent/src/controller.rs` that the Volume arm sets it unconditionally and does not early-return on `Unavailable`. If it does, treat `Unavailable` exactly as `Pending`.
 
-- [ ] **Step 4: Run tests** — `cargo test -p kloudlite-git-agent` — PASS. Then `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- [ ] **Step 4: Run tests** — `cargo test -p kloudlite-agent` — PASS. Then `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 
 - [ ] **Step 5: Commit**
 
@@ -484,7 +484,7 @@ git commit -m "Take an unowned volume on claim with a compare-and-set on its pin
 
 `btrfs_delete` on a plain directory in the test falls back to `remove_dir_all` — if it does not already, give it that fallback when `btrfs` is not on PATH (the existing tests run on a Mac).
 
-- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-git-agent stale_worktrees` — FAIL.
+- [ ] **Step 2: Run, expect failure** — `cargo test -p kloudlite-agent stale_worktrees` — FAIL.
 
 - [ ] **Step 3: Implement**
 

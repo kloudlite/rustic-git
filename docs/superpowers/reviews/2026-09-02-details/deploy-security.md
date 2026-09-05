@@ -20,15 +20,15 @@ namespaces it makes" (`agent-admission.yaml:56-57`), but its `matchConstraints` 
 `namespaces`, `secrets` and `rolebindings` (`:69-76`). The agent also holds cluster-wide
 `pods: create` (`agent-rbac.yaml:191-193`), plus `statefulsets`, `services`, `networkpolicies`,
 `limitranges` — none namespace-pinned. `workspace-admission.yaml` would refuse a privileged /
-hostPath pod, but its binding is scoped by `namespaceSelector` on `kloudlite-git.io/kind`
+hostPath pod, but its binding is scoped by `namespaceSelector` on `kloudlite.io/kind`
 (`:79-84`), which kube-system does not carry — deliberately (`:22-24`). So a compromised agent
 (or a bug in a pod builder) can `create` a privileged, `hostPath: /`, kube-system pod on any
-node, mounting `kloudlite-git-jwt` and the agent Secret. That turns root-on-one-node into
+node, mounting `kloudlite-jwt` and the agent Secret. That turns root-on-one-node into
 root-on-the-cluster and mint-any-user's-token.
 
 Fix: add `pods`, `statefulsets`, `services`, `networkpolicies`, `limitranges` to policy 2's
 resourceRules with the same `ws-`/`wt-`/`env-` namespace test, or bind
-`kloudlite-git-workspace-pod-fence` a second time with a `matchConditions` on the agent's username
+`kloudlite-workspace-pod-fence` a second time with a `matchConditions` on the agent's username
 and no namespaceSelector.
 
 ### H2 — Team workspaces are denied by the agent's own admission policy (`wt-` namespaces)
@@ -55,13 +55,13 @@ Severity High · Category tenant isolation / blast radius
 ZeroFS listens on `0.0.0.0:2049` and is fronted by a ClusterIP Service; NFSv3 with AUTH_SYS and
 `nolock` authenticates nothing, so anyone who can reach 2049 reads and writes `{pool}/homes/*` —
 every owner's dotfiles, shell history and SSH material — for the whole region. Nothing in
-`deploy/k3s/` applies a NetworkPolicy in `kloudlite-git-system`, and the one process in that
+`deploy/k3s/` applies a NetworkPolicy in `kloudlite-system`, and the one process in that
 namespace that accepts unauthenticated internet connections (the gateway, `gateway.yaml:16-17`)
 is a pod away from it. Tenant pods are blocked only incidentally, by
 `allow_internet_egress`'s RFC-1918 exclusion (`crates/workspaces/src/k8s.rs:1222-1244`).
 
-Fix: a default-deny NetworkPolicy in `kloudlite-git-system` plus one ingress rule admitting 2049
-from `app=kloudlite-git-agent` in kube-system only — the same shape as `agent-peer.yaml`.
+Fix: a default-deny NetworkPolicy in `kloudlite-system` plus one ingress rule admitting 2049
+from `app=kloudlite-agent` in kube-system only — the same shape as `agent-peer.yaml`.
 
 ### H4 — gVisor is installed-but-not-enabled, and nothing requires a runtimeClass
 Severity High · Category tenant isolation
@@ -100,7 +100,7 @@ Any path strictly under `/wspool-prod/` is admitted, which includes
 traversal but not naming another tenant outright. Only the pod builders keep tenants apart.
 Fix: require the hostPath to start with `/wspool-prod/vol/`, `/wspool-prod/homes/`,
 `/wspool-prod/homecache/` or `/wspool-prod/attach/` *and* contain the pod's owner segment (the
-`kloudlite-git.io/owner` label the builder already stamps) — CEL can compare the two.
+`kloudlite.io/owner` label the builder already stamps) — CEL can compare the two.
 
 ### M3 — Spec-is-read-only policy misses CREATE, snapshots and volumereplicas
 `deploy/k3s/agent-admission.yaml:29-32`, `deploy/k3s/agent-rbac.yaml:147-156`
@@ -114,7 +114,7 @@ Fix: extend policy 1's resourceRules to `snapshots`/`volumereplicas`, restrict S
 to metadata (the annotation is the only intended write), and add CREATE with a shape check on
 Volume.
 
-### M4 — `kloudlite-git-api-secrets` grants full CRUD on every Secret in a workspace namespace
+### M4 — `kloudlite-api-secrets` grants full CRUD on every Secret in a workspace namespace
 `deploy/k3s/api-rbac.yaml:59-68`
 The header says the API needs "exactly two Secrets" (`:51-52`), but the rule has no
 `resourceNames`, and the RoleBinding puts it over the whole namespace — which also holds the
@@ -205,8 +205,8 @@ that the pod network is trusted here.
 - **L5** `deploy/k3s/env.example.sh` — a near-verbatim duplicate of the git-ignored `env.sh`
   (correctly untracked; the real operator CIDR is local-only). Fine as a template; flagged only
   as the one redundancy worth knowing about.
-- **L6** `deploy/kloudlite-git.yaml:452-456,483-488` — the api tier reaches the k3s cluster with a
-  long-lived ServiceAccount kubeconfig in the `kloudlite-git-k3s-kubeconfig` Secret, in a different
+- **L6** `deploy/kloudlite.yaml:452-456,483-488` — the api tier reaches the k3s cluster with a
+  long-lived ServiceAccount kubeconfig in the `kloudlite-k3s-kubeconfig` Secret, in a different
   cloud. No rotation path is documented, and the `ponytail:` note says the design replaces it.
   Add a rotation step to `deploy/k3s/README.md` until then.
 

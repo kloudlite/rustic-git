@@ -1,11 +1,11 @@
 [package]
-name = "kloudlite-git-core"
+name = "kloudlite-core"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_core"
+name = "kloudlite_core"
 
 [dependencies]
 tracing = { workspace = true }

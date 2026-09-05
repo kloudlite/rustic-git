@@ -22,7 +22,7 @@ use std::sync::atomic::AtomicBool;
 
 /// How many packs a repo may hold before the owner's lane consolidates them.
 pub fn max_packs() -> usize {
-    kloudlite_git_storage::config::env("KLOUDLITE_GIT_REPACK_PACKS", "32").parse().unwrap_or(32)
+    kloudlite_storage::config::env("KLOUDLITE_REPACK_PACKS", "32").parse().unwrap_or(32)
 }
 
 /// Extension trait, not an inherent `impl Store`: `Store` lives in `storage` and the orphan rule

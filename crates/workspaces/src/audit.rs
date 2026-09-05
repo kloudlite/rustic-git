@@ -42,7 +42,7 @@ fn object_key(ts: &str, rand_suffix: &str) -> String {
 pub async fn record(os: &Arc<dyn ObjectStore>, entry: &AuditEntry) -> Result<(), slatedb::object_store::Error> {
     let mut buf = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut buf);
-    let key = OsPath::from(object_key(&entry.ts, &kloudlite_git_core::hex(&buf)));
+    let key = OsPath::from(object_key(&entry.ts, &kloudlite_core::hex(&buf)));
     let bytes = serde_json::to_vec(entry).expect("AuditEntry has no non-serializable field");
     os.put(&key, PutPayload::from(bytes)).await?;
     Ok(())

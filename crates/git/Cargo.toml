@@ -1,18 +1,18 @@
 [package]
-name = "kloudlite-git-git"
+name = "kloudlite-vcs"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_git"
+name = "kloudlite_vcs"
 
 [dependencies]
 tracing = { workspace = true }
-kloudlite-git-core = { path = "../core" }
-kloudlite-git-storage = { path = "../storage" }
-kloudlite-git-gitbase = { path = "../gitbase" }
-kloudlite-git-app = { path = "../app" }
+kloudlite-core = { path = "../core" }
+kloudlite-storage = { path = "../storage" }
+kloudlite-gitbase = { path = "../gitbase" }
+kloudlite-app = { path = "../app" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 slatedb = { workspace = true }

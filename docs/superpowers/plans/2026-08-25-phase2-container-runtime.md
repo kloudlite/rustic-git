@@ -56,7 +56,7 @@ before starting. This plan implements it; it does not re-derive it.
 | `bins/agent/src/runtime/mod.rs` | Daemon connection + version check, label constants, `RtErr` → `EngErr` mapping, `re-export`s. |
 | `bins/agent/src/runtime/spec.rs` | `ContainerSpec`, `Environment`/`Workspace` → `Vec<ContainerSpec>`, `mount_source` (the C1 chokepoint), `spec_hash`. |
 | `bins/agent/src/runtime/reconcile.rs` | `up` / `down` / `delete` / `start` / `stop` / `is_running` / `list_ours`, all label-driven. |
-| `bins/agent/src/runtime/net.rs` | `ensure_network` / `remove_network` for `kloudlite-git-{env_id}`. |
+| `bins/agent/src/runtime/net.rs` | `ensure_network` / `remove_network` for `kloudlite-{env_id}`. |
 | `bins/agent/tests/runtime_daemon.rs` | `#[ignore]`d integration tests against a real daemon. |
 
 **Modified**
@@ -98,11 +98,11 @@ Produces:
 
 ```rust
 // bins/agent/src/runtime/mod.rs
-pub const L_OWNER: &str = "kloudlite-git.owner";
-pub const L_KIND: &str = "kloudlite-git.kind";
-pub const L_ID: &str = "kloudlite-git.id";
-pub const L_SERVICE: &str = "kloudlite-git.service";
-pub const L_SPEC: &str = "kloudlite-git.spec";
+pub const L_OWNER: &str = "kloudlite.owner";
+pub const L_KIND: &str = "kloudlite.kind";
+pub const L_ID: &str = "kloudlite.id";
+pub const L_SERVICE: &str = "kloudlite.service";
+pub const L_SPEC: &str = "kloudlite.spec";
 
 /// Minimum daemon API we are willing to talk. `create_network` with `EndpointSettings.aliases`
 /// and label filters on `list_containers` both predate this comfortably; the pin exists so a
@@ -125,7 +125,7 @@ pub fn is_not_found(e: &bollard::errors::Error) -> bool;
       `serde_yaml = { workspace = true }` for `serde_yml = { workspace = true }` and fix the one
       call site in `compose.rs` — or skip it, since Task 6 deletes that file; if `compose.rs`
       still compiles at this point just leave `serde_yaml` in the workspace table until Task 6.
-      Run `cargo build -p kloudlite-git-agent-bin`.
+      Run `cargo build -p kloudlite-agent-bin`.
       Commit: `git commit -am "Add bollard and serde_yml, drop serde_yaml"`
 
 - [ ] **Step 2 (failing test):** In `bins/agent/src/runtime/mod.rs` write the module with the
@@ -140,17 +140,17 @@ pub fn is_not_found(e: &bollard::errors::Error) -> bool;
 
           #[test]
           fn label_names_are_the_documented_contract() {
-              assert_eq!(L_OWNER, "kloudlite-git.owner");
-              assert_eq!(L_KIND, "kloudlite-git.kind");
-              assert_eq!(L_ID, "kloudlite-git.id");
-              assert_eq!(L_SERVICE, "kloudlite-git.service");
-              assert_eq!(L_SPEC, "kloudlite-git.spec");
+              assert_eq!(L_OWNER, "kloudlite.owner");
+              assert_eq!(L_KIND, "kloudlite.kind");
+              assert_eq!(L_ID, "kloudlite.id");
+              assert_eq!(L_SERVICE, "kloudlite.service");
+              assert_eq!(L_SPEC, "kloudlite.spec");
           }
       }
       ```
 
       Add `mod runtime;` to `bins/agent/src/lib.rs`.
-      Run: `cargo test -p kloudlite-git-agent-bin runtime::` — fails to compile (no module yet).
+      Run: `cargo test -p kloudlite-agent-bin runtime::` — fails to compile (no module yet).
 
 - [ ] **Step 3 (implement):**
 
@@ -161,17 +161,17 @@ pub fn is_not_found(e: &bollard::errors::Error) -> bool;
       //! from depending on a rendered compose file stops being expressible.
 
       use bollard::Docker;
-      use kloudlite_git_workspaces::engine::EngErr;
+      use kloudlite_workspaces::engine::EngErr;
 
       pub mod net;
       pub mod reconcile;
       pub mod spec;
 
-      pub const L_OWNER: &str = "kloudlite-git.owner";
-      pub const L_KIND: &str = "kloudlite-git.kind";
-      pub const L_ID: &str = "kloudlite-git.id";
-      pub const L_SERVICE: &str = "kloudlite-git.service";
-      pub const L_SPEC: &str = "kloudlite-git.spec";
+      pub const L_OWNER: &str = "kloudlite.owner";
+      pub const L_KIND: &str = "kloudlite.kind";
+      pub const L_ID: &str = "kloudlite.id";
+      pub const L_SERVICE: &str = "kloudlite.service";
+      pub const L_SPEC: &str = "kloudlite.spec";
 
       pub const MIN_API: &str = "1.41";
 
@@ -211,7 +211,7 @@ pub fn is_not_found(e: &bollard::errors::Error) -> bool;
       same-width `1.NN` strings; that is every version Docker has ever shipped.
       `// ponytail: lexical version compare, fine while the daemon stays on 1.NN`.
 
-- [ ] **Step 4:** Run `cargo test -p kloudlite-git-agent-bin runtime::` — passes.
+- [ ] **Step 4:** Run `cargo test -p kloudlite-agent-bin runtime::` — passes.
       `cargo clippy --workspace -- -D warnings` — clean.
       Commit: `git commit -am "Add the runtime module skeleton with label constants and a daemon version pin"`
 
@@ -226,7 +226,7 @@ This is the security task. Everything else waits on `mount_source`.
 **Interfaces**
 
 Consumes: `runtime::{L_OWNER, L_KIND, L_ID, L_SERVICE, L_SPEC}`,
-`kloudlite_git_workspaces::model::{Environment, Service, Mount, PortMap}` (Task 5 adds `PortMap`;
+`kloudlite_workspaces::model::{Environment, Service, Mount, PortMap}` (Task 5 adds `PortMap`;
 until then, code the `ports` field as `Vec<PortMap>` and land Task 5's model change first if
 you prefer a compiling order — the plan orders Task 5 after because its API work depends on
 this validator).
@@ -297,7 +297,7 @@ pub fn ws_container_name(ws_id: &str) -> String;                  // ws-{id}
       }
       ```
 
-- [ ] **Step 2:** Run `cargo test -p kloudlite-git-agent-bin spec::` — fails to compile.
+- [ ] **Step 2:** Run `cargo test -p kloudlite-agent-bin spec::` — fails to compile.
 
 - [ ] **Step 3 (implement `mount_source`):**
 
@@ -308,7 +308,7 @@ pub fn ws_container_name(ws_id: &str) -> String;                  // ws-{id}
       /// because a bind string is colon-delimited, so a colon-bearing folder would let a caller
       /// append their own `:target:ro` field.
       pub fn mount_source(live: &Path, folder: &str) -> Result<PathBuf, EngErr> {
-          if !kloudlite_git_storage::store::valid_segment(folder) {
+          if !kloudlite_storage::store::valid_segment(folder) {
               return Err(EngErr(format!("invalid volume folder {folder:?}")));
           }
           Ok(live.join("volumes").join(folder))
@@ -325,10 +325,10 @@ pub fn ws_container_name(ws_id: &str) -> String;                  // ws-{id}
       }
       ```
 
-      `bins/agent/Cargo.toml` needs `kloudlite-git-storage = { path = "../../crates/storage" }`
+      `bins/agent/Cargo.toml` needs `kloudlite-storage = { path = "../../crates/storage" }`
       (it reaches it transitively today; make it direct).
 
-- [ ] **Step 4:** Run `cargo test -p kloudlite-git-agent-bin spec::` — passes.
+- [ ] **Step 4:** Run `cargo test -p kloudlite-agent-bin spec::` — passes.
       Commit: `git commit -am "Build bind sources only from validated segments"`
 
 - [ ] **Step 5 (failing test — hashing):**
@@ -363,12 +363,12 @@ pub fn ws_container_name(ws_id: &str) -> String;                  // ws-{id}
           // Labels are DERIVED from the spec (the spec label is the hash itself), so they must
           // not feed the hash — otherwise no fixed point exists.
           let mut e = a.clone();
-          e.labels.insert("kloudlite-git.spec".into(), "whatever".into());
+          e.labels.insert("kloudlite.spec".into(), "whatever".into());
           assert_eq!(spec_hash(&a), spec_hash(&e));
       }
       ```
 
-- [ ] **Step 6:** Run `cargo test -p kloudlite-git-agent-bin spec::` — fails.
+- [ ] **Step 6:** Run `cargo test -p kloudlite-agent-bin spec::` — fails.
 
 - [ ] **Step 7 (implement):**
 
@@ -421,11 +421,11 @@ pub fn ws_container_name(ws_id: &str) -> String;                  // ws-{id}
           assert_eq!(specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["env-e1-app-1", "env-e1-db-1"]);
           let db = specs.iter().find(|s| s.service == "db").unwrap();
           assert_eq!(db.binds, ["/pool/vol/env-e1/live/volumes/data:/data/db"]);
-          assert_eq!(db.labels["kloudlite-git.id"], "env-e1");
-          assert_eq!(db.labels["kloudlite-git.kind"], "env");
-          assert_eq!(db.labels["kloudlite-git.service"], "db");
-          assert_eq!(db.labels["kloudlite-git.owner"], env.owner);
-          assert_eq!(db.labels["kloudlite-git.spec"], spec_hash(db));
+          assert_eq!(db.labels["kloudlite.id"], "env-e1");
+          assert_eq!(db.labels["kloudlite.kind"], "env");
+          assert_eq!(db.labels["kloudlite.service"], "db");
+          assert_eq!(db.labels["kloudlite.owner"], env.owner);
+          assert_eq!(db.labels["kloudlite.spec"], spec_hash(db));
       }
 
       #[test]
@@ -439,7 +439,7 @@ pub fn ws_container_name(ws_id: &str) -> String;                  // ws-{id}
       fn ws_spec_keeps_the_double_bind_and_the_ws_name() {
           let s = ws_spec("w1", "alice", "nginx:alpine", Path::new("/pool/vol/w1/live")).unwrap();
           assert_eq!(s.name, "ws-w1");
-          assert_eq!(s.labels["kloudlite-git.kind"], "ws");
+          assert_eq!(s.labels["kloudlite.kind"], "ws");
           assert_eq!(s.binds, [
               "/pool/vol/w1/live:/workspace",
               "/pool/vol/w1/live:/usr/share/nginx/html:ro",
@@ -472,7 +472,7 @@ Consumes: `runtime::{connect, err, is_not_found, L_ID, L_OWNER}`.
 Produces:
 
 ```rust
-/// `kloudlite-git-{env_id}`, deliberately NOT `env-{id}`: a compose project network from the
+/// `kloudlite-{env_id}`, deliberately NOT `env-{id}`: a compose project network from the
 /// implementation this replaces is already called `env-{id}_default`-ish, and during the
 /// migration window both may exist on the same host.
 pub fn net_name(env_id: &str) -> String;
@@ -485,11 +485,11 @@ pub async fn remove_network(d: &Docker, env_id: &str) -> Result<(), EngErr>;
       ```rust
       #[test]
       fn net_name_cannot_collide_with_a_compose_project_network() {
-          assert_eq!(net_name("e1"), "kloudlite-git-e1");
+          assert_eq!(net_name("e1"), "kloudlite-e1");
           assert_ne!(net_name("e1"), "env-e1");
       }
       ```
-      Run: `cargo test -p kloudlite-git-agent-bin net::` — fails.
+      Run: `cargo test -p kloudlite-agent-bin net::` — fails.
 
 - [ ] **Step 2 (implement):**
 
@@ -497,7 +497,7 @@ pub async fn remove_network(d: &Docker, env_id: &str) -> Result<(), EngErr>;
       use bollard::network::{CreateNetworkOptions, InspectNetworkOptions};
 
       pub fn net_name(env_id: &str) -> String {
-          format!("kloudlite-git-{env_id}")
+          format!("kloudlite-{env_id}")
       }
 
       /// Idempotent. Create-then-tolerate-409 rather than inspect-then-create: two jobs for the
@@ -576,12 +576,12 @@ i.e. exactly the container-name prefix, so callers never construct two different
       #[test]
       fn ours_filter_matches_our_label_or_the_legacy_compose_project() {
           let f = ours_filter("env-e1");
-          assert_eq!(f["label"], ["kloudlite-git.id=env-e1"]);
+          assert_eq!(f["label"], ["kloudlite.id=env-e1"]);
           let f = legacy_filter("env-e1");
           assert_eq!(f["label"], ["com.docker.compose.project=env-e1"]);
       }
       ```
-      Run: `cargo test -p kloudlite-git-agent-bin reconcile::` — fails.
+      Run: `cargo test -p kloudlite-agent-bin reconcile::` — fails.
 
 - [ ] **Step 2 (implement the filters and `list_by`):**
 
@@ -626,7 +626,7 @@ i.e. exactly the container-name prefix, so callers never construct two different
       ```rust
       //! Integration tests against a REAL Docker daemon. `#[ignore]`d so `cargo test` on a
       //! machine without one still passes; run them on a docker host with
-      //! `cargo test -p kloudlite-git-agent-bin --test runtime_daemon -- --ignored --test-threads=1`.
+      //! `cargo test -p kloudlite-agent-bin --test runtime_daemon -- --ignored --test-threads=1`.
       //! Single-threaded because they share the daemon's container namespace.
 
       #[tokio::test]
@@ -644,7 +644,7 @@ i.e. exactly the container-name prefix, so callers never construct two different
           runtime::reconcile::delete(&d, "env-dns0").await.unwrap();
       }
       ```
-      Run: `cargo test -p kloudlite-git-agent-bin --test runtime_daemon -- --ignored` — fails.
+      Run: `cargo test -p kloudlite-agent-bin --test runtime_daemon -- --ignored` — fails.
 
 - [ ] **Step 5 (implement `create_one`, `down`, `delete`, `start`, `stop`, `is_running`):**
 
@@ -989,7 +989,7 @@ i.e. exactly the container-name prefix, so callers never construct two different
 
 Consumes: `runtime::spec::{mount_source, mount_target}` semantics (duplicated as a validator
 here — the API crate must not depend on the agent bin, so `api.rs` calls
-`kloudlite_git_storage::store::valid_segment` directly, the same predicate).
+`kloudlite_storage::store::valid_segment` directly, the same predicate).
 Produces:
 
 ```rust
@@ -1043,7 +1043,7 @@ have neither key, and a non-defaulted field would fail to deserialize every exis
           assert_eq!(svcs[0].ports, [PortMap { container: 27017, host: None }]);
       }
       ```
-      Run: `cargo test -p kloudlite-git-workspaces api::` — fails.
+      Run: `cargo test -p kloudlite-workspaces api::` — fails.
 
 - [ ] **Step 2 (implement):** add the model fields, then in `api.rs`:
 
@@ -1054,11 +1054,11 @@ have neither key, and a non-defaulted field would fail to deserialize every exis
       /// that is enforced in both places on purpose.
       fn validate_services(svcs: &[Service]) -> Result<(), String> {
           for s in svcs {
-              if !kloudlite_git_storage::store::valid_segment(&s.name) {
+              if !kloudlite_storage::store::valid_segment(&s.name) {
                   return Err(format!("invalid service name {:?}", s.name));
               }
               for m in &s.mounts {
-                  if !kloudlite_git_storage::store::valid_segment(&m.folder) {
+                  if !kloudlite_storage::store::valid_segment(&m.folder) {
                       return Err(format!("invalid volume folder {:?}", m.folder));
                   }
                   if !m.path.starts_with('/') || m.path.contains(':') {
@@ -1133,7 +1133,7 @@ have neither key, and a non-defaulted field would fail to deserialize every exis
       `text/yaml`, read the body as a string and `parse_env_yaml` it; otherwise the existing JSON
       path. Keep `NewEnvironment`'s JSON shape unchanged.
 
-- [ ] **Step 3:** Run `cargo test -p kloudlite-git-workspaces` — passes.
+- [ ] **Step 3:** Run `cargo test -p kloudlite-workspaces` — passes.
       Commit: `git commit -am "Accept compose-shaped YAML as an input format and refuse unknown keys"`
 
 - [ ] **Step 4:** Have `EnvUp`'s done handler write `up`'s `Vec<Published>` onto the
@@ -1226,10 +1226,10 @@ runs forever. Labels make ownership queryable for the first time.
           assert_eq!(doomed, ["env-c", "ws-d"]);
       }
       ```
-      Run: `cargo test -p kloudlite-git-agent-bin janitor` — fails.
+      Run: `cargo test -p kloudlite-agent-bin janitor` — fails.
 
 - [ ] **Step 2 (implement):** `orphan_ids` is a set difference. In `spawn_janitor`'s tick, call
-      `runtime::reconcile::list_ours(&d)`, group by the `kloudlite-git.id` label, ask the meta store
+      `runtime::reconcile::list_ours(&d)`, group by the `kloudlite.id` label, ask the meta store
       which of those ids still exist, and `runtime::reconcile::delete` the rest.
 
       **Fail closed:** a store error must skip the sweep entirely, never treat "I could not ask"
@@ -1248,7 +1248,7 @@ runs forever. Labels make ownership queryable for the first time.
 - [ ] **Step 1:** The `docker compose version` preflight (line 40) becomes a daemon check —
       `docker version --format '{{.Server.APIVersion}}'` — since compose is no longer required.
       The cleanup trap (line 77) drops its `-f "$ENV_DIR/docker-compose.yml"` teardown for
-      `docker rm -f $(docker ps -aq --filter "label=kloudlite-git.id=env-$ENV_ID")`, which needs no
+      `docker rm -f $(docker ps -aq --filter "label=kloudlite.id=env-$ENV_ID")`, which needs no
       `ENV_DIR` at all. Delete the `ENV_DIR=` assignment.
 
 - [ ] **Step 2:** Extend the environment create (line ~424) to two services, and assert DNS:
@@ -1278,7 +1278,7 @@ runs forever. Labels make ownership queryable for the first time.
       rm -rf "$MOUNT/env/$ENV_ID"   # simulate the half-removed directory M1 stranded jobs on
       curl -fsS -X DELETE "$BASE/v1/environments/$ENV_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
       wait_env_state "$ENV_ID" deleted
-      [ -z "$(docker ps -aq --filter "label=kloudlite-git.id=env-$ENV_ID")" ] \
+      [ -z "$(docker ps -aq --filter "label=kloudlite.id=env-$ENV_ID")" ] \
         || fail "containers survived the environment delete"
       ```
 
@@ -1296,7 +1296,7 @@ runs forever. Labels make ownership queryable for the first time.
 ## Done when
 
 - `cargo test` and `cargo clippy --workspace -- -D warnings` are clean.
-- `cargo test -p kloudlite-git-agent-bin --test runtime_daemon -- --ignored --test-threads=1`
+- `cargo test -p kloudlite-agent-bin --test runtime_daemon -- --ignored --test-threads=1`
   passes on a docker host.
 - `./tests/ws_e2e.sh` passes on the btrfs VM (exit 0, not 77).
 - `grep -rn "docker compose\|serde_yaml" crates bins` returns nothing outside `tests/`.

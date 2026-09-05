@@ -95,11 +95,11 @@ controller-owned fact and the API does not copy facts into spec. Every agent wat
 `spec.nodeName` is its own. `status: { phase: pending|working|done|error, observedGeneration,
 snapshotId, lineageTip, at, conditions: [Progressing, Ready] }`.
 
-**Finalizer** `kloudlite-git.io/snapshot`: a delete while `working` must wait for the in-flight
+**Finalizer** `kloudlite.io/snapshot`: a delete while `working` must wait for the in-flight
 btrfs send / upload to finish (the same reason `Volume` has one) — a request is removed only
 when nothing is running for it.
 
-Cluster-scoped, labelled `kloudlite-git.io/owner` and `kloudlite-git.io/volume`. **Not owned by the
+Cluster-scoped, labelled `kloudlite.io/owner` and `kloudlite.io/volume`. **Not owned by the
 Volume**: a snapshot outlives a deleted workspace, because the thing it names still exists.
 
 The record: the registry commit record (`vol/{owner}/{id}` on the server tier, written by the
@@ -170,8 +170,8 @@ reconciler waits on `NamespaceReady` for its own namespace rather than creating 
 ## Placement
 
 A `Workspace` with empty `status.nodeName` is *unplaced*. Each agent runs a second `Workspace`
-watch with field selector `status.nodeName=` (empty) — only agents on `kloudlite-git.io/session`
-nodes do this for Workspaces; only agents on `kloudlite-git.io/env` nodes for Environments.
+watch with field selector `status.nodeName=` (empty) — only agents on `kloudlite.io/session`
+nodes do this for Workspaces; only agents on `kloudlite.io/env` nodes for Environments.
 
 Claim, in the reconciler of that watch (this node = `me`):
 
@@ -219,7 +219,7 @@ for. Every dependency below is wired as (1) or (2); `requeue` is only ever the b
 | Reconciler | Watches (primary) | Also watches → mapped to primary by | Woken by |
 |---|---|---|---|
 | Placement (per agent, its role) | `Workspace`/`Environment` with `status.nodeName=` (empty) | — | create of an unplaced object, or a cleared `nodeName` |
-| Workspace | `Workspace` with `status.nodeName={node}` | `Volume` → ownerReference; `Pod` → ownerReference (label-selected to `kloudlite-git.io/kind=workspace`); `OwnerBinding` → `spec.owner` == binding owner; `Workspace` → `storage.source.cloneOf.workspace` (a clone waits on its source's `compatibleNodes`) | claim write, Volume status (`ready`), pod readiness, `NamespaceReady` |
+| Workspace | `Workspace` with `status.nodeName={node}` | `Volume` → ownerReference; `Pod` → ownerReference (label-selected to `kloudlite.io/kind=workspace`); `OwnerBinding` → `spec.owner` == binding owner; `Workspace` → `storage.source.cloneOf.workspace` (a clone waits on its source's `compatibleNodes`) | claim write, Volume status (`ready`), pod readiness, `NamespaceReady` |
 | Environment | `Environment` with `status.nodeName={node}` | `Volume` → ownerReference; `Deployment` → ownerReference; `SnapshotRequest` → ownerReference (the stop snapshot is its child) | claim write, Volume status, deployment readiness, stop snapshot `done` |
 | Volume | `Volume` with `spec.nodeName={node}` | — | creation by parent, finalizer on delete |
 | SnapshotRequest | all `SnapshotRequest`s, acting only when the named Volume is on this node | `Volume` → `spec.volume` (a request created before its Volume is placed waits) | creation by the API (push) or by the Environment reconciler (stop); finalizer on delete |
@@ -246,7 +246,7 @@ enters the node's selector. No poll.
      image: $WS_GIT_INIT_IMAGE   # pinned alpine/git from the agent env; any workspace image works
      command: sh -c 'set -e; [ "$(ls -A /workspace)" ] || git clone --depth 1 --single-branch --branch "$BRANCH" "$URL" /workspace'
      env: GIT_SSH_COMMAND (same value as the main container), URL=ssh://git@{WS_GIT_SSH_HOST}[:{port}]/{owner}/{repo}.git, BRANCH
-     volumeMounts: live at /workspace, user-key at /etc/kloudlite-git/ssh (both as the main container)
+     volumeMounts: live at /workspace, user-key at /etc/kloudlite/ssh (both as the main container)
      securityContext: hardened()   # same user; files land owned by the workspace user
      ```
      `WS_GIT_SSH_HOST` / `WS_GIT_SSH_PORT` come from the agent's env (DaemonSet), as

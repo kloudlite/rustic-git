@@ -53,7 +53,7 @@ are deliberately gone, and `N>=2` is a durability requirement.
 - Modify: `crates/workspaces/src/crd.rs` — add `Snapshot` + `SnapshotStatus`, `VolumeReplica` +
   `VolumeReplicaStatus`; add `replicas: u32` (default 2) to `VolumeSpec`; add `head: Option<String>`
   and `durable: Option<String>` to `WorkspaceStatus` and `EnvironmentStatus`
-- Regenerate: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml` (deploy/k3s/crds.yaml is generated — never hand-edit)
+- Regenerate: `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml` (deploy/k3s/crds.yaml is generated — never hand-edit)
 - Test: `mod tests` in crd.rs, and the crd_yaml snapshot test
 
 **Interfaces (produces):**

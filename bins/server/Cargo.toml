@@ -1,28 +1,28 @@
 [package]
-name = "kloudlite-git-server"
+name = "kloudlite-server"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]                      # thin lib so the workspace test host (Task 11) can drive the router
-name = "kloudlite_git_server"
+name = "kloudlite_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "kloudlite-git"        # binary name unchanged
+name = "kloudlite"        # binary name unchanged
 path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
 metrics = { workspace = true }
-kloudlite-git-core = { path = "../../crates/core", features = ["ssh"] }
-kloudlite-git-storage = { path = "../../crates/storage" }
-kloudlite-git-gitbase = { path = "../../crates/gitbase" }
-kloudlite-git-pulls = { path = "../../crates/pulls", features = ["check"] }
-kloudlite-git-app = { path = "../../crates/app" }
-kloudlite-git-git = { path = "../../crates/git" }
-kloudlite-git-registry = { path = "../../crates/registry" }
-kloudlite-git-workspaces = { path = "../../crates/workspaces" }
+kloudlite-core = { path = "../../crates/core", features = ["ssh"] }
+kloudlite-storage = { path = "../../crates/storage" }
+kloudlite-gitbase = { path = "../../crates/gitbase" }
+kloudlite-pulls = { path = "../../crates/pulls", features = ["check"] }
+kloudlite-app = { path = "../../crates/app" }
+kloudlite-vcs = { path = "../../crates/git" }
+kloudlite-registry = { path = "../../crates/registry" }
+kloudlite-workspaces = { path = "../../crates/workspaces" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

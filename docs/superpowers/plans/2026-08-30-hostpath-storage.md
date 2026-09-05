@@ -24,7 +24,7 @@ costs this accepts.
   safer than what it replaces; never emit an untyped `hostPath`.
 - **`nodeSelector`, never `nodeName`.** `nodeName` bypasses the scheduler and with it resource
   packing, taints and admission. The hostname selector is added ALONGSIDE the existing
-  `kloudlite-git.io/{role}` selector and toleration — it does not replace them.
+  `kloudlite.io/{role}` selector and toleration — it does not replace them.
 - **Host paths are agent-constructed only.** Every path is built from `PodContext.pool` and an id.
   No user-supplied value ever reaches a `hostPath.path`. `validate_mount` and its `valid_segment`
   check on `Mount::folder` stay EXACTLY as they are — that check is what keeps a user's folder name
@@ -102,7 +102,7 @@ Add to `mod tests` in `crates/workspaces/src/k8s.rs`:
         let s = p.spec.unwrap();
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
-        assert_eq!(sel.get("kloudlite-git.io/session").map(String::as_str), Some("true"));
+        assert_eq!(sel.get("kloudlite.io/session").map(String::as_str), Some("true"));
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 ```
@@ -112,7 +112,7 @@ them; match whatever the neighbouring tests already call.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces host_path`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-workspaces host_path`
 Expected: FAIL — the volumes are still `persistentVolumeClaim` and there is no hostname selector.
 
 - [ ] **Step 3: Rewrite the four volume builders**
@@ -203,7 +203,7 @@ fn placement(spec: &mut PodSpec, role: &str, node: &str) {
     // mounted from the host there is no PV to carry it, and an unpinned pod would mount an empty
     // directory on the wrong node.
     spec.node_selector = Some(BTreeMap::from([
-        (format!("kloudlite-git.io/{role}"), "true".to_string()),
+        (format!("kloudlite.io/{role}"), "true".to_string()),
         ("kubernetes.io/hostname".to_string(), node.to_string()),
     ]));
 ```
@@ -214,7 +214,7 @@ and the `PodContext.pool` doc comment claiming "Only the PV needs it".
 
 - [ ] **Step 6: Run the tests**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-workspaces`
 Expected: PASS. Existing assertions that a pod carries NO `host_path` (`:1652`, `:1659`, `:1905`,
 `:2099`) now assert the opposite of the design — invert them to assert no `persistent_volume_claim`.
 That is the one case in this plan where changing an assertion is correct, because the rule it
@@ -262,7 +262,7 @@ to start.
 - [ ] **Step 3: Test and commit**
 
 ```bash
-CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces
+CARGO_INCREMENTAL=0 cargo test -p kloudlite-workspaces
 git add crates/workspaces/src/k8s.rs
 git commit -m "Drop the workspace namespace floor to privileged for host mounts"
 ```
@@ -289,7 +289,7 @@ git commit -m "Drop the workspace namespace floor to privileged for host mounts"
 async fn a_workspace_reconcile_writes_no_storage_objects() {
     let (ctx, rec) = ctx_ready();
     let w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
-    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert!(
         rec.calls().iter().all(|c| !c.1.contains("persistentvolume")),
         "no PV or PVC traffic at all: {:?}", rec.calls()
@@ -300,7 +300,7 @@ async fn a_workspace_reconcile_writes_no_storage_objects() {
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin no_storage_objects`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-agent-bin no_storage_objects`
 Expected: FAIL — `ensure_storage` still writes both halves.
 
 - [ ] **Step 3: Delete `ensure_storage` and its five call sites**
@@ -346,7 +346,7 @@ git commit -m "Delete the PersistentVolume layer and its bind gate"
 
 **Files:**
 - Modify: `deploy/k3s/agent-rbac.yaml` — the header table IS the role; both must change together
-- Delete: the `kloudlite-git-local` StorageClass manifest (find it under `deploy/`)
+- Delete: the `kloudlite-local` StorageClass manifest (find it under `deploy/`)
 
 - [ ] **Step 1: Remove the rules**
 
@@ -369,10 +369,10 @@ controller rebuild. Add to `deploy/k3s/README.md`:
 Pod volumes cannot be patched, so pods built against PVCs are deleted and recreated in the new
 shape. After rolling the agent:
 
-    kubectl delete pods -A -l kloudlite-git.io/kind=workspace
-    kubectl delete pods -A -l kloudlite-git.io/kind=environment
-    kubectl delete pvc -A -l kloudlite-git.io/owner
-    kubectl delete pv -l kloudlite-git.io/owner
+    kubectl delete pods -A -l kloudlite.io/kind=workspace
+    kubectl delete pods -A -l kloudlite.io/kind=environment
+    kubectl delete pvc -A -l kloudlite.io/owner
+    kubectl delete pv -l kloudlite.io/owner
 
 Each running workspace restarts once. Nothing on disk is touched: the subvolumes the PVs pointed at
 are the same ones the pods now mount directly.
@@ -435,7 +435,7 @@ constrains the agent's CRD writes and matches pods **not at all**, which is why 
 rather than a rule added there.
 
 **Interfaces:**
-- Consumes: the `kloudlite-git.io/kind` label on namespaces (`workspace` / `environment`), written by
+- Consumes: the `kloudlite.io/kind` label on namespaces (`workspace` / `environment`), written by
   `k8s::namespace`.
 - Produces: no Rust API. One manifest, applied alongside `agent-rbac.yaml`.
 
@@ -455,7 +455,7 @@ after the prefix so `/wspool-prod-evil` does not pass a naive `startsWith`, and 
 containing `..`.
 
 Bind with `validationActions: ["Deny"]` and a `namespaceSelector` on
-`kloudlite-git.io/kind in (workspace, environment)`.
+`kloudlite.io/kind in (workspace, environment)`.
 
 Two things this must NOT catch, and a test of whether the selector is right: the agent's own
 DaemonSet (privileged, hostPath, in `kube-system`) and the gateway. Both live outside the selected
@@ -465,7 +465,7 @@ Set `failurePolicy: Fail`, matching `agent-admission.yaml`.
 
 - [ ] **Step 2: Note the honest limit of the namespace selector**
 
-If a namespace ever lacked the `kloudlite-git.io/kind` label, the policy would not apply to it. Write
+If a namespace ever lacked the `kloudlite.io/kind` label, the policy would not apply to it. Write
 that down in the file's header comment rather than leaving it implicit. It is acceptable because the
 same code path (`k8s::namespace`, server-side applied on every binding reconcile) writes both that
 label and the PSA level — a namespace missing the label is a namespace that never got `privileged`
@@ -500,7 +500,7 @@ There is no cluster here and no Rust to run for the manifest itself. Verify by:
 - checking each CEL expression by hand against `k8s::workspace_pod`'s real output — every mount it
   emits must PASS. Walk the four volumes (`live`, `nix`, `home`, `attach`) and both nix subPath
   mounts explicitly in your report. A policy that refuses our own pods is worse than no policy.
-- `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces --locked` for the comment edits.
+- `CARGO_INCREMENTAL=0 cargo test -p kloudlite-workspaces --locked` for the comment edits.
 
 - [ ] **Step 6: Commit**
 

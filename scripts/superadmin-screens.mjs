@@ -12,11 +12,11 @@
 // and the cookie is unmintable without the deployment secret.
 //
 // Usage (a laptop with no cluster):
-//   cd web && KLOUDLITE_GIT_ADMIN_FIXTURES=1 AUTH_SECRET=dev-secret AUTH_URL=http://localhost:3000 \
+//   cd web && KLOUDLITE_ADMIN_FIXTURES=1 AUTH_SECRET=dev-secret AUTH_URL=http://localhost:3000 \
 //     bun run dev
 //   AUTH_SECRET=dev-secret node scripts/superadmin-screens.mjs [http://localhost:3000]
 //
-// `KLOUDLITE_GIT_ADMIN_FIXTURES=1` is what makes the pages render without an admin API: every GET the
+// `KLOUDLITE_ADMIN_FIXTURES=1` is what makes the pages render without an admin API: every GET the
 // console makes is answered from web/apps/web/src/lib/fixtures/superadmin.ts. Writes are not faked,
 // so the forms on these screens still need a real cluster.
 import { spawn } from "node:child_process";

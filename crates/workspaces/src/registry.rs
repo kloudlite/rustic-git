@@ -1,12 +1,12 @@
 //! Where a volume's snapshot history lives: the `vol/{owner}/{name}` registry namespace.
 //!
-//! One keyspace over from `kloudlite_git_registry::store`'s image pattern, and deliberately the same
+//! One keyspace over from `kloudlite_registry::store`'s image pattern, and deliberately the same
 //! shape: a volume gets its own SlateDB, opened through the same storage pool as repos and images
 //! (`vol` joins `RESERVED_OWNERS` so no repo or image can collide with it), routed by the same
 //! ownership middleware. Read-only in PRODUCTION — nothing writes a `SnapshotRecord` any more, the
 //! write side (`vol_agent.rs`) went with the durable-snapshots cutover (see
 //! `docs/superpowers/specs/2026-09-03-durable-snapshots-design.md`) — but `append_snapshots` stays
-//! because `tests/browse_http.rs` (root `kloudlite-git-tests`, exercising `browse_api::volumes` —
+//! because `tests/browse_http.rs` (root `kloudlite-tests`, exercising `browse_api::volumes` —
 //! FROZEN, keep-until-drained) has no other way to seed a pre-cutover row for the frozen read side
 //! to serve.
 //!
@@ -14,8 +14,8 @@
 //! `SnapshotRecord` (immutable once written — a snapshot is content-addressed by its own id, never
 //! mutated).
 
-use kloudlite_git_core::Result;
-use kloudlite_git_storage::store::Store;
+use kloudlite_core::Result;
+use kloudlite_storage::store::Store;
 use slatedb::object_store::ObjectStoreExt;
 use slatedb::Db;
 use std::sync::Arc;
@@ -112,7 +112,7 @@ impl VolExt for Store {
     async fn append_snapshots(&self, owner: &str, name: &str, records: &[SnapshotRecord]) -> Result<()> {
         let db = self.vol_db(owner, name).await?;
         for r in records {
-            let bytes = serde_json::to_vec(r).map_err(|e| kloudlite_git_core::err(e.to_string()))?;
+            let bytes = serde_json::to_vec(r).map_err(|e| kloudlite_core::err(e.to_string()))?;
             db.put(snapshot_key(&r.id), bytes).await?;
         }
         // The listing marker, AFTER the records: `browse_api::volumes` reads its mtime as "last
@@ -127,7 +127,7 @@ impl VolExt for Store {
         let mut it = db.scan_prefix(SNAPSHOT_PREFIX, ..).await?;
         let mut out = vec![];
         while let Some(kv) = it.next().await? {
-            out.push(serde_json::from_slice::<SnapshotRecord>(&kv.value).map_err(|e| kloudlite_git_core::err(e.to_string()))?);
+            out.push(serde_json::from_slice::<SnapshotRecord>(&kv.value).map_err(|e| kloudlite_core::err(e.to_string()))?);
         }
         // `scan_prefix` yields ascending key order, i.e. insertion order by id, not by time — sort
         // by `created_at` and reverse so "newest first" holds even if ids do not sort that way.

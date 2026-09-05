@@ -198,7 +198,7 @@ echo $(( (e - s) * 10 ))"#
 pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> Result<(i32, String, String)> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
     // The probe's workspaces are personal, never a team's, so the namespace is `ws-slo-probe`.
-    let ns = kloudlite_git_workspaces::crd::ws_namespace(PROBE_USER, "");
+    let ns = kloudlite_workspaces::crd::ws_namespace(PROBE_USER, "");
     crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["sh", "-c", script], cap).await
 }
 

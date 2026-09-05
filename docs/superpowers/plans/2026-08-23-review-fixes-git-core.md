@@ -51,8 +51,8 @@ Append to `tests/protocol.rs`:
 ```rust
 /// Drive `upload::serve` with one fetch command and return the raw pack bytes it streamed.
 fn fetch_pack_bytes(
-    s: &std::sync::Arc<kloudlite_git::store::Store>,
-    repo: &kloudlite_git::store::Repo,
+    s: &std::sync::Arc<kloudlite::store::Store>,
+    repo: &kloudlite::store::Repo,
     lines: &[String],
 ) -> Vec<u8> {
     let mut req = Vec::new();
@@ -433,11 +433,11 @@ git commit -m "Send a filtered pack as the explicit list the filter chose"
 Create `tests/pack_cap.rs` (its own file because it sets a process-global env var):
 
 ```rust
-//! Its own binary: `KLOUDLITE_GIT_MAX_BODY` is process-global and every other push test would
+//! Its own binary: `KLOUDLITE_MAX_BODY` is process-global and every other push test would
 //! trip over a 1 KiB cap.
 mod common;
-use kloudlite_git::pktline;
-use kloudlite_git::protocol::receive;
+use kloudlite::pktline;
+use kloudlite::protocol::receive;
 use std::io::{Cursor, Write};
 
 fn pack_of(dir: &std::path::Path, revs: &str) -> Vec<u8> {
@@ -462,7 +462,7 @@ async fn an_oversized_pack_is_refused_before_it_is_indexed() {
         eprintln!("skip: no git");
         return;
     }
-    std::env::set_var("KLOUDLITE_GIT_MAX_BODY", "1024");
+    std::env::set_var("KLOUDLITE_MAX_BODY", "1024");
     let e = common::env().await;
     let s = e.store.clone();
     s.create_repo("a", "r").await.unwrap();
@@ -1674,7 +1674,7 @@ async fn a_malformed_author_line_degrades_one_row_not_the_page() {
         "tree {}\nparent {head}\nauthor t <t@t> notatime +0000\ncommitter t <t@t> notatime +0000\n\nodd\n",
         common_tree_of(&repo, head)
     );
-    let mut staging = kloudlite_git::objects::Staging::default();
+    let mut staging = kloudlite::objects::Staging::default();
     let odd = staging.add(gix_object::Kind::Commit, raw.into_bytes()).unwrap();
     staging.write(&e.store, &repo).await.unwrap();
 
@@ -1686,7 +1686,7 @@ async fn a_malformed_author_line_degrades_one_row_not_the_page() {
     assert_eq!(log[1].oid, head.to_hex().to_string());
 }
 
-fn common_tree_of(repo: &kloudlite_git::store::Repo, oid: gix_hash::ObjectId) -> String {
+fn common_tree_of(repo: &kloudlite::store::Repo, oid: gix_hash::ObjectId) -> String {
     let odb = repo.odb().unwrap();
     gix_object::FindExt::find_commit(&odb, &oid, &mut Vec::new()).unwrap().tree().to_hex().to_string()
 }
@@ -1891,7 +1891,7 @@ async fn a_non_trailing_star_is_refused() {
     let e = common::env().await;
     let s = &e.store;
     s.create_repo("alice", "web").await.unwrap();
-    let p = |pattern: &str| kloudlite_git::refs::Protection { pattern: pattern.into(), no_force: true, no_delete: true };
+    let p = |pattern: &str| kloudlite::refs::Protection { pattern: pattern.into(), no_force: true, no_delete: true };
     assert!(s.set_protection("alice", "web", &p("rel*ease")).await.is_err());
     assert!(s.set_protection("alice", "web", &p("*/main")).await.is_err());
     assert!(s.set_protection("alice", "web", &p("release/*")).await.is_ok());
@@ -2255,7 +2255,7 @@ Above the `rand = "0.8"` line in `[dependencies]`:
 
 - [ ] **Step 2: Verify a release build links**
 
-Run: `cargo build --release --bin kloudlite-git`
+Run: `cargo build --release --bin kloudlite`
 Expected: links clean (takes longer than a debug build).
 
 - [ ] **Step 3: Commit**

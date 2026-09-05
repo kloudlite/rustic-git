@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use kloudlite_git_core::httpx::Trusted;
+use kloudlite_core::httpx::Trusted;
 use std::sync::Arc;
 
 /// Liveness/readiness. 503 when the object store has stopped answering, or when no live leader
@@ -153,7 +153,7 @@ fn two_lines(body: &str) -> Option<(&str, &str)> {
 /// A grant's failure, on the wire. A grant that FENCED this node (`App::fenced_check`) has left it
 /// demoted, and the honest answer is then 421 — "not the leader" — so the asker re-reads the
 /// lease at once instead of reporting one bad grant and waiting a beat.
-fn own_err(app: &App, e: kloudlite_git_core::Error) -> Response {
+fn own_err(app: &App, e: kloudlite_core::Error) -> Response {
     if !app.is_leader() {
         // Built here rather than through `leader_only`: a promotion landing between the two reads
         // would make its `None` unwrap panic the handler.
@@ -291,7 +291,7 @@ pub(crate) fn repo_of(path: &str) -> Option<String> {
         // reason `imagetags` names an image: the records live in that database and only the node
         // holding it may open it.
         if tail == "volumehistory" {
-            return Some(kloudlite_git_workspaces::registry::routing_key(owner, name));
+            return Some(kloudlite_workspaces::registry::routing_key(owner, name));
         }
         let (owner, name) = crate::protocol::parse_repo_pair(owner, name)?;
         return Some(format!("{owner}/{name}"));
@@ -764,7 +764,7 @@ mod tests {
         // either the repo or the image of that name.
         assert_eq!(
             repo_of("/api/alice/ws-1/volumehistory"),
-            Some(kloudlite_git_workspaces::registry::routing_key("alice", "ws-1")),
+            Some(kloudlite_workspaces::registry::routing_key("alice", "ws-1")),
         );
         assert_ne!(repo_of("/api/alice/ws-1/volumehistory"), repo_of("/api/alice/ws-1/refs"));
         // An `/api/` path that is not a browse route is not routable at all. `repo_of` says None

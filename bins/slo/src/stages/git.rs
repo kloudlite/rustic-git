@@ -215,7 +215,7 @@ async fn clone_http(c: &mut Ctx, name: &str) {
 /// to refuse.
 pub(crate) async fn known_hosts(c: &Ctx) -> Result<PathBuf> {
     if c.cfg.ssh_hostkey.trim().is_empty() {
-        return Err(anyhow!("no host key is pinned (KLOUDLITE_GIT_SLO_SSH_HOSTKEY)"));
+        return Err(anyhow!("no host key is pinned (KLOUDLITE_SLO_SSH_HOSTKEY)"));
     }
     let (host, port) = c.cfg.ssh_endpoint();
     // `[host]:port` is the form ssh matches a non-22 port against; the bare host for 22.
@@ -287,7 +287,7 @@ pub(crate) fn ssh_url(c: &Ctx, name: &str) -> String {
 /// and "the host key changed" is the one cause an operator must never have to guess at.
 async fn hostkey(c: &mut Ctx) {
     if c.cfg.ssh_hostkey.trim().is_empty() {
-        c.skip("ssh.hostkey", "no host key is pinned (KLOUDLITE_GIT_SLO_SSH_HOSTKEY)");
+        c.skip("ssh.hostkey", "no host key is pinned (KLOUDLITE_SLO_SSH_HOSTKEY)");
         return;
     }
     c.step("ssh.hostkey", Duration::from_secs(30), |c| {
@@ -528,7 +528,7 @@ mod tests {
         "web.repo.page",
     ];
 
-    fn sample<'a>(c: &'a Ctx, id: &str) -> &'a kloudlite_git_workspaces::history::slo::StepReport {
+    fn sample<'a>(c: &'a Ctx, id: &str) -> &'a kloudlite_workspaces::history::slo::StepReport {
         c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("no {id}"))
     }
 

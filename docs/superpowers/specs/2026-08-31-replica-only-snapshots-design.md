@@ -42,7 +42,7 @@ A `Snapshot` CR is a commit: written once, never mutated after `Ready`, carrying
 kind: Snapshot
 metadata:
   name: repo-2ad-c9f41a2b                  # {volume}-{short uuid}: see naming note below
-  labels: {kloudlite-git.io/volume: repo-2ad, kloudlite-git.io/owner: karthik1729}
+  labels: {kloudlite.io/volume: repo-2ad, kloudlite.io/owner: karthik1729}
   ownerReferences: [{kind: Volume, name: repo-2ad, blockOwnerDeletion: true}]
 spec:
   volume: repo-2ad
@@ -85,11 +85,11 @@ The repository stays declarative. What each node actually holds goes in a `Volum
 per (volume, node), written **only by that node**, so there is never a contended key:
 
 ```yaml
-apiVersion: kloudlite-git.io/v1alpha1
+apiVersion: kloudlite.io/v1alpha1
 kind: VolumeReplica
 metadata:
   name: repo-2ad.session-0                  # {volume}.{node} — deterministic, idempotent
-  labels: {kloudlite-git.io/volume: repo-2ad, kloudlite-git.io/node: session-0}
+  labels: {kloudlite.io/volume: repo-2ad, kloudlite.io/node: session-0}
   ownerReferences: [{kind: Volume, name: repo-2ad, blockOwnerDeletion: true}]
 spec:
   volume: repo-2ad
@@ -102,7 +102,7 @@ status:
 AS SHIPPED: a `branches` map (newest commit per branch this node holds) was designed for a
 finer-grained scheduling arm but is NOT populated — `write_replica_status` writes phase-only, and
 the claim predicate is Synced-only. The field name stays reserved; reintroduce it only together
-with the scheduler arm that reads it. Only the `kloudlite-git.io/volume` label is stamped on a
+with the scheduler arm that reads it. Only the `kloudlite.io/volume` label is stamped on a
 replica row.
 
 Dropped from earlier drafts, deliberately: `behind` (derivable from `branches` against the

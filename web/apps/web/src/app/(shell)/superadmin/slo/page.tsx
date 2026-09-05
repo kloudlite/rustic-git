@@ -40,7 +40,7 @@ export default async function SloPage({ searchParams }: { searchParams: Promise<
   const { slos, runs } = o.value;
   // The idle panel is otherwise unreachable for review: the fixtures always have a run in flight.
   // Fixtures only — against a real admin api this flag does nothing.
-  const idle = process.env.KLOUDLITE_GIT_ADMIN_FIXTURES === "1" && (await searchParams).idle === "1";
+  const idle = process.env.KLOUDLITE_ADMIN_FIXTURES === "1" && (await searchParams).idle === "1";
   const running = idle ? null : o.value.running;
   // Idle is never an empty box: the panel falls back to the last finished run, collapsed.
   const shown = running ?? runs.find((r) => r.state !== "running") ?? null;

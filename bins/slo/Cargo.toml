@@ -1,22 +1,22 @@
 [package]
-name = "kloudlite-git-slo-bin"
+name = "kloudlite-slo-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_slo"
+name = "kloudlite_slo"
 path = "src/lib.rs"
 
 [[bin]]
-name = "kloudlite-git-slo"
+name = "kloudlite-slo"
 path = "src/main.rs"
 
 [dependencies]
-kloudlite-git-core = { path = "../../crates/core" }
+kloudlite-core = { path = "../../crates/core" }
 # The catalogue and the wire types are the workspaces crate's: the probe reports what the admin
 # process validates, so both sides must read one definition of `RunReport`, never two copies.
-kloudlite-git-workspaces = { path = "../../crates/workspaces" }
+kloudlite-workspaces = { path = "../../crates/workspaces" }
 clap = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }

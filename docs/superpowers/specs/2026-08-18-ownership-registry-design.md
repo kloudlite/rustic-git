@@ -5,7 +5,7 @@ hash in a load balancer, then a rendezvous hash over a peer list — and each sp
 reconciling the derivation with reality. This design stops deriving it. One node writes a map of
 `repo → (node, expires)` and is the only thing that decides who owns what.
 
-That node is `kloudlite-git-0`. Not elected — named.
+That node is `kloudlite-0`. Not elected — named.
 
 The map lives in its own SlateDB database, `cluster/ownership`, alongside everything else this
 system stores. Pod zero opens it for writing and is the only writer; every other node opens it
@@ -36,8 +36,8 @@ fact removes the class.
 
 ## Leadership is a name, not a decision
 
-`kloudlite-git-0` is the leader. Every node derives it from its own identity: strip the ordinal from
-`KLOUDLITE_GIT_SELF`, append `-0`. There is no election, no lease on leadership, no heartbeat to
+`kloudlite-0` is the leader. Every node derives it from its own identity: strip the ordinal from
+`KLOUDLITE_SELF`, append `-0`. There is no election, no lease on leadership, no heartbeat to
 decide it, and no protocol to get wrong.
 
 The property this buys is worth stating plainly: **two leaders cannot exist.** A StatefulSet
@@ -62,7 +62,7 @@ unreachable blocks new claims; it does not get replaced.
                     ▲              │        │
              writes │         reads│        │reads
         ┌───────────┴──────┐  ┌────▼─────┐  ┌▼─────────┐
-        │  kloudlite-git-0    │  │ -1       │  │ -2       │
+        │  kloudlite-0    │  │ -1       │  │ -2       │
         │  sole writer     │◄─┤ claims   │◄─┤ claims   │
         └──────────────────┘  └──────────┘  └──────────┘
                      claims travel to pod zero over the peer port;
@@ -97,10 +97,10 @@ the hop count. It cannot produce two owners, because a follower's belief never g
 Written by pod zero to `cluster/ownership`, one key per **currently open** repo:
 
 ```
-"alice/web" → { node: "kloudlite-git-1", expires: 2026-08-18T09:14:03Z }
+"alice/web" → { node: "kloudlite-1", expires: 2026-08-18T09:14:03Z }
 ```
 
-Bounded by `nodes × KLOUDLITE_GIT_MAX_WARM` — at three pods and sixteen warm databases each, at most
+Bounded by `nodes × KLOUDLITE_MAX_WARM` — at three pods and sixteen warm databases each, at most
 48 entries, whatever the repo count. It does not grow with the number of repositories, because a
 repo has an entry only while some node holds it open.
 
@@ -191,7 +191,7 @@ the forward path is removed.
 
 `Membership`, `rank`, the two-phase `decide`, `/probe`, `probe_via`, probe timeouts, retries,
 positive caching, single-flight, and hop-based failover. Roughly two thirds of `peers.rs` and a
-third of `proxy.rs`. `KLOUDLITE_GIT_REPLICAS` goes too: the leader's name is derived from the pod's
+third of `proxy.rs`. `KLOUDLITE_REPLICAS` goes too: the leader's name is derived from the pod's
 own identity and every other node's address comes from the map, so nothing needs a peer count any
 more. Scaling is `spec.replicas` alone.
 

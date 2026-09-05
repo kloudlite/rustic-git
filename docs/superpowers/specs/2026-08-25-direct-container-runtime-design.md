@@ -56,7 +56,7 @@ Practical notes for the implementation:
   Docker-equivalent semantics for bind mounts onto btrfs subvolumes.
 - The API socket is a systemd unit (`podman.socket` → `/run/podman/podman.sock`) and must be
   enabled; it is not on by default. Make the socket path configurable
-  (`KLOUDLITE_GIT_CONTAINER_SOCKET`) and default to Podman's, so a Docker host still works by
+  (`KLOUDLITE_CONTAINER_SOCKET`) and default to Podman's, so a Docker host still works by
   pointing it at `/var/run/docker.sock`.
 - Podman's Docker-compat API is close but not identical. Pin the negotiated version and fail
   startup with a clear message rather than at first job. Where an endpoint differs, prefer the
@@ -79,11 +79,11 @@ Every container the agent creates carries:
 
 | Label | Value | Purpose |
 |---|---|---|
-| `kloudlite-git.owner` | `{owner}` | Reclamation and audit |
-| `kloudlite-git.kind` | `env` \| `ws` | Distinguishes the two container shapes |
-| `kloudlite-git.id` | `env-{id}` \| `ws-{id}` | Groups an environment's containers |
-| `kloudlite-git.service` | `{service name}` | Identifies one service within an environment |
-| `kloudlite-git.spec` | `{sha256 of the rendered service spec}` | Drives recreate-vs-leave-alone |
+| `kloudlite.owner` | `{owner}` | Reclamation and audit |
+| `kloudlite.kind` | `env` \| `ws` | Distinguishes the two container shapes |
+| `kloudlite.id` | `env-{id}` \| `ws-{id}` | Groups an environment's containers |
+| `kloudlite.service` | `{service name}` | Identifies one service within an environment |
+| `kloudlite.spec` | `{sha256 of the rendered service spec}` | Drives recreate-vs-leave-alone |
 
 This single change is what fixes the teardown class of bugs: **`down` and `delete` become a
 label query, so they need no local state at all.** They are correct on a fresh agent, after a
@@ -110,10 +110,10 @@ runtime/
 
 **`up(env, live)` — reconcile, not create.**
 
-1. Ensure the network `kloudlite-git-{env.id}` exists (idempotent; `net.rs`).
+1. Ensure the network `kloudlite-{env.id}` exists (idempotent; `net.rs`).
 2. Build the desired `Vec<ContainerSpec>` from `env.services`, hashing each.
-3. List existing containers by label `kloudlite-git.id={env.id}`.
-4. For each desired service: if a container exists with a matching `kloudlite-git.spec`, ensure
+3. List existing containers by label `kloudlite.id={env.id}`.
+4. For each desired service: if a container exists with a matching `kloudlite.spec`, ensure
    it is started; if it exists with a different hash, remove and recreate it; if absent,
    pull-if-needed, create, connect to the network, start.
 5. Remove any labelled container whose service is no longer in the desired set.
@@ -139,7 +139,7 @@ alias equal to its service name. That is what makes `mongodb://db:27017` resolve
 service in the same environment, and it is a single `create_network` plus an `EndpointSettings`
 with `aliases` at connect time.
 
-The network is named `kloudlite-git-{env.id}` rather than `env-{id}` so it cannot collide with a
+The network is named `kloudlite-{env.id}` rather than `env-{id}` so it cannot collide with a
 compose project network left over from the current implementation during migration.
 
 **Always pass an explicit `--subnet`; never let the runtime auto-allocate.** Today compose's
@@ -224,7 +224,7 @@ UI can link to it. Without this, environments can only be used from inside thems
 **Label-driven janitor reclamation.** The janitor currently reclaims subvolumes but knows
 nothing about containers, so a container whose `Environment` document is gone (a delete that
 failed after the doc write, a Cosmos rollback) runs forever. With labels it becomes a
-straightforward sweep: list all `kloudlite-git.kind` containers, ask the store which ids still
+straightforward sweep: list all `kloudlite.kind` containers, ask the store which ids still
 exist, force-remove the rest. This is only possible because labels make ownership queryable —
 today there is no way to ask "which containers are ours?"
 
@@ -237,7 +237,7 @@ validated only for non-emptiness (`api.rs:536`) and then joined into a bind sour
 
 Do not carry that forward. In the new `spec.rs`, a bind source is constructed only from
 `live.join("volumes").join(segment)` where `segment` has passed
-`kloudlite_git_storage::store::valid_segment` (already rejects `.`, `..`, `/`, and anything
+`kloudlite_storage::store::valid_segment` (already rejects `.`, `..`, `/`, and anything
 outside `[A-Za-z0-9._-]`). Validate at the API boundary as well, so a bad spec is refused at
 write time rather than at materialization time. `Mount.path` must be absolute and contain no
 `:`.
@@ -250,7 +250,7 @@ from validated segments only; it never accepts a caller-supplied path.**
 Two environments are live on the production VM (`demo-env`, `mongo-test`) with
 compose-created containers carrying compose's labels, not ours.
 
-- `down`/`delete` match **either** `kloudlite-git.id={id}` **or**
+- `down`/`delete` match **either** `kloudlite.id={id}` **or**
   `com.docker.compose.project=env-{id}` for one release, so existing environments can still be
   torn down. Remove the compose branch afterwards; note it with a `// ponytail:` marker naming
   the removal trigger.
@@ -290,5 +290,5 @@ compose-created containers carrying compose's labels, not ours.
 - bollard negotiates the daemon API version; pin a minimum and fail startup with a clear
   message rather than at first job.
 - Losing `docker compose logs`/`ps` as debugging affordances. Both are daemon API calls we
-  should expose in the product regardless; until then `docker ps --filter label=kloudlite-git.id=...`
+  should expose in the product regardless; until then `docker ps --filter label=kloudlite.id=...`
   is the equivalent and works because the labels exist.

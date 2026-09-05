@@ -6,7 +6,7 @@
 
 **Architecture:** No new CRD and no new `/v1` route: the `OwnerBinding` reconciler (`bins/agent/src/binding.rs`) authors one child `Volume` named `home-{owner}` plus a local PV and a `home` PVC in each of the owner's namespaces, exactly the way parents author their volume children today, and the existing Volume controller materializes it (pulling the registry's `main` ref when this node has no subvolume and history exists). Caches are nested subvolumes (`k8s::HOME_LOCAL_DIRS`) that `btrfs send` and the qgroup both ignore. Replication reuses `Engine::push_env`: an agent beat every `WS_HOME_PUSH_SECS` pushes homes whose btrfs generation moved, and `apply_workspace`'s `Stopped` arm gates the pod delete on a `stop-home-{ws}` `SnapshotRequest` landing, the same fail-closed shape `apply_environment` already uses.
 
-**Tech Stack:** Rust (kube 0.x runtime controllers, k8s-openapi, tokio, serde/schemars), btrfs (`subvolume create/show`, nested subvolumes, qgroups), the existing `Engine` (`crates/workspaces/src/engine`), the fake-kube harness (`kloudlite_git_workspaces::kube_test`), bash e2e against k3s.
+**Tech Stack:** Rust (kube 0.x runtime controllers, k8s-openapi, tokio, serde/schemars), btrfs (`subvolume create/show`, nested subvolumes, qgroups), the existing `Engine` (`crates/workspaces/src/engine`), the fake-kube harness (`kloudlite_workspaces::kube_test`), bash e2e against k3s.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-workspace-home-design.md`
 
@@ -15,11 +15,11 @@
 - **Single writer per subvolume.** Inside a region one node per person (the `OwnerBinding`), so two nodes never push the same home; the timer and the stop push serialise on the volume's `ws_lock` flock inside the engine.
 - **Keep-biased.** Nothing is created empty and later overwritten, nothing is deleted to converge; an unreachable registry at first materialization is `phase: Error`, reason `RegionUnreachable`, and no subvolume exists afterwards. Nested cache subvolumes that already exist (or exist as plain directories the person made) are left alone.
 - **Fail-closed stop.** A workspace stop deletes its pod only after `stop-home-{ws}` reaches `done`; a failed push leaves the workspace at its current phase with `Ready=False` reason `StopSnapshotFailed`, never tears down. The request is deleted after the teardown, like `stop-{env}`.
-- **Labels are views.** `spec.owner` on the home Volume is the truth; `kloudlite-git.io/owner`, `/kind`, `/team` and the `kloudlite-git.io/stop-of` label on the stop request exist for listing and watching only. Never authorize on a label.
+- **Labels are views.** `spec.owner` on the home Volume is the truth; `kloudlite.io/owner`, `/kind`, `/team` and the `kloudlite.io/stop-of` label on the stop request exist for listing and watching only. Never authorize on a label.
 - **The agent may not write spec** except the documented exceptions. Today: `Volume.spec.restoreTo` (`restore_gate`). This plan adds ONE more: `Volume.spec.quotaGb` on a Volume owned by an `OwnerBinding` (Task 8), allowed by name in `deploy/k3s/agent-admission.yaml`. The home Volume is CREATED by the agent's binding reconciler through `ensure_child_volume`, exactly like a Workspace's child Volume is today — `create` is not governed by the spec-is-read-only policy (it matches `UPDATE` only) and is already granted in RBAC.
 - **Any new agent kube write is a row in the RBAC table in `deploy/k3s/agent-rbac.yaml` (the table IS the role) AND must be allowed by the admission policies in `deploy/k3s/agent-admission.yaml`.** Every write in this plan reuses a verb already granted (`volumes: create,patch`; `snapshotrequests: create,delete`; `persistentvolumes`/`persistentvolumeclaims: create,patch`); the table's call-site column is updated in Tasks 2, 7 and 8.
 - **No `hostPath`.** The home reaches the pod as a statically provisioned `local` PV with node affinity (`k8s::local_pv`), like the subvolume and the Nix store; `no_pod_this_module_builds_uses_a_hostpath` in `k8s.rs` stays green.
-- **CRD manifest regenerated** after every spec-struct change: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`, and `deploy/k3s/crds.yaml` committed in the same commit.
+- **CRD manifest regenerated** after every spec-struct change: `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml`, and `deploy/k3s/crds.yaml` committed in the same commit.
 - **Clippy clean:** `cargo clippy --workspace --all-targets -- -D warnings` introduces no NEW warnings in files you touch (CI gates `--workspace -- -D warnings`).
 - **Comments explain WHY, never what**; match the density of `bins/server/src/router/route.rs`. Deliberate ceilings are marked `// ponytail: <ceiling and upgrade path>`.
 - **Commit subjects are imperative sentence case with no tool attribution.** No `Co-Authored-By`, no "Generated with".
@@ -88,7 +88,7 @@
         });
         assert!(!is_home_volume(&v), "a name is a convention, not the link");
         v.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-            api_version: "kloudlite-git.io/v1alpha1".into(), kind: "OwnerBinding".into(), name: "r1-alice".into(),
+            api_version: "kloudlite.io/v1alpha1".into(), kind: "OwnerBinding".into(), name: "r1-alice".into(),
             uid: "u".into(), controller: Some(true), block_owner_deletion: Some(true),
         }]);
         assert!(is_home_volume(&v));
@@ -97,7 +97,7 @@
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --lib crd::tests`
+Run: `cargo test -p kloudlite-workspaces --lib crd::tests`
 Expected: compile error — `home_quota_gb`, `DEFAULT_HOME_QUOTA_GB`, `home_volume_name`, `is_home_volume` not found.
 
 - [ ] **Step 3: Implement**
@@ -164,7 +164,7 @@ In `bins/agent/src/claim.rs` `ensure_binding`, the struct literal becomes:
 
 - [ ] **Step 4: Regenerate the CRD manifest and run the tests**
 
-Run: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml && cargo test -p kloudlite-git-workspaces --lib crd::tests && cargo test -p kloudlite-git-agent`
+Run: `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml && cargo test -p kloudlite-workspaces --lib crd::tests && cargo test -p kloudlite-agent`
 Expected: all PASS; `git diff --stat deploy/k3s/crds.yaml` shows the `homeQuotaGb` property added under the OwnerBinding schema.
 
 - [ ] **Step 5: Commit**
@@ -203,14 +203,14 @@ git commit -m "Give a binding a home quota and name the owner's home volume"
 - [ ] **Step 1: Write the failing test** (in `reconcile.rs`, after `a_second_reconcile_of_a_ready_binding_writes_no_status`)
 
 ```rust
-const HOME_VOL_GET: &str = "/apis/kloudlite-git.io/v1alpha1/volumes/home-alice";
-const VOLUMES: &str = "/apis/kloudlite-git.io/v1alpha1/volumes";
+const HOME_VOL_GET: &str = "/apis/kloudlite.io/v1alpha1/volumes/home-alice";
+const VOLUMES: &str = "/apis/kloudlite.io/v1alpha1/volumes";
 
 fn home_vol_json(quota: u64) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "home-alice", "uid": "home-uid-1", "generation": 1,
-                     "ownerReferences": [{"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "OwnerBinding",
+                     "ownerReferences": [{"apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerBinding",
                                           "name": crd::binding_name("r1", "alice"), "uid": "ob-uid-1",
                                           "controller": true, "blockOwnerDeletion": true}]},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": quota},
@@ -225,16 +225,16 @@ fn home_vol_json(quota: u64) -> serde_json::Value {
 async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
     let tmp = tempfile::tempdir().unwrap();
     let ws_list = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
     });
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/workspaces", ws_list),
+            kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", ws_list),
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-            kloudlite_git_workspaces::kube_test::not_found(HOME_VOL_GET),
-            kloudlite_git_workspaces::kube_test::post(VOLUMES, home_vol_json(2)),
+            kloudlite_workspaces::kube_test::not_found(HOME_VOL_GET),
+            kloudlite_workspaces::kube_test::post(VOLUMES, home_vol_json(2)),
             pv_route("home-ws-alice"),
             pvc_route("home"),
         ]
@@ -244,7 +244,7 @@ async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
     );
     let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
 
-    kloudlite_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+    kloudlite_agent::binding::apply_binding(&b, &ctx).await.unwrap();
 
     let vol = rec.sent("POST", VOLUMES);
     assert_eq!(vol.len(), 1, "{:?}", rec.calls());
@@ -255,7 +255,7 @@ async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
     assert_eq!(vol[0]["spec"]["quotaGb"], 2, "the binding's default home quota");
     assert!(vol[0]["spec"].get("source").is_none(), "an empty home; the first materialization decides whether to pull");
     assert_eq!(vol[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
-    assert_eq!(vol[0]["metadata"]["labels"]["kloudlite-git.io/kind"], "home");
+    assert_eq!(vol[0]["metadata"]["labels"]["kloudlite.io/kind"], "home");
 
     let pv = rec.sent("PATCH", "/api/v1/persistentvolumes/home-ws-alice");
     assert_eq!(pv.len(), 1, "{:?}", rec.calls());
@@ -275,7 +275,7 @@ async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p kloudlite-git-agent --test reconcile a_binding_creates_the_owners_home_volume_and_its_claim`
+Run: `cargo test -p kloudlite-agent --test reconcile a_binding_creates_the_owners_home_volume_and_its_claim`
 Expected: FAIL — `rec.sent("POST", VOLUMES)` is empty (no home is authored yet).
 
 - [ ] **Step 3: Add the names to `k8s.rs`**
@@ -420,7 +420,7 @@ In `apply_binding`, collect the namespaces and call it before the status write:
 - [ ] **Step 6: Update the RBAC table comment** in `deploy/k3s/agent-rbac.yaml` (rows only; the rules already grant these):
 
 ```
-#   volumes (kloudlite-git.io)                get,list,watch               Controller + heartbeat list
+#   volumes (kloudlite.io)                get,list,watch               Controller + heartbeat list
 #                                          create                       ensure_child_volume (a
 #                                                                       parent's child; binding::
 #                                                                       ensure_home for home-{owner})
@@ -434,7 +434,7 @@ In `apply_binding`, collect the namespaces and call it before the status write:
 
 - [ ] **Step 7: Run the tests**
 
-Run: `cargo test -p kloudlite-git-agent --test reconcile binding && cargo test -p kloudlite-git-agent && cargo clippy -p kloudlite-git-agent --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-agent --test reconcile binding && cargo test -p kloudlite-agent && cargo clippy -p kloudlite-agent --all-targets -- -D warnings`
 Expected: all PASS, including the two pre-existing binding tests — `a_second_reconcile_of_a_ready_binding_writes_no_status` needs its route list extended with `not_found(HOME_VOL_GET)`, `post(VOLUMES, home_vol_json(2))`, `pv_route("home-ws-alice")`, `pvc_route("home")` to stay green (the mock 404s unknown paths, and `ensure` on a 404 is an error). Do the same for `a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready`, adding `pv_route(&format!("home-{}", crd::ws_namespace("alice", "acme")))` and a PVC route for that namespace (`pvc_route` is hard-wired to `ws-alice`; add a `Route { method: "PATCH", path: format!("/api/v1/namespaces/{acme}/persistentvolumeclaims/home"), status: 200, body: … }` inline).
 
 - [ ] **Step 8: Commit**
@@ -504,7 +504,7 @@ async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_res
     e.create_subvol("home-alice").unwrap();
     e.ensure_home_dirs("home-alice", 1000).unwrap();
     let live = e.pool.live("home-alice");
-    for rel in kloudlite_git_workspaces::k8s::HOME_LOCAL_DIRS {
+    for rel in kloudlite_workspaces::k8s::HOME_LOCAL_DIRS {
         assert!(live.join(rel).is_dir(), "{rel}");
         assert_eq!(std::fs::metadata(live.join(rel)).unwrap().uid(), 1000, "{rel} must be the owner's, not root's");
     }
@@ -530,7 +530,7 @@ async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_res
     assert_eq!(std::fs::read(live2.join(".zshrc")).unwrap(), b"alias ll='ls -l'");
     assert!(!live2.join(".cache").join("big").exists(), "nested subvolumes are never in the send stream");
     e.ensure_home_dirs("home-alice-2", 1000).unwrap();
-    for rel in kloudlite_git_workspaces::k8s::HOME_LOCAL_DIRS {
+    for rel in kloudlite_workspaces::k8s::HOME_LOCAL_DIRS {
         assert!(live2.join(rel).is_dir(), "{rel} must be recreated after a restore");
     }
 }
@@ -538,7 +538,7 @@ async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_res
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --lib the_generation_is_read_off_subvolume_show; cargo test -p kloudlite-git-workspaces --test engine_ops a_homes_cache`
+Run: `cargo test -p kloudlite-workspaces --lib the_generation_is_read_off_subvolume_show; cargo test -p kloudlite-workspaces --test engine_ops a_homes_cache`
 Expected: compile errors — `parse_generation`, `ensure_home_dirs`, `sync_pool`, `generation`, `HOME_LOCAL_DIRS` not found. (On this Mac the btrfs test prints `skipping` once it compiles; it runs for real on the Linux VM.)
 
 - [ ] **Step 3: The constant** (in `k8s.rs`, after `HOME_CLAIM`)
@@ -637,7 +637,7 @@ pub fn parse_generation(subvolume_show: &str) -> Option<u64> {
         // After every path that can leave a new `live` behind, same rule as the quota below: a
         // home's caches are nested subvolumes, and a received stream does not carry them.
         if home {
-            engine.ensure_home_dirs(id, kloudlite_git_workspaces::k8s::SSH_UID as u32).map_err(|e| e.to_string())?;
+            engine.ensure_home_dirs(id, kloudlite_workspaces::k8s::SSH_UID as u32).map_err(|e| e.to_string())?;
         }
 ```
 
@@ -645,7 +645,7 @@ pub fn parse_generation(subvolume_show: &str) -> Option<u64> {
 
 - [ ] **Step 6: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces --lib the_generation_is_read_off_subvolume_show && cargo test -p kloudlite-git-workspaces --test engine_ops a_homes_cache && cargo test -p kloudlite-git-agent && cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-agent --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-workspaces --lib the_generation_is_read_off_subvolume_show && cargo test -p kloudlite-workspaces --test engine_ops a_homes_cache && cargo test -p kloudlite-agent && cargo clippy -p kloudlite-workspaces -p kloudlite-agent --all-targets -- -D warnings`
 Expected: the parser test PASS; the btrfs test prints `skipping: btrfs unavailable or not root` and PASS here (real run on the VM: PASS); the agent suite PASS; clippy clean.
 
 - [ ] **Step 7: Commit**
@@ -697,7 +697,7 @@ git commit -m "Keep a home's caches in nested subvolumes and read its btrfs gene
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --lib a_workspace_pod_mounts_the_home_and_the_workspace_inside_it`
+Run: `cargo test -p kloudlite-workspaces --lib a_workspace_pod_mounts_the_home_and_the_workspace_inside_it`
 Expected: FAIL — `expected home volume`.
 
 - [ ] **Step 3: Implement**
@@ -749,7 +749,7 @@ The prelude's script body is unchanged (`mkdir -p $H/.config/fish` is already a 
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces --lib k8s && cargo test -p kloudlite-git-agent --test reconcile`
+Run: `cargo test -p kloudlite-workspaces --lib k8s && cargo test -p kloudlite-agent --test reconcile`
 Expected: PASS. If `every_child_object_cascades_on_delete` or `a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token` index into the volume/mount lists by position, adjust them to look up by name — the assertions themselves are unchanged.
 
 - [ ] **Step 5: Commit**
@@ -775,7 +775,7 @@ git commit -m "Mount the owner's home at /home/kl with the workspace inside it"
 - [ ] **Step 1: Write the failing test** (in `reconcile.rs`)
 
 ```rust
-const HOME_STATUS: &str = "/apis/kloudlite-git.io/v1alpha1/volumes/home-alice/status";
+const HOME_STATUS: &str = "/apis/kloudlite.io/v1alpha1/volumes/home-alice/status";
 
 fn home_volume() -> crd::Volume {
     serde_json::from_value(home_vol_json(2)).map(|mut v: crd::Volume| { v.status = None; v }).unwrap()
@@ -792,10 +792,10 @@ async fn a_home_that_cannot_reach_the_registry_settles_and_creates_no_subvolume(
     let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(HOME_STATUS)]);
     let v = home_volume();
 
-    let action = kloudlite_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_volume(&v, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
     wait_idle(&ctx).await;
-    let action = kloudlite_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_volume(&v, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent: no retry loop");
 
     let last = rec.sent("PATCH", HOME_STATUS).last().cloned().expect("a status write");
@@ -811,7 +811,7 @@ async fn a_home_that_cannot_reach_the_registry_settles_and_creates_no_subvolume(
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p kloudlite-git-agent --test reconcile a_home_that_cannot_reach_the_registry`
+Run: `cargo test -p kloudlite-agent --test reconcile a_home_that_cannot_reach_the_registry`
 Expected: FAIL — on this Mac the operation fails with a `btrfs` not-found error, reason `OperationFailed`, action `requeue(60s)`, not `RegionUnreachable`/`await_change` (the home arm goes to `create_subvol` and never asks the registry).
 
 - [ ] **Step 3: Implement**
@@ -865,7 +865,7 @@ In `controller.rs` `volume_work`, the materialize arm becomes:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p kloudlite-git-agent --test reconcile && cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-agent --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-agent --test reconcile && cargo clippy -p kloudlite-workspaces -p kloudlite-agent --all-targets -- -D warnings`
 Expected: PASS; `permanent_reason` already maps the `region unreachable` marker to `RegionUnreachable`, so no change there.
 
 - [ ] **Step 5: Commit**
@@ -957,11 +957,11 @@ fn only_changed_ready_homes_are_pushed_by_the_timer() {
         "home-working" => Some(9),
         _ => None,
     };
-    let mut due: Vec<String> = kloudlite_git_agent::controller::homes_to_push(&volumes, generation, pushed)
+    let mut due: Vec<String> = kloudlite_agent::controller::homes_to_push(&volumes, generation, pushed)
         .iter().map(|v| v.metadata.name.clone().unwrap()).collect();
     due.sort();
     assert_eq!(due, vec!["home-moved", "home-new"]);
-    assert_eq!(kloudlite_git_agent::controller::HOME_PUSH_MESSAGE, "home: periodic");
+    assert_eq!(kloudlite_agent::controller::HOME_PUSH_MESSAGE, "home: periodic");
 }
 ```
 
@@ -969,7 +969,7 @@ fn only_changed_ready_homes_are_pushed_by_the_timer() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test engine_pool the_pushed_generation; cargo test -p kloudlite-git-agent --test reconcile only_changed_ready_homes`
+Run: `cargo test -p kloudlite-workspaces --test engine_pool the_pushed_generation; cargo test -p kloudlite-agent --test reconcile only_changed_ready_homes`
 Expected: compile errors — `pushed_gen`, `record_pushed_gen`, `homes_to_push`, `HOME_PUSH_MESSAGE` not found.
 
 - [ ] **Step 3: The pool half** (in `pool.rs`, inside `impl Pool` after `set_lineage`)
@@ -1106,7 +1106,7 @@ fn home_push_beat(ctx: &Ctx) {
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces --test engine_pool && cargo test -p kloudlite-git-agent && cargo clippy -p kloudlite-git-workspaces -p kloudlite-git-agent --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-workspaces --test engine_pool && cargo test -p kloudlite-agent && cargo clippy -p kloudlite-workspaces -p kloudlite-agent --all-targets -- -D warnings`
 Expected: PASS, clippy clean.
 
 - [ ] **Step 6: Commit**
@@ -1138,9 +1138,9 @@ git commit -m "Push changed homes from an agent beat every five minutes"
 - [ ] **Step 1: Write the failing tests** (in `reconcile.rs`, after the environment stop tests)
 
 ```rust
-const WS_STOP_REQ: &str = "/apis/kloudlite-git.io/v1alpha1/snapshotrequests/stop-home-ws-1";
+const WS_STOP_REQ: &str = "/apis/kloudlite.io/v1alpha1/snapshotrequests/stop-home-ws-1";
 const WS_POD_DEL: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
-const SNAPSHOTS: &str = "/apis/kloudlite-git.io/v1alpha1/snapshotrequests";
+const SNAPSHOTS: &str = "/apis/kloudlite.io/v1alpha1/snapshotrequests";
 
 fn stopping_ws() -> crd::Workspace {
     let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
@@ -1151,7 +1151,7 @@ fn stopping_ws() -> crd::Workspace {
 
 fn home_stop_req(status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotRequest",
         "metadata": {"name": "stop-home-ws-1", "uid": "stop-home-uid-1"},
         "spec": {"volume": "home-alice"},
         "status": status,
@@ -1161,8 +1161,8 @@ fn home_stop_req(status: serde_json::Value) -> serde_json::Value {
 fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
     let mut routes = vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }];
     match req {
-        Some(r) => routes.push(kloudlite_git_workspaces::kube_test::get(WS_STOP_REQ, r)),
-        None => routes.push(kloudlite_git_workspaces::kube_test::not_found(WS_STOP_REQ)),
+        Some(r) => routes.push(kloudlite_workspaces::kube_test::get(WS_STOP_REQ, r)),
+        None => routes.push(kloudlite_workspaces::kube_test::not_found(WS_STOP_REQ)),
     }
     routes
 }
@@ -1173,11 +1173,11 @@ fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
 async fn a_stopping_workspace_requests_a_home_push_before_deleting_its_pod() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = ws_stop_routes(None);
-    routes.push(kloudlite_git_workspaces::kube_test::post(SNAPSHOTS, home_stop_req(serde_json::json!({"phase": "pending"}))));
+    routes.push(kloudlite_workspaces::kube_test::post(SNAPSHOTS, home_stop_req(serde_json::json!({"phase": "pending"}))));
     let (ctx, rec) = ctx(tmp.path(), routes);
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
 
-    let action = kloudlite_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
     let req = rec.sent("POST", SNAPSHOTS).remove(0);
     assert_eq!(req["metadata"]["name"], "stop-home-ws-1");
@@ -1198,7 +1198,7 @@ async fn a_failed_home_push_keeps_the_workspace_pod() {
     let (ctx, rec) = ctx(tmp.path(), ws_stop_routes(Some(home_stop_req(serde_json::json!({"phase": "error"})))));
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
 
-    let action = kloudlite_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "woken by the request's own status");
     assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
@@ -1221,7 +1221,7 @@ async fn a_landed_home_push_deletes_the_pod_and_its_request() {
     let (ctx, rec) = ctx(tmp.path(), routes);
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
 
-    let action = kloudlite_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change());
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "{:?}", rec.calls());
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_STOP_REQ}")), "the request must not outlive the stop: {:?}", rec.calls());
@@ -1239,7 +1239,7 @@ async fn a_workspace_without_a_home_here_stops_without_a_push() {
     routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
     let (ctx, rec) = ctx(tmp.path(), routes);
 
-    let action = kloudlite_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change());
     assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "{:?}", rec.calls());
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "{:?}", rec.calls());
@@ -1259,7 +1259,7 @@ async fn an_already_stopped_workspace_pushes_nothing_again() {
     st.pod_ref = None;
     w.status = Some(st);
 
-    let action = kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change());
     assert!(rec.calls().is_empty(), "nothing to do: {:?}", rec.calls());
 }
@@ -1267,7 +1267,7 @@ async fn an_already_stopped_workspace_pushes_nothing_again() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-agent --test reconcile home_push; cargo test -p kloudlite-git-agent --test reconcile stopped_workspace`
+Run: `cargo test -p kloudlite-agent --test reconcile home_push; cargo test -p kloudlite-agent --test reconcile stopped_workspace`
 Expected: `a_stopping_workspace_requests_a_home_push_before_deleting_its_pod` FAILS (the pod DELETE happens with no POST; the mock 404s the delete → the reconcile errors or records a DELETE), `a_failed_home_push_keeps_the_workspace_pod` FAILS (a DELETE is attempted), `an_already_stopped_workspace_pushes_nothing_again` FAILS (a DELETE is attempted).
 
 - [ ] **Step 3: Generalise `await_stop_push` into `stop_push`**
@@ -1473,7 +1473,7 @@ In `run`, the workspace controller gains one more watch (after `.watches_shared_
 - [ ] **Step 6: RBAC table rows** (`deploy/k3s/agent-rbac.yaml`, comment only — the verbs are already granted):
 
 ```
-#   snapshotrequests (kloudlite-git.io)       get,list,watch               Controller; stop_push
+#   snapshotrequests (kloudlite.io)       get,list,watch               Controller; stop_push
 #                                          create                       stop_push (stop-{env},
 #                                                                       stop-home-{ws})
 #                                          patch                        finalizer (metadata)
@@ -1486,7 +1486,7 @@ and the rule comment on `snapshotrequests` gains ", and the same for `stop-home-
 
 - [ ] **Step 7: Run the tests**
 
-Run: `cargo test -p kloudlite-git-agent && cargo clippy -p kloudlite-git-agent --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-agent && cargo clippy -p kloudlite-agent --all-targets -- -D warnings`
 Expected: PASS — the five new workspace tests, and the five pre-existing environment stop tests unchanged.
 
 - [ ] **Step 8: Commit**
@@ -1520,15 +1520,15 @@ git commit -m "Push the home before a workspace stop deletes its pod"
 async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
     let tmp = tempfile::tempdir().unwrap();
     let ws_list = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
     });
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/workspaces", ws_list),
+            kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", ws_list),
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-            kloudlite_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
+            kloudlite_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
             Route { method: "PATCH", path: HOME_VOL_GET.into(), status: 200, body: home_vol_json(5) },
             pv_route("home-ws-alice"),
             pvc_route("home"),
@@ -1541,7 +1541,7 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
     b["spec"]["homeQuotaGb"] = serde_json::json!(5);
     let b: crd::OwnerBinding = serde_json::from_value(b).unwrap();
 
-    kloudlite_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+    kloudlite_agent::binding::apply_binding(&b, &ctx).await.unwrap();
 
     let patch = rec.sent("PATCH", HOME_VOL_GET);
     assert_eq!(patch.len(), 1, "{:?}", rec.calls());
@@ -1553,10 +1553,10 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            kloudlite_git_workspaces::kube_test::get("/apis/kloudlite-git.io/v1alpha1/workspaces", serde_json::json!({
-                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
+            kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", serde_json::json!({
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-            kloudlite_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
+            kloudlite_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
             pv_route("home-ws-alice"),
             pvc_route("home"),
         ]
@@ -1565,14 +1565,14 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
         .collect(),
     );
     let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
-    kloudlite_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+    kloudlite_agent::binding::apply_binding(&b, &ctx).await.unwrap();
     assert!(rec.sent("PATCH", HOME_VOL_GET).is_empty(), "{:?}", rec.calls());
 }
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p kloudlite-git-agent --test reconcile a_raised_home_quota`
+Run: `cargo test -p kloudlite-agent --test reconcile a_raised_home_quota`
 Expected: FAIL — `rec.sent("PATCH", HOME_VOL_GET)` is empty.
 
 - [ ] **Step 3: Implement**
@@ -1607,7 +1607,7 @@ In `deploy/k3s/agent-admission.yaml`, the Volume branch of the first policy beco
                                 || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
              && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
           : object.spec == oldObject.spec
-      message: "kloudlite-git-agent writes status, not spec (the exceptions: Volume.spec.restoreTo, and Volume.spec.quotaGb on an OwnerBinding's home volume)"
+      message: "kloudlite-agent writes status, not spec (the exceptions: Volume.spec.restoreTo, and Volume.spec.quotaGb on an OwnerBinding's home volume)"
 ```
 
 and its header comment's "ONE spec field" paragraph gains: "…and, since the persistent home, `Volume.spec.quotaGb` on a Volume an `OwnerBinding` owns — `binding::ensure_home` copies the binding's `homeQuotaGb` down; the ownerReference is what scopes it, so a workspace's volume quota stays `/v1`'s."
@@ -1616,7 +1616,7 @@ and its header comment's "ONE spec field" paragraph gains: "…and, since the pe
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p kloudlite-git-agent --test reconcile binding && cargo clippy -p kloudlite-git-agent --all-targets -- -D warnings`
+Run: `cargo test -p kloudlite-agent --test reconcile binding && cargo clippy -p kloudlite-agent --all-targets -- -D warnings`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1716,7 +1716,7 @@ Expected: `bash -n` prints nothing; shellcheck introduces no new warnings in the
 
 - [ ] **Step 3: Run it on the Linux VM** (documented in CLAUDE.md as the only place it runs)
 
-Run: `cargo build --bin kloudlite-git --bin kloudlite-git-api --bin kloudlite-git-agent --bin kl && ./tests/ws_e2e.sh`
+Run: `cargo build --bin kloudlite --bin kloudlite-api --bin kloudlite-agent --bin kl && ./tests/ws_e2e.sh`
 Expected: `OK: … persistent home (…) all passed`; exit 0. On this Mac: exit 77 with `SKIP: btrfs/mkfs.btrfs not on PATH`.
 
 - [ ] **Step 4: Commit**

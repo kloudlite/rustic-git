@@ -26,7 +26,7 @@ pub use teams::{
 use mongodb::bson::{doc, DateTime};
 use mongodb::options::ClientOptions;
 use mongodb::{Client, Collection, IndexModel};
-use kloudlite_git_core::{err, Result};
+use kloudlite_core::{err, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -281,7 +281,7 @@ impl std::fmt::Display for Invalid {
 
 impl std::error::Error for Invalid {}
 
-pub(crate) fn invalid(msg: &str) -> kloudlite_git_core::Error {
+pub(crate) fn invalid(msg: &str) -> kloudlite_core::Error {
     Box::new(Invalid(msg.to_string()))
 }
 
@@ -311,7 +311,7 @@ pub fn check_handle(h: &str) -> Result<()> {
     if RESERVED.contains(&h) {
         return Err(invalid("that handle is reserved"));
     }
-    if !kloudlite_git_storage::store::valid_owner(h) {
+    if !kloudlite_storage::store::valid_owner(h) {
         return Err(invalid("that handle cannot be used"));
     }
     Ok(())
@@ -379,7 +379,7 @@ impl Directory {
         let mut opts = ClientOptions::parse(uri).await.map_err(|e| err(format!("mongo: {e}")))?;
         // Cosmos closes idle connections aggressively; a small pool that is
         // re-established quickly beats a large one full of dead sockets.
-        opts.app_name = Some("kloudlite-git-api".into());
+        opts.app_name = Some("kloudlite-api".into());
         opts.max_pool_size = Some(16);
         // The driver's own command monitoring is the ONE choke point this client has: every
         // collection call in this file (and in `teams.rs`) ends as a command event carrying the
@@ -906,7 +906,7 @@ impl Directory {
         Ok(())
     }
 
-    /// The `KLOUDLITE_GIT_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
+    /// The `KLOUDLITE_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
     /// is a way to get the first administrator into an empty cluster, not the list itself, so
     /// removing an email from it must not silently revoke someone the list has since granted.
     pub async fn ensure_superadmins(&self, emails: &[String]) -> Result<usize> {
@@ -938,7 +938,7 @@ pub const OPS: &[&str] = &[
 /// One command event, timed by the driver itself. Started events carry no duration and are
 /// ignored: the pair we want is succeeded/failed, which is one record per round trip.
 fn on_command(ev: mongodb::event::command::CommandEvent) {
-    use kloudlite_git_core::metrics::dep_took;
+    use kloudlite_core::metrics::dep_took;
     use mongodb::event::command::CommandEvent::*;
     match ev {
         Started(_) => {}
@@ -1011,7 +1011,7 @@ mod tests {
         assert_eq!(super::kind_of(&io(std::io::ErrorKind::ConnectionRefused)), "refused");
         assert_eq!(super::kind_of(&io(std::io::ErrorKind::BrokenPipe)), "other");
         for e in [io(std::io::ErrorKind::TimedOut), io(std::io::ErrorKind::BrokenPipe)] {
-            assert!(kloudlite_git_core::metrics::ERROR_KINDS.contains(&super::kind_of(&e)));
+            assert!(kloudlite_core::metrics::ERROR_KINDS.contains(&super::kind_of(&e)));
         }
     }
 

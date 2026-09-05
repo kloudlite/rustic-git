@@ -226,7 +226,7 @@ Add the periodic lane: each node walks the repos **it already owns** and calls t
 **Why.** Task 3b landed the periodic lane, but its ownership set is `pool.warm_repos()` — repos this
 node currently holds OPEN. That is what spec §6.4 asks for ("for what it holds warm"), and it is the
 right scope: the alternative, walking every assigned repo, means opening thousands of databases on a
-timer, which is how the WAL explosion that took `kloudlite-git-0` down began.
+timer, which is how the WAL explosion that took `kloudlite-0` down began.
 
 But it leaves one case genuinely uncovered, and it is the cutover case:
 
@@ -242,7 +242,7 @@ overstated there. Neither loop can fix it, because both are driven by the repo b
 A marker is a VIEW, so a mirror is a perfectly good source for it — and any error self-heals the
 next time the owner touches the repo via `reconcile_marker`.
 
-Add `kloudlite-git admin backfill-repo-markers`:
+Add `kloudlite admin backfill-repo-markers`:
 - Read every row from Mongo `repos`.
 - For each, `index::write(Kind::Repo, owner, Marker { name, public, created_by, created_ms,
   description, .. })` from the row's own fields.
@@ -476,7 +476,7 @@ this task, so the diff stays reviewable.
 - **Clippy: identical to master** — 9 warnings, same kinds, verified by running both branches and
   diffing the warning kinds. No new warnings.
 - **Redis-down and Mongo-down drills: these are the DEFAULT test condition.** No test sets
-  `KLOUDLITE_GIT_MONGO_URI` or `KLOUDLITE_GIT_REDIS_URL`, and the whole suite passes without either. The
+  `KLOUDLITE_MONGO_URI` or `KLOUDLITE_REDIS_URL`, and the whole suite passes without either. The
   floor tests assert `!cache.connected()` explicitly before proving the owner still finds and
   performs work. This is the proof the truth actually moved.
 - **`every_browse_route_is_routable`: passes** with the new `pulls` tail (BROWSE_TAILS now 22).
@@ -490,7 +490,7 @@ this task, so the diff stays reviewable.
 ### Deploy-blocking bug found during verification
 
 The StatefulSet — the git nodes, which are the ONLY workload that runs `ensure_migrated` — had no
-`KLOUDLITE_GIT_MONGO_URI`. Only the api and worker Deployments carried it. Deploying as-was would have
+`KLOUDLITE_MONGO_URI`. Only the api and worker Deployments carried it. Deploying as-was would have
 started every owning node in the `Source::Absent` state, which by its own correct rules records each
 touched repo as migrated with zero pull requests: every existing PR orphaned, numbering restarted at
 1 into collisions that overwrite real rows. Ruling 2's whole purpose, defeated by a manifest.
@@ -504,7 +504,7 @@ directory at all.
 - [ ] `cargo test` — full suite green
 - [ ] `cargo clippy --lib` — no new warnings in touched files
 - [ ] `./tests/registry_e2e.sh` — exit 0, or 77 with the docker half genuinely skipped (77 is NOT a pass)
-- [ ] **Redis-down drill:** with `KLOUDLITE_GIT_REDIS_URL` unset — PR writes succeed, the owner's sweep
+- [ ] **Redis-down drill:** with `KLOUDLITE_REDIS_URL` unset — PR writes succeed, the owner's sweep
       still finds mergeability work, listings still render from markers
 - [ ] **Mongo-down drill:** with the `pulls`/`repos` collections unreachable, a migrated repo's PRs
       still open, list, and merge. This is the proof the truth actually moved.

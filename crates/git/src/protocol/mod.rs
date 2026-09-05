@@ -1,7 +1,7 @@
 pub mod receive;
 pub mod upload;
 
-pub const AGENT: &str = "agent=kloudlite-git/0.1";
+pub const AGENT: &str = "agent=kloudlite/0.1";
 
 /// Run a future to completion from sync code inside `spawn_blocking`.
 ///

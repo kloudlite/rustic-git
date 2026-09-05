@@ -13,20 +13,20 @@ use axum::response::Response;
 fn realm() -> String {
     // The externally reachable base URL. The challenge must name a URL the CLIENT can reach, not
     // this pod's address, so it is configuration rather than something derived from the request.
-    std::env::var("KLOUDLITE_GIT_EXTERNAL_URL").unwrap_or_else(|_| "http://localhost:8080".into())
+    std::env::var("KLOUDLITE_EXTERNAL_URL").unwrap_or_else(|_| "http://localhost:8080".into())
 }
 
 pub fn challenge(scope: Option<&str>) -> Response {
     challenge_for(&realm(), scope)
 }
 
-/// Refuses a `KLOUDLITE_GIT_EXTERNAL_URL` that cannot be a header value, so the process fails at
+/// Refuses a `KLOUDLITE_EXTERNAL_URL` that cannot be a header value, so the process fails at
 /// boot instead of `challenge` panicking on the first anonymous request.
 pub fn check_external_url() -> crate::Result<()> {
     let base = realm();
     header::HeaderValue::from_str(&challenge_value(&base, None))
         .map(|_| ())
-        .map_err(|_| crate::err(format!("KLOUDLITE_GIT_EXTERNAL_URL is not a valid header value: {base:?}")))
+        .map_err(|_| crate::err(format!("KLOUDLITE_EXTERNAL_URL is not a valid header value: {base:?}")))
 }
 
 fn challenge_value(base: &str, scope: Option<&str>) -> String {

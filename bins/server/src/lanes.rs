@@ -79,7 +79,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     // Image pull counters are tallied in memory on the GET path and land here; losing one
     // window of counts to a crash is the accepted price of a lock-free pull.
     lane(app.clone(), 30, |a| async move {
-        use kloudlite_git_registry::store::ImageExt;
+        use kloudlite_registry::store::ImageExt;
         if let Err(e) = a.store.flush_pulls().await {
             tracing::warn!(error = %e, "registry.counters.flush.failed");
         }
@@ -165,7 +165,7 @@ pub async fn reconcile_owned_markers(app: &App) {
         if let Err(e) = app.store.reconcile_marker(owner, name, kind, db_public).await {
             tracing::warn!(owner = %owner, repo = %name, reason = "write", error = %e, "index.marker.reconcile.failed");
         }
-        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_app::RECONCILE_GAP).await;
     }
 }
 
@@ -190,7 +190,7 @@ pub async fn check_owned_pulls(app: &App) {
         if let Err(e) = crate::pulls::check_repo(&app.store, owner, name).await {
             tracing::warn!(owner = %owner, repo = %name, error = %e, "merge.mergeability.failed");
         }
-        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_app::RECONCILE_GAP).await;
     }
 }
 
@@ -246,7 +246,7 @@ pub async fn announce_stranded_merges(app: &App) {
                 tracing::warn!(owner = %owner, repo = %name, number = pr.number, error = %e, "merge.announce.failed");
             }
         }
-        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_app::RECONCILE_GAP).await;
     }
 }
 
@@ -277,6 +277,6 @@ pub async fn consolidate_owned_packs(app: &App, max_packs: usize) {
             }
             Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "packs.consolidate.failed"),
         }
-        tokio::time::sleep(kloudlite_git_app::RECONCILE_GAP).await;
+        tokio::time::sleep(kloudlite_app::RECONCILE_GAP).await;
     }
 }

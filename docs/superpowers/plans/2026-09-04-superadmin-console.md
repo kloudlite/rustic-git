@@ -7,14 +7,14 @@ it healthy", "what does this owner have", "run a change safely" and "what happen
 the flat Requests/Usage/Quotas/Clusters/Monitoring tabs the quotas-and-superadmin plan shipped.
 Everything the operator can do is audited forever.
 
-**Architecture:** No new CRDs. The admin server process (`bins/api` with `KLOUDLITE_GIT_API_ROLE=admin`,
+**Architecture:** No new CRDs. The admin server process (`bins/api` with `KLOUDLITE_API_ROLE=admin`,
 router `crates/workspaces/src/api/admin.rs` + `admin/{settings,schema}.rs`) grows: an append-only
 audit log written straight to the object store it already has a handle to (`ApiState::keys`,
 `s.keys.as_ref().map(|store| store.os.clone())`, the same accessor `admin/settings.rs`'s
 `object_store()` uses) at `audit/{yyyy-mm}/{ts}-{ulid}.json`, one composed detail/list endpoint per
 area (`/admin/owners`, `/admin/owners/{slug}`, `/admin/clusters`, `/admin/clusters/{region}`,
 `/admin/monitoring/signals`, `/admin/overview`), and drain/undrain/decommission routes that patch
-the `Node` object's `kloudlite-git.io/decommission` label the way `bins/agent/src/decommission.rs`
+the `Node` object's `kloudlite.io/decommission` label the way `bins/agent/src/decommission.rs`
 already reads it. Every write route funnels through one `audit::record` call so no route can land
 silently. The server-tier superadmin management routes (`crates/api/src/teams.rs`,
 `/api/admin/superadmins/{user}`) gain the "not yourself / not the last one" rules; nothing about
@@ -69,7 +69,7 @@ These apply to every task; they are not repeated per task.
 - **Gates — run all of these before every commit, unpiped:**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces -p kloudlite-git-api -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces -p kloudlite-api -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -246,7 +246,7 @@ async fn audit_list_filters_by_actor_action_and_target() { /* write three rows w
 - [ ] **Step 6: Run tests, verify, commit**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces audit -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces audit -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -310,7 +310,7 @@ async fn approve_with_no_body_still_grants_exactly_what_was_asked() { /* unchang
 - [ ] **Step 4: Run tests, verify, commit**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces api_admin -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces api_admin -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -370,9 +370,9 @@ async fn write_quota_without_a_note_is_422() { /* PUT /admin/quota/acme with not
   `owners_list` (renamed from `usage_all`, kept as the same route `/admin/usage` for backward
   compatibility is NOT needed — the spec replaces Usage with Owners outright, so
   `/admin/usage` is deleted and `/admin/owners` takes its route slot; the web's Usage tab is
-  deleted in Task 11). Add a third owner source: every distinct `kloudlite-git.io/owner` label value
+  deleted in Task 11). Add a third owner source: every distinct `kloudlite.io/owner` label value
   across `Workspace`/`Environment`/`Volume` — `Api::<Workspace>::all(...).list(&ListParams::default()
-  .labels("kloudlite-git.io/owner"))`'s label KEYS aren't directly listable via `kube`, so instead list
+  .labels("kloudlite.io/owner"))`'s label KEYS aren't directly listable via `kube`, so instead list
   every object of each of the three kinds and collect `.spec.owner` (not the label — Global
   Constraint: never enumerate off a label) into the same `BTreeSet` `usage_all` already builds from
   Quota/QuotaRequest. This resolves the ponytail note in the existing `usage_all` doc comment;
@@ -391,7 +391,7 @@ async fn write_quota_without_a_note_is_422() { /* PUT /admin/quota/acme with not
 - [ ] **Step 5: Run tests, verify, commit**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces api_admin_owners -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces api_admin_owners -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -415,7 +415,7 @@ async fn write_quota_without_a_note_is_422() { /* PUT /admin/quota/acme with not
 - Produces: `GET /admin/clusters` → `Vec<ClusterRow>` (`ClusterRow { region: String, status:
   String, agents_ready: i64, agents_desired: i64, nodes_ready: i64, nodes_total: i64,
   draining: i64, working_copies: i64, settings_status: "present"|"absent"|"parse-error" }` —
-  `agents_*`/`nodes_*` from `list_nodes` (existing) plus the `kloudlite-git-agent` DaemonSet's
+  `agents_*`/`nodes_*` from `list_nodes` (existing) plus the `kloudlite-agent` DaemonSet's
   `WorkloadDoc` (existing, `workloads::list_workloads`'s per-region half); `working_copies` counts
   `Workspace`+`Environment` objects in that region whose `podRef`/equivalent is set (a live
   worktree, same predicate `decommission.rs`'s `is_live_worktree` uses); `settings_status` from
@@ -434,7 +434,7 @@ async fn write_quota_without_a_note_is_422() { /* PUT /admin/quota/acme with not
   the `DECOMMISSION_STATUS` annotation (so a re-drain starts counting from `draining …` again, not
   a stale `drained` stamp); `POST /admin/clusters/{region}/nodes/{node}/decommission` (body
   `{ reason: String }`) refuses (409, "not drained yet") unless the node's
-  `kloudlite-git.io/decommission-status` annotation starts with `"drained "`, then applies the k3s
+  `kloudlite.io/decommission-status` annotation starts with `"drained "`, then applies the k3s
   built-in `node.kubernetes.io/unschedulable` cordon (`Api::<Node>::cordon`, `kube`'s helper) —
   the console's own decommission action is "stop scheduling new pods here", never a VM delete,
   matching the spec's Decision 2 exactly ("the operator is told the VM may be deleted (the console
@@ -509,7 +509,7 @@ async fn drain_without_a_reason_is_422() { /* … */ }
 - [ ] **Step 5: Run tests, verify, commit**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces api_admin_clusters -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces api_admin_clusters -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -547,9 +547,9 @@ async fn drain_without_a_reason_is_422() { /* … */ }
     node-exporter, neither obtainable from an ad-hoc scrape; `why` says exactly that ("needs a
     sustained rate window a point-in-time scrape cannot compute" / "needs node-exporter, not
     deployed").
-  Pods are listed by label — `rg -n "app.kubernetes.io/name\|prometheus.io/scrape" deploy/kloudlite-git.yaml
+  Pods are listed by label — `rg -n "app.kubernetes.io/name\|prometheus.io/scrape" deploy/kloudlite.yaml
   deploy/k3s/*.yaml` for the exact label selector already on each Deployment/StatefulSet's pod
-  template — fetched over the in-cluster pod IP at `:9464/metrics` (`KLOUDLITE_GIT_METRICS_ADDR`'s
+  template — fetched over the in-cluster pod IP at `:9464/metrics` (`KLOUDLITE_METRICS_ADDR`'s
   default port per `crates/core/src/metrics.rs`), parsed as Prometheus text exposition (a small
   hand-rolled line parser: `name{labels} value` — ponytail: no `prometheus-parse` crate added for
   ~15 lines of splitting, revisit if the format needs escaping this parser doesn't handle).
@@ -597,7 +597,7 @@ fn window_only_rules_report_unknown() {
 
 - [ ] **Step 3: the handler**
 
-  List central pods (`Api::<Pod>::namespaced(aks_client, "kloudlite-git")` filtered by the label
+  List central pods (`Api::<Pod>::namespaced(aks_client, "kloudlite")` filtered by the label
   selector found in Step's file check above), `reqwest::get` each `/metrics`, evaluate, assemble
   `Vec<SignalRow>` in `deploy/alerts.md`'s table order. `restarts_last_hour` reads
   `status.container_statuses` off the same pod list, no second fetch.
@@ -605,7 +605,7 @@ fn window_only_rules_report_unknown() {
 - [ ] **Step 4: Run tests, verify, commit**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces api_admin_monitoring -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces api_admin_monitoring -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -663,7 +663,7 @@ async fn add_superadmin_refuses_an_email_with_no_account() { /* "ghost@x" has no
 - [ ] **Step 3: Run tests, verify, commit**
 
   ```bash
-  cargo test -p kloudlite-git-api teams -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-api teams -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -731,7 +731,7 @@ async fn overview_with_nothing_pending_still_returns_fleet_numbers() { /* … */
 - [ ] **Step 4: Run tests, verify, commit**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces api_admin_overview -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces api_admin_overview -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
@@ -977,7 +977,7 @@ describe("activeArea", () => {
 - [ ] **Step 2: `clusters/[region]/page.tsx`**
 
   Nodes table (name, ready, agent pod ready — cross-referenced from the region's `workloads` list
-  by `name === "kloudlite-git-agent"`'s readiness doesn't map per-node, so agent-pod-readiness per
+  by `name === "kloudlite-agent"`'s readiness doesn't map per-node, so agent-pod-readiness per
   node needs the DaemonSet's `status.numberReady` shown once per region, not per node — spec
   ambiguity noted below, resolved as: show the DaemonSet-level ready/desired once above the table,
   and per-node only what `NodeRow` actually carries — `ready`, `decommission_status` parsed into
@@ -1032,9 +1032,9 @@ describe("activeArea", () => {
 - [ ] **Step 2: `page.tsx`**
 
   Table: alert name, state badge (firing = destructive variant, ok = outline, unknown = muted),
-  the `why` text. `KLOUDLITE_GIT_GRAFANA_URL` link shown only if set — reuse whatever the app already
+  the `why` text. `KLOUDLITE_GRAFANA_URL` link shown only if set — reuse whatever the app already
   does to read an env-derived optional link (`rg -n "NEXT_PUBLIC\|process.env" web/apps/web/src/app/\(shell\)/superadmin`
-  for the pattern; if `KLOUDLITE_GIT_GRAFANA_URL` isn't already surfaced to the web, add it via
+  for the pattern; if `KLOUDLITE_GRAFANA_URL` isn't already surfaced to the web, add it via
   `getPublicCentralSettings` if that's where such links live, else a plain `NEXT_PUBLIC_GRAFANA_URL`
   env var read server-side in the page).
 
@@ -1198,7 +1198,7 @@ describe("auditQueryString", () => {
 - [ ] **Step 2: `deploy/k3s/README.md`**
 
   Release note entry: "Superadmin console: re-apply `deploy/k3s/api-rbac.yaml` (`nodes` gains
-  `patch`) before deploying this release's `kloudlite-git-admin` image — the drain/undrain/
+  `patch`) before deploying this release's `kloudlite-admin` image — the drain/undrain/
   decommission routes 403 without it."
 
 - [ ] **Step 3: `tests/ws_e2e.sh`**
@@ -1214,7 +1214,7 @@ describe("auditQueryString", () => {
 - [ ] **Step 4: Run the gates one more time across the whole plan**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces -p kloudlite-git-api -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces -p kloudlite-api -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   cd web && bun run lint; echo exit=$?
   bunx tsc --noEmit -p apps/web/tsconfig.json; echo exit=$?

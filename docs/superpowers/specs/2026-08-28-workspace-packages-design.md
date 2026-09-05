@@ -42,7 +42,7 @@ live outside the spec). Either can be added later without changing anything belo
 
 | Component | Where | What it does |
 |---|---|---|
-| `nix-daemon` container | `kloudlite-git-agent` DaemonSet, kube-system, one per node | Runs `nix-daemon` from the `nixos/nix` image with the host's `/nix` mounted. The store, the SQLite db, the daemon socket and every profile live on the host disk under `/nix`; the container is stateless. |
+| `nix-daemon` container | `kloudlite-agent` DaemonSet, kube-system, one per node | Runs `nix-daemon` from the `nixos/nix` image with the host's `/nix` mounted. The store, the SQLite db, the daemon socket and every profile live on the host disk under `/nix`; the container is stateless. |
 | Nix client in the agent image | `bins/agent` image | `nix` CLI, talking to the daemon over `/nix/var/nix/daemon-socket/socket` (both containers mount host `/nix`). The agent never runs a build itself: the daemon does, as `nixbld` users, sandboxed. |
 | `packages` module | `crates/workspaces/src/packages.rs` | Pure: validates attribute names, renders the `buildEnv` expression, derives the profile hash. Testable without Nix. |
 | Profile step in the Workspace reconciler | `bins/agent/src/controller.rs` | Between "volume materialized" and "pod applied": ping the daemon, realise, then link. Writes `status.packages`. |

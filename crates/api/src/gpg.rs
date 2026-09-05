@@ -10,7 +10,7 @@
 //! fingerprint: verification needs the material, and the answer to "whose is
 //! this?" is a walk from subkey to primary.
 
-use kloudlite_git_core::{hex, Result};
+use kloudlite_core::{hex, Result};
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 
 /// Why a signature is or is not good.
@@ -59,7 +59,7 @@ pub fn is_pgp(signature: &str) -> bool {
 /// verification result (`verify_signature`) does not pay the parse twice per request.
 pub fn parse_signature(signature: &str) -> Result<DetachedSignature> {
     Ok(DetachedSignature::from_string(signature)
-        .map_err(|e| kloudlite_git_core::err(format!("signature: {e}")))?
+        .map_err(|e| kloudlite_core::err(format!("signature: {e}")))?
         .0)
 }
 
@@ -84,7 +84,7 @@ pub fn issuers(sig: &DetachedSignature) -> Vec<String> {
 /// inside it — more than once per request.
 pub fn parse_key(armoured: &str) -> Result<SignedPublicKey> {
     Ok(SignedPublicKey::from_string(armoured)
-        .map_err(|e| kloudlite_git_core::err(format!("public key: {e}")))?
+        .map_err(|e| kloudlite_core::err(format!("public key: {e}")))?
         .0)
 }
 

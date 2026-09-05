@@ -4,9 +4,9 @@
 //! a 404 for anything not in the catalogue, and 503 — never 500 — when there is no ClickHouse at
 //! all, which is a supported deployment rather than an outage.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, ApiState};
-use kloudlite_git_workspaces::history::History;
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, ApiState};
+use kloudlite_workspaces::history::History;
 use serde_json::{json, Value};
 use std::sync::Arc;
 

@@ -1,8 +1,8 @@
 mod common;
 
-use kloudlite_git_pulls::directory::{MergeState, MergeableState};
-use kloudlite_git_gitbase::refs::UpdateRefsExt;
-use kloudlite_git_pulls::pulls::{self, Comment, MergeJob, Mergeability, PullRequest, PullState};
+use kloudlite_pulls::directory::{MergeState, MergeableState};
+use kloudlite_gitbase::refs::UpdateRefsExt;
+use kloudlite_pulls::pulls::{self, Comment, MergeJob, Mergeability, PullRequest, PullState};
 
 fn pr(number: i64, state: PullState) -> PullRequest {
     PullRequest {
@@ -231,7 +231,7 @@ fn a_bson_date_row_still_deserializes() {
         "createdAt": DateTime::from_millis(1_755_772_800_000),
         "comments": [],
     };
-    let pr: kloudlite_git_pulls::pulls::PullRequest =
+    let pr: kloudlite_pulls::pulls::PullRequest =
         mongodb::bson::from_document(d).expect("a bson DateTime row must still deserialize");
     assert_eq!(pr.created_at_ms, 1_755_772_800_000);
 }
@@ -392,7 +392,7 @@ async fn a_failed_read_leaves_the_repo_unmigrated() {
     let e = common::env().await;
     e.store.create_repo("a", "r").await.unwrap();
     let bad = pulls::migrate_from(&e.store, "a", "r", || async {
-        Err(kloudlite_git_core::err("mongo down"))
+        Err(kloudlite_core::err("mongo down"))
     })
     .await;
     assert!(bad.is_err());
@@ -432,7 +432,7 @@ async fn repo_with_a_ff(e: &common::TestEnv, owner: &str, name: &str) {
     e.store
         .update_refs(
             &repo,
-            &[kloudlite_git_gitbase::refs::RefUpdate {
+            &[kloudlite_gitbase::refs::RefUpdate {
                 name: "refs/heads/base".into(),
                 old: None,
                 new: Some(oid),
@@ -468,7 +468,7 @@ async fn the_owners_sweep_checks_a_pull_with_nothing_central_up() {
     pulls::put(&db, &open_pr(1)).await.unwrap();
 
     let app = common::app(e.store.clone()).await;
-    kloudlite_git_server::lanes::check_owned_pulls(&app).await;
+    kloudlite_server::lanes::check_owned_pulls(&app).await;
 
     let got = pulls::get(&db, 1).await.unwrap().unwrap();
     let m = got
@@ -585,15 +585,15 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
     pulls::put(&db, &open_pr(1)).await.unwrap();
     pulls::put(&db, &open_pr(2)).await.unwrap();
 
-    let router = kloudlite_git_server::router::peer_router(common::app(e.store.clone()).await);
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
     let post = |path: String| {
         let router = router.clone();
         async move {
             let req = Request::builder()
                 .method("POST")
                 .uri(path)
-                .header(kloudlite_git_core::peer::PEER_HEADER, "test-peer-secret")
-                .header(kloudlite_git_core::peer::OWNER_HEADER, "a")
+                .header(kloudlite_core::peer::PEER_HEADER, "test-peer-secret")
+                .header(kloudlite_core::peer::OWNER_HEADER, "a")
                 .body(axum::body::Body::empty())
                 .unwrap();
             router.oneshot(req).await.unwrap().status()
@@ -668,7 +668,7 @@ fn queued(number: i64, strategy: &str) -> PullRequest {
 
 mod worker_merges {
     use super::*;
-    use kloudlite_git_pulls::merge_worker::{self, Outcome, OutcomeState};
+    use kloudlite_pulls::merge_worker::{self, Outcome, OutcomeState};
 
     /// A repo with `base` and `master` in whatever shape `build` leaves them, served on a peer
     /// listener. Returns that listener's base URL — the fleet, from the worker's point of view.
@@ -745,8 +745,8 @@ mod worker_merges {
     async fn peer(base: &str, path: &str, body: Option<serde_json::Value>) -> reqwest::Response {
         let mut req = reqwest::Client::new()
             .post(format!("{base}{path}"))
-            .header(kloudlite_git_core::peer::PEER_HEADER, "test-peer-secret")
-            .header(kloudlite_git_core::peer::OWNER_HEADER, "a");
+            .header(kloudlite_core::peer::PEER_HEADER, "test-peer-secret")
+            .header(kloudlite_core::peer::OWNER_HEADER, "a");
         if let Some(b) = body {
             req = req.json(&b);
         }
@@ -1056,10 +1056,10 @@ mod worker_merges {
         })
         .await
         .unwrap();
-        let oid = kloudlite_git_gitbase::objects::write_commit(
+        let oid = kloudlite_gitbase::objects::write_commit(
             &e.store,
             &repo,
-            kloudlite_git_gitbase::objects::NewCommit {
+            kloudlite_gitbase::objects::NewCommit {
                 tree,
                 parents: vec![base],
                 message: "somebody else\n".into(),
@@ -1073,7 +1073,7 @@ mod worker_merges {
         e.store
             .update_refs(
                 &repo,
-                &[kloudlite_git_gitbase::refs::RefUpdate {
+                &[kloudlite_gitbase::refs::RefUpdate {
                     name: "refs/heads/base".into(),
                     old: Some(base),
                     new: Some(oid),
@@ -1151,14 +1151,14 @@ mod worker_merges {
         e.store.open_repo("a", "r").await.unwrap();
 
         let a = common::app(e.store.clone()).await;
-        kloudlite_git_server::lanes::announce_stranded_merges(&a).await;
+        kloudlite_server::lanes::announce_stranded_merges(&a).await;
 
         // `xrevrange`, not `xreadgroup`: the in-process stand-in has no consumer groups, and what
         // is being asserted is that the event was PUBLISHED, not how it is delivered.
         let published = e.store.cache.xrevrange("events", 16).await;
         let kinds: Vec<String> = published
             .iter()
-            .filter_map(|(_, f)| kloudlite_git_storage::events::from_fields(f))
+            .filter_map(|(_, f)| kloudlite_storage::events::from_fields(f))
             .map(|ev| format!("{:?}#{}", ev.kind, ev.number))
             .collect();
         assert!(
@@ -1461,7 +1461,7 @@ mod worker_merges {
         let mut fresh = queued(1, "merge");
         fresh.merge.as_mut().unwrap().requested_at_ms = now;
         pulls::put(&db, &fresh).await.unwrap();
-        kloudlite_git_server::lanes::announce_stranded_merges(&app).await;
+        kloudlite_server::lanes::announce_stranded_merges(&app).await;
         assert!(
             e.store.cache.xrevrange("events", 16).await.is_empty(),
             "a job announced a moment ago must not be announced again"
@@ -1475,7 +1475,7 @@ mod worker_merges {
         })
         .await
         .unwrap();
-        kloudlite_git_server::lanes::announce_stranded_merges(&app).await;
+        kloudlite_server::lanes::announce_stranded_merges(&app).await;
         assert_eq!(
             e.store.cache.xrevrange("events", 16).await.len(),
             1,
@@ -1491,7 +1491,7 @@ mod worker_merges {
             .unwrap()
             .announced_at_ms
             .is_some());
-        kloudlite_git_server::lanes::announce_stranded_merges(&app).await;
+        kloudlite_server::lanes::announce_stranded_merges(&app).await;
         assert_eq!(
             e.store.cache.xrevrange("events", 16).await.len(),
             1,

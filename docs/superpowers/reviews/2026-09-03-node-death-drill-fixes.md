@@ -214,7 +214,7 @@ rebuilds the condition list wholesale on every tick.
 
 Fixed at the root rather than by preserving the condition through the rebuild: the parent's OWN
 reconcile writes `Decommissioning=True/NodeLeaving` when its Node carries
-`kloudlite-git.io/decommission=true`. `controller::i_am_dead` becomes `my_node` and returns
+`kloudlite.io/decommission=true`. `controller::i_am_dead` becomes `my_node` and returns
 `{dead, decommissioning}` from the SAME single GET it already made, so the notice costs no extra
 API call; `with_drain_notice` appends it at the running arms of `apply_workspace` (the
 `PodNotReady` write and the converged write) and `apply_environment`. A stop arm never calls it, so
@@ -234,9 +234,9 @@ node midway through a multi-pass test.
 ## Gates (round 3)
 
 ```
-cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1  → exit 0
+cargo test -p kloudlite-agent-bin -p kloudlite-workspaces -- --test-threads=1  → exit 0
 cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
-CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml                  → exit 0
+CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml                  → exit 0
 ```
 
 ## Round 3 review fixes
@@ -269,7 +269,7 @@ the source voldir is created before the lock because `ws_lock`'s file lives unde
 ## Gates (round 3 review fixes)
 
 ```
-cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1  → exit 0
+cargo test -p kloudlite-agent-bin -p kloudlite-workspaces -- --test-threads=1  → exit 0
 cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
 ```
 
@@ -318,7 +318,7 @@ the `list` beside it and for the same reason.
 ## Gates (round 4)
 
 ```
-cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1  → exit 0
+cargo test -p kloudlite-agent-bin -p kloudlite-workspaces -- --test-threads=1  → exit 0
 cargo clippy --workspace --all-targets --locked -- -D warnings                   → exit 0
 ```
 

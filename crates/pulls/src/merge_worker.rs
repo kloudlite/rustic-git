@@ -29,7 +29,7 @@
 //! Nothing here opens a database, and nothing here is async: it is a sequence of subprocesses, so
 //! callers run it on a blocking thread.
 
-use kloudlite_git_core::{err, Result};
+use kloudlite_core::{err, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -215,11 +215,11 @@ fn dir_size(p: &Path) -> u64 {
 /// lane. Seconds, via env; the job default sits under the liveness probe's 30 minute window.
 fn cmd_timeout() -> Duration {
     static T: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *T.get_or_init(|| secs("KLOUDLITE_GIT_MERGE_CMD_TIMEOUT", 15 * 60))
+    *T.get_or_init(|| secs("KLOUDLITE_MERGE_CMD_TIMEOUT", 15 * 60))
 }
 fn job_timeout() -> Duration {
     static T: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *T.get_or_init(|| secs("KLOUDLITE_GIT_MERGE_JOB_TIMEOUT", 25 * 60))
+    *T.get_or_init(|| secs("KLOUDLITE_MERGE_JOB_TIMEOUT", 25 * 60))
 }
 fn secs(var: &str, default: u64) -> Duration {
     Duration::from_secs(
@@ -326,8 +326,8 @@ fn must(dir: &Path, args: &[&str]) -> Result<String> {
 /// A git command that talks to the fleet.
 ///
 /// The peer secret rides in `-c http.extraHeader`, so NOTHING here may put the argv into an error,
-/// a log line or a panic message. `x-kloudlite-git-peer` admits the request on the peer listener;
-/// `x-kloudlite-git-owner` is the identity it is served as, and the git routes authorize it exactly
+/// a log line or a panic message. `x-kloudlite-peer` admits the request on the peer listener;
+/// `x-kloudlite-owner` is the identity it is served as, and the git routes authorize it exactly
 /// as they would a token for that owner (see `http::open`).
 fn networked(dir: &Path, secret: &str, owner: &str, args: &[&str]) -> Result<std::process::Output> {
     out(Command::new("git")
@@ -335,11 +335,11 @@ fn networked(dir: &Path, secret: &str, owner: &str, args: &[&str]) -> Result<std
         .arg(dir)
         .args([
             "-c",
-            &format!("http.extraHeader={}: {secret}", kloudlite_git_core::peer::PEER_HEADER),
+            &format!("http.extraHeader={}: {secret}", kloudlite_core::peer::PEER_HEADER),
         ])
         .args([
             "-c",
-            &format!("http.extraHeader={}: {owner}", kloudlite_git_core::peer::OWNER_HEADER),
+            &format!("http.extraHeader={}: {owner}", kloudlite_core::peer::OWNER_HEADER),
         ])
         // Fail a transfer that has moved less than 1 KiB/s for a minute. Without this a half-open
         // connection hangs the lane indefinitely: the lane's heartbeat goes stale and the pod is
@@ -802,7 +802,7 @@ fn rebase(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<Stri
         let ident = must(&wt, &["log", "-1", "--format=%an%n%ae", "HEAD"])?;
         let (name, mail) = ident
             .split_once('\n')
-            .unwrap_or(("kloudlite-git", "noreply@invalid"));
+            .unwrap_or(("kloudlite", "noreply@invalid"));
         let o = out(Command::new("git")
             .arg("-C")
             .arg(&wt)

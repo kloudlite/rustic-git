@@ -10,16 +10,16 @@ Files, in the order a cluster is built:
 | `env.example.sh` | Copy to `env.sh` (git-ignored) and edit. Sizes, names, operator CIDR, `API_CLIENTS` (the api tier's egress, admitted to 6443 by both the NSG and nftables), `CF_IPS_FILE` (defaults to `cloudflare-ips-v4.txt`). |
 | `provision-azure.sh` | VNet, NSG (including the Cloudflare-on-80 and api-tier-on-6443 rules, from `CF_IPS_FILE`/`API_CLIENTS`), control plane, workers, build VM. Idempotent — re-run after a partial failure. |
 | `format-pool.sh` | Run on each worker with the data disk as argument. btrfs at `/wspool-prod`. |
-| `crds.yaml` | **Generated** — do not hand-edit. `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`. Now also carries `Region`: apply this and `api-rbac.yaml` before rolling the api image, then register each region with `POST /v1/regions` rather than seeding it into Cosmos. |
+| `crds.yaml` | **Generated** — do not hand-edit. `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml`. Now also carries `Region`: apply this and `api-rbac.yaml` before rolling the api image, then register each region with `POST /v1/regions` rather than seeding it into Cosmos. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins every namespaced object it writes — pods, statefulsets, services, networkpolicies, limitranges, Secrets, RoleBindings — to the `ws-`/`wt-`/`env-` namespaces it makes. Apply with `agent-rbac.yaml`, always. |
 | `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods, and metrics (9464) only from the OTel collector's pod in `kube-system` (`otel-agent.yaml`). It used to name a namespace called `monitoring` that never existed, so 9464 was unreachable and the agent's gauges went nowhere. No Service — discovery is by pod IP from the API. See "Replication" below. |
-| `otel-agent.yaml` | The region's OpenTelemetry collectors: ServiceAccount + ClusterRole (the header table is the role), a DaemonSet for the per-node receivers (kubelet stats, pod logs, and this node's `prometheus.io/scrape` pods) and a one-replica Deployment for `k8s_cluster`. Exports to the ClickStack gateway on AKS. Needs the `kloudlite-git-otel` Secret first (`../clickstack/README.md`) and `KLOUDLITE_GIT_REGION` edited to this region's id. |
+| `otel-agent.yaml` | The region's OpenTelemetry collectors: ServiceAccount + ClusterRole (the header table is the role), a DaemonSet for the per-node receivers (kubelet stats, pod logs, and this node's `prometheus.io/scrape` pods) and a one-replica Deployment for `k8s_cluster`. Exports to the ClickStack gateway on AKS. Needs the `kloudlite-otel` Secret first (`../clickstack/README.md`) and `KLOUDLITE_REGION` edited to this region's id. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
-| `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `kloudlite-git-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
+| `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `kloudlite-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly backup of the SQLite datastore, the cluster identity and a YAML dump of every CRD object to Azure Blob. Restore procedure is in the script's trailing comment. |
 | `backup-controlplane.{service,timer}` | The systemd units that make "hourly" true — see "Control-plane backup" below. |
@@ -53,7 +53,7 @@ kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspa
 
 ### The SLO probe's two owners
 
-`quotas-slo.yaml` is above because the probe (`deploy/kloudlite-git.yaml`'s three CronJobs) runs
+`quotas-slo.yaml` is above because the probe (`deploy/kloudlite.yaml`'s three CronJobs) runs
 as `slo-probe` and `slo-other` in THIS cluster, and without the two `Quota` objects it inherits
 `default-user` — a real person's allowance, which makes `quota.refused` cost a person's worth of
 workspaces before it sees its 409. Safe to re-apply; nothing else references them.
@@ -64,26 +64,26 @@ kubectl apply -f quotas-slo.yaml
 # The probe's SSH key, once, on the AKS side (it is a Secret there, not here). Generate it and
 # register the public half; the runs use the private one for every SSH step.
 ssh-keygen -t ed25519 -N '' -C slo-probe -f /tmp/slo_ed25519
-kubectl -n kloudlite-git create secret generic kloudlite-git-slo --from-file=ssh_key=/tmp/slo_ed25519
+kubectl -n kloudlite create secret generic kloudlite-slo --from-file=ssh_key=/tmp/slo_ed25519
 shred -u /tmp/slo_ed25519            # the cluster has it now; a copy on a laptop is a second key to lose
 
 # The probe's own identity on this region: apply slo-rbac.yaml (the header table is the role —
 # exec into its pods, cordon/taint for the drills, impersonate the agent for one dry-run), then
-# mint a kubeconfig for the `kloudlite-git-slo` ServiceAccount exactly as "Rotating the api
+# mint a kubeconfig for the `kloudlite-slo` ServiceAccount exactly as "Rotating the api
 # tier's kubeconfig" below does for the api's, and store it on AKS as
-# kloudlite-git-slo-k3s-kubeconfig. Without it stages 5-7 cannot see the workspace CRDs.
+# kloudlite-slo-k3s-kubeconfig. Without it stages 5-7 cannot see the workspace CRDs.
 kubectl apply -f slo-rbac.yaml
 
 # Then claim the two usernames, once. Idempotent.
 # `create job --from` copies the pod template verbatim and takes no argument override, so the
 # subcommand is swapped in on the way past.
-kubectl -n kloudlite-git create job slo-bootstrap --from=cronjob/kloudlite-git-slo-fast \
+kubectl -n kloudlite create job slo-bootstrap --from=cronjob/kloudlite-slo-fast \
   --dry-run=client -o json | jq '.spec.template.spec.containers[0].args=["bootstrap"]' | kubectl apply -f -
 ```
 
 Every object a run creates is named `run-{run_id}` and swept by name prefix, so leftovers from a
 crashed run are cleaned up by the NEXT run rather than accumulating. To see them:
-`kubectl get workspaces,environments,snapshots -l kloudlite-git.io/owner=slo-probe`. Deleting a
+`kubectl get workspaces,environments,snapshots -l kloudlite.io/owner=slo-probe`. Deleting a
 `run-*` object by hand is always safe — nothing outside the probe references one — and is the
 right move only if the probe itself is stopped and the objects are holding quota.
 
@@ -98,7 +98,7 @@ reconcile pass aborts** — every workspace on that node stops converging until 
 replaced. Apply in this order:
 
 1. Pin and apply `agent-daemonset.yaml` only, and **wait for the rollout to finish on every node**
-   (`kubectl rollout status daemonset/kloudlite-git-agent -n <ns>`) before moving on.
+   (`kubectl rollout status daemonset/kloudlite-agent -n <ns>`) before moving on.
 2. Only then apply `agent-rbac.yaml` (and `agent-admission.yaml`).
    `workspace-admission.yaml` is the exception to this ordering: it is deny-only, matches on
    namespace rather than agent identity, and requires nothing from the new agent, so apply it
@@ -106,10 +106,10 @@ replaced. Apply in this order:
 3. Then run the cutover deletes below: pods, then pvc, then pv.
 
 ```sh
-kubectl delete pods -A -l kloudlite-git.io/kind=workspace
-kubectl delete pods -A -l kloudlite-git.io/kind=environment
-kubectl delete pvc -A -l kloudlite-git.io/kind=volume
-kubectl delete pv -l kloudlite-git.io/kind=volume
+kubectl delete pods -A -l kloudlite.io/kind=workspace
+kubectl delete pods -A -l kloudlite.io/kind=environment
+kubectl delete pvc -A -l kloudlite.io/kind=volume
+kubectl delete pv -l kloudlite.io/kind=volume
 ```
 
 Each running workspace restarts once. Nothing on disk is touched: the subvolumes the PVs pointed at
@@ -126,9 +126,9 @@ on it for anything user-facing mid-rollout.
 Nodes need labels before the DaemonSet will schedule and before placement will pick them:
 
 ```sh
-kubectl label node <node> kloudlite-git.io/pool=true          # has a btrfs pool: run the controller here
-kubectl label node <node> kloudlite-git.io/session=true       # may host workspaces
-kubectl label node <node> kloudlite-git.io/env=true           # may host environments
+kubectl label node <node> kloudlite.io/pool=true          # has a btrfs pool: run the controller here
+kubectl label node <node> kloudlite.io/session=true       # may host workspaces
+kubectl label node <node> kloudlite.io/env=true           # may host environments
 ```
 
 One key per role, not `role=session`, because a label key holds one value and a small cluster needs
@@ -154,14 +154,14 @@ but only once the timer is installed — this is the step that was missing. Once
 # 1. A SAS on container k3s-backup with create+write only (no list/delete: the script rotates by
 #    overwriting fixed names, so a leaked SAS cannot read or destroy history), and a healthchecks-style
 #    monitor URL with a 1 h period. Both by hand on the node:
-ssh azureuser@<k3s-cp> 'sudo install -d -m700 /etc/kloudlite-git \
-  && sudo sh -c "umask 077; cat > /etc/kloudlite-git/k3s-backup.sas" \
-  && sudo sh -c "echo SNITCH_URL=https://hc-ping.com/<uuid> > /etc/kloudlite-git/k3s-backup.env"'
+ssh azureuser@<k3s-cp> 'sudo install -d -m700 /etc/kloudlite \
+  && sudo sh -c "umask 077; cat > /etc/kloudlite/k3s-backup.sas" \
+  && sudo sh -c "echo SNITCH_URL=https://hc-ping.com/<uuid> > /etc/kloudlite/k3s-backup.env"'
 # 1b. The encryption key. The bundle carries the cluster CA, the SA signing key and the join
 #     token, so it is encrypted before it leaves the node and the blobs are useless without this
 #     file. Generate it once, then PUT A COPY IN THE PASSWORD MANAGER: a restore onto a fresh node
 #     starts from the vault copy, and a lost key makes every backup noise.
-ssh azureuser@<k3s-cp> 'sudo sh -c "umask 077; openssl rand -hex 32 > /etc/kloudlite-git/k3s-backup.key"; sudo cat /etc/kloudlite-git/k3s-backup.key'
+ssh azureuser@<k3s-cp> 'sudo sh -c "umask 077; openssl rand -hex 32 > /etc/kloudlite/k3s-backup.key"; sudo cat /etc/kloudlite/k3s-backup.key'
 # 2. Script and units.
 scp deploy/k3s/backup-controlplane.{sh,service,timer} azureuser@<k3s-cp>:/tmp/
 ssh azureuser@<k3s-cp> 'sudo install -m755 /tmp/backup-controlplane.sh /usr/local/bin/ \
@@ -192,8 +192,8 @@ comment block at the bottom of `backup-controlplane.sh`.
 ## Rotating the api tier's kubeconfig
 
 The api tier (`bins/api`) authenticates to this cluster with a long-lived kubeconfig held in the
-`kloudlite-git-k3s-kubeconfig` Secret, mounted at `/etc/kloudlite-git/k3s` on the `kloudlite-git-api`
-Deployment (`deploy/kloudlite-git.yaml`) and pointed at by `KUBECONFIG` there. It is a stopgap — the
+`kloudlite-k3s-kubeconfig` Secret, mounted at `/etc/kloudlite/k3s` on the `kloudlite-api`
+Deployment (`deploy/kloudlite.yaml`) and pointed at by `KUBECONFIG` there. It is a stopgap — the
 `ponytail:` note beside that env var says the pull design in
 `docs/superpowers/specs/2026-08-26-cluster-sync-design.md` replaces it with each cluster syncing
 its own desired state, at which point this Secret goes away entirely. Until then, rotate it:
@@ -201,7 +201,7 @@ its own desired state, at which point this Secret goes away entirely. Until then
 ```sh
 # 1. A fresh bound token for the api's own ServiceAccount (deploy/k3s/api-rbac.yaml), scoped to
 #    this cluster only — nothing wider than what /v1 already had.
-KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create token kloudlite-git-api --duration=8760h > /tmp/api.token
+KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create token kloudlite-api --duration=8760h > /tmp/api.token
 
 # 2. Build a kubeconfig around it with the cluster's CA (already on disk from provisioning, or
 #    pull it fresh):
@@ -209,22 +209,22 @@ KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clu
   | base64 -d > /tmp/api-ca.crt
 API_SERVER=$(KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
 kubectl config set-cluster k3s --server="$API_SERVER" --certificate-authority=/tmp/api-ca.crt --embed-certs=true --kubeconfig=/tmp/api.kubeconfig
-kubectl config set-credentials kloudlite-git-api --token="$(cat /tmp/api.token)" --kubeconfig=/tmp/api.kubeconfig
-kubectl config set-context default --cluster=k3s --user=kloudlite-git-api --kubeconfig=/tmp/api.kubeconfig
+kubectl config set-credentials kloudlite-api --token="$(cat /tmp/api.token)" --kubeconfig=/tmp/api.kubeconfig
+kubectl config set-context default --cluster=k3s --user=kloudlite-api --kubeconfig=/tmp/api.kubeconfig
 kubectl config use-context default --kubeconfig=/tmp/api.kubeconfig
 
 # 3. Replace the Secret in the AKS cluster (default context — this is a different cluster from
 #    the k3s one above), and roll the api pods to pick it up:
-kubectl create secret generic kloudlite-git-k3s-kubeconfig --from-file=config=/tmp/api.kubeconfig \
-  --dry-run=client -o yaml | kubectl -n kloudlite-git apply -f -
-kubectl -n kloudlite-git rollout restart deploy/kloudlite-git-api
+kubectl create secret generic kloudlite-k3s-kubeconfig --from-file=config=/tmp/api.kubeconfig \
+  --dry-run=client -o yaml | kubectl -n kloudlite apply -f -
+kubectl -n kloudlite rollout restart deploy/kloudlite-api
 
 # 4. Verify with a live read through the new token, then let the old token expire — a bound token
 #    has no separate revoke call, so "the old token stops working" means deleting the Secret entry
 #    is not enough; the old token is only dead once its --duration expires or the ServiceAccount
 #    it was bound to is deleted and recreated. Rotating on the schedule below is what keeps that
 #    window short.
-curl -s https://api.kloudlite-git.example/v1/regions -H "Authorization: Bearer <api client token>" | head -c 200
+curl -s https://api.kloudlite.example/v1/regions -H "Authorization: Bearer <api client token>" | head -c 200
 
 # 5. Clean up the local token files — they are as sensitive as the kubeconfig itself.
 rm -f /tmp/api.token /tmp/api-ca.crt /tmp/api.kubeconfig
@@ -240,7 +240,7 @@ The 2026-08-27 change: the API writes ONE unplaced object, the agents claim it t
 `status.nodeName`, and the Volume becomes a child of its Workspace. The CRDs and the agent move
 together — the old agent's watch 4xx's between them — so steps 2–4 are one operation, not a
 change with a soak in the middle. The k3s side uses `KUBECONFIG=.local/k3s.yaml`; the API tier
-lives on AKS in the `kloudlite-git` namespace, on the default context.
+lives on AKS in the `kloudlite` namespace, on the default context.
 
 ```sh
 # 1. The stuck pre-migration workspace. It predates status.nodeName and no controller can converge
@@ -257,19 +257,19 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy
 # 4. The agent, immediately after the CRDs — same operation. Repin the image tag to the SHA CI
 #    built first (image.yml), then apply and wait for the DaemonSet to finish.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/nix-conf.yaml -f deploy/k3s/agent-daemonset.yaml
-KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/kloudlite-git-agent -n kube-system
+KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/kloudlite-agent -n kube-system
 
 # 5. Watch the startup migration adopt the existing objects. Every line it writes is prefixed
 #    `migration:`; every workspace must end with a node in STATUS, not only in spec.
-KUBECONFIG=.local/k3s.yaml kubectl logs -n kube-system -l app=kloudlite-git-agent --tail=200 \
+KUBECONFIG=.local/k3s.yaml kubectl logs -n kube-system -l app=kloudlite-agent --tail=200 \
   | grep migration:
 KUBECONFIG=.local/k3s.yaml kubectl get workspaces \
   -o custom-columns=NAME:.metadata.name,SPEC:.spec.nodeName,STATUS:.status.nodeName,VOL:.status.volumeRef
 
-# 6. Only then the API tier, on AKS (deploy/kloudlite-git.yaml, pinned to CI's SHA by deploy/pin.sh;
+# 6. Only then the API tier, on AKS (deploy/kloudlite.yaml, pinned to CI's SHA by deploy/pin.sh;
 #    deploy/roll.sh applies it in one go).
 deploy/roll.sh
-kubectl rollout status deploy/kloudlite-git-api -n kloudlite-git
+kubectl rollout status deploy/kloudlite-api -n kloudlite
 ```
 
 Then verify by hand what `tests/ws_e2e.sh`'s seeded phase proves — nightly in
@@ -307,11 +307,11 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
 # 2. Roll the agent (repin the image tag to the SHA CI built, then apply and wait).
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml
-KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/kloudlite-git-agent -n kube-system
+KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/kloudlite-agent -n kube-system
 
-# 3. Then the API tier (kloudlite-git.yaml) — deploy/roll.sh applies it.
+# 3. Then the API tier (kloudlite.yaml) — deploy/roll.sh applies it.
 deploy/roll.sh
-kubectl rollout status deploy/kloudlite-git-api -n kloudlite-git
+kubectl rollout status deploy/kloudlite-api -n kloudlite
 ```
 
 Pre-existing asymmetry, follow-up only: `live_parents` in `crates/workspaces/src/api.rs` selects
@@ -332,8 +332,8 @@ stale on the FIRST post-rollout beat** — `ensure`'s Server-Side Apply then 422
 immutable `hostPath` until it's deleted. Same step as the hostpath cutover's Step 3, run right
 after step 2 above:
 
-    kubectl delete pods -A -l kloudlite-git.io/kind=workspace
-    kubectl delete pods -A -l kloudlite-git.io/kind=environment
+    kubectl delete pods -A -l kloudlite.io/kind=workspace
+    kubectl delete pods -A -l kloudlite.io/kind=environment
 
 Nothing forces every volume to migrate at once, and nothing needs to — the delete above just
 closes the 422 window for homes; a workspace/environment volume's own pod recreates on whatever
@@ -368,7 +368,7 @@ The `bins/server/src/browse_api/volumes.rs` browse surface stays up through all 
 is frozen (nothing writes it any more) but the Snapshots page still reads it, and it keeps showing
 old-model history for a volume until that volume's rows age out or the surface itself is retired.
 
-The `kloudlite-git-agent` Secret's `AZURE_*` keys become unused (the env wiring is already gone); the
+The `kloudlite-agent` Secret's `AZURE_*` keys become unused (the env wiring is already gone); the
 keys may stay in the Secret harmlessly or be pruned with the storage account whenever the old
 container is retired.
 
@@ -429,14 +429,14 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
    public IP, both **proxied**.
 2. SSL/TLS mode **Full (strict)** for the zone.
 3. SSL/TLS → Origin Server → Create Certificate (15 years) for `ws-*.khost.dev`, then
-   `kubectl -n kloudlite-git-system create secret tls gateway-tls --cert=<cert> --key=<key>`.
-4. Copy the `kloudlite-git-jwt` Secret from AKS into this cluster's `kloudlite-git-system` (the gateway
+   `kubectl -n kloudlite-system create secret tls gateway-tls --cert=<cert> --key=<key>`.
+4. Copy the `kloudlite-jwt` Secret from AKS into this cluster's `kloudlite-system` (the gateway
    verifies session tokens locally, with the same secret the api mints them with), and check
    the `WS_REGION` in `gateway.yaml`'s ConfigMap equals the agent Secret's. Moving the gateway
    out of `kube-system` (2026-08-29) is a roll in this order: the agent first (its next reconcile
    rewrites every workspace's `allow-gateway-ssh` policy to the new namespace), then
    `kubectl apply -f gateway.yaml`, then `kubectl -n kube-system delete deploy,svc,sa
-   kloudlite-git-gateway`. SSH sessions drop once, between the agent roll and the new gateway
+   kloudlite-gateway`. SSH sessions drop once, between the agent roll and the new gateway
    coming up.
 5. The Azure NSG in front of the pool nodes needs the same admission — it sits before nftables and
    drops 80 otherwise. Both the `allow-http-cloudflare` and `allow-apiserver-api-tier` NSG rules
@@ -454,7 +454,7 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
 
 ## Two things that bite
 
-**The agent Secret is not in this directory.** `kloudlite-git-agent` in `kube-system` carries
+**The agent Secret is not in this directory.** `kloudlite-agent` in `kube-system` carries
 `WS_REGION` and `WS_PEER_SECRET`, and it is created by hand because it holds a secret. The agent
 holds no registry URL, no agent token and no Azure credential any more: its commit history is the
 `Volume`'s own status.
@@ -472,7 +472,7 @@ destination region; there is no cross-region read path.
 **Do not run `tests/ws_e2e.sh` on a node the DaemonSet is running on.** The script starts its own
 agent against its own loopback pool; two controllers reconciling one object materialize it into two
 different pools. The script refuses to start if it sees the DaemonSet on its node — take the label
-off first (`kubectl label node <node> kloudlite-git.io/pool-`) and put it back after.
+off first (`kubectl label node <node> kloudlite.io/pool-`) and put it back after.
 
 ## Replication
 
@@ -480,11 +480,11 @@ Volume standbys, pull-based: every node's agent decides which commits it must ho
 rendezvous names it, or it runs one of the volume's worktrees) and GETs them from a peer that
 already has them. Bring it up:
 
-1. Add `WS_PEER_SECRET` to the `kloudlite-git-agent` Secret (same one as `WS_REGION` etc. above) —
+1. Add `WS_PEER_SECRET` to the `kloudlite-agent` Secret (same one as `WS_REGION` etc. above) —
    any shared string, compared in constant time on every peer request. Unset, the peer listener
    never starts and the puller never dials: fail-closed, not fail-open.
 2. Apply `agent-peer.yaml` (already in the fresh-cluster command above) so the listener's port
-   8444 is reachable only from other `app: kloudlite-git-agent` pods — without it, every pod in the
+   8444 is reachable only from other `app: kloudlite-agent` pods — without it, every pod in the
    cluster, workspace pods included, can already reach an agent pod's IP directly.
 
 How many copies a volume gets is `Volume.spec.replicas`, per volume — there is no cluster-wide
@@ -559,14 +559,14 @@ would be a second liveness system on top of the Node object's own.
 The planned version of node death. It never stops anyone's work; the node drains at the people's
 pace, and an operator in a hurry stops those workspaces through `/v1` like anyone else.
 
-1. `kubectl label node <n> kloudlite-git.io/decommission=true`. From that moment every other agent
+1. `kubectl label node <n> kloudlite.io/decommission=true`. From that moment every other agent
    treats it as unplaceable — it wins no rendezvous slot, counts as no copy, and refuses claims —
    while it keeps serving pulls and keeps running everything already on it. Running parents get
    `Decommissioning=True/NodeLeaving` ("this node is being retired; stop when convenient and the
    next start lands elsewhere") so the person is told, and nothing is marked `Unavailable`: the
    node is alive and the work on it is healthy.
 2. Watch the one annotation: `kubectl describe node <n> | grep decommission-status`, or
-   `kubectl get node <n> -o jsonpath='{.metadata.annotations.kloudlite-git\.io/decommission-status}'`.
+   `kubectl get node <n> -o jsonpath='{.metadata.annotations.kloudlite\.io/decommission-status}'`.
    It reads `draining running=N owned=N copies=N thin=N` and is rewritten every
    `WS_DECOMMISSION_SECS` (default 30). `running` is people's workspaces — it only falls when they
    stop them. `owned` falls as each volume becomes releasable (everything on it stopped AND
@@ -608,24 +608,24 @@ check and its own rollback — if a check fails, roll that step back before star
 
 2. **`workspace-admission.yaml`.** Pre-checks first, all three must pass:
    `kubectl get runtimeclass gvisor` exists;
-   `kubectl -n kube-system get secret kloudlite-git-agent -o jsonpath='{.data.WS_RUNTIME_CLASS}' | base64 -d`
+   `kubectl -n kube-system get secret kloudlite-agent -o jsonpath='{.data.WS_RUNTIME_CLASS}' | base64 -d`
    prints `gvisor`; and every workspace pod already runs under it —
-   `kubectl get pod -A -l kloudlite-git.io/kind -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,RC:.spec.runtimeClassName`
+   `kubectl get pod -A -l kloudlite.io/kind -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,RC:.spec.runtimeClassName`
    shows `gvisor` on every row, no `<none>`. Only then
    `kubectl apply -f workspace-admission.yaml`. *Check:* create one workspace (`kl ws create …`)
    and watch it reach `Running` — the policy refuses pods at admission, so a bad policy shows up
    as a workspace stuck in `Creating` with a denial event on its namespace.
-   *Rollback:* `kubectl delete validatingadmissionpolicybinding kloudlite-git-workspace-pod-fence`
+   *Rollback:* `kubectl delete validatingadmissionpolicybinding kloudlite-workspace-pod-fence`
    (delete the binding, not the policy — a policy with no binding enforces nothing).
 
 3. **`agent-rbac.yaml` + `agent-admission.yaml`, together.** They are one change: the role is
    only true because the policy enforces it. `kubectl apply -f agent-rbac.yaml -f agent-admission.yaml`.
    *Check:* over a FULL reconcile pass — wait five minutes, long enough for every beat including
    the sync beat (`WS_SYNC_SECS`, default 60s) to have run —
-   `kubectl -n kube-system logs ds/kloudlite-git-agent --since=5m | grep -i forbidden` stays empty.
+   `kubectl -n kube-system logs ds/kloudlite-agent --since=5m | grep -i forbidden` stays empty.
    A single `forbidden` line means the role lost a verb the controller uses — do not leave it.
    *Rollback:* delete the two bindings
-   (`kubectl delete validatingadmissionpolicybinding kloudlite-git-agent-spec-is-read-only kloudlite-git-agent-tenant-namespaces-only`)
+   (`kubectl delete validatingadmissionpolicybinding kloudlite-agent-spec-is-read-only kloudlite-agent-tenant-namespaces-only`)
    and re-apply the previous revision of both files from git — deleting the ClusterRoleBinding
    instead would stop the agent dead, which is not a rollback.
 
@@ -646,8 +646,8 @@ check and its own rollback — if a check fails, roll that step back before star
    `kubectl describe node | grep -A6 "Allocated resources"` on each node must leave that much
    unrequested, or the DaemonSet pod sits `Pending` and that node serves no workspaces.
    `kubectl apply -f agent-daemonset.yaml`, then
-   `kubectl -n kube-system rollout status ds/kloudlite-git-agent`.
-   *Rollback:* `kubectl -n kube-system rollout undo ds/kloudlite-git-agent`.
+   `kubectl -n kube-system rollout status ds/kloudlite-agent`.
+   *Rollback:* `kubectl -n kube-system rollout undo ds/kloudlite-agent`.
 
 9. **`harden-node.sh` — one node at a time, last.** This one can lock you out: it drops by default
    on the public NIC. Before touching a node, open a SECOND ssh session to it and LEAVE IT OPEN
@@ -712,9 +712,9 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml \
 
 # Then the agent, then the api tier.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml
-KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/kloudlite-git-agent -n kube-system
+KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/kloudlite-agent -n kube-system
 deploy/roll.sh
-kubectl rollout status deploy/kloudlite-git-api -n kloudlite-git
+kubectl rollout status deploy/kloudlite-api -n kloudlite
 ```
 
 No migration script, and nothing to run afterwards:
@@ -735,7 +735,7 @@ No migration script, and nothing to run afterwards:
 ## Release: quotas and the admin server
 
 Two new CRDs (`Quota`, `QuotaRequest`) and a second `bins/api` process — the same binary started
-with `KLOUDLITE_GIT_API_ROLE=admin` instead of the default `user` — that mounts `api::admin::router()`
+with `KLOUDLITE_API_ROLE=admin` instead of the default `user` — that mounts `api::admin::router()`
 and serves the superadmin-only surfaces (region creation, quota decisions,
 `/api/admin/superadmins`) from its own host. Apply in this order:
 
@@ -743,24 +743,24 @@ and serves the superadmin-only surfaces (region creation, quota decisions,
 # 1. The CRDs — adds `quotas` and `quotarequests`. Additive; existing objects are untouched.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
-# 2. api-rbac.yaml now defines TWO roles: the existing kloudlite-git-api SA keeps its read-only quota
-#    surfaces, and a new kloudlite-git-admin SA/ClusterRole gets the only write access to
+# 2. api-rbac.yaml now defines TWO roles: the existing kloudlite-api SA keeps its read-only quota
+#    surfaces, and a new kloudlite-admin SA/ClusterRole gets the only write access to
 #    Quota/QuotaRequest/Region. Apply both here — the admin kubeconfig minted next needs the SA to
 #    already exist.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 
-# 3. Mint the kloudlite-git-admin-k3s-kubeconfig Secret for the kloudlite-git-admin SA, the same recipe
+# 3. Mint the kloudlite-admin-k3s-kubeconfig Secret for the kloudlite-admin SA, the same recipe
 #    as "Rotating the api tier's kubeconfig" above, adjusted to the admin SA and Secret name:
-KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create token kloudlite-git-admin --duration=8760h > /tmp/admin.token
+KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create token kloudlite-admin --duration=8760h > /tmp/admin.token
 KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
   | base64 -d > /tmp/admin-ca.crt
 API_SERVER=$(KUBECONFIG=.local/k3s.yaml kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
 kubectl config set-cluster k3s --server="$API_SERVER" --certificate-authority=/tmp/admin-ca.crt --embed-certs=true --kubeconfig=/tmp/admin.kubeconfig
-kubectl config set-credentials kloudlite-git-admin --token="$(cat /tmp/admin.token)" --kubeconfig=/tmp/admin.kubeconfig
-kubectl config set-context default --cluster=k3s --user=kloudlite-git-admin --kubeconfig=/tmp/admin.kubeconfig
+kubectl config set-credentials kloudlite-admin --token="$(cat /tmp/admin.token)" --kubeconfig=/tmp/admin.kubeconfig
+kubectl config set-context default --cluster=k3s --user=kloudlite-admin --kubeconfig=/tmp/admin.kubeconfig
 kubectl config use-context default --kubeconfig=/tmp/admin.kubeconfig
-kubectl create secret generic kloudlite-git-admin-k3s-kubeconfig --from-file=config=/tmp/admin.kubeconfig \
-  --dry-run=client -o yaml | kubectl -n kloudlite-git apply -f -
+kubectl create secret generic kloudlite-admin-k3s-kubeconfig --from-file=config=/tmp/admin.kubeconfig \
+  --dry-run=client -o yaml | kubectl -n kloudlite apply -f -
 rm -f /tmp/admin.token /tmp/admin-ca.crt /tmp/admin.kubeconfig
 
 # 4. The agent's role — no spec write changed (the agent creates/patches its namespace's
@@ -769,13 +769,13 @@ rm -f /tmp/admin.token /tmp/admin-ca.crt /tmp/admin.kubeconfig
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml
 ```
 
-Then the AKS roll: `deploy/kloudlite-git.yaml` adds the `kloudlite-git-admin` Deployment and Service —
+Then the AKS roll: `deploy/kloudlite.yaml` adds the `kloudlite-admin` Deployment and Service —
 no Ingress and no DNS: the admin api is reached only server-side by the web through
-`KLOUDLITE_GIT_ADMIN_API_URL=http://kloudlite-git-admin`, and the superadmin pages live on the app host
+`KLOUDLITE_ADMIN_API_URL=http://kloudlite-admin`, and the superadmin pages live on the app host
 at `/superadmin`. Repin and roll it with the rest of the tier (`deploy/pin.sh`, `deploy/roll.sh`),
-then `deploy/kloudlite-git-web.yaml` for that env var.
+then `deploy/kloudlite-web.yaml` for that env var.
 
-Set `KLOUDLITE_GIT_WORKSPACES_ADMINS` on the admin-role Deployment before its first boot: it seeds
+Set `KLOUDLITE_WORKSPACES_ADMINS` on the admin-role Deployment before its first boot: it seeds
 those addresses into the directory's `superadmins` collection once, additively — after that boot
 the list is managed only through `/api/admin/superadmins`, and removing an address from the env
 revokes nobody.
@@ -788,14 +788,14 @@ allocation only; nothing already running is touched.
 ## Release: live settings
 
 One new CRD (`ClusterSettings`, singleton `default` per region) and no new process — the admin
-`bins/api` gains settings routes on its existing router, and `kloudlite-git-agent`/the central tier
+`bins/api` gains settings routes on its existing router, and `kloudlite-agent`/the central tier
 gain a refresh beat each. Apply in this order:
 
 ```sh
 # 1. The CRD — adds `clustersettings`. Additive; nothing existing reads or writes it yet.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
-# 2. api-rbac.yaml: the kloudlite-git-admin ClusterRole gains create/patch on ClusterSettings and
+# 2. api-rbac.yaml: the kloudlite-admin ClusterRole gains create/patch on ClusterSettings and
 #    patch (restart-annotation only, via the admission policy) on the KNOWN central workloads.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 
@@ -804,13 +804,13 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml
 ```
 
-Then the AKS roll: `deploy/kloudlite-git.yaml` adds the `kloudlite-git-admin` Role/RoleBinding for
+Then the AKS roll: `deploy/kloudlite.yaml` adds the `kloudlite-admin` Role/RoleBinding for
 patching the KNOWN_CENTRAL workloads' pod templates, and turns on
-`automountServiceAccountToken: true` on the `kloudlite-git-admin` Deployment specifically (every
+`automountServiceAccountToken: true` on the `kloudlite-admin` Deployment specifically (every
 other Deployment here keeps it `false` — this is the one process whose own in-cluster token is
 what lets it roll its siblings, distinct from the k3s kubeconfig Secret it already mounts for
 `ClusterSettings`/agent workload rolls). Repin and roll with `deploy/pin.sh`/`deploy/roll.sh`,
-then `deploy/kloudlite-git-web.yaml` for the settings admin UI.
+then `deploy/kloudlite-web.yaml` for the settings admin UI.
 
 **What existing readers see:** nothing, until a stored `cluster/settings` document or a
 `ClusterSettings/default` CR is actually written — every field's `stored ??` branch is empty at
@@ -821,7 +821,7 @@ first boot, so every process runs exactly as it did on env alone.
 RBAC only on this side — no new CRD, no new process.
 
 ```sh
-# api-rbac.yaml: the kloudlite-git-admin ClusterRole gains `patch` on nodes, for the Clusters area's
+# api-rbac.yaml: the kloudlite-admin ClusterRole gains `patch` on nodes, for the Clusters area's
 # drain / undrain / decommission (the decommission label, the status annotation undrain clears,
 # and spec.unschedulable). Nodes cannot be name-restricted, so the scoping is in the handler:
 # one named node, in a region this cluster actually answers for, with a reason on the audit row.
@@ -833,8 +833,8 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 
 Apply it BEFORE rolling the api image: without it a drain answers 403 from the k3s API server.
 
-On the AKS side, `deploy/kloudlite-git.yaml`'s `kloudlite-git-admin-workloads` Role gains `get`/`list`
-on `pods` (namespaced to `kloudlite-git`) — the Monitoring page's Signals scrape reads each pod's
+On the AKS side, `deploy/kloudlite.yaml`'s `kloudlite-admin-workloads` Role gains `get`/`list`
+on `pods` (namespaced to `kloudlite`) — the Monitoring page's Signals scrape reads each pod's
 `/metrics` and `restartCount` this way instead of assuming a Prometheus. Re-apply it before
 rolling the admin image: without it Signals answers 403.
 
@@ -847,8 +847,8 @@ no new process.
 # crds.yaml: adds Request.
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
-# api-rbac.yaml: adds `requests` to both ClusterRoles (kloudlite-git-api: get/list/create;
-# kloudlite-git-admin: get/list/create/patch/delete plus patch/update on requests/status).
+# api-rbac.yaml: adds `requests` to both ClusterRoles (kloudlite-api: get/list/create;
+# kloudlite-admin: get/list/create/patch/delete plus patch/update on requests/status).
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 ```
 
@@ -868,41 +868,41 @@ failure mode is chosen on purpose — see the `OTEL_INGESTION_KEY` comment in `o
 #    every cluster.
 # 2. Per region: the collector's Secret, then the collector, then the widened metrics policy and
 #    the api RBAC the history layer's watches need.
-KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create secret generic kloudlite-git-otel \
+KUBECONFIG=.local/k3s.yaml kubectl -n kube-system create secret generic kloudlite-otel \
   --from-literal=key='<ingestion key>'
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/otel-agent.yaml
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-peer.yaml
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml
 # 3. AKS: the admin Deployment's new env, after the ClickHouse user exists — the process logs
 #    `history.migrations.applied` with `count` > 0 once, then `count=0` on every restart.
-kubectl -n kloudlite-git apply -f deploy/kloudlite-git.yaml
+kubectl -n kloudlite apply -f deploy/kloudlite.yaml
 ```
 
 `agent-peer.yaml`'s metrics rule previously admitted a namespace named `monitoring` that never
 existed, so the agent's 9464 was unreachable; applying the new one is what makes the node gauges
 arrive at all.
 
-`api-rbac.yaml` adds `watch` to every read the `kloudlite-git-admin` ClusterRole already had. The
+`api-rbac.yaml` adds `watch` to every read the `kloudlite-admin` ClusterRole already had. The
 admin process runs one reflector per kind per region and turns the transitions into
 `kloudlite.events`; without `watch` each one retries forever behind a backoff and the console's
 charts stay empty while every other admin surface works. It grants no new authority — a `watch` is
 a streamed `list`.
 
-`deploy/kloudlite-git.yaml` gains the AKS copy of the collectors (namespace `kloudlite-git`, region
-`central`, exporting to the gateway's ClusterIP) and five env vars on `kloudlite-git-admin`:
-`KLOUDLITE_GIT_CLICKHOUSE_URL`/`_USER`/`_PASSWORD`, `KLOUDLITE_GIT_HYPERDX_URL` and
-`KLOUDLITE_GIT_REGION`. The first four are optional — unset, the admin process behaves exactly as it
-did and `/admin/history/*` answers 503. `KLOUDLITE_GIT_REGION` labels the watch against the mounted
+`deploy/kloudlite.yaml` gains the AKS copy of the collectors (namespace `kloudlite`, region
+`central`, exporting to the gateway's ClusterIP) and five env vars on `kloudlite-admin`:
+`KLOUDLITE_CLICKHOUSE_URL`/`_USER`/`_PASSWORD`, `KLOUDLITE_HYPERDX_URL` and
+`KLOUDLITE_REGION`. The first four are optional — unset, the admin process behaves exactly as it
+did and `/admin/history/*` answers 503. `KLOUDLITE_REGION` labels the watch against the mounted
 kubeconfig's cluster and must equal that region's collector value (`centralindia-k3s`), or
 telemetry and events land under different region names and neither side looks wrong.
 
 ## Release: the rename (2026-09-04)
 
-`rustic-git` became `kloudlite-git` everywhere: crates, binaries, `KLOUDLITE_GIT_*`, the CRD group
-`kloudlite-git.io` and its labels, images `ghcr.io/kloudlite/kloudlite-git{,-web}`, namespaces
-`kloudlite-git` (AKS) and `kloudlite-git-system` (k3s), every Secret and ServiceAccount. Two things
+`rustic-git` became `kloudlite` everywhere: crates, binaries, `KLOUDLITE_*`, the CRD group
+`kloudlite.io` and its labels, images `ghcr.io/kloudlite/kloudlite{,-web}`, namespaces
+`kloudlite` (AKS) and `kloudlite-system` (k3s), every Secret and ServiceAccount. Two things
 deliberately kept their old name because they are data locations, not labels: the blob container
-`rustic-git` (`KLOUDLITE_GIT_S3_URL=az://rustic-git`, every repo lives there) (the retired ZeroFS prefix inside it can be deleted). The ClickHouse database and user were renamed in place (`RENAME DATABASE`).
+`rustic-git` (`KLOUDLITE_S3_URL=az://rustic-git`, every repo lives there) (the retired ZeroFS prefix inside it can be deleted). The ClickHouse database and user were renamed in place (`RENAME DATABASE`).
 
 The cutover ran old and new side by side only for the stateless tiers. The server tier and the
 agent are single-writer (the ownership lease, the btrfs pool), so the old StatefulSet and
@@ -910,4 +910,4 @@ DaemonSet were scaled to zero before the new ones took over. Objects owned by th
 CRs (tenant NetworkPolicies, ResourceQuotas) were garbage-collected with the old CRDs and
 recreated by the new agent on its next reconcile; the four live CRs (Region, OwnerBindings) were
 re-created by hand under the new group with the same names and specs. The api tier's k3s
-kubeconfigs were re-minted for the new ServiceAccounts (`kloudlite-git-api`, `-admin`).
+kubeconfigs were re-minted for the new ServiceAccounts (`kloudlite-api`, `-admin`).

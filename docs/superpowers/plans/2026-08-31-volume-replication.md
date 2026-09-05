@@ -102,7 +102,7 @@ amended transport section is why NOTHING here writes into `{pool}/recv/`.
     }
 ```
 
-- [ ] **Step 2: Run and watch them fail** — `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces replicate` (module doesn't exist).
+- [ ] **Step 2: Run and watch them fail** — `CARGO_INCREMENTAL=0 cargo test -p kloudlite-workspaces replicate` (module doesn't exist).
 
 - [ ] **Step 3: Implement**
 
@@ -171,7 +171,7 @@ pub fn order_groups(vols: &[(String, Option<String>)]) -> Vec<String> {
     }
 ```
 
-- [ ] **Step 4: Tests pass** — `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-workspaces replicate`
+- [ ] **Step 4: Tests pass** — `CARGO_INCREMENTAL=0 cargo test -p kloudlite-workspaces replicate`
 - [ ] **Step 5: Commit** — `git add crates/workspaces && git commit -m "Add replica target selection and clone-group ordering"`
 
 ---
@@ -222,7 +222,7 @@ invent a second fixture style.
 
 1. Auth (above).
 2. `Digest`-style validation of `{owner}` and `{id}` path segments via
-   `kloudlite_git_storage::store::valid_segment` — a path segment becomes a filesystem path here,
+   `kloudlite_storage::store::valid_segment` — a path segment becomes a filesystem path here,
    same rule as everywhere else in this codebase.
 3. `create_dir_all(pool.repl(id))`, snapshot names present BEFORE, spawn
    `btrfs receive <repl/{id}>` with stdin piped, stream the body in with
@@ -285,7 +285,7 @@ than the floor is swept; a live one and a young one are kept; unreadable `vol/` 
 - [ ] **Step 3: Implement one beat pass**
 
 1. `WS_REPLICA_COUNT <= 1` or `WS_PEER_SECRET` unset → return immediately.
-2. Candidates: `Api::<Node>::all` list by label `kloudlite-git.io/pool=true`, names sorted. (RBAC
+2. Candidates: `Api::<Node>::all` list by label `kloudlite.io/pool=true`, names sorted. (RBAC
    gains `list` on nodes — Task 4.)
 3. This node's volumes: the Volumes already cached by the controller's reflector if one exists,
    else one list filtered to `spec.nodeName == ctx.node`; drop homes
@@ -296,7 +296,7 @@ than the floor is swept; a live one and a young one are kept; unreadable `vol/` 
    - RO snapshot `{pool}/repl/{id}/g{generation}` if not already present (one snapshot serves
      every target of this beat).
    - `GET /peer/v1/snapshots/{owner}/{id}` on the target (address: list agent pods by label
-     `app=kloudlite-git-agent` + field `spec.nodeName={target}` in kube-system, dial pod IP:8444 —
+     `app=kloudlite-agent` + field `spec.nodeName={target}` in kube-system, dial pod IP:8444 —
      the ClusterRole already holds pods get/list/watch).
    - Parent = newest `g*` name present on BOTH sides; clones add `-c {pool}/repl/{src}/g*` for the
      newest ancestor snapshot the receiver also lists.
@@ -323,11 +323,11 @@ than the floor is swept; a live one and a young one are kept; unreadable `vol/` 
 **Files:**
 - Modify: `deploy/k3s/agent-daemonset.yaml` — env `WS_REPLICA_COUNT` (value "1" — OFF until the
   operator raises it), `WS_REPLICA_SECS`, `WS_PEER_ADDR`, and `WS_PEER_SECRET` from the existing
-  optional `kloudlite-git-agent` secretRef; containerPort 8444 named `peer`
+  optional `kloudlite-agent` secretRef; containerPort 8444 named `peer`
 - Modify: `deploy/k3s/agent-rbac.yaml` — nodes `get` → `get,list` (header table row AND rule
   together; the table IS the role)
 - Create: peer NetworkPolicy + headless discovery note in `deploy/k3s/agent-peer.yaml` — a
-  NetworkPolicy in kube-system admitting 8444 only from pods labelled `app=kloudlite-git-agent`
+  NetworkPolicy in kube-system admitting 8444 only from pods labelled `app=kloudlite-agent`
   (discovery is by pod IP from the API, so no Service object is needed at all — say so in the
   file header instead of shipping an unused Service)
 - Modify: `deploy/k3s/README.md` — table row, apply line, and a "Replication" section: how to set

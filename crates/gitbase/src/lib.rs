@@ -2,10 +2,10 @@
 //! gix-touching half, and merge-base — everything that walks or writes a `gix_odb::Handle`.
 //!
 //! Split out of the old single lib so the gix dependency stack does not
-//! have to be pulled in by callers that only need `kloudlite-git-storage`.
+//! have to be pulled in by callers that only need `kloudlite-storage`.
 
-pub(crate) use kloudlite_git_core::{err, Result};
-pub(crate) use kloudlite_git_storage::store;
+pub(crate) use kloudlite_core::{err, Result};
+pub(crate) use kloudlite_storage::store;
 
 pub mod objects;
 pub mod refs;

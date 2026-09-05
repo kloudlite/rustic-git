@@ -1,7 +1,7 @@
 mod common;
 use axum::http::StatusCode;
-use kloudlite_git_registry::store::ImageExt;
-use kloudlite_git_registry::Digest;
+use kloudlite_registry::store::ImageExt;
+use kloudlite_registry::Digest;
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
     let (base, e) = common::serve_public().await;
@@ -406,7 +406,7 @@ async fn an_image_without_blob_rows_is_backfilled_from_its_manifests() {
     let m = manifest_naming(&[&mine]);
     use slatedb::object_store::ObjectStoreExt;
     e.store.os
-        .put(&kloudlite_git_registry::store::manifest_path("acme", "nginx", &Digest::of(&m)), slatedb::object_store::PutPayload::from(m))
+        .put(&kloudlite_registry::store::manifest_path("acme", "nginx", &Digest::of(&m)), slatedb::object_store::PutPayload::from(m))
         .await.unwrap();
     e.store.set_image_visibility("acme", "nginx", true).await.unwrap();
 
@@ -427,7 +427,7 @@ async fn deleting_a_blob_drops_the_images_hold_row() {
         .basic_auth("acme", Some(&token)).body(body).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
     assert!(
-        kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
+        kloudlite_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
         "the push records the hold"
     );
 
@@ -435,7 +435,7 @@ async fn deleting_a_blob_drops_the_images_hold_row() {
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::ACCEPTED);
     assert!(
-        !kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
+        !kloudlite_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
         "the hold row must go with the bytes"
     );
 }

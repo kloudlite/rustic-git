@@ -589,7 +589,7 @@ impl ImageExt for Store {
     /// interleave the marker swap. Callers must log-and-continue on error: a marker is a view, not
     /// something a push should ever fail over.
     async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()> {
-        let lock = self.keyed_lock(&kloudlite_git_storage::index::lock_key(kloudlite_git_storage::index::Kind::Img, owner, name));
+        let lock = self.keyed_lock(&kloudlite_storage::index::lock_key(kloudlite_storage::index::Kind::Img, owner, name));
         let _guard = lock.lock().await;
         let public = self.image_is_public(owner, name).await?;
         let (count, newest) = self.manifest_stat_fast(owner, name).await?;
@@ -614,7 +614,7 @@ impl ImageExt for Store {
     /// (spec §6.5) — without the lock, a-public-then-b-private and a-private-then-b-public racing
     /// could leave both markers, or neither, present.
     async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()> {
-        let lock = self.keyed_lock(&kloudlite_git_storage::index::lock_key(kloudlite_git_storage::index::Kind::Img, owner, name));
+        let lock = self.keyed_lock(&kloudlite_storage::index::lock_key(kloudlite_storage::index::Kind::Img, owner, name));
         let _guard = lock.lock().await;
         // Remove-permissive-first (spec §6.2) applies to the whole flip, not just the marker
         // write below: on a private flip, delete the PUBLIC marker before the DB row changes, so

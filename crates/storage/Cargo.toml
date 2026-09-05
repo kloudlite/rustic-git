@@ -1,15 +1,15 @@
 [package]
-name = "kloudlite-git-storage"
+name = "kloudlite-storage"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_storage"
+name = "kloudlite_storage"
 
 [dependencies]
 tracing = { workspace = true }
-kloudlite-git-core = { path = "../core" }
+kloudlite-core = { path = "../core" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 slatedb = { workspace = true }

@@ -13,16 +13,16 @@ use std::time::Instant;
 
 use chrono::Datelike;
 use clap::{Parser, Subcommand};
-use kloudlite_git_core::metrics::{register, Kind};
-use kloudlite_git_slo::ctx::{Ctx, OTHER_EMAIL, OTHER_USER, PROBE_EMAIL, PROBE_USER};
-use kloudlite_git_slo::stages;
-use kloudlite_git_slo::suite::TEARDOWN;
-use kloudlite_git_slo::{suite, Config};
-use kloudlite_git_workspaces::history::slo::StepReport;
-use kloudlite_git_workspaces::slo::catalogue::Suite;
+use kloudlite_core::metrics::{register, Kind};
+use kloudlite_slo::ctx::{Ctx, OTHER_EMAIL, OTHER_USER, PROBE_EMAIL, PROBE_USER};
+use kloudlite_slo::stages;
+use kloudlite_slo::suite::TEARDOWN;
+use kloudlite_slo::{suite, Config};
+use kloudlite_workspaces::history::slo::StepReport;
+use kloudlite_workspaces::slo::catalogue::Suite;
 
 #[derive(Parser)]
-#[command(name = "kloudlite-git-slo")]
+#[command(name = "kloudlite-slo")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -62,7 +62,7 @@ async fn main() {
     // `reqwest` is pinned `rustls-no-provider`, and with two providers reachable rustls refuses to
     // pick one for us.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    kloudlite_git_core::log::init();
+    kloudlite_core::log::init();
     register(&[
         ("slo_steps_total", Kind::Counter, &[("ok", "true")]),
         ("slo_steps_total", Kind::Counter, &[("ok", "false")]),
@@ -106,7 +106,7 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
     // too, but the parent reads `steps.json` out of it and must not depend on that ordering.
     let _ = std::fs::create_dir_all(&c.tmp);
 
-    let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("kloudlite-git-slo").into());
+    let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("kloudlite-slo").into());
     let status = std::process::Command::new(exe)
         .args(["run", "--suite", kind.as_str(), "--inner", "--run-id", &c.run_id])
         .status();

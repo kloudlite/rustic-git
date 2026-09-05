@@ -1,15 +1,15 @@
 [package]
-name = "kloudlite-git-gitbase"
+name = "kloudlite-gitbase"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_gitbase"
+name = "kloudlite_gitbase"
 
 [dependencies]
-kloudlite-git-core = { path = "../core" }
-kloudlite-git-storage = { path = "../storage" }
+kloudlite-core = { path = "../core" }
+kloudlite-storage = { path = "../storage" }
 gix-odb = { workspace = true }
 gix-hash = { workspace = true }
 gix-object = { workspace = true }

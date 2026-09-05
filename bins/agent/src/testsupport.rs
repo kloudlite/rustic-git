@@ -3,10 +3,10 @@
 //! two different worlds.
 
 use crate::controller::Ctx;
-use kloudlite_git_core::settings::LiveSettings;
-use kloudlite_git_workspaces::engine::{Engine, Pool as EnginePool};
-use kloudlite_git_workspaces::kube_test::{mock_client, Recorder, Route};
-use kloudlite_git_workspaces::settings::AgentSettings;
+use kloudlite_core::settings::LiveSettings;
+use kloudlite_workspaces::engine::{Engine, Pool as EnginePool};
+use kloudlite_workspaces::kube_test::{mock_client, Recorder, Route};
+use kloudlite_workspaces::settings::AgentSettings;
 use std::sync::Arc;
 
 pub(crate) struct NoopNix;
@@ -29,7 +29,7 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
     let engine = Engine::new(EnginePool::new(pool));
     // Set, not read from the environment: a pod spec built without an image is a reconcile error,
     // and every test in this binary shares one process env — hence `--test-threads=1`.
-    std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-git-workspace:deadbeef");
+    std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-workspace:deadbeef");
     // `LiveSettings::new` directly, not a fake reflector — a beat's test never has to touch
     // `std::env` for a field it wants to override, only for `WS_DEFAULT_IMAGE` above (a `Ctx::new`
     // boot-time read, unrelated to the beats this fixture serves).

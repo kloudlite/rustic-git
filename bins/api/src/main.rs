@@ -10,17 +10,17 @@
 //! make it a fact: this process cannot open a repository for writing, because none
 //! of that code is reachable from here.
 
-use kloudlite_git_core::err;
-use kloudlite_git_core::{require_jwt_secret_from_env, Result};
-use kloudlite_git_storage::config::{env, install_crypto_provider, open_store};
+use kloudlite_core::err;
+use kloudlite_core::{require_jwt_secret_from_env, Result};
+use kloudlite_storage::config::{env, install_crypto_provider, open_store};
 use std::sync::Arc;
 
 /// The mongo-backed `Directory` wearing the workspaces api's own `Directory` trait: team
 /// membership, the CLI-token revocation list (a token works only while its row stands, the same
 /// rule `crates/api`'s `user_identity` enforces), and the owner's `authorized_keys` for the
 /// Secret every workspace's sshd reads. Kept here rather than in either crate so
-/// `kloudlite-git-workspaces` never needs a dependency on `kloudlite-git-pulls` just for these lookups.
-struct Dir(Arc<kloudlite_git_pulls::directory::Directory>);
+/// `kloudlite-workspaces` never needs a dependency on `kloudlite-pulls` just for these lookups.
+struct Dir(Arc<kloudlite_pulls::directory::Directory>);
 
 impl Dir {
     /// Handle in, email out. Every identity this process is handed comes off the JWT as a HANDLE,
@@ -47,7 +47,7 @@ impl Dir {
 }
 
 #[async_trait::async_trait]
-impl kloudlite_git_workspaces::api::Directory for Dir {
+impl kloudlite_workspaces::api::Directory for Dir {
     async fn teams_for(&self, user: &str) -> Vec<String> {
         let Some(email) = self.email_or_closed(user).await else { return vec![] };
         self.0.slugs_for(&email).await.unwrap_or_default()
@@ -56,30 +56,30 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
     async fn is_live(&self, jti: &str) -> bool {
         matches!(
             self.0.credential(jti).await,
-            Ok(Some(c)) if c.kind == kloudlite_git_pulls::directory::CredentialKind::CliToken
+            Ok(Some(c)) if c.kind == kloudlite_pulls::directory::CredentialKind::CliToken
         )
     }
 
-    async fn for_owner(&self, owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
-        let authorized_keys = kloudlite_git_api::authorized_keys_for(&self.0, owner)
+    async fn for_owner(&self, owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
+        let authorized_keys = kloudlite_api::authorized_keys_for(&self.0, owner)
             .await
             .inspect_err(|e| tracing::warn!(reason = "ssh-keys", %owner, error = %e, "directory.read.failed"))
             .ok()?;
-        let (git_name, git_email) = kloudlite_git_api::git_identity_for(&self.0, owner)
+        let (git_name, git_email) = kloudlite_api::git_identity_for(&self.0, owner)
             .await
             .inspect_err(|e| tracing::warn!(reason = "git-identity", %owner, error = %e, "directory.read.failed"))
             .ok()?;
-        Some(kloudlite_git_workspaces::api::OwnerMaterial { authorized_keys, git_name, git_email })
+        Some(kloudlite_workspaces::api::OwnerMaterial { authorized_keys, git_name, git_email })
     }
 
-    async fn team_role(&self, user: &str, team: &str) -> Option<kloudlite_git_workspaces::api::TeamRole> {
-        use kloudlite_git_pulls::directory::Role;
-        use kloudlite_git_workspaces::api::TeamRole;
+    async fn team_role(&self, user: &str, team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
+        use kloudlite_pulls::directory::Role;
+        use kloudlite_workspaces::api::TeamRole;
         let t = self.0.get(team).await.ok().flatten()?;
         // The same value `slugs_for` matches on, through the same members array — one identity,
         // so membership and role can never disagree.
         let email = self.email_or_closed(user).await?;
-        match kloudlite_git_pulls::directory::Directory::role_of(&t, &email)? {
+        match kloudlite_pulls::directory::Directory::role_of(&t, &email)? {
             Role::Owner => Some(TeamRole::Owner),
             Role::Admin => Some(TeamRole::Admin),
             Role::Member => Some(TeamRole::Member),
@@ -105,10 +105,10 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
         &self,
         team: &str,
         user: &str,
-        role: kloudlite_git_workspaces::api::TeamRole,
-    ) -> kloudlite_git_workspaces::api::GrantAccess {
-        use kloudlite_git_pulls::directory::{AddMember, Membership, Role};
-        use kloudlite_git_workspaces::api::{GrantAccess, TeamRole};
+        role: kloudlite_workspaces::api::TeamRole,
+    ) -> kloudlite_workspaces::api::GrantAccess {
+        use kloudlite_pulls::directory::{AddMember, Membership, Role};
+        use kloudlite_workspaces::api::{GrantAccess, TeamRole};
         let role = match role {
             TeamRole::Owner => Role::Owner,
             TeamRole::Admin => Role::Admin,
@@ -157,12 +157,12 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
 
 #[tokio::main]
 async fn main() {
-    kloudlite_git_core::log::init();
-    kloudlite_git_core::metrics::init();
+    kloudlite_core::log::init();
+    kloudlite_core::metrics::init();
     // Its own listener: 8090 is what the ingress forwards `/v1` to.
-    kloudlite_git_core::metrics::serve_if_configured().await;
-    use kloudlite_git_core::metrics::Kind::*;
-    kloudlite_git_core::metrics::register(&[
+    kloudlite_core::metrics::serve_if_configured().await;
+    use kloudlite_core::metrics::Kind::*;
+    kloudlite_core::metrics::register(&[
         ("http_request_duration_seconds", Histogram, &[]),
         ("http_requests_total", Counter, &[("listener", "api"), ("class", "probe"), ("status", "5xx")]),
         ("http_requests_total", Counter, &[("listener", "api"), ("class", "probe"), ("status", "421")]),
@@ -196,10 +196,10 @@ async fn main() {
         ("slo_notify_total", Counter, &[("result", "ok")]),
         ("slo_notify_total", Counter, &[("result", "error")]),
     ]);
-    kloudlite_git_core::metrics::register_dependency("blob", kloudlite_git_storage::metered::OPS);
-    kloudlite_git_core::metrics::register_dependency("redis", kloudlite_git_storage::cache::OPS);
-    kloudlite_git_core::metrics::register_dependency("mongo", kloudlite_git_pulls::directory::OPS);
-    kloudlite_git_core::metrics::register_dependency("clickhouse", kloudlite_git_workspaces::history::OPS);
+    kloudlite_core::metrics::register_dependency("blob", kloudlite_storage::metered::OPS);
+    kloudlite_core::metrics::register_dependency("redis", kloudlite_storage::cache::OPS);
+    kloudlite_core::metrics::register_dependency("mongo", kloudlite_pulls::directory::OPS);
+    kloudlite_core::metrics::register_dependency("clickhouse", kloudlite_workspaces::history::OPS);
     if let Err(e) = run().await {
         tracing::error!(error = %e, "process.exiting");
         std::process::exit(2);
@@ -218,9 +218,9 @@ async fn run() -> Result<()> {
 
     // The browse routes live on the git nodes' PEER listener, so this must be the
     // peer Service, never the public one.
-    let upstream = env("KLOUDLITE_GIT_UPSTREAM", "http://kloudlite-git:8081");
-    let secret = std::env::var("KLOUDLITE_GIT_PEER_SECRET")
-        .map_err(|_| err("KLOUDLITE_GIT_PEER_SECRET required"))?;
+    let upstream = env("KLOUDLITE_UPSTREAM", "http://kloudlite:8081");
+    let secret = std::env::var("KLOUDLITE_PEER_SECRET")
+        .map_err(|_| err("KLOUDLITE_PEER_SECRET required"))?;
 
     // Optional on purpose: without it the browse routes still answer and only the
     // team routes report unavailable. A database outage must not stop reads that
@@ -228,11 +228,11 @@ async fn run() -> Result<()> {
     // Same binary, same image, one env choosing which surface it exposes. Read once, up here,
     // both because the bootstrap below needs it and so the router-selection match downstream
     // reuses this binding rather than reading the env var a second time.
-    let role = std::env::var("KLOUDLITE_GIT_API_ROLE").unwrap_or_else(|_| "user".into());
-    let directory = match std::env::var("KLOUDLITE_GIT_MONGO_URI") {
+    let role = std::env::var("KLOUDLITE_API_ROLE").unwrap_or_else(|_| "user".into());
+    let directory = match std::env::var("KLOUDLITE_MONGO_URI") {
         Ok(uri) if !uri.is_empty() => {
-            let db = env("KLOUDLITE_GIT_MONGO_DB", "kloudlite");
-            let d = kloudlite_git_pulls::directory::Directory::connect(&uri, &db).await?;
+            let db = env("KLOUDLITE_MONGO_DB", "kloudlite");
+            let d = kloudlite_pulls::directory::Directory::connect(&uri, &db).await?;
             tracing::info!(db = %db, "directory.connected");
             // Only the admin process seeds the directory: the bootstrap is additive and harmless
             // to run twice, but running it from the user role too would mean an operator who
@@ -240,14 +240,14 @@ async fn run() -> Result<()> {
             // reversed, running it here only, a fleet with no admin replica up yet simply has no
             // bootstrap run until one is, which is the safe direction to be wrong in.
             //
-            // `KLOUDLITE_GIT_WORKSPACES_ADMINS` is a BOOTSTRAP now, not the list: it seeds the
+            // `KLOUDLITE_WORKSPACES_ADMINS` is a BOOTSTRAP now, not the list: it seeds the
             // directory once so an empty cluster has a first administrator, and after that the
             // list is managed through /api/admin/superadmins. Additive only — dropping an address
             // from the env must not silently revoke someone. Unset or empty defaults to the
             // owner's own address (2026-09-04) so a fresh deployment always has one superadmin to
             // add the rest from the admin area.
             if role == "admin" {
-                let seed: Vec<String> = std::env::var("KLOUDLITE_GIT_WORKSPACES_ADMINS")
+                let seed: Vec<String> = std::env::var("KLOUDLITE_WORKSPACES_ADMINS")
                     .unwrap_or_default()
                     .split(',')
                     .map(|s| s.trim().to_lowercase())
@@ -271,8 +271,8 @@ async fn run() -> Result<()> {
     // Same rule as the git tier: in a fleet an unset secret is a startup error, not a
     // degraded mode, because the tokens this tier mints are verified by the other one.
     require_jwt_secret_from_env()?;
-    let jwt = match std::env::var("KLOUDLITE_GIT_JWT_SECRET") {
-        Ok(s) if !s.is_empty() => Some(Arc::new(kloudlite_git_core::jwt::Jwt::new(&s)?)),
+    let jwt = match std::env::var("KLOUDLITE_JWT_SECRET") {
+        Ok(s) if !s.is_empty() => Some(Arc::new(kloudlite_core::jwt::Jwt::new(&s)?)),
         _ => {
             tracing::warn!(reason = "jwt-secret-unset", "auth.signing.unavailable");
             None
@@ -284,12 +284,12 @@ async fn run() -> Result<()> {
     // kube client every other route here uses — no separate store to wire up.
     let workspaces = match jwt.clone() {
         Some(jwt) => {
-            let mut state = kloudlite_git_workspaces::api::ApiState::new(jwt);
+            let mut state = kloudlite_workspaces::api::ApiState::new(jwt);
             // So a new workspace comes up with the owner's platform-issued git key already mounted.
             state = state.with_keys(store.clone());
             // Optional everywhere: unset means a failed probe run is recorded and shown on the
             // console, and nobody is messaged (design's Notify row).
-            state = state.with_slo_webhook(std::env::var("KLOUDLITE_GIT_SLO_WEBHOOK").ok());
+            state = state.with_slo_webhook(std::env::var("KLOUDLITE_SLO_WEBHOOK").ok());
             if let Some(dir) = directory.clone() {
                 state = state.with_directory(Arc::new(Dir(dir)));
             }
@@ -307,7 +307,7 @@ async fn run() -> Result<()> {
             // design"). `GET /admin/settings/central` reads `cluster/settings` off `store`
             // directly instead — see `ApiState::keys`, already wired below.
             if role == "admin" {
-                state = state.with_peer(kloudlite_git_workspaces::api::admin::PeerClient::new(upstream.clone(), secret.clone()));
+                state = state.with_peer(kloudlite_workspaces::api::admin::PeerClient::new(upstream.clone(), secret.clone()));
             }
             // Only the admin role ever talks to its OWN cluster (`admin::workloads`'s central
             // half) — server/api/worker/gateway have no business with it, only this process does.
@@ -316,7 +316,7 @@ async fn run() -> Result<()> {
             // `try_default()` would honor that env var and hand back the SAME region client
             // again instead of this cluster's own projected ServiceAccount token.
             // `automountServiceAccountToken: true` is set on the admin Deployment alone
-            // (deploy/kloudlite-git.yaml), so this succeeds only there.
+            // (deploy/kloudlite.yaml), so this succeeds only there.
             if role == "admin" {
                 match kube::Config::incluster() {
                     Ok(cfg) => match kube::Client::try_from(cfg) {
@@ -331,13 +331,13 @@ async fn run() -> Result<()> {
             // /admin/history route answers 503, and nothing is recorded — exactly how the
             // deployment behaved before ClickStack existed.
             if role == "admin" {
-                match kloudlite_git_workspaces::history::History::from_env() {
+                match kloudlite_workspaces::history::History::from_env() {
                     Some(h) => {
                         // Migrations at boot, so a fresh ClickStack becomes usable with no manual
                         // step. A failure is LOGGED, not fatal: quota decisions and node drains
                         // must not be held hostage by an analytics store, and the next restart
                         // retries an idempotent set of statements.
-                        match kloudlite_git_workspaces::history::schema::migrate(&h).await {
+                        match kloudlite_workspaces::history::schema::migrate(&h).await {
                             Ok(n) => tracing::info!(count = n, "history.migrations.applied"),
                             Err(e) => tracing::error!(error = %e, "history.migrations.failed"),
                         }
@@ -347,7 +347,7 @@ async fn run() -> Result<()> {
                         let consumer_cache = cache.clone();
                         let consumer_history = h.clone();
                         tokio::spawn(async move {
-                            kloudlite_git_workspaces::history::events::consume_forever(
+                            kloudlite_workspaces::history::events::consume_forever(
                                 consumer_cache,
                                 consumer_history,
                             )
@@ -362,12 +362,12 @@ async fn run() -> Result<()> {
                         // so `"default"` on a cluster that is really `eu-west` mislabels history
                         // permanently. A missing watch only leaves a gap an operator closes by
                         // setting the variable and restarting; a wrong region cannot be undone.
-                        match std::env::var("KLOUDLITE_GIT_REGION").ok().filter(|r| !r.is_empty()) {
+                        match std::env::var("KLOUDLITE_REGION").ok().filter(|r| !r.is_empty()) {
                             Some(region) => {
                                 if let Some(k) = state.kube.clone() {
                                     let h = h.clone();
                                     tokio::spawn(
-                                        kloudlite_git_workspaces::history::watch::watch_region(
+                                        kloudlite_workspaces::history::watch::watch_region(
                                             k, region, h,
                                         ),
                                     );
@@ -380,7 +380,7 @@ async fn run() -> Result<()> {
                         // holds none of our CRDs, so a watch against `state.aks` 404s forever.
                         if let Some(k) = state.kube.clone() {
                             let h = h.clone();
-                            tokio::spawn(kloudlite_git_workspaces::history::watch::watch_central(
+                            tokio::spawn(kloudlite_workspaces::history::watch::watch_central(
                                 k, h,
                             ));
                         }
@@ -397,16 +397,16 @@ async fn run() -> Result<()> {
         None => None,
     };
 
-    let l = tokio::net::TcpListener::bind(env("KLOUDLITE_GIT_API_ADDR", "0.0.0.0:8090")).await?;
+    let l = tokio::net::TcpListener::bind(env("KLOUDLITE_API_ADDR", "0.0.0.0:8090")).await?;
     tracing::info!(listener = "api", addr = %l.local_addr()?, %upstream, "listener.started");
     // Adding or removing an ssh key has to reach every running workspace of that owner, and the
     // Secret it lands in is the workspaces tier's to write — so the hook is just that call.
-    let on_keys_changed: Option<kloudlite_git_api::KeysChanged> = workspaces.clone().map(|ws| {
+    let on_keys_changed: Option<kloudlite_api::KeysChanged> = workspaces.clone().map(|ws| {
         Arc::new(move |owner: String| {
             let ws = ws.clone();
-            Box::pin(async move { kloudlite_git_workspaces::api::refresh_user_keys(&ws, &owner).await })
+            Box::pin(async move { kloudlite_workspaces::api::refresh_user_keys(&ws, &owner).await })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-        }) as kloudlite_git_api::KeysChanged
+        }) as kloudlite_api::KeysChanged
     });
     // The hourly folds and the alert evaluator. Spawned from the admin role only, and only with
     // ClickHouse configured — the fold itself is a cluster-wide list, and running either for
@@ -414,8 +414,8 @@ async fn run() -> Result<()> {
     if role == "admin" {
         if let Some(ws) = workspaces.clone() {
             if ws.history.is_some() {
-                tokio::spawn(kloudlite_git_workspaces::history::alerts::evaluate_forever(ws.clone()));
-                tokio::spawn(kloudlite_git_workspaces::history::beats::run_beats(ws));
+                tokio::spawn(kloudlite_workspaces::history::alerts::evaluate_forever(ws.clone()));
+                tokio::spawn(kloudlite_workspaces::history::beats::run_beats(ws));
             }
         }
     }
@@ -424,10 +424,10 @@ async fn run() -> Result<()> {
     // role mounts ONLY `/v1` and never sees an admin route (design doc §5). `role` was read once,
     // above, before the bootstrap decided whether to run.
     let workspaces_router = workspaces.map(|ws| match role.as_str() {
-        "admin" => kloudlite_git_workspaces::api::admin::router(ws),
-        _ => kloudlite_git_workspaces::api::router(ws),
+        "admin" => kloudlite_workspaces::api::admin::router(ws),
+        _ => kloudlite_workspaces::api::router(ws),
     });
-    kloudlite_git_api::serve(
+    kloudlite_api::serve(
         store,
         cache,
         directory,

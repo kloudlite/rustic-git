@@ -16,7 +16,7 @@ mod repo;
 mod volumes;
 
 use crate::router::{internal, open};
-use kloudlite_git_core::httpx::Trusted;
+use kloudlite_core::httpx::Trusted;
 use crate::store::Repo;
 use crate::App;
 use axum::{

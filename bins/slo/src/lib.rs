@@ -1,4 +1,4 @@
-//! `kloudlite-git-slo`: a synthetic user that walks the whole product every five minutes and
+//! `kloudlite-slo`: a synthetic user that walks the whole product every five minutes and
 //! reports each step as one SLO sample.
 //!
 //! It is a client and nothing else — it holds no object-store credential, opens no database, and

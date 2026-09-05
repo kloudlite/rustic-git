@@ -5,7 +5,7 @@
 //! teardown after it, whatever the child did. `suite()` is therefore the child's list only.
 
 use futures::future::BoxFuture;
-use kloudlite_git_workspaces::slo::catalogue::Suite;
+use kloudlite_workspaces::slo::catalogue::Suite;
 
 use crate::ctx::Ctx;
 use crate::stages;
@@ -22,7 +22,7 @@ pub const TEARDOWN: &str = "11 · Teardown";
 
 /// Set to `1` to insert a stage that panics, which is how the out-of-process split is tested at
 /// all: nothing else in the binary can be made to abort on demand. Never set in a deployment.
-const PANIC_ENV: &str = "KLOUDLITE_GIT_SLO_TEST_PANIC";
+const PANIC_ENV: &str = "KLOUDLITE_SLO_TEST_PANIC";
 
 /// The fast stages, which every suite runs: weekly and monthly are the fast journey PLUS their
 /// own extra stages, never a different journey — an SLO whose only samples came from a monthly

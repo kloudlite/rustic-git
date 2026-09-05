@@ -6,7 +6,7 @@ Date: 2026-08-30. Status: draft for review.
 
 A workspace's storage is expressed as four PersistentVolume/PersistentVolumeClaim pairs, all of
 them static, all of them pointing at a directory the agent already created on the node's btrfs
-pool. Kubernetes contributes nothing to their lifecycle: `kloudlite-git-local` is
+pool. Kubernetes contributes nothing to their lifecycle: `kloudlite-local` is
 `no-provisioner`, so nothing is provisioned; the paths are chosen by the agent, not the cluster;
 and the capacity numbers are cosmetic, since the real quota is a btrfs qgroup.
 
@@ -52,7 +52,7 @@ purpose (`k8s.rs:959` — "placement rides on the PV; kept in context for the PV
 is already in hand.
 
 Placement becomes a `nodeSelector` on `kubernetes.io/hostname`, added beside the
-`kloudlite-git.io/session` selector and toleration the pods already carry.
+`kloudlite.io/session` selector and toleration the pods already carry.
 
 **`nodeSelector`, not `nodeName`.** Setting `nodeName` assigns the pod directly and bypasses the
 scheduler, which would also bypass resource packing, taints, and every admission the scheduler
@@ -100,7 +100,7 @@ rename would leave the pod reading the old inode exactly as it does now.
   `WaitingForStorage` condition
 - the `claimRef` pre-binding shipped in `e722a3e`, which exists only to make binding exclusive
 - `persistentvolumes` and `persistentvolumeclaims` from the agent ClusterRole
-- the `kloudlite-git-local` StorageClass manifest
+- the `kloudlite-local` StorageClass manifest
 - four PV objects and four PVC objects per workspace
 
 Create time loses the binding term entirely: what is left is the pod start the gate was waiting on.

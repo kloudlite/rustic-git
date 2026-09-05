@@ -5,7 +5,7 @@
 //! the one the write path itself enforces.
 
 use super::*;
-use kloudlite_git_core::settings::{CentralSettings, Mark, CENTRAL_SETTING_META};
+use kloudlite_core::settings::{CentralSettings, Mark, CENTRAL_SETTING_META};
 use std::collections::HashMap;
 
 #[derive(serde::Serialize)]
@@ -89,13 +89,13 @@ fn unit_of(name: &str, is_bool: bool, is_string: bool) -> &'static str {
 /// `(wire name, env var)` — only the fields `CentralSettings::from_env` actually reads one for;
 /// everything else has no env override today (`env` is `null` for those rows).
 const CENTRAL_ENV_VARS: &[(&str, &str)] = &[
-    ("maxBody", "KLOUDLITE_GIT_MAX_BODY"),
-    ("maxLayer", "KLOUDLITE_GIT_MAX_LAYER"),
-    ("uploadGraceSecs", "KLOUDLITE_GIT_UPLOAD_GRACE_SECS"),
-    ("cloneHost", "KLOUDLITE_GIT_CLONE_HOST"),
-    ("sshHost", "KLOUDLITE_GIT_SSH_HOST"),
-    ("sshPort", "KLOUDLITE_GIT_SSH_PORT"),
-    ("registryHost", "KLOUDLITE_GIT_REGISTRY_HOST"),
+    ("maxBody", "KLOUDLITE_MAX_BODY"),
+    ("maxLayer", "KLOUDLITE_MAX_LAYER"),
+    ("uploadGraceSecs", "KLOUDLITE_UPLOAD_GRACE_SECS"),
+    ("cloneHost", "KLOUDLITE_CLONE_HOST"),
+    ("sshHost", "KLOUDLITE_SSH_HOST"),
+    ("sshPort", "KLOUDLITE_SSH_PORT"),
+    ("registryHost", "KLOUDLITE_REGISTRY_HOST"),
 ];
 
 /// Ranges as `core::settings::validate_stored` enforces them — the exact numbers that function's
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn no_secret_or_address_env_var_is_exposed() {
         const FORBIDDEN: &[&str] = &[
-            "SECRET", "JWT", "S3_URL", "CACHE_DIR", "PEER_ADDR", "PEER_SVC", "KLOUDLITE_GIT_SELF",
+            "SECRET", "JWT", "S3_URL", "CACHE_DIR", "PEER_ADDR", "PEER_SVC", "KLOUDLITE_SELF",
             "WS_POOL", "WS_REGION", "NODE_NAME", "HOMES_EXPORT", "AUTH_", "RESEND_", "AWS_", "AZURE_",
         ];
         for (name, var) in CENTRAL_ENV_VARS.iter().chain(CLUSTER_ENV_VARS) {

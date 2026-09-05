@@ -38,13 +38,13 @@ async fn a_visibility_flip_orphans_every_entry() {
     e.store.create_repo("alice", "web").await.unwrap();
     e.store.set_public("alice", "web", true).await.unwrap();
     e.store.cache.put("alice/web", "refs", b"stale", TTL).await;
-    e.store.cache.put("alice/web", kloudlite_git_api::META, b"1", TTL).await;
+    e.store.cache.put("alice/web", kloudlite_api::META, b"1", TTL).await;
     e.store.cache.put("alice/web", "tree:abc:src", b"stale", TTL).await;
 
     e.store.set_public("alice", "web", false).await.unwrap();
 
     assert_eq!(e.store.cache.get("alice/web", "refs").await, None);
-    assert_eq!(e.store.cache.get("alice/web", kloudlite_git_api::META).await, None);
+    assert_eq!(e.store.cache.get("alice/web", kloudlite_api::META).await, None);
     assert_eq!(e.store.cache.get("alice/web", "tree:abc:src").await, None);
     assert!(!e.store.is_public("alice", "web").await.unwrap());
 }

@@ -1,4 +1,4 @@
-//! One JSON line to `KLOUDLITE_GIT_SLO_WEBHOOK` when a probe run fails and when `SloBurn` starts
+//! One JSON line to `KLOUDLITE_SLO_WEBHOOK` when a probe run fails and when `SloBurn` starts
 //! firing.
 //!
 //! Best effort by construction: the webhook is a NUDGE, exactly like the Redis events stream — the
@@ -48,11 +48,11 @@ pub fn body(
     })
 }
 
-/// The console link. `KLOUDLITE_GIT_WEB_URL` is read here rather than carried in `ApiState` for the
+/// The console link. `KLOUDLITE_WEB_URL` is read here rather than carried in `ApiState` for the
 /// same reason `monitoring`'s HyperDX link is: it is a constant of the deployment, and an unset one
 /// leaves a relative path rather than a dead absolute link.
 fn console_url() -> String {
-    let base = std::env::var("KLOUDLITE_GIT_WEB_URL").unwrap_or_default();
+    let base = std::env::var("KLOUDLITE_WEB_URL").unwrap_or_default();
     format!("{}/superadmin/slo", base.trim_end_matches('/'))
 }
 

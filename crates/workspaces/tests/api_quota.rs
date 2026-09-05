@@ -1,13 +1,13 @@
-//! `GET /v1/quota` against a mocked API server (`kloudlite_git_workspaces::kube_test`) with a stub
+//! `GET /v1/quota` against a mocked API server (`kloudlite_workspaces::kube_test`) with a stub
 //! `Directory` for team membership.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{router, ApiState, Directory, TeamRole};
-use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{router, ApiState, Directory, TeamRole};
+use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 /// `karthik` (admin) and `bob` (plain member) both belong to team `acme`.
 struct StubMembership;
@@ -33,7 +33,7 @@ impl Directory for StubMembership {
     }
 
     // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
-    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
     }
 
@@ -80,18 +80,18 @@ fn admin_token(jwt: &Jwt) -> String {
 fn region_route() -> Route {
     get(
         format!("{API}/regions/centralindia"),
-        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region", "metadata": {"name": "centralindia"}, "spec": {"name": "centralindia", "status": "active"}}),
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Region", "metadata": {"name": "centralindia"}, "spec": {"name": "centralindia", "status": "active"}}),
     )
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 fn ws_obj(id: &str, owner: &str, state: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": id, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": id, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "team": "", "name": id, "region": "centralindia",
                  "image": "img:1", "desiredState": state, "packages": [],
                  "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
@@ -101,8 +101,8 @@ fn ws_obj(id: &str, owner: &str, state: &str) -> Value {
 
 fn vol_obj(name: &str, owner: &str, gb: u64) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "team": "", "nodeName": "node-a", "region": "centralindia", "quotaGb": gb}
     })
 }
@@ -230,8 +230,8 @@ async fn a_create_that_would_cross_the_disk_limit_is_refused_on_disk() {
 async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
     let snaps: Vec<Value> = (0..20)
         .map(|i| json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": format!("snap-{i}"), "labels": {"kloudlite-git.io/owner": "karthik"}},
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": format!("snap-{i}"), "labels": {"kloudlite.io/owner": "karthik"}},
             "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "transient": false},
             "status": {"phase": "ready"}
         }))
@@ -261,8 +261,8 @@ async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
 // generic `Request` shape, not the old `QuotaRequest` one.
 fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Request",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Request",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "kind": "quota", "requestedBy": owner,
                  "quota": {"workspaces": 10}, "reason": "more room"}
     });
@@ -290,7 +290,7 @@ async fn a_team_admin_may_open_a_request_for_the_team() {
     let sent = s.rec.sent("POST", &format!("{API}/requests")).remove(0);
     assert_eq!(sent["spec"]["owner"], "acme");
     assert_eq!(sent["spec"]["quota"]["workspaces"], 40);
-    assert_eq!(sent["metadata"]["labels"]["kloudlite-git.io/owner"], "acme");
+    assert_eq!(sent["metadata"]["labels"]["kloudlite.io/owner"], "acme");
 }
 
 /// A plain member may not: raising a team's ceiling is a team decision, and the message says so.

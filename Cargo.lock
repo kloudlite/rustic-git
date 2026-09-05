@@ -3457,7 +3457,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-agent-bin"
+name = "kloudlite-agent-bin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3467,9 +3467,9 @@ dependencies = [
  "futures",
  "json-patch",
  "k8s-openapi",
- "kloudlite-git-core",
- "kloudlite-git-storage",
- "kloudlite-git-workspaces",
+ "kloudlite-core",
+ "kloudlite-storage",
+ "kloudlite-workspaces",
  "kube",
  "kube-runtime",
  "libc",
@@ -3487,7 +3487,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-api"
+name = "kloudlite-api"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -3495,10 +3495,10 @@ dependencies = [
  "chrono",
  "form_urlencoded",
  "futures",
- "kloudlite-git-core",
- "kloudlite-git-pulls",
- "kloudlite-git-storage",
- "kloudlite-git-workspaces",
+ "kloudlite-core",
+ "kloudlite-pulls",
+ "kloudlite-storage",
+ "kloudlite-workspaces",
  "mongodb",
  "pgp",
  "rand 0.8.7",
@@ -3515,28 +3515,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-api-bin"
+name = "kloudlite-api-bin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "kloudlite-git-api",
- "kloudlite-git-core",
- "kloudlite-git-pulls",
- "kloudlite-git-storage",
- "kloudlite-git-workspaces",
+ "kloudlite-api",
+ "kloudlite-core",
+ "kloudlite-pulls",
+ "kloudlite-storage",
+ "kloudlite-workspaces",
  "kube",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "kloudlite-git-app"
+name = "kloudlite-app"
 version = "0.1.0"
 dependencies = [
  "futures",
- "kloudlite-git-core",
- "kloudlite-git-pulls",
- "kloudlite-git-storage",
+ "kloudlite-core",
+ "kloudlite-pulls",
+ "kloudlite-storage",
  "metrics",
  "rand 0.8.7",
  "reqwest",
@@ -3547,7 +3547,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-core"
+name = "kloudlite-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -3570,7 +3570,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-gateway-bin"
+name = "kloudlite-gateway-bin"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -3578,9 +3578,9 @@ dependencies = [
  "futures",
  "jsonwebtoken",
  "k8s-openapi",
- "kloudlite-git-core",
- "kloudlite-git-storage",
- "kloudlite-git-workspaces",
+ "kloudlite-core",
+ "kloudlite-storage",
+ "kloudlite-workspaces",
  "kube",
  "metrics",
  "rustls",
@@ -3591,31 +3591,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-git"
-version = "0.1.0"
-dependencies = [
- "base64",
- "gix-features",
- "gix-hash",
- "gix-object",
- "gix-odb",
- "gix-pack",
- "gix-traverse",
- "imara-diff",
- "kloudlite-git-app",
- "kloudlite-git-core",
- "kloudlite-git-gitbase",
- "kloudlite-git-storage",
- "russh",
- "serde",
- "slatedb",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "kloudlite-git-gitbase"
+name = "kloudlite-gitbase"
 version = "0.1.0"
 dependencies = [
  "flate2",
@@ -3626,20 +3602,20 @@ dependencies = [
  "gix-odb",
  "gix-pack",
  "gix-traverse",
- "kloudlite-git-core",
- "kloudlite-git-storage",
+ "kloudlite-core",
+ "kloudlite-storage",
  "tokio",
 ]
 
 [[package]]
-name = "kloudlite-git-pulls"
+name = "kloudlite-pulls"
 version = "0.1.0"
 dependencies = [
  "futures",
  "gix-hash",
- "kloudlite-git-core",
- "kloudlite-git-gitbase",
- "kloudlite-git-storage",
+ "kloudlite-core",
+ "kloudlite-gitbase",
+ "kloudlite-storage",
  "libc",
  "mongodb",
  "serde",
@@ -3651,16 +3627,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-registry"
+name = "kloudlite-registry"
 version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
  "form_urlencoded",
  "futures",
- "kloudlite-git-app",
- "kloudlite-git-core",
- "kloudlite-git-storage",
+ "kloudlite-app",
+ "kloudlite-core",
+ "kloudlite-storage",
  "metrics",
  "rand 0.8.7",
  "serde",
@@ -3672,7 +3648,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-server"
+name = "kloudlite-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3683,14 +3659,14 @@ dependencies = [
  "gix-hash",
  "gix-object",
  "gix-odb",
- "kloudlite-git-app",
- "kloudlite-git-core",
- "kloudlite-git-git",
- "kloudlite-git-gitbase",
- "kloudlite-git-pulls",
- "kloudlite-git-registry",
- "kloudlite-git-storage",
- "kloudlite-git-workspaces",
+ "kloudlite-app",
+ "kloudlite-core",
+ "kloudlite-gitbase",
+ "kloudlite-pulls",
+ "kloudlite-registry",
+ "kloudlite-storage",
+ "kloudlite-vcs",
+ "kloudlite-workspaces",
  "metrics",
  "rand 0.8.7",
  "reqwest",
@@ -3708,7 +3684,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-slo-bin"
+name = "kloudlite-slo-bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3719,8 +3695,8 @@ dependencies = [
  "clap",
  "futures",
  "k8s-openapi",
- "kloudlite-git-core",
- "kloudlite-git-workspaces",
+ "kloudlite-core",
+ "kloudlite-workspaces",
  "kube",
  "metrics",
  "object_store",
@@ -3735,7 +3711,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-storage"
+name = "kloudlite-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3744,7 +3720,7 @@ dependencies = [
  "futures",
  "gix-hash",
  "gix-odb",
- "kloudlite-git-core",
+ "kloudlite-core",
  "rand 0.8.7",
  "redis",
  "rustls",
@@ -3760,7 +3736,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-tests"
+name = "kloudlite-tests"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3772,16 +3748,16 @@ dependencies = [
  "gix-object",
  "gix-odb",
  "gix-traverse",
- "kloudlite-git-api",
- "kloudlite-git-app",
- "kloudlite-git-core",
- "kloudlite-git-git",
- "kloudlite-git-gitbase",
- "kloudlite-git-pulls",
- "kloudlite-git-registry",
- "kloudlite-git-server",
- "kloudlite-git-storage",
- "kloudlite-git-workspaces",
+ "kloudlite-api",
+ "kloudlite-app",
+ "kloudlite-core",
+ "kloudlite-gitbase",
+ "kloudlite-pulls",
+ "kloudlite-registry",
+ "kloudlite-server",
+ "kloudlite-storage",
+ "kloudlite-vcs",
+ "kloudlite-workspaces",
  "mongodb",
  "reqwest",
  "russh",
@@ -3793,14 +3769,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-worker-bin"
+name = "kloudlite-vcs"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "gix-features",
+ "gix-hash",
+ "gix-object",
+ "gix-odb",
+ "gix-pack",
+ "gix-traverse",
+ "imara-diff",
+ "kloudlite-app",
+ "kloudlite-core",
+ "kloudlite-gitbase",
+ "kloudlite-storage",
+ "russh",
+ "serde",
+ "slatedb",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "kloudlite-worker-bin"
 version = "0.1.0"
 dependencies = [
  "futures",
- "kloudlite-git-core",
- "kloudlite-git-pulls",
- "kloudlite-git-registry",
- "kloudlite-git-storage",
+ "kloudlite-core",
+ "kloudlite-pulls",
+ "kloudlite-registry",
+ "kloudlite-storage",
  "metrics",
  "rand 0.8.7",
  "reqwest",
@@ -3813,7 +3813,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kloudlite-git-workspaces"
+name = "kloudlite-workspaces"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3825,10 +3825,10 @@ dependencies = [
  "http",
  "http-body-util",
  "k8s-openapi",
- "kloudlite-git-core",
- "kloudlite-git-server",
- "kloudlite-git-storage",
- "kloudlite-git-workspaces",
+ "kloudlite-core",
+ "kloudlite-server",
+ "kloudlite-storage",
+ "kloudlite-workspaces",
  "kube",
  "libc",
  "metrics",

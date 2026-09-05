@@ -2,7 +2,7 @@
 use super::hidden;
 use crate::registry::store::ImageExt;
 use crate::router::internal;
-use kloudlite_git_core::httpx::Trusted;
+use kloudlite_core::httpx::Trusted;
 use crate::App;
 use axum::{
     extract::{Path, Query, State},
@@ -248,7 +248,7 @@ pub(super) async fn imagedelete(
     }
     use slatedb::object_store::ObjectStore;
     use futures::{StreamExt, TryStreamExt};
-    let prefix = kloudlite_git_registry::store::manifest_prefix(&owner, &name);
+    let prefix = kloudlite_registry::store::manifest_prefix(&owner, &name);
     // `delete_stream` feeds deletes straight off the listing — the collect-then-delete loop
     // paid one round trip per manifest. NotFound per object is tolerated: another delete of
     // the same image racing this one changes nothing about the end state.

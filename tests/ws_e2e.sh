@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end workspaces/environments test: a real btrfs pool, a real kloudlite-git (server tier),
-# kloudlite-git-api, kloudlite-git-agent, real Azure blob storage, a real k3s cluster.
+# End-to-end workspaces/environments test: a real btrfs pool, a real kloudlite (server tier),
+# kloudlite-api, kloudlite-agent, real Azure blob storage, a real k3s cluster.
 #
 # Mirrors tests/registry_e2e.sh's conventions: exit 77 when a prerequisite is absent (root-capable
 # btrfs, a reachable cluster with the CRDs installed, Azure credentials) rather than failing
@@ -8,7 +8,7 @@
 # node (the CLAUDE.md-documented `wssnap-bench` VM) — it cannot run on a Mac laptop, which is why
 # this script was authored without ever being run locally: read it carefully before trusting a
 # change to it. CI does not pre-build anything for it — build the binaries on the VM itself
-# (`cargo build --bin kloudlite-git --bin kloudlite-git-api --bin kloudlite-git-agent`). A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
+# (`cargo build --bin kloudlite --bin kloudlite-api --bin kloudlite-agent`). A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
 #
 # Three binaries, and none of them talks to a volume registry: a volume's history is the chain of
 # Ready `Snapshot` CRs a push wrote, so GET /v1/volumes/* reads the CRDs (`Volume.status.head` names the tip)
@@ -58,30 +58,30 @@ kubectl version --request-timeout=5s >/dev/null 2>&1 || {
   echo "SKIP: no reachable kubernetes cluster" >&2
   exit 77
 }
-kubectl get crd volumes.kloudlite-git.io >/dev/null 2>&1 || {
-  echo "SKIP: kloudlite-git CRDs not installed (deploy/k3s/crds.yaml)" >&2
+kubectl get crd volumes.kloudlite.io >/dev/null 2>&1 || {
+  echo "SKIP: kloudlite CRDs not installed (deploy/k3s/crds.yaml)" >&2
   exit 77
 }
-kubectl -n kloudlite-git-system rollout status deployment/kloudlite-git-gateway --timeout=60s >/dev/null 2>&1 || {
-  echo "SKIP: kloudlite-git-gateway deployment not Ready in kloudlite-git-system (not applied, or still in kube-system — see deploy/k3s/gateway.yaml)" >&2
+kubectl -n kloudlite-system rollout status deployment/kloudlite-gateway --timeout=60s >/dev/null 2>&1 || {
+  echo "SKIP: kloudlite-gateway deployment not Ready in kloudlite-system (not applied, or still in kube-system — see deploy/k3s/gateway.yaml)" >&2
   exit 77
 }
 [ -n "${AZURE_ACCOUNT:-}" ] && [ -n "${AZURE_KEY:-}" ] && [ -n "${AZURE_CONTAINER:-}" ] || {
   echo "SKIP: AZURE_ACCOUNT/AZURE_KEY/AZURE_CONTAINER not set" >&2
   exit 77
 }
-kubectl -n kloudlite-git-system get deploy zerofs >/dev/null 2>&1 || {
-  echo "SKIP: zerofs Deployment not in kloudlite-git-system (not applied — see deploy/k3s/zerofs.yaml)" >&2
+kubectl -n kloudlite-system get deploy zerofs >/dev/null 2>&1 || {
+  echo "SKIP: zerofs Deployment not in kloudlite-system (not applied — see deploy/k3s/zerofs.yaml)" >&2
   exit 77
 }
 
-SERVER_BIN="${WS_E2E_SERVER_BIN:-target/debug/kloudlite-git}"
-API_BIN="${WS_E2E_API_BIN:-target/debug/kloudlite-git-api}"
-AGENT_BIN="${WS_E2E_AGENT_BIN:-target/debug/kloudlite-git-agent}"
+SERVER_BIN="${WS_E2E_SERVER_BIN:-target/debug/kloudlite}"
+API_BIN="${WS_E2E_API_BIN:-target/debug/kloudlite-api}"
+AGENT_BIN="${WS_E2E_AGENT_BIN:-target/debug/kloudlite-agent}"
 KL_BIN="${WS_E2E_KL_BIN:-target/debug/kl}"
 if [ ! -x "$SERVER_BIN" ] || [ ! -x "$API_BIN" ] || [ ! -x "$AGENT_BIN" ] || [ ! -x "$KL_BIN" ]; then
-  log "building kloudlite-git/kloudlite-git-api/kloudlite-git-agent/kl (not found at $SERVER_BIN / $API_BIN / $AGENT_BIN / $KL_BIN)"
-  cargo build -q --bin kloudlite-git --bin kloudlite-git-api --bin kloudlite-git-agent --bin kl
+  log "building kloudlite/kloudlite-api/kloudlite-agent/kl (not found at $SERVER_BIN / $API_BIN / $AGENT_BIN / $KL_BIN)"
+  cargo build -q --bin kloudlite --bin kloudlite-api --bin kloudlite-agent --bin kl
 fi
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ USER_EMAIL="ws-e2e-user@example.test"
 SERVER_BASE="http://$SERVER_HTTP_ADDR"
 BASE="http://$API_ADDR"
 # The admin host, set independently — see deploy/k3s/README.md's release note for this feature.
-# Falls back to $BASE only for a single-process local run where KLOUDLITE_GIT_API_ROLE was never
+# Falls back to $BASE only for a single-process local run where KLOUDLITE_API_ROLE was never
 # split (the admin routes still exist there under /admin during local dev, since main.rs mounts
 # whichever router the role says — this fallback exists for that convenience, not for prod). This
 # script always starts both roles as separate processes (below), so ADMIN_BASE is set here to its
@@ -200,7 +200,7 @@ wait_for_listener() {
 
 # ---------------------------------------------------------------------------
 # Start the server tier: git, the registry, and the ssh listener the workspace pods clone
-# through. Solo mode (no KLOUDLITE_GIT_PEER_SVC): a single node needs no ownership map.
+# through. Solo mode (no KLOUDLITE_PEER_SVC): a single node needs no ownership map.
 #
 # A file:// store, not mem://, and the api below shares the same one: mem:// is per-PROCESS, and
 # three things here must see one set of credentials — the `admin` subcommands that seed a git repo,
@@ -209,57 +209,57 @@ wait_for_listener() {
 # ---------------------------------------------------------------------------
 STORE_URL="file://$TMPD/store"
 mkdir -p "$TMPD/store"
-log "starting kloudlite-git serve on $SERVER_HTTP_ADDR"
+log "starting kloudlite serve on $SERVER_HTTP_ADDR"
 # Its own cache dir, like every other process here: the default is `./.local/cache` in the repo,
 # which would make one run's leftovers an input to the next.
-KLOUDLITE_GIT_CACHE_DIR="$TMPD/cache-server" \
-KLOUDLITE_GIT_S3_URL="$STORE_URL" \
-KLOUDLITE_GIT_JWT_SECRET="$JWT_SECRET" \
-KLOUDLITE_GIT_HTTP_ADDR="$SERVER_HTTP_ADDR" \
-KLOUDLITE_GIT_PEER_ADDR="$SERVER_PEER_ADDR" \
-KLOUDLITE_GIT_SSH_ADDR="$SERVER_SSH_ADDR" \
-KLOUDLITE_GIT_HOST_KEY="$TMPD/host_key" \
+KLOUDLITE_CACHE_DIR="$TMPD/cache-server" \
+KLOUDLITE_S3_URL="$STORE_URL" \
+KLOUDLITE_JWT_SECRET="$JWT_SECRET" \
+KLOUDLITE_HTTP_ADDR="$SERVER_HTTP_ADDR" \
+KLOUDLITE_PEER_ADDR="$SERVER_PEER_ADDR" \
+KLOUDLITE_SSH_ADDR="$SERVER_SSH_ADDR" \
+KLOUDLITE_HOST_KEY="$TMPD/host_key" \
 "$SERVER_BIN" serve &
 SERVER_PID=$!
 
 log "waiting for the server to answer"
-wait_for_listener "$SERVER_BASE/healthz" "kloudlite-git serve"
+wait_for_listener "$SERVER_BASE/healthz" "kloudlite serve"
 
 # ---------------------------------------------------------------------------
 # Start the api: the user-facing /v1/workspaces|environments|regions|volumes surface — the one
 # writer of the CRDs the controllers reconcile. It talks to no other tier: /v1/volumes/* reads
 # SnapshotRequests out of the cluster, and /v1/regions is a CRD like everything else here.
 # ---------------------------------------------------------------------------
-log "starting kloudlite-git-api on $API_ADDR"
-KLOUDLITE_GIT_CACHE_DIR="$TMPD/cache-api" \
-KLOUDLITE_GIT_S3_URL="$STORE_URL" \
-KLOUDLITE_GIT_JWT_SECRET="$JWT_SECRET" \
-KLOUDLITE_GIT_PEER_SECRET="$PEER_SECRET" \
-KLOUDLITE_GIT_API_ADDR="$API_ADDR" \
-KLOUDLITE_GIT_WORKSPACES_ADMINS="$ADMIN_EMAIL" \
+log "starting kloudlite-api on $API_ADDR"
+KLOUDLITE_CACHE_DIR="$TMPD/cache-api" \
+KLOUDLITE_S3_URL="$STORE_URL" \
+KLOUDLITE_JWT_SECRET="$JWT_SECRET" \
+KLOUDLITE_PEER_SECRET="$PEER_SECRET" \
+KLOUDLITE_API_ADDR="$API_ADDR" \
+KLOUDLITE_WORKSPACES_ADMINS="$ADMIN_EMAIL" \
 "$API_BIN" &
 API_PID=$!
 
 log "waiting for the api to answer"
-wait_for_listener "$BASE/v1/regions" "kloudlite-git-api"
+wait_for_listener "$BASE/v1/regions" "kloudlite-api"
 
 # ---------------------------------------------------------------------------
 # Start a second api process, admin role: `/admin/*` only, no `/v1` route compiled in at all
 # (design doc §5, Task 9/13). A real separate process, not the same one wearing two hats, so this
 # is the same split prod runs (Task 11's separate Deployment) rather than a stand-in for it.
 # ---------------------------------------------------------------------------
-log "starting kloudlite-git-api (admin role) on $ADMIN_API_ADDR"
-KLOUDLITE_GIT_CACHE_DIR="$TMPD/cache-api-admin" \
-KLOUDLITE_GIT_S3_URL="$STORE_URL" \
-KLOUDLITE_GIT_JWT_SECRET="$JWT_SECRET" \
-KLOUDLITE_GIT_PEER_SECRET="$PEER_SECRET" \
-KLOUDLITE_GIT_API_ADDR="$ADMIN_API_ADDR" \
-KLOUDLITE_GIT_API_ROLE="admin" \
+log "starting kloudlite-api (admin role) on $ADMIN_API_ADDR"
+KLOUDLITE_CACHE_DIR="$TMPD/cache-api-admin" \
+KLOUDLITE_S3_URL="$STORE_URL" \
+KLOUDLITE_JWT_SECRET="$JWT_SECRET" \
+KLOUDLITE_PEER_SECRET="$PEER_SECRET" \
+KLOUDLITE_API_ADDR="$ADMIN_API_ADDR" \
+KLOUDLITE_API_ROLE="admin" \
 "$API_BIN" &
 API_ADMIN_PID=$!
 
 log "waiting for the admin api to answer"
-wait_for_listener "$ADMIN_BASE/admin/quota-requests" "kloudlite-git-api (admin)"
+wait_for_listener "$ADMIN_BASE/admin/quota-requests" "kloudlite-api (admin)"
 
 # ---------------------------------------------------------------------------
 # Mint HS256 session JWTs by hand: there is no CLI in this repo that mints one (checked
@@ -312,12 +312,12 @@ echo "$REGION_JSON" | grep -q "\"$REGION_ID\"" || fail "region create did not ec
 # NB this script runs its own agent against its own loopback pool, so the DaemonSet controller must
 # not also be watching this node: two controllers reconciling one Volume would materialize it into
 # two different pools and fight over its status. Take the pool label off this node first:
-#   kubectl label node "$(hostname)" kloudlite-git.io/pool-
+#   kubectl label node "$(hostname)" kloudlite.io/pool-
 E2E_NODE="${WS_E2E_NODE:-$(hostname)}"
 kubectl get node "$E2E_NODE" >/dev/null 2>&1 || fail "node $E2E_NODE is not in the cluster (set WS_E2E_NODE)"
-if kubectl get pods -n kube-system -l app=kloudlite-git-agent \
+if kubectl get pods -n kube-system -l app=kloudlite-agent \
      --field-selector "spec.nodeName=$E2E_NODE" --no-headers 2>/dev/null | grep -q .; then
-  fail "the kloudlite-git-agent DaemonSet is running on $E2E_NODE; remove the kloudlite-git.io/pool label first"
+  fail "the kloudlite-agent DaemonSet is running on $E2E_NODE; remove the kloudlite.io/pool label first"
 fi
 
 # Where the git-seeding init container clones from. It runs in a POD, so loopback is not an address
@@ -333,13 +333,13 @@ NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=
 # unreferenced-volume collection (and its age floor) both ride it, so every reclaim assertion in
 # this script would time out at the default; 20 s here, and every such wait below is at least
 # three beats.
-log "starting kloudlite-git-agent against pool $MOUNT as node $E2E_NODE"
+log "starting kloudlite-agent against pool $MOUNT as node $E2E_NODE"
 NODE_NAME="$E2E_NODE" \
 WS_GIT_SSH_HOST="$NODE_IP" \
 WS_GIT_SSH_PORT="$SERVER_SSH_PORT" \
 WS_REGION="$REGION_ID" \
 WS_POOL="$MOUNT" \
-WS_HOMES_EXPORT="zerofs.kloudlite-git-system.svc:/" \
+WS_HOMES_EXPORT="zerofs.kloudlite-system.svc:/" \
 WS_SYNC_SECS="5" \
 WS_REPLICA_SECS="20" \
 HOSTNAME="ws-e2e-agent" \
@@ -423,7 +423,7 @@ api_delete() {
 # the same image and pass. The agent's own pinned tag is the one to use — a TAGGED platform image is
 # still `model::is_default_image`, so sshd, the nix profile and zsh all keep working below, while
 # `spec.image` differs from the untagged marker a bare restore falls back to.
-WS_IMAGE=$(kubectl -n kube-system get daemonset kloudlite-git-agent \
+WS_IMAGE=$(kubectl -n kube-system get daemonset kloudlite-agent \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="WS_DEFAULT_IMAGE")].value}')
 [ -n "$WS_IMAGE" ] || fail "the agent DaemonSet has no WS_DEFAULT_IMAGE to pin e2e-ws to"
 case "$WS_IMAGE" in
@@ -546,7 +546,7 @@ ready_transients() {
   # check are done in awk against the paired field this prints alongside each name.
   # Sorted by creationTimestamp, so a caller taking `head -1`/`tail -1` gets the oldest/newest
   # cut rather than whatever order the API server listed the names in.
-  kubectl get snapshots -l "kloudlite-git.io/volume=$WS_ID" --sort-by=.metadata.creationTimestamp \
+  kubectl get snapshots -l "kloudlite.io/volume=$WS_ID" --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{range .items[?(@.status.phase=="Ready")]}{.metadata.name}{" "}{.spec.transient}{"\n"}{end}' \
     2>/dev/null | awk -v p="^sync-$WS_ID-" '$1 ~ p && $2 == "true" {print $1}'
 }
@@ -619,16 +619,16 @@ done
 log "live settings: cadence change observed (new transient $AFTER_SETTINGS)"
 
 # ---------------------------------------------------------------------------
-# Live settings, boot case: `gitInitImage` is `Mark::Boot` — a save must roll `kloudlite-git-agent`
+# Live settings, boot case: `gitInitImage` is `Mark::Boot` — a save must roll `kloudlite-agent`
 # by patching the pod template's restart annotation (never a pod delete), and a second save while
 # the first roll is still in flight must 409 with nothing written. Unlike the live case above,
 # this mechanism (precheck-then-write-then-roll, the 409) lives entirely in the admin API, not in
 # a raw CR write — so this half is driven through $ADMIN_BASE rather than kubectl, and the two
 # blocks together cover both paths spec §7 distinguishes.
 # ---------------------------------------------------------------------------
-log "boot settings: PUT gitInitImage through the admin api and expecting kloudlite-git-agent to roll"
-BEFORE_RESTARTED_AT=$(kubectl -n kube-system get daemonset kloudlite-git-agent \
-  -o jsonpath='{.spec.template.metadata.annotations.kloudlite-git\.io/restarted-at}' 2>/dev/null || true)
+log "boot settings: PUT gitInitImage through the admin api and expecting kloudlite-agent to roll"
+BEFORE_RESTARTED_AT=$(kubectl -n kube-system get daemonset kloudlite-agent \
+  -o jsonpath='{.spec.template.metadata.annotations.kloudlite\.io/restarted-at}' 2>/dev/null || true)
 BOOT_CODE=$(curl -s -o /tmp/ws_e2e_boot_put.json -w '%{http_code}' \
   -X PUT "$ADMIN_BASE/admin/settings/clusters/$REGION_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' -d '{"gitInitImage":"alpine/git:2.45.3","note":"e2e boot roll"}')
@@ -652,14 +652,14 @@ else
   log "boot settings: first roll had already settled before the second save landed ($RETRY_CODE) — 409 path not exercised this run"
 fi
 
-kubectl -n kube-system rollout status daemonset/kloudlite-git-agent --timeout=120s \
-  || fail "kloudlite-git-agent DaemonSet rollout did not complete after the gitInitImage change"
-AFTER_RESTARTED_AT=$(kubectl -n kube-system get daemonset kloudlite-git-agent \
-  -o jsonpath='{.spec.template.metadata.annotations.kloudlite-git\.io/restarted-at}' 2>/dev/null || true)
-[ -n "$AFTER_RESTARTED_AT" ] || fail "kloudlite-git-agent pod template has no kloudlite-git.io/restarted-at annotation after the boot save"
+kubectl -n kube-system rollout status daemonset/kloudlite-agent --timeout=120s \
+  || fail "kloudlite-agent DaemonSet rollout did not complete after the gitInitImage change"
+AFTER_RESTARTED_AT=$(kubectl -n kube-system get daemonset kloudlite-agent \
+  -o jsonpath='{.spec.template.metadata.annotations.kloudlite\.io/restarted-at}' 2>/dev/null || true)
+[ -n "$AFTER_RESTARTED_AT" ] || fail "kloudlite-agent pod template has no kloudlite.io/restarted-at annotation after the boot save"
 [ "$AFTER_RESTARTED_AT" != "$BEFORE_RESTARTED_AT" ] \
-  || fail "kloudlite-git.io/restarted-at did not change: still $BEFORE_RESTARTED_AT"
-log "boot settings: kloudlite-git-agent rolled, restarted-at is fresh ($AFTER_RESTARTED_AT)"
+  || fail "kloudlite.io/restarted-at did not change: still $BEFORE_RESTARTED_AT"
+log "boot settings: kloudlite-agent rolled, restarted-at is fresh ($AFTER_RESTARTED_AT)"
 
 # ---------------------------------------------------------------------------
 # Push: the one mutating verb — `/v1` writes a `Snapshot` CR and the owning node cuts it (btrfs
@@ -809,8 +809,8 @@ ssh-add "$TMPD/id" >/dev/null 2>&1 || fail "ssh-add failed"
 log "pointing kl at the local api and the gateway's in-cluster Service"
 export KL_CONFIG_DIR="$TMPD/kl-config"
 mkdir -p "$KL_CONFIG_DIR"
-GATEWAY_IP=$(kubectl get svc kloudlite-git-gateway -n kloudlite-git-system -o jsonpath='{.spec.clusterIP}')
-[ -n "$GATEWAY_IP" ] || fail "kloudlite-git-gateway Service has no clusterIP"
+GATEWAY_IP=$(kubectl get svc kloudlite-gateway -n kloudlite-system -o jsonpath='{.spec.clusterIP}')
+[ -n "$GATEWAY_IP" ] || fail "kloudlite-gateway Service has no clusterIP"
 export KL_GATEWAY_OVERRIDE="ws://$GATEWAY_IP:8080"
 cat > "$KL_CONFIG_DIR/config.json" <<EOF
 {"api":"$BASE","token":"$USER_TOKEN","expires_at":"2099-01-01T00:00:00Z","username":"$USER_NAME"}
@@ -830,7 +830,7 @@ log "checking the registered key landed in the pod's authorized_keys"
 kubectl -n "$WS_NS" exec "$WS_ID" -- ls /home/kl/.ssh/authorized_keys >/dev/null \
   || fail "no /home/kl/.ssh/authorized_keys in the workspace pod"
 
-# The negative half: a peer workspace pod is not `app=kloudlite-git-gateway` in `kloudlite-git-system`, so the
+# The negative half: a peer workspace pod is not `app=kloudlite-gateway` in `kloudlite-system`, so the
 # default-deny-plus-gateway-hole NetworkPolicy must refuse it on port 22 — `kl` above only proved
 # the gateway path works, not that the direct path is actually closed. `|| true` is load-bearing
 # under `set -e`, same as the environment default-deny assertion above: a correctly refused `nc` is
@@ -945,7 +945,7 @@ wait_ws_ready "$RESTORE_ID"
 # /v1/platform-key) all need the Mongo directory this script does not run.
 # ---------------------------------------------------------------------------
 E2E_REPO="e2e-seed"
-admin() { KLOUDLITE_GIT_CACHE_DIR="$TMPD/cache-admin" KLOUDLITE_GIT_S3_URL="$STORE_URL" "$SERVER_BIN" admin "$@"; }
+admin() { KLOUDLITE_CACHE_DIR="$TMPD/cache-admin" KLOUDLITE_S3_URL="$STORE_URL" "$SERVER_BIN" admin "$@"; }
 
 # ORDER: every write below must happen before anything probes that user, repo, token or
 # fingerprint. The server's credential lookup caches MISSES for 60s per process, so a probe that
@@ -1042,7 +1042,7 @@ done
   || fail "history did not grow by exactly one after push ($SEED_BEFORE -> $SEED_AFTER)"
 echo "$SEED_HISTORY" | grep -q '"message":"seeded push"' || fail "push message missing: $SEED_HISTORY"
 echo "$SEED_HISTORY" | grep -q '"created_at":"' || fail "history lost the created_at the web reads"
-kubectl get snapshotrequests -l "kloudlite-git.io/volume=$SEED_ID" -o name | grep -q . \
+kubectl get snapshotrequests -l "kloudlite.io/volume=$SEED_ID" -o name | grep -q . \
   || fail "a push wrote no SnapshotRequest"
 
 log "deleting the seeded workspace with ONE call and letting GC take the child"
@@ -1179,7 +1179,7 @@ curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/push" -H "Authorization: Bearer
 ENV_SNAP=""
 for i in $(seq 1 60); do
   # Sorted, so `tail -1` is the cut this push just made and not the create-time one.
-  ENV_SNAP=$(kubectl get snapshots -l "kloudlite-git.io/volume=$ENV_ID" --sort-by=.metadata.creationTimestamp \
+  ENV_SNAP=$(kubectl get snapshots -l "kloudlite.io/volume=$ENV_ID" --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{range .items[?(@.status.phase=="Ready")]}{.metadata.name}{" "}{.spec.transient}{"\n"}{end}' \
     2>/dev/null | awk '$2 == "false" {print $1}' | tail -1)
   [ -n "$ENV_SNAP" ] && break
@@ -1253,7 +1253,7 @@ curl -fsS -X DELETE "$BASE/v1/environments/$ENV_ID" -H "Authorization: Bearer $U
 kubectl wait --for=delete "environment/$ENV_ID" --timeout=300s || fail "restored environment $ENV_ID still present after delete"
 ENV_ID=""
 kubectl get volume "$ENV_VOLUME" >/dev/null 2>&1 || fail "the Volume CR $ENV_VOLUME went with its second working copy; its snapshots should have kept it"
-for sn in $(kubectl get snapshots -l "kloudlite-git.io/volume=$ENV_VOLUME" \
+for sn in $(kubectl get snapshots -l "kloudlite.io/volume=$ENV_VOLUME" \
   -o jsonpath='{range .items[?(@.spec.transient==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
   api_delete "$BASE/v1/volumes/$ENV_VOLUME/snapshots/$sn"
   [ "$DEL_CODE" = 204 ] || fail "deleting environment snapshot $sn answered $DEL_CODE: $DEL_BODY"
@@ -1274,7 +1274,7 @@ done
 log "commit model: push landed as a Ready Snapshot CR"
 SNAP_NAME=""
 for i in $(seq 1 30); do
-  SNAP_NAME=$(kubectl get snapshots -l "kloudlite-git.io/volume=$WS_ID" \
+  SNAP_NAME=$(kubectl get snapshots -l "kloudlite.io/volume=$WS_ID" \
     -o jsonpath='{.items[?(@.status.phase=="Ready")].metadata.name}' 2>/dev/null | awk '{print $1}')
   [ -n "$SNAP_NAME" ] && break
   sleep 2
@@ -1301,7 +1301,7 @@ SECOND_NODE=$(kubectl get nodes -o jsonpath='{.items[?(@.metadata.name!="'"$E2E_
 if [ -n "$SECOND_NODE" ]; then
   REPLICA_SYNCED=""
   for i in $(seq 1 60); do
-    REPLICA_SYNCED=$(kubectl get volumereplicas -l "kloudlite-git.io/volume=$WS_ID" \
+    REPLICA_SYNCED=$(kubectl get volumereplicas -l "kloudlite.io/volume=$WS_ID" \
       -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null | tr ' ' '\n' | grep -vx "$E2E_NODE" | head -1)
     [ -n "$REPLICA_SYNCED" ] && break
     sleep 2
@@ -1365,7 +1365,7 @@ FROZEN_IMAGE=$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.image
   || fail "the restored image is not the one the Snapshot froze: $RESTORED_IMAGE != $FROZEN_IMAGE"
 # The whole point of creating e2e-ws with an explicit image: without this the assertion above would
 # pass just as well on a restore that ignored `spec.state` and fell back to the default.
-[ "$RESTORED_IMAGE" != "ghcr.io/kloudlite/kloudlite-git-workspace" ] \
+[ "$RESTORED_IMAGE" != "ghcr.io/kloudlite/kloudlite-workspace" ] \
   || fail "the restored image is the default fallback, so the frozen state proved nothing"
 [ "$(kubectl get snapshot "$SNAP_NAME" -o jsonpath='{.spec.state.kind}')" = workspace ] \
   || fail "snapshot carries no state"
@@ -1395,7 +1395,7 @@ echo "$DEL_BODY" | grep -q "the volume still has a workspace or environment" \
   || fail "wrong refusal for an attached volume: $DEL_BODY"
 SYNC_POINT=""
 for i in $(seq 1 30); do
-  SYNC_POINT=$(kubectl get snapshots -l "kloudlite-git.io/volume=$WS_VOLUME" \
+  SYNC_POINT=$(kubectl get snapshots -l "kloudlite.io/volume=$WS_VOLUME" \
     -o jsonpath='{range .items[?(@.spec.transient==true)]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1)
   [ -n "$SYNC_POINT" ] && break
   sleep 2
@@ -1414,7 +1414,7 @@ curl -fsS -X DELETE "$BASE/v1/workspaces/$SNAP_STATE_RESTORE_ID" -H "Authorizati
 wait_ws_gone "$SNAP_STATE_RESTORE_ID"
 SNAP_STATE_RESTORE_ID=""
 kubectl get volume "$WS_VOLUME" >/dev/null 2>&1 || fail "the Volume CR $WS_VOLUME went with its second working copy; its snapshots should have kept it"
-for sn in $(kubectl get snapshots -l "kloudlite-git.io/volume=$WS_VOLUME" \
+for sn in $(kubectl get snapshots -l "kloudlite.io/volume=$WS_VOLUME" \
   -o jsonpath='{range .items[?(@.spec.transient==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
   api_delete "$BASE/v1/volumes/$WS_VOLUME/snapshots/$sn"
   [ "$DEL_CODE" = 204 ] || fail "deleting snapshot $sn answered $DEL_CODE: $DEL_BODY"
@@ -1437,10 +1437,10 @@ echo "OK (durable snapshots): a push outlived its workspace and its environment 
 # inside the script (a label flip, a nodeSelector trick) makes kubelet stop heartbeating, so there
 # is no safe in-script way to simulate it; not covered here.
 # ---------------------------------------------------------------------------
-POOL_NODES=$(kubectl get nodes -l kloudlite-git.io/pool=true --no-headers 2>/dev/null | awk '{print $1}')
+POOL_NODES=$(kubectl get nodes -l kloudlite.io/pool=true --no-headers 2>/dev/null | awk '{print $1}')
 POOL_NODE_COUNT=$(printf '%s\n' "$POOL_NODES" | grep -c . || true)
 if [ "$POOL_NODE_COUNT" -lt 3 ]; then
-  log "volume takeover: skipping (need >=3 kloudlite-git.io/pool=true nodes, found $POOL_NODE_COUNT)"
+  log "volume takeover: skipping (need >=3 kloudlite.io/pool=true nodes, found $POOL_NODE_COUNT)"
 else
   log "volume takeover: node JOIN — creating a workspace, then dropping the standby's pool label"
   TAKEOVER_WS_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
@@ -1451,7 +1451,7 @@ else
 
   STANDBY=""
   for i in $(seq 1 30); do
-    STANDBY=$(kubectl get volumereplicas -l "kloudlite-git.io/volume=$TAKEOVER_WS_ID" \
+    STANDBY=$(kubectl get volumereplicas -l "kloudlite.io/volume=$TAKEOVER_WS_ID" \
       -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null | tr ' ' '\n' | grep -vx "$E2E_NODE" | head -1)
     [ -n "$STANDBY" ] && break
     sleep 2
@@ -1461,11 +1461,11 @@ else
   # Removing and re-adding a THIRD node's label restores the identical pool set, so rendezvous
   # re-elects the same standby and nothing has moved — the drill would pass on a no-op. Drop the
   # STANDBY's label instead: the slot has nowhere to stay and must move to another live node.
-  kubectl label node "$STANDBY" kloudlite-git.io/pool- >/dev/null
+  kubectl label node "$STANDBY" kloudlite.io/pool- >/dev/null
 
   NEW_STANDBY=""
   for i in $(seq 1 90); do
-    NEW_STANDBY=$(kubectl get volumereplicas -l "kloudlite-git.io/volume=$TAKEOVER_WS_ID" \
+    NEW_STANDBY=$(kubectl get volumereplicas -l "kloudlite.io/volume=$TAKEOVER_WS_ID" \
       -o jsonpath='{.items[?(@.status.phase=="Synced")].spec.node}' 2>/dev/null \
       | tr ' ' '\n' | grep -vx "$E2E_NODE" | grep -vx "$STANDBY" | head -1)
     [ -n "$NEW_STANDBY" ] && break
@@ -1476,11 +1476,11 @@ else
   # Retire is keep-biased: the old copy goes only on the beat AFTER its replacement reports
   # Synced, so this poll starts from a state where both rows legitimately exist.
   for i in $(seq 1 30); do
-    kubectl get volumereplicas -l "kloudlite-git.io/volume=$TAKEOVER_WS_ID" \
+    kubectl get volumereplicas -l "kloudlite.io/volume=$TAKEOVER_WS_ID" \
       -o jsonpath="{.items[?(@.spec.node==\"$STANDBY\")]}" 2>/dev/null | grep -q . || break
     sleep 2
   done
-  kubectl get volumereplicas -l "kloudlite-git.io/volume=$TAKEOVER_WS_ID" \
+  kubectl get volumereplicas -l "kloudlite.io/volume=$TAKEOVER_WS_ID" \
     -o jsonpath="{.items[?(@.spec.node==\"$STANDBY\")]}" 2>/dev/null | grep -q . \
     && fail "the displaced node $STANDBY's VolumeReplica row for $TAKEOVER_WS_ID is still around"
   # The displaced node's subvolume lives on ITS OWN pool, not this script's loopback $MOUNT, so it
@@ -1493,10 +1493,10 @@ else
   # Give the node its label back and let placement settle: the pool set is the original one again,
   # so rendezvous elects $STANDBY once more and $NEW_STANDBY retires. Bounded — a cluster left
   # mid-move by a timeout here is worse than a slow assert.
-  kubectl label node "$STANDBY" kloudlite-git.io/pool=true --overwrite >/dev/null
+  kubectl label node "$STANDBY" kloudlite.io/pool=true --overwrite >/dev/null
   SETTLED=""
   for i in $(seq 1 90); do
-    SETTLED=$(kubectl get volumereplicas -l "kloudlite-git.io/volume=$TAKEOVER_WS_ID" \
+    SETTLED=$(kubectl get volumereplicas -l "kloudlite.io/volume=$TAKEOVER_WS_ID" \
       -o jsonpath="{.items[?(@.spec.node==\"$STANDBY\")].status.phase}" 2>/dev/null)
     [ "$SETTLED" = "Synced" ] && break
     sleep 4
@@ -1507,7 +1507,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Superadmin console: node drain via the admin host. Drain only sets the
-# label the agent watches (`kloudlite-git.io/decommission`) — it never touches
+# label the agent watches (`kloudlite.io/decommission`) — it never touches
 # workload placement itself, so this just asserts the label round-trips and
 # lands an audit row, the same guard as every other $ADMIN_BASE check above.
 # ---------------------------------------------------------------------------
@@ -1515,14 +1515,14 @@ log "superadmin console: draining $E2E_NODE via $ADMIN_BASE"
 curl -fsS -X POST "$ADMIN_BASE/admin/clusters/$REGION_ID/nodes/$E2E_NODE/drain" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"reason":"e2e drain check"}' >/dev/null
-DRAIN_LABEL=$(kubectl get node "$E2E_NODE" -o jsonpath='{.metadata.labels.kloudlite-git\.io/decommission}')
-[ "$DRAIN_LABEL" = "true" ] || fail "drain did not set kloudlite-git.io/decommission=true on $E2E_NODE (got '$DRAIN_LABEL')"
+DRAIN_LABEL=$(kubectl get node "$E2E_NODE" -o jsonpath='{.metadata.labels.kloudlite\.io/decommission}')
+[ "$DRAIN_LABEL" = "true" ] || fail "drain did not set kloudlite.io/decommission=true on $E2E_NODE (got '$DRAIN_LABEL')"
 
 curl -fsS -X POST "$ADMIN_BASE/admin/clusters/$REGION_ID/nodes/$E2E_NODE/undrain" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"reason":"e2e undrain check"}' >/dev/null
-UNDRAIN_LABEL=$(kubectl get node "$E2E_NODE" -o jsonpath='{.metadata.labels.kloudlite-git\.io/decommission}')
-[ -z "$UNDRAIN_LABEL" ] || fail "undrain did not clear kloudlite-git.io/decommission on $E2E_NODE (got '$UNDRAIN_LABEL')"
+UNDRAIN_LABEL=$(kubectl get node "$E2E_NODE" -o jsonpath='{.metadata.labels.kloudlite\.io/decommission}')
+[ -z "$UNDRAIN_LABEL" ] || fail "undrain did not clear kloudlite.io/decommission on $E2E_NODE (got '$UNDRAIN_LABEL')"
 
 curl -fsS "$ADMIN_BASE/admin/audit?action=drain" -H "Authorization: Bearer $ADMIN_TOKEN" | grep -q "\"target\":\"$REGION_ID/$E2E_NODE\"" \
   || fail "no audit row found for drain of $REGION_ID/$E2E_NODE (GET /admin/audit?action=drain)"
@@ -1530,7 +1530,7 @@ log "superadmin console: node drain/undrain and audit row passed"
 
 # ---------------------------------------------------------------------------
 # History layer. Skipped rather than failed when the admin process has no
-# ClickHouse: `KLOUDLITE_GIT_CLICKHOUSE_URL` is optional by design (a process
+# ClickHouse: `KLOUDLITE_CLICKHOUSE_URL` is optional by design (a process
 # without it runs exactly as before), so a laptop run without ClickStack must
 # still pass the rest of this file. Same shape as every other prerequisite
 # here — a missing one skips its block; only exit 77 at the top says the whole
@@ -1577,4 +1577,4 @@ else
 fi
 
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls kloudlite-git-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds, generic requests (access request opened, one-pending-per-kind, unioned queue, approve sets membership, second decision 409s)), superadmin console (node drain/undrain, audit row) passed$HISTORY_CLAUSE"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history), durable snapshots for both kinds (delete -> detached -> restore -> collect) and a definition-change sync cut all passed, live settings (live syncSecs change cuts sooner, boot gitInitImage change rolls kloudlite-agent with a fresh restarted-at, a second save while rolling 409s), quota (limit refused, request, one-pending, approve on the admin host, ResourceQuota, create succeeds, generic requests (access request opened, one-pending-per-kind, unioned queue, approve sets membership, second decision 409s)), superadmin console (node drain/undrain, audit row) passed$HISTORY_CLAUSE"

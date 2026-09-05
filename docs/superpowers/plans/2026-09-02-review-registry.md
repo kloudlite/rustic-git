@@ -6,7 +6,7 @@
 
 **Architecture:** Nothing moves between crates and no new module appears. Four kinds of change: (a) one-line default and pagination corrections in `crates/registry` (M1, L2, L3, L6); (b) bounded concurrency where `crates/registry/src/gc.rs` already states the rule, reusing `gc::stats_of` (M2, M4); (c) row-cleanup symmetry in the image DB — one shared suffix-delete helper and one prefix sweep on the blob-delete path (L1, L4); (d) two validation gaps on the PR path — branch names at open, and a tip-stamped mergeability verdict so a lapsed lane cannot overwrite a newer answer (M3, M5). L7 is a pure assertion.
 
-**Tech Stack:** Rust 2021 workspace; axum + `slatedb::object_store` 0.14.1 for the registry; `futures::StreamExt::buffered` for bounded fan-out; `reqwest` + `tower::ServiceExt::oneshot` in the integration suite under `tests/` (root package `kloudlite-git-tests`); `cargo test`, `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+**Tech Stack:** Rust 2021 workspace; axum + `slatedb::object_store` 0.14.1 for the registry; `futures::StreamExt::buffered` for bounded fan-out; `reqwest` + `tower::ServiceExt::oneshot` in the integration suite under `tests/` (root package `kloudlite-tests`); `cargo test`, `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 
 **Spec:** docs/superpowers/reviews/2026-09-02-codebase-review.md (details: docs/superpowers/reviews/2026-09-02-details/registry-pulls-worker.md)
 
@@ -50,7 +50,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-registry the_default_layer_cap_is_the_copy_cap`. Expected: `error[E0425]: cannot find value 'DEFAULT_MAX_LAYER' in module 'super'`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-registry the_default_layer_cap_is_the_copy_cap`. Expected: `error[E0425]: cannot find value 'DEFAULT_MAX_LAYER' in module 'super'`.
 
 - [ ] **Step 3: Implement** — replace `crates/registry/src/blobs.rs:16-27` with:
 
@@ -62,14 +62,14 @@ mod tests {
 pub const DEFAULT_MAX_LAYER: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Largest single layer accepted, checked against the body's size BEFORE it is stored: an
-/// unbounded push must not be able to fill a node's disk. Override with KLOUDLITE_GIT_MAX_LAYER.
+/// unbounded push must not be able to fill a node's disk. Override with KLOUDLITE_MAX_LAYER.
 ///
 /// Read once and cached: this is on the hot blob path and the env var never changes after
 /// process start.
 pub fn max_layer() -> u64 {
     static LAYER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *LAYER.get_or_init(|| {
-        std::env::var("KLOUDLITE_GIT_MAX_LAYER").ok().and_then(|v| v.parse().ok())
+        std::env::var("KLOUDLITE_MAX_LAYER").ok().and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_LAYER)
     })
 }
@@ -81,7 +81,7 @@ Then fix the stale comment at `tests/registry_blobs.rs:32`:
     // was an anonymous memory-DoS for public images (max_layer is 5 GiB by default).
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-registry && cargo test --test registry_blobs && cargo test --test registry_limits && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-registry && cargo test --test registry_blobs && cargo test --test registry_limits && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add crates/registry/src/blobs.rs tests/registry_blobs.rs && git commit -m "Default the layer cap to the 5 GiB copy limit"`; NO Co-Authored-By, NO Claude-Session, NO attribution trailers.
 
@@ -184,17 +184,17 @@ async fn an_unreadable_manifest_reads_as_not_held_not_as_a_fault() {
     .to_string()
     .into_bytes();
     let md = Digest::of(&manifest);
-    let loc = kloudlite_git_registry::store::manifest_path("acme", "nginx", &md);
+    let loc = kloudlite_registry::store::manifest_path("acme", "nginx", &md);
 
     let inner = std::sync::Arc::new(slatedb::object_store::memory::InMemory::new());
     inner.put(&loc, PutPayload::from(manifest)).await.unwrap();
     let os = std::sync::Arc::new(FailsOneGet { inner, bad: loc.clone() });
     let tmp = tempfile::tempdir().unwrap();
     let store = std::sync::Arc::new(
-        kloudlite_git_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
+        kloudlite_storage::store::Store::open(os, tmp.path().join("cache"), false).await.unwrap(),
     );
 
-    let held = kloudlite_git_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await;
+    let held = kloudlite_registry::store::image_holds_blob(&store, "acme", "nginx", &layer).await;
     assert_eq!(held.unwrap(), false, "an unreadable manifest names nothing; it is not a 500");
 }
 
@@ -212,15 +212,15 @@ async fn the_backfill_marks_itself_done_and_does_not_walk_twice() {
     .to_string()
     .into_bytes();
     let md = Digest::of(&manifest);
-    let loc = kloudlite_git_registry::store::manifest_path("acme", "nginx", &md);
+    let loc = kloudlite_registry::store::manifest_path("acme", "nginx", &md);
     e.store.os.put(&loc, PutPayload::from(manifest)).await.unwrap();
 
-    assert!(kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
+    assert!(kloudlite_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
         .await
         .unwrap());
     e.store.os.delete(&loc).await.unwrap();
     assert!(
-        kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
+        kloudlite_registry::store::image_holds_blob(&e.store, "acme", "nginx", &layer)
             .await
             .unwrap(),
         "the row survives the manifest; the walk must not run a second time"
@@ -228,7 +228,7 @@ async fn the_backfill_marks_itself_done_and_does_not_walk_twice() {
 }
 ```
 
-If `tests/registry_store.rs` does not already import them, add at the top of the file beside the existing `use` lines: `use kloudlite_git_registry::Digest;` and `use kloudlite_git_registry::store::ImageExt;` (drop either if it is already there — a duplicate import is a clippy failure). `async_trait` is already a workspace dependency of the root test package; if `cargo test` reports it missing, add `async-trait = "0.1"` to the root `Cargo.toml`'s `[dev-dependencies]`.
+If `tests/registry_store.rs` does not already import them, add at the top of the file beside the existing `use` lines: `use kloudlite_registry::Digest;` and `use kloudlite_registry::store::ImageExt;` (drop either if it is already there — a duplicate import is a clippy failure). `async_trait` is already a workspace dependency of the root test package; if `cargo test` reports it missing, add `async-trait = "0.1"` to the root `Cargo.toml`'s `[dev-dependencies]`.
 
 - [ ] **Step 2: Run it, expect failure** — `cargo test --test registry_store an_unreadable_manifest_reads_as_not_held_not_as_a_fault`. Expected: the assertion never runs; the test panics on `held.unwrap()` with `called 'Result::unwrap()' on an 'Err' value: ... injected transient failure`.
 
@@ -425,7 +425,7 @@ pub(crate) async fn stats_of(store: &Store, owner: &str, names: &[&str]) -> Vec<
     .await;
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test --test registry_manifests && cargo test --test registry_http && cargo test -p kloudlite-git-registry && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test --test registry_manifests && cargo test --test registry_http && cargo test -p kloudlite-registry && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add crates/registry/src/gc.rs crates/registry/src/routes.rs crates/registry/src/manifests.rs tests/registry_manifests.rs && git commit -m "Bound the catalog and manifest probe fan-outs at sixteen"`; NO Co-Authored-By, NO Claude-Session, NO attribution trailers.
 
@@ -566,7 +566,7 @@ async fn deleting_a_blob_drops_the_images_hold_row() {
         .basic_auth("acme", Some(&token)).body(body).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
     assert!(
-        kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
+        kloudlite_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
         "the push records the hold"
     );
 
@@ -574,13 +574,13 @@ async fn deleting_a_blob_drops_the_images_hold_row() {
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::ACCEPTED);
     assert!(
-        !kloudlite_git_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
+        !kloudlite_registry::store::image_holds_blob(&e.store, "acme", "nginx", &d).await.unwrap(),
         "the hold row must go with the bytes"
     );
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test --test registry_blobs deleting_a_blob_drops_the_images_hold_row`. Expected: `assertion failed: !kloudlite_git_registry::store::image_holds_blob(...)` — "the hold row must go with the bytes".
+- [ ] **Step 2: Run it, expect failure** — `cargo test --test registry_blobs deleting_a_blob_drops_the_images_hold_row`. Expected: `assertion failed: !kloudlite_registry::store::image_holds_blob(...)` — "the hold row must go with the bytes".
 
 - [ ] **Step 3: Implement** —
 
@@ -665,7 +665,7 @@ The doc comment at `blobs.rs:201-205` still holds and must not change: this is s
     }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-git-registry a_zero_page_size_is_no_page_size`. Expected: `assertion 'left == right' failed: n=0 lists everything rather than ending the catalog; left: [], right: ["a", "b", "c"]`.
+- [ ] **Step 2: Run it, expect failure** — `cargo test -p kloudlite-registry a_zero_page_size_is_no_page_size`. Expected: `assertion 'left == right' failed: n=0 lists everything rather than ending the catalog; left: [], right: ["a", "b", "c"]`.
 
 - [ ] **Step 3: Implement** —
 
@@ -683,7 +683,7 @@ The doc comment at `blobs.rs:201-205` still holds and must not change: this is s
     let n = q.get("n").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(usize::MAX);
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-registry && cargo test --test registry_http && cargo test --test registry_manifests && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-registry && cargo test --test registry_http && cargo test --test registry_manifests && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add crates/registry/src/lib.rs crates/registry/src/routes.rs && git commit -m "Read a zero page size as no page size"`; NO Co-Authored-By, NO Claude-Session, NO attribution trailers.
 
@@ -785,7 +785,7 @@ async fn a_tag_whose_manifest_is_gone_is_not_counted_as_a_pull() {
 
     // Take the bytes away behind the tag, and clear the cached copy so the GET reaches the store.
     e.store.manifests().remove(&format!("acme/nginx/{d}"));
-    e.store.os.delete(&kloudlite_git_registry::store::manifest_path("acme", "nginx", &d)).await.unwrap();
+    e.store.os.delete(&kloudlite_registry::store::manifest_path("acme", "nginx", &d)).await.unwrap();
     let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
@@ -853,7 +853,7 @@ And in the store-fetch path, immediately after `app.store.manifests().insert(cac
 - Modify: `tests/registry_manifests.rs:132-150` (`deleting_a_manifest_by_digest_drops_its_media_type_row`)
 
 **Interfaces:**
-- Consumes: `kloudlite_git_registry::store::blob_path(owner: &str, d: &Digest) -> OsPath`, `slatedb::object_store::ObjectStoreExt::head`. No production code changes.
+- Consumes: `kloudlite_registry::store::blob_path(owner: &str, d: &Digest) -> OsPath`, `slatedb::object_store::ObjectStoreExt::head`. No production code changes.
 
 - [ ] **Step 1: Write the failing test** — extend `deleting_a_manifest_by_digest_drops_its_media_type_row` (`tests/registry_manifests.rs:132`). Rename it and add the blob assertion; the rule the crate doc puts first has no direct test today:
 
@@ -869,8 +869,8 @@ and, immediately before the DELETE in that test's body, capture the layer path, 
 
 ```rust
     use slatedb::object_store::ObjectStoreExt;
-    let layer = kloudlite_git_registry::store::blob_path("acme", &Digest::of(b"layer"));
-    let cfg = kloudlite_git_registry::store::blob_path("acme", &Digest::of(b"cfg"));
+    let layer = kloudlite_registry::store::blob_path("acme", &Digest::of(b"layer"));
+    let cfg = kloudlite_registry::store::blob_path("acme", &Digest::of(b"cfg"));
     assert!(e.store.os.head(&layer).await.is_ok(), "the layer is there before the delete");
 ```
 
@@ -914,7 +914,7 @@ and after the `assert_eq!(r.status(), StatusCode::ACCEPTED);`:
 #[tokio::test(flavor = "multi_thread")]
 async fn a_change_on_a_branch_name_git_will_not_accept_is_refused() {
     let e = common::env().await;
-    let router = kloudlite_git_server::router::peer_router(common::app(e.store.clone()).await);
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
 
     for bad in [
@@ -994,7 +994,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it, expect failure** — `cargo test --test browse_http a_change_on_a_branch_name_git_will_not_accept_is_refused` and `cargo test -p kloudlite-git-server branch_names_git_will_never_accept_are_refused`. Expected: `error[E0432]: unresolved import 'super::valid_branch'` for the unit test, and `assertion 'left == right' failed: head "" was accepted; left: 201, right: 400` for the integration one.
+- [ ] **Step 2: Run it, expect failure** — `cargo test --test browse_http a_change_on_a_branch_name_git_will_not_accept_is_refused` and `cargo test -p kloudlite-server branch_names_git_will_never_accept_are_refused`. Expected: `error[E0432]: unresolved import 'super::valid_branch'` for the unit test, and `assertion 'left == right' failed: head "" was accepted; left: 201, right: 400` for the integration one.
 
 - [ ] **Step 3: Implement** — insert into `bins/server/src/browse_api/pulls.rs` immediately above `pub(super) async fn api_pull_open` (line 146):
 
@@ -1023,7 +1023,7 @@ and in `api_pull_open`, immediately after the `base == head` refusal (currently 
     }
 ```
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-git-server && cargo test --test browse_http && cargo test --test pulls && cargo test --test api_server && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test -p kloudlite-server && cargo test --test browse_http && cargo test --test pulls && cargo test --test api_server && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add bins/server/src/browse_api/pulls.rs tests/browse_http.rs && git commit -m "Refuse a change opened on an illegal branch name"`; NO Co-Authored-By, NO Claude-Session, NO attribution trailers.
 
@@ -1221,7 +1221,7 @@ fn unknown(why: String) -> Verdict {
 
 Also extend the doc comment above `api_pull_mergeability` (`pulls.rs:513-518`): after "the two tips the answer belongs to were stamped by the check that asked for this", add "— and a verdict that names different ones is refused 409, the same shape of answer a lapsed claim gets on the outcome route."
 
-- [ ] **Step 4: Run tests and clippy** — `cargo test --test pulls && cargo test --test browse_http && cargo test -p kloudlite-git-pulls && cargo test -p kloudlite-git-server && cargo clippy --workspace --all-targets --locked -- -D warnings`
+- [ ] **Step 4: Run tests and clippy** — `cargo test --test pulls && cargo test --test browse_http && cargo test -p kloudlite-pulls && cargo test -p kloudlite-server && cargo clippy --workspace --all-targets --locked -- -D warnings`
 
 - [ ] **Step 5: Commit** — `git add crates/pulls/src/merge_worker.rs bins/server/src/browse_api/pulls.rs tests/pulls.rs && git commit -m "Stamp a mergeability verdict with the tips it came from"`; NO Co-Authored-By, NO Claude-Session, NO attribution trailers.
 

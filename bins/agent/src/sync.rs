@@ -20,7 +20,7 @@
 use crate::controller::Ctx;
 use kube::api::{Api, ListParams, PostParams};
 use kube::ResourceExt;
-use kloudlite_git_workspaces::crd;
+use kloudlite_workspaces::crd;
 use std::sync::Arc;
 
 /// The generation the sync point was cut FROM, on the `Snapshot` itself. An annotation rather than
@@ -171,11 +171,11 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
 mod tests {
     use super::*;
     use crate::testsupport::test_ctx;
-    use kloudlite_git_workspaces::kube_test::Route;
+    use kloudlite_workspaces::kube_test::Route;
 
     fn transient_with_generation(name: &str, volume: &str, worktree: &str, gen: Option<u64>) -> crd::Snapshot {
         let mut v = serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1",
+            "apiVersion": "kloudlite.io/v1alpha1",
             "kind": "Snapshot",
             "metadata": {"name": name, "uid": "snap-uid"},
             "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "", "transient": true},
@@ -227,7 +227,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![Route {
             method: "GET",
-            path: "/apis/kloudlite-git.io/v1alpha1/workspaces".into(),
+            path: "/apis/kloudlite.io/v1alpha1/workspaces".into(),
             status: 500,
             body: serde_json::json!({}),
         }];
@@ -237,7 +237,7 @@ mod tests {
         // A negative alone passes for the wrong reason against a mock that 404s everything. Pin
         // what the pass DID do, so a code change that calls something else fails here rather than
         // silently satisfying the absence.
-        assert_eq!(rec.calls(), vec!["GET /apis/kloudlite-git.io/v1alpha1/workspaces".to_string()], "the beat lists, and stops");
+        assert_eq!(rec.calls(), vec!["GET /apis/kloudlite.io/v1alpha1/workspaces".to_string()], "the beat lists, and stops");
     }
 
     fn live_fixture() -> crate::listing::Parent {
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(spec.state, Some(live.state));
     }
 
-    fn env_fixture(services: Vec<kloudlite_git_workspaces::model::Service>) -> crate::listing::Parent {
+    fn env_fixture(services: Vec<kloudlite_workspaces::model::Service>) -> crate::listing::Parent {
         crate::listing::Parent {
             kind: "Environment",
             pod_ref: None,
@@ -286,8 +286,8 @@ mod tests {
         }
     }
 
-    fn service(name: &str) -> kloudlite_git_workspaces::model::Service {
-        kloudlite_git_workspaces::model::Service {
+    fn service(name: &str) -> kloudlite_workspaces::model::Service {
+        kloudlite_workspaces::model::Service {
             name: name.into(),
             image: "mongo:7".into(),
             command: vec![],

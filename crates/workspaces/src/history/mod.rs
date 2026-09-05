@@ -5,7 +5,7 @@
 //! written by the exporter and read here for charts and alert evaluation — we never write it, and
 //! its schema is the exporter's to change. `kloudlite` is ours: `events`, `usage_hourly`,
 //! `fleet_hourly`, `alerts`, plus the `metrics_5m` rollup, and the ADMIN process (`bins/api` with
-//! `KLOUDLITE_GIT_API_ROLE=admin`) is its only writer. Nothing else in the fleet constructs a
+//! `KLOUDLITE_API_ROLE=admin`) is its only writer. Nothing else in the fleet constructs a
 //! `History`.
 //!
 //! Deliberately a `reqwest` call and a format string, not a client crate. Two verbs cover every
@@ -13,7 +13,7 @@
 //! crate would buy connection pooling we do not need (writes are batched on beats) at the cost of
 //! a dependency that has to track the server version.
 //!
-//! Optional by design: `from_env` answers `None` when `KLOUDLITE_GIT_CLICKHOUSE_URL` is unset, and
+//! Optional by design: `from_env` answers `None` when `KLOUDLITE_CLICKHOUSE_URL` is unset, and
 //! every caller treats that as "history unavailable" rather than an error, so a deployment without
 //! ClickStack behaves exactly as it did before this module existed.
 
@@ -103,11 +103,11 @@ impl History {
     /// `None` is a supported configuration, not a failure: see the module doc. The credentials come
     /// from the ClickStack chart's own ClickHouse Secret.
     pub fn from_env() -> Option<History> {
-        let url = std::env::var("KLOUDLITE_GIT_CLICKHOUSE_URL")
+        let url = std::env::var("KLOUDLITE_CLICKHOUSE_URL")
             .ok()
             .filter(|u| !u.is_empty())?;
-        let user = std::env::var("KLOUDLITE_GIT_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
-        let password = std::env::var("KLOUDLITE_GIT_CLICKHOUSE_PASSWORD").unwrap_or_default();
+        let user = std::env::var("KLOUDLITE_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
+        let password = std::env::var("KLOUDLITE_CLICKHOUSE_PASSWORD").unwrap_or_default();
         Some(History::new(&url, &user, &password))
     }
 
@@ -136,13 +136,13 @@ impl History {
             .send()
             .await
             .map_err(|e| {
-                kloudlite_git_core::metrics::dep_done(DEP, op, start, Some(transport_kind(&e)));
+                kloudlite_core::metrics::dep_done(DEP, op, start, Some(transport_kind(&e)));
                 HistoryError::Http(e.to_string())
             })?;
         let status = r.status().as_u16();
         let kind = (!(200..300).contains(&status))
-            .then(|| kloudlite_git_core::metrics::http_error_kind(status));
-        kloudlite_git_core::metrics::dep_done(DEP, op, start, kind);
+            .then(|| kloudlite_core::metrics::http_error_kind(status));
+        kloudlite_core::metrics::dep_done(DEP, op, start, kind);
         let body = r.text().await.map_err(|e| HistoryError::Http(e.to_string()))?;
         if !(200..300).contains(&status) {
             return Err(HistoryError::Server { status, body });

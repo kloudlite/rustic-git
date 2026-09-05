@@ -4,13 +4,13 @@
 //! Every mutation's whole output is an object in the API server, so the assertions are about what
 //! the handler POSTed or PATCHed, read back off the mock's recorder.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{router, ApiState, Directory};
-use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{router, ApiState, Directory};
+use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 const NODE: &str = "node-a";
 
 struct Server {
@@ -24,7 +24,7 @@ struct Server {
 /// into each test's route list — an unmatched route in the mock is simply never hit.
 fn region_obj(id: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Region",
         "metadata": {"name": id},
         "spec": {"name": id, "status": "active"}
     })
@@ -37,8 +37,8 @@ fn with_region(mut routes: Vec<Route>) -> Vec<Route> {
 
 fn vol_obj(name: &str, owner: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"kloudlite-git.io/owner": owner, "kloudlite-git.io/kind": "workspace"}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"kloudlite.io/owner": owner, "kloudlite.io/kind": "workspace"}},
         "spec": {"owner": owner, "nodeName": NODE, "region": "centralindia", "quotaGb": 20}
     })
 }
@@ -47,8 +47,8 @@ fn vol_obj(name: &str, owner: &str) -> Value {
 /// both of those are facts the controllers report in status.
 fn ws_obj(name: &str, owner: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {
             "owner": owner, "team": "", "name": name, "region": "centralindia", "image": "nginx:alpine",
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -66,8 +66,8 @@ fn placed_ws(name: &str, owner: &str) -> Value {
 /// A freshly created `Environment`: no status, because no controller has seen it yet.
 fn new_env(name: &str, owner: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Environment",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "services": [],
             "storage": {"quotaGb": 20}, "desiredState": "running"
@@ -84,23 +84,23 @@ fn env_obj(name: &str, owner: &str) -> Value {
 /// Creating, cloning and restoring all list the owner's workspaces in the target team first to
 /// refuse a taken name; most tests have none.
 fn no_workspaces() -> Route {
-    get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
+    get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
 }
 
 /// Same, so a workspace-only test's environment listing (`quota::usage` reads both kinds) doesn't
 /// 404.
 fn no_environments() -> Route {
-    get(format!("{API}/environments"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
+    get(format!("{API}/environments"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}))
 }
 
 /// `pushed_volumes` lists `Snapshot` CRs on every mutation response now (M3), so any test whose
 /// mock has no snapshots at all needs this route or the list 404s.
 fn no_snapshots() -> Route {
-    get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}))
+    get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}))
 }
 
 fn no_volumes() -> Route {
-    get(format!("{API}/volumes"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": []}))
+    get(format!("{API}/volumes"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": []}))
 }
 
 /// What `guard_alloc` reads beyond the create/clone/restore/push routes a test already mocks: the
@@ -117,7 +117,7 @@ fn huge_quota_routes(owner: &str) -> Vec<Route> {
     vec![get(
         format!("{API}/quotas/{owner}"),
         json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Quota",
             "metadata": {"name": owner},
             "spec": {"workspaces": 1000, "environments": 1000, "snapshots": 1000, "diskGb": 1_000_000, "cpu": 1000, "memoryGb": 1_000_000}
         }),
@@ -175,12 +175,12 @@ impl Directory for StubMembership {
     }
 
     // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
-    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
     }
 
     // Not exercised here — this file's snapshot case is about membership, not rank.
-    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_git_workspaces::api::TeamRole> {
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None
     }
 
@@ -353,7 +353,7 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
     // two places allowed to name one is two places that can disagree about where the data is.
     assert!(w["spec"].get("nodeName").is_none(), "placement is a fact the controllers establish: {w}");
     assert!(w["spec"].get("volumeRef").is_none(), "a volumeRef in spec was a wish about a fact: {w}");
-    assert_eq!(w["metadata"]["labels"]["kloudlite-git.io/owner"], "karthik");
+    assert_eq!(w["metadata"]["labels"]["kloudlite.io/owner"], "karthik");
 }
 
 /// `live_state` was always `null` and existed only because a web type named it. The web type goes
@@ -362,7 +362,7 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
 async fn a_workspace_doc_has_no_live_state_field() {
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ])
     .await;
     let body: Value = reqwest::Client::new()
@@ -384,8 +384,8 @@ async fn a_workspace_doc_has_no_live_state_field() {
 async fn creating_past_the_quota_limit_is_refused() {
     let many: Vec<Value> = (0..5).map(|i| ws_obj(&format!("ws-{i}"), "karthik")).collect();
     let mut routes = vec![
-        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": many})),
-        get(format!("{API}/environments"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": many})),
+        get(format!("{API}/environments"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []})),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ];
     routes.extend(quota_gate_routes());
@@ -416,7 +416,7 @@ fn many_ws(n: usize) -> Vec<Value> {
 }
 
 fn ws_list(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": items})
 }
 
 /// `n` environments owned by "karthik", for quota-counting fixtures.
@@ -425,7 +425,7 @@ fn many_envs(n: usize) -> Vec<Value> {
 }
 
 fn list_of_envs(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": items})
 }
 
 /// Same limit, reached through `clone_ws` — the second write path that creates a Workspace.
@@ -807,7 +807,7 @@ async fn creating_in_an_inactive_region_is_refused() {
 async fn listing_regions_never_names_a_storage_account() {
     let s = server(vec![get(
         format!("{API}/regions"),
-        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": [region_obj("centralindia")]}),
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "RegionList", "metadata": {}, "items": [region_obj("centralindia")]}),
     )])
     .await;
     let resp = reqwest::Client::new()
@@ -844,7 +844,7 @@ async fn create_env_writes_exactly_one_unplaced_environment() {
     let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
     assert_eq!(e["spec"]["name"], "app-dev");
     assert_eq!(e["spec"]["desiredState"], "running");
-    assert_eq!(e["metadata"]["labels"]["kloudlite-git.io/kind"], "environment");
+    assert_eq!(e["metadata"]["labels"]["kloudlite.io/kind"], "environment");
     assert!(e["spec"].get("nodeName").is_none(), "placement is the controllers': {e}");
 }
 
@@ -884,7 +884,7 @@ async fn agent_routes_are_gone_from_the_api_router() {
 /// A created `Snapshot` as the API server echoes it back.
 fn snap_obj() -> serde_json::Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": "ws-1-abcdef01"},
         "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
         "status": {"phase": "working"},
@@ -902,7 +902,7 @@ async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
         no_environments(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
     routes.extend(quota_gate_routes());
@@ -922,8 +922,8 @@ async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
     assert_eq!(req["spec"]["volume"], "ws-1");
     assert_eq!(req["spec"]["worktree"], "ws-1");
     assert_eq!(req["spec"]["message"], "checkpoint");
-    assert_eq!(req["metadata"]["labels"]["kloudlite-git.io/volume"], "ws-1");
-    assert_eq!(req["metadata"]["labels"]["kloudlite-git.io/owner"], "karthik");
+    assert_eq!(req["metadata"]["labels"]["kloudlite.io/volume"], "ws-1");
+    assert_eq!(req["metadata"]["labels"]["kloudlite.io/owner"], "karthik");
     assert_eq!(req["status"]["phase"], "working");
 }
 
@@ -935,7 +935,7 @@ async fn push_with_no_body_omits_the_message() {
         no_environments(),
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
     routes.extend(quota_gate_routes());
@@ -961,7 +961,7 @@ async fn env_push_targets_the_environments_own_volume() {
         no_environments(),
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
         get(format!("{API}/volumes/env-1"), vol_obj("env-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
     routes.extend(quota_gate_routes());
@@ -1021,7 +1021,7 @@ async fn push_before_the_volume_exists_is_a_conflict() {
 async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let keys = Arc::new(
-        kloudlite_git_storage::store::Store::open(
+        kloudlite_storage::store::Store::open(
             Arc::new(object_store::memory::InMemory::new()),
             tmp.path().join("cache"),
             false,
@@ -1032,7 +1032,7 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
     keys.rotate_user_key("karthik", "PRIVATE KEY", "SHA256:abc", None).await.unwrap();
 
     let list = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [placed_ws("ws-1", "karthik")]
     });
     // No route for the Secret GET: the mock 404s it, which is exactly "the namespace has no key".
@@ -1040,7 +1040,7 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
         no_snapshots(),
         get(format!("{API}/workspaces"), list),
         get(format!("{API}/snapshots"), json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []
         })),
         Route {
             method: "PATCH",
@@ -1171,12 +1171,12 @@ impl Directory for StubCliTokens {
     }
 
     // No keys in this case: `None` is "the lookup failed", which is what an unwired directory is.
-    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
     }
 
     // Not exercised here — this stub is about CLI-token liveness only.
-    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_git_workspaces::api::TeamRole> {
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None
     }
 
@@ -1204,11 +1204,11 @@ async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
 
 #[tokio::test]
 async fn a_cli_token_is_a_caller_until_it_is_revoked() {
-    let ws = json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "items": []});
+    let ws = json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "items": []});
     let routes = || {
         vec![
             get(format!("{API}/workspaces"), ws.clone()),
-            get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "items": []})),
+            get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         ]
     };
     let live = server_with_cli(routes(), true).await;
@@ -1319,7 +1319,7 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
     named["spec"]["name"] = json!("gh");
     let s = server(vec![get(
         format!("{API}/workspaces"),
-        json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [named]}),
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [named]}),
     )])
     .await;
     let resp = reqwest::Client::new()
@@ -1339,8 +1339,8 @@ struct StubKeys;
 
 #[async_trait::async_trait]
 impl Directory for StubKeys {
-    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
-        Some(kloudlite_git_workspaces::api::OwnerMaterial {
+    async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
+        Some(kloudlite_workspaces::api::OwnerMaterial {
             authorized_keys: "ssh-ed25519 AAAA karthik@laptop".into(),
             git_name: "Karthik".into(),
             git_email: "karthik@example.com".into(),
@@ -1359,7 +1359,7 @@ impl Directory for StubKeys {
     }
 
     // Not exercised here — this stub is about ssh/git material only.
-    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_git_workspaces::api::TeamRole> {
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None
     }
 
@@ -1375,7 +1375,7 @@ impl Directory for StubKeys {
 fn ns_obj(name: &str, owner: &str) -> Value {
     json!({
         "apiVersion": "v1", "kind": "Namespace",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner, "kloudlite-git.io/kind": "workspace"}}
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner, "kloudlite.io/kind": "workspace"}}
     })
 }
 
@@ -1389,7 +1389,7 @@ impl Directory for KeyTeams {
         vec!["team1".into(), self.0.clone()]
     }
 
-    async fn for_owner(&self, owner: &str) -> Option<kloudlite_git_workspaces::api::OwnerMaterial> {
+    async fn for_owner(&self, owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         StubKeys.for_owner(owner).await
     }
 
@@ -1400,7 +1400,7 @@ impl Directory for KeyTeams {
     }
 
     // Not exercised here — this stub is about namespace/keys fan-out, not rank.
-    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_git_workspaces::api::TeamRole> {
+    async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None
     }
 
@@ -1420,7 +1420,7 @@ impl Directory for KeyTeams {
 async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     let tmp = tempfile::tempdir().unwrap();
     let keys = Arc::new(
-        kloudlite_git_storage::store::Store::open(
+        kloudlite_storage::store::Store::open(
             Arc::new(object_store::memory::InMemory::new()),
             tmp.path().join("cache"),
             false,
@@ -1431,7 +1431,7 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     keys.rotate_user_key("karthik", "PRIVATE KEY", "SHA256:abc", None).await.unwrap();
 
     let long_team = "a".repeat(60);
-    let long_ns = kloudlite_git_workspaces::crd::ws_namespace("karthik", &long_team);
+    let long_ns = kloudlite_workspaces::crd::ws_namespace("karthik", &long_team);
     assert!(!long_ns.ends_with("-karthik"), "this team must be DNS-hashed: {long_ns}");
 
     let ok = |ns: &str| Route {
@@ -1444,12 +1444,12 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
         get(
             "/api/v1/namespaces",
             json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": [
-                ns_obj(&kloudlite_git_workspaces::crd::ws_namespace("karthik", "team1"), "karthik"),
+                ns_obj(&kloudlite_workspaces::crd::ws_namespace("karthik", "team1"), "karthik"),
                 ns_obj(&long_ns, "karthik"),
                 ns_obj("ws-someoneelse", "karthik")
             ]}),
         ),
-        ok(&kloudlite_git_workspaces::crd::ws_namespace("karthik", "team1")),
+        ok(&kloudlite_workspaces::crd::ws_namespace("karthik", "team1")),
         ok(&long_ns),
     ]);
     let state = ApiState::new(
@@ -1459,17 +1459,17 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     .with_keys(keys)
     .with_directory(Arc::new(KeyTeams(long_team)));
 
-    kloudlite_git_workspaces::api::refresh_user_keys(&state, "karthik").await;
+    kloudlite_workspaces::api::refresh_user_keys(&state, "karthik").await;
 
     let mut patches: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("PATCH")).collect();
     patches.sort();
     let mut want = vec![
-        format!("PATCH /api/v1/namespaces/{}/secrets/user-key", kloudlite_git_workspaces::crd::ws_namespace("karthik", "team1")),
+        format!("PATCH /api/v1/namespaces/{}/secrets/user-key", kloudlite_workspaces::crd::ws_namespace("karthik", "team1")),
         format!("PATCH /api/v1/namespaces/{long_ns}/secrets/user-key"),
     ];
     want.sort();
     assert_eq!(patches, want, "{patches:?}");
-    let body = rec.sent("PATCH", &format!("/api/v1/namespaces/{}/secrets/user-key", kloudlite_git_workspaces::crd::ws_namespace("karthik", "team1"))).pop().unwrap();
+    let body = rec.sent("PATCH", &format!("/api/v1/namespaces/{}/secrets/user-key", kloudlite_workspaces::crd::ws_namespace("karthik", "team1"))).pop().unwrap();
     assert_eq!(body["stringData"]["authorized_keys"], "ssh-ed25519 AAAA karthik@laptop");
     assert_eq!(body["stringData"]["gitconfig"], "[user]\n\tname = \"Karthik\"\n\temail = \"karthik@example.com\"\n");
 }
@@ -1607,7 +1607,7 @@ async fn an_environment_with_an_unusable_name_or_service_is_refused() {
 #[tokio::test]
 async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
     let taken = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [placed_ws("ws-old", "karthik")]
     });
     let mut routes = vec![
@@ -1662,7 +1662,7 @@ async fn attaching_sets_the_spec_field_and_its_listing_label() {
     assert_eq!(patch["spec"]["attachedEnvironment"], "env-1");
     // `delete_env`'s sweep selects on this label, since a teammate's workspace can be attached to
     // an environment it does not own — stamped in the same patch as spec so the two never drift.
-    assert_eq!(patch["metadata"]["labels"]["kloudlite-git.io/attached-environment"], "env-1");
+    assert_eq!(patch["metadata"]["labels"]["kloudlite.io/attached-environment"], "env-1");
     assert!(patch["status"].is_null(), "the API writes spec/labels only");
 }
 
@@ -1736,7 +1736,7 @@ async fn detaching_is_a_null_merge_patch_and_repeats() {
     assert!(patches[0]["spec"]["attachedEnvironment"].is_null());
     // Cleared in the same patch as the spec field, so the listing label never outlives the
     // attachment it is a view of.
-    assert!(patches[0]["metadata"]["labels"]["kloudlite-git.io/attached-environment"].is_null());
+    assert!(patches[0]["metadata"]["labels"]["kloudlite.io/attached-environment"].is_null());
 }
 
 /// Deleting an environment clears the attachment on every workspace pointing at it: only `/v1` may
@@ -1746,7 +1746,7 @@ async fn deleting_an_environment_clears_the_attachments_to_it() {
     let mut attached = placed_ws("ws-1", "karthik");
     attached["spec"]["attachedEnvironment"] = json!("env-1");
     let list = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [attached, placed_ws("ws-2", "karthik")]
     });
     let s = server(vec![
@@ -1799,8 +1799,8 @@ async fn delete_env_lists_only_workspaces_attached_to_it() {
         .find(|r| r.starts_with(&format!("GET {API}/workspaces?")))
         .expect("the attachment sweep listed workspaces");
     assert!(
-        listed.contains("kloudlite-git.io%2Fattached-environment%3Denv-1")
-            || listed.contains("kloudlite-git.io/attached-environment=env-1"),
+        listed.contains("kloudlite.io%2Fattached-environment%3Denv-1")
+            || listed.contains("kloudlite.io/attached-environment=env-1"),
         "{listed}"
     );
 }
@@ -1815,8 +1815,8 @@ async fn deleting_an_attached_workspace_removes_the_environment_side_policy() {
     attached["spec"]["attachedEnvironment"] = json!("env-1");
     let policy = format!(
         "/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}",
-        kloudlite_git_workspaces::crd::env_namespace("env-1"),
-        kloudlite_git_workspaces::k8s::attach_policy_name("ws-1")
+        kloudlite_workspaces::crd::env_namespace("env-1"),
+        kloudlite_workspaces::k8s::attach_policy_name("ws-1")
     );
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), attached),
@@ -1857,8 +1857,8 @@ async fn detaching_a_stopped_workspace_still_collects_the_environment_side_polic
     cleared["spec"]["attachedEnvironment"] = json!(null);
     let policy = format!(
         "/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}",
-        kloudlite_git_workspaces::crd::env_namespace("env-1"),
-        kloudlite_git_workspaces::k8s::attach_policy_name("ws-1")
+        kloudlite_workspaces::crd::env_namespace("env-1"),
+        kloudlite_workspaces::k8s::attach_policy_name("ws-1")
     );
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), cleared.clone()),
@@ -1887,7 +1887,7 @@ fn ready_snap(name: &str, volume: &str, owner: &str, state: Option<Value>) -> Va
         spec["state"] = st;
     }
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name}, "spec": spec, "status": {"phase": "ready"},
     })
 }
@@ -1992,7 +1992,7 @@ async fn a_pre_change_snapshot_restores_as_before() {
     let r = restore(&s, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "snap-ws"})).await;
     assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
     let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
-    assert_eq!(w["spec"]["image"], kloudlite_git_workspaces::model::default_ws_image());
+    assert_eq!(w["spec"]["image"], kloudlite_workspaces::model::default_ws_image());
     assert!(w["spec"]["packages"].as_array().is_none_or(|p| p.is_empty()), "{w}");
     assert_eq!(w["spec"]["storage"]["quotaGb"], 20);
 }
@@ -2008,7 +2008,7 @@ async fn a_restore_takes_its_region_from_the_volume_when_the_source_is_gone() {
         no_environments(),
         get(
             format!("{API}/volumes/ws-src"),
-            json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-src"},
+            json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-src"},
                    "spec": {"owner": "karthik", "nodeName": "node-a", "region": "centralindia", "quotaGb": 20}}),
         ),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
@@ -2101,12 +2101,12 @@ async fn a_frozen_service_with_an_escaping_mount_is_refused() {
 async fn the_ssh_name_fallback_refuses_a_mislabelled_workspace() {
     let mut foreign = placed_ws("ws-bob", "bob");
     // The label says karthik; the spec says bob. The spec is the truth.
-    foreign["metadata"]["labels"]["kloudlite-git.io/owner"] = json!("karthik");
+    foreign["metadata"]["labels"]["kloudlite.io/owner"] = json!("karthik");
     foreign["spec"]["name"] = json!("target");
     foreign["status"]["sshHostKey"] = json!("ssh-ed25519 AAAA");
     let s = server(vec![
         get(format!("{API}/workspaces/target"), json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404})),
-        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign]})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign]})),
     ])
     .await;
     let resp = reqwest::Client::new()
@@ -2122,10 +2122,10 @@ async fn the_ssh_name_fallback_refuses_a_mislabelled_workspace() {
 #[tokio::test]
 async fn list_ws_drops_a_mislabelled_workspace() {
     let mut foreign = placed_ws("ws-bob", "bob");
-    foreign["metadata"]["labels"]["kloudlite-git.io/owner"] = json!("karthik");
+    foreign["metadata"]["labels"]["kloudlite.io/owner"] = json!("karthik");
     let s = server(vec![
-        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign, placed_ws("ws-mine", "karthik")]})),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
+        get(format!("{API}/workspaces"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [foreign, placed_ws("ws-mine", "karthik")]})),
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ])
     .await;
     let resp = reqwest::Client::new()
@@ -2146,8 +2146,8 @@ async fn list_ws_drops_a_mislabelled_workspace() {
 #[tokio::test]
 async fn a_workspace_restore_refuses_an_environment_snapshot() {
     let snap = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "env-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "env-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
         "spec": {"volume": "env-1", "owner": "karthik", "worktree": "env-1", "parent": "",
                  "state": {"kind": "environment", "services": [], "quotaGb": 20}},
         "status": {"phase": "ready", "readyAt": "2026-08-27T09:00:00Z"}
@@ -2170,8 +2170,8 @@ async fn a_workspace_restore_refuses_an_environment_snapshot() {
 #[tokio::test]
 async fn an_environment_restore_refuses_a_workspace_snapshot() {
     let snap = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "ws-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
         "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": "",
                  "state": {"kind": "workspace", "image": "alpine:3.20", "packages": [],
                            "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
@@ -2283,8 +2283,8 @@ async fn a_team_name_is_matched_case_insensitively() {
 async fn a_stop_response_reports_the_volume_it_has() {
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
-            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
+            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
                        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
                        "status": {"phase": "ready"}}]})),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
@@ -2306,8 +2306,8 @@ async fn a_stop_response_reports_the_volume_it_has() {
 async fn a_workspace_doc_reports_its_volume_without_an_upstream() {
     let s = server(vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
-            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite-git.io/owner": "karthik"}},
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
+            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
                        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
                        "status": {"phase": "ready"}}]})),
     ])

@@ -321,7 +321,7 @@ async fn kill_agent(k: &kube::Client, node: &str) -> Result<()> {
     let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
         kube::Api::namespaced(k.clone(), "kube-system");
     let list = pods
-        .list(&kube::api::ListParams::default().labels("app=kloudlite-git-agent").fields(&format!("spec.nodeName={node}")))
+        .list(&kube::api::ListParams::default().labels("app=kloudlite-agent").fields(&format!("spec.nodeName={node}")))
         .await
         .map_err(|e| anyhow!("could not find {node}'s agent: {e}"))?;
     for p in list.items {
@@ -393,7 +393,7 @@ async fn verb(c: &Ctx, base: &str, v: &str, jwt: &str, reason: &Value) -> Result
 /// minutes and the id would fail for the fleet behaving exactly as designed. Anyone's worktree
 /// counts, not only the probe's: this drill touches a shared cluster.
 async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<String> {
-    use kloudlite_git_workspaces::crd;
+    use kloudlite_workspaces::crd;
     let busy = running_nodes(k).await?;
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
     let list = api.list(&kube::api::ListParams::default()).await.map_err(|e| anyhow!("could not list the nodes: {e}"))?;
@@ -413,7 +413,7 @@ async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<String> {
 
 /// Every node with a Running workspace or environment placed on it.
 async fn running_nodes(k: &kube::Client) -> Result<Vec<String>> {
-    use kloudlite_git_workspaces::crd;
+    use kloudlite_workspaces::crd;
     let mut out = vec![];
     let ws: kube::Api<crd::Workspace> = kube::Api::all(k.clone());
     let env: kube::Api<crd::Environment> = kube::Api::all(k.clone());
@@ -448,7 +448,7 @@ fn is_running(phase: Option<&str>) -> bool {
 
 /// Wait for the agent's sticky `drained <RFC 3339>` stamp.
 async fn stamped(k: &kube::Client, node: &str, cap: Duration) -> Result<()> {
-    use kloudlite_git_workspaces::crd;
+    use kloudlite_workspaces::crd;
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
     let at = std::time::Instant::now();
     loop {
@@ -485,7 +485,7 @@ async fn stamped(k: &kube::Client, node: &str, cap: Duration) -> Result<()> {
 /// `Ctx::kube` follows `KUBECONFIG` into k3s, where none of those pods run.
 async fn redis_down(c: &mut Ctx) {
     let Some(host) = c.cfg.redis_host.clone() else {
-        return c.skip("drill.redis.down", "no KLOUDLITE_GIT_SLO_REDIS_HOST to deny");
+        return c.skip("drill.redis.down", "no KLOUDLITE_SLO_REDIS_HOST to deny");
     };
     let k = match drill::incluster() {
         Ok(k) => k,
@@ -505,7 +505,7 @@ async fn redis_down(c: &mut Ctx) {
                 tokio::time::sleep(REDIS_DOWN).await;
                 without_redis(c, &name).await
             };
-            drill::with_netpol(&k, "kloudlite-git", NETPOL, deny_egress(&ips), body_cap, body).await
+            drill::with_netpol(&k, "kloudlite", NETPOL, deny_egress(&ips), body_cap, body).await
         }
         .boxed()
     })
@@ -525,7 +525,7 @@ pub const NETPOL: &str = "slo-drill-redis";
 fn deny_egress(ips: &[String]) -> Value {
     json!({
         "podSelector": { "matchExpressions": [
-            { "key": "app", "operator": "In", "values": ["kloudlite-git-srv", "kloudlite-git-worker"] }
+            { "key": "app", "operator": "In", "values": ["kloudlite-srv", "kloudlite-worker"] }
         ]},
         "policyTypes": ["Egress"],
         "egress": [

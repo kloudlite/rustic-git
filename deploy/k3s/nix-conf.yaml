@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kloudlite-git-nix
+  name: kloudlite-nix
   namespace: kube-system
 data:
   nix.conf: |

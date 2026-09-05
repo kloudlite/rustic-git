@@ -8,11 +8,11 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use kloudlite_git_agent::peer::{peer_http_client, pull_one, receive_ceiling, router, PeerState};
-use kloudlite_git_core::settings::LiveSettings;
-use kloudlite_git_workspaces::engine::{Engine, Pool as EnginePool};
-use kloudlite_git_workspaces::kube_test::{mock_client, Recorder, Route};
-use kloudlite_git_workspaces::settings::AgentSettings;
+use kloudlite_agent::peer::{peer_http_client, pull_one, receive_ceiling, router, PeerState};
+use kloudlite_core::settings::LiveSettings;
+use kloudlite_workspaces::engine::{Engine, Pool as EnginePool};
+use kloudlite_workspaces::kube_test::{mock_client, Recorder, Route};
+use kloudlite_workspaces::settings::AgentSettings;
 use std::time::Duration;
 
 fn test_settings() -> LiveSettings<AgentSettings> {

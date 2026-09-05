@@ -147,7 +147,7 @@ export const enabledProviders = {
 /** One decision about the session cookie, made here and read back by
  *  `lib/api-token.ts`. Auth.js would pick the same defaults from AUTH_URL, but
  *  two places deriving the same answer is how they come to differ. */
-// AUTH_URL must be set (deploy/kloudlite-git-web.yaml does): behind a TLS proxy the
+// AUTH_URL must be set (deploy/kloudlite-web.yaml does): behind a TLS proxy the
 // request itself looks like http, so an unset AUTH_URL silently drops `Secure` —
 // the one failure mode here that is invisible everywhere it does not matter and
 // catastrophic in the one place it does. In production that is a refusal, not a

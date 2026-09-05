@@ -11,15 +11,15 @@
 # anti-affinity rather than a DaemonSet — a DaemonSet would also schedule onto a node whose IP is
 # in no DNS record, and `hostPort` makes two pods per node unschedulable anyway.
 #
-# Its own namespace, `kloudlite-git-system` (`k8s::GATEWAY_NAMESPACE` — the workspace NetworkPolicy
-# admits port 22 from `app=kloudlite-git-gateway` pods in THAT namespace and nowhere else, so the two
+# Its own namespace, `kloudlite-system` (`k8s::GATEWAY_NAMESPACE` — the workspace NetworkPolicy
+# admits port 22 from `app=kloudlite-gateway` pods in THAT namespace and nowhere else, so the two
 # must agree). Not `kube-system`: this is the one process that accepts unauthenticated internet
 # connections, and it has no business sharing a namespace with the agent's credential Secret.
-# Anything it needs from AKS (`kloudlite-git-jwt`, the optional `gateway-tls`) is copied here.
+# Anything it needs from AKS (`kloudlite-jwt`, the optional `gateway-tls`) is copied here.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: kloudlite-git-system
+  name: kloudlite-system
   labels:
     # `privileged`, honestly: the built-in Pod Security Admission's `baseline` refuses any
     # `hostPort`, and the hostPort IS this deployment. The tenant namespaces the agent creates are
@@ -29,8 +29,8 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kloudlite-git-gateway
-  namespace: kloudlite-git-system
+  name: kloudlite-gateway
+  namespace: kloudlite-system
 ---
 # `get` and nothing else, on two kinds. The gateway reads placement (`status.podRef`) and an
 # address (`status.podIP`); it never writes, never lists, and holds no user credential — a token
@@ -43,9 +43,9 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-gateway
+  name: kloudlite-gateway
 rules:
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["workspaces"]
     verbs: ["get"]
   - apiGroups: [""]
@@ -55,15 +55,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kloudlite-git-gateway
+  name: kloudlite-gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kloudlite-git-gateway
+  name: kloudlite-gateway
 subjects:
   - kind: ServiceAccount
-    name: kloudlite-git-gateway
-    namespace: kloudlite-git-system
+    name: kloudlite-gateway
+    namespace: kloudlite-system
 ---
 # The region this gateway serves. It MUST equal `WS_REGION` in the agent's Secret in kube-system
 # (the region name the api mints session tokens for): the gateway verifies a token's region
@@ -72,18 +72,18 @@ subjects:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kloudlite-git-gateway
-  namespace: kloudlite-git-system
+  name: kloudlite-gateway
+  namespace: kloudlite-system
 data:
   WS_REGION: centralindia-k3s
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kloudlite-git-gateway
-  namespace: kloudlite-git-system
+  name: kloudlite-gateway
+  namespace: kloudlite-system
   labels:
-    app: kloudlite-git-gateway
+    app: kloudlite-gateway
 spec:
   # One per pool node: `session-0` and `env-0`. Raising this past the node count leaves pods
   # Pending on `hostPort`.
@@ -95,11 +95,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: kloudlite-git-gateway
+      app: kloudlite-gateway
   template:
     metadata:
       labels:
-        app: kloudlite-git-gateway
+        app: kloudlite-gateway
       # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
       # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
       annotations:
@@ -107,11 +107,11 @@ spec:
         prometheus.io/port: "9464"
         prometheus.io/path: /metrics
     spec:
-      serviceAccountName: kloudlite-git-gateway
+      serviceAccountName: kloudlite-gateway
       nodeSelector:
-        kloudlite-git.io/pool: "true"
+        kloudlite.io/pool: "true"
       tolerations:
-        - key: kloudlite-git.io/role
+        - key: kloudlite.io/role
           operator: Exists
       affinity:
         podAntiAffinity:
@@ -120,7 +120,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  app: kloudlite-git-gateway
+                  app: kloudlite-gateway
               topologyKey: kubernetes.io/hostname
       containers:
         - name: gateway
@@ -128,7 +128,7 @@ spec:
           # code is running, and `IfNotPresent` on an immutable tag means image GC costs a
           # re-pull rather than a silent version change.
           # No imagePullSecret: the package is public, like the repository.
-          image: ghcr.io/kloudlite/kloudlite-git-gateway:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:42155883d45e92fc1f516a8a435fbbcf45d4dee8aa91d9222ba0e5014ab01e68
+          image: ghcr.io/kloudlite/kloudlite-gateway:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:42155883d45e92fc1f516a8a435fbbcf45d4dee8aa91d9222ba0e5014ab01e68
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -137,23 +137,23 @@ spec:
               hostPort: 80
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
-            - name: KLOUDLITE_GIT_LOG_FORMAT
+            - name: KLOUDLITE_LOG_FORMAT
               value: json
             # A separate listener: 8080 and 443 are the internet-facing ones. NOT a hostPort.
-            - name: KLOUDLITE_GIT_METRICS_ADDR
+            - name: KLOUDLITE_METRICS_ADDR
               value: 0.0.0.0:9464
             # The same secret the api mints session tokens with — verification is local, so the
             # gateway needs no call to AKS on the connect path. Copied into this cluster at
             # rollout; the pod fails closed without it.
-            - name: KLOUDLITE_GIT_JWT_SECRET
+            - name: KLOUDLITE_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: kloudlite-git-jwt
+                  name: kloudlite-jwt
                   key: secret
             - name: WS_REGION
               valueFrom:
                 configMapKeyRef:
-                  name: kloudlite-git-gateway
+                  name: kloudlite-gateway
                   key: WS_REGION
             - name: RUST_BACKTRACE
               value: "1"
@@ -185,11 +185,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: kloudlite-git-gateway
-  namespace: kloudlite-git-system
+  name: kloudlite-gateway
+  namespace: kloudlite-system
 spec:
   selector:
-    app: kloudlite-git-gateway
+    app: kloudlite-gateway
   ports:
     - name: http
       port: 8080

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
-use kloudlite_git_workspaces::crd;
+use kloudlite_workspaces::crd;
 
 use super::{admin, api, raw};
 use crate::ctx::{Ctx, PROBE_USER};
@@ -20,7 +20,7 @@ use crate::ctx::{Ctx, PROBE_USER};
 const REFUSAL_CEILING: Duration = Duration::from_secs(10);
 
 /// The agent's identity, exactly as `deploy/k3s/agent-rbac.yaml` declares it.
-const AGENT_SA: &str = "system:serviceaccount:kube-system:kloudlite-git-agent";
+const AGENT_SA: &str = "system:serviceaccount:kube-system:kloudlite-agent";
 
 /// The statuses that mean "refused" — `allowed` names which ones this caller accepts. A 5xx is
 /// never one of them: the SLI is that the platform says no, and a tier that is down says nothing
@@ -215,7 +215,7 @@ async fn may_impersonate(client: &kube::Client) -> bool {
                 verb: Some("impersonate".into()),
                 // The grant is scoped by resourceName (slo-rbac.yaml); an unnamed review reads as
                 // "may impersonate ANY serviceaccount", which is exactly what we are not allowed.
-                name: Some("kloudlite-git-agent".into()),
+                name: Some("kloudlite-agent".into()),
                 namespace: Some("kube-system".into()),
                 ..Default::default()
             }),

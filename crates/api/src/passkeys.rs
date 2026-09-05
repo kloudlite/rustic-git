@@ -7,7 +7,7 @@ use super::*;
 // counter — and answers the one question a sign-in asks before it knows who is
 // signing in: whose credential is this?
 
-use kloudlite_git_pulls::directory::Passkey;
+use kloudlite_pulls::directory::Passkey;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

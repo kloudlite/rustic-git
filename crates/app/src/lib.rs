@@ -1,14 +1,14 @@
-use kloudlite_git_core::jwt;
-use kloudlite_git_core::peer as proxy;
-use kloudlite_git_storage::{ownership, pool, store};
-use kloudlite_git_pulls::pulls;
+use kloudlite_core::jwt;
+use kloudlite_core::peer as proxy;
+use kloudlite_storage::{ownership, pool, store};
+use kloudlite_pulls::pulls;
 
 use ownership::lease::{self, Held, Lease, LEADER_TTL};
 use ownership::{Entry, Grant, OwnershipStore, Route};
-use kloudlite_git_core::{err, Result};
+use kloudlite_core::{err, Result};
 use std::sync::Arc;
 
-/// Resolves a node name (`kloudlite-git-1`) to the address of its peer HTTP listener. In production
+/// Resolves a node name (`kloudlite-1`) to the address of its peer HTTP listener. In production
 /// that is `{name}.{svc}:{port}` — the StatefulSet's own identity, no lookup. It is a function
 /// rather than a template so tests can put a fleet on loopback ports.
 pub type AddrOf = Arc<dyn Fn(&str) -> String + Send + Sync>;
@@ -29,7 +29,7 @@ pub enum Patience {
 pub struct App {
     pub store: Arc<store::Store>,
     pub ownership: Arc<OwnershipStore>,
-    /// This pod's own name, e.g. `kloudlite-git-2`.
+    /// This pod's own name, e.g. `kloudlite-2`.
     pub self_name: String,
     /// Who holds the leader lease, as this node last read it. `None` until the first read, and
     /// again after a read finds the lease absent or expired — an unknown leader is found by
@@ -79,7 +79,7 @@ pub struct App {
     /// would expire another test's drain lease under it.
     skew_ms: std::sync::atomic::AtomicU64,
     /// Mints and verifies registry bearer tokens (`/v2/token`). Keyed from
-    /// `KLOUDLITE_GIT_JWT_SECRET` when set; otherwise a random per-process secret, which means
+    /// `KLOUDLITE_JWT_SECRET` when set; otherwise a random per-process secret, which means
     /// tokens die with the process — fine for a dev run, and in a fleet it shows up as
     /// "log in again", never as a forged token being accepted.
     pub jwt: Arc<jwt::Jwt>,
@@ -100,11 +100,11 @@ pub struct App {
     /// unreachable" must not be, and a pair of fields could hold the nonsensical combination.
     pub dir: pulls::Source,
     /// `stored ?? env ?? default` for every central-tier tunable, swapped in by
-    /// `kloudlite_git_core::settings::refresh_central_beat` every `SETTINGS_REFRESH_SECS`. Seeded
+    /// `kloudlite_core::settings::refresh_central_beat` every `SETTINGS_REFRESH_SECS`. Seeded
     /// from env alone at construction; `main.rs`'s boot sequence does one synchronous GET of
     /// `cluster/settings` and stores the merged result before serving anything, so the very
     /// first request already sees an admin-set value rather than waiting out the first beat.
-    pub central: kloudlite_git_core::settings::LiveSettings<kloudlite_git_core::settings::CentralSettings>,
+    pub central: kloudlite_core::settings::LiveSettings<kloudlite_core::settings::CentralSettings>,
 }
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
@@ -149,7 +149,7 @@ impl App {
         // it is fixed at startup and nothing changes it once the `App` is shared.
         dir: pulls::Source,
     ) -> Self {
-        let jwt_secret = std::env::var("KLOUDLITE_GIT_JWT_SECRET").unwrap_or_else(|_| {
+        let jwt_secret = std::env::var("KLOUDLITE_JWT_SECRET").unwrap_or_else(|_| {
             use rand::Rng;
             rand::thread_rng()
                 .sample_iter(rand::distributions::Alphanumeric)
@@ -180,8 +180,8 @@ impl App {
             leader_lock: tokio::sync::Mutex::new(()),
             claim_gate: tokio::sync::Semaphore::new(MAX_WAITING_CLAIMS),
             dir,
-            central: kloudlite_git_core::settings::LiveSettings::new(
-                kloudlite_git_core::settings::CentralSettings::from_env(),
+            central: kloudlite_core::settings::LiveSettings::new(
+                kloudlite_core::settings::CentralSettings::from_env(),
             ),
         }
     }
@@ -1016,12 +1016,12 @@ mod tests {
     #[tokio::test]
     async fn a_lone_node_takes_the_lease_and_leads() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
         assert!(!a.is_leader() && a.leader().is_none() && !a.leader_live());
         a.election_tick().await.unwrap();
         assert!(a.is_leader());
         assert_eq!(a.leader_epoch(), 1);
-        assert_eq!(a.leader().as_deref(), Some("kloudlite-git-srv-0"));
+        assert_eq!(a.leader().as_deref(), Some("kloudlite-srv-0"));
         assert!(a.leader_live());
         assert!(a.ownership.is_writer().await);
         // A second tick renews rather than re-takes: same epoch, still the writer.
@@ -1032,12 +1032,12 @@ mod tests {
     #[tokio::test]
     async fn a_second_node_follows_the_holder() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
         a.election_tick().await.unwrap();
-        let b = fleet_app(&os, "kloudlite-git-srv-1").await;
+        let b = fleet_app(&os, "kloudlite-srv-1").await;
         b.election_tick().await.unwrap();
         assert!(!b.is_leader());
-        assert_eq!(b.leader().as_deref(), Some("kloudlite-git-srv-0"));
+        assert_eq!(b.leader().as_deref(), Some("kloudlite-srv-0"));
         assert!(b.leader_live());
         assert!(!b.ownership.is_writer().await);
     }
@@ -1045,22 +1045,22 @@ mod tests {
     #[tokio::test]
     async fn a_lease_taken_by_another_node_demotes() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
         a.election_tick().await.unwrap();
-        plant(&os, "kloudlite-git-srv-1", 2, a.now_ms() + 5_000).await;
+        plant(&os, "kloudlite-srv-1", 2, a.now_ms() + 5_000).await;
         a.election_tick().await.unwrap();
         assert!(!a.is_leader(), "somebody else holds a live lease at a newer epoch");
-        assert_eq!(a.leader().as_deref(), Some("kloudlite-git-srv-1"));
+        assert_eq!(a.leader().as_deref(), Some("kloudlite-srv-1"));
         assert!(!a.ownership.is_writer().await);
-        let e = a.grant_claim("alice/web", "kloudlite-git-srv-2", false).await.expect_err("demoted: must not grant");
+        let e = a.grant_claim("alice/web", "kloudlite-srv-2", false).await.expect_err("demoted: must not grant");
         assert!(e.to_string().contains("not the leader"), "{e}");
     }
 
     #[tokio::test]
     async fn an_expired_lease_is_taken_with_the_next_epoch() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
-        plant(&os, "kloudlite-git-srv-9", 5, a.now_ms() - 1).await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
+        plant(&os, "kloudlite-srv-9", 5, a.now_ms() - 1).await;
         a.election_tick().await.unwrap();
         assert!(a.is_leader());
         assert_eq!(a.leader_epoch(), 6);
@@ -1072,8 +1072,8 @@ mod tests {
     #[tokio::test]
     async fn a_restarted_holder_resumes_its_own_live_lease() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
-        plant(&os, "kloudlite-git-srv-0", 3, a.now_ms() + 5_000).await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
+        plant(&os, "kloudlite-srv-0", 3, a.now_ms() + 5_000).await;
         a.election_tick().await.unwrap();
         assert!(a.is_leader());
         assert_eq!(a.leader_epoch(), 3);
@@ -1086,11 +1086,11 @@ mod tests {
     #[tokio::test]
     async fn a_fenced_map_write_demotes() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
         a.election_tick().await.unwrap();
         let stray = OwnershipStore::open(os.clone());
         stray.promote().await.unwrap();
-        assert!(a.grant_claim("alice/web", "kloudlite-git-srv-1", false).await.is_err());
+        assert!(a.grant_claim("alice/web", "kloudlite-srv-1", false).await.is_err());
         assert!(!a.is_leader(), "a fenced writer is not the leader");
         assert!(!a.ownership.is_writer().await);
     }
@@ -1098,11 +1098,11 @@ mod tests {
     #[tokio::test]
     async fn grants_refuse_without_the_lease() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
         for r in [
-            a.grant_claim("alice/web", "kloudlite-git-srv-1", false).await.map(|_| ()),
-            a.grant_renew("kloudlite-git-srv-1", &["alice/web".into()]).await.map(|_| ()),
-            a.grant_release("alice/web", "kloudlite-git-srv-1").await,
+            a.grant_claim("alice/web", "kloudlite-srv-1", false).await.map(|_| ()),
+            a.grant_renew("kloudlite-srv-1", &["alice/web".into()]).await.map(|_| ()),
+            a.grant_release("alice/web", "kloudlite-srv-1").await,
             a.prune_once().await,
         ] {
             let e = r.expect_err("no lease, no writes");
@@ -1115,9 +1115,9 @@ mod tests {
     #[tokio::test]
     async fn leader_live_follows_the_lease() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
         a.election_tick().await.unwrap();
-        let b = fleet_app(&os, "kloudlite-git-srv-1").await;
+        let b = fleet_app(&os, "kloudlite-srv-1").await;
         assert!(!b.leader_live(), "no lease read yet: a rolled pod must not take traffic");
         b.election_tick().await.unwrap();
         assert!(b.leader_live());
@@ -1132,7 +1132,7 @@ mod tests {
     #[tokio::test]
     async fn a_leader_past_its_own_expiry_demotes_even_when_the_read_fails() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
         a.election_tick().await.unwrap();
         assert!(a.is_leader());
         // Unreadable lease: the beat's `lease::read` errors before it can tell us anything.
@@ -1148,8 +1148,8 @@ mod tests {
     #[tokio::test]
     async fn a_retiring_node_does_not_promote_and_gives_the_lease_back() {
         let os = mem();
-        let a = fleet_app(&os, "kloudlite-git-srv-0").await;
-        let h = lease::take(os.as_ref(), "kloudlite-git-srv-0", a.now_ms(), None).await.unwrap().unwrap();
+        let a = fleet_app(&os, "kloudlite-srv-0").await;
+        let h = lease::take(os.as_ref(), "kloudlite-srv-0", a.now_ms(), None).await.unwrap().unwrap();
         a.retiring.store(true, std::sync::atomic::Ordering::Relaxed);
         a.promote(h).await.unwrap();
         assert!(!a.is_leader());
@@ -1165,14 +1165,14 @@ mod tests {
     #[tokio::test]
     async fn a_failed_ask_re_reads_the_lease() {
         let os = mem();
-        let b = fleet_app(&os, "kloudlite-git-srv-1").await;
+        let b = fleet_app(&os, "kloudlite-srv-1").await;
         b.set_leader(Some("ghost"));
         assert!(b.claim_to_recover("alice/web").await.is_err()); // two quick tries, 250 ms apart
         assert_eq!(b.leader(), None, "the lease is absent: nobody leads, and 'ghost' is forgotten");
 
-        plant(&os, "kloudlite-git-srv-0", 4, b.now_ms() + 5_000).await;
+        plant(&os, "kloudlite-srv-0", 4, b.now_ms() + 5_000).await;
         assert!(b.claim_to_recover("alice/web").await.is_err());
-        assert_eq!(b.leader().as_deref(), Some("kloudlite-git-srv-0"), "re-read on the failed connect");
+        assert_eq!(b.leader().as_deref(), Some("kloudlite-srv-0"), "re-read on the failed connect");
         assert!(b.leader_live());
     }
 
@@ -1183,7 +1183,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
         std::mem::forget(tmp);
-        let a = App::new(store, Arc::new(OwnershipStore::solo()), "kloudlite-git-0".into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "s".into(), pulls::Source::Absent);
+        let a = App::new(store, Arc::new(OwnershipStore::solo()), "kloudlite-0".into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "s".into(), pulls::Source::Absent);
         assert!(a.is_leader() && a.leader_live());
         a.election_tick().await.unwrap();
         assert!(lease::read(os.as_ref()).await.unwrap().is_none(), "solo never writes a lease");
@@ -1194,7 +1194,7 @@ mod tests {
     #[tokio::test]
     async fn a_claim_past_the_gate_fails_fast() {
         let os = mem();
-        let follower = fleet_app(&os, "kloudlite-git-srv-1").await; // nobody leads; the addr is a refused port
+        let follower = fleet_app(&os, "kloudlite-srv-1").await; // nobody leads; the addr is a refused port
         let _held = follower.claim_gate.acquire_many(MAX_WAITING_CLAIMS as u32).await.unwrap();
         let t = std::time::Instant::now();
         let err = follower.claim("alice/cold").await.expect_err("must not be granted");

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Cut the single `kloudlite_git` library into a Cargo workspace (strategy A: bottom-up, crate-at-a-time behind a shrinking `kloudlite_git` facade) so each of the three binaries links only what it uses, and the eight files over 700 lines become focused module trees. Zero behavior change; binary names, image contents, deploy yamls, env vars unchanged.
+**Goal:** Cut the single `kloudlite` library into a Cargo workspace (strategy A: bottom-up, crate-at-a-time behind a shrinking `kloudlite` facade) so each of the three binaries links only what it uses, and the eight files over 700 lines become focused module trees. Zero behavior change; binary names, image contents, deploy yamls, env vars unchanged.
 
 **Architecture:** Extraction order is forced by two item-level facts the spec's module-level map could not see: (1) `App` is named by `registry` and `git` handler signatures (`State<Arc<App>>`), so it cannot dissolve into `bins/server` — it becomes a small `crates/app` crate; (2) `App` holds `dir: pulls::Source`, so `pulls` must extract before `app`, which must extract before `git` and `registry`. Final crate DAG:
 
@@ -24,10 +24,10 @@ Two spec deviations, decided here on contact with the code (both recorded in the
 ## Global Constraints
 
 - **Behavior-frozen migration. NO functional changes.** Code moves and import rewrites only; the one sanctioned shape change is turning three `App` lane methods into free functions with identical bodies (Task 6).
-- **The facade keeps every consumer compiling mid-migration:** after each extraction, `src/lib.rs` re-exports the moved modules (`pub use kloudlite_git_<crate>::…`) so `kloudlite_git::…` paths in `main.rs`, `src/bin/*`, and `tests/*.rs` are untouched until Task 11.
+- **The facade keeps every consumer compiling mid-migration:** after each extraction, `src/lib.rs` re-exports the moved modules (`pub use kloudlite_<crate>::…`) so `kloudlite::…` paths in `main.rs`, `src/bin/*`, and `tests/*.rs` are untouched until Task 11.
 - **Every commit green:** foreground `cargo test` (full suite) and `cargo clippy --lib -- -D warnings` before every commit. As crates appear, additionally `cargo clippy -p <new-crate> -- -D warnings`; from Task 11 the invocation is `cargo clippy --workspace -- -D warnings` (lib + bin targets — the equivalent of today's gate; `--all-targets` keeps its pre-existing test-target lints, the bar there stays "no NEW warnings in files you touch").
 - **Single-opener invariant untouched:** the routing middleware (`repo_of` → `route_inner`), `BROWSE_TAILS`, and `every_browse_route_is_routable` move only in Task 10, verbatim, and that test must be green in the same commit.
-- **Binary names unchanged:** `kloudlite-git`, `kloudlite-git-api`, `kloudlite-git-worker` — `[[bin]] name` pins them regardless of package names.
+- **Binary names unchanged:** `kloudlite`, `kloudlite-api`, `kloudlite-worker` — `[[bin]] name` pins them regardless of package names.
 - **Only two things delete a blob; manifest bytes verbatim; `Digest::parse` is the only path→key gate** — Task 8 moves that code without editing it.
 - Preserve every `// ponytail:` marker; comments explain WHY at `src/http.rs` density; moved code keeps its comments byte-for-byte.
 - Each crate whose handlers return `Result<T, Response>` keeps `#![allow(clippy::result_large_err)]` at its root (currently on `src/lib.rs`; needed in `git`, `registry`, `api`, `app`, `bins/server`).
@@ -117,13 +117,13 @@ This is the riskiest seam because it splits two files (`src/proxy.rs`, `src/http
 
 ```toml
 [package]
-name = "kloudlite-git-core"
+name = "kloudlite-core"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_core"
+name = "kloudlite_core"
 
 [dependencies]
 axum = { workspace = true }
@@ -160,21 +160,21 @@ pub use err::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, 
   - `#[cfg(test)] mod is_connect_error_tests` and `mod tests` (secret_eq test)
   What STAYS in `src/proxy.rs` (server half; moves to `git` in Task 7): `HEADER_MAX`, `HEADER_TIMEOUT`, `serve_peer_streams`, `serve_peer_stream` — these use `App`, `ssh::serve_git`, `pool::is_fenced`, `pktline::write_err`.
 - [ ] **Step 6:** Facade wiring in the root package:
-  - root `Cargo.toml`: `members = [".", "crates/core"]`; `[dependencies] kloudlite-git-core = { path = "crates/core" }`.
+  - root `Cargo.toml`: `members = [".", "crates/core"]`; `[dependencies] kloudlite-core = { path = "crates/core" }`.
   - `src/lib.rs`: delete the moved items and `pub mod jwt; pub mod pktline;`; add
     ```rust
-    pub use kloudlite_git_core::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
-    pub use kloudlite_git_core::{jwt, pktline};
+    pub use kloudlite_core::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
+    pub use kloudlite_core::{jwt, pktline};
     ```
-  - `src/proxy.rs`: delete the moved items; add at top `pub use kloudlite_git_core::peer::*;` (keeps every `crate::proxy::X` and `kloudlite_git::proxy::X` path alive — tests import `kloudlite_git::proxy::{Forwarder, HOPS_HEADER, OWNER_HEADER, PEER_HEADER}`).
-  - `src/http.rs`: delete `Trusted` and `max_body`; add `pub use kloudlite_git_core::httpx::{max_body, Trusted};` and fix the two `use crate::http::` sites if paths shifted (they should not).
+  - `src/proxy.rs`: delete the moved items; add at top `pub use kloudlite_core::peer::*;` (keeps every `crate::proxy::X` and `kloudlite::proxy::X` path alive — tests import `kloudlite::proxy::{Forwarder, HOPS_HEADER, OWNER_HEADER, PEER_HEADER}`).
+  - `src/http.rs`: delete `Trusted` and `max_body`; add `pub use kloudlite_core::httpx::{max_body, Trusted};` and fix the two `use crate::http::` sites if paths shifted (they should not).
 - [ ] **Step 7:** Verify:
 
 ```sh
 cargo test
 cargo clippy --lib -- -D warnings
-cargo clippy -p kloudlite-git-core -- -D warnings
-! cargo tree -p kloudlite-git-core -e normal | grep -qE 'russh|gix-|pgp|slatedb|redis|mongodb'   # core is thin
+cargo clippy -p kloudlite-core -- -D warnings
+! cargo tree -p kloudlite-core -e normal | grep -qE 'russh|gix-|pgp|slatedb|redis|mongodb'   # core is thin
 ```
 
 - [ ] **Step 8:** Commit: `Extract the core crate: errors, jwt, pktline, http shared bits, peer client`
@@ -195,16 +195,16 @@ cargo clippy -p kloudlite-git-core -- -D warnings
 
 ```toml
 [package]
-name = "kloudlite-git-storage"
+name = "kloudlite-storage"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_storage"
+name = "kloudlite_storage"
 
 [dependencies]
-kloudlite-git-core = { path = "../core" }
+kloudlite-core = { path = "../core" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 slatedb = { workspace = true }
@@ -223,12 +223,12 @@ slatedb-common = { workspace = true }
 tempfile = { workspace = true }
 ```
 
-  (If `cargo check -p kloudlite-git-storage` flags an unused entry, delete it; if it flags a missing one — e.g. `axum` should NOT be needed here; if it is, the offending item belongs in a higher crate, stop and re-read the seam.)
-- [ ] **Step 2:** Move `store.rs`, `ownership.rs` (+ `ownership/tests.rs`), `index.rs`, `events.rs`, `auth.rs`, `config.rs` verbatim. Inside the crate, rewrite `crate::err`/`crate::Result`/`crate::hex` to `kloudlite_git_core::…` (or re-export them from `crates/storage/src/lib.rs` as `use kloudlite_git_core::{err, hex, Error, Result};` so `crate::err` keeps resolving — do the re-export, it is the smaller diff and every later crate repeats the pattern):
+  (If `cargo check -p kloudlite-storage` flags an unused entry, delete it; if it flags a missing one — e.g. `axum` should NOT be needed here; if it is, the offending item belongs in a higher crate, stop and re-read the seam.)
+- [ ] **Step 2:** Move `store.rs`, `ownership.rs` (+ `ownership/tests.rs`), `index.rs`, `events.rs`, `auth.rs`, `config.rs` verbatim. Inside the crate, rewrite `crate::err`/`crate::Result`/`crate::hex` to `kloudlite_core::…` (or re-export them from `crates/storage/src/lib.rs` as `use kloudlite_core::{err, hex, Error, Result};` so `crate::err` keeps resolving — do the re-export, it is the smaller diff and every later crate repeats the pattern):
 
 ```rust
 #![allow(clippy::result_large_err)]
-pub(crate) use kloudlite_git_core::{err, hex, Error, Result};
+pub(crate) use kloudlite_core::{err, hex, Error, Result};
 pub mod auth;
 pub mod cache;
 pub mod config;
@@ -241,18 +241,18 @@ pub mod store;
 
 - [ ] **Step 3 (spec file split — pool.rs, 891 lines):** land it as `pool/mod.rs` (Pool struct, `path`, `env_u64`, `FencedError`, `is_fenced`, the `ReleaseHook` trait, construction/`exists`), `pool/lease.rs` (open/lease/handle-lifecycle: everything from the lease-taking path through fencing detection), `pool/evict.rs` (eviction, `max_warm` pressure, release-on-close). Cut at existing `impl` block boundaries — no function body changes; `pub(crate)` between the submodules, public surface identical (`pub use` from `mod.rs` for every item that was `pub` before: `Pool`, `FencedError`, `is_fenced`, `path`, `ReleaseHook`). Keep the `// ponytail:` markers at `pool.rs:267` and near line 28's Weak-hook comment with their code.
 - [ ] **Step 4 (spec file split — cache.rs, 766 lines):** `cache/mod.rs` (Cache struct, `key`, memory layer `mem_get`/`Mem`, redis `run`/`run_within`), `cache/disk.rs` (the on-disk cache half: disk read/write/prune paths). Same rules as Step 3.
-- [ ] **Step 5:** Facade: root `Cargo.toml` gains `kloudlite-git-storage = { path = "crates/storage" }` and the member entry. `src/lib.rs` replaces the eight `pub mod` lines with:
+- [ ] **Step 5:** Facade: root `Cargo.toml` gains `kloudlite-storage = { path = "crates/storage" }` and the member entry. `src/lib.rs` replaces the eight `pub mod` lines with:
 
 ```rust
-pub use kloudlite_git_storage::{auth, cache, config, events, index, ownership, pool, store};
+pub use kloudlite_storage::{auth, cache, config, events, index, ownership, pool, store};
 ```
 
 - [ ] **Step 6:** Verify:
 
 ```sh
 cargo test
-cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-storage -- -D warnings
-! cargo tree -p kloudlite-git-storage -e normal | grep -qE 'russh|pgp|gix-pack|gix-traverse|gix-object|axum|imara-diff'
+cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-storage -- -D warnings
+! cargo tree -p kloudlite-storage -e normal | grep -qE 'russh|pgp|gix-pack|gix-traverse|gix-object|axum|imara-diff'
 ```
 
 - [ ] **Step 7:** Commit: `Extract the storage crate with pool and cache split into modules`
@@ -267,26 +267,26 @@ cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-storage -- -D
 
 **Steps:**
 
-- [ ] **Step 1:** `crates/gitbase/Cargo.toml` — deps: `kloudlite-git-core`, `kloudlite-git-storage`, `gix-odb`, `gix-hash`, `gix-object`, `gix-pack`, `gix-traverse`, `gix-features`, `gix-actor`, `flate2`, `tokio`, `serde` (all `{ workspace = true }` except the two path deps). Lib name `kloudlite_git_gitbase`.
-- [ ] **Step 2:** Move `objects.rs` and `refs.rs` verbatim (`crate::store` → `kloudlite_git_storage::store`, or the same `pub(crate) use` re-export trick as Task 3). `crates/gitbase/src/lib.rs`:
+- [ ] **Step 1:** `crates/gitbase/Cargo.toml` — deps: `kloudlite-core`, `kloudlite-storage`, `gix-odb`, `gix-hash`, `gix-object`, `gix-pack`, `gix-traverse`, `gix-features`, `gix-actor`, `flate2`, `tokio`, `serde` (all `{ workspace = true }` except the two path deps). Lib name `kloudlite-gitbase`.
+- [ ] **Step 2:** Move `objects.rs` and `refs.rs` verbatim (`crate::store` → `kloudlite_storage::store`, or the same `pub(crate) use` re-export trick as Task 3). `crates/gitbase/src/lib.rs`:
 
 ```rust
-pub(crate) use kloudlite_git_core::{err, Error, Result};
-pub(crate) use kloudlite_git_storage::store;
+pub(crate) use kloudlite_core::{err, Error, Result};
+pub(crate) use kloudlite_storage::store;
 pub mod objects;
 pub mod refs;
 mod merge_base;
 pub use merge_base::merge_base;
 ```
 
-- [ ] **Step 3:** Move `merge_base` (the whole function, its doc comment, and any private helper only it uses — check `src/browse.rs` around line 442) into `crates/gitbase/src/merge_base.rs`. In `src/browse.rs` add `pub use kloudlite_git_gitbase::merge_base;` so `crate::browse::merge_base` (callers: `src/pulls.rs:462`, `src/http/browse_api/merge.rs:136`) and test imports keep resolving.
-- [ ] **Step 4:** Facade: `src/lib.rs` → `pub use kloudlite_git_gitbase::{objects, refs};` replacing the two `pub mod` lines; root Cargo.toml member + dep.
+- [ ] **Step 3:** Move `merge_base` (the whole function, its doc comment, and any private helper only it uses — check `src/browse.rs` around line 442) into `crates/gitbase/src/merge_base.rs`. In `src/browse.rs` add `pub use kloudlite-gitbase::merge_base;` so `crate::browse::merge_base` (callers: `src/pulls.rs:462`, `src/http/browse_api/merge.rs:136`) and test imports keep resolving.
+- [ ] **Step 4:** Facade: `src/lib.rs` → `pub use kloudlite-gitbase::{objects, refs};` replacing the two `pub mod` lines; root Cargo.toml member + dep.
 - [ ] **Step 5:** Verify:
 
 ```sh
 cargo test
-cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-gitbase -- -D warnings
-! cargo tree -p kloudlite-git-gitbase -e normal | grep -qE 'russh|pgp|axum|redis|mongodb'
+cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-gitbase -- -D warnings
+! cargo tree -p kloudlite-gitbase -e normal | grep -qE 'russh|pgp|axum|redis|mongodb'
 ```
 
 - [ ] **Step 6:** Commit: `Extract the gitbase crate for objects, refs and merge_base`
@@ -296,10 +296,10 @@ cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-gitbase -- -D
 ### Task 5: Extract crates/pulls (model/check/jobs split, directory split, merge_worker)
 
 **Decision point (pulls seam), resolved by reading `src/pulls.rs`:**
-- **`model.rs`** — everything the worker imports, zero gix: `pull_key`, `PullRequest`, `Mergeability`, `MergeJob`, `PullState`, `Comment`, the `ms`/`ms_opt` deserializers, `get`, `put`, `list`, `with_merge_jobs`, `open_only`, `next_number`, `Source`, `ensure_migrated`, `migrate_from`, `is_migrated`, and **`Deep`** (moved out of the check section — `src/bin/worker.rs` names `kloudlite_git::pulls::Deep` at lines 254/355, so it must not sit behind the gix gate).
-- **`check.rs`** — gix, server-only, **feature-gated** (`#[cfg(feature = "check")] pub mod check;` with `pub use check::*` under the same cfg): `CHECK_LIMIT`, `check`, `check_with`, `check_repo`, `Checked` (its `Deep` payload comes from `model`). This is the only module that touches `gix_hash::ObjectId`, `store::Repo::odb()`, and `gitbase::merge_base` — the feature gates optional deps `gix-hash` and `kloudlite-git-gitbase`.
+- **`model.rs`** — everything the worker imports, zero gix: `pull_key`, `PullRequest`, `Mergeability`, `MergeJob`, `PullState`, `Comment`, the `ms`/`ms_opt` deserializers, `get`, `put`, `list`, `with_merge_jobs`, `open_only`, `next_number`, `Source`, `ensure_migrated`, `migrate_from`, `is_migrated`, and **`Deep`** (moved out of the check section — `src/bin/worker.rs` names `kloudlite::pulls::Deep` at lines 254/355, so it must not sit behind the gix gate).
+- **`check.rs`** — gix, server-only, **feature-gated** (`#[cfg(feature = "check")] pub mod check;` with `pub use check::*` under the same cfg): `CHECK_LIMIT`, `check`, `check_with`, `check_repo`, `Checked` (its `Deep` payload comes from `model`). This is the only module that touches `gix_hash::ObjectId`, `store::Repo::odb()`, and `gitbase::merge_base` — the feature gates optional deps `gix-hash` and `kloudlite-gitbase`.
 - **`jobs.rs`** — merge-claim lifecycle, no gix: `modify`, `claim_merge`, `takeable`, `claim_merge_number`, `ANNOUNCE_EVERY`, `stranded_merges`, `mark_announced`, `finish_merge`, `clear_merge`, `set_state`.
-- The worker links `kloudlite-git-pulls` with default features (no `check`); the facade — and later `bins/server` — enables `features = ["check"]`. The worker_merges suite (37 tests) is the guard that no code moved across an await boundary.
+- The worker links `kloudlite-pulls` with default features (no `check`); the facade — and later `bins/server` — enables `features = ["check"]`. The worker_merges suite (37 tests) is the guard that no code moved across an await boundary.
 
 **Files:**
 - Create: `crates/pulls/Cargo.toml`, `crates/pulls/src/lib.rs`, `crates/pulls/src/pulls/{mod,model,check,jobs}.rs`, `crates/pulls/src/directory/{mod,teams}.rs` (split of `src/directory.rs`, 775 lines), `crates/pulls/src/merge_worker.rs` (moved)
@@ -311,23 +311,23 @@ cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-gitbase -- -D
 
 ```toml
 [package]
-name = "kloudlite-git-pulls"
+name = "kloudlite-pulls"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_pulls"
+name = "kloudlite_pulls"
 
 [features]
 # The mergeability check is a gix graph walk; the worker never runs it and must not link gix
 # to have the pull-request model. The server and the facade turn it on.
-check = ["dep:gix-hash", "dep:kloudlite-git-gitbase"]
+check = ["dep:gix-hash", "dep:kloudlite-gitbase"]
 
 [dependencies]
-kloudlite-git-core = { path = "../core" }
-kloudlite-git-storage = { path = "../storage" }
-kloudlite-git-gitbase = { path = "../gitbase", optional = true }
+kloudlite-core = { path = "../core" }
+kloudlite-storage = { path = "../storage" }
+kloudlite-gitbase = { path = "../gitbase", optional = true }
 gix-hash = { workspace = true, optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -354,14 +354,14 @@ pub use crate::directory::{MergeState, MergeableState};
 
 - [ ] **Step 3 (spec file split — directory.rs):** `directory/mod.rs` (types `Member`, `User`, `Handle`, `Repo`, `Credential`, `Passkey`, `check_handle`, `Directory` struct + its repo/user/credential methods, `is_duplicate_key`, the `pub use crate::pulls::{Comment, …}` re-export) and `directory/teams.rs` (`Team` and the team-membership methods of `Directory` as a second `impl Directory` block). Cut at impl-block boundaries; public surface identical via `pub use teams::*` if anything is free-standing.
 - [ ] **Step 4:** Move `src/merge_worker.rs` verbatim (`crate::Result` → core re-export; `crate::directory::MergeableState` → `crate::directory::…` still works inside this crate). The `local()`/`networked()` split moves untouched — never format a networked argv into anything.
-- [ ] **Step 5:** Facade: `src/lib.rs` → `pub use kloudlite_git_pulls::{directory, merge_worker, pulls};` (root dep declared with `features = ["check"]`).
+- [ ] **Step 5:** Facade: `src/lib.rs` → `pub use kloudlite_pulls::{directory, merge_worker, pulls};` (root dep declared with `features = ["check"]`).
 - [ ] **Step 6:** Verify:
 
 ```sh
 cargo test        # includes the 37-test worker_merges guard inside tests/pulls.rs
-cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-pulls --all-features -- -D warnings
-! cargo tree -p kloudlite-git-pulls -e normal | grep -qE 'gix-|russh|pgp'        # default features: no gix
-cargo tree -p kloudlite-git-pulls -e normal --features check | grep -q gix-hash  # check pulls it in
+cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-pulls --all-features -- -D warnings
+! cargo tree -p kloudlite-pulls -e normal | grep -qE 'gix-|russh|pgp'        # default features: no gix
+cargo tree -p kloudlite-pulls -e normal --features check | grep -q gix-hash  # check pulls it in
 ```
 
 - [ ] **Step 7:** Commit: `Extract the pulls crate split into model, check and jobs`
@@ -378,9 +378,9 @@ cargo tree -p kloudlite-git-pulls -e normal --features check | grep -q gix-hash 
 
 **Steps:**
 
-- [ ] **Step 1:** `crates/app/Cargo.toml` — deps: `kloudlite-git-core`, `kloudlite-git-storage`, `kloudlite-git-pulls` (NO `check` feature), `tokio`, `futures`, `rand`, `serde_json`, `reqwest`. Lib name `kloudlite_git_app`.
-- [ ] **Step 2:** Move from `src/lib.rs` into `crates/app/src/lib.rs`, verbatim: `AddrOf`, `Patience`, `App` (struct, all fields including `dir: pulls::Source`, `neg_cache`, `recovery_asked`, `skew_ms` — keep both `// ponytail:` markers in the field docs), `RECOVERY_ASK_EVERY`, `RECONCILE_GAP` (becomes `pub` — the lane free fns in the facade need it), `NEG_TTL`, `impl pool::ReleaseHook for App`, and `impl App` **minus** the three lane methods: keep `new`, `with_directory`, `neg_cache_hit`, `neg_cache_miss`, `owner`, `with_topology`, `is_leader`, `route`, `now_ms`, `advance_clock`, `may_ask_to_recover`, `claim`, `claim_to_recover`, `force_claim`, `renew_all`, `renew_once`, `prune_once`, `release`, `announce_draining`, `grant_claim`, `grant_renew`, `grant_release`, `on_fenced`, `open_repo_after_fence`. `Forwarder` comes from `kloudlite_git_core::peer`.
-- [ ] **Step 3:** In the facade `src/lib.rs`: add `pub use kloudlite_git_app::{App, AddrOf, Patience, RECOVERY_ASK_EVERY};` and rewrite the three lanes as free functions with unchanged bodies:
+- [ ] **Step 1:** `crates/app/Cargo.toml` — deps: `kloudlite-core`, `kloudlite-storage`, `kloudlite-pulls` (NO `check` feature), `tokio`, `futures`, `rand`, `serde_json`, `reqwest`. Lib name `kloudlite_app`.
+- [ ] **Step 2:** Move from `src/lib.rs` into `crates/app/src/lib.rs`, verbatim: `AddrOf`, `Patience`, `App` (struct, all fields including `dir: pulls::Source`, `neg_cache`, `recovery_asked`, `skew_ms` — keep both `// ponytail:` markers in the field docs), `RECOVERY_ASK_EVERY`, `RECONCILE_GAP` (becomes `pub` — the lane free fns in the facade need it), `NEG_TTL`, `impl pool::ReleaseHook for App`, and `impl App` **minus** the three lane methods: keep `new`, `with_directory`, `neg_cache_hit`, `neg_cache_miss`, `owner`, `with_topology`, `is_leader`, `route`, `now_ms`, `advance_clock`, `may_ask_to_recover`, `claim`, `claim_to_recover`, `force_claim`, `renew_all`, `renew_once`, `prune_once`, `release`, `announce_draining`, `grant_claim`, `grant_renew`, `grant_release`, `on_fenced`, `open_repo_after_fence`. `Forwarder` comes from `kloudlite_core::peer`.
+- [ ] **Step 3:** In the facade `src/lib.rs`: add `pub use kloudlite_app::{App, AddrOf, Patience, RECOVERY_ASK_EVERY};` and rewrite the three lanes as free functions with unchanged bodies:
 
 ```rust
 pub async fn reconcile_owned_markers(app: &App) { /* body of the old method, self -> app */ }
@@ -388,13 +388,13 @@ pub async fn check_owned_pulls(app: &App) { /* uses pulls::check_repo — facade
 pub async fn announce_stranded_merges(app: &App) { /* uses pulls::stranded_merges + events */ }
 ```
 
-  In `src/main.rs` `spawn_lease_tasks`, change the three call sites `a.reconcile_owned_markers().await` → `kloudlite_git::reconcile_owned_markers(&a).await` (same for the other two). This is the plan's one sanctioned call-shape change; nothing about ordering, intervals, or bodies moves.
+  In `src/main.rs` `spawn_lease_tasks`, change the three call sites `a.reconcile_owned_markers().await` → `kloudlite::reconcile_owned_markers(&a).await` (same for the other two). This is the plan's one sanctioned call-shape change; nothing about ordering, intervals, or bodies moves.
 - [ ] **Step 4:** Verify:
 
 ```sh
 cargo test
-cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-app -- -D warnings
-! cargo tree -p kloudlite-git-app -e normal | grep -qE 'gix-|russh|pgp|axum'   # app stays gix-free
+cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-app -- -D warnings
+! cargo tree -p kloudlite-app -e normal | grep -qE 'gix-|russh|pgp|axum'   # app stays gix-free
 ```
 
 - [ ] **Step 5:** Commit: `Extract the app crate and turn its lanes into free functions`
@@ -409,18 +409,18 @@ cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-app -- -D war
 
 **Steps:**
 
-- [ ] **Step 1:** `crates/git/Cargo.toml` — package `kloudlite-git-git`, lib `kloudlite_git_git`; deps: `kloudlite-git-core`, `kloudlite-git-storage`, `kloudlite-git-gitbase`, `kloudlite-git-app`, and workspace deps `tokio`, `tokio-util`, `axum`, `russh`, `gix-odb`, `gix-pack`, `gix-object`, `gix-hash`, `gix-traverse`, `gix-features`, `flate2`, `futures`, `imara-diff`, `serde`, `serde_json`, `base64`. (`imara-diff` is browse's; confirm with `cargo check -p` and prune unused.)
+- [ ] **Step 1:** `crates/git/Cargo.toml` — package `kloudlite`, lib `kloudlite`; deps: `kloudlite-core`, `kloudlite-storage`, `kloudlite-gitbase`, `kloudlite-app`, and workspace deps `tokio`, `tokio-util`, `axum`, `russh`, `gix-odb`, `gix-pack`, `gix-object`, `gix-hash`, `gix-traverse`, `gix-features`, `flate2`, `futures`, `imara-diff`, `serde`, `serde_json`, `base64`. (`imara-diff` is browse's; confirm with `cargo check -p` and prune unused.)
 - [ ] **Step 2 (spec file split — upload.rs):** `upload/mod.rs` keeps the entry points and re-exports (`advertise`, `serve`, `read_args`); `upload/refs.rs` gets ref advertisement (`ls_refs`, `head_target`, `peel_to_object`); `upload/walk.rs` gets negotiation and walking (`fetch`'s want/have walk helpers: `parse_size`, `filtered_objects`, `keep_blob`, `shallow_walk`, `ours`, `peel_wants`, `commit_range`, `counts_with_leaves`); `upload/pack.rs` gets pack emission (`write_pack_range`, `count_objects`, `pack_from_ids`, `write_counts`) — including the gitoxide#2935 merge-commit workaround, which moves with its comment intact (delete only when upstream fixes, per CLAUDE.md). `fetch` itself stays in `mod.rs` if it is the orchestrator; cut helpers at function boundaries, `pub(super)` visibility, public surface unchanged (`advertise`, `serve` re-exported from `protocol::upload`).
-- [ ] **Step 3:** Move `protocol/mod.rs`, `protocol/receive.rs`, `browse.rs` (minus `merge_base`, already gone; keep its `pub use kloudlite_git_gitbase::merge_base;`), `ssh.rs`, `gc.rs` verbatim. `receive.rs`'s `crate::http::max_body` becomes `kloudlite_git_core::httpx::max_body`.
-- [ ] **Step 4:** Move the server half of `src/proxy.rs` (`HEADER_MAX`, `HEADER_TIMEOUT`, `serve_peer_streams`, `serve_peer_stream`) to `crates/git/src/proxy.rs`, whose top reads `pub use kloudlite_git_core::peer::*;` so `proxy::Forwarder` etc. keep one canonical path. Delete `src/proxy.rs`.
+- [ ] **Step 3:** Move `protocol/mod.rs`, `protocol/receive.rs`, `browse.rs` (minus `merge_base`, already gone; keep its `pub use kloudlite-gitbase::merge_base;`), `ssh.rs`, `gc.rs` verbatim. `receive.rs`'s `crate::http::max_body` becomes `kloudlite_core::httpx::max_body`.
+- [ ] **Step 4:** Move the server half of `src/proxy.rs` (`HEADER_MAX`, `HEADER_TIMEOUT`, `serve_peer_streams`, `serve_peer_stream`) to `crates/git/src/proxy.rs`, whose top reads `pub use kloudlite_core::peer::*;` so `proxy::Forwarder` etc. keep one canonical path. Delete `src/proxy.rs`.
 - [ ] **Step 5:** `crates/git/src/lib.rs`:
 
 ```rust
 #![allow(clippy::result_large_err)]
-pub(crate) use kloudlite_git_core::{err, Error, Result};
-pub(crate) use kloudlite_git_storage::{auth, ownership, pool, store};
-pub(crate) use kloudlite_git_gitbase::refs;
-pub(crate) use kloudlite_git_app::App;
+pub(crate) use kloudlite_core::{err, Error, Result};
+pub(crate) use kloudlite_storage::{auth, ownership, pool, store};
+pub(crate) use kloudlite-gitbase::refs;
+pub(crate) use kloudlite_app::App;
 pub mod browse;
 pub mod gc;
 pub mod protocol;
@@ -428,13 +428,13 @@ pub mod proxy;
 pub mod ssh;
 ```
 
-  Facade `src/lib.rs`: `pub use kloudlite_git_git::{browse, gc, protocol, proxy, ssh};`
+  Facade `src/lib.rs`: `pub use kloudlite::{browse, gc, protocol, proxy, ssh};`
 - [ ] **Step 6:** Verify:
 
 ```sh
 cargo test        # protocol.rs, ssh_e2e.rs, pack_cap.rs, proxy.rs suites all still through the facade
-cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-git -- -D warnings
-! cargo tree -p kloudlite-git-git -e normal | grep -qE 'pgp|mongodb'
+cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite -- -D warnings
+! cargo tree -p kloudlite -e normal | grep -qE 'pgp|mongodb'
 ```
 
 - [ ] **Step 7:** Commit: `Extract the git crate with upload split into refs, walk and pack`
@@ -449,15 +449,15 @@ cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-git -- -D war
 
 **Steps:**
 
-- [ ] **Step 1:** `crates/registry/Cargo.toml` — package `kloudlite-git-registry`, lib `kloudlite_git_registry`; deps: `kloudlite-git-core`, `kloudlite-git-storage`, `kloudlite-git-app`, and `tokio`, `axum`, `futures`, `serde`, `serde_json`, `base64`, `chrono`, `form_urlencoded`, `reqwest`. No gix, no russh, no pgp.
-- [ ] **Step 2:** Move all nine files byte-for-byte; `src/registry/mod.rs` becomes `crates/registry/src/lib.rs` (prepend `#![allow(clippy::result_large_err)]` and the cross-crate `pub(crate) use` block: `kloudlite_git_core::{err, hex, jwt, httpx::Trusted}`, `kloudlite_git_storage::{auth, index, ownership, pool, store}`, `kloudlite_git_app::App`). The blob-deletion rule, verbatim manifests, `Digest::parse`, `oci_err` envelope: moved, not edited.
-- [ ] **Step 3:** Facade: `src/lib.rs` → `pub use kloudlite_git_registry as registry;` (keeps `kloudlite_git::registry::…` and, inside the facade, `crate::registry::…`).
+- [ ] **Step 1:** `crates/registry/Cargo.toml` — package `kloudlite-registry`, lib `kloudlite_registry`; deps: `kloudlite-core`, `kloudlite-storage`, `kloudlite-app`, and `tokio`, `axum`, `futures`, `serde`, `serde_json`, `base64`, `chrono`, `form_urlencoded`, `reqwest`. No gix, no russh, no pgp.
+- [ ] **Step 2:** Move all nine files byte-for-byte; `src/registry/mod.rs` becomes `crates/registry/src/lib.rs` (prepend `#![allow(clippy::result_large_err)]` and the cross-crate `pub(crate) use` block: `kloudlite_core::{err, hex, jwt, httpx::Trusted}`, `kloudlite_storage::{auth, index, ownership, pool, store}`, `kloudlite_app::App`). The blob-deletion rule, verbatim manifests, `Digest::parse`, `oci_err` envelope: moved, not edited.
+- [ ] **Step 3:** Facade: `src/lib.rs` → `pub use kloudlite_registry as registry;` (keeps `kloudlite::registry::…` and, inside the facade, `crate::registry::…`).
 - [ ] **Step 4:** Verify:
 
 ```sh
 cargo test        # registry_{blobs,http,gc,limits,manifests,store,uploads}.rs suites
-cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-registry -- -D warnings
-! cargo tree -p kloudlite-git-registry -e normal | grep -qE 'gix-|russh|pgp|mongodb|imara-diff'
+cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-registry -- -D warnings
+! cargo tree -p kloudlite-registry -e normal | grep -qE 'gix-|russh|pgp|mongodb|imara-diff'
 ```
 
 - [ ] **Step 5:** Commit: `Extract the registry crate`
@@ -472,15 +472,15 @@ cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-registry -- -
 
 **Steps:**
 
-- [ ] **Step 1:** `crates/api/Cargo.toml` — package `kloudlite-git-api`, lib `kloudlite_git_api`; deps: `kloudlite-git-core`, `kloudlite-git-storage`, `kloudlite-git-pulls` (default features — the api tier reads the model and the directory, it never runs the gix check), and `tokio`, `axum`, `tower-http`, `pgp`, `serde`, `serde_json`, `base64`, `reqwest`, `futures`, `chrono`, `rand`. **Recorded deviation:** `gpg` lives here, not in `git` — its only consumers are `credentials.rs` and `signatures.rs`, and moving it here is what actually strips pgp from the git-serving path; the spec's "api binary drops pgp" is dropped as infeasible (the api tier verifies commit signatures).
-- [ ] **Step 2:** Move the files; `api/mod.rs` becomes `crates/api/src/lib.rs` (add `#![allow(clippy::result_large_err)]`, `pub mod gpg;`, and `pub(crate) use kloudlite_git_core::{err, jwt, Result}; pub(crate) use kloudlite_git_storage::{auth, cache, events, store}; pub(crate) use kloudlite_git_pulls::directory;`). `crate::gpg::…` in credentials/signatures now resolves inside this crate; `gpg`'s `#[cfg(test)] pub mod tests` helpers (`gen`, `reforge_subkey`, `subkey_signature`) stay visible to `signatures.rs` tests since both are one crate.
-- [ ] **Step 3:** Facade: `src/lib.rs` → `pub use kloudlite_git_api as api; pub use kloudlite_git_api::gpg;`.
+- [ ] **Step 1:** `crates/api/Cargo.toml` — package `kloudlite-api`, lib `kloudlite_api`; deps: `kloudlite-core`, `kloudlite-storage`, `kloudlite-pulls` (default features — the api tier reads the model and the directory, it never runs the gix check), and `tokio`, `axum`, `tower-http`, `pgp`, `serde`, `serde_json`, `base64`, `reqwest`, `futures`, `chrono`, `rand`. **Recorded deviation:** `gpg` lives here, not in `git` — its only consumers are `credentials.rs` and `signatures.rs`, and moving it here is what actually strips pgp from the git-serving path; the spec's "api binary drops pgp" is dropped as infeasible (the api tier verifies commit signatures).
+- [ ] **Step 2:** Move the files; `api/mod.rs` becomes `crates/api/src/lib.rs` (add `#![allow(clippy::result_large_err)]`, `pub mod gpg;`, and `pub(crate) use kloudlite_core::{err, jwt, Result}; pub(crate) use kloudlite_storage::{auth, cache, events, store}; pub(crate) use kloudlite_pulls::directory;`). `crate::gpg::…` in credentials/signatures now resolves inside this crate; `gpg`'s `#[cfg(test)] pub mod tests` helpers (`gen`, `reforge_subkey`, `subkey_signature`) stay visible to `signatures.rs` tests since both are one crate.
+- [ ] **Step 3:** Facade: `src/lib.rs` → `pub use kloudlite_api as api; pub use kloudlite_api::gpg;`.
 - [ ] **Step 4:** Verify:
 
 ```sh
 cargo test        # api_server.rs suite
-cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-api -- -D warnings
-! cargo tree -p kloudlite-git-api -e normal | grep -qE 'gix-|russh|slatedb'   # note: slatedb SHOULD be absent
+cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-api -- -D warnings
+! cargo tree -p kloudlite-api -e normal | grep -qE 'gix-|russh|slatedb'   # note: slatedb SHOULD be absent
 ```
 
   If that last assertion fails because `storage` carries slatedb (it does), drop the `slatedb` term — the real assertions are `gix-|russh`. The binary-level wins are measured in Task 10.
@@ -504,27 +504,27 @@ cargo clippy --lib -- -D warnings && cargo clippy -p kloudlite-git-api -- -D war
 ```toml
 # bins/server/Cargo.toml
 [package]
-name = "kloudlite-git-server"
+name = "kloudlite-server"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]                      # thin lib so the workspace test host (Task 11) can drive the router
-name = "kloudlite_git_server"
+name = "kloudlite_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "kloudlite-git"        # binary name unchanged
+name = "kloudlite"        # binary name unchanged
 path = "src/main.rs"
 
 [dependencies]
-kloudlite-git-core = { path = "../../crates/core" }
-kloudlite-git-storage = { path = "../../crates/storage" }
-kloudlite-git-gitbase = { path = "../../crates/gitbase" }
-kloudlite-git-pulls = { path = "../../crates/pulls", features = ["check"] }
-kloudlite-git-app = { path = "../../crates/app" }
-kloudlite-git-git = { path = "../../crates/git" }
-kloudlite-git-registry = { path = "../../crates/registry" }
+kloudlite-core = { path = "../../crates/core" }
+kloudlite-storage = { path = "../../crates/storage" }
+kloudlite-gitbase = { path = "../../crates/gitbase" }
+kloudlite-pulls = { path = "../../crates/pulls", features = ["check"] }
+kloudlite-app = { path = "../../crates/app" }
+kloudlite = { path = "../../crates/git" }
+kloudlite-registry = { path = "../../crates/registry" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
@@ -543,20 +543,20 @@ gix-hash = { workspace = true }        # only if the router names ObjectId; prun
 ```toml
 # bins/api/Cargo.toml
 [package]
-name = "kloudlite-git-api-bin"
+name = "kloudlite-api-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [[bin]]
-name = "kloudlite-git-api"
+name = "kloudlite-api"
 path = "src/main.rs"
 
 [dependencies]
-kloudlite-git-core = { path = "../../crates/core" }
-kloudlite-git-storage = { path = "../../crates/storage" }
-kloudlite-git-pulls = { path = "../../crates/pulls" }     # directory; no check feature
-kloudlite-git-api = { path = "../../crates/api" }
+kloudlite-core = { path = "../../crates/core" }
+kloudlite-storage = { path = "../../crates/storage" }
+kloudlite-pulls = { path = "../../crates/pulls" }     # directory; no check feature
+kloudlite-api = { path = "../../crates/api" }
 tokio = { workspace = true }
 axum = { workspace = true }
 rustls = { workspace = true }
@@ -565,20 +565,20 @@ rustls = { workspace = true }
 ```toml
 # bins/worker/Cargo.toml
 [package]
-name = "kloudlite-git-worker-bin"
+name = "kloudlite-worker-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [[bin]]
-name = "kloudlite-git-worker"
+name = "kloudlite-worker"
 path = "src/main.rs"
 
 [dependencies]
-kloudlite-git-core = { path = "../../crates/core" }
-kloudlite-git-storage = { path = "../../crates/storage" }
-kloudlite-git-pulls = { path = "../../crates/pulls" }     # model + jobs + merge_worker; NO check
-kloudlite-git-registry = { path = "../../crates/registry" }
+kloudlite-core = { path = "../../crates/core" }
+kloudlite-storage = { path = "../../crates/storage" }
+kloudlite-pulls = { path = "../../crates/pulls" }     # model + jobs + merge_worker; NO check
+kloudlite-registry = { path = "../../crates/registry" }
 tokio = { workspace = true }
 rustls = { workspace = true }
 reqwest = { workspace = true }
@@ -587,20 +587,20 @@ serde_json = { workspace = true }
 futures = { workspace = true }
 ```
 
-  In each moved `main.rs`, rewrite `kloudlite_git::X` to the owning crate path (mechanical: `kloudlite_git::config` → `kloudlite_git_storage::config`, `kloudlite_git::merge_worker` → `kloudlite_git_pulls::merge_worker`, `kloudlite_git::proxy::PEER_HEADER` → `kloudlite_git_core::peer::PEER_HEADER`, `kloudlite_git::registry::gc` → `kloudlite_git_registry::gc`, …). Bins are the first consumers to leave the facade; tests stay on it until Task 11.
+  In each moved `main.rs`, rewrite `kloudlite::X` to the owning crate path (mechanical: `kloudlite::config` → `kloudlite_storage::config`, `kloudlite::merge_worker` → `kloudlite_pulls::merge_worker`, `kloudlite::proxy::PEER_HEADER` → `kloudlite_core::peer::PEER_HEADER`, `kloudlite::registry::gc` → `kloudlite_registry::gc`, …). Bins are the first consumers to leave the facade; tests stay on it until Task 11.
 - [ ] **Step 2 (spec file split — main.rs → bins/server):** `boot.rs` (`host_key`, `fleet_guard` + its tests, `backfill_repo_markers` + `backfill_tests`, `run`/CLI admin plumbing, `post_to_owner`, the `mod tests` store helper), `lanes.rs` (`spawn_lease_tasks` plus the three free functions from the facade — `reconcile_owned_markers`, `check_owned_pulls`, `announce_stranded_merges` — deleted from `src/lib.rs` in the same commit), `listeners.rs` (the listener-binding parts of `serve()`: public, peer, peer-stream, ssh), `main.rs` (`main`, `serve()` orchestration, crypto-provider install). Cut at existing function boundaries only.
-- [ ] **Step 3 (spec file split — http.rs → bins/server/src/router/):** `router/route.rs` — the routing middleware and ownership plumbing: `repo_of`, `api_prefixed`, `git_shape`, `api_route`, `is_git_route`, `route_public`, `route_peer`, `route_inner`, `trust_peer`, `trust_nobody`, `healthz`, `own_claim`, `own_renew`, `own_release`, `own_draining`, `two_lines`, `leader_only`, `BROWSE_TAILS`, and the `every_browse_route_is_routable` test beside it. `router/git.rs` — the git handlers: `open`, `body_reader`, `reopen_after_fence`, `info_refs`, `upload_pack`, `receive_pack`, `respond_first`, `is_client_fault`, `success`, `git_routes`. `router/limits.rs` — `max_decompressed`, `internal`, `client_err`, `bad_request`, `fenced_elsewhere` (plus a `pub use kloudlite_git_core::httpx::{max_body, Trusted};`). `router/mod.rs` — `router()`, `peer_router()`, re-exports. Move `src/http/browse_api/` to `bins/server/src/browse_api/` unchanged (its `crate::…` paths point at the re-export block in `bins/server/src/lib.rs`).
+- [ ] **Step 3 (spec file split — http.rs → bins/server/src/router/):** `router/route.rs` — the routing middleware and ownership plumbing: `repo_of`, `api_prefixed`, `git_shape`, `api_route`, `is_git_route`, `route_public`, `route_peer`, `route_inner`, `trust_peer`, `trust_nobody`, `healthz`, `own_claim`, `own_renew`, `own_release`, `own_draining`, `two_lines`, `leader_only`, `BROWSE_TAILS`, and the `every_browse_route_is_routable` test beside it. `router/git.rs` — the git handlers: `open`, `body_reader`, `reopen_after_fence`, `info_refs`, `upload_pack`, `receive_pack`, `respond_first`, `is_client_fault`, `success`, `git_routes`. `router/limits.rs` — `max_decompressed`, `internal`, `client_err`, `bad_request`, `fenced_elsewhere` (plus a `pub use kloudlite_core::httpx::{max_body, Trusted};`). `router/mod.rs` — `router()`, `peer_router()`, re-exports. Move `src/http/browse_api/` to `bins/server/src/browse_api/` unchanged (its `crate::…` paths point at the re-export block in `bins/server/src/lib.rs`).
 - [ ] **Step 4:** `bins/server/src/lib.rs` exposes what main.rs and the test host need:
 
 ```rust
 #![allow(clippy::result_large_err)]
-pub(crate) use kloudlite_git_core::{err, Error, Result};
-pub(crate) use kloudlite_git_storage::{auth, cache, events, index, ownership, pool, store};
-pub(crate) use kloudlite_git_gitbase::{objects, refs};
-pub(crate) use kloudlite_git_pulls::{directory, merge_worker, pulls};
-pub(crate) use kloudlite_git_app::App;
-pub(crate) use kloudlite_git_git::{browse, protocol, proxy, ssh};
-pub(crate) use kloudlite_git_registry as registry;
+pub(crate) use kloudlite_core::{err, Error, Result};
+pub(crate) use kloudlite_storage::{auth, cache, events, index, ownership, pool, store};
+pub(crate) use kloudlite-gitbase::{objects, refs};
+pub(crate) use kloudlite_pulls::{directory, merge_worker, pulls};
+pub(crate) use kloudlite_app::App;
+pub(crate) use kloudlite::{browse, protocol, proxy, ssh};
+pub(crate) use kloudlite_registry as registry;
 pub mod boot;
 pub mod browse_api;
 pub mod lanes;
@@ -613,12 +613,12 @@ pub mod router;
 
 ```sh
 cargo build --release --locked
-ls target/release/kloudlite-git target/release/kloudlite-git-api target/release/kloudlite-git-worker  # all three, same names
+ls target/release/kloudlite target/release/kloudlite-api target/release/kloudlite-worker  # all three, same names
 cargo test          # includes every_browse_route_is_routable in its new home
 cargo clippy --workspace -- -D warnings
-! cargo tree -p kloudlite-git-api-bin -e normal    | grep -qE 'russh|gix-pack|gix-odb|gix-traverse|imara-diff'
-! cargo tree -p kloudlite-git-worker-bin -e normal | grep -qE 'russh|pgp|gix-pack|gix-traverse|imara-diff'
-cargo tree -p kloudlite-git-worker-bin -e normal | grep -q slatedb    # worker keeps its store
+! cargo tree -p kloudlite-api-bin -e normal    | grep -qE 'russh|gix-pack|gix-odb|gix-traverse|imara-diff'
+! cargo tree -p kloudlite-worker-bin -e normal | grep -qE 'russh|pgp|gix-pack|gix-traverse|imara-diff'
+cargo tree -p kloudlite-worker-bin -e normal | grep -q slatedb    # worker keeps its store
 ```
 
 - [ ] **Step 6:** Commit: `Move the three binaries into bin packages and split main and the router`
@@ -627,7 +627,7 @@ cargo tree -p kloudlite-git-worker-bin -e normal | grep -q slatedb    # worker k
 
 ### Task 11: Delete the facade, re-home the tests, fix Dockerfile/CI/docs
 
-**Tests decision, resolved by reading `tests/*.rs`:** the suites exercise the composed server (`kloudlite_git::App`, router, registry, protocol — imports span seven crates), so they stay together at the **workspace root**: the root package stops being a facade and becomes the integration-test host `kloudlite-git-tests` (near-empty lib, all dev-dependencies). This — rather than attaching to `bins/server` — keeps `./tests/registry_e2e.sh`, `./tests/compat-matrix.sh`, and `cargo test --test registry_blobs` working from the repo root exactly as CLAUDE.md documents them.
+**Tests decision, resolved by reading `tests/*.rs`:** the suites exercise the composed server (`kloudlite::App`, router, registry, protocol — imports span seven crates), so they stay together at the **workspace root**: the root package stops being a facade and becomes the integration-test host `kloudlite-tests` (near-empty lib, all dev-dependencies). This — rather than attaching to `bins/server` — keeps `./tests/registry_e2e.sh`, `./tests/compat-matrix.sh`, and `cargo test --test registry_blobs` working from the repo root exactly as CLAUDE.md documents them.
 
 **Files:**
 - Modify: root `Cargo.toml`, `src/lib.rs` (gutted), every `tests/*.rs`, `Dockerfile`, `.github/workflows/image.yml`, `CLAUDE.md`
@@ -635,22 +635,22 @@ cargo tree -p kloudlite-git-worker-bin -e normal | grep -q slatedb    # worker k
 
 **Steps:**
 
-- [ ] **Step 1:** Root `Cargo.toml`: rename the package to `kloudlite-git-tests`, drop `[lib] name = "kloudlite_git"` (plain default lib), move every runtime dependency to `[dev-dependencies]` as path deps on all nine workspace crates (pulls with `features = ["check"]`, plus `kloudlite-git-server` for the router/boot helpers) plus the existing dev deps (`slatedb-common`, `tower`, `tempfile`, `async-trait`, `serde_json`, `mongodb`, `tokio`, `axum`, `futures`, `reqwest`, `russh` — prune to what the tests actually name). `src/lib.rs` shrinks to `//! Integration-test host; the code lives in crates/ and bins/.`
+- [ ] **Step 1:** Root `Cargo.toml`: rename the package to `kloudlite-tests`, drop `[lib] name = "kloudlite"` (plain default lib), move every runtime dependency to `[dev-dependencies]` as path deps on all nine workspace crates (pulls with `features = ["check"]`, plus `kloudlite-server` for the router/boot helpers) plus the existing dev deps (`slatedb-common`, `tower`, `tempfile`, `async-trait`, `serde_json`, `mongodb`, `tokio`, `axum`, `futures`, `reqwest`, `russh` — prune to what the tests actually name). `src/lib.rs` shrinks to `//! Integration-test host; the code lives in crates/ and bins/.`
 - [ ] **Step 2:** Rewrite test imports once, mechanically:
 
 ```sh
-grep -rl 'kloudlite_git::' tests/ | xargs sed -i '' \
-  -e 's/kloudlite_git::App/kloudlite_git_app::App/g' \
-  -e 's/kloudlite_git::\(store\|pool\|ownership\|index\|cache\|events\|auth\|config\)/kloudlite_git_storage::\1/g' \
-  -e 's/kloudlite_git::\(objects\|refs\)/kloudlite_git_gitbase::\1/g' \
-  -e 's/kloudlite_git::\(pulls\|directory\|merge_worker\)/kloudlite_git_pulls::\1/g' \
-  -e 's/kloudlite_git::\(protocol\|browse\|ssh\|gc\)/kloudlite_git_git::\1/g' \
-  -e 's/kloudlite_git::proxy/kloudlite_git_core::peer/g' \
-  -e 's/kloudlite_git::registry/kloudlite_git_registry::/g;s/registry::::/registry::/g' \
-  -e 's/kloudlite_git::\(pktline\|jwt\|err\|hex\)/kloudlite_git_core::\1/g'
+grep -rl 'kloudlite::' tests/ | xargs sed -i '' \
+  -e 's/kloudlite::App/kloudlite_app::App/g' \
+  -e 's/kloudlite::\(store\|pool\|ownership\|index\|cache\|events\|auth\|config\)/kloudlite_storage::\1/g' \
+  -e 's/kloudlite::\(objects\|refs\)/kloudlite-gitbase::\1/g' \
+  -e 's/kloudlite::\(pulls\|directory\|merge_worker\)/kloudlite_pulls::\1/g' \
+  -e 's/kloudlite::\(protocol\|browse\|ssh\|gc\)/kloudlite::\1/g' \
+  -e 's/kloudlite::proxy/kloudlite_core::peer/g' \
+  -e 's/kloudlite::registry/kloudlite_registry::/g;s/registry::::/registry::/g' \
+  -e 's/kloudlite::\(pktline\|jwt\|err\|hex\)/kloudlite_core::\1/g'
 ```
 
-  then `cargo test --no-run` and fix the residue by hand (router/`http` references → `kloudlite_git_server::router`, `Trusted` → `kloudlite_git_core::httpx::Trusted`). `tests/common/` gets the same treatment.
+  then `cargo test --no-run` and fix the residue by hand (router/`http` references → `kloudlite_server::router`, `Trusted` → `kloudlite_core::httpx::Trusted`). `tests/common/` gets the same treatment.
 - [ ] **Step 3:** Dockerfile: the two `COPY Cargo.toml Cargo.lock ./` + `COPY src ./src` pairs (planner and build stages, lines 17-18 and 26-27) become `COPY Cargo.toml Cargo.lock ./` + `COPY src ./src` + `COPY crates ./crates` + `COPY bins ./bins` + `COPY tests ./tests` (cargo-chef and `cargo build --release --locked` need every member manifest; `tests` is a member). The build command and the three `COPY --from=build /src/target/release/…` lines are unchanged — verify the built image stage still finds all three binaries.
 - [ ] **Step 4:** CI `.github/workflows/image.yml`: `cargo clippy --lib -- -D warnings` → `cargo clippy --workspace -- -D warnings` (same bar: every lib and bin, test targets excluded; the pre-existing `--all-targets` lints stay grandfathered). `cargo test` line unchanged — at the workspace root it now runs every member's tests plus `tests/`.
 - [ ] **Step 5:** CLAUDE.md Commands section: replace the clippy line with `cargo clippy --workspace -- -D warnings` and its parenthetical; note that `cargo test --test registry_blobs` still works from the root (tests host member); add one line naming the workspace layout (`crates/{core,storage,gitbase,pulls,app,git,registry,api}`, `bins/{server,api,worker}`).
@@ -659,10 +659,10 @@ grep -rl 'kloudlite_git::' tests/ | xargs sed -i '' \
 ```sh
 cargo test
 cargo clippy --workspace -- -D warnings
-cargo build --release --locked && ls target/release/kloudlite-git{,-api,-worker}
+cargo build --release --locked && ls target/release/kloudlite{,-api,-worker}
 ./tests/registry_e2e.sh || test $? -eq 77          # 77 = docker half skipped, not a pass — note which
-grep -rn 'kloudlite_git::' tests/ src/ | wc -l        # 0 — the facade name is gone
-docker build . -t kloudlite-git-workspace-check       # if a daemon is available; otherwise flag for CI
+grep -rn 'kloudlite::' tests/ src/ | wc -l        # 0 — the facade name is gone
+docker build . -t kloudlite-workspace-check       # if a daemon is available; otherwise flag for CI
 ```
 
 - [ ] **Step 7:** Commit: `Delete the facade, re-home the tests and update the build plumbing`

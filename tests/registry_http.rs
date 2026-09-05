@@ -1,6 +1,6 @@
 mod common;
 use axum::http::StatusCode;
-use kloudlite_git_registry::store::ImageExt;
+use kloudlite_registry::store::ImageExt;
 
 // Spins the public router on an ephemeral port and returns its base URL.
 // (Mirror the harness in tests/http_e2e.rs — reuse its helper rather than writing a second one.)
@@ -92,11 +92,11 @@ async fn a_forged_bearer_is_refused() {
 /// store, not tags in a database it must never open on an unrouted node.
 async fn put_manifest_bytes(e: &common::TestEnv, owner: &str, name: &str, body: &[u8]) {
     use slatedb::object_store::ObjectStoreExt;
-    let d = kloudlite_git_registry::Digest::of(body);
+    let d = kloudlite_registry::Digest::of(body);
     e.store
         .os
         .put(
-            &kloudlite_git_registry::store::manifest_path(owner, name, &d),
+            &kloudlite_registry::store::manifest_path(owner, name, &d),
             slatedb::object_store::PutPayload::from(body.to_vec()),
         )
         .await
@@ -110,7 +110,7 @@ async fn the_browse_api_lists_a_teams_images() {
     // `image_names` lists the `repo/img/{owner}/` object-store prefix, which only exists once the
     // image's database has been opened at least once — a real push does that via `put_manifest`;
     // here `put_tag` is the public entry point that does the same (`touch_image` is crate-private).
-    e.store.put_tag("acme", "nginx", "latest", &kloudlite_git_registry::Digest::of(b"m1")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &kloudlite_registry::Digest::of(b"m1")).await.unwrap();
     put_manifest_bytes(&e, "acme", "nginx", b"m1").await;
     put_manifest_bytes(&e, "acme", "nginx", b"m2").await;
     // The `images` route checks the caller against `{owner}`, same as every other browse handler
@@ -128,9 +128,9 @@ async fn the_browse_api_lists_a_teams_images() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stranger_lists_only_public_images() {
     let (base, e) = common::serve_peer().await;
-    e.store.put_tag("acme", "nginx", "latest", &kloudlite_git_registry::Digest::of(b"m1")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &kloudlite_registry::Digest::of(b"m1")).await.unwrap();
     put_manifest_bytes(&e, "acme", "nginx", b"m1").await;
-    e.store.put_tag("acme", "secret", "latest", &kloudlite_git_registry::Digest::of(b"m2")).await.unwrap();
+    e.store.put_tag("acme", "secret", "latest", &kloudlite_registry::Digest::of(b"m2")).await.unwrap();
     put_manifest_bytes(&e, "acme", "secret", b"m2").await;
     // Same routed flip the visibility test uses.
     let r = common::peer_post_as(&base, "acme", "/api/acme/nginx/imagevisibility?visibility=public", "").await;
@@ -161,8 +161,8 @@ async fn image_listing_serves_marker_fields() {
     let m2 = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": MEDIA,
-        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_git_registry::Digest::of(b"cfg2").to_string(), "size": 4},
-        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_git_registry::Digest::of(b"layer2").to_string(), "size": 6}]
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_registry::Digest::of(b"cfg2").to_string(), "size": 4},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_registry::Digest::of(b"layer2").to_string(), "size": 6}]
     }).to_string().into_bytes();
     for (tag, body) in [("latest", m1), ("v1", m2)] {
         let r = c
@@ -222,8 +222,8 @@ async fn a_team_gets_none_of_another_teams_images() {
 #[tokio::test]
 async fn the_browse_api_lists_an_images_own_tags() {
     let (base, e) = common::serve_peer().await;
-    e.store.put_tag("acme", "nginx", "latest", &kloudlite_git_registry::Digest::of(b"m")).await.unwrap();
-    e.store.put_tag("acme", "nginx", "v1", &kloudlite_git_registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &kloudlite_registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "v1", &kloudlite_registry::Digest::of(b"m")).await.unwrap();
     let r = common::peer_get_as(&base, "acme", "/api/acme/nginx/imagetags").await;
     assert_eq!(r.status(), StatusCode::OK);
     let b: serde_json::Value = r.json().await.unwrap();
@@ -235,7 +235,7 @@ async fn the_browse_api_lists_an_images_own_tags() {
 #[tokio::test]
 async fn a_team_gets_none_of_another_teams_imagetags() {
     let (base, e) = common::serve_peer().await;
-    e.store.put_tag("acme", "nginx", "latest", &kloudlite_git_registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &kloudlite_registry::Digest::of(b"m")).await.unwrap();
     let r = common::peer_get_as(&base, "umbrella", "/api/acme/nginx/imagetags").await;
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
@@ -248,7 +248,7 @@ async fn deleting_a_tag_leaves_the_manifest_and_other_tags_alone() {
     common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     let token = e.store.create_token("acme").await.unwrap();
     let m = manifest_bytes();
-    let d = kloudlite_git_registry::Digest::of(&m);
+    let d = kloudlite_registry::Digest::of(&m);
     let c = reqwest::Client::new();
     for tag in ["latest", "v1"] {
         let r = c
@@ -299,7 +299,7 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     let c = reqwest::Client::new();
 
     let m1 = manifest_bytes();
-    let d1 = kloudlite_git_registry::Digest::of(&m1);
+    let d1 = kloudlite_registry::Digest::of(&m1);
     let r = c
         .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
         .basic_auth("acme", Some(&token))
@@ -314,8 +314,8 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     let m2 = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": MEDIA,
-        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_git_registry::Digest::of(b"cfg2").to_string(), "size": 4},
-        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_git_registry::Digest::of(b"layer2").to_string(), "size": 6}]
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_registry::Digest::of(b"cfg2").to_string(), "size": 4},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_registry::Digest::of(b"layer2").to_string(), "size": 6}]
     }).to_string().into_bytes();
     let r = c
         .put(format!("{pub_base}/v2/acme/nginx-alpine/manifests/latest"))
@@ -374,7 +374,7 @@ async fn imagedelete_evicts_the_manifest_cache() {
     let c = reqwest::Client::new();
 
     let m1 = manifest_bytes();
-    let d1 = kloudlite_git_registry::Digest::of(&m1);
+    let d1 = kloudlite_registry::Digest::of(&m1);
     let r = c
         .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
         .basic_auth("acme", Some(&token))
@@ -413,7 +413,7 @@ async fn imagedelete_evicts_the_manifest_cache() {
 #[tokio::test]
 async fn imagedelete_removes_the_marker_even_with_zero_manifests() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
-    use kloudlite_git_storage::index::{self, Kind};
+    use kloudlite_storage::index::{self, Kind};
     common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     use slatedb::object_store::{ObjectStore, ObjectStoreExt};
 
@@ -465,13 +465,13 @@ async fn deleting_an_image_leaves_its_blobs_on_disk() {
     // A layer, written directly to the object store (mirroring `put_manifest_bytes` above) rather
     // than through the full upload-session dance, which this test has no need to exercise.
     let layer = b"a layer's worth of bytes".to_vec();
-    let ld = kloudlite_git_registry::Digest::of(&layer);
+    let ld = kloudlite_registry::Digest::of(&layer);
     {
         use slatedb::object_store::ObjectStoreExt;
         e.store
             .os
             .put(
-                &kloudlite_git_registry::store::blob_path("acme", &ld),
+                &kloudlite_registry::store::blob_path("acme", &ld),
                 slatedb::object_store::PutPayload::from(layer.clone()),
             )
             .await
@@ -480,7 +480,7 @@ async fn deleting_an_image_leaves_its_blobs_on_disk() {
     let m = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": MEDIA,
-        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_git_registry::Digest::of(b"cfg").to_string(), "size": 3},
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_registry::Digest::of(b"cfg").to_string(), "size": 3},
         "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": ld.to_string(), "size": layer.len()}]
     }).to_string().into_bytes();
     let r = c
@@ -497,7 +497,7 @@ async fn deleting_an_image_leaves_its_blobs_on_disk() {
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
 
     use slatedb::object_store::ObjectStoreExt;
-    let still_there = e.store.os.head(&kloudlite_git_registry::store::blob_path("acme", &ld)).await;
+    let still_there = e.store.os.head(&kloudlite_registry::store::blob_path("acme", &ld)).await;
     assert!(still_there.is_ok(), "the layer blob must survive an image delete");
 }
 
@@ -506,7 +506,7 @@ async fn deleting_an_image_leaves_its_blobs_on_disk() {
 #[tokio::test]
 async fn a_stranger_gets_404_from_both_image_write_routes() {
     let (_pub_base, peer_base, e) = common::serve_public_and_peer().await;
-    e.store.put_tag("acme", "nginx", "latest", &kloudlite_git_registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &kloudlite_registry::Digest::of(b"m")).await.unwrap();
 
     let r = common::peer_post_as(&peer_base, "umbrella", "/api/acme/nginx/imagetagdelete", "latest").await;
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
@@ -522,8 +522,8 @@ fn manifest_bytes() -> Vec<u8> {
     serde_json::json!({
         "schemaVersion": 2,
         "mediaType": MEDIA,
-        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_git_registry::Digest::of(b"cfg").to_string(), "size": 3},
-        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_git_registry::Digest::of(b"layer").to_string(), "size": 5}]
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_registry::Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_registry::Digest::of(b"layer").to_string(), "size": 5}]
     }).to_string().into_bytes()
 }
 
@@ -555,7 +555,7 @@ async fn the_token_endpoint_accepts_a_repeated_scope() {
 #[tokio::test]
 async fn oci_internal_returns_the_oci_envelope() {
     use axum::response::IntoResponse;
-    let r = kloudlite_git_registry::oci_internal(kloudlite_git_core::err("boom")).into_response();
+    let r = kloudlite_registry::oci_internal(kloudlite_core::err("boom")).into_response();
     assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -574,7 +574,7 @@ async fn oci_internal_returns_the_oci_envelope() {
 async fn imagevisibility_flips_through_a_routed_endpoint() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
     common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
-    use kloudlite_git_storage::index::{self, Kind};
+    use kloudlite_storage::index::{self, Kind};
     use slatedb::object_store::ObjectStoreExt;
 
     // A push is the only public way to make the image exist; it also writes the first marker,
@@ -620,7 +620,7 @@ async fn imagevisibility_flips_through_a_routed_endpoint() {
 async fn imagetags_paginates_like_tags_list() {
     let (base, e) = common::serve_peer().await;
     for t in ["a", "b", "c"] {
-        e.store.put_tag("acme", "nginx", t, &kloudlite_git_registry::Digest::of(b"m")).await.unwrap();
+        e.store.put_tag("acme", "nginx", t, &kloudlite_registry::Digest::of(b"m")).await.unwrap();
     }
     let r = common::peer_get_as(&base, "acme", "/api/acme/nginx/imagetags?n=2").await;
     assert_eq!(r.status(), StatusCode::OK);
@@ -645,10 +645,10 @@ async fn imagetags_answers_from_the_meta_row_without_reading_the_manifest() {
     common::seed_blobs(&e, "acme", &[b"cfg", b"layer"]).await;
     let m = serde_json::json!({
         "schemaVersion": 2,
-        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_git_registry::Digest::of(b"cfg").to_string(), "size": 3},
-        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_git_registry::Digest::of(b"layer").to_string(), "size": 5}]
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": kloudlite_registry::Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": kloudlite_registry::Digest::of(b"layer").to_string(), "size": 5}]
     }).to_string().into_bytes();
-    let d = kloudlite_git_registry::Digest::of(&m);
+    let d = kloudlite_registry::Digest::of(&m);
     let token = e.store.create_token("acme").await.unwrap();
     let r = reqwest::Client::new()
         .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
@@ -659,7 +659,7 @@ async fn imagetags_answers_from_the_meta_row_without_reading_the_manifest() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
-    slatedb::object_store::ObjectStoreExt::delete(&e.store.os, &kloudlite_git_registry::store::manifest_path("acme", "nginx", &d))
+    slatedb::object_store::ObjectStoreExt::delete(&e.store.os, &kloudlite_registry::store::manifest_path("acme", "nginx", &d))
         .await
         .unwrap();
 

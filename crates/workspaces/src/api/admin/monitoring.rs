@@ -38,7 +38,7 @@ struct SignalsResponse {
     pods_listed: usize,
     /// `"history"` when at least one rule has a recorded state, `"none"` when nothing is reporting.
     source: &'static str,
-    /// Only when `KLOUDLITE_GIT_HYPERDX_URL` is set: a dead link on a monitoring page is worse than
+    /// Only when `KLOUDLITE_HYPERDX_URL` is set: a dead link on a monitoring page is worse than
     /// no link.
     #[serde(skip_serializing_if = "Option::is_none")]
     hyperdx_url: Option<String>,
@@ -77,7 +77,7 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
     }
 
     let client = aks(&s)?;
-    let pods = Api::<Pod>::namespaced(client.clone(), "kloudlite-git")
+    let pods = Api::<Pod>::namespaced(client.clone(), "kloudlite")
         .list(&ListParams::default())
         .await
         .map_err(kube_err)?;
@@ -104,7 +104,7 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
         scrape_failures: Vec::new(),
         pods_listed: pods.items.len(),
         source,
-        hyperdx_url: std::env::var("KLOUDLITE_GIT_HYPERDX_URL")
+        hyperdx_url: std::env::var("KLOUDLITE_HYPERDX_URL")
             .ok()
             .filter(|u| !u.is_empty()),
     })

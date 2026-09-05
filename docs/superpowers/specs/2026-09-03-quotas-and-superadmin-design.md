@@ -77,7 +77,7 @@ reason }`, `status { state: pending | approved | denied, decidedBy, decidedAt, n
 
 - A `superadmins` collection/flag in the directory (server tier, beside users and teams):
   a list of user ids. Managed by `POST/DELETE /api/admin/superadmins/{user}` on the server tier,
-  itself superadmin-only; the bootstrap is the existing `KLOUDLITE_GIT_WORKSPACES_ADMINS` env — on
+  itself superadmin-only; the bootstrap is the existing `KLOUDLITE_WORKSPACES_ADMINS` env — on
   boot the api tier ensures those emails are in the list, then the env is only a bootstrap.
 - Login mints `superadmin: true` into the session JWT when the user is listed; `/v1` and the
   web read the claim (`/v1` keeps `require_admin` but it now checks the claim, and `/v1/regions`
@@ -107,14 +107,14 @@ Everything that needs the superadmin claim is served by a SEPARATE api process, 
 | node decommission status | — |
 | cross-owner list / stop / delete | own objects only |
 
-- Same image, same `kloudlite-git-api` binary, one env `KLOUDLITE_GIT_API_ROLE=user|admin` (default
+- Same image, same `kloudlite-api` binary, one env `KLOUDLITE_API_ROLE=user|admin` (default
   `user`). The admin role mounts ONLY `/admin/*` and answers 404 to `/v1`; the user role mounts
   ONLY `/v1/*` and has no admin route compiled into its router — a `/v1` authorization bug cannot
   reach an admin handler because the handler is not there.
 - The admin server refuses every request whose JWT lacks `superadmin: true`, before routing.
-- Separate Deployment (`kloudlite-git-admin`, 1 replica) and Service — NO Ingress and no DNS
+- Separate Deployment (`kloudlite-admin`, 1 replica) and Service — NO Ingress and no DNS
   (owner, 2026-09-04): nothing outside the cluster calls the admin api; the web reaches it
-  server-side through `KLOUDLITE_GIT_ADMIN_API_URL=http://kloudlite-git-admin`, and the superadmin
+  server-side through `KLOUDLITE_ADMIN_API_URL=http://kloudlite-admin`, and the superadmin
   pages live on the app host at `/superadmin`, reached from a "Superadmin" entry in the profile
   dropdown that only a session with the claim sees. The gate is identity: the admin server
   refuses every request whose JWT lacks `superadmin: true`. Separate ServiceAccount whose
@@ -123,7 +123,7 @@ Everything that needs the superadmin claim is served by a SEPARATE api process, 
   create) plus `create` on `QuotaRequest` (a person or team admin opens one).
 - The web's `/superadmin` area calls the admin api; `NEXT_PUBLIC_ADMIN_API_URL` (or the server-side
   equivalent) names it. Everything else in the web keeps calling `/v1`.
-- `KLOUDLITE_GIT_WORKSPACES_ADMINS` bootstrap runs on the admin server only, and DEFAULTS to
+- `KLOUDLITE_WORKSPACES_ADMINS` bootstrap runs on the admin server only, and DEFAULTS to
   `karthik@kloudlite.io` when unset (owner, 2026-09-04), so a fresh deployment always has one
   superadmin who can add the rest from the admin area.
 
@@ -157,7 +157,7 @@ claim is the gate, and the admin server additionally refuses any token without i
 | push when at the snapshots limit | 409; the working copy keeps running |
 | owner with no `Quota` object | the `default-user` or `default-team` limits apply |
 | superadmin lists another owner's workspaces | allowed (claim), audit-logged with the caller |
-| `KLOUDLITE_GIT_WORKSPACES_ADMINS` set at boot | those users are ensured in the superadmin list; the env is otherwise unused |
+| `KLOUDLITE_WORKSPACES_ADMINS` set at boot | those users are ensured in the superadmin list; the env is otherwise unused |
 
 ## Not doing
 

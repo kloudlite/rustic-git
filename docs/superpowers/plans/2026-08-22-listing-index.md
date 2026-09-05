@@ -253,9 +253,9 @@ Assert each of the three states with real `os.get` calls on both paths.
 ### Task 8: Drift ceiling documented
 
 **Files:**
-- Modify: `deploy/kloudlite-git.yaml` — comment on the worker Deployment naming the sweep cadence and the drift ceiling per spec §6: structural drift heals within one sweep period; visibility drift heals when the owning node next opens the repo or on its warm-repo reconcile lane
+- Modify: `deploy/kloudlite.yaml` — comment on the worker Deployment naming the sweep cadence and the drift ceiling per spec §6: structural drift heals within one sweep period; visibility drift heals when the owning node next opens the repo or on its warm-repo reconcile lane
 - Modify: `CLAUDE.md` — one line under the load-bearing rules: markers under `index/` are views, never authorization; owning nodes write them and reconcile their visibility, the GC worker reconciles their structure
-- [ ] **Step 1:** Make both edits. **Step 2:** `kubectl apply --dry-run=client -f deploy/kloudlite-git.yaml` OK; `cargo test` green (no code change). **Step 3: Commit** — `Document the listing index and its drift ceiling`
+- [ ] **Step 1:** Make both edits. **Step 2:** `kubectl apply --dry-run=client -f deploy/kloudlite.yaml` OK; `cargo test` green (no code change). **Step 3: Commit** — `Document the listing index and its drift ceiling`
 
 ---
 

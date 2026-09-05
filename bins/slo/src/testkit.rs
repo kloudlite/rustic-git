@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use kloudlite_git_workspaces::slo::catalogue::Suite;
+use kloudlite_workspaces::slo::catalogue::Suite;
 
 use crate::config::Config;
 use crate::ctx::Ctx;

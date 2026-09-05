@@ -140,7 +140,7 @@ mod tests {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces packages`
+Run: `cargo test -p kloudlite-workspaces packages`
 Expected: compile error, `packages` module not found.
 
 - [ ] **Step 3: Implement**
@@ -295,8 +295,8 @@ pub fn path_env(image_path: Option<&str>) -> String {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces packages`
-Expected: 7 passed. Also `cargo clippy -p kloudlite-git-workspaces -- -D warnings` clean.
+Run: `cargo test -p kloudlite-workspaces packages`
+Expected: 7 passed. Also `cargo clippy -p kloudlite-workspaces -- -D warnings` clean.
 
 - [ ] **Step 5: Commit**
 
@@ -346,13 +346,13 @@ fn workspace_status_carries_packages_and_omits_it_when_unset() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cargo test -p kloudlite-git-workspaces workspace_status_carries_packages` → compile error.
+- [ ] **Step 2: Run to verify it fails** — `cargo test -p kloudlite-workspaces workspace_status_carries_packages` → compile error.
 
 - [ ] **Step 3: Implement** — add `PackagesStatus` (doc comment: what the FILE says as of the last pass vs. what the profile on disk IS — `observed` is the list, `observed_hash` the idempotency key) and the `packages` field on `WorkspaceStatus`; `pub const PACKAGES_READY: &str = "PackagesReady";` next to the other condition names.
 
 - [ ] **Step 4: Regenerate and test**
 
-Run: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml && cargo test -p kloudlite-git-workspaces`
+Run: `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml && cargo test -p kloudlite-workspaces`
 Expected: `deploy/k3s/crds.yaml` changes (Workspace status schema gains `packages`); all pass.
 
 - [ ] **Step 5: Commit**
@@ -426,7 +426,7 @@ fn the_nix_pv_is_read_only_and_pinned_to_the_node() {
 
 (`ws_spec()`, `ctx()`, `owner_ref()` are the existing test helpers in that module — reuse them; if `ws_spec` is named differently there, use the helper the `a_workspace_pod_double_mounts_its_volume` test uses.)
 
-- [ ] **Step 2: Run to verify they fail** — `cargo test -p kloudlite-git-workspaces k8s::tests` → compile errors (`nix_pv` missing).
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p kloudlite-workspaces k8s::tests` → compile errors (`nix_pv` missing).
 
 - [ ] **Step 3: Implement**
 
@@ -520,7 +520,7 @@ and `volumes: Some(vec![claim_volume(id), nix_volume(id), user_key_volume(init.i
 
 `path_env(None)`: the image's PATH is not readable at apply time; the default covers Debian and Alpine images. `// ponytail: an image with a non-standard PATH loses it; read it from the image config via the registry if that ever matters.`
 
-- [ ] **Step 4: Run** — `cargo test -p kloudlite-git-workspaces k8s && cargo clippy -p kloudlite-git-workspaces -- -D warnings`. Expected: all pass, including `a_workspace_pod_double_mounts_its_volume` (it counts claims named `live`; the new mounts are named `nix`).
+- [ ] **Step 4: Run** — `cargo test -p kloudlite-workspaces k8s && cargo clippy -p kloudlite-workspaces -- -D warnings`. Expected: all pass, including `a_workspace_pod_double_mounts_its_volume` (it counts claims named `live`; the new mounts are named `nix`).
 
 - [ ] **Step 5: Commit**
 
@@ -566,7 +566,7 @@ fn a_list_is_validated_as_a_whole() {
   in `crd.rs` tests: `WorkspaceSpec` round-trips `packages` and omits it when empty (mirror `workspace_status_carries_packages_and_omits_it_when_unset`).
 - [ ] **Step 2: Run** — expect compile failures (`validate_list` missing).
 - [ ] **Step 3: Implement** — rename `FileError`→`PackageError` (drop `TooLarge`, `Yaml`, `Pin`), remove the YAML parse and the pin validation, add `validate_list`, remove `serde_yaml` from both Cargo.toml files (`cargo update -p serde_yaml` is NOT needed — the lock keeps it for other deps), update the module doc (the list now arrives from the API/CR, validated twice because an object can be written by kubectl). Add `packages` to `WorkspaceSpec` with a doc comment (the truth; a clone copies it; a restore never touches it). Regenerate crds.yaml.
-- [ ] **Step 4: Run** — `cargo test -p kloudlite-git-workspaces && cargo clippy -p kloudlite-git-workspaces -- -D warnings && CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml && cargo test -p kloudlite-git-workspaces --test crd_yaml`.
+- [ ] **Step 4: Run** — `cargo test -p kloudlite-workspaces && cargo clippy -p kloudlite-workspaces -- -D warnings && CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml && cargo test -p kloudlite-workspaces --test crd_yaml`.
 - [ ] **Step 5: Commit** — `git commit -m "Carry a workspace's package list on its spec"`.
 
 ---
@@ -669,7 +669,7 @@ mod tests {
 
 (`tempfile` is already a dev-dependency of the agent crate if `bins/agent/Cargo.toml` lists it; otherwise add `tempfile = "3"` under `[dev-dependencies]`.)
 
-- [ ] **Step 2: Run to verify they fail** — `cargo test -p kloudlite-git-agent-bin nix::` → compile error.
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p kloudlite-agent-bin nix::` → compile error.
 
 - [ ] **Step 3: Implement**
 
@@ -802,7 +802,7 @@ pub fn profile_exists_in(root: &Path, id: &str) -> bool {
 
 In `bins/agent/src/lib.rs`: `pub mod nix;`; in the boot path, `let nix: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });`, refuse to start when `WS_NIXPKGS` is empty (same shape as the `NODE_NAME` check: `return Err("WS_NIXPKGS is required: the nixpkgs pin every profile on this node is built against".into())`), `std::fs::create_dir_all(nix::PROFILES_DIR)` (log a warning, not a failure, if `/nix` is absent — the daemon container seeds it). Add `pub nix: Arc<dyn nix::Nix>` to `Ctx` in `controller.rs` and wherever `Ctx` is constructed (lib.rs and the test helper in `bins/agent/tests/reconcile.rs` — give the test helper a `FakeNix`, defined in Task 5).
 
-- [ ] **Step 4: Run** — `cargo test -p kloudlite-git-agent-bin nix:: && cargo clippy -p kloudlite-git-agent-bin -- -D warnings`. Expected: 4 pass. (The `reconcile.rs` tests fail to compile until Task 5 adds `nix` to the test `Ctx` — do that minimal edit here with a `FakeNix` that returns `Ok` for everything, and let Task 5 grow it.)
+- [ ] **Step 4: Run** — `cargo test -p kloudlite-agent-bin nix:: && cargo clippy -p kloudlite-agent-bin -- -D warnings`. Expected: 4 pass. (The `reconcile.rs` tests fail to compile until Task 5 adds `nix` to the test `Ctx` — do that minimal edit here with a `FakeNix` that returns `Ok` for everything, and let Task 5 grow it.)
 
 - [ ] **Step 5: Commit**
 
@@ -828,7 +828,7 @@ git commit -m "Give the agent a Nix runner that builds and publishes profiles by
 ```rust
 /// A fake `Nix` that records what it was asked to build and answers as told.
 struct FakeNix { builds: Mutex<Vec<(String, PathBuf)>>, answer: Mutex<Result<(), String>> }
-impl kloudlite_git_agent::nix::Nix for FakeNix {
+impl kloudlite_agent::nix::Nix for FakeNix {
     fn build(&self, expr: &str, out: &Path, _: Duration) -> Result<(), String> {
         self.builds.lock().unwrap().push((expr.to_string(), out.to_path_buf()));
         let r = self.answer.lock().unwrap().clone();
@@ -862,12 +862,12 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
     let (ctx, _rec, fake) = ws_ctx_with_nix().await;
     let mut ws = ready_workspace("ws-1", vec!["hello".into()]);
     let pin = std::env::var("WS_NIXPKGS").unwrap();
-    ws.status.as_mut().unwrap().packages = Some(kloudlite_git_workspaces::crd::PackagesStatus {
+    ws.status.as_mut().unwrap().packages = Some(kloudlite_workspaces::crd::PackagesStatus {
         observed: vec!["hello".into()],
-        observed_hash: Some(kloudlite_git_workspaces::packages::hash(&pin, &["hello".into()])),
+        observed_hash: Some(kloudlite_workspaces::packages::hash(&pin, &["hello".into()])),
         profile: None, nixpkgs: Some(pin),
     });
-    std::os::unix::fs::symlink("/tmp", kloudlite_git_agent::nix::profile_path("ws-1")).unwrap();
+    std::os::unix::fs::symlink("/tmp", kloudlite_agent::nix::profile_path("ws-1")).unwrap();
     let _ = apply_workspace(&ws, &ctx).await.unwrap();
     assert!(fake.builds.lock().unwrap().is_empty(), "nothing to build");
 }
@@ -875,7 +875,7 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
 #[tokio::test]
 async fn a_failed_build_keeps_the_old_profile_and_says_why() {
     let (ctx, rec, fake) = ws_ctx_with_nix().await;
-    std::os::unix::fs::symlink("/tmp", kloudlite_git_agent::nix::profile_path("ws-1")).unwrap();
+    std::os::unix::fs::symlink("/tmp", kloudlite_agent::nix::profile_path("ws-1")).unwrap();
     *fake.answer.lock().unwrap() = Err("error: attribute 'nodejs_99' missing".into());
     let ws = ready_workspace("ws-1", vec!["nodejs_99".into()]);
     let _ = apply_workspace(&ws, &ctx).await.unwrap();
@@ -883,7 +883,7 @@ async fn a_failed_build_keeps_the_old_profile_and_says_why() {
     let c = st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "PackagesReady").unwrap().clone();
     assert_eq!(c["reason"], "BuildFailed");
     assert!(c["message"].as_str().unwrap().contains("nodejs_99"));
-    assert!(kloudlite_git_agent::nix::profile_exists("ws-1"), "the previous profile is untouched");
+    assert!(kloudlite_agent::nix::profile_exists("ws-1"), "the previous profile is untouched");
     assert!(rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "the pod still runs on the old profile");
 }
 
@@ -901,7 +901,7 @@ async fn an_invalid_spec_entry_never_reaches_nix() {
 
 Test plumbing this task adds: `ws_ctx_with_nix()` builds the usual mocked `Ctx` with `nix: Arc<FakeNix>` (returning the `Arc<FakeNix>` too), sets `WS_PROFILES_DIR` to a tempdir and `WS_NIXPKGS` to `github:NixOS/nixpkgs/` + 40 `a`s. `ready_workspace(id, packages)` returns a Workspace whose Volume mock answers `phase: ready` with `spec.packages` set; `WS_STATUS` is the status PATCH path constant.
 
-- [ ] **Step 2: Run to verify they fail** — `cargo test -p kloudlite-git-agent-bin --test reconcile profile` → failures.
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p kloudlite-agent-bin --test reconcile profile` → failures.
 
 - [ ] **Step 3: Implement**
 
@@ -925,7 +925,7 @@ async fn ensure_profile(
     prev: &crd::WorkspaceStatus,
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
-    use kloudlite_git_workspaces::packages;
+    use kloudlite_workspaces::packages;
     let uid = w.uid().unwrap_or_default();
     let key = format!("profile:{uid}");
 
@@ -1037,7 +1037,7 @@ and carry `packages: prev.packages.clone()` plus the `PackagesReady` condition i
 
 `RETRY` already exists (60 s).
 
-- [ ] **Step 4: Run** — `cargo test -p kloudlite-git-agent-bin && cargo clippy -p kloudlite-git-agent-bin -- -D warnings`.
+- [ ] **Step 4: Run** — `cargo test -p kloudlite-agent-bin && cargo clippy -p kloudlite-agent-bin -- -D warnings`.
 
 - [ ] **Step 5: Commit**
 
@@ -1065,7 +1065,7 @@ git commit -m "Build a workspace's Nix profile from its spec before its pod"
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kloudlite-git-nix
+  name: kloudlite-nix
   namespace: kube-system
 data:
   nix.conf: |
@@ -1133,7 +1133,7 @@ volumeMounts: `- name: nix\n  mountPath: /nix` and `- name: nix-conf\n  mountPat
             type: DirectoryOrCreate
         - name: nix-conf
           configMap:
-            name: kloudlite-git-nix
+            name: kloudlite-nix
 ```
 README apply line: add `-f nix-conf.yaml`.
 
@@ -1142,8 +1142,8 @@ README apply line: add `-f nix-conf.yaml`.
 ```bash
 export KUBECONFIG=.local/k3s.yaml
 kubectl apply -f deploy/k3s/nix-conf.yaml -f deploy/k3s/agent-daemonset.yaml   # image tag unchanged for now — this checks the daemon only
-kubectl -n kube-system rollout status ds/kloudlite-git-agent --timeout=300s
-P=$(kubectl -n kube-system get pods -l app=kloudlite-git-agent -o name | head -1)
+kubectl -n kube-system rollout status ds/kloudlite-agent --timeout=300s
+P=$(kubectl -n kube-system get pods -l app=kloudlite-agent -o name | head -1)
 kubectl -n kube-system exec $P -c nix-daemon -- /nix/var/nix/profiles/default/bin/nix store ping
 kubectl -n kube-system exec $P -c agent -- /nix/var/nix/profiles/default/bin/nix build --impure --expr 'let pkgs = import (builtins.getFlake "github:NixOS/nixpkgs/<rev>") { }; in pkgs.hello' -o /nix/var/kloudlite/profiles/smoke && kubectl -n kube-system exec $P -c agent -- /nix/var/kloudlite/profiles/smoke/bin/hello
 kubectl -n kube-system exec $P -c agent -- rm /nix/var/kloudlite/profiles/smoke
@@ -1181,7 +1181,7 @@ fn the_store_gc_threshold_reads_gigabytes_with_a_default() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cargo test -p kloudlite-git-agent-bin nix_gc_high` → compile error.
+- [ ] **Step 2: Run to verify it fails** — `cargo test -p kloudlite-agent-bin nix_gc_high` → compile error.
 
 - [ ] **Step 3: Implement** — `spawn_janitor(engine, pool, nix: Arc<dyn nix::Nix>)`; after the existing sweeps:
 ```rust
@@ -1198,7 +1198,7 @@ fn the_store_gc_threshold_reads_gigabytes_with_a_default() {
 ```
 `nix_gc_high_bytes()` reads `WS_NIX_GC_HIGH_GB` (default 60) × 2^30. `nix_store_bytes` walks the dir with `walkdir` if it is already a dependency, else a recursive `read_dir` summing `metadata().len()` (skip errors). `// ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix filesystem is the cheaper signal once /nix is its own mount.`
 
-- [ ] **Step 4: Run** — `cargo test -p kloudlite-git-agent-bin && cargo clippy -p kloudlite-git-agent-bin -- -D warnings`.
+- [ ] **Step 4: Run** — `cargo test -p kloudlite-agent-bin && cargo clippy -p kloudlite-agent-bin -- -D warnings`.
 
 - [ ] **Step 5: Commit**
 
@@ -1249,7 +1249,7 @@ plus, in the api's HTTP tests (the file has an in-process router test pattern fo
 
 - [ ] **Step 3: Implement** — `model.rs`: fields + `PackagesDoc`. `api.rs`: create request struct gains `#[serde(default)] packages: Vec<String>`; `packages::validate_list` → 422 on Err; written into `WorkspaceSpec.packages`. New handler `patch_workspace_packages` on `PATCH /v1/workspaces/{id}` (owner check via the same helper the other per-workspace handlers use; body `{ packages }`; validate; `Patch::Merge(json!({"spec": {"packages": list}}))` on the Workspace; return the refreshed doc). `ws_doc`: `packages: w.spec.packages.clone()`, `packages_status` from the `PACKAGES_READY` condition. Web: `api.ts` types + `setWorkspacePackages`; `actions.ts` `setPackages` server action (form field `packages` = whitespace/comma-separated text → array; `revalidatePath`); `workspace-list.tsx`: in the create dialog a `packages` Input (placeholder `hello jq nodejs_20`, hint "nixpkgs attribute names — search.nixos.org"); on each row, chips for `w.packages`, the `installing packages…` / `packages: BuildFailed` status with `title={message}`, and a small "Packages" dialog (Input prefilled with the current list, Apply → `setPackages`, closes on success via `useDialogUntilSuccess` — copy the sibling dialogs' shape).
 
-- [ ] **Step 4: Run** — `cargo test -p kloudlite-git-workspaces && cargo clippy --workspace -- -D warnings && cd web && bunx tsc --noEmit -p apps/web/tsconfig.json && bun run lint`.
+- [ ] **Step 4: Run** — `cargo test -p kloudlite-workspaces && cargo clippy --workspace -- -D warnings && cd web && bunx tsc --noEmit -p apps/web/tsconfig.json && bun run lint`.
 
 - [ ] **Step 5: Commit**
 
@@ -1303,8 +1303,8 @@ Plus, in the existing clone phase after the clone is ready: `kubectl -n "$WS_NS"
 ### Task 10: Rollout
 
 - [ ] **Step 1** — `kubectl apply -f deploy/k3s/crds.yaml` (k3s). Additive.
-- [ ] **Step 2** — push; wait for `image.yml`; pin `deploy/k3s/agent-daemonset.yaml` to the SHA; `kubectl apply -f deploy/k3s/nix-conf.yaml -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-daemonset.yaml`; `rollout status`. Watch `kubectl -n kube-system logs ds/kloudlite-git-agent -c agent` for `PackagesReady`; existing workspaces get an empty profile on their next pass and keep their current pods (`// ponytail:` in the spec: a pod created before this roll has no `/nix` until it is recreated).
-- [ ] **Step 3** — push the web/api change; pin `deploy/kloudlite-git.yaml` + `deploy/kloudlite-git-web.yaml`; apply.
+- [ ] **Step 2** — push; wait for `image.yml`; pin `deploy/k3s/agent-daemonset.yaml` to the SHA; `kubectl apply -f deploy/k3s/nix-conf.yaml -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-daemonset.yaml`; `rollout status`. Watch `kubectl -n kube-system logs ds/kloudlite-agent -c agent` for `PackagesReady`; existing workspaces get an empty profile on their next pass and keep their current pods (`// ponytail:` in the spec: a pod created before this roll has no `/nix` until it is recreated).
+- [ ] **Step 3** — push the web/api change; pin `deploy/kloudlite.yaml` + `deploy/kloudlite-web.yaml`; apply.
 - [ ] **Step 4** — Prove it in production: a repo with `kloudlite.yaml` → workspace → `hello`. Screenshot the row showing the chips.
 
 ---

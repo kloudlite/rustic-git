@@ -10,7 +10,7 @@
 //! `head`, `put`, `delete`, `copy`, `rename` — is a default that funnels through one of them, so
 //! there is nothing to add and nothing that can be double counted.
 
-use kloudlite_git_core::metrics::dep_done;
+use kloudlite_core::metrics::dep_done;
 use slatedb::object_store::path::Path;
 use slatedb::object_store::{
     CopyOptions, Error, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -185,7 +185,7 @@ mod tests {
             generic("whatever"),
             Error::NotFound { path: "a".into(), source: "x".to_string().into() },
         ] {
-            assert!(kloudlite_git_core::metrics::ERROR_KINDS.contains(&kind_of(&e)));
+            assert!(kloudlite_core::metrics::ERROR_KINDS.contains(&kind_of(&e)));
         }
     }
 }

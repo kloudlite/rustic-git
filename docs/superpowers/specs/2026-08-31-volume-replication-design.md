@@ -154,7 +154,7 @@ unchanged). Replacing the registry as the durable tier — this is availability,
 
 1. **Space.** N=2 doubles pool usage. The pool is 1% full of 1 TiB today, so this is not urgent, but
    nothing here bounds total replica space or sheds replicas under pressure.
-2. **Where the peer secret comes from.** The `kloudlite-git-jwt` Secret is the existing pattern; this
+2. **Where the peer secret comes from.** The `kloudlite-jwt` Secret is the existing pattern; this
    needs its own key and a decision about rotation.
 3. **Interaction with the home volume.** A home is per-owner-per-node by design and every workspace
    of that owner on that node mounts it. Replicating a home to a node that holds none of the owner's

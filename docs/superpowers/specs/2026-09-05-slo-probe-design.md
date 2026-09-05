@@ -8,13 +8,13 @@
 `deploy/alerts.md` watches symptoms — 5xx ratios, lease renewals, Azure's own availability
 numbers. None of it answers the question the owner actually asks: *can a person, right now, push
 a repo, open a workspace, ssh into it, push a snapshot and get it back?* Eleven of the hundred
-SLOs in the catalogue (`deploy/slo.md`, the visual is the "Kloudlite Git SLOs" artifact) have an
+SLOs in the catalogue (`deploy/slo.md`, the visual is the "Kloudlite SLOs" artifact) have an
 alert; the other eighty-nine are only observable by doing the thing. The owner wants to know
 first, before any user does.
 
 ## Decision, in one paragraph
 
-A new binary, `kloudlite-git-slo`, walks one synthetic user's whole day — identity, git over
+A new binary, `kloudlite-slo`, walks one synthetic user's whole day — identity, git over
 HTTP and SSH, a pull request, the registry, a workspace, an environment, the lifecycle verbs,
 the admin queue, the security refusals, the edge, the telemetry pipeline — as a Kubernetes
 `CronJob` on AKS every five minutes, with a weekly and a monthly suite that add the heavy checks
@@ -28,7 +28,7 @@ error budget and burn rate, and evaluates two new rules in the existing 30 s eva
 step by step, every SLO's budget, the last twenty runs, and one run's detail with the failing
 step's message. A firing `SloBurn` reaches the owner the way every other rule does (HyperDX
 alert → webhook) and, additionally, the admin process posts one line to
-`KLOUDLITE_GIT_SLO_WEBHOOK` on every run failure, so a broken journey is a message within the
+`KLOUDLITE_SLO_WEBHOOK` on every run failure, so a broken journey is a message within the
 same five minutes it broke.
 
 Not chosen: a shell script in a `busybox` CronJob (no structured logs, no shared JWT/HTTP code,
@@ -42,13 +42,13 @@ separate ClickHouse writer (the single-writer rule for `kloudlite.*` stays).
 | Component | Where | What it does |
 | --- | --- | --- |
 | Catalogue | `crates/workspaces/src/slo/catalogue.rs`, `deploy/slo.md` | Every SLO: `id`, feature, SLI text, `Target { good_pct, max_ms }`, suite. One test holds the two equal. |
-| Probe | `bins/slo` → `kloudlite-git-slo`, image `ghcr.io/kloudlite/kloudlite-git-slo` | Runs a suite; one stage at a time; reports after each stage; tears down always. Subcommands `run --suite fast|weekly|monthly`, `bootstrap`. |
+| Probe | `bins/slo` → `kloudlite-slo`, image `ghcr.io/kloudlite/kloudlite-slo` | Runs a suite; one stage at a time; reports after each stage; tears down always. Subcommands `run --suite fast|weekly|monthly`, `bootstrap`. |
 | Store | `history::schema` migrations 8 and 9: `kloudlite.slo_runs`, `kloudlite.slo_results` | `ReplacingMergeTree`, 400 d TTL, keyed so a re-sent report is idempotent. |
 | Admin API | `crates/workspaces/src/api/admin/slo.rs` | `PUT /admin/slo/runs/{id}` (the probe's report), `GET /admin/slo`, `GET /admin/slo/runs`, `GET /admin/slo/runs/{id}`. |
 | Rules | `history::alerts` catalogue, `deploy/alerts.md` | `SloProbeMissing`, `SloBurn`. Tier `Central`. |
-| Notify | `history::notify` | One JSON line to `KLOUDLITE_GIT_SLO_WEBHOOK` on run failure and on a `SloBurn` transition. Optional; unset means nothing. |
+| Notify | `history::notify` | One JSON line to `KLOUDLITE_SLO_WEBHOOK` on run failure and on a `SloBurn` transition. Optional; unset means nothing. |
 | Console | `web/apps/web/src/app/(shell)/superadmin/slo/` | Area nine. Running-now tracker, SLO table with budgets, runs table, run detail. Overview tile. Fixtures. |
-| Deploy | `deploy/kloudlite-git.yaml` | Three `CronJob`s, ServiceAccount + Role, Secret `kloudlite-git-slo`, `Quota` CRs for the two probe owners (applied on k3s). |
+| Deploy | `deploy/kloudlite.yaml` | Three `CronJob`s, ServiceAccount + Role, Secret `kloudlite-slo`, `Quota` CRs for the two probe owners (applied on k3s). |
 
 ## The catalogue
 
@@ -76,8 +76,8 @@ backup restore drill) is in the table with suite `manual` and no id, and never i
 
 ## The probe
 
-**Identity.** The probe mounts the `kloudlite-git-jwt` Secret and mints its own tokens with
-`kloudlite_git_core::jwt`: a user token for `slo-probe`, one for `slo-other` (the second tenant),
+**Identity.** The probe mounts the `kloudlite-jwt` Secret and mints its own tokens with
+`kloudlite_core::jwt`: a user token for `slo-probe`, one for `slo-other` (the second tenant),
 and an admin token (`mint_admin(.., superadmin: true)`) used only for `/admin/*` calls. It never
 holds a password, an Azure credential or a HyperDX key. `bootstrap` (a one-off Job, idempotent)
 claims the two usernames through `POST /v1/users/username`, pushes the registry canary image
@@ -103,7 +103,7 @@ Dockerfile), `kubectl` (pinned), `kl` (built in the same `cargo build`), `openss
 `dig` (`bind9-dnsutils`), `curl`. Debian bookworm, uid 1001, read-only root, `/tmp` emptyDir
 for the git and crane working trees.
 
-**Access.** ServiceAccount `kloudlite-git-slo` in ns `kloudlite-git` with a Role limited to
+**Access.** ServiceAccount `kloudlite-slo` in ns `kloudlite` with a Role limited to
 `pods: get, list, delete` (the leader failover drill) and a mounted copy of the k3s kubeconfig
 Secret the api tier already has (exec into workspace pods, node taint/label for the drills,
 `auth can-i` as the agent SA). The gateway is reached through Cloudflare like a user's `kl`.
@@ -201,8 +201,8 @@ Every caller-shaped value in the SQL goes through `series::ident` or a typed par
 - **Runs** `Section`: last twenty — suite, started, duration, state pill, failed step and its
   detail truncated, link to the run page.
 - `/superadmin/slo/runs/[id]`: every step in order with ms and detail, the stage headers from
-  the journey, and "Open in HyperDX" pre-filtered to `service.name:kloudlite-git-slo run_id:…`
-  when `KLOUDLITE_GIT_HYPERDX_URL` is set.
+  the journey, and "Open in HyperDX" pre-filtered to `service.name:kloudlite-slo run_id:…`
+  when `KLOUDLITE_HYPERDX_URL` is set.
 - Overview gets one tile, "SLO", value = SLOs burning, sub = last run state and age, `href`
   to the area; the Overview's attention list gets `slo.failed` and `slo.burning` kinds.
 - `AutoRefresh` 10 s on the area page, like Monitoring. Fixtures in `lib/fixtures/superadmin.ts`
@@ -210,23 +210,23 @@ Every caller-shaped value in the SQL goes through `series::ident` or a typed par
 
 ## Deploy
 
-- `image.yml`: the `slo` Dockerfile stage → `ghcr.io/kloudlite/kloudlite-git-slo:{sha}`;
+- `image.yml`: the `slo` Dockerfile stage → `ghcr.io/kloudlite/kloudlite-slo:{sha}`;
   `deploy/pin.sh` rewrites it with the other Rust images.
-- `deploy/kloudlite-git.yaml`: `CronJob/slo-fast` `*/5 * * * *`, `concurrencyPolicy: Forbid`,
+- `deploy/kloudlite.yaml`: `CronJob/slo-fast` `*/5 * * * *`, `concurrencyPolicy: Forbid`,
   `activeDeadlineSeconds: 900`, `successfulJobsHistoryLimit: 3`, `failedJobsHistoryLimit: 5`;
   `slo-weekly` `0 2 * * 0`; `slo-monthly` `0 3 * * 0` with the binary exiting 0 and doing
-  nothing when the day of month is past 7. All three: `KLOUDLITE_GIT_LOG_FORMAT=json`,
+  nothing when the day of month is past 7. All three: `KLOUDLITE_LOG_FORMAT=json`,
   `prometheus.io/scrape: "false"`, `restartPolicy: Never`, `backoffLimit: 0`.
-- Env (the names `bins/slo/src/config.rs` reads are the contract): `KLOUDLITE_GIT_ADMIN_API_URL`,
-  `KLOUDLITE_GIT_API_URL`, `KLOUDLITE_GIT_WEB_URL`, `KLOUDLITE_GIT_URL` (git over HTTP),
-  `KLOUDLITE_GIT_SLO_REGISTRY`, `KLOUDLITE_GIT_SLO_SSH_HOST`, `KLOUDLITE_GIT_SLO_REGION` (the k3s
-  region the workspace goes to), `KLOUDLITE_GIT_SLO_HOSTS` (comma list for the edge checks),
-  `KLOUDLITE_GIT_JWT_SECRET`, `KUBECONFIG`; optional `KLOUDLITE_GIT_SLO_SSH_HOSTKEY` and
-  `KLOUDLITE_GIT_SLO_CANARY_DIGEST` (unset → the dependent ids skip). Shared across the three
-  CronJobs through `ConfigMap/kloudlite-git-slo-env`.
-- Secret `kloudlite-git-slo`: `ssh_key` (the probe user's private key, generated once by the
+- Env (the names `bins/slo/src/config.rs` reads are the contract): `KLOUDLITE_ADMIN_API_URL`,
+  `KLOUDLITE_API_URL`, `KLOUDLITE_WEB_URL`, `KLOUDLITE_URL` (git over HTTP),
+  `KLOUDLITE_SLO_REGISTRY`, `KLOUDLITE_SLO_SSH_HOST`, `KLOUDLITE_SLO_REGION` (the k3s
+  region the workspace goes to), `KLOUDLITE_SLO_HOSTS` (comma list for the edge checks),
+  `KLOUDLITE_JWT_SECRET`, `KUBECONFIG`; optional `KLOUDLITE_SLO_SSH_HOSTKEY` and
+  `KLOUDLITE_SLO_CANARY_DIGEST` (unset → the dependent ids skip). Shared across the three
+  CronJobs through `ConfigMap/kloudlite-slo-env`.
+- Secret `kloudlite-slo`: `ssh_key` (the probe user's private key, generated once by the
   operator, its public half registered by the run itself), nothing else.
-- Admin Deployment: `KLOUDLITE_GIT_SLO_WEBHOOK` optional.
+- Admin Deployment: `KLOUDLITE_SLO_WEBHOOK` optional.
 - k3s: `Quota/slo-probe` (`workspaces: 1, environments: 1, snapshots: 10, diskGb: 5`),
   `Quota/slo-other` (all zero), applied by hand per `deploy/k3s/README.md`.
 - `deploy/alerts.md` gains the two rows; `deploy/RECOVERY.md` notes that the probe is the
@@ -262,5 +262,5 @@ Every caller-shaped value in the SQL goes through `series::ident` or a typed par
 
 Email sign-in and passkey registration (need an inbox / an authenticator). Per-region probe
 pods (one probe on AKS reaches every region through the api; a second region gets a second
-`CronJob` with a different `KLOUDLITE_GIT_SLO_REGION`, no code). Public status page. Alert
+`CronJob` with a different `KLOUDLITE_SLO_REGION`, no code). Public status page. Alert
 routing beyond the one webhook. Node SSH.

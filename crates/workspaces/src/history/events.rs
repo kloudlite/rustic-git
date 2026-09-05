@@ -73,7 +73,7 @@ pub fn audit_event(ts: &str, actor: &str, action: &str, target: &str, result: &s
     }
 }
 
-/// The one stream every repo's events multiplex onto (`kloudlite_git_storage::events`), and OUR
+/// The one stream every repo's events multiplex onto (`kloudlite_storage::events`), and OUR
 /// consumer group on it — separate from the merge worker's, so the two never steal each other's
 /// entries and neither depends on the other running.
 const STREAM: &str = "events";
@@ -95,7 +95,7 @@ const BATCH: usize = 64;
 /// same row and the ReplacingMergeTree collapses it, which is what lets the consumer ack AFTER the
 /// insert without ever double-counting.
 pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<EventRow> {
-    let e = kloudlite_git_storage::events::from_fields(fields)?;
+    let e = kloudlite_storage::events::from_fields(fields)?;
     // `owner/name` — a repo key that is not of that shape is a producer bug, not a reason to drop
     // the event: keep the row, leave the owner empty rather than inventing an attribution.
     let owner = e.repo.split_once('/').map(|(o, _)| o.to_string()).unwrap_or_default();
@@ -112,7 +112,7 @@ pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<Even
         // `HeadMoved` is repo-wide and carries no PR, so its `number` is a 0 marker rather than a
         // pull number — naming `repo#0` would invent a pull request that does not exist.
         target: match e.kind {
-            kloudlite_git_storage::events::Kind::HeadMoved => e.repo.clone(),
+            kloudlite_storage::events::Kind::HeadMoved => e.repo.clone(),
             _ => format!("{}#{}", e.repo, e.number),
         },
         // The stream carries repo events, which belong to the git tier, not to a workspace region.
@@ -130,10 +130,10 @@ pub fn stream_event(stream_id: &str, fields: &[(String, String)]) -> Option<Even
 ///
 /// The stream stays a nudge, never the record (CLAUDE.md): with Redis absent `xreadgroup` answers
 /// empty and this loop simply idles — nothing anywhere depends on an entry having arrived.
-pub async fn consume_forever(cache: Arc<kloudlite_git_storage::cache::Cache>, history: Arc<History>) {
+pub async fn consume_forever(cache: Arc<kloudlite_storage::cache::Cache>, history: Arc<History>) {
     if !cache.connected() {
         // Loud once, at startup: "the activity feed stopped filling in" is much harder to diagnose
-        // than a missing KLOUDLITE_GIT_REDIS_URL named in the logs.
+        // than a missing KLOUDLITE_REDIS_URL named in the logs.
         tracing::info!(mode = "no-redis", "history.consumer.disabled");
     }
     cache.xgroup_create_mkstream(STREAM, GROUP).await;
@@ -145,7 +145,7 @@ pub async fn consume_forever(cache: Arc<kloudlite_git_storage::cache::Cache>, hi
         // Once per beat, from the group's own PEL: how far behind this consumer is. Absent rather
         // than 0 when Redis cannot answer — see `xpending_count`.
         if let Some(n) = cache.xpending_count(STREAM, GROUP).await {
-            kloudlite_git_core::metrics::set_gauge("history_stream_pending", n as f64);
+            kloudlite_core::metrics::set_gauge("history_stream_pending", n as f64);
         }
         let mut batch = if last_claim.elapsed() >= RECLAIM_EVERY {
             last_claim = std::time::Instant::now();

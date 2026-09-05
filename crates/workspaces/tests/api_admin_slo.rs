@@ -4,9 +4,9 @@
 //! console keys its placeholder off (never a 500 — a deployment without ClickStack is supported),
 //! and the probe's `PUT` refuses a report that does not describe the run it is filed under.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, ApiState};
-use kloudlite_git_workspaces::history::History;
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, ApiState};
+use kloudlite_workspaces::history::History;
 use serde_json::{json, Value};
 use std::sync::Arc;
 

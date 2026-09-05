@@ -18,9 +18,9 @@
 - Restore precedence, both kinds: explicit request body field → snapshot `state` → live source's spec (if it still exists) → the kind's defaults. `RestoreEnvBody.services` absent ⇒ snapshot's services; `[]` explicit ⇒ no services.
 - Everything a restore takes from a snapshot passes the same validation as a request body: `crate::packages::validate_list` for packages, `check_services` for services. A snapshot is data, never an authorization; owner and team never come from the state.
 - `quota_gb` in the state is `spec.storage.quota_gb`, else the kind's default (`default_env_quota()` for environments; the workspace default `/v1` applies at create).
-- `deploy/k3s/crds.yaml` is regenerated with `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml` and committed; never hand-edited.
+- `deploy/k3s/crds.yaml` is regenerated with `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml` and committed; never hand-edited.
 - Comments say why, never what; keep every `// ponytail:` marker; commit subjects imperative sentence case; no tool attribution anywhere in commit messages.
-- Gates for every task: `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?` (unpiped) and `cargo clippy --workspace --all-targets --locked -- -D warnings`; web tasks add `cd web && bun run lint && bunx tsc --noEmit -p apps/web/tsconfig.json && bun test`.
+- Gates for every task: `cargo test -p kloudlite-agent-bin -p kloudlite-workspaces -- --test-threads=1; echo exit=$?` (unpiped) and `cargo clippy --workspace --all-targets --locked -- -D warnings`; web tasks add `cd web && bun run lint && bunx tsc --noEmit -p apps/web/tsconfig.json && bun test`.
 
 ---
 
@@ -86,7 +86,7 @@ fn of_workspace_copies_the_spec_and_falls_back_to_the_default_quota() {
 
 If `WorkspaceSpec` has fields this literal does not name, fill them with their defaults; if no `DEFAULT_WS_QUOTA_GB` constant exists, introduce `pub const DEFAULT_WS_QUOTA_GB: u64` in `crd.rs` holding the value `/v1`'s create path applies today (find it: `grep -n quota crates/workspaces/src/api.rs` around `create_ws`) and make that path use the constant.
 
-- [ ] **Step 2: Run them, expect failure** — `cargo test -p kloudlite-git-workspaces snapshot_state of_workspace a_snapshot_spec_without` fails: `SnapshotState` not found.
+- [ ] **Step 2: Run them, expect failure** — `cargo test -p kloudlite-workspaces snapshot_state of_workspace a_snapshot_spec_without` fails: `SnapshotState` not found.
 
 - [ ] **Step 3: Implement** — in `crd.rs`, beside `SnapshotSpec`:
 
@@ -142,7 +142,7 @@ Add to `SnapshotSpec`:
 
 Move the environment default quota next to the workspace one as `pub const DEFAULT_ENV_QUOTA_GB: u64` and make `api.rs`'s `default_env_quota()` return it. `model::Service` and `PodResources` must derive `JsonSchema` and `PartialEq` — add the derives if missing (check `Mount` too). Every `SnapshotSpec { .. }` literal in the tree (five cut sites, tests) needs `state: None` for now — grep `SnapshotSpec {` and add it; later tasks replace the `None`s.
 
-- [ ] **Step 4: Regenerate the CRD and run the gates** — `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml`, then `cargo test -p kloudlite-git-agent-bin -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?` and clippy. Confirm `deploy/k3s/crds.yaml` now carries `state` with a `kind` discriminator under the Snapshot schema (`grep -c attachedEnvironment deploy/k3s/crds.yaml` ≥ 1).
+- [ ] **Step 4: Regenerate the CRD and run the gates** — `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml`, then `cargo test -p kloudlite-agent-bin -p kloudlite-workspaces -- --test-threads=1; echo exit=$?` and clippy. Confirm `deploy/k3s/crds.yaml` now carries `state` with a `kind` discriminator under the Snapshot schema (`grep -c attachedEnvironment deploy/k3s/crds.yaml` ≥ 1).
 
 - [ ] **Step 5: Commit** — `git add crates/workspaces deploy/k3s/crds.yaml bins/agent && git commit -m "Add the snapshot state record to the Snapshot CRD"`
 
@@ -158,7 +158,7 @@ Move the environment default quota next to the workspace one as `pub const DEFAU
 - Consumes: `crd::SnapshotState::{of_workspace, of_environment}` (Task 1).
 - Produces: `create_commit(c, volume, owner, worktree, parent, message, state: crd::SnapshotState)`; `clone_base(.., state: crd::SnapshotState)` (or it derives from `src` internally — pick the one with fewer call-site edits and say which in the report).
 
-- [ ] **Step 1: Write the failing tests** — in `crates/workspaces/tests/api_commit_model.rs`, following the file's existing recorder pattern (`rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/snapshots")`):
+- [ ] **Step 1: Write the failing tests** — in `crates/workspaces/tests/api_commit_model.rs`, following the file's existing recorder pattern (`rec.sent("POST", "/apis/kloudlite.io/v1alpha1/snapshots")`):
 
 ```rust
 #[tokio::test]
@@ -167,7 +167,7 @@ async fn a_push_records_the_workspace_definition_on_the_snapshot() {
     let (app, rec) = app_with_ready_workspace("ws-1", "alpine:3.20", &["jq"]).await;
     let r = post(&app, "/v1/workspaces/ws-1/push", json!({"message": "m"})).await;
     assert_eq!(r.status(), 202);
-    let body = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/snapshots").pop().unwrap();
+    let body = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/snapshots").pop().unwrap();
     assert_eq!(body["spec"]["state"]["kind"], "workspace");
     assert_eq!(body["spec"]["state"]["image"], "alpine:3.20");
     assert_eq!(body["spec"]["state"]["packages"], json!(["jq"]));
@@ -178,7 +178,7 @@ async fn a_push_records_the_environment_services_on_the_snapshot() {
     let (app, rec) = app_with_ready_environment("env-1", 2).await; // two services
     let r = post(&app, "/v1/environments/env-1/push", json!({})).await;
     assert_eq!(r.status(), 202);
-    let body = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/snapshots").pop().unwrap();
+    let body = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/snapshots").pop().unwrap();
     assert_eq!(body["spec"]["state"]["kind"], "environment");
     assert_eq!(body["spec"]["state"]["services"].as_array().unwrap().len(), 2);
 }
@@ -188,7 +188,7 @@ async fn a_clone_cut_records_the_source_definition() {
     let (app, rec) = app_with_ready_workspace("ws-1", "alpine:3.20", &["jq"]).await;
     let r = post(&app, "/v1/workspaces/ws-1/clone", json!({"name": "c"})).await;
     assert_eq!(r.status(), 202);
-    let cut = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/snapshots").into_iter()
+    let cut = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/snapshots").into_iter()
         .find(|b| b["metadata"]["name"].as_str().unwrap().starts_with("clone-")).unwrap();
     assert_eq!(cut["spec"]["state"]["kind"], "workspace");
     assert_eq!(cut["spec"]["state"]["image"], "alpine:3.20");
@@ -233,7 +233,7 @@ The `Parent` fixture in those tests gains `state: crd::SnapshotState::Workspace 
 In `bins/agent/tests/reconcile.rs`, the existing stop-cut test (grep `stop-ws-` in that file) gains:
 
 ```rust
-let cut = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/snapshots").into_iter()
+let cut = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/snapshots").into_iter()
     .find(|b| b["metadata"]["name"].as_str().unwrap().starts_with("stop-")).unwrap();
 assert_eq!(cut["spec"]["state"]["kind"], "workspace");
 assert_eq!(cut["spec"]["state"]["packages"], serde_json::json!(ws_fixture_packages()));
@@ -274,7 +274,7 @@ async fn restoring_a_workspace_whose_source_is_gone_takes_the_snapshot_state() {
     let (app, rec) = app_with_snapshot_only("ws-src-aaaa", workspace_state("alpine:3.19", &["ripgrep"], 7)).await;
     let r = post(&app, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "ws-src-aaaa"})).await;
     assert_eq!(r.status(), 202);
-    let body = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/workspaces").pop().unwrap();
+    let body = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/workspaces").pop().unwrap();
     assert_eq!(body["spec"]["image"], "alpine:3.19");
     assert_eq!(body["spec"]["packages"], json!(["ripgrep"]));
     assert_eq!(body["spec"]["storage"]["quotaGb"], 7);
@@ -285,7 +285,7 @@ async fn a_restore_body_field_overrides_the_snapshot_state() {
     let (app, rec) = app_with_snapshot_only("ws-src-aaaa", workspace_state("alpine:3.19", &["ripgrep"], 7)).await;
     let r = post(&app, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "ws-src-aaaa", "image": "alpine:3.20"})).await;
     assert_eq!(r.status(), 202);
-    let body = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/workspaces").pop().unwrap();
+    let body = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/workspaces").pop().unwrap();
     assert_eq!(body["spec"]["image"], "alpine:3.20");
     assert_eq!(body["spec"]["packages"], json!(["ripgrep"])); // untouched fields still come from the snapshot
 }
@@ -295,8 +295,8 @@ async fn a_pre_change_snapshot_restores_as_before() {
     let (app, rec) = app_with_snapshot_only("ws-src-aaaa", /* state */ None).await;
     let r = post(&app, "/v1/workspaces/restore", json!({"name": "back", "snapshot_id": "ws-src-aaaa"})).await;
     assert_eq!(r.status(), 202);
-    let body = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/workspaces").pop().unwrap();
-    assert_eq!(body["spec"]["image"], kloudlite_git_workspaces::model::default_ws_image());
+    let body = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/workspaces").pop().unwrap();
+    assert_eq!(body["spec"]["image"], kloudlite_workspaces::model::default_ws_image());
     assert_eq!(body["spec"]["packages"], json!([]));
 }
 
@@ -312,7 +312,7 @@ async fn restoring_an_environment_without_services_takes_the_snapshots() {
     let (app, rec) = app_with_env_snapshot_only("env-src-aaaa", environment_state(2, 9)).await;
     let r = post(&app, "/v1/environments/restore", json!({"name": "back", "snapshot_id": "env-src-aaaa"})).await;
     assert_eq!(r.status(), 202);
-    let body = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/environments").pop().unwrap();
+    let body = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/environments").pop().unwrap();
     assert_eq!(body["spec"]["services"].as_array().unwrap().len(), 2);
     assert_eq!(body["spec"]["storage"]["quotaGb"], 9);
 }
@@ -322,7 +322,7 @@ async fn restoring_an_environment_with_empty_services_restores_data_only() {
     let (app, rec) = app_with_env_snapshot_only("env-src-aaaa", environment_state(2, 9)).await;
     let r = post(&app, "/v1/environments/restore", json!({"name": "back", "snapshot_id": "env-src-aaaa", "services": []})).await;
     assert_eq!(r.status(), 202);
-    let body = rec.sent("POST", "/apis/kloudlite-git.io/v1alpha1/environments").pop().unwrap();
+    let body = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/environments").pop().unwrap();
     assert_eq!(body["spec"]["services"].as_array().unwrap().len(), 0);
 }
 ```

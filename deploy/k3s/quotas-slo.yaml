@@ -6,7 +6,7 @@
 # objects the probe falls back to `default-user`, which is a real person's allowance — and
 # `quota.refused` (the fast suite's check that /v1 refuses an over-quota create) would then need to
 # create a person's worth of workspaces before it saw a 409.
-apiVersion: kloudlite-git.io/v1alpha1
+apiVersion: kloudlite.io/v1alpha1
 kind: Quota
 metadata:
   name: slo-probe
@@ -35,7 +35,7 @@ spec:
 # another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any
 # stage ever manages to allocate as this owner the create fails here rather than succeeding
 # quietly and leaving the SLO green.
-apiVersion: kloudlite-git.io/v1alpha1
+apiVersion: kloudlite.io/v1alpha1
 kind: Quota
 metadata:
   name: slo-other

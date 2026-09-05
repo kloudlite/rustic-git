@@ -1,6 +1,6 @@
 # SLOs
 
-One synthetic user, `kloudlite-git-slo`, walks this whole table as a Kubernetes `CronJob` — fast
+One synthetic user, `kloudlite-slo`, walks this whole table as a Kubernetes `CronJob` — fast
 every 5 min, weekly and monthly add the heavy checks and the resilience drills — and reports each
 step while it runs to the admin process, which computes 30-day attainment, error budget and burn
 rate per row. The catalogue lives in Rust (`crates/workspaces/src/slo/catalogue.rs`); this file is

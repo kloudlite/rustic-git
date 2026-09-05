@@ -63,7 +63,7 @@ Add to `bins/agent/tests/reconcile.rs`, following the file's existing fixture st
 async fn a_workspace_whose_claims_are_pending_gets_no_pod() {
     let (ctx, rec) = ctx_with_pending_claims();
     let w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
-    let action = kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
 
     assert!(rec.calls().iter().all(|c| !(c.0 == "POST" && c.1.contains("/pods"))), "no pod is created");
     assert!(action != kube::runtime::controller::Action::await_change(), "it requeues rather than waiting for an event");
@@ -81,7 +81,7 @@ async fn a_workspace_whose_claims_are_pending_gets_no_pod() {
 async fn a_workspace_whose_claims_are_bound_gets_its_pod() {
     let (ctx, rec) = ctx_with_bound_claims();
     let w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
-    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert!(rec.calls().iter().any(|c| c.0 == "POST" && c.1.contains("/pods")), "the pod is created");
 }
 
@@ -91,7 +91,7 @@ async fn a_workspace_whose_claims_are_bound_gets_its_pod() {
 async fn an_existing_pod_is_not_disturbed_by_an_unbound_claim() {
     let (ctx, rec) = ctx_with_pending_claims_and_a_running_pod();
     let w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
-    kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
     assert!(rec.calls().iter().all(|c| c.0 != "DELETE" || !c.1.contains("/pods")), "the pod is left alone");
 }
 
@@ -100,7 +100,7 @@ async fn an_existing_pod_is_not_disturbed_by_an_unbound_claim() {
 async fn a_claim_that_cannot_be_read_is_treated_as_unbound() {
     let (ctx, rec) = ctx_with_claim_read_failing();
     let w: crd::Workspace = serde_json::from_value(ws_json_ready()).unwrap();
-    let _ = kloudlite_git_agent::controller::apply_workspace(&w, &ctx).await;
+    let _ = kloudlite_agent::controller::apply_workspace(&w, &ctx).await;
     assert!(rec.calls().iter().all(|c| !(c.0 == "POST" && c.1.contains("/pods"))), "no pod on an unreadable claim");
 }
 ```
@@ -112,7 +112,7 @@ invent a new fixture style, and do not add a second fake.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin claims`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-agent-bin claims`
 Expected: FAIL — the pod is created regardless of claim phase.
 
 - [ ] **Step 3: Add the constant**
@@ -192,7 +192,7 @@ above shows the shape, not necessarily the exact borrow. Add the `PersistentVolu
 
 - [ ] **Step 6: Run them and watch them pass**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-git-agent-bin`
+Run: `CARGO_INCREMENTAL=0 cargo test -p kloudlite-agent-bin`
 Expected: PASS, including the four new tests. Existing reconcile tests that create a pod may now
 need their fixtures to report claims as `Bound`; update the FIXTURE, never an assertion. If any
 existing test's assertion has to change to accommodate the gate, stop and report it — that would

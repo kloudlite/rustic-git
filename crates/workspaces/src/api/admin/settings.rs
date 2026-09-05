@@ -10,7 +10,7 @@
 
 use super::super::workloads::{self, RollReason, Scope};
 use super::*;
-use kloudlite_git_core::settings::{
+use kloudlite_core::settings::{
     range_err, validate_stored, Mark, StoredCentralSettings, CENTRAL_SETTINGS_KEY, CENTRAL_SETTING_META,
 };
 use slatedb::object_store::{path::Path as OsPath, ObjectStoreExt};
@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 /// one thing", the same shape `with_kube`/`with_aks` already have.
 pub struct PeerClient {
     pub client: reqwest::Client,
-    /// e.g. `http://kloudlite-git:8081` — the peer Service, never the public one.
+    /// e.g. `http://kloudlite:8081` — the peer Service, never the public one.
     pub upstream: String,
     pub secret: String,
 }
@@ -91,7 +91,7 @@ async fn central_boot_readers(s: &ApiState, field: &str) -> Result<Vec<(Scope, &
     match field {
         "sshHost" | "sshPort" => {
             let regions = super::active_regions(s).await?;
-            Ok(regions.into_iter().map(|r| (Scope::Region(r), "kloudlite-git-gateway")).collect())
+            Ok(regions.into_iter().map(|r| (Scope::Region(r), "kloudlite-gateway")).collect())
         }
         "logFormat" | "workerLanes" => {
             Ok(workloads::KNOWN_CENTRAL.iter().map(|(name, _)| (Scope::Central, *name)).collect())
@@ -157,13 +157,13 @@ pub(crate) async fn put_central(
     // `refuse_without_claim`) is forwarded so the server tier's own `require_superadmin` re-checks
     // it independently — belt and braces, matching `admin_settings.rs`'s own doc comment.
     let peer = peer(&s)?;
-    let Some(token) = kloudlite_git_core::httpx::bearer_token(&headers) else {
+    let Some(token) = kloudlite_core::httpx::bearer_token(&headers) else {
         return Err((StatusCode::UNAUTHORIZED, "bearer token required").into_response());
     };
     let resp = peer
         .client
         .put(format!("{}/api/admin/settings", peer.upstream))
-        .header(kloudlite_git_core::peer::PEER_HEADER, &peer.secret)
+        .header(kloudlite_core::peer::PEER_HEADER, &peer.secret)
         .bearer_auth(token)
         .json(&patch)
         .send()
@@ -233,13 +233,13 @@ pub(crate) async fn revert_central(
         }
     }
     let peer = peer(&s)?;
-    let Some(token) = kloudlite_git_core::httpx::bearer_token(&headers) else {
+    let Some(token) = kloudlite_core::httpx::bearer_token(&headers) else {
         return Err((StatusCode::UNAUTHORIZED, "bearer token required").into_response());
     };
     let resp = peer
         .client
         .post(format!("{}/api/admin/settings/revert", peer.upstream))
-        .header(kloudlite_git_core::peer::PEER_HEADER, &peer.secret)
+        .header(kloudlite_core::peer::PEER_HEADER, &peer.secret)
         .bearer_auth(token)
         .send()
         .await

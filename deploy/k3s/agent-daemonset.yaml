@@ -42,18 +42,18 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: kloudlite-git-agent
+  name: kloudlite-agent
   namespace: kube-system
   labels:
-    app: kloudlite-git-agent
+    app: kloudlite-agent
 spec:
   selector:
     matchLabels:
-      app: kloudlite-git-agent
+      app: kloudlite-agent
   template:
     metadata:
       labels:
-        app: kloudlite-git-agent
+        app: kloudlite-agent
       # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
       # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
       annotations:
@@ -67,12 +67,12 @@ spec:
       # `agent-peer` NetworkPolicy — the only thing restricting the peer listener on 8444 to other
       # agents — stops applying to it. hostPID buys the first without giving up the second.
       hostPID: true
-      serviceAccountName: kloudlite-git-agent
+      serviceAccountName: kloudlite-agent
       # Only nodes that carry a btrfs pool. The control plane has none and must not run this.
       nodeSelector:
-        kloudlite-git.io/pool: "true"
+        kloudlite.io/pool: "true"
       tolerations:
-        - key: kloudlite-git.io/role
+        - key: kloudlite.io/role
           operator: Exists
           effect: NoSchedule
       # A restart must not orphan a btrfs send mid-stream; give it room to finish or be killed
@@ -111,7 +111,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/kloudlite-git-agent:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:24fa2a3b86afe4ab48663acb55ca75bde4d1af56098d37a34d9d8b98db07c0bc
+          image: ghcr.io/kloudlite/kloudlite-agent:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:24fa2a3b86afe4ab48663acb55ca75bde4d1af56098d37a34d9d8b98db07c0bc
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -128,9 +128,9 @@ spec:
               memory: 512Mi
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
-            - name: KLOUDLITE_GIT_LOG_FORMAT
+            - name: KLOUDLITE_LOG_FORMAT
               value: json
-            - name: KLOUDLITE_GIT_METRICS_ADDR
+            - name: KLOUDLITE_METRICS_ADDR
               value: 0.0.0.0:9464
             # The shard key. The controller refuses to start without it rather than watching every
             # node's objects — see lib.rs's check.
@@ -143,7 +143,7 @@ spec:
             # The region's shared-home NFS export —
             # `run()` mounts it at `{pool}/homes` once at agent startup, before the controller
             # starts. Unset means this node serves no shared home (fail closed, see lib.rs).
-            # Azure Files Premium (NFS 4.1), account kloudlite-git-homes in rustic-git-k3s, reachable
+            # Azure Files Premium (NFS 4.1), account kloudlite-homes in rustic-git-k3s, reachable
             # only from the `nodes` subnet through its service endpoint. Per region: the homes are
             # region-local by design, so each region gets its own share.
             - name: WS_HOMES_EXPORT
@@ -151,9 +151,9 @@ spec:
             # `WS_RUNTIME_CLASS=gvisor` is deliberately NOT set here. Unset, tenant pods run under
             # runc and share the host kernel (audit S-29); set, every tenant pod names the
             # `gvisor` RuntimeClass and stays Pending on any node that cannot serve it. So it is
-            # per-cluster, and goes in the `kloudlite-git-agent` Secret next to WS_REGION (an inline
+            # per-cluster, and goes in the `kloudlite-agent` Secret next to WS_REGION (an inline
             # env would override envFrom, same as WS_REGION) only once EVERY pool node has had
-            # install-gvisor.sh run, carries `kloudlite-git.io/gvisor=true` (runtimeclass.yaml's
+            # install-gvisor.sh run, carries `kloudlite.io/gvisor=true` (runtimeclass.yaml's
             # nodeSelector) and runtimeclass.yaml is applied. Verify after the agent restarts:
             #   kubectl get pod -n ws-<owner> -o jsonpath='{.items[*].spec.runtimeClassName}'
             # prints `gvisor`, and `dmesg` inside a workspace prints gVisor's banner.
@@ -168,7 +168,7 @@ spec:
             # Pinned, so seeding works whatever image the workspace itself runs.
             - name: WS_GIT_INIT_IMAGE
               value: alpine/git:2.45.2@sha256:16ad8e788e1d3b0c30f18da8dde5c0ace3b187445a62d8af893b003ca1e70592
-            # `WS_REGION` comes from the `kloudlite-git-agent` Secret: it names the region whose blob
+            # `WS_REGION` comes from the `kloudlite-agent` Secret: it names the region whose blob
             # container this node reads and writes, and is half of an `OwnerBinding`'s identity
             # (controller/mod.rs). A node pointed at the wrong region cannot see snapshots pushed
             # by its neighbours. Never set it inline here — an explicit env silently overrides
@@ -194,7 +194,7 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-git-workspace:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:768bc3344dfcf2aeeefc2a54290e4f76ed68e98616d75b183930080d0b336c14
+              value: ghcr.io/kloudlite/kloudlite-workspace:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:768bc3344dfcf2aeeefc2a54290e4f76ed68e98616d75b183930080d0b336c14
             - name: WS_BASE_PACKAGES
               value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
             - name: WS_REPLICA_SECS
@@ -214,10 +214,10 @@ spec:
             # WS_NODE_DEAD_SECS (peer/placement.rs) defaults to 180 s — how long another node must be
             # observed NotReady before this one reaps its VolumeReplica rows and takes over.
             # No override here: the code default is the value the cluster runs.
-            # How often a node labelled `kloudlite-git.io/decommission=true` runs the drain beat
+            # How often a node labelled `kloudlite.io/decommission=true` runs the drain beat
             # (decommission.rs): tell its running worktrees the next start lands elsewhere, release
             # each volume as it becomes stopped-and-replicated, and rewrite its own
-            # `kloudlite-git.io/decommission-status` annotation. Every other node pays one node LIST
+            # `kloudlite.io/decommission-status` annotation. Every other node pays one node LIST
             # per interval and nothing else, which is why it can be this hot.
             - name: WS_DECOMMISSION_SECS
               value: "30"
@@ -245,7 +245,7 @@ spec:
             # region's container and nothing else. Restoring elsewhere means pushing again from a
             # node in the destination region. See README "Two things that bite".
             - secretRef:
-                name: kloudlite-git-agent
+                name: kloudlite-agent
                 optional: true
           ports:
             - name: peer
@@ -327,4 +327,4 @@ spec:
             type: DirectoryOrCreate
         - name: nix-conf
           configMap:
-            name: kloudlite-git-nix
+            name: kloudlite-nix

@@ -1,9 +1,9 @@
 //! `history` is optional state: a process without ClickStack must still build, route and answer —
 //! the console renders a flat placeholder, never an error page.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::ApiState;
-use kloudlite_git_workspaces::history::History;
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::ApiState;
+use kloudlite_workspaces::history::History;
 use std::sync::Arc;
 
 fn jwt() -> Arc<Jwt> {

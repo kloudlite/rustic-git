@@ -1,4 +1,4 @@
-//! The node-scoped controller: three reconcilers over the `kloudlite-git.io/v1alpha1` CRDs bound to
+//! The node-scoped controller: three reconcilers over the `kloudlite.io/v1alpha1` CRDs bound to
 //! THIS node, converging the local btrfs pool and the node's pods toward what the specs ask for.
 //!
 //! `spec.nodeName` is the whole sharding story: two nodes cannot contend for one object because the
@@ -13,10 +13,10 @@
 //! change here) — they never have to cross an actual cross-thread `.await` boundary.
 
 use kube::runtime::watcher;
-use kloudlite_git_core::settings::LiveSettings;
-use kloudlite_git_workspaces::crd::{self, Phase, VolumeSource};
-use kloudlite_git_workspaces::engine::Engine;
-use kloudlite_git_workspaces::settings::AgentSettings;
+use kloudlite_core::settings::LiveSettings;
+use kloudlite_workspaces::crd::{self, Phase, VolumeSource};
+use kloudlite_workspaces::engine::Engine;
+use kloudlite_workspaces::settings::AgentSettings;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,9 +53,9 @@ pub(crate) use status::{conditions_eq, create_if_absent, delete_ignoring_404, en
 /// Shared because a Workspace and an Environment carry the identical `WorkspaceStorage`, and both
 /// reconcilers have to resolve it into `status.head` before they check anything out (an
 /// environment that never did parked forever in `HeadUnknown`).
-pub(crate) fn clone_commit(storage: &Option<kloudlite_git_workspaces::crd::WorkspaceStorage>) -> Option<&str> {
+pub(crate) fn clone_commit(storage: &Option<kloudlite_workspaces::crd::WorkspaceStorage>) -> Option<&str> {
     match storage.as_ref()?.source.as_ref()? {
-        kloudlite_git_workspaces::crd::VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
+        kloudlite_workspaces::crd::VolumeSource::CloneOf { commit: Some(c), .. } => Some(c.as_str()),
         _ => None,
     }
 }
@@ -141,7 +141,7 @@ pub type InFlight = HashMap<String, (i64, tokio::task::JoinHandle<Result<Done, S
 
 /// The API tier's identity, which the per-namespace Secret grant names. Hard-coded: the API is
 /// deployed by the manifests in `deploy/`, which name exactly these.
-pub(crate) const API_SERVICE_ACCOUNT: &str = "kloudlite-git-api";
+pub(crate) const API_SERVICE_ACCOUNT: &str = "kloudlite-api";
 pub(crate) const API_NAMESPACE: &str = "kube-system";
 
 pub struct Ctx {
@@ -187,7 +187,7 @@ pub struct Ctx {
     /// This node's region, from `WS_REGION` — the other half of an `OwnerBinding`'s identity.
     pub region: String,
     /// The roles this node carries, read ONCE from its own `Node` labels at startup
-    /// (`kloudlite-git.io/session`, `kloudlite-git.io/env`). A second, hand-maintained copy of a label
+    /// (`kloudlite.io/session`, `kloudlite.io/env`). A second, hand-maintained copy of a label
     /// the scheduler already reads is a second thing that can be wrong — see `k8s::placement`.
     pub roles: Vec<String>,
     /// `WS_HOMES_EXPORT`: `None` means this node has no shared-home NFS mount, and every

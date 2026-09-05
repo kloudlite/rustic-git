@@ -1,8 +1,8 @@
 //! `deploy/k3s/crds.yaml` is a GENERATED artifact — Phase 2A installs exactly what the Rust
-//! types say. This test is the generator (`CRD_REGEN=1 cargo test -p kloudlite-git-workspaces
+//! types say. This test is the generator (`CRD_REGEN=1 cargo test -p kloudlite-workspaces
 //! --test crd_yaml`) and the drift check in one, so a field added to a spec struct cannot ship
 //! without the manifest moving with it.
-use kloudlite_git_workspaces::crd::all_crds;
+use kloudlite_workspaces::crd::all_crds;
 
 #[test]
 fn generated_crds_match_the_committed_manifest() {
@@ -151,7 +151,7 @@ fn every_phase_is_a_schema_enum() {
 #[test]
 fn the_legacy_spec_pointers_are_pruned_and_storage_is_optional() {
     use kube::CustomResourceExt;
-    use kloudlite_git_workspaces::crd::{Environment, Workspace};
+    use kloudlite_workspaces::crd::{Environment, Workspace};
     for crd in [Workspace::crd(), Environment::crd()] {
         let v = &crd.spec.versions[0];
         let root = v.schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
@@ -179,7 +179,7 @@ fn the_legacy_spec_pointers_are_pruned_and_storage_is_optional() {
 #[test]
 fn the_volume_status_has_no_push_pointer() {
     use kube::CustomResourceExt;
-    let schema = serde_json::to_string(&kloudlite_git_workspaces::crd::Volume::crd().spec.versions[0].schema).unwrap();
+    let schema = serde_json::to_string(&kloudlite_workspaces::crd::Volume::crd().spec.versions[0].schema).unwrap();
     assert!(!schema.contains("lastPush"), "lastPush must be dropped");
     assert!(!schema.contains("lastSnapshot"), "and not replaced by a second writer's field");
 }
@@ -188,7 +188,7 @@ fn the_volume_status_has_no_push_pointer() {
 /// yields `env-env-{hex}`. Valid Kubernetes, wrong every time a human reads it.
 #[test]
 fn env_namespace_does_not_double_its_prefix() {
-    use kloudlite_git_workspaces::crd::env_namespace;
+    use kloudlite_workspaces::crd::env_namespace;
     assert_eq!(env_namespace("env-abc123"), "env-abc123");
     // An id without the prefix still gets one — the namespace should say what it holds.
     assert_eq!(env_namespace("abc123"), "env-abc123");
@@ -201,7 +201,7 @@ fn env_namespace_does_not_double_its_prefix() {
 /// per namespace — and their personal namespace stays what it always was.
 #[test]
 fn workspace_namespace_is_per_team_per_owner() {
-    use kloudlite_git_workspaces::crd::ws_namespace;
+    use kloudlite_workspaces::crd::ws_namespace;
     assert_eq!(ws_namespace("alice", ""), "ws-alice");
     // A team equal to the owner is personal, not "alice-alice".
     assert_eq!(ws_namespace("alice", "alice"), "ws-alice");
@@ -216,7 +216,7 @@ fn workspace_namespace_is_per_team_per_owner() {
 /// label the API server accepts.
 #[test]
 fn no_two_owner_team_pairs_share_a_namespace() {
-    use kloudlite_git_workspaces::crd::{binding_name, ws_namespace};
+    use kloudlite_workspaces::crd::{binding_name, ws_namespace};
     use std::collections::HashMap;
     let handles = ["a", "b", "c", "a-b", "b-c", "acme", "bob", "acme-bob", "x", "att", "x-att", &"a".repeat(39), &"b".repeat(39)];
     let teams = handles.iter().copied().chain([""]);
@@ -251,7 +251,7 @@ fn no_two_owner_team_pairs_share_a_namespace() {
 /// the serde spelling would silently never match.
 #[test]
 fn phase_as_str_matches_the_wire_form() {
-    use kloudlite_git_workspaces::crd::Phase::*;
+    use kloudlite_workspaces::crd::Phase::*;
     for p in [Pending, Creating, Ready, Running, Stopped, Working, Done, Error] {
         assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(p.as_str()), "{p:?}");
     }
@@ -266,7 +266,7 @@ fn phase_as_str_matches_the_wire_form() {
 #[test]
 fn the_in_place_restore_wish_is_optional_on_the_parent_and_the_child() {
     use kube::CustomResourceExt;
-    use kloudlite_git_workspaces::crd::{Environment, Volume};
+    use kloudlite_workspaces::crd::{Environment, Volume};
     let crd = Environment::crd();
     let v = &crd.spec.versions[0];
     let root = v.schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
@@ -287,13 +287,13 @@ fn the_in_place_restore_wish_is_optional_on_the_parent_and_the_child() {
 /// claim the field and prune the wish the parent's gate just wrote.
 #[test]
 fn a_volume_spec_without_a_wish_carries_no_restore_to() {
-    let spec = kloudlite_git_workspaces::crd::VolumeSpec {
+    let spec = kloudlite_workspaces::crd::VolumeSpec {
         owner: "alice".into(),
         team: String::new(),
         node_name: "node-a".into(),
         region: "r1".into(),
         quota_gb: 10,
-        replicas: kloudlite_git_workspaces::crd::DEFAULT_REPLICAS,
+        replicas: kloudlite_workspaces::crd::DEFAULT_REPLICAS,
         source: None,
         restore_to: None,
     };
@@ -306,7 +306,7 @@ fn a_volume_spec_without_a_wish_carries_no_restore_to() {
 #[test]
 fn the_attached_environment_is_an_optional_string() {
     use kube::CustomResourceExt;
-    use kloudlite_git_workspaces::crd;
+    use kloudlite_workspaces::crd;
     let crd = crd::Workspace::crd();
     let schema = crd.spec.versions[0].schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
     let props = schema.properties.as_ref().unwrap()["spec"].properties.as_ref().unwrap();
@@ -322,7 +322,7 @@ fn the_attached_environment_is_an_optional_string() {
 /// and `env-` only.
 #[test]
 fn every_namespace_the_code_makes_is_admitted() {
-    use kloudlite_git_workspaces::crd::{env_namespace, ws_namespace};
+    use kloudlite_workspaces::crd::{env_namespace, ws_namespace};
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/agent-admission.yaml");
     let policy = std::fs::read_to_string(path).unwrap();
     // Only the Namespace arm of policy 2's expression: the Secret and RoleBinding arms test
@@ -385,8 +385,8 @@ fn quota_kinds_are_published() {
 /// of their own gets — so a change here is a change to what every unlisted owner may allocate.
 #[test]
 fn the_bootstrap_defaults_are_the_specs_table() {
-    let u = kloudlite_git_workspaces::crd::default_quota(false);
+    let u = kloudlite_workspaces::crd::default_quota(false);
     assert_eq!((u.workspaces, u.environments, u.snapshots, u.disk_gb, u.cpu, u.memory_gb), (5, 2, 20, 100, 8, 32));
-    let t = kloudlite_git_workspaces::crd::default_quota(true);
+    let t = kloudlite_workspaces::crd::default_quota(true);
     assert_eq!((t.workspaces, t.environments, t.snapshots, t.disk_gb, t.cpu, t.memory_gb), (20, 8, 80, 400, 32, 128));
 }

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// `bins/api` with `KLOUDLITE_GIT_API_ROLE=admin` — where every `/admin/*` call goes,
+    /// `bins/api` with `KLOUDLITE_API_ROLE=admin` — where every `/admin/*` call goes,
     /// including the run report itself.
     pub admin_url: String,
     /// The ordinary `/v1` process. Deliberately separate from `admin_url`: `sec.user.process`
@@ -24,7 +24,7 @@ pub struct Config {
     /// The ingress address Cloudflare sends `hosts[0]` to. `None` — unset — skips `edge.origin`
     /// rather than inventing an address: a probe that guessed one would report the wrong origin.
     pub origin_ip: Option<String>,
-    /// The `kloudlite-git-jwt` Secret. The probe mints its own tokens rather than holding a
+    /// The `kloudlite-jwt` Secret. The probe mints its own tokens rather than holding a
     /// password, so this is the only credential in the pod.
     pub jwt_secret: String,
     /// The private half of the key `bootstrap` registered for `slo-probe`.
@@ -57,10 +57,10 @@ pub struct Config {
 pub struct Azure {
     pub subscription: String,
     pub resource_group: String,
-    /// The storage account holding both `kloudlite-git` and `k3s-backup` — the same account, per
+    /// The storage account holding both `kloudlite` and `k3s-backup` — the same account, per
     /// deploy/BACKUPS.md's store table.
     pub storage_account: String,
-    /// The Cosmos account behind the directory and the PR store (`kloudlite-git-mongo`).
+    /// The Cosmos account behind the directory and the PR store (`kloudlite-mongo`).
     pub cosmos_account: String,
 }
 
@@ -74,28 +74,28 @@ fn opt(k: &str, default: &str) -> String {
 
 impl Config {
     pub fn from_env() -> Result<Config> {
-        let ssh_host = req("KLOUDLITE_GIT_SSH_HOST")?;
+        let ssh_host = req("KLOUDLITE_SSH_HOST")?;
         check_ssh_host(&ssh_host)?;
         Ok(Config {
-            admin_url: req("KLOUDLITE_GIT_ADMIN_API_URL")?,
-            api_url: req("KLOUDLITE_GIT_API_URL")?,
-            web_url: req("KLOUDLITE_GIT_WEB_URL")?,
-            git_url: req("KLOUDLITE_GIT_URL")?,
-            registry: req("KLOUDLITE_GIT_REGISTRY")?,
+            admin_url: req("KLOUDLITE_ADMIN_API_URL")?,
+            api_url: req("KLOUDLITE_API_URL")?,
+            web_url: req("KLOUDLITE_WEB_URL")?,
+            git_url: req("KLOUDLITE_URL")?,
+            registry: req("KLOUDLITE_REGISTRY")?,
             ssh_host,
-            region: req("KLOUDLITE_GIT_REGION")?,
-            hosts: opt("KLOUDLITE_GIT_SLO_HOSTS", "")
+            region: req("KLOUDLITE_REGION")?,
+            hosts: opt("KLOUDLITE_SLO_HOSTS", "")
                 .split(',')
                 .map(|h| h.trim().to_string())
                 .filter(|h| !h.is_empty())
                 .collect(),
-            origin_ip: Some(opt("KLOUDLITE_GIT_SLO_ORIGIN_IP", "")).filter(|v| !v.is_empty()),
-            jwt_secret: req("KLOUDLITE_GIT_JWT_SECRET")?,
-            ssh_key_path: opt("KLOUDLITE_GIT_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
-            ssh_hostkey: opt("KLOUDLITE_GIT_SLO_SSH_HOSTKEY", ""),
-            canary_digest: Some(opt("KLOUDLITE_GIT_SLO_CANARY_DIGEST", "")).filter(|d| !d.is_empty()),
+            origin_ip: Some(opt("KLOUDLITE_SLO_ORIGIN_IP", "")).filter(|v| !v.is_empty()),
+            jwt_secret: req("KLOUDLITE_JWT_SECRET")?,
+            ssh_key_path: opt("KLOUDLITE_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
+            ssh_hostkey: opt("KLOUDLITE_SLO_SSH_HOSTKEY", ""),
+            canary_digest: Some(opt("KLOUDLITE_SLO_CANARY_DIGEST", "")).filter(|d| !d.is_empty()),
             azure: azure(),
-            redis_host: Some(opt("KLOUDLITE_GIT_SLO_REDIS_HOST", "")).filter(|v| !v.is_empty()),
+            redis_host: Some(opt("KLOUDLITE_SLO_REDIS_HOST", "")).filter(|v| !v.is_empty()),
         })
     }
 }
@@ -105,10 +105,10 @@ impl Config {
 fn azure() -> Option<Azure> {
     let v = |k: &str| Some(opt(k, "")).filter(|v| !v.is_empty());
     Some(Azure {
-        subscription: v("KLOUDLITE_GIT_SLO_AZURE_SUBSCRIPTION")?,
-        resource_group: v("KLOUDLITE_GIT_SLO_AZURE_RESOURCE_GROUP")?,
-        storage_account: v("KLOUDLITE_GIT_SLO_AZURE_STORAGE_ACCOUNT")?,
-        cosmos_account: v("KLOUDLITE_GIT_SLO_AZURE_COSMOS_ACCOUNT")?,
+        subscription: v("KLOUDLITE_SLO_AZURE_SUBSCRIPTION")?,
+        resource_group: v("KLOUDLITE_SLO_AZURE_RESOURCE_GROUP")?,
+        storage_account: v("KLOUDLITE_SLO_AZURE_STORAGE_ACCOUNT")?,
+        cosmos_account: v("KLOUDLITE_SLO_AZURE_COSMOS_ACCOUNT")?,
     })
 }
 
@@ -140,13 +140,13 @@ fn split_ssh_host(v: &str) -> Option<(&str, u16)> {
     }
 }
 
-/// Refused at boot, not guessed at: `KLOUDLITE_GIT_SSH_HOST` decides which port every SSH step
+/// Refused at boot, not guessed at: `KLOUDLITE_SSH_HOST` decides which port every SSH step
 /// dials, and a value this cannot read would send all three of them at port 22 of the wrong host.
 fn check_ssh_host(v: &str) -> Result<()> {
     match split_ssh_host(v) {
         Some(_) => Ok(()),
         None => Err(anyhow::anyhow!(
-            "KLOUDLITE_GIT_SSH_HOST must be host, host:port, [v6] or [v6]:port; got `{v}`"
+            "KLOUDLITE_SSH_HOST must be host, host:port, [v6] or [v6]:port; got `{v}`"
         )),
     }
 }

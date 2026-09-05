@@ -14,7 +14,7 @@
 # Building on a newer host (ubuntu 24.04, glibc 2.39) yields an image that dies at exec.
 #
 # `PROFILE` names the target dir the binaries come from: `release` (default) or `dev-image` for the
-# deploy/k3s/dev-push.sh loop. Only the five kloudlite-git binaries make it into the context — see
+# deploy/k3s/dev-push.sh loop. Only the five kloudlite binaries make it into the context — see
 # .dockerignore — so a fat `target/` costs nothing to send.
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS server
@@ -31,21 +31,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Each Deployment picks its process with `command`, so a binary missing here is a
 # CrashLoopBackOff there, not a build error.
 ARG PROFILE=release
-COPY target/${PROFILE}/kloudlite-git /usr/local/bin/kloudlite-git
-COPY target/${PROFILE}/kloudlite-git-api /usr/local/bin/kloudlite-git-api
-COPY target/${PROFILE}/kloudlite-git-worker /usr/local/bin/kloudlite-git-worker
+COPY target/${PROFILE}/kloudlite /usr/local/bin/kloudlite
+COPY target/${PROFILE}/kloudlite-api /usr/local/bin/kloudlite-api
+COPY target/${PROFILE}/kloudlite-worker /usr/local/bin/kloudlite-worker
 # Not root. Nothing here needs a capability: the listeners bind 8080/2222/8081/8082, the host
 # key lives in a mounted Secret in the cluster, and the pack cache is a directory. The two
 # directories the binaries write are created and owned here so a plain `docker run` (no
 # mounts) works; in the cluster both are mounts and `fsGroup` on the pod makes them writable.
 # uid 1001 matches web/Dockerfile so one securityContext convention serves both images.
 RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin kloudlite \
-    && mkdir -p /var/cache/kloudlite-git /var/lib/kloudlite-git \
-    && chown kloudlite:kloudlite /var/cache/kloudlite-git /var/lib/kloudlite-git
-ENV KLOUDLITE_GIT_CACHE_DIR=/var/cache/kloudlite-git KLOUDLITE_GIT_HOST_KEY=/var/lib/kloudlite-git/host_key
+    && mkdir -p /var/cache/kloudlite /var/lib/kloudlite \
+    && chown kloudlite:kloudlite /var/cache/kloudlite /var/lib/kloudlite
+ENV KLOUDLITE_CACHE_DIR=/var/cache/kloudlite KLOUDLITE_HOST_KEY=/var/lib/kloudlite/host_key
 USER kloudlite
 EXPOSE 8080 2222
-ENTRYPOINT ["kloudlite-git"]
+ENTRYPOINT ["kloudlite"]
 CMD ["serve"]
 
 # The node controller. A separate IMAGE, not a fourth binary in the server one: this runs as root
@@ -71,10 +71,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       btrfs-progs util-linux ca-certificates git openssh-client nfs-common netbase \
     && rm -rf /var/lib/apt/lists/*
 ARG PROFILE=release
-COPY target/${PROFILE}/kloudlite-git-agent /usr/local/bin/kloudlite-git-agent
+COPY target/${PROFILE}/kloudlite-agent /usr/local/bin/kloudlite-agent
 # Root, deliberately and unlike the server image: btrfs subvolume operations on the host pool are
 # not something a capability set can be narrowed to.
-ENTRYPOINT ["kloudlite-git-agent"]
+ENTRYPOINT ["kloudlite-agent"]
 
 # The SSH gateway. Its own image rather than a fourth binary in the server one: this pod runs with
 # NET_BIND_SERVICE to hold hostPort 443 on a pool node, and that capability has no business on the
@@ -85,20 +85,20 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 ARG PROFILE=release
-COPY target/${PROFILE}/kloudlite-git-gateway /usr/local/bin/kloudlite-git-gateway
+COPY target/${PROFILE}/kloudlite-gateway /usr/local/bin/kloudlite-gateway
 # The FILE capability is what actually lets uid 1001 bind 443, and it is not optional.
 # `capabilities.add: [NET_BIND_SERVICE]` in the pod spec sets the container's BOUNDING and
 # permitted sets — but execve empties the permitted set of a non-root process unless the binary
 # itself carries the capability, and Kubernetes has no way to request ambient capabilities. So the
 # pod grant alone yields EACCES on 443; the pod grant plus this file capability is what works, and
 # neither half is sufficient on its own (the bounding set must still permit it).
-RUN setcap cap_net_bind_service=+ep /usr/local/bin/kloudlite-git-gateway \
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/kloudlite-gateway \
     && apt-get purge -y libcap2-bin && apt-get autoremove -y
 # uid 1001 as in the server image: the binary writes no files and needs no other privilege.
 RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin kloudlite
 USER kloudlite
 EXPOSE 443 8080
-ENTRYPOINT ["kloudlite-git-gateway"]
+ENTRYPOINT ["kloudlite-gateway"]
 
 # The default workspace image: what `ws-{id}` runs when a workspace names no image of its own.
 # Stock alpine plus exactly what the platform itself needs and cannot get from Nix:
@@ -153,7 +153,7 @@ RUN set -eux; \
     chmod +x /usr/local/bin/crane /usr/local/bin/kubectl; \
     rm -f /tmp/crane.tgz
 ARG PROFILE=release
-COPY target/${PROFILE}/kloudlite-git-slo /usr/local/bin/kloudlite-git-slo
+COPY target/${PROFILE}/kloudlite-slo /usr/local/bin/kloudlite-slo
 # `kl` is the user CLI, built by the same `cargo build`: stage 1's `id.cli.flow` and stage 5's
 # tunnel checks exercise the CLI a person actually runs, not a reimplementation of it.
 COPY target/${PROFILE}/kl /usr/local/bin/kl
@@ -162,4 +162,4 @@ COPY target/${PROFILE}/kl /usr/local/bin/kl
 # CronJob), so a home baked in here would only be a read-only trap.
 RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin kloudlite
 USER kloudlite
-ENTRYPOINT ["kloudlite-git-slo"]
+ENTRYPOINT ["kloudlite-slo"]

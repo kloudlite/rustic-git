@@ -1,4 +1,4 @@
-# RBAC for the node controller (`kloudlite-git-agent`).
+# RBAC for the node controller (`kloudlite-agent`).
 #
 # THE TABLE BELOW IS THE ROLE. It is every Kubernetes call the agent makes, enumerated from
 # `bins/agent/src/*.rs` (the `crates/workspaces` crate builds objects; it never calls the API
@@ -7,7 +7,7 @@
 #
 #   resource (group)                       verb(s)                      call site
 #   ------------------------------------------------------------------------------------------------
-#   workspaces, environments (kloudlite-git.io)
+#   workspaces, environments (kloudlite.io)
 #                                          get,list,watch               Controller watches; claim
 #                                                                       re-read; check_source
 #                                          patch                        heal_labels (metadata.labels
@@ -20,7 +20,7 @@
 #                                                                       (the delete path decides
 #                                                                       whether the Volume detaches
 #                                                                       or is collected)
-#   volumes (kloudlite-git.io)                get,list,watch               Controller + heartbeat list
+#   volumes (kloudlite.io)                get,list,watch               Controller + heartbeat list
 #                                          create                       ensure_child_volume (a
 #                                                                       parent's child)
 #                                          patch                        finalizer (metadata),
@@ -40,21 +40,21 @@
 #                                                                       with no worktree and no
 #                                                                       snapshot has no
 #                                                                       ownerReference left to GC it)
-#   ownerbindings (kloudlite-git.io)          get,list,watch               Controller; namespace_ready
+#   ownerbindings (kloudlite.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
-#   quotas (kloudlite-git.io)                 get,list,watch               binding/environment reconcile:
+#   quotas (kloudlite.io)                 get,list,watch               binding/environment reconcile:
 #                                                                       the owner's effective ceiling,
 #                                                                       written into the namespace as
 #                                                                       a ResourceQuota. READ ONLY —
 #                                                                       a quota is desired state and
 #                                                                       the agent never writes one
-#   clustersettings (kloudlite-git.io)        get,list,watch               refresh beat reads the single
+#   clustersettings (kloudlite.io)        get,list,watch               refresh beat reads the single
 #   clustersettings/status                 patch                        `default` object every tunable; the ack (observedGeneration) is the one write
 #                                                                       (sync/replica/decommission
 #                                                                       intervals, timeouts, images)
 #                                                                       comes from. READ ONLY — an
 #                                                                       admin writes it through /v1
-#   snapshots (kloudlite-git.io)              get,list,watch               pull_beat (missing-commit
+#   snapshots (kloudlite.io)              get,list,watch               pull_beat (missing-commit
 #                                                                       diff against local_commits);
 #                                                                       Controller (cut, retention,
 #                                                                       stop-push watch)
@@ -72,7 +72,7 @@
 #                                                                       parent's own transients —
 #                                                                       worthless once the worktree
 #                                                                       they were cut from is gone)
-#   volumereplicas (kloudlite-git.io)         get,list,watch               pull_beat (source selection,
+#   volumereplicas (kloudlite.io)         get,list,watch               pull_beat (source selection,
 #                                                                       reaper)
 #                                          create,patch                 write_replica_status (this
 #                                                                       node's own row — the sole
@@ -81,9 +81,9 @@
 #                                                                       ONE guarded exception, gated
 #                                                                       on the row's node being
 #                                                                       NotReady past WS_NODE_DEAD_SECS
-#   */status (kloudlite-git.io, all six)      patch                        patch_status (apply)
+#   */status (kloudlite.io, all six)      patch                        patch_status (apply)
 #                                          update                       replace_status (claim CAS)
-#   */finalizers (kloudlite-git.io, all four) update                       finalizer on volumes; the
+#   */finalizers (kloudlite.io, all four) update                       finalizer on volumes; the
 #                                                                       parents for OwnerReferences
 #                                                                       PermissionEnforcement on
 #                                                                       their children (Snapshot has
@@ -125,7 +125,7 @@
 #                                                                       parent it hosts (run.rs)
 #                                          patch                        decommission_beat, THIS
 #                                                                       node's own
-#                                                                       `kloudlite-git.io/decommission-
+#                                                                       `kloudlite.io/decommission-
 #                                                                       status` annotation only
 #
 # Two things RBAC cannot say, and where the ValidatingAdmissionPolicy in `agent-admission.yaml`
@@ -151,43 +151,43 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kloudlite-git-agent
+  name: kloudlite-agent
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-agent
+  name: kloudlite-agent
 rules:
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch"]
   # `create` on the children: a controller that creates a child owns it, and the API lost the same
   # verbs. `delete` is `collect_unreferenced_volumes` (peer/sweeps.rs): an ownerless Volume with no
   # worktree and no snapshot has no ownerReference left to garbage-collect it, so the sweep is the
   # only thing that can reclaim it — without this verb the beat 403s every pass.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["volumes"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # `ownerbindings` are created by the agent that WINS a placement claim — `claim::ensure_binding`;
   # a losing claimant never creates one, and nothing ever edits or deletes one.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["ownerbindings"]
     verbs: ["get", "list", "watch", "create"]
   # Read-only, and deliberately so: a `Quota` is DESIRED state, written by a superadmin through
   # /v1. The agent only projects it into the namespace as a `ResourceQuota`, which is why
   # agent-admission.yaml gains nothing for this feature — there is no agent spec write to refuse.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list", "watch"]
   # Same read-only reasoning as `quotas` for the SPEC: `ClusterSettings` is admin-written desired
   # state, and the agent's refresh beat only ever reads the single `default` object. The STATUS
   # subresource is the one thing the agent writes back — `observedGeneration`, the ack the admin
   # UI's "pending" marker waits for — and the admission policy fences spec, not status.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["clustersettings"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["clustersettings/status"]
     verbs: ["patch"]
   # `snapshots`: mostly created by `/v1` (Task 6's `/push`), CR-first per the brief — the agent
@@ -203,22 +203,22 @@ rules:
   # `migrate_and_seed_baseline` stamped one; every snapshot made today is GC'd by its owner.
   # `patch` is metadata only (rule 1 below: on a main resource it is `patch` on all of it, and spec
   # stays read-only — agent-admission.yaml does not even match `snapshots`): the commit reconciler
-  # re-stamps a sync point's `kloudlite-git.io/synced-generation` with the generation the worktree has
+  # re-stamps a sync point's `kloudlite.io/synced-generation` with the generation the worktree has
   # AFTER the cut, because a snapshot bumps its own source's generation and the pre-cut value
   # leaves every idle worktree due forever.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["snapshots"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # `volumereplicas`: every node reads every row (source selection walks OTHER nodes' rows, and
   # the reaper reads every node's), but writes only its own — `create`/`patch` for
   # `write_replica_status`'s create-or-update, `delete` for the ONE guarded cross-node exception,
   # `reap_dead_replicas`, gated on the row's `spec.node` being NotReady past `WS_NODE_DEAD_SECS`.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["volumereplicas"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # Status is the controller's half of every object. `update` is for `replace_status` — the claim
   # is an optimistic PUT carrying resourceVersion, not a forced apply, so two nodes cannot both win.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources:
       ["volumes/status", "workspaces/status", "environments/status",
        "ownerbindings/status", "volumereplicas/status", "snapshots/status"]
@@ -229,7 +229,7 @@ rules:
   # OwnerReferencesPermissionEnforcement: every child this controller creates carries
   # `blockOwnerDeletion`, and a cluster running that admission plugin checks the creator may
   # update the OWNER's finalizers.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources:
       ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers",
        "ownerbindings/finalizers"]
@@ -272,12 +272,12 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # `get` is read-only, once, at startup: which pools this node advertises
-  # (`kloudlite-git.io/session|env`).
+  # (`kloudlite.io/session|env`).
   # `list` joined `get` for replication: the sender computes standby targets by rendezvous over
   # the pooled nodes, and every agent must see the same candidate list or two nodes will disagree
   # about who holds what.
   # `patch` is annotations in practice — the decommission beat writes this node's own
-  # `kloudlite-git.io/decommission-status`, which is how an operator watches a drain and learns when
+  # `kloudlite.io/decommission-status`, which is how an operator watches a drain and learns when
   # the VM is safe to delete. RBAC cannot narrow `patch` to one annotation on one node, and the
   # admission policy does not match `nodes`, so this is a broad verb taken KNOWINGLY: the agent
   # already runs as root with the host PID namespace on that node, so a compromised agent could
@@ -294,7 +294,7 @@ rules:
     verbs: ["get", "list", "watch", "patch"]
   # The controller creates two RoleBindings in each workspace namespace: one so the API can write
   # that namespace's git-token Secret (see api-rbac.yaml), one so the agent itself can read and
-  # create that namespace's host-key Secret (see `kloudlite-git-agent-ws-secrets` below). Kubernetes
+  # create that namespace's host-key Secret (see `kloudlite-agent-ws-secrets` below). Kubernetes
   # refuses to let a subject grant permissions it does not itself hold unless it has `bind` on the
   # role being granted; `bind` on exactly these two ClusterRoles is the narrow form. The policy
   # in agent-admission.yaml is what stops this pair being "grant either role to anyone anywhere".
@@ -303,20 +303,20 @@ rules:
     verbs: ["create", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles"]
-    resourceNames: ["kloudlite-git-api-secrets", "kloudlite-git-agent-ws-secrets"]
+    resourceNames: ["kloudlite-api-secrets", "kloudlite-agent-ws-secrets"]
     verbs: ["bind"]
 ---
 # Secrets are deliberately NOT in the ClusterRole above. The agent reads exactly one Secret per
 # workspace — the `ws-ssh-{id}` host key — and creates the one that is missing; it never updates
 # one (a host key that changed is indistinguishable from a man in the middle), never lists or
 # watches, and the ownerReference does the deleting. Cluster-wide `get` would have covered
-# `kloudlite-git-jwt` and the api's credentials in kube-system, so this role is bound per workspace
+# `kloudlite-jwt` and the api's credentials in kube-system, so this role is bound per workspace
 # namespace by the binding reconciler instead (`k8s::agent_secret_binding`), the same shape as the
 # api's grant.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-agent-ws-secrets
+  name: kloudlite-agent-ws-secrets
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -325,12 +325,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kloudlite-git-agent
+  name: kloudlite-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kloudlite-git-agent
+  name: kloudlite-agent
 subjects:
   - kind: ServiceAccount
-    name: kloudlite-git-agent
+    name: kloudlite-agent
     namespace: kube-system

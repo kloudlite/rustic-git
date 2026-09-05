@@ -7,15 +7,15 @@
 // module of this same lib — is a SEPARATE crate that only sees `pub` items. Every module here
 // (`boot`, `lanes`, `listeners`, `router`, `browse_api`) reaches these the same way either way,
 // so widening the visibility costs nothing internally and is what lets `main()` call
-// `kloudlite_git_server::{store, App, ...}` directly instead of duplicating these re-exports.
-pub use kloudlite_git_core::pktline;
-pub use kloudlite_git_core::{err, hex, require_jwt_secret_from_env, Error, Result};
-pub use kloudlite_git_storage::{auth, cache, config, events, index, ownership, pool, store};
-pub use kloudlite_git_gitbase::{objects, refs};
-pub use kloudlite_git_pulls::{directory, merge_worker, pulls};
-pub use kloudlite_git_app::{App, AddrOf};
-pub use kloudlite_git_git::{browse, gc, protocol, proxy, ssh};
-pub use kloudlite_git_registry as registry;
+// `kloudlite_server::{store, App, ...}` directly instead of duplicating these re-exports.
+pub use kloudlite_core::pktline;
+pub use kloudlite_core::{err, hex, require_jwt_secret_from_env, Error, Result};
+pub use kloudlite_storage::{auth, cache, config, events, index, ownership, pool, store};
+pub use kloudlite_gitbase::{objects, refs};
+pub use kloudlite_pulls::{directory, merge_worker, pulls};
+pub use kloudlite_app::{App, AddrOf};
+pub use kloudlite_vcs::{browse, gc, protocol, proxy, ssh};
+pub use kloudlite_registry as registry;
 
 pub mod boot;
 pub mod browse_api;

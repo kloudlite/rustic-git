@@ -157,7 +157,7 @@ impl Cache {
         // `Cmd`), so it records its own timing here rather than being invisible.
         let start = Instant::now();
         let r = tokio::time::timeout(CMD_TIMEOUT, fut).await;
-        kloudlite_git_core::metrics::dep_done(
+        kloudlite_core::metrics::dep_done(
             DEP,
             "eval",
             start,
@@ -293,7 +293,7 @@ async fn run_within<T: redis::FromRedisValue>(
         Ok(r) => r,
         Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
     };
-    kloudlite_git_core::metrics::dep_done(DEP, op, start, r.as_ref().err().map(kind_of));
+    kloudlite_core::metrics::dep_done(DEP, op, start, r.as_ref().err().map(kind_of));
     r
 }
 
@@ -353,7 +353,7 @@ mod tests {
             (redis::ErrorKind::ResponseError, "ERR nope").into();
         assert_eq!(kind_of(&response), "other");
         for e in [io(std::io::ErrorKind::TimedOut), response] {
-            assert!(kloudlite_git_core::metrics::ERROR_KINDS.contains(&kind_of(&e)));
+            assert!(kloudlite_core::metrics::ERROR_KINDS.contains(&kind_of(&e)));
         }
     }
 

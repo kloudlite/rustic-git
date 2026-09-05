@@ -1,18 +1,18 @@
 [package]
-name = "kloudlite-git-api"
+name = "kloudlite-api"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_api"
+name = "kloudlite_api"
 
 [dependencies]
 tracing = { workspace = true }
-kloudlite-git-core = { path = "../core", features = ["ssh"] }
-kloudlite-git-storage = { path = "../storage" }
-kloudlite-git-pulls = { path = "../pulls" }
-kloudlite-git-workspaces = { path = "../workspaces" }
+kloudlite-core = { path = "../core", features = ["ssh"] }
+kloudlite-storage = { path = "../storage" }
+kloudlite-pulls = { path = "../pulls" }
+kloudlite-workspaces = { path = "../workspaces" }
 tokio = { workspace = true }
 futures = { workspace = true }
 slatedb = { workspace = true }

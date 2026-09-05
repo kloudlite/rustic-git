@@ -44,7 +44,7 @@ worktree this node runs (a `Workspace`/`Environment` with `status.nodeName == me
 1. Read the worktree's btrfs generation (`Engine::generation`, restored from history — it was
    deleted as caller-free in the shared-home work).
 2. Compare with the generation recorded on the worktree's CURRENT transient (an annotation,
-   `kloudlite-git.io/synced-generation`). Equal → **do nothing**. This is the old home beat's
+   `kloudlite.io/synced-generation`). Equal → **do nothing**. This is the old home beat's
    `homes_to_push` gate: an idle worktree costs one `btrfs subvolume show` per minute and nothing
    else.
 3. Otherwise create a `Snapshot` CR `sync-{ws}-{8 hex}` with `transient: true`, `parent` = the

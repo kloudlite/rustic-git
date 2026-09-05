@@ -1,26 +1,26 @@
 //! Which node ends up serving a repo, and who may claim an identity.
 mod common;
 
-use kloudlite_git_storage::ownership::OwnershipStore;
-use kloudlite_git_app::App;
+use kloudlite_storage::ownership::OwnershipStore;
+use kloudlite_app::App;
 use std::sync::Arc;
 
 const SECRET: &str = "test-peer-secret";
 /// The node every fleet starts FIRST, which is why it holds the lease: `node()` runs one election
 /// beat before serving, and the first beat on an empty store wins. Nothing else is special about it.
-const LEADER: &str = "kloudlite-git-0";
+const LEADER: &str = "kloudlite-0";
 /// One node's own Store over a shared object store, so each node has its own pool and the test can
 /// see which node opened a repo. One shared Store would mean one shared pool, and "exactly one
 /// opener" could never fail.
 struct Node {
-    store: Arc<kloudlite_git_storage::store::Store>,
+    store: Arc<kloudlite_storage::store::Store>,
     app: Arc<App>,
     public: String,
     peer: String,
     _tmp: tempfile::TempDir,
 }
 
-/// Bring up a node named `name` (`kloudlite-git-N`). `fleet` is every node's (name, peer addr); it is
+/// Bring up a node named `name` (`kloudlite-N`). `fleet` is every node's (name, peer addr); it is
 /// how a node resolves a name from the map to somewhere to forward. **Start `LEADER` first** — the
 /// first node to tick takes the lease, and every later one reads who holds it.
 async fn node(
@@ -30,7 +30,7 @@ async fn node(
 ) -> Node {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(
-        kloudlite_git_storage::store::Store::open(os.clone(), tmp.path().join("cache"), false)
+        kloudlite_storage::store::Store::open(os.clone(), tmp.path().join("cache"), false)
             .await
             .unwrap(),
     );
@@ -60,7 +60,7 @@ async fn node(
             addr
         }),
         SECRET.into(),
-        kloudlite_git_pulls::pulls::Source::Absent,
+        kloudlite_pulls::pulls::Source::Absent,
     ));
     // One election beat before serving, and then a renewal beat, because a lease that lapses
     // mid-test changes what the test measures. A test that needs a failover still advances a
@@ -82,7 +82,7 @@ async fn node(
     });
     // Eviction gives the lease back before it closes the database, exactly as `serve()` wires it.
     store.pool.set_release_hook(
-        Arc::downgrade(&app) as std::sync::Weak<dyn kloudlite_git_storage::pool::ReleaseHook>
+        Arc::downgrade(&app) as std::sync::Weak<dyn kloudlite_storage::pool::ReleaseHook>
     );
     let pub_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let public = pub_l.local_addr().unwrap().to_string();
@@ -94,15 +94,15 @@ async fn node(
         .expect("node must be in its own fleet");
     let (peer_l, stream_l) = take_reserved(&my_addr);
     let a2 = app.clone();
-    tokio::spawn(async move { axum::serve(pub_l, kloudlite_git_server::router::router(a2)).await.unwrap() });
+    tokio::spawn(async move { axum::serve(pub_l, kloudlite_server::router::router(a2)).await.unwrap() });
     let a4 = app.clone();
     tokio::spawn(async move {
-        axum::serve(peer_l, kloudlite_git_server::router::peer_router(a4))
+        axum::serve(peer_l, kloudlite_server::router::peer_router(a4))
             .await
             .unwrap()
     });
     let a3 = app.clone();
-    tokio::spawn(async move { kloudlite_git_git::proxy::serve_peer_streams(a3, stream_l).await });
+    tokio::spawn(async move { kloudlite_vcs::proxy::serve_peer_streams(a3, stream_l).await });
     Node {
         store,
         app,
@@ -177,10 +177,10 @@ fn blackholed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> 
     B.get_or_init(Default::default)
 }
 
-/// A fleet of `n` nodes, `kloudlite-git-0` first — start it first, and it leads.
+/// A fleet of `n` nodes, `kloudlite-0` first — start it first, and it leads.
 fn fleet(n: usize) -> Vec<(String, String)> {
     (0..n)
-        .map(|i| format!("kloudlite-git-{i}"))
+        .map(|i| format!("kloudlite-{i}"))
         .zip(reserve_ports(n))
         .collect()
 }
@@ -202,7 +202,7 @@ async fn the_public_listener_ignores_a_claimed_identity() {
             "http://{}/alice/web/info/refs?service=git-upload-pack",
             a.public
         ))
-        .header(kloudlite_git_core::peer::OWNER_HEADER, "alice")
+        .header(kloudlite_core::peer::OWNER_HEADER, "alice")
         .send()
         .await
         .unwrap();
@@ -221,8 +221,8 @@ async fn the_public_listener_ignores_a_claimed_hop_count() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     let res = client()
         .await
@@ -233,8 +233,8 @@ async fn the_public_listener_ignores_a_claimed_hop_count() {
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
         .header(
-            kloudlite_git_core::peer::HOPS_HEADER,
-            kloudlite_git_core::peer::MAX_HOPS.to_string(),
+            kloudlite_core::peer::HOPS_HEADER,
+            kloudlite_core::peer::MAX_HOPS.to_string(),
         )
         .send()
         .await
@@ -262,10 +262,10 @@ async fn the_peer_listener_requires_the_secret() {
                 "http://{}/alice/web/info/refs?service=git-upload-pack",
                 a.peer
             ))
-            .header(kloudlite_git_core::peer::OWNER_HEADER, "alice")
+            .header(kloudlite_core::peer::OWNER_HEADER, "alice")
             .header("git-protocol", "version=2");
         if let Some(w) = wrong {
-            r = r.header(kloudlite_git_core::peer::PEER_HEADER, w);
+            r = r.header(kloudlite_core::peer::PEER_HEADER, w);
         }
         assert_eq!(r.send().await.unwrap().status(), 403, "secret {wrong:?}");
     }
@@ -283,7 +283,7 @@ async fn the_peer_listener_serves_healthz_and_honours_identity() {
     let ok = |p: &str| format!("http://{}{p}", a.peer);
     assert_eq!(
         c.get(ok("/healthz"))
-            .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+            .header(kloudlite_core::peer::PEER_HEADER, SECRET)
             .send()
             .await
             .unwrap()
@@ -293,8 +293,8 @@ async fn the_peer_listener_serves_healthz_and_honours_identity() {
     assert_eq!(c.get(ok("/healthz")).send().await.unwrap().status(), 403);
     let res = c
         .get(ok("/alice/web/info/refs?service=git-upload-pack"))
-        .header(kloudlite_git_core::peer::OWNER_HEADER, "alice")
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::OWNER_HEADER, "alice")
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
         .header("git-protocol", "version=2")
         .send()
         .await
@@ -314,8 +314,8 @@ async fn a_second_node_is_told_the_holder_and_forwards_there() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let c = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let c = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     let res = client()
         .await
@@ -325,8 +325,8 @@ async fn a_second_node_is_told_the_holder_and_forwards_there() {
         ))
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
-        .header(kloudlite_git_core::peer::HOPS_HEADER, "1")
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::HOPS_HEADER, "1")
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -351,8 +351,8 @@ async fn a_request_out_of_hops_is_refused_unless_local() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     let res = client()
         .await
@@ -363,10 +363,10 @@ async fn a_request_out_of_hops_is_refused_unless_local() {
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
         .header(
-            kloudlite_git_core::peer::HOPS_HEADER,
-            kloudlite_git_core::peer::MAX_HOPS.to_string(),
+            kloudlite_core::peer::HOPS_HEADER,
+            kloudlite_core::peer::MAX_HOPS.to_string(),
         )
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -402,8 +402,8 @@ async fn a_real_git_push_and_clone_work_through_a_forwarding_node() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     // The fixture FIRST: `renew_once` only renews repos this node has OPEN, so the window
     // between the claim and A's first forwarded request is not covered by the beat. Doing the
     // slow local work before the claim keeps that window at roughly one HTTP round trip.
@@ -461,7 +461,7 @@ async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
     a.app.claim(&repo).await.unwrap();
     let adb = a.store.pool.get(o, n).await.unwrap(); // a holds it — kept, see the not-owner test
     // a stray opener (an admin command, say) takes the writer epoch
-    let stray = slatedb::Db::builder(kloudlite_git_storage::pool::path(o, n), e.store.os.clone())
+    let stray = slatedb::Db::builder(kloudlite_storage::pool::path(o, n), e.store.os.clone())
         .build()
         .await
         .unwrap();
@@ -508,8 +508,8 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
     // The map says A holds it, but B has the database open anyway — a stale opener, which is
     // exactly what fencing is the backstop for.
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     // HOLD b's handle across the fence: if it were dropped and re-fetched after a took the epoch,
     // a fast manifest poll could have already flagged it, the re-fetch would evict and return Err,
@@ -535,7 +535,7 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
         Ok(_) => panic!("fenced handle must be reported, not reopened"),
         Err(e) => e,
     };
-    assert!(kloudlite_git_storage::pool::is_fenced(&e2), "got: {e2}");
+    assert!(kloudlite_storage::pool::is_fenced(&e2), "got: {e2}");
     assert_eq!(
         b.store.pool.warm_count(),
         0,
@@ -570,8 +570,8 @@ async fn a_claim_outlives_an_operation_longer_than_the_lease() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     // Open it on A immediately, as a real request would in the same handler: `renew_once` only
     // renews repos this node has OPEN (`Pool::warm_repos`), so a claim with nothing behind it
@@ -607,7 +607,7 @@ async fn a_push_after_a_stray_opener_succeeds() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     a.app.claim(&repo).await.unwrap();
     let adb = a.store.pool.get(o, n).await.unwrap();
-    let stray = slatedb::Db::builder(kloudlite_git_storage::pool::path(o, n), e.store.os.clone())
+    let stray = slatedb::Db::builder(kloudlite_storage::pool::path(o, n), e.store.os.clone())
         .build()
         .await
         .unwrap();
@@ -657,7 +657,7 @@ async fn a_push_racing_a_stray_opener_still_succeeds_or_reports_cleanly() {
     a.app.claim(&repo).await.unwrap();
     let _adb = a.store.pool.get(o, n).await.unwrap();
     // the stray stays open for the whole push: whichever arm fires, nothing may be swallowed
-    let stray = slatedb::Db::builder(kloudlite_git_storage::pool::path(o, n), e.store.os.clone())
+    let stray = slatedb::Db::builder(kloudlite_storage::pool::path(o, n), e.store.os.clone())
         .build()
         .await
         .unwrap();
@@ -705,8 +705,8 @@ async fn an_unhealthy_node_stops_serving_but_still_forwards() {
     let (mine, theirs) = ("alice/mine".to_string(), "alice/theirs".to_string());
     for r in [&mine, &theirs] { let (o, n) = r.split_once('/').unwrap(); e.store.create_repo(o, n).await.unwrap(); }
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim(&mine).await.unwrap();
     b.app.claim(&theirs).await.unwrap();
     // A reads the map through a follower's poll, so wait for b's entry to reach it: otherwise A
@@ -723,7 +723,7 @@ async fn an_unhealthy_node_stops_serving_but_still_forwards() {
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
     assert_eq!(res.status(), 200);
     assert_eq!(a.store.pool.warm_count(), 1);
-    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(kloudlite_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status(), 200);
+    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(kloudlite_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status(), 200);
 
     // Flip a unhealthy directly (the probe loop is not under test).
     a.store.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -732,7 +732,7 @@ async fn an_unhealthy_node_stops_serving_but_still_forwards() {
     let res = c.get(format!("http://{}/{mine}/info/refs?service=git-upload-pack", a.public))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
     assert_eq!(res.status(), 503, "unhealthy: must not serve even what it holds");
-    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(kloudlite_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status(), 503);
+    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(kloudlite_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status(), 503);
     // A repo b holds: a still FORWARDS it (forwarding is safe), b serves.
     let res = c.get(format!("http://{}/{theirs}/info/refs?service=git-upload-pack", a.public))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
@@ -754,7 +754,7 @@ async fn a_claim_on_an_unowned_repo_is_granted_and_only_the_claimant_warms() {
     let token = e.store.create_token("alice").await.unwrap();
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     e.store.create_repo("alice", "web").await.unwrap();
     // B is a follower: its claim travels to A, which decides and writes the map.
     let res = client().await
@@ -762,7 +762,7 @@ async fn a_claim_on_an_unowned_repo_is_granted_and_only_the_claimant_warms() {
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
         .send().await.unwrap();
     assert_eq!(res.status(), 200);
-    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-1");
     assert_eq!(b.store.pool.warm_count(), 1, "the claimant opened it");
     assert_eq!(a.store.pool.warm_count(), 0, "the leader did not — it only granted");
 }
@@ -776,7 +776,7 @@ async fn an_invented_repo_name_is_404_and_claims_nothing() {
     let token = e.store.create_token("alice").await.unwrap();
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     for i in 0..5 {
         let res = client().await
             .get(format!("http://{}/alice/nope{i}/info/refs?service=git-upload-pack", b.public))
@@ -793,7 +793,7 @@ async fn an_invented_repo_name_is_404_and_claims_nothing() {
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
         .send().await.unwrap();
     assert_eq!(res.status(), 200);
-    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-1");
 }
 
 /// The prefix probe and the map read are not one atomic look: a creator on another node can claim
@@ -805,12 +805,12 @@ async fn a_claim_that_lands_while_the_prefix_is_still_empty_is_forwarded_not_ser
     let e = common::env().await;
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     // A is mid-create: it holds the lease, but nothing of `alice/fresh` has been flushed yet.
     a.app.claim("alice/fresh").await.unwrap();
     assert!(!b.store.pool.exists("alice", "fresh").await.unwrap(), "the prefix must still be empty");
     match b.app.route("alice/fresh").await {
-        kloudlite_git_storage::ownership::Route::Peer(p) => assert_eq!(p.name, LEADER),
+        kloudlite_storage::ownership::Route::Peer(p) => assert_eq!(p.name, LEADER),
         other => panic!("must forward to the claimant, got {other:?}"),
     }
     assert_eq!(b.store.pool.warm_count(), 0, "and B opened nothing");
@@ -824,16 +824,16 @@ async fn a_repeated_invented_name_asks_the_leader_once_per_window() {
     let e = common::env().await;
     let f = fleet(2);
     let _a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let asks = || b.app.owner_asks.load(std::sync::atomic::Ordering::Relaxed);
     let before = asks();
     for _ in 0..5 {
-        assert_eq!(b.app.route("alice/nope").await, kloudlite_git_storage::ownership::Route::Missing);
+        assert_eq!(b.app.route("alice/nope").await, kloudlite_storage::ownership::Route::Missing);
     }
     assert_eq!(asks() - before, 1, "one leader read for the whole window");
     // Past the window it asks again — the cache forgets, so a name that becomes real is seen.
-    b.app.advance_clock(kloudlite_git_app::MISSING_ASK_EVERY + std::time::Duration::from_millis(1));
-    assert_eq!(b.app.route("alice/nope").await, kloudlite_git_storage::ownership::Route::Missing);
+    b.app.advance_clock(kloudlite_app::MISSING_ASK_EVERY + std::time::Duration::from_millis(1));
+    assert_eq!(b.app.route("alice/nope").await, kloudlite_storage::ownership::Route::Missing);
     assert_eq!(asks() - before, 2, "and once more in the next window");
     assert_eq!(b.store.pool.warm_count(), 0);
 }
@@ -843,7 +843,7 @@ async fn a_repeated_invented_name_asks_the_leader_once_per_window() {
 #[test]
 fn only_the_create_routes_may_claim_a_name_that_does_not_exist() {
     use axum::http::Method;
-    use kloudlite_git_server::router_test::may_create;
+    use kloudlite_server::router_test::may_create;
     assert!(may_create(&Method::POST, "/api/alice/web/create"));
     assert!(may_create(&Method::POST, "/v2/alice/web/blobs/uploads/"));
     assert!(may_create(&Method::PUT, "/v2/alice/web/manifests/v1"));
@@ -866,24 +866,24 @@ async fn a_follower_refuses_to_decide_ownership() {
     let e = common::env().await;
     let f = fleet(2);
     let _a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let c = client().await;
     for what in ["claim", "renew", "release"] {
         let res = c
             .post(format!("http://{}/own/{what}", b.peer))
-            .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
-            .body("alice/web\nkloudlite-git-1")
+            .header(kloudlite_core::peer::PEER_HEADER, SECRET)
+            .body("alice/web\nkloudlite-1")
             .send().await.unwrap();
         assert_eq!(res.status(), 421, "/own/{what} on a follower");
     }
     // And the leader does answer, so 421 is about leadership, not about the route existing.
     let res = c
         .post(format!("http://{}/own/claim", _a.peer))
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
-        .body("alice/web\nkloudlite-git-1")
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
+        .body("alice/web\nkloudlite-1")
         .send().await.unwrap();
     assert_eq!(res.status(), 200);
-    assert!(res.text().await.unwrap().starts_with("granted\nkloudlite-git-1\n"));
+    assert!(res.text().await.unwrap().starts_with("granted\nkloudlite-1\n"));
 }
 
 /// The leader is unreachable: a cold repo gets a 503 and NOBODY opens it.
@@ -905,7 +905,7 @@ async fn a_cold_repo_is_503_when_the_leader_cannot_be_reached() {
     let b_addr = f[1].1.clone();
     let mut b_fleet = b_view.clone();
     b_fleet[1].1 = b_addr;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &b_fleet).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &b_fleet).await;
     let res = client().await
         .get(format!("http://{}/alice/web/info/refs?service=git-upload-pack", b.public))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
@@ -923,16 +923,16 @@ async fn a_release_makes_a_repo_claimable_at_once() {
     let e = common::env().await;
     let f = fleet(3);
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     let repo = "alice/web";
-    assert!(matches!(a.app.claim(repo).await.unwrap(), kloudlite_git_storage::ownership::Grant::Granted(_)));
+    assert!(matches!(a.app.claim(repo).await.unwrap(), kloudlite_storage::ownership::Grant::Granted(_)));
     a.app.release(repo).await.unwrap();
     // Read through the leader's writer handle: a follower's copy is up to a poll interval behind,
     // and what is under test is the delete, not the propagation.
     assert_eq!(leader.app.owner(repo).await.unwrap(), None, "the entry is deleted, not shortened");
     match b.app.claim(repo).await.unwrap() {
-        kloudlite_git_storage::ownership::Grant::Granted(e) => assert_eq!(e.node, "kloudlite-git-2"),
+        kloudlite_storage::ownership::Grant::Granted(e) => assert_eq!(e.node, "kloudlite-2"),
         g => panic!("a released repo must be claimable at once: {g:?}"),
     }
 }
@@ -944,22 +944,22 @@ async fn a_release_from_a_node_that_no_longer_holds_it_is_ignored() {
     let e = common::env().await;
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let repo = "alice/web";
-    assert!(matches!(b.app.claim(repo).await.unwrap(), kloudlite_git_storage::ownership::Grant::Granted(_)));
+    assert!(matches!(b.app.claim(repo).await.unwrap(), kloudlite_storage::ownership::Grant::Granted(_)));
     a.app.release(repo).await.unwrap(); // the leader never held it
     assert_eq!(
         a.app.owner(repo).await.unwrap().map(|e| e.node),
-        Some("kloudlite-git-1".to_string()),
+        Some("kloudlite-1".to_string()),
         "a stale release deleted the real owner's entry"
     );
 }
 
-async fn stream_listener(store: Arc<kloudlite_git_storage::store::Store>) -> String {
+async fn stream_listener(store: Arc<kloudlite_storage::store::Store>) -> String {
     let app = common::app(store).await;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    tokio::spawn(async move { kloudlite_git_git::proxy::serve_peer_streams(app, l).await });
+    tokio::spawn(async move { kloudlite_vcs::proxy::serve_peer_streams(app, l).await });
     addr
 }
 
@@ -1058,12 +1058,12 @@ async fn a_two_hop_ssh_forward_relays_the_status_line() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let c = node(e.store.os.clone(), "kloudlite-git-3", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let c = node(e.store.os.clone(), "kloudlite-3", &f).await;
     a.app.claim(&repo).await.unwrap();
     // Talk to C's STREAM port directly as if we were B, hops=1. C is not the owner and can reach A,
     // so C forwards to A and must relay A's status.
-    let mut sock = tokio::net::TcpStream::connect(kloudlite_git_core::peer::stream_addr(&c.peer)).await.unwrap();
+    let mut sock = tokio::net::TcpStream::connect(kloudlite_core::peer::stream_addr(&c.peer)).await.unwrap();
     sock.write_all(format!("{SECRET} git-upload-pack {repo} alice 1\n").as_bytes()).await.unwrap();
     let mut r = BufReader::new(sock);
     let mut line = String::new();
@@ -1122,8 +1122,8 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     e.store.add_ssh_key(o, &fp).await.unwrap();
 
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
 
     // The fixture FIRST: `renew_once` only renews repos this node has OPEN, so the window
     // between the claim and A's first forwarded request is not covered by the beat. Doing the
@@ -1134,7 +1134,7 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     let ssh_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ssh_port = ssh_l.local_addr().unwrap().port();
     let b_app = b.app.clone();
-    tokio::spawn(async move { kloudlite_git_git::ssh::serve(b_app, ssh_l, host_key).await.unwrap() });
+    tokio::spawn(async move { kloudlite_vcs::ssh::serve(b_app, ssh_l, host_key).await.unwrap() });
 
     // One commit, pushed over a's public HTTP port, so the repo has content. This also opens a's
     // copy before the claim below — fine: `claim` on a repo this node already has open is a no-op
@@ -1195,7 +1195,7 @@ async fn a_percent_encoded_repo_path_is_refused_not_routed_around() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     b.app.claim(&repo).await.unwrap();
     // encode the last byte of the repo name
     let last = n.chars().last().unwrap();
@@ -1217,13 +1217,13 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
     let e = common::env().await;
     let f = fleet(3);
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     let repo = "alice/web";
     // The repo must exist: routing does not claim a repo that does not, it lets the handler 404.
     e.store.create_repo("alice", "web").await.unwrap();
 
-    assert_eq!(b.app.route_for(repo, true).await, kloudlite_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, kloudlite_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
     assert_eq!(b.store.pool.warm_count(), 1);
 
@@ -1233,14 +1233,14 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
 
     assert_eq!(b.store.pool.warm_count(), 1, "the database must stay open through the drain");
     match a.app.claim(repo).await.unwrap() {
-        kloudlite_git_storage::ownership::Grant::HeldBy(h) => assert_eq!(h.node, "kloudlite-git-2"),
+        kloudlite_storage::ownership::Grant::HeldBy(h) => assert_eq!(h.node, "kloudlite-2"),
         g => panic!("claimable while the loser still holds the database open: {g:?}"),
     }
 
     b.store.pool.await_retires().await;
     assert_eq!(b.store.pool.warm_count(), 0, "the database must be closed after the drain");
     match a.app.claim(repo).await.unwrap() {
-        kloudlite_git_storage::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
+        kloudlite_storage::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
         g => panic!("still not claimable after the drain: {g:?}"),
     }
 }
@@ -1253,18 +1253,18 @@ async fn an_evicting_node_still_owns_the_repo_during_the_drain() {
     let e = common::env().await;
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let repo = "alice/web";
-    assert_eq!(b.app.route_for(repo, true).await, kloudlite_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, kloudlite_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
 
     b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
     b.store.pool.sweep().await;
 
     assert_eq!(b.store.pool.warm_count(), 1, "closed before the drain was over");
-    assert_eq!(b.app.route_for(repo, true).await, kloudlite_git_storage::ownership::Route::Local, "still serving");
+    assert_eq!(b.app.route_for(repo, true).await, kloudlite_storage::ownership::Route::Local, "still serving");
     match a.app.route_for(repo, true).await {
-        kloudlite_git_storage::ownership::Route::Peer(p) => assert_eq!(p.name, "kloudlite-git-1"),
+        kloudlite_storage::ownership::Route::Peer(p) => assert_eq!(p.name, "kloudlite-1"),
         r => panic!("the other node must still forward to the evicting node: {r:?}"),
     }
 }
@@ -1277,18 +1277,18 @@ async fn a_node_that_loses_its_lease_closes_the_database() {
     let e = common::env().await;
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let repo = "alice/web";
-    assert_eq!(b.app.route_for(repo, true).await, kloudlite_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, kloudlite_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
     assert_eq!(b.store.pool.warm_count(), 1);
 
     // The leader hands it to someone else, as it would after b's lease lapsed.
     a.app
         .ownership
-        .put(repo, &kloudlite_git_storage::ownership::Entry {
+        .put(repo, &kloudlite_storage::ownership::Entry {
             node: LEADER.into(),
-            expires_ms: kloudlite_git_storage::ownership::now_ms() + 60_000,
+            expires_ms: kloudlite_storage::ownership::now_ms() + 60_000,
         })
         .await
         .unwrap();
@@ -1310,7 +1310,7 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
     e.store.create_repo("alice", "cold").await.unwrap();
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let c = client().await;
     let get = |n: &Node, repo: &str| {
         let url = format!("http://{}/{repo}/info/refs?service=git-upload-pack", n.public);
@@ -1330,7 +1330,7 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
     assert_eq!(b.store.pool.warm_count(), 1);
 
     // The leader goes away, and its lease ages out: exactly what a roll produces.
-    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-1");
     // Age the entry out the way a roll does — the leader is the last pod updated, so every
     // follower's renewals fail for the whole ten seconds it is down. Written directly rather than
     // slept through, then given a follower poll (200ms) to reach B.
@@ -1338,9 +1338,9 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
         .ownership
         .put(
             "alice/web",
-            &kloudlite_git_storage::ownership::Entry {
-                node: "kloudlite-git-1".into(),
-                expires_ms: kloudlite_git_storage::ownership::now_ms() - 1,
+            &kloudlite_storage::ownership::Entry {
+                node: "kloudlite-1".into(),
+                expires_ms: kloudlite_storage::ownership::now_ms() - 1,
             },
         )
         .await
@@ -1348,10 +1348,10 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
     // B reads the map through a follower poll (200ms); wait for the expired entry to reach it.
     for _ in 0..50 {
         let seen = b.app.owner("alice/web").await.unwrap();
-        if seen.is_some_and(|e| e.expires_ms < kloudlite_git_storage::ownership::now_ms()) { break; }
+        if seen.is_some_and(|e| e.expires_ms < kloudlite_storage::ownership::now_ms()) { break; }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(b.app.owner("alice/web").await.unwrap().unwrap().expires_ms < kloudlite_git_storage::ownership::now_ms(), "B never saw the lapsed entry");
+    assert!(b.app.owner("alice/web").await.unwrap().unwrap().expires_ms < kloudlite_storage::ownership::now_ms(), "B never saw the lapsed entry");
     blackholed().lock().unwrap().insert(f[0].1.clone());
 
     assert_eq!(get(&b, "alice/web").await, 200, "warm and ours: keep serving");
@@ -1369,10 +1369,10 @@ async fn a_repo_that_goes_warm_again_during_the_drain_is_not_released() {
     let e = common::env().await;
     let f = fleet(2);
     let _a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let repo = "alice/web";
     e.store.create_repo("alice", "web").await.unwrap();
-    assert_eq!(b.app.route_for(repo, true).await, kloudlite_git_storage::ownership::Route::Local);
+    assert_eq!(b.app.route_for(repo, true).await, kloudlite_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
 
     // Retire it, then take a reference back before the drain is over.
@@ -1384,7 +1384,7 @@ async fn a_repo_that_goes_warm_again_during_the_drain_is_not_released() {
     assert_eq!(b.store.pool.warm_count(), 1, "an in-use database must not be closed");
     assert_eq!(
         b.app.owner(repo).await.unwrap().map(|x| x.node),
-        Some("kloudlite-git-1".to_string()),
+        Some("kloudlite-1".to_string()),
         "the lease was released under a database that is still open"
     );
     drop(held);
@@ -1398,19 +1398,19 @@ async fn an_entry_left_by_a_dead_node_is_reclaimed_by_prune() {
     let e = common::env().await;
     let f = fleet(3);
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let repo = "alice/web";
-    // As if kloudlite-git-2 claimed it and was killed: the entry is here, and it has lapsed.
-    let dead = kloudlite_git_storage::ownership::Entry {
-        node: "kloudlite-git-2".to_string(),
-        expires_ms: kloudlite_git_storage::ownership::now_ms() - 1,
+    // As if kloudlite-2 claimed it and was killed: the entry is here, and it has lapsed.
+    let dead = kloudlite_storage::ownership::Entry {
+        node: "kloudlite-2".to_string(),
+        expires_ms: kloudlite_storage::ownership::now_ms() - 1,
     };
     leader.app.ownership.put(repo, &dead).await.unwrap();
 
     leader.app.prune_once().await.unwrap();
     assert_eq!(leader.app.owner(repo).await.unwrap(), None, "a lapsed entry must be pruned");
     match a.app.claim(repo).await.unwrap() {
-        kloudlite_git_storage::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
+        kloudlite_storage::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
         g => panic!("the repo must be claimable after the dead node's entry is pruned: {g:?}"),
     }
 }
@@ -1425,19 +1425,19 @@ async fn a_node_whose_pool_is_closed_does_not_claim() {
     let e = common::env().await;
     let f = fleet(3);
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let repo = "alice/web";
     e.store.create_repo("alice", "web").await.unwrap();
 
     // Warm, then shut down the way SIGTERM does: releases the lease and closes the pool.
-    assert_eq!(a.app.route_for(repo, true).await, kloudlite_git_storage::ownership::Route::Local);
+    assert_eq!(a.app.route_for(repo, true).await, kloudlite_storage::ownership::Route::Local);
     a.store.pool.get("alice", "web").await.unwrap();
     a.store.pool.close().await;
 
     assert!(a.store.pool.is_closed());
     assert_eq!(
         a.app.route_for(repo, true).await,
-        kloudlite_git_storage::ownership::Route::Unavailable,
+        kloudlite_storage::ownership::Route::Unavailable,
         "a closed pool must refuse, not claim the repo back on its way out"
     );
     assert_eq!(
@@ -1462,8 +1462,8 @@ async fn a_forward_to_a_departed_owner_recovers() {
     e.store.create_repo("alice", "web").await.unwrap();
     e.store.create_repo("alice", "other").await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
 
     // A owns both, so B's copy of the map points at A.
     a.app.claim("alice/other").await.unwrap();
@@ -1472,7 +1472,7 @@ async fn a_forward_to_a_departed_owner_recovers() {
         if b.app.owner(&repo).await.unwrap().is_some() { break; }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert_eq!(b.app.owner(&repo).await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(b.app.owner(&repo).await.unwrap().unwrap().node, "kloudlite-1");
 
     // A leaves the way SIGTERM makes it leave: lease released, then unreachable.
     a.app.release(&repo).await.unwrap();
@@ -1502,8 +1502,8 @@ async fn a_browse_request_is_routed_by_the_repo_the_handler_opens() {
     e.store.create_repo("alice", "info").await.unwrap();
     let f = fleet(3);
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
     // The two candidate readings of the one path, held by two different nodes.
     a.app.claim("alice/info").await.unwrap();
     leader.app.claim("api/alice").await.unwrap();
@@ -1512,8 +1512,8 @@ async fn a_browse_request_is_routed_by_the_repo_the_handler_opens() {
     let res = client()
         .await
         .get(format!("http://{}/api/alice/info/refs", b.peer))
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
-        .header(kloudlite_git_core::peer::OWNER_HEADER, "alice")
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::OWNER_HEADER, "alice")
         .send()
         .await
         .unwrap();
@@ -1535,7 +1535,7 @@ async fn an_api_path_that_is_not_a_browse_route_is_refused_not_dispatched() {
     let e = common::env().await;
     let f = fleet(2);
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     // A legacy repo owned by the now-reserved `api`, held by the leader.
     e.store.pool.get("api", "alice").await.unwrap();
     leader.app.claim("api/alice").await.unwrap();
@@ -1551,8 +1551,8 @@ async fn an_api_path_that_is_not_a_browse_route_is_refused_not_dispatched() {
         let c = client().await;
         let r = if post { c.post(&url).body("0000") } else { c.get(&url) };
         let res = r
-            .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
-            .header(kloudlite_git_core::peer::OWNER_HEADER, "alice")
+            .header(kloudlite_core::peer::PEER_HEADER, SECRET)
+            .header(kloudlite_core::peer::OWNER_HEADER, "alice")
             .send()
             .await
             .unwrap();
@@ -1575,16 +1575,16 @@ async fn a_visibility_flip_is_routed_to_the_owner() {
     let f = fleet(3);
     e.store.create_repo("alice", "web").await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let c = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let c = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim("alice/web").await.unwrap();
     // Warm A's handle BEFORE the flip: the defect is a stale view in an ALREADY-OPEN database, so
     // a test that flips first and reads after would pass even with a second writer.
     let res = client()
         .await
         .get(format!("http://{}/api/alice/web/refs", a.peer))
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
-        .header(kloudlite_git_core::peer::OWNER_HEADER, "alice")
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::OWNER_HEADER, "alice")
         .send()
         .await
         .unwrap();
@@ -1596,7 +1596,7 @@ async fn a_visibility_flip_is_routed_to_the_owner() {
             "http://{}/api/alice/web/visibility?visibility=public",
             c.peer
         ))
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -1608,7 +1608,7 @@ async fn a_visibility_flip_is_routed_to_the_owner() {
     let res = client()
         .await
         .get(format!("http://{}/api/alice/web/refs", a.peer))
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -1624,14 +1624,14 @@ async fn a_visibility_flip_is_refused_on_the_public_listener() {
     let f = fleet(3);
     e.store.create_repo("alice", "web").await.unwrap();
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let c = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let c = node(e.store.os.clone(), "kloudlite-2", &f).await;
     a.app.claim("alice/web").await.unwrap();
     for host in [&a.public, &c.public] {
         let res = client()
             .await
             .post(format!("http://{host}/api/alice/web/visibility?visibility=public"))
-            .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+            .header(kloudlite_core::peer::PEER_HEADER, SECRET)
             .send()
             .await
             .unwrap();
@@ -1659,22 +1659,22 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
 
     a.app.claim(&repo).await.unwrap();
     for _ in 0..50 {
         if b.app.owner(&repo).await.unwrap().is_some() { break; }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert_eq!(b.app.owner(&repo).await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(b.app.owner(&repo).await.unwrap().unwrap().node, "kloudlite-1");
 
     // Past the anti-flap window, so this is an old entry rather than one just written.
     // Age the entry past the anti-flap window on the LEADER's clock — the only clock
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(kloudlite_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(kloudlite_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     // A dies without a SIGTERM: no release, the entry stays live and named to A.
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
@@ -1688,12 +1688,12 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
     blackholed().lock().unwrap().remove(&f[1].1);
 
     assert_eq!(res.status(), 200, "a hard-crashed owner must be taken over, not 502'd");
-    assert!(took < kloudlite_git_storage::ownership::LEASE_TTL, "took {took:?}: that is waiting out the TTL");
+    assert!(took < kloudlite_storage::ownership::LEASE_TTL, "took {took:?}: that is waiting out the TTL");
     assert_eq!(b.store.pool.warm_count(), 1, "B took the repo over");
     assert_eq!(a.store.pool.warm_count(), 0, "A never served it");
     assert_eq!(
         leader.app.owner(&repo).await.unwrap().unwrap().node,
-        "kloudlite-git-2",
+        "kloudlite-2",
         "the map must name the new owner"
     );
 }
@@ -1710,27 +1710,27 @@ async fn a_force_claim_that_loses_the_race_honours_the_winner() {
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
-    let c = node(e.store.os.clone(), "kloudlite-git-3", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
+    let c = node(e.store.os.clone(), "kloudlite-3", &f).await;
 
     a.app.claim(&repo).await.unwrap();
     // Age the entry past the anti-flap window on the LEADER's clock — the only clock
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(kloudlite_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(kloudlite_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
     // C gets there first.
     match c.app.force_claim(&repo).await.unwrap() {
-        kloudlite_git_storage::ownership::Grant::Granted(en) => assert_eq!(en.node, "kloudlite-git-3"),
+        kloudlite_storage::ownership::Grant::Granted(en) => assert_eq!(en.node, "kloudlite-3"),
         g => panic!("C should have won: {g:?}"),
     }
     // B arrives moments later, having failed against the SAME dead owner.
     match b.app.force_claim(&repo).await.unwrap() {
-        kloudlite_git_storage::ownership::Grant::HeldBy(en) => assert_eq!(
-            en.node, "kloudlite-git-3",
+        kloudlite_storage::ownership::Grant::HeldBy(en) => assert_eq!(
+            en.node, "kloudlite-3",
             "the loser must be told the winner so it forwards there"
         ),
         g => panic!("a force-claim losing the race must not be granted: {g:?}"),
@@ -1739,7 +1739,7 @@ async fn a_force_claim_that_loses_the_race_honours_the_winner() {
     assert_eq!(b.store.pool.warm_count(), 0, "the loser must not open the repo");
     assert_eq!(
         leader.app.owner(&repo).await.unwrap().unwrap().node,
-        "kloudlite-git-3",
+        "kloudlite-3",
         "the winner keeps it"
     );
 }
@@ -1758,8 +1758,8 @@ async fn one_connect_failure_does_not_move_a_repo() {
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
 
     a.app.claim(&repo).await.unwrap();
     for _ in 0..50 {
@@ -1772,7 +1772,7 @@ async fn one_connect_failure_does_not_move_a_repo() {
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(kloudlite_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(kloudlite_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
 
     // A blip, not a death: A refuses exactly one connection and then answers normally.
     flaky().lock().unwrap().insert(f[1].1.clone(), 1);
@@ -1785,7 +1785,7 @@ async fn one_connect_failure_does_not_move_a_repo() {
     assert_eq!(res.status(), 200, "the retry should have reached A and been served");
     assert_eq!(
         leader.app.owner(&repo).await.unwrap().unwrap().node,
-        "kloudlite-git-1",
+        "kloudlite-1",
         "one connect failure moved the repo: a blip must not fence a healthy owner"
     );
     assert_eq!(b.app.store.pool.warm_count(), 0, "B must not have opened the repo");
@@ -1806,7 +1806,7 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
 
     // Jam the shelf: A can claim, but cannot lay the repo down on disk.
     let cache = a._tmp.path().join("cache");
@@ -1829,7 +1829,7 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
 
     // The lease must not be sitting on A. Either nobody holds it, or it has already lapsed.
     let held = leader.app.owner(&repo).await.unwrap()
-        .filter(|en| !kloudlite_git_storage::ownership::is_expired(en, kloudlite_git_storage::ownership::now_ms()));
+        .filter(|en| !kloudlite_storage::ownership::is_expired(en, kloudlite_storage::ownership::now_ms()));
     assert!(
         held.is_none(),
         "A kept a lease on a repo it cannot open: {held:?}"
@@ -1855,12 +1855,12 @@ async fn a_second_failed_forward_within_a_second_does_not_ask_the_leader_again()
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
     let f = fleet(2);
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
 
     assert!(a.app.may_ask_to_recover(&repo), "first ask goes through");
     assert!(!a.app.may_ask_to_recover(&repo), "second ask inside the window is refused");
     assert!(a.app.may_ask_to_recover("bob/other"), "the window is per repo, not global");
-    a.app.advance_clock(kloudlite_git_app::RECOVERY_ASK_EVERY + std::time::Duration::from_millis(1));
+    a.app.advance_clock(kloudlite_app::RECOVERY_ASK_EVERY + std::time::Duration::from_millis(1));
     assert!(a.app.may_ask_to_recover(&repo), "and it reopens after the window");
 }
 
@@ -1879,8 +1879,8 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
     let leader = node(e.store.os.clone(), LEADER, &f).await;
-    let a = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
 
     a.app.claim(&repo).await.unwrap();
     for _ in 0..50 {
@@ -1891,7 +1891,7 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(kloudlite_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(kloudlite_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
     // A push into the dead owner: not replayable, so it must fail without touching the window.
@@ -1930,19 +1930,19 @@ async fn concurrent_claims_never_grant_one_repo_twice() {
     let leader = node(e.store.os.clone(), LEADER, &f).await;
 
     let (a, b) = tokio::join!(
-        leader.app.grant_claim("alice/web", "kloudlite-git-1", false),
-        leader.app.grant_claim("alice/web", "kloudlite-git-2", false),
+        leader.app.grant_claim("alice/web", "kloudlite-1", false),
+        leader.app.grant_claim("alice/web", "kloudlite-2", false),
     );
     let results = [a.unwrap(), b.unwrap()];
     let granted: Vec<_> = results
         .iter()
-        .filter(|g| matches!(g, kloudlite_git_storage::ownership::Grant::Granted(_)))
+        .filter(|g| matches!(g, kloudlite_storage::ownership::Grant::Granted(_)))
         .collect();
     assert_eq!(granted.len(), 1, "expected exactly one Granted, got {results:?}");
 
     let holder = leader.app.owner("alice/web").await.unwrap().expect("map must name a holder");
     assert!(
-        holder.node == "kloudlite-git-1" || holder.node == "kloudlite-git-2",
+        holder.node == "kloudlite-1" || holder.node == "kloudlite-2",
         "unexpected holder {holder:?}"
     );
 }
@@ -1951,7 +1951,7 @@ async fn concurrent_claims_never_grant_one_repo_twice() {
 fn v2_paths_derive_the_image_key() {
     // repo_of is private, so assert through the public helper the middleware uses.
     assert_eq!(
-        kloudlite_git_registry::image_route("/v2/acme/nginx/blobs/sha256:ab").map(|(o, n)| kloudlite_git_registry::routing_key(o, n)),
+        kloudlite_registry::image_route("/v2/acme/nginx/blobs/sha256:ab").map(|(o, n)| kloudlite_registry::routing_key(o, n)),
         Some("img/acme/nginx".to_string())
     );
 }
@@ -1961,17 +1961,17 @@ fn v2_paths_derive_the_image_key() {
 /// Serving it `Local` unclaimed let every node open the same fresh database inside that window.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_empty_prefix_is_claimed_never_served_unclaimed() {
-    use kloudlite_git_storage::ownership::Route;
+    use kloudlite_storage::ownership::Route;
     let e = common::env().await;
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     // B routes first: the answer may be Local, but only because B now HOLDS the lease.
     assert_eq!(b.app.route_for("alice/unflushed", true).await, Route::Local);
-    assert_eq!(a.app.owner("alice/unflushed").await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(a.app.owner("alice/unflushed").await.unwrap().unwrap().node, "kloudlite-1");
     // A sees the same empty prefix and must defer to B, not open it too.
     match a.app.route_for("alice/unflushed", true).await {
-        Route::Peer(p) => assert_eq!(p.name, "kloudlite-git-1"),
+        Route::Peer(p) => assert_eq!(p.name, "kloudlite-1"),
         other => panic!("A must forward to the claimant, got {other:?}"),
     }
     assert_eq!(a.store.pool.warm_count(), 0);
@@ -1986,16 +1986,16 @@ async fn a_create_holds_the_lease_before_it_opens_the_database() {
     let token = e.store.create_token("alice").await.unwrap();
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let res = client()
         .await
         .post(format!("http://{}/api/alice/fresh/create?visibility=private", b.peer))
-        .header(kloudlite_git_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
     assert_eq!(res.status(), 201);
-    assert_eq!(a.app.owner("alice/fresh").await.unwrap().unwrap().node, "kloudlite-git-1");
+    assert_eq!(a.app.owner("alice/fresh").await.unwrap().unwrap().node, "kloudlite-1");
     assert_eq!(b.store.pool.warm_count(), 1, "the creator opened it under its own lease");
     // The very next request lands on the other node: it must forward, and A must stay cold.
     let res = client()
@@ -2017,8 +2017,8 @@ async fn a_fleet_elects_exactly_one_leader() {
     let e = common::env().await;
     let f = fleet(3);
     let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let c = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let c = node(e.store.os.clone(), "kloudlite-2", &f).await;
     let leaders: Vec<String> =
         [&a, &b, &c].iter().filter(|n| n.app.is_leader()).map(|n| n.app.self_name.clone()).collect();
     assert_eq!(leaders, vec![LEADER.to_string()], "started first, took the lease first");
@@ -2042,13 +2042,13 @@ async fn a_fleet_elects_exactly_one_leader() {
 /// successor opened the map, the fence demoted it, and its `/own/*` answers 421 from then on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dead_leader_is_replaced_and_its_late_write_is_refused() {
-    use kloudlite_git_storage::ownership::lease::LEADER_TTL;
-    use kloudlite_git_storage::ownership::Grant;
+    use kloudlite_storage::ownership::lease::LEADER_TTL;
+    use kloudlite_storage::ownership::Grant;
     let e = common::env().await;
     let f = fleet(3);
     let zero = node(e.store.os.clone(), LEADER, &f).await;
-    let one = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
-    let two = node(e.store.os.clone(), "kloudlite-git-2", &f).await;
+    let one = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let two = node(e.store.os.clone(), "kloudlite-2", &f).await;
     e.store.create_repo("alice", "web").await.unwrap();
     assert!(zero.app.is_leader() && !one.app.is_leader() && !two.app.is_leader());
 
@@ -2062,16 +2062,16 @@ async fn a_dead_leader_is_replaced_and_its_late_write_is_refused() {
     // grant hits the fence, it demotes, and it answers 421; TWO re-reads the lease and lands on ONE.
     assert_eq!(two.app.leader().as_deref(), Some(LEADER));
     match two.app.claim("alice/web").await.unwrap() {
-        Grant::Granted(en) => assert_eq!(en.node, "kloudlite-git-2"),
+        Grant::Granted(en) => assert_eq!(en.node, "kloudlite-2"),
         g => panic!("expected a grant, got {g:?}"),
     }
-    assert_eq!(two.app.leader().as_deref(), Some("kloudlite-git-1"), "the stale name was replaced by the lease");
-    assert_eq!(one.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-git-2");
+    assert_eq!(two.app.leader().as_deref(), Some("kloudlite-1"), "the stale name was replaced by the lease");
+    assert_eq!(one.app.owner("alice/web").await.unwrap().unwrap().node, "kloudlite-2");
     assert!(!zero.app.is_leader(), "the fenced grant demoted it");
     assert!(!zero.app.ownership.is_writer().await);
 
     // And a write from the old leader after that is refused in-process, before any storage.
-    let late = zero.app.grant_claim("alice/late", "kloudlite-git-2", false).await;
+    let late = zero.app.grant_claim("alice/late", "kloudlite-2", false).await;
     assert!(late.as_ref().is_err_and(|e| e.to_string().contains("not the leader")), "{late:?}");
 }
 
@@ -2079,16 +2079,16 @@ async fn a_dead_leader_is_replaced_and_its_late_write_is_refused() {
 /// live lease, ready again once somebody does — and "somebody" may be this node.
 #[tokio::test(flavor = "multi_thread")]
 async fn healthz_is_unready_only_while_no_leader_lives() {
-    use kloudlite_git_storage::ownership::lease::LEADER_TTL;
+    use kloudlite_storage::ownership::lease::LEADER_TTL;
     let e = common::env().await;
     let f = fleet(2);
     let _zero = node(e.store.os.clone(), LEADER, &f).await;
-    let one = node(e.store.os.clone(), "kloudlite-git-1", &f).await;
+    let one = node(e.store.os.clone(), "kloudlite-1", &f).await;
     let c = client().await;
     let healthz = |n: &Node| {
         let url = format!("http://{}/healthz", n.peer);
         let c = c.clone();
-        async move { c.get(url).header(kloudlite_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status() }
+        async move { c.get(url).header(kloudlite_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status() }
     };
     assert_eq!(healthz(&one).await, 200, "a live leader exists");
 

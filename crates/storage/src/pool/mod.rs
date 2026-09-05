@@ -124,7 +124,7 @@ pub fn path(owner: &str, name: &str) -> String {
 }
 
 /// See the comment at its use: this, not object-store latency, sets how long a lone push takes.
-const KLOUDLITE_GIT_FLUSH_INTERVAL_MS: u64 = 100;
+const KLOUDLITE_FLUSH_INTERVAL_MS: u64 = 100;
 
 fn env_u64(k: &str, default: u64) -> u64 {
     std::env::var(k)
@@ -133,7 +133,7 @@ fn env_u64(k: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// SlateDB's on-disk cache for object-store parts, rooted under `KLOUDLITE_GIT_CACHE_DIR`.
+/// SlateDB's on-disk cache for object-store parts, rooted under `KLOUDLITE_CACHE_DIR`.
 ///
 /// It is OFF by default (`root_folder: None`), which is how this has been running: every SST block
 /// miss under a tag read, a visibility check or a ref read is an S3 GET. Sized by env because the
@@ -145,14 +145,14 @@ fn env_u64(k: &str, default: u64) -> u64 {
 /// `subdir` separates the repo pool from the ownership map, which is read on every route decision
 /// and must not share an eviction budget with 64 repo databases.
 ///
-/// Keyed on `KLOUDLITE_GIT_CACHE_DIR` being SET, not on a default path, and that is load-bearing:
+/// Keyed on `KLOUDLITE_CACHE_DIR` being SET, not on a default path, and that is load-bearing:
 /// the cache is keyed by database path, so two object stores holding different data under
 /// `repo/alice/web` would read each other's parts. In the fleet there is exactly one bucket per
 /// node and the deployment sets the variable; in a test process there are dozens of `InMemory`
 /// stores using the same paths, and an implicit `./.local/cache` would silently cross them.
 pub(crate) fn disk_cache_options(subdir: &str) -> slatedb::config::ObjectStoreCacheOptions {
-    let mb = env_u64("KLOUDLITE_GIT_SLATEDB_DISK_CACHE_MB", 4096);
-    let root = std::env::var("KLOUDLITE_GIT_CACHE_DIR")
+    let mb = env_u64("KLOUDLITE_SLATEDB_DISK_CACHE_MB", 4096);
+    let root = std::env::var("KLOUDLITE_CACHE_DIR")
         .ok()
         .map(|d| std::path::PathBuf::from(d).join(subdir));
     slatedb::config::ObjectStoreCacheOptions {
@@ -166,14 +166,14 @@ pub(crate) fn disk_cache_options(subdir: &str) -> slatedb::config::ObjectStoreCa
 ///
 /// `Db::builder` installs its own 512 MiB block + 128 MiB meta cache when none is given
 /// (`DEFAULT_BLOCK_CACHE_CAPACITY`/`DEFAULT_META_CACHE_CAPACITY` in slatedb 0.15) — 640 MiB
-/// nominal times `KLOUDLITE_GIT_MAX_WARM` (64) is 40 GiB against a pod limit in single-digit GiB, so
+/// nominal times `KLOUDLITE_MAX_WARM` (64) is 40 GiB against a pod limit in single-digit GiB, so
 /// sharing is a memory-safety fix as much as a hit-rate one. SlateDB scopes each database's keys
 /// inside its own wrapper, so one instance across every repo cannot mix them up, and a cache
 /// handed in this way is never closed by SlateDB — which is what we want when the pool outlives
 /// every database in it. The defaults below are node-wide totals and so deliberately far under
 /// SlateDB's per-database ones.
-const KLOUDLITE_GIT_SLATEDB_BLOCK_CACHE_MB: u64 = 256;
-const KLOUDLITE_GIT_SLATEDB_META_CACHE_MB: u64 = 64;
+const KLOUDLITE_SLATEDB_BLOCK_CACHE_MB: u64 = 256;
+const KLOUDLITE_SLATEDB_META_CACHE_MB: u64 = 64;
 
 fn shared_db_cache() -> Arc<dyn slatedb::db_cache::DbCache> {
     use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
@@ -185,8 +185,8 @@ fn shared_db_cache() -> Arc<dyn slatedb::db_cache::DbCache> {
     };
     Arc::new(
         slatedb::db_cache::SplitCache::new()
-            .with_block_cache(mk(KLOUDLITE_GIT_SLATEDB_BLOCK_CACHE_MB))
-            .with_meta_cache(mk(KLOUDLITE_GIT_SLATEDB_META_CACHE_MB))
+            .with_block_cache(mk(KLOUDLITE_SLATEDB_BLOCK_CACHE_MB))
+            .with_meta_cache(mk(KLOUDLITE_SLATEDB_META_CACHE_MB))
             .build(),
     )
 }
@@ -201,7 +201,7 @@ impl Pool {
         // Every ref update waits for the next WAL flush, so this interval — not object-store
         // latency — sets how long a push takes when pushes arrive one at a time. An idle database
         // does not flush, so a short interval costs nothing until there is something to write.
-        let flush_ms = KLOUDLITE_GIT_FLUSH_INTERVAL_MS;
+        let flush_ms = KLOUDLITE_FLUSH_INTERVAL_MS;
         // WAL collection runs whether or not `background` is set, and has to. A database takes a
         // write on every ref update or tag move, and nothing else ever reclaims those WAL objects:
         // the ownership map, configured the same way, reached 18,521 WAL files in four days and
@@ -242,8 +242,8 @@ impl Pool {
             os,
             db_cache: shared_db_cache(),
             entries: Mutex::new(HashMap::new()),
-            idle_ttl_ms: (env_u64("KLOUDLITE_GIT_WARM_TTL_SECS", 300) * 1000).into(),
-            max_warm: (env_u64("KLOUDLITE_GIT_MAX_WARM", 64) as usize).into(),
+            idle_ttl_ms: (env_u64("KLOUDLITE_WARM_TTL_SECS", 300) * 1000).into(),
+            max_warm: (env_u64("KLOUDLITE_MAX_WARM", 64) as usize).into(),
             flush_every_ms: (300_000u64).into(),
             settings,
             hook: Mutex::new(None),
@@ -374,7 +374,7 @@ mod tests {
     /// parts, which is exactly the shape of a test process full of `InMemory` stores.
     #[test]
     fn the_disk_cache_is_off_unless_a_cache_dir_is_configured() {
-        let set = std::env::var("KLOUDLITE_GIT_CACHE_DIR").is_ok();
+        let set = std::env::var("KLOUDLITE_CACHE_DIR").is_ok();
         assert_eq!(disk_cache_options("slatedb").root_folder.is_some(), set);
     }
 

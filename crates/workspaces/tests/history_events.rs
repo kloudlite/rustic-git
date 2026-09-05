@@ -1,7 +1,7 @@
 //! The event row shape and the audit dual write. The object-store audit log stays the append-only
 //! legal record; this is the queryable copy, and a failure to write the copy must never affect it.
 
-use kloudlite_git_workspaces::history::events::{audit_event, stream_event, EventRow};
+use kloudlite_workspaces::history::events::{audit_event, stream_event, EventRow};
 
 #[test]
 fn a_row_serializes_in_the_shape_the_events_table_takes() {

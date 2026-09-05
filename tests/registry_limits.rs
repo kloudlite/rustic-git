@@ -3,12 +3,12 @@
 //! second must agree.
 mod common;
 use axum::http::StatusCode;
-use kloudlite_git_registry::Digest;
+use kloudlite_registry::Digest;
 
 const CAP: &str = "16";
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
-    std::env::set_var("KLOUDLITE_GIT_MAX_LAYER", CAP);
+    std::env::set_var("KLOUDLITE_MAX_LAYER", CAP);
     let (base, e) = common::serve_public().await;
     let token = e.store.create_token("acme").await.unwrap();
     (base, e, reqwest::Client::new(), token)

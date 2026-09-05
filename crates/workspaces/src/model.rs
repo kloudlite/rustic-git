@@ -27,7 +27,7 @@ pub fn default_ws_image() -> String {
 /// The MARKER a spec carries for "the platform's image" — untagged on purpose. The tag is the
 /// agent's business (`WS_DEFAULT_IMAGE`, pinned with the agent by pin.sh): a spec that froze a
 /// tag would pin every workspace to whatever the image was the day it was created.
-pub const DEFAULT_WS_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-git-workspace";
+pub const DEFAULT_WS_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-workspace";
 
 /// Whether a spec's image means "the platform's own": the marker, a tagged form of it, or the
 /// two images the platform used to default to — specs written back then must keep getting sshd.
@@ -131,7 +131,7 @@ pub struct Mount {
 /// the bind string. Kept here rather than in `engine::compose` so the runtime that replaces
 /// compose can call the same rule.
 pub fn validate_mount(m: &Mount) -> Result<(), String> {
-    if !kloudlite_git_storage::store::valid_segment(&m.folder) {
+    if !kloudlite_storage::store::valid_segment(&m.folder) {
         return Err(format!("mount folder {:?} must be a single name of [A-Za-z0-9._-]", m.folder));
     }
     if !m.path.starts_with('/') || m.path.contains(':') || m.path.contains('\0') {
@@ -200,7 +200,7 @@ pub fn valid_ws_name(name: &str) -> bool {
 /// k8s label-value ceiling). Shared by `validate_ws_spec`'s `attachedEnvironment` check and
 /// `attach_ws`'s request-body check, so the two can never drift into checking different things.
 pub fn valid_segment_label(s: &str) -> bool {
-    kloudlite_git_storage::store::valid_segment(s) && s.len() <= 63
+    kloudlite_storage::store::valid_segment(s) && s.len() <= 63
 }
 
 /// Every untrusted string on a `WorkspaceSpec` that becomes a path, an argv word or an object
@@ -215,7 +215,7 @@ pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> 
         return Err(format!("workspace name {:?} is not a name", spec.name));
     }
     validate_owner(&spec.owner)?;
-    if !spec.team.is_empty() && !kloudlite_git_storage::store::valid_segment(&spec.team) {
+    if !spec.team.is_empty() && !kloudlite_storage::store::valid_segment(&spec.team) {
         return Err(format!("team {:?} is not a segment", spec.team));
     }
     // `write_attach_label` (controller/workspace.rs) patches this verbatim into a label value —
@@ -235,7 +235,7 @@ pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> 
 /// is a root-run `mkdir`/`chown` outside the pool. The reserved names (`api`, `v2`, `img`) that
 /// `store::valid_owner` also refuses are refused here on purpose: no real owner may hold one.
 pub fn validate_owner(owner: &str) -> Result<(), String> {
-    match kloudlite_git_storage::store::valid_owner(owner) {
+    match kloudlite_storage::store::valid_owner(owner) {
         true => Ok(()),
         false => Err(format!("owner {owner:?} is not an owner name")),
     }

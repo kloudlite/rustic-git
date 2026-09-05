@@ -12,11 +12,11 @@ use super::*;
 use crate::controller::Settings;
 use crate::testsupport::test_ctx;
 use k8s_openapi::api::core::v1::Node;
-use kloudlite_git_core::settings::LiveSettings;
-use kloudlite_git_workspaces::crd;
-use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
-use kloudlite_git_workspaces::replicate;
-use kloudlite_git_workspaces::settings::AgentSettings;
+use kloudlite_core::settings::LiveSettings;
+use kloudlite_workspaces::crd;
+use kloudlite_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
+use kloudlite_workspaces::replicate;
+use kloudlite_workspaces::settings::AgentSettings;
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ async fn a_pod_wearing_the_label_but_not_the_service_account_is_not_a_peer() {
         "apiVersion": "v1", "kind": "PodList",
         "items": [{
             "apiVersion": "v1", "kind": "Pod",
-            "metadata": {"name": "not-us", "namespace": "kube-system", "labels": {"app": "kloudlite-git-agent"}},
+            "metadata": {"name": "not-us", "namespace": "kube-system", "labels": {"app": "kloudlite-agent"}},
             "spec": {"nodeName": "node-b", "serviceAccountName": "default"},
             "status": {"podIp": "10.0.0.9"},
         }],
@@ -69,16 +69,16 @@ fn the_receive_ceiling_follows_the_volumes_quota() {
 // The pull side: `pull_beat`, `pull_volume`, `reap_dead_replicas`.
 // -----------------------------------------------------------------------------------------
 
-const SNAPSHOTS: &str = "/apis/kloudlite-git.io/v1alpha1/snapshots";
-const VOLREPLICAS: &str = "/apis/kloudlite-git.io/v1alpha1/volumereplicas";
+const SNAPSHOTS: &str = "/apis/kloudlite.io/v1alpha1/snapshots";
+const VOLREPLICAS: &str = "/apis/kloudlite.io/v1alpha1/volumereplicas";
 const NODES: &str = "/api/v1/nodes";
-const VOLUMES: &str = "/apis/kloudlite-git.io/v1alpha1/volumes";
-const WORKSPACES: &str = "/apis/kloudlite-git.io/v1alpha1/workspaces";
-const ENVIRONMENTS: &str = "/apis/kloudlite-git.io/v1alpha1/environments";
+const VOLUMES: &str = "/apis/kloudlite.io/v1alpha1/volumes";
+const WORKSPACES: &str = "/apis/kloudlite.io/v1alpha1/workspaces";
+const ENVIRONMENTS: &str = "/apis/kloudlite.io/v1alpha1/environments";
 
 fn ready_snapshot(name: &str, volume: &str, parent: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1",
+        "apiVersion": "kloudlite.io/v1alpha1",
         "kind": "Snapshot",
         "metadata": {"name": name, "uid": "snap-uid"},
         "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent},
@@ -157,7 +157,7 @@ fn parent_at(kind: &'static str, name: &str, volume: &str, phase: crd::Phase, re
 async fn an_empty_pinned_volume_with_placed_parents_is_still_unplaced() {
     let tmp = tempfile::tempdir().unwrap();
     let ws = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "name": "ws-1", "region": "r1", "image": "img", "desiredState": "stopped", "packages": []},
         "status": {"phase": "ready", "nodeName": "node-dead", "volumeRef": "vol-1"},
@@ -170,7 +170,7 @@ async fn an_empty_pinned_volume_with_placed_parents_is_still_unplaced() {
 
     // The volume as the crash left it: empty pin, and a parent still placed on the dead node.
     let vol = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "vol-1", "uid": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1",
                  "quotaGb": 5, "replicas": 2},
@@ -205,7 +205,7 @@ async fn an_empty_pinned_volume_with_no_placed_parents_is_left_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![]);
     let vol = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "vol-1", "uid": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 2},
     });
@@ -233,7 +233,7 @@ async fn an_empty_pinned_volume_with_a_running_parent_on_a_live_node_is_left_alo
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-a", vec![]);
     let vol = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "vol-1", "uid": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 2},
     });
@@ -253,7 +253,7 @@ async fn an_empty_pinned_volume_with_a_running_parent_on_a_live_node_is_left_alo
 
 fn replica_of(volume: &str, node: &str, phase: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": format!("{volume}.{node}"), "uid": format!("uid-{node}")},
         "spec": {"volume": volume, "node": node},
         "status": {"phase": phase, "branches": {}},
@@ -324,7 +324,7 @@ async fn a_snapshot_with_no_cr_at_all_is_still_retired() {
     assert!(rec.calls().contains(&format!("GET {SNAPSHOTS}/gone")), "{:?}", rec.calls());
 }
 
-/// H2: creating this node's `VolumeReplica` for the first time stamps `kloudlite-git.io/volume`
+/// H2: creating this node's `VolumeReplica` for the first time stamps `kloudlite.io/volume`
 /// — the e2e (`tests/ws_e2e.sh`) selects replicas by exactly that label, and nothing else in
 /// this codebase writes a `VolumeReplica`.
 #[tokio::test]
@@ -338,12 +338,12 @@ async fn write_replica_status_stamps_the_volume_label_on_create() {
             path: VOLREPLICAS.into(),
             status: 201,
             body: serde_json::json!({
-                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
                 "metadata": {"name": name, "uid": "vr-uid"},
                 "spec": {"volume": "vol-1", "node": "node-b"},
             }),
         },
-        Route { method: "PUT", path: format!("{VOLREPLICAS}/{name}/status"), status: 200, body: serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica", "metadata": {"name": name}, "spec": {"volume": "vol-1", "node": "node-b"}, "status": {"phase": "Synced", "branches": {}}}) },
+        Route { method: "PUT", path: format!("{VOLREPLICAS}/{name}/status"), status: 200, body: serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica", "metadata": {"name": name}, "spec": {"volume": "vol-1", "node": "node-b"}, "status": {"phase": "Synced", "branches": {}}}) },
     ];
     let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
 
@@ -351,7 +351,7 @@ async fn write_replica_status_stamps_the_volume_label_on_create() {
 
     let created = rec.sent("POST", VOLREPLICAS);
     assert_eq!(created.len(), 1, "{:?}", rec.calls());
-    assert_eq!(created[0]["metadata"]["labels"]["kloudlite-git.io/volume"], "vol-1");
+    assert_eq!(created[0]["metadata"]["labels"]["kloudlite.io/volume"], "vol-1");
 }
 
 /// Nothing missing (every Ready `Snapshot` is already a local snapshot): `pull_volume` makes no
@@ -364,7 +364,7 @@ async fn a_clean_pull_with_nothing_missing_writes_synced() {
     std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-aaaaaaaa")).unwrap();
 
     let created = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-1.node-b", "uid": "vr-uid"},
         "spec": {"volume": "vol-1", "node": "node-b"},
         "status": {"phase": "Syncing", "branches": {}},
@@ -516,7 +516,7 @@ fi
     let pod = serde_json::json!({
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": "agent-a"},
-        "spec": {"serviceAccountName": "kloudlite-git-agent"},
+        "spec": {"serviceAccountName": "kloudlite-agent"},
         "status": {"podIP": "127.0.0.1"},
     });
     let routes = vec![
@@ -524,13 +524,13 @@ fi
         Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
         not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
         Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
             "spec": {"volume": "vol-1", "node": "node-b"},
             "status": {"phase": "Syncing", "branches": {}},
         }) },
         Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
             "spec": {"volume": "vol-1", "node": "node-b"},
             "status": {"phase": "Synced", "branches": {}},
@@ -611,7 +611,7 @@ async fn pull_volume_resolves_a_source_address_once_per_pass() {
 #[tokio::test]
 async fn a_volumes_owner_is_always_interesting_even_with_nothing_running() {
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "vol-1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
@@ -701,7 +701,7 @@ async fn a_third_node_finds_a_dead_standbys_volume_interesting() {
     assert_eq!(replicate::targets("v2", "node-a", &["node-a".into(), "node-b".into(), "node-c".into()], 2), vec!["node-b".to_string()]);
 
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v2"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
@@ -719,7 +719,7 @@ async fn a_third_node_finds_a_dead_standbys_volume_interesting() {
 #[tokio::test]
 async fn a_node_holding_the_only_copy_finds_it_interesting() {
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v0"},
         "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 1},
         "status": {"phase": "unavailable"},
@@ -778,7 +778,7 @@ async fn reaper_deletes_dead_keeps_young_keeps_absent_condition() {
 
     let replica = |node: &str| {
         serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": format!("vol-1.{node}"), "uid": format!("uid-{node}")},
             "spec": {"volume": "vol-1", "node": node},
             "status": {"phase": "Synced", "branches": {}},
@@ -827,7 +827,7 @@ async fn pull_beat_reaps_unclaims_and_places_nothing_on_a_node_list_error() {
 
 fn ws_placed(name: &str, node: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "name": name, "region": "r1", "image": "img", "desiredState": "running", "packages": []},
         "status": {"phase": "ready", "nodeName": node, "volumeRef": format!("vol-{name}")},
@@ -836,7 +836,7 @@ fn ws_placed(name: &str, node: &str) -> serde_json::Value {
 
 fn ws_placed_stopped(name: &str, node: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "name": name, "region": "r1", "image": "img", "desiredState": "stopped", "packages": []},
         "status": {"phase": "ready", "nodeName": node, "volumeRef": format!("vol-{name}")},
@@ -845,7 +845,7 @@ fn ws_placed_stopped(name: &str, node: &str) -> serde_json::Value {
 
 fn vol_owned(name: &str, node: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
@@ -860,7 +860,7 @@ fn vol_at_rv(name: &str, node: &str, rv: &str) -> serde_json::Value {
 
 fn env_placed_stopped(name: &str, node: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Environment",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "acme", "name": name, "region": "r1", "services": [], "desiredState": "stopped"},
         "status": {"phase": "creating", "nodeName": node, "volumeRef": format!("vol-{name}")},
@@ -915,11 +915,11 @@ async fn a_stopped_parent_beside_a_running_clone_on_one_volume_never_moves() {
     let old = "2000-01-01T00:00:00Z";
     let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
     let routes = vec![
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-clone", ws_placed("ws-clone", "node-b")),
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "node-b") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-clone/status".into(), status: 200, body: ws_placed("ws-clone", "node-b") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "node-b") },
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-clone", ws_placed("ws-clone", "node-b")),
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "node-b") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-clone/status".into(), status: 200, body: ws_placed("ws-clone", "node-b") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "node-b") },
     ];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
@@ -933,18 +933,18 @@ async fn a_stopped_parent_beside_a_running_clone_on_one_volume_never_moves() {
     sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
     assert!(
-        !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/kloudlite-git.io/v1alpha1/volumes/vol-1")),
+        !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/kloudlite.io/v1alpha1/volumes/vol-1")),
         "the pin is never cleared while a sibling runs: {:?}",
         rec.calls()
     );
-    let stop_writes = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status");
+    let stop_writes = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/workspaces/ws-stop/status");
     assert!(
         stop_writes.iter().all(|w| w["status"]["nodeName"] == "node-b"),
         "the stopped sibling keeps its placement: {stop_writes:?}"
     );
     // Both parents carry NodeDead so the API can say why neither will start.
     for name in ["ws-stop", "ws-clone"] {
-        let sent = rec.sent("PUT", &format!("/apis/kloudlite-git.io/v1alpha1/workspaces/{name}/status"));
+        let sent = rec.sent("PUT", &format!("/apis/kloudlite.io/v1alpha1/workspaces/{name}/status"));
         assert!(sent.iter().any(|w| w["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "NodeDead")), "{name}");
     }
 }
@@ -958,11 +958,11 @@ async fn the_sweep_retries_a_conflicted_volume_status_write() {
     let nodes = vec![node_ready_obj("node-x"), node_dead_obj("node-b", old)];
     let conflict = serde_json::to_value(kube::core::Status::failure("conflict", "Conflict").with_code(409)).unwrap();
     let routes = vec![
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1", ws_placed("ws-1", "node-b")),
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: ws_placed("ws-1", "node-b") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 409, body: conflict },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_at_rv("vol-1", "node-b", "10") },
-        get("/apis/kloudlite-git.io/v1alpha1/volumes/vol-1", vol_at_rv("vol-1", "node-b", "10")),
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-1", ws_placed("ws-1", "node-b")),
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: ws_placed("ws-1", "node-b") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-1/status".into(), status: 409, body: conflict },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_at_rv("vol-1", "node-b", "10") },
+        get("/apis/kloudlite.io/v1alpha1/volumes/vol-1", vol_at_rv("vol-1", "node-b", "10")),
     ];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
@@ -972,7 +972,7 @@ async fn the_sweep_retries_a_conflicted_volume_status_write() {
 
     sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
-    let writes = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status");
+    let writes = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/volumes/vol-1/status");
     assert_eq!(writes.len(), 2, "the conflicted write is retried once: {:?}", rec.calls());
     assert_eq!(writes[1]["metadata"]["resourceVersion"], "10", "and against the re-read object");
     assert_eq!(writes[1]["status"]["conditions"][0]["reason"], "NodeDead");
@@ -1001,14 +1001,14 @@ async fn the_sweep_unplaces_a_dead_owners_parents_and_never_touches_a_live_one()
     let old = "2000-01-01T00:00:00Z";
     let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
     let routes = vec![
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-dead", ws_placed_stopped("ws-dead", "node-b")),
-        get("/apis/kloudlite-git.io/v1alpha1/environments/env-dead", env_placed_stopped("env-dead", "node-b")),
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-dead/status".into(), status: 200, body: ws_placed_stopped("ws-dead", "") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/environments/env-dead/status".into(), status: 200, body: env_placed_stopped("env-dead", "") },
-        Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-dead".into(), status: 200, body: vol_at_rv("vol-ws-dead", "", "10") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-dead/status".into(), status: 200, body: vol_owned("vol-ws-dead", "") },
-        Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-env-dead".into(), status: 200, body: vol_at_rv("vol-env-dead", "", "10") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-env-dead/status".into(), status: 200, body: vol_owned("vol-env-dead", "") },
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-dead", ws_placed_stopped("ws-dead", "node-b")),
+        get("/apis/kloudlite.io/v1alpha1/environments/env-dead", env_placed_stopped("env-dead", "node-b")),
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-dead/status".into(), status: 200, body: ws_placed_stopped("ws-dead", "") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/environments/env-dead/status".into(), status: 200, body: env_placed_stopped("env-dead", "") },
+        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-dead".into(), status: 200, body: vol_at_rv("vol-ws-dead", "", "10") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-dead/status".into(), status: 200, body: vol_owned("vol-ws-dead", "") },
+        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-env-dead".into(), status: 200, body: vol_at_rv("vol-env-dead", "", "10") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-env-dead/status".into(), status: 200, body: vol_owned("vol-env-dead", "") },
     ];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
@@ -1024,11 +1024,11 @@ async fn the_sweep_unplaces_a_dead_owners_parents_and_never_touches_a_live_one()
 
     sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
-    let ws_sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-dead/status");
+    let ws_sent = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/workspaces/ws-dead/status");
     assert_eq!(ws_sent.len(), 1, "{:?}", rec.calls());
     assert_eq!(ws_sent[0]["status"]["nodeName"], "", "nodeName cleared");
     assert_eq!(ws_sent[0]["status"]["phase"], "ready", "nothing else in status is touched");
-    let env_sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/environments/env-dead/status");
+    let env_sent = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/environments/env-dead/status");
     assert_eq!(env_sent.len(), 1);
     assert_eq!(env_sent[0]["status"]["nodeName"], "");
     assert!(!rec.calls().iter().any(|c| c.contains("/volumes/vol-live")), "{:?}", rec.calls());
@@ -1041,9 +1041,9 @@ async fn a_running_worktree_on_a_dead_node_is_marked_not_moved() {
     let old = "2000-01-01T00:00:00Z";
     let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
     let routes = vec![
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-run", ws_placed("ws-run", "node-b")),
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-b") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-run/status".into(), status: 200, body: vol_owned("vol-ws-run", "node-b") },
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-run", ws_placed("ws-run", "node-b")),
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-run/status".into(), status: 200, body: ws_placed("ws-run", "node-b") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-run/status".into(), status: 200, body: vol_owned("vol-ws-run", "node-b") },
     ];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
@@ -1052,15 +1052,15 @@ async fn a_running_worktree_on_a_dead_node_is_marked_not_moved() {
 
     sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
-    let ws_sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-run/status");
+    let ws_sent = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/workspaces/ws-run/status");
     assert_eq!(ws_sent.len(), 1, "{:?}", rec.calls());
     assert_eq!(ws_sent[0]["status"]["nodeName"], "node-b", "a running worktree keeps its node");
     assert_eq!(ws_sent[0]["status"]["conditions"][0]["reason"], "NodeDead");
     assert!(
-        !rec.calls().iter().any(|c| c == "PATCH /apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-run"),
+        !rec.calls().iter().any(|c| c == "PATCH /apis/kloudlite.io/v1alpha1/volumes/vol-ws-run"),
         "pin untouched: {:?}", rec.calls()
     );
-    let vol_sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-run/status");
+    let vol_sent = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-run/status");
     assert_eq!(vol_sent.len(), 1);
     assert_eq!(vol_sent[0]["status"]["phase"], "unavailable");
     assert_eq!(vol_sent[0]["status"]["conditions"][0]["reason"], "NodeDead");
@@ -1078,7 +1078,7 @@ async fn a_second_pass_over_the_same_running_dead_state_writes_nothing() {
     // a drifted message is a rewrite every beat and this is what catches that.
     let why = "owner node-b is unavailable; a Running worktree (ws-run) still names volume vol-ws-run, so it stays pinned";
     let already_degraded = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": "ws-run", "uid": "uid-ws-run", "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "name": "ws-run", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
         "status": {
@@ -1087,7 +1087,7 @@ async fn a_second_pass_over_the_same_running_dead_state_writes_nothing() {
         },
     });
     let already_unavailable = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "vol-ws-run", "uid": "uid-vol-ws-run", "generation": 1, "resourceVersion": "9"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {
@@ -1095,7 +1095,7 @@ async fn a_second_pass_over_the_same_running_dead_state_writes_nothing() {
             "conditions": [{"type": "Available", "status": "False", "reason": "NodeDead", "message": why, "observedGeneration": 1, "lastTransitionTime": "2026-09-01T00:00:00Z"}],
         },
     });
-    let routes = vec![get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-run", already_degraded)];
+    let routes = vec![get("/apis/kloudlite.io/v1alpha1/workspaces/ws-run", already_degraded)];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
     let mut beat = beat_of(vec![already_unavailable], vec![], vec![]);
@@ -1117,12 +1117,12 @@ async fn a_stopped_worktree_on_a_dead_node_is_released_with_its_volume() {
     let old = "2000-01-01T00:00:00Z";
     let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
     let routes = vec![
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-stop/status".into(), status: 200, body: ws_placed_stopped("ws-stop", "") },
         // The API server bumps resourceVersion on the patch; the status PUT must carry the
         // NEW one or it 409s and the volume never gets marked.
-        Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop".into(), status: 200, body: vol_at_rv("vol-ws-stop", "", "10") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop/status".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
+        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop".into(), status: 200, body: vol_at_rv("vol-ws-stop", "", "10") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop/status".into(), status: 200, body: vol_owned("vol-ws-stop", "") },
     ];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
@@ -1131,10 +1131,10 @@ async fn a_stopped_worktree_on_a_dead_node_is_released_with_its_volume() {
 
     sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
-    let ws_sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop/status");
+    let ws_sent = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/workspaces/ws-stop/status");
     assert_eq!(ws_sent.len(), 1);
     assert_eq!(ws_sent[0]["status"]["nodeName"], "");
-    let patched = rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop");
+    let patched = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop");
     assert_eq!(patched.len(), 1);
     // A guarded JSON patch, not a blind merge: `test` proves the owner hadn't already moved
     // (a survivor's takeover landing between our list and this patch), THEN `replace` clears
@@ -1147,7 +1147,7 @@ async fn a_stopped_worktree_on_a_dead_node_is_released_with_its_volume() {
     assert_eq!(ops[1]["op"], "replace");
     assert_eq!(ops[1]["path"], "/spec/nodeName");
     assert_eq!(ops[1]["value"], "");
-    let vol_sent = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop/status");
+    let vol_sent = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop/status");
     assert_eq!(vol_sent.len(), 1);
     assert_eq!(vol_sent[0]["metadata"]["resourceVersion"], "10", "the status PUT must carry the patch's resourceVersion, not the stale one");
     assert_eq!(vol_sent[0]["spec"]["nodeName"], "", "and the patched spec it read back");
@@ -1165,10 +1165,10 @@ async fn a_lost_pin_cas_leaves_the_volume_and_its_parents_untouched() {
     let old = "2000-01-01T00:00:00Z";
     let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
     let routes = vec![
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-stop", ws_placed_stopped("ws-stop", "node-b")),
         Route {
             method: "PATCH",
-            path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-ws-stop".into(),
+            path: "/apis/kloudlite.io/v1alpha1/volumes/vol-ws-stop".into(),
             status: 422,
             body: serde_json::to_value(kube::core::Status::failure("the test operation failed", "Invalid").with_code(422)).unwrap(),
         },
@@ -1194,12 +1194,12 @@ async fn a_shared_volume_releases_every_parent_on_it_at_once() {
     let old = "2000-01-01T00:00:00Z";
     let nodes = vec![node_ready_obj("node-a"), node_dead_obj("node-b", old)];
     let routes = vec![
-        get("/apis/kloudlite-git.io/v1alpha1/workspaces/ws-a", ws_placed_stopped("ws-a", "node-b")),
-        get("/apis/kloudlite-git.io/v1alpha1/environments/env-b", env_placed_stopped("env-b", "node-b")),
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-a/status".into(), status: 200, body: ws_placed_stopped("ws-a", "") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/environments/env-b/status".into(), status: 200, body: env_placed_stopped("env-b", "") },
-        Route { method: "PATCH", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
-        Route { method: "PUT", path: "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
+        get("/apis/kloudlite.io/v1alpha1/workspaces/ws-a", ws_placed_stopped("ws-a", "node-b")),
+        get("/apis/kloudlite.io/v1alpha1/environments/env-b", env_placed_stopped("env-b", "node-b")),
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-a/status".into(), status: 200, body: ws_placed_stopped("ws-a", "") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/environments/env-b/status".into(), status: 200, body: env_placed_stopped("env-b", "") },
+        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-1".into(), status: 200, body: vol_at_rv("vol-1", "", "10") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-1/status".into(), status: 200, body: vol_owned("vol-1", "") },
     ];
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = test_ctx(tmp.path(), "node-x", routes);
@@ -1211,10 +1211,10 @@ async fn a_shared_volume_releases_every_parent_on_it_at_once() {
 
     sweep_dead_nodes(&ctx, &beat, &nodes, node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()).await;
 
-    assert_eq!(rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1").len(), 1, "one pin patch for the volume, not one per parent");
-    assert_eq!(rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/volumes/vol-1/status").len(), 1);
-    let ws = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/workspaces/ws-a/status");
-    let env = rec.sent("PUT", "/apis/kloudlite-git.io/v1alpha1/environments/env-b/status");
+    assert_eq!(rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/volumes/vol-1").len(), 1, "one pin patch for the volume, not one per parent");
+    assert_eq!(rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/volumes/vol-1/status").len(), 1);
+    let ws = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/workspaces/ws-a/status");
+    let env = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/environments/env-b/status");
     assert_eq!(ws.len(), 1, "{:?}", rec.calls());
     assert_eq!(env.len(), 1, "{:?}", rec.calls());
     assert_eq!(ws[0]["status"]["nodeName"], "");
@@ -1228,7 +1228,7 @@ async fn a_shared_volume_releases_every_parent_on_it_at_once() {
 async fn take_volume_wins_with_a_test_op_on_an_empty_pin() {
     let routes = vec![Route {
         method: "PATCH",
-        path: "/apis/kloudlite-git.io/v1alpha1/volumes/v1".into(),
+        path: "/apis/kloudlite.io/v1alpha1/volumes/v1".into(),
         status: 200,
         body: vol_owned("v1", "node-a"),
     }];
@@ -1237,7 +1237,7 @@ async fn take_volume_wins_with_a_test_op_on_an_empty_pin() {
 
     assert!(crate::controller::volume::take_volume(&ctx, "v1", "node-a").await.unwrap());
 
-    let sent = rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/volumes/v1");
+    let sent = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/volumes/v1");
     assert_eq!(sent.len(), 1);
     let ops = sent[0].as_array().expect("a JSON Patch is an array of ops");
     assert_eq!(ops[0], serde_json::json!({"op": "test", "path": "/spec/nodeName", "value": ""}));
@@ -1248,7 +1248,7 @@ async fn take_volume_wins_with_a_test_op_on_an_empty_pin() {
 async fn take_volume_loses_quietly_when_the_test_op_fails() {
     let routes = vec![Route {
         method: "PATCH",
-        path: "/apis/kloudlite-git.io/v1alpha1/volumes/v1".into(),
+        path: "/apis/kloudlite.io/v1alpha1/volumes/v1".into(),
         status: 422,
         body: serde_json::to_value(kube::core::Status::failure("test failed", "Invalid").with_code(422))
             .expect("Status serializes"),
@@ -1257,7 +1257,7 @@ async fn take_volume_loses_quietly_when_the_test_op_fails() {
     let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
     assert!(!crate::controller::volume::take_volume(&ctx, "v1", "node-a").await.unwrap());
-    assert_eq!(rec.sent("PATCH", "/apis/kloudlite-git.io/v1alpha1/volumes/v1").len(), 1);
+    assert_eq!(rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/volumes/v1").len(), 1);
 }
 
 // A nodes-list error's effect on both sweeps together is covered by
@@ -1272,7 +1272,7 @@ async fn take_volume_loses_quietly_when_the_test_op_fails() {
 
 fn ready_transient(name: &str, volume: &str, parent: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1",
+        "apiVersion": "kloudlite.io/v1alpha1",
         "kind": "Snapshot",
         "metadata": {"name": name, "uid": "snap-uid-transient"},
         "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent, "transient": true},
@@ -1330,7 +1330,7 @@ fi
     let pod = serde_json::json!({
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": "agent-a"},
-        "spec": {"serviceAccountName": "kloudlite-git-agent"},
+        "spec": {"serviceAccountName": "kloudlite-agent"},
         "status": {"podIP": "127.0.0.1"},
     });
     let routes = vec![
@@ -1341,13 +1341,13 @@ fi
         Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
         not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
         Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
             "spec": {"volume": "vol-1", "node": "node-b"},
             "status": {"phase": "Syncing", "branches": {}},
         }) },
         Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
             "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
             "spec": {"volume": "vol-1", "node": "node-b"},
             "status": {"phase": "Synced", "branches": {}},
@@ -1415,13 +1415,13 @@ async fn retire_pass_drops_a_copy_whose_slot_moved_once_the_replacement_is_synce
     std::fs::create_dir_all(tmp.path().join("vol/v1")).unwrap();
 
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
     });
     let replica_c = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "v1.node-c", "uid": "uid-c"},
         "spec": {"volume": "v1", "node": "node-c"},
         "status": {"phase": "Synced", "branches": {}},
@@ -1433,7 +1433,7 @@ async fn retire_pass_drops_a_copy_whose_slot_moved_once_the_replacement_is_synce
             path: format!("{VOLREPLICAS}/v1.node-b"),
             status: 200,
             body: serde_json::json!({
-                "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
                 "metadata": {"name": "v1.node-b", "uid": "uid-b"},
                 "spec": {"volume": "v1", "node": "node-b"},
                 "status": {"phase": "Synced", "branches": {}},
@@ -1457,13 +1457,13 @@ async fn retire_pass_keeps_a_copy_whose_replacement_is_not_synced_yet() {
     std::fs::create_dir_all(tmp.path().join("vol/v1")).unwrap();
 
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
     });
     let replica_c = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "v1.node-c", "uid": "uid-c"},
         "spec": {"volume": "v1", "node": "node-c"},
         "status": {"phase": "Syncing", "branches": {}},
@@ -1500,7 +1500,7 @@ async fn retire_pass_drops_a_voldir_whose_volume_cr_is_gone() {
     std::fs::create_dir_all(tmp.path().join("vol/v-gone/snap")).unwrap();
     std::fs::create_dir_all(tmp.path().join("vol/v-live/snap")).unwrap();
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v-live"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
@@ -1594,7 +1594,7 @@ async fn retire_pass_drops_my_replica_row_whose_volume_cr_is_gone() {
 
 fn snap_of(name: &str, volume: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name, "uid": format!("uid-{name}")},
         "spec": {"volume": volume, "owner": "alice", "worktree": volume, "parent": "", "transient": false},
         "status": {"phase": "ready"},
@@ -1602,7 +1602,7 @@ fn snap_of(name: &str, volume: &str) -> serde_json::Value {
 }
 
 fn snap_list(items: Vec<serde_json::Value>) -> serde_json::Value {
-    serde_json::json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "SnapshotList", "metadata": {"resourceVersion": "1"}, "items": items})
+    serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {"resourceVersion": "1"}, "items": items})
 }
 
 /// The baseline `Snapshot` used to carry no ownerReference at all, so it outlived its volume
@@ -1664,7 +1664,7 @@ const LONG_AGO: &str = "2000-01-01T00:00:00Z";
 
 fn vol_unowned(name: &str, node: &str, created_at: &str) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9", "creationTimestamp": created_at},
         "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
@@ -1674,7 +1674,7 @@ fn vol_unowned(name: &str, node: &str, created_at: &str) -> serde_json::Value {
 fn vol_still_owned(name: &str, node: &str, created_at: &str) -> serde_json::Value {
     let mut v = vol_unowned(name, node, created_at);
     v["metadata"]["ownerReferences"] = serde_json::json!([
-        {"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace", "name": "ws-1", "uid": "ws-uid", "controller": true}
+        {"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "name": "ws-1", "uid": "ws-uid", "controller": true}
     ]);
     v
 }
@@ -1833,13 +1833,13 @@ async fn retire_pass_keeps_a_hosted_worktree_even_when_its_replacement_is_synced
     std::fs::create_dir_all(tmp.path().join("vol/v1/live/ws-1")).unwrap();
 
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
     });
     let replica_c = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "v1.node-c", "uid": "uid-c"},
         "spec": {"volume": "v1", "node": "node-c"},
         "status": {"phase": "Synced", "branches": {}},
@@ -1865,7 +1865,7 @@ async fn retire_pass_rechecks_ownership_before_dropping_a_worktree_a_fresh_takeo
     std::fs::create_dir_all(tmp.path().join("vol/v1/live/ws-1")).unwrap();
 
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
@@ -1876,7 +1876,7 @@ async fn retire_pass_rechecks_ownership_before_dropping_a_worktree_a_fresh_takeo
         path: format!("{VOLUMES}/v1"),
         status: 200,
         body: serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
             "metadata": {"name": "v1"},
             "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
             "status": {"phase": "ready"},
@@ -1900,7 +1900,7 @@ async fn retire_pass_rechecks_ownership_before_dropping_a_worktree_a_fresh_takeo
 async fn a_pull_beat_lists_each_kind_once_for_the_beat() {
     let tmp = tempfile::tempdir().unwrap();
     let volume = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "v1"},
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 1},
         "status": {"phase": "ready"},
@@ -1931,10 +1931,10 @@ async fn a_pull_beat_lists_each_kind_once_for_the_beat() {
 
 fn transient_gen(name: &str, volume: &str, worktree: &str, generation: u64) -> serde_json::Value {
     serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1",
+        "apiVersion": "kloudlite.io/v1alpha1",
         "kind": "Snapshot",
         "metadata": {"name": name, "uid": format!("uid-{name}"),
-                     "annotations": {"kloudlite-git.io/synced-generation": generation.to_string()}},
+                     "annotations": {"kloudlite.io/synced-generation": generation.to_string()}},
         "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": "",
                  "transient": true},
         "status": {"phase": "ready"},
@@ -1975,7 +1975,7 @@ fn an_unannotated_transient_reads_as_generation_zero() {
 
 fn replica_with_branches(volume: &str, node: &str, phase: &str, branches: serde_json::Value) -> crd::VolumeReplica {
     serde_json::from_value(serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": format!("{volume}.{node}"), "uid": format!("uid-{node}")},
         "spec": {"volume": volume, "node": node},
         "status": {"phase": phase, "branches": branches},
@@ -2040,7 +2040,7 @@ fn with_no_transient_plain_synced_is_up_to_date() {
 async fn a_pull_pass_reports_only_the_newest_held_transient_per_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     let created = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-1.node-b", "uid": "r-uid"},
         "spec": {"volume": "vol-1", "node": "node-b"},
         "status": {"phase": "Syncing", "branches": {}},
@@ -2078,7 +2078,7 @@ async fn a_pull_pass_reports_only_the_newest_held_transient_per_worktree() {
 async fn a_pull_pass_records_only_the_transients_it_actually_holds() {
     let tmp = tempfile::tempdir().unwrap();
     let created = serde_json::json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "VolumeReplica",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
         "metadata": {"name": "vol-1.node-b", "uid": "r-uid"},
         "spec": {"volume": "vol-1", "node": "node-b"},
         "status": {"phase": "Syncing", "branches": {}},
@@ -2264,7 +2264,7 @@ fn agent_pod(node: &str, ip: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": format!("agent-{node}"), "namespace": "kube-system"},
-        "spec": {"nodeName": node, "serviceAccountName": "kloudlite-git-agent"},
+        "spec": {"nodeName": node, "serviceAccountName": "kloudlite-agent"},
         "status": {"podIP": ip},
     })
 }

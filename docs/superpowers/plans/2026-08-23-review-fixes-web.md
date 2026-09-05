@@ -17,7 +17,7 @@
 - House style (`CLAUDE.md`): comments explain WHY, never what. Deliberate shortcuts are marked `// ponytail: <ceiling and upgrade path>`. Commit subjects are imperative sentence case, NO tool attribution, no "claude" anywhere in the message.
 - `import "server-only"` modules (`lib/api.ts`, `lib/browse.ts`, `lib/passkey.ts`, `lib/session.ts`, …) cannot be imported by `"use client"` components except as `import type`. Anything a client component needs at runtime goes in a module without that import (`lib/utils.ts`, a new file, or the component itself).
 - We are in implementation phase: where a feature does not exist, render an honest empty state; do NOT build the feature.
-- The web image only rebuilds when `web/**` changes and `deploy/kloudlite-git-web.yaml` is pinned by hand (see `CLAUDE.md` "Deploying"). Deploying is outside this plan.
+- The web image only rebuilds when `web/**` changes and `deploy/kloudlite-web.yaml` is pinned by hand (see `CLAUDE.md` "Deploying"). Deploying is outside this plan.
 
 ---
 
@@ -1147,7 +1147,7 @@ export default function Loading() {
 
 - [ ] **Step 3: Verify and commit**
 
-From `web/`: `bun run lint` and `bunx tsc --noEmit -p apps/web/tsconfig.json` → clean. Manual: stop the api (or point `KLOUDLITE_GIT_API_URL` at a dead port), open a repo — the error page renders inside the shell with a working "Try again".
+From `web/`: `bun run lint` and `bunx tsc --noEmit -p apps/web/tsconfig.json` → clean. Manual: stop the api (or point `KLOUDLITE_API_URL` at a dead port), open a repo — the error page renders inside the shell with a working "Try again".
 
 ```bash
 git add "web/apps/web/src/app/(shell)/error.tsx" "web/apps/web/src/app/(shell)/[owner]/[repo]/loading.tsx"
@@ -2249,4 +2249,4 @@ git commit -m "Move shadcn and tw-animate-css to devDependencies"
 - [ ] From `web/`: `bun run lint`, `bunx tsc --noEmit -p apps/web/tsconfig.json`, `bun run build` → all clean.
 - [ ] `grep -rn "lib/mock\|mock-repo\|dev-auth\|lib/sso\|theme-picker\|setTimeout" web/apps/web/src` → only `lib/use-copy.ts` matches.
 - [ ] Re-read `docs/code-review-2026-08-23.md` sections 2–6 and check every `web/` row maps to a landed commit.
-- [ ] Deploy is a separate step: the web image rebuilds on push (`web/**` changed); pin the SHA in `deploy/kloudlite-git-web.yaml` per `CLAUDE.md`.
+- [ ] Deploy is a separate step: the web image rebuilds on push (`web/**` changed); pin the SHA in `deploy/kloudlite-web.yaml` per `CLAUDE.md`.

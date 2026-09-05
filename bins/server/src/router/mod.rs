@@ -20,7 +20,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/livez", get(route::livez))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))
-        .layer(axum::middleware::from_fn_with_state("public", kloudlite_git_core::metrics::http_metrics))
+        .layer(axum::middleware::from_fn_with_state("public", kloudlite_core::metrics::http_metrics))
         .with_state(app)
 }
 
@@ -28,7 +28,7 @@ pub fn router(app: Arc<App>) -> Router {
 /// handlers. `/healthz` and the `/own/*` protocol are inside the secret check on purpose: a claim
 /// without the secret must fail loudly (403), not silently succeed and hide a misconfiguration.
 /// The `route` middleware ignores non-git paths, so `/own/*` passes straight through it.
-/// `/metrics` is NOT here: it is a listener of its own (`KLOUDLITE_GIT_METRICS_ADDR`), because a
+/// `/metrics` is NOT here: it is a listener of its own (`KLOUDLITE_METRICS_ADDR`), because a
 /// scrape route inside the secret check cannot be scraped, and one outside it is an enumeration
 /// oracle for any pod on a cluster running `networkPolicy: none`.
 pub fn peer_router(app: Arc<App>) -> Router {
@@ -52,6 +52,6 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .route("/api/admin/settings/revert", post(admin_settings::revert_settings))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
-        .layer(axum::middleware::from_fn_with_state("peer", kloudlite_git_core::metrics::http_metrics))
+        .layer(axum::middleware::from_fn_with_state("peer", kloudlite_core::metrics::http_metrics))
         .with_state(app)
 }

@@ -1,20 +1,20 @@
 [package]
-name = "kloudlite-git-api-bin"
+name = "kloudlite-api-bin"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [[bin]]
-name = "kloudlite-git-api"
+name = "kloudlite-api"
 path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
-kloudlite-git-core = { path = "../../crates/core" }
-kloudlite-git-storage = { path = "../../crates/storage" }
-kloudlite-git-pulls = { path = "../../crates/pulls" }     # directory; no check feature
-kloudlite-git-api = { path = "../../crates/api" }
-kloudlite-git-workspaces = { path = "../../crates/workspaces" }
+kloudlite-core = { path = "../../crates/core" }
+kloudlite-storage = { path = "../../crates/storage" }
+kloudlite-pulls = { path = "../../crates/pulls" }     # directory; no check feature
+kloudlite-api = { path = "../../crates/api" }
+kloudlite-workspaces = { path = "../../crates/workspaces" }
 kube = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

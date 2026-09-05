@@ -14,8 +14,8 @@
 - Namespace prefixes are exactly three: `ws-` (personal), `wt-` (team pair), `env-` (environment) — `crates/workspaces/src/crd.rs:752-757`.
 - The seven allowed capabilities are exactly `CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID, NET_BIND_SERVICE, SYS_CHROOT` — `crates/workspaces/src/k8s.rs:676-679`.
 - The pool root is `/wspool-prod`, which must stay in step with `WS_POOL` in `deploy/k3s/agent-daemonset.yaml`.
-- The owner label is `kloudlite-git.io/owner`, stamped on every tenant pod and on the env StatefulSet pod template (`k8s.rs:30,72-77,1030-1032,1101-1104`) — a view label, used here only to scope a hostPath, never to authorize.
-- The agent's identity is `system:serviceaccount:kube-system:kloudlite-git-agent`.
+- The owner label is `kloudlite.io/owner`, stamped on every tenant pod and on the env StatefulSet pod template (`k8s.rs:30,72-77,1030-1032,1101-1104`) — a view label, used here only to scope a hostPath, never to authorize.
+- The agent's identity is `system:serviceaccount:kube-system:kloudlite-agent`.
 - Manifest verification is `KUBECONFIG=.local/k3s.yaml kubectl apply --dry-run=server -f <file>` run from the repo root; never apply without the dry-run passing first.
 - Rust CI gate: `cargo clippy --workspace --all-targets --locked -- -D warnings` plus `cargo test -p <crate>`.
 - Comments explain WHY only; keep any `// ponytail:` marker you edit near.
@@ -26,7 +26,7 @@
 ### Task 1: Tie `ws_namespace` to the admission policy's prefix set (failing test)
 
 **Files:** Modify `crates/workspaces/tests/crd_yaml.rs` (append after the existing `no_two_owner_team_pairs_share_a_namespace` test, which ends around `:200`); reads `deploy/k3s/agent-admission.yaml:81-95`.
-**Interfaces:** Consumes `kloudlite_git_workspaces::crd::{ws_namespace, env_namespace}` and the text of `deploy/k3s/agent-admission.yaml`. Produces test `every_namespace_the_code_makes_is_admitted`.
+**Interfaces:** Consumes `kloudlite_workspaces::crd::{ws_namespace, env_namespace}` and the text of `deploy/k3s/agent-admission.yaml`. Produces test `every_namespace_the_code_makes_is_admitted`.
 
 - [ ] **Step 1: Append the test to `crates/workspaces/tests/crd_yaml.rs`.** It parses the Namespace branch of policy 2 out of the YAML text (no `serde_yaml` — see the file's header comment on RUSTSEC-2024-0320) and asserts every namespace the code can mint starts with a prefix that branch admits.
 
@@ -37,7 +37,7 @@
 /// and `env-` only.
 #[test]
 fn every_namespace_the_code_makes_is_admitted() {
-    use kloudlite_git_workspaces::crd::{env_namespace, ws_namespace};
+    use kloudlite_workspaces::crd::{env_namespace, ws_namespace};
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/agent-admission.yaml");
     let policy = std::fs::read_to_string(path).unwrap();
     // Only the Namespace arm of policy 2's expression: the Secret and RoleBinding arms test
@@ -72,7 +72,7 @@ fn every_namespace_the_code_makes_is_admitted() {
 }
 ```
 
-- [ ] **Step 2: Run it and confirm it fails for the right reason.** `cargo test -p kloudlite-git-workspaces --test crd_yaml every_namespace_the_code_makes_is_admitted` must fail with `namespace wt-alice-<tail> is denied by agent-admission.yaml (admits ["ws-", "env-"])`. If it fails with `no startsWith literals found`, the expression was reshaped and the parse anchors need updating before continuing.
+- [ ] **Step 2: Run it and confirm it fails for the right reason.** `cargo test -p kloudlite-workspaces --test crd_yaml every_namespace_the_code_makes_is_admitted` must fail with `namespace wt-alice-<tail> is denied by agent-admission.yaml (admits ["ws-", "env-"])`. If it fails with `no startsWith literals found`, the expression was reshaped and the parse anchors need updating before continuing.
 - [ ] **Step 3: Commit** with `git add crates/workspaces/tests/crd_yaml.rs && git commit -m "Add a failing test tying ws_namespace to the admission prefix set"`.
 
 ---
@@ -84,7 +84,7 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
 **Files:**
 - Modify `deploy/k3s/agent-admission.yaml:26-32` (policy 1 resourceRules), `:36-44` (policy 1 validation), `:54-60` (policy 2 header), `:67-76` (policy 2 resourceRules), `:80-95` (policy 2 validation)
 - Modify `deploy/k3s/workspace-admission.yaml:26-31` (the prefix comment), `:49-70` (validations; add two more)
-- Modify `deploy/k3s/api-rbac.yaml:63-68` (`kloudlite-git-api-secrets` rules)
+- Modify `deploy/k3s/api-rbac.yaml:63-68` (`kloudlite-api-secrets` rules)
 - Modify `deploy/k3s/agent-peer.yaml:9-11` (comment), `:29-36` (ingress)
 - Modify `deploy/k3s/agent-daemonset.yaml:163-164` (`WS_GIT_INIT_IMAGE`), `deploy/k3s/zerofs.yaml:104-111` (zerofs image)
 - Modify `deploy/k3s/agent-rbac.yaml:53,55` (header table counts)
@@ -92,9 +92,9 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
 - Modify `deploy/k3s/README.md:15-16` (the file table) and `:51` (the apply line)
 - Test: `crates/workspaces/tests/crd_yaml.rs` (Task 1's test turns green), plus `kubectl apply --dry-run=server`
 
-**Interfaces:** Consumes `kloudlite-git.io/owner`, the `ws-`/`wt-`/`env-` prefixes, the seven `hardened()` capabilities, `WS_RUNTIME_CLASS=gvisor` (already set in the `kloudlite-git-agent` Secret). Produces ValidatingAdmissionPolicies `kloudlite-git-agent-spec-is-read-only`, `kloudlite-git-agent-tenant-namespaces-only`, `kloudlite-git-workspace-pod-fence`; NetworkPolicies `zerofs-default-deny` and `zerofs-nfs-from-agents` in `kloudlite-git-system`.
+**Interfaces:** Consumes `kloudlite.io/owner`, the `ws-`/`wt-`/`env-` prefixes, the seven `hardened()` capabilities, `WS_RUNTIME_CLASS=gvisor` (already set in the `kloudlite-agent` Secret). Produces ValidatingAdmissionPolicies `kloudlite-agent-spec-is-read-only`, `kloudlite-agent-tenant-namespaces-only`, `kloudlite-workspace-pod-fence`; NetworkPolicies `zerofs-default-deny` and `zerofs-nfs-from-agents` in `kloudlite-system`.
 
-- [ ] **Step 1: H2 — admit `wt-` in all three branches of policy 2, and extend the same policy to the five unpinned kinds (H1).** Replace `deploy/k3s/agent-admission.yaml:67-95` (the `matchConstraints`/`matchConditions`/`validations` of `kloudlite-git-agent-tenant-namespaces-only`) with:
+- [ ] **Step 1: H2 — admit `wt-` in all three branches of policy 2, and extend the same policy to the five unpinned kinds (H1).** Replace `deploy/k3s/agent-admission.yaml:67-95` (the `matchConstraints`/`matchConditions`/`validations` of `kloudlite-agent-tenant-namespaces-only`) with:
 
 ```yaml
   matchConstraints:
@@ -117,7 +117,7 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
         resources: ["rolebindings"]
   matchConditions:
     - name: from-the-agent
-      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-git-agent'"
+      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-agent'"
   validations:
     - expression: >-
         object.kind == 'Namespace'
@@ -132,17 +132,17 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
               || object.metadata.namespace.startsWith('wt-')
               || object.metadata.namespace.startsWith('env-'))
              && object.roleRef.kind == 'ClusterRole'
-             && object.roleRef.name in ['kloudlite-git-api-secrets', 'kloudlite-git-agent-ws-secrets']
+             && object.roleRef.name in ['kloudlite-api-secrets', 'kloudlite-agent-ws-secrets']
              && has(object.subjects)
              && object.subjects.all(s, s.kind == 'ServiceAccount'
                                        && s.namespace == 'kube-system'
-                                       && s.name in ['kloudlite-git-api', 'kloudlite-git-agent']))
+                                       && s.name in ['kloudlite-api', 'kloudlite-agent']))
         : (object.kind in ['Pod', 'StatefulSet', 'Service', 'NetworkPolicy', 'LimitRange'])
           ? (object.metadata.namespace.startsWith('ws-')
              || object.metadata.namespace.startsWith('wt-')
              || object.metadata.namespace.startsWith('env-'))
         : false
-      message: "kloudlite-git-agent may only write ws-/wt-/env- namespaces and namespaced objects inside them, ws-ssh-* Secrets, and the two api/agent secret RoleBindings"
+      message: "kloudlite-agent may only write ws-/wt-/env- namespaces and namespaced objects inside them, ws-ssh-* Secrets, and the two api/agent secret RoleBindings"
 ```
 
 - [ ] **Step 2: Correct policy 2's header to say what it now covers.** Replace `deploy/k3s/agent-admission.yaml:54-60` with:
@@ -153,7 +153,7 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
 #    `secrets` there. The same shape is true of `pods: create`, which the role holds cluster-wide:
 #    a privileged `hostPath: /` pod in kube-system turns root-on-one-node into root-on-the-cluster
 #    and mints any user's token, and the pod fence in workspace-admission.yaml cannot refuse it
-#    because that binding is scoped to namespaces carrying `kloudlite-git.io/kind`. So this pins EVERY
+#    because that binding is scoped to namespaces carrying `kloudlite.io/kind`. So this pins EVERY
 #    namespaced kind the agent writes — pods, statefulsets, services, networkpolicies, limitranges,
 #    secrets, rolebindings — to the tenant namespaces it makes (`ws-`/`wt-` for workspaces, `env-`
 #    for environments; `wt-` is the team pair, see `crd::ws_namespace`), every RoleBinding to the
@@ -175,13 +175,13 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
       # `volumereplicas` are here because the agent holds `patch` on both: a Snapshot's `parent` is
       # the history chain `/v1` reads back at `GET /v1/volumes/{name}/history`, so an unchecked
       # patch grafts that chain.
-      - apiGroups: ["kloudlite-git.io"]
+      - apiGroups: ["kloudlite.io"]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["workspaces", "environments", "volumes", "ownerbindings", "snapshots", "volumereplicas"]
   matchConditions:
     - name: from-the-agent
-      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-git-agent'"
+      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-agent'"
   validations:
     # A create has no oldObject, so it gets its own arm. The only Volume the agent authors is a
     # PARENT'S CHILD (`ensure_child_volume`, which sets an ownerReference and lets garbage
@@ -197,14 +197,14 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
                                      || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
                   && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
                : object.spec == oldObject.spec)
-      message: "kloudlite-git-agent writes status, not spec (exceptions: Volume.spec.restoreTo, Volume.spec.nodeName owned->'' or ''->node, and a created Volume must be a parent's child)"
+      message: "kloudlite-agent writes status, not spec (exceptions: Volume.spec.restoreTo, Volume.spec.nodeName owned->'' or ''->node, and a created Volume must be a parent's child)"
 ```
 
 - [ ] **Step 4: H4 and M1 — require the runtimeClass and bound capability adds in the pod fence.** Append these two validations to `deploy/k3s/workspace-admission.yaml` after the hostPath validation (currently ending `:70`):
 
 ```yaml
     # gVisor is what makes tenant isolation three independent things instead of two. It is live —
-    # `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-git-agent` Secret, read into `PodContext.runtime_class`
+    # `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-agent` Secret, read into `PodContext.runtime_class`
     # — but until this validation existed the kernel boundary rested on that one env var: unset it
     # (a Secret edit, a restored backup, a fresh cluster) and every tenant pod silently drops back to
     # runc, sharing the host kernel, with no alert anywhere. Now the FENCE holds it, and an agent
@@ -232,7 +232,7 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
 
 ```yaml
     - expression: >-
-        has(object.metadata.labels) && 'kloudlite-git.io/owner' in object.metadata.labels
+        has(object.metadata.labels) && 'kloudlite.io/owner' in object.metadata.labels
           && (has(object.spec.volumes) ? object.spec.volumes : [])
             .all(v, !has(v.hostPath)
                     || (!v.hostPath.path.contains('..')
@@ -240,10 +240,10 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
                             || v.hostPath.path.startsWith('/nix/')
                             || v.hostPath.path.startsWith('/wspool-prod/vol/')
                             || v.hostPath.path.startsWith('/wspool-prod/attach/')
-                            || v.hostPath.path == '/wspool-prod/homes/' + object.metadata.labels['kloudlite-git.io/owner']
-                            || v.hostPath.path.startsWith('/wspool-prod/homes/' + object.metadata.labels['kloudlite-git.io/owner'] + '/')
-                            || v.hostPath.path == '/wspool-prod/homecache/' + object.metadata.labels['kloudlite-git.io/owner']
-                            || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['kloudlite-git.io/owner'] + '/'))))
+                            || v.hostPath.path == '/wspool-prod/homes/' + object.metadata.labels['kloudlite.io/owner']
+                            || v.hostPath.path.startsWith('/wspool-prod/homes/' + object.metadata.labels['kloudlite.io/owner'] + '/')
+                            || v.hostPath.path == '/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner']
+                            || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner'] + '/'))))
       message: "workspace/environment hostPath volumes must be /nix, under /nix/, under /wspool-prod/vol|attach/, or this owner's own homes/homecache directory"
 ```
 
@@ -255,7 +255,7 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
 # `startsWith('/nix/')` rule alone rejects every workspace pod this cluster builds. `/wspool-prod`
 # is NOT allowed exactly, only its four known subtrees: `vol/` (worktrees), `attach/` (the rendered
 # resolv.conf), `homes/` and `homecache/`. The last two are additionally scoped to the pod's own
-# `kloudlite-git.io/owner` label, because those two paths are keyed BY OWNER — a builder bug naming
+# `kloudlite.io/owner` label, because those two paths are keyed BY OWNER — a builder bug naming
 # another owner is a whole other person's dotfiles and shell history. `vol/` and `attach/` are keyed
 # by volume and workspace id, not by owner, so CEL has nothing to compare there and the pod builders
 # remain the only thing keeping tenants apart on those two; that residual is deliberate and known.
@@ -268,7 +268,7 @@ Covers H1, H2, H3, H4 (summary High #1, #2, #3, #7), M1, M2, M3, M4, M6, M7, M10
 - [ ] **Step 6: H3 — create `deploy/k3s/system-netpol.yaml`,** the default-deny plus one ingress rule for the NFS export, same shape as `agent-peer.yaml`:
 
 ```yaml
-# `kloudlite-git-system` holds two things with nothing in common: ZeroFS, which serves EVERY owner's
+# `kloudlite-system` holds two things with nothing in common: ZeroFS, which serves EVERY owner's
 # home in the region over NFSv3, and the gateway, which accepts unauthenticated connections from
 # the internet. NFSv3 with AUTH_SYS and `nolock` (see `mount_homes`) authenticates nothing at all,
 # so "who can reach 2049" IS the authorization: anyone who can open that socket reads and writes
@@ -285,7 +285,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: zerofs-default-deny
-  namespace: kloudlite-git-system
+  namespace: kloudlite-system
 spec:
   podSelector:
     matchLabels:
@@ -297,7 +297,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: zerofs-nfs-from-agents
-  namespace: kloudlite-git-system
+  namespace: kloudlite-system
 spec:
   podSelector:
     matchLabels:
@@ -312,13 +312,13 @@ spec:
               kubernetes.io/metadata.name: kube-system
           podSelector:
             matchLabels:
-              app: kloudlite-git-agent
+              app: kloudlite-agent
       ports:
         - protocol: TCP
           port: 2049
 ```
 
-  Note for the reviewer of this step: `namespaceSelector` and `podSelector` are ONE peer here (no `-` before `podSelector`). The two-peer form means "every pod in kube-system OR every `kloudlite-git-agent` pod anywhere" — the same trap the `attach_egress` comment in `k8s.rs:1291` names.
+  Note for the reviewer of this step: `namespaceSelector` and `podSelector` are ONE peer here (no `-` before `podSelector`). The two-peer form means "every pod in kube-system OR every `kloudlite-agent` pod anywhere" — the same trap the `attach_egress` comment in `k8s.rs:1291` names.
 
 - [ ] **Step 7: M4 — name the two Secrets the api may write.** Replace `deploy/k3s/api-rbac.yaml:63-68` with:
 
@@ -372,12 +372,12 @@ docker buildx imagetools inspect ghcr.io/barre/zerofs:2.3.2 --format '{{.Manifes
 
   The `alpine/git` one is the init container that clones with the owner's platform key, so a moved tag runs attacker code next to that credential — that is the WHY to leave in the comment.
 
-- [ ] **Step 10: M10 — correct the two header-table counts.** In `deploy/k3s/agent-rbac.yaml`, line 53 reads `#   */status (kloudlite-git.io, all five)` — the rule at `:159-163` grants six (`snapshots/status` included); change to `all six`. Line 55 reads `#   */finalizers (kloudlite-git.io, all five)` — the rule at `:170-174` grants four; change to `all four (Snapshot has none)`.
-- [ ] **Step 11: Add the new file to the README.** In `deploy/k3s/README.md`, add a row after the `workspace-admission.yaml` row at `:16`: `| \`system-netpol.yaml\` | Default-deny plus the one 2049-from-agents rule in \`kloudlite-git-system\`: the NFS home export authenticates nothing, so reachability is the authorization. Apply with \`zerofs.yaml\`. |`, and append ` -f system-netpol.yaml` to the apply line at `:51`.
+- [ ] **Step 10: M10 — correct the two header-table counts.** In `deploy/k3s/agent-rbac.yaml`, line 53 reads `#   */status (kloudlite.io, all five)` — the rule at `:159-163` grants six (`snapshots/status` included); change to `all six`. Line 55 reads `#   */finalizers (kloudlite.io, all five)` — the rule at `:170-174` grants four; change to `all four (Snapshot has none)`.
+- [ ] **Step 11: Add the new file to the README.** In `deploy/k3s/README.md`, add a row after the `workspace-admission.yaml` row at `:16`: `| \`system-netpol.yaml\` | Default-deny plus the one 2049-from-agents rule in \`kloudlite-system\`: the NFS home export authenticates nothing, so reachability is the authorization. Apply with \`zerofs.yaml\`. |`, and append ` -f system-netpol.yaml` to the apply line at `:51`.
 - [ ] **Step 12: Verify.** Run, in order:
-  - `cargo test -p kloudlite-git-workspaces --test crd_yaml` — Task 1's test must now pass.
+  - `cargo test -p kloudlite-workspaces --test crd_yaml` — Task 1's test must now pass.
   - `KUBECONFIG=.local/k3s.yaml kubectl apply --dry-run=server -f deploy/k3s/agent-admission.yaml -f deploy/k3s/workspace-admission.yaml -f deploy/k3s/api-rbac.yaml -f deploy/k3s/agent-peer.yaml -f deploy/k3s/system-netpol.yaml -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/zerofs.yaml -f deploy/k3s/agent-rbac.yaml` — every object `(server dry run)`, no CEL compile error. A CEL mistake surfaces here as `spec.validations[N].expression: Invalid value: …`, which is the whole reason for the dry run.
-  - Then, against the live cluster: `KUBECONFIG=.local/k3s.yaml kubectl get pod -A -l kloudlite-git.io/kind -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.runtimeClassName}{"\n"}{end}'` must print `gvisor` on every row BEFORE applying — a running pod without it would be refused on its next update.
+  - Then, against the live cluster: `KUBECONFIG=.local/k3s.yaml kubectl get pod -A -l kloudlite.io/kind -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.runtimeClassName}{"\n"}{end}'` must print `gvisor` on every row BEFORE applying — a running pod without it would be refused on its next update.
 - [ ] **Step 13: Commit** with `git add deploy/k3s crates/workspaces/tests/crd_yaml.rs && git commit -m "Pin every namespaced object the agent writes to tenant namespaces"`.
 
 ---
@@ -389,7 +389,7 @@ Covers M8, M9. Separate from Task 2 because both numbers must be measured on the
 **Files:** Modify `deploy/k3s/zerofs.yaml:116-131` (resources and probes), `deploy/k3s/agent-daemonset.yaml:271-286` (nix-daemon container), `deploy/k3s/README.md` (a new failover section).
 **Interfaces:** Consumes the measured working-set numbers; produces `resources.limits` on both containers, a `livenessProbe` on ZeroFS, and a README "ZeroFS failover" section.
 
-- [ ] **Step 1: Measure.** `KUBECONFIG=.local/k3s.yaml kubectl top pod -n kloudlite-git-system -l app=zerofs` and `kubectl top pod -n kube-system -l app=kloudlite-git-agent --containers`, each sampled a few times across a working hour. Write the observed peaks into the commit body; the limits are 2× the observed peak, rounded up to a round Gi/m.
+- [ ] **Step 1: Measure.** `KUBECONFIG=.local/k3s.yaml kubectl top pod -n kloudlite-system -l app=zerofs` and `kubectl top pod -n kube-system -l app=kloudlite-agent --containers`, each sampled a few times across a working hour. Write the observed peaks into the commit body; the limits are 2× the observed peak, rounded up to a round Gi/m.
 - [ ] **Step 2: Add a memory limit and a real liveness probe to ZeroFS.** In `deploy/k3s/zerofs.yaml`, replace the `resources` block (`:116-119`, currently requests only) and add a liveness probe beside the readiness probe at `:127-131`:
 
 ```yaml
@@ -415,7 +415,7 @@ Covers M8, M9. Separate from Task 2 because both numbers must be measured on the
             failureThreshold: 3
 ```
 
-  If `rpcinfo` is not in the image (`kubectl exec -n kloudlite-git-system deploy/zerofs -- which rpcinfo`), fall back to `nc -z 127.0.0.1 2049` only as a last resort and say in the comment that it is no better than the readiness probe; prefer adding a probe the image can actually answer.
+  If `rpcinfo` is not in the image (`kubectl exec -n kloudlite-system deploy/zerofs -- which rpcinfo`), fall back to `nc -z 127.0.0.1 2049` only as a last resort and say in the comment that it is no better than the readiness probe; prefer adding a probe the image can actually answer.
 
 - [ ] **Step 3: Bound nix-daemon.** In `deploy/k3s/agent-daemonset.yaml`, add to the `nix-daemon` container after its `securityContext` (`:280-282`):
 
@@ -431,7 +431,7 @@ Covers M8, M9. Separate from Task 2 because both numbers must be measured on the
               memory: <measured>Gi
 ```
 
-- [ ] **Step 4: Document the failover.** Append to `deploy/k3s/README.md` a `### ZeroFS failover (manual, by design)` section: ZeroFS is `replicas: 1` with `strategy: Recreate` because SlateDB has one writer, and it is pinned to the control plane by `nodeSelector`; if that node is lost, every home in the region is unavailable until it returns. Recovery is: bring the control-plane node back, or edit the `nodeSelector`/toleration to another node AND confirm the old pod is gone first (`kubectl -n kloudlite-git-system get pod -l app=zerofs` empty) — two ZeroFS pods on one SlateDB prefix is the fencing the header forbids. Then restart the agents (`kubectl -n kube-system rollout restart ds/kloudlite-git-agent`) so their NFS mounts re-resolve; without that they answer EIO from stale handles.
+- [ ] **Step 4: Document the failover.** Append to `deploy/k3s/README.md` a `### ZeroFS failover (manual, by design)` section: ZeroFS is `replicas: 1` with `strategy: Recreate` because SlateDB has one writer, and it is pinned to the control plane by `nodeSelector`; if that node is lost, every home in the region is unavailable until it returns. Recovery is: bring the control-plane node back, or edit the `nodeSelector`/toleration to another node AND confirm the old pod is gone first (`kubectl -n kloudlite-system get pod -l app=zerofs` empty) — two ZeroFS pods on one SlateDB prefix is the fencing the header forbids. Then restart the agents (`kubectl -n kube-system rollout restart ds/kloudlite-agent`) so their NFS mounts re-resolve; without that they answer EIO from stale handles.
 - [ ] **Step 5: Verify.** `KUBECONFIG=.local/k3s.yaml kubectl apply --dry-run=server -f deploy/k3s/zerofs.yaml -f deploy/k3s/agent-daemonset.yaml` — both accepted, and `kubectl explain` is not needed; the dry run rejects a malformed probe.
 - [ ] **Step 6: Commit** with `git add deploy/k3s && git commit -m "Bound ZeroFS and nix-daemon and probe ZeroFS for liveness"`.
 
@@ -543,7 +543,7 @@ Covers M11 and L4.
 
   (The established/related rule at `:53` already covers replies to node-initiated traffic; these keep pod-network return paths explicit for a reader and admit no new connections.) Then add to the header at `:5-7` a line stating the pod network is untrusted here and that a change to this file is the second lock, not the first.
 
-- [ ] **Step 2: Apply it on one node and prove the cluster still works before touching the second.** On a pool node: `sudo bash deploy/k3s/harden-node.sh` (it validates with `nft -c` before loading — `:80`), then from a workspace pod `kl ws ssh <id>` must still work, `kubectl -n kube-system logs ds/kloudlite-git-agent --tail=20` must show reconciles continuing, and a `kl ws push` must complete (that is the peer path). Only then run it on the other node.
+- [ ] **Step 2: Apply it on one node and prove the cluster still works before touching the second.** On a pool node: `sudo bash deploy/k3s/harden-node.sh` (it validates with `nft -c` before loading — `:80`), then from a workspace pod `kl ws ssh <id>` must still work, `kubectl -n kube-system logs ds/kloudlite-agent --tail=20` must show reconciles continuing, and a `kl ws push` must complete (that is the peer path). Only then run it on the other node.
 - [ ] **Step 3: Fold the two prose-only rules into `provision-azure.sh`.** After the existing NSG rule block at `:21-34`, add:
 
 ```sh
@@ -597,7 +597,7 @@ Covers L1. TDD in Rust — this is a policy the code builds, not a manifest.
 
   Adapt `policies(...)`/`ctx()`/`owner_ref()` to the helpers the module's existing tests already use — read the tests around `k8s.rs:1885-1941` and reuse them rather than inventing new fixtures.
 
-- [ ] **Step 2: Run and confirm it fails.** `cargo test -p kloudlite-git-workspaces allow_dns_reaches_coredns_only` fails at the `pod_selector` unwrap with `called \`Option::unwrap()\` on a \`None\` value`.
+- [ ] **Step 2: Run and confirm it fails.** `cargo test -p kloudlite-workspaces allow_dns_reaches_coredns_only` fails at the `pod_selector` unwrap with `called \`Option::unwrap()\` on a \`None\` value`.
 - [ ] **Step 3: Implement.** In the `allow-dns` `json!` at `k8s.rs:1183-1192`, replace the `"to"` entry with:
 
 ```rust
@@ -609,7 +609,7 @@ Covers L1. TDD in Rust — this is a policy the code builds, not a manifest.
 
   and extend the comment above it: the namespace label alone admitted every kube-system pod on 53, the agent's peer listener among them; `k8s-app: kube-dns` is CoreDNS's own label in k3s, and the two selectors must stay in ONE peer.
 
-- [ ] **Step 4: Run the gates.** `cargo test -p kloudlite-git-workspaces` and `cargo clippy --workspace --all-targets --locked -- -D warnings`. Then, on the cluster, from any workspace pod: `getent hosts kubernetes.default` still resolves after the agent rolls.
+- [ ] **Step 4: Run the gates.** `cargo test -p kloudlite-workspaces` and `cargo clippy --workspace --all-targets --locked -- -D warnings`. Then, on the cluster, from any workspace pod: `getent hosts kubernetes.default` still resolves after the agent rolls.
 - [ ] **Step 5: Commit** with `git add crates/workspaces && git commit -m "Narrow the tenant DNS egress policy to CoreDNS"`.
 
 ---
@@ -643,12 +643,12 @@ openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(xxd -p -c 256 "$KEY_FILE")" \
 
 Covers L6.
 
-**Files:** Modify `deploy/k3s/README.md` (new subsection); read `deploy/kloudlite-git.yaml:452-456,483-488` for the Secret name and mount path first.
-**Interfaces:** Consumes the `kloudlite-git-k3s-kubeconfig` Secret; produces a README "Rotating the api tier's kubeconfig" subsection.
+**Files:** Modify `deploy/k3s/README.md` (new subsection); read `deploy/kloudlite.yaml:452-456,483-488` for the Secret name and mount path first.
+**Interfaces:** Consumes the `kloudlite-k3s-kubeconfig` Secret; produces a README "Rotating the api tier's kubeconfig" subsection.
 
-- [ ] **Step 1: Read `deploy/kloudlite-git.yaml:445-495`** and note the exact Secret name, the ServiceAccount it is minted from, and the `ponytail:` note saying the design replaces it — the rotation doc must not contradict that note.
-- [ ] **Step 2: Write the subsection.** Steps, as commands: mint a fresh bound token for the api's ServiceAccount (`kubectl -n kube-system create token kloudlite-git-api --duration=8760h`), build the kubeconfig around it with the cluster's CA, `kubectl create secret generic kloudlite-git-k3s-kubeconfig --from-file=... --dry-run=client -o yaml | kubectl apply -f -` in the AKS cluster, `kubectl rollout restart deploy/kloudlite-git-api` there, verify with a `/v1/regions` read, then delete the old token. State the cadence (yearly, or immediately on any suspicion) and that this is a stopgap the `ponytail:` note names.
-- [ ] **Step 3: Verify.** `grep -n "kloudlite-git-k3s-kubeconfig" deploy/k3s/README.md deploy/kloudlite-git.yaml` shows the README section referencing the same Secret name the manifest uses — a doc naming a Secret that does not exist is worse than no doc.
+- [ ] **Step 1: Read `deploy/kloudlite.yaml:445-495`** and note the exact Secret name, the ServiceAccount it is minted from, and the `ponytail:` note saying the design replaces it — the rotation doc must not contradict that note.
+- [ ] **Step 2: Write the subsection.** Steps, as commands: mint a fresh bound token for the api's ServiceAccount (`kubectl -n kube-system create token kloudlite-api --duration=8760h`), build the kubeconfig around it with the cluster's CA, `kubectl create secret generic kloudlite-k3s-kubeconfig --from-file=... --dry-run=client -o yaml | kubectl apply -f -` in the AKS cluster, `kubectl rollout restart deploy/kloudlite-api` there, verify with a `/v1/regions` read, then delete the old token. State the cadence (yearly, or immediately on any suspicion) and that this is a stopgap the `ponytail:` note names.
+- [ ] **Step 3: Verify.** `grep -n "kloudlite-k3s-kubeconfig" deploy/k3s/README.md deploy/kloudlite.yaml` shows the README section referencing the same Secret name the manifest uses — a doc naming a Secret that does not exist is worse than no doc.
 - [ ] **Step 4: Commit** with `git add deploy/k3s/README.md && git commit -m "Document rotating the api tier's k3s kubeconfig"`.
 
 ---
@@ -660,11 +660,11 @@ Covers L6.
 | H1 (agent SA can create a privileged kube-system pod) — summary High #2 | Task 2, steps 1-2 |
 | H2 (`wt-` namespaces denied) — summary High #1 | Task 1 + Task 2, step 1 |
 | H3 (unauthenticated NFS export, no NetworkPolicy) — summary High #3 | Task 2, step 6 |
-| H4 (nothing requires the runtimeClass) — summary High #7, reduced per the summary's correction: gVisor is already live via `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-git-agent` Secret, so only the admission validation is planned; no rollout | Task 2, step 4 |
+| H4 (nothing requires the runtimeClass) — summary High #7, reduced per the summary's correction: gVisor is already live via `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-agent` Secret, so only the admission validation is planned; no rollout | Task 2, step 4 |
 | M1 (pod fence does not refuse capability adds) | Task 2, step 4 |
 | M2 (hostPath allow-list per-pool, not per-tenant) | Task 2, step 5 |
 | M3 (spec-read-only policy misses CREATE, snapshots, volumereplicas) | Task 2, step 3 |
-| M4 (`kloudlite-git-api-secrets` full CRUD on every Secret) | Task 2, step 7 |
+| M4 (`kloudlite-api-secrets` full CRUD on every Secret) | Task 2, step 7 |
 | M5 (`kl` re-writes the host key; not a pin) | Task 4 |
 | M6 (`agent-peer` blocks the metrics port) | Task 2, step 8 |
 | M7 (two images pinned by mutable tag) | Task 2, step 9 |

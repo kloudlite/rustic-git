@@ -8,7 +8,7 @@
 # keeps only this node's pods — one scraper per node, each covering its own, so no target is
 # scraped twice and no pod is missed.
 #
-# What `kloudlite-git-otel-agent` may do in this cluster (the header table IS the role — both
+# What `kloudlite-otel-agent` may do in this cluster (the header table IS the role — both
 # workloads share one ServiceAccount, because neither reads anything the other may not):
 #
 # | Resource                          | Verbs            | Why                                    |
@@ -29,18 +29,18 @@
 # | resourcequotas, jobs, cronjobs,   |                  | DaemonSet                              |
 # | replicationcontrollers, hpa       |                  |                                        |
 #
-# NOT granted, deliberately: anything in `kloudlite-git.io` (the CRDs are the API's and the agent's,
+# NOT granted, deliberately: anything in `kloudlite.io` (the CRDs are the API's and the agent's,
 # and telemetry has no business reading a workspace's spec), any write verb at all, and secrets.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
 rules:
   - apiGroups: [""]
     resources: ["pods", "nodes", "namespaces", "services", "endpoints"]
@@ -79,21 +79,21 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
 subjects:
   - kind: ServiceAccount
-    name: kloudlite-git-otel-agent
+    name: kloudlite-otel-agent
     namespace: kube-system
 ---
 # The per-node half.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
   namespace: kube-system
 data:
   config.yaml: |
@@ -120,10 +120,10 @@ data:
                 # ingress) is somebody else's telemetry.
                 - source_labels: [__meta_kubernetes_namespace]
                   action: keep
-                  regex: kube-system|kloudlite-git-system
+                  regex: kube-system|kloudlite-system
                 - source_labels: [__meta_kubernetes_pod_name]
                   action: keep
-                  regex: kloudlite-git-.*
+                  regex: kloudlite-.*
                 # The annotation names the metrics port; without this rewrite discovery would
                 # scrape the pod's first declared port, which for most of ours is not 9464.
                 - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
@@ -145,9 +145,9 @@ data:
         endpoint: https://${env:K8S_NODE_IP}:10250
         insecure_skip_verify: true
         metric_groups: [node, pod, container]
-      # OUR pods' logs only (the agent and these collectors in kube-system, the gateway in kloudlite-git-system), so HyperDX has logs beside metrics
+      # OUR pods' logs only (the agent and these collectors in kube-system, the gateway in kloudlite-system), so HyperDX has logs beside metrics
       # without ingesting every workspace container on the node. Our binaries keep plain
-      # tracing output; `KLOUDLITE_GIT_LOG_FORMAT=json` makes them structured here without
+      # tracing output; `KLOUDLITE_LOG_FORMAT=json` makes them structured here without
       # changing the code.
       # The node's own syslog, kernel lines only: the NFS export not answering, a btrfs error on
       # the pool, the OOM killer — what a pod log can never say about itself.
@@ -171,14 +171,14 @@ data:
             field: attributes["service.name"]
             value: node-syslog
       filelog:
-        include: [/var/log/pods/kube-system_kloudlite-git-*/*/*.log, /var/log/pods/kloudlite-git-system_*/*/*.log]
+        include: [/var/log/pods/kube-system_kloudlite-*/*/*.log, /var/log/pods/kloudlite-system_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
-        exclude: [/var/log/pods/*_kloudlite-git-otel-*/*/*.log]
+        exclude: [/var/log/pods/*_kloudlite-otel-*/*/*.log]
         include_file_path: true
         operators:
           - type: container
             id: container-parser
-          # Our binaries run with KLOUDLITE_GIT_LOG_FORMAT=json (one object per event, fields
+          # Our binaries run with KLOUDLITE_LOG_FORMAT=json (one object per event, fields
           # flattened next to `level`/`target`/`message`), so level, module and call-site fields
           # become real columns instead of text inside a coloured string. A line that is not
           # JSON (a panic backtrace, a child process) passes through as plain body.
@@ -228,11 +228,11 @@ data:
       # fleet as one node and both rules would silently report one node's disk as everyone's.
       resource:
         attributes:
-          - { key: region, value: "${env:KLOUDLITE_GIT_REGION}", action: upsert }
+          - { key: region, value: "${env:KLOUDLITE_REGION}", action: upsert }
           - { key: k8s.node.name, value: "${env:K8S_NODE_NAME}", action: insert }
       # One identity on every log row and metric point, the same four keys everywhere:
-      # `service.name` is the WORKLOAD (kloudlite-git-srv, -api, -admin, -worker, -gateway, -agent),
-      # never the container name (the server's container is called `kloudlite-git`) and never the
+      # `service.name` is the WORKLOAD (kloudlite-srv, -api, -admin, -worker, -gateway, -agent),
+      # never the container name (the server's container is called `kloudlite`) and never the
       # scrape job; `service.instance.id` is the pod; `tier` says central or region so a query
       # can pick a control plane without listing regions. Resource-level, so it lands beside
       # `region` and the k8s.* keys k8sattributes resolved just before.
@@ -242,7 +242,7 @@ data:
         error_mode: ignore
         metrics:
           metric:
-            - 'resource.attributes["k8s.pod.name"] != nil and not IsMatch(resource.attributes["k8s.pod.name"], "^kloudlite-git-")'
+            - 'resource.attributes["k8s.pod.name"] != nil and not IsMatch(resource.attributes["k8s.pod.name"], "^kloudlite-")'
       transform/identity:
         error_mode: ignore
         log_statements:
@@ -291,7 +291,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kloudlite-git-otel-cluster
+  name: kloudlite-otel-cluster
   namespace: kube-system
 data:
   config.yaml: |
@@ -313,7 +313,7 @@ data:
       # and already carry the right one per datapoint — stamping this pod's would be a lie.
       resource:
         attributes:
-          - { key: region, value: "${env:KLOUDLITE_GIT_REGION}", action: upsert }
+          - { key: region, value: "${env:KLOUDLITE_REGION}", action: upsert }
       batch:
         timeout: 10s
         send_batch_size: 1024
@@ -340,16 +340,16 @@ data:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: kloudlite-git-otel-agent
+  name: kloudlite-otel-agent
   namespace: kube-system
 spec:
   selector:
-    matchLabels: { app: kloudlite-git-otel-agent }
+    matchLabels: { app: kloudlite-otel-agent }
   template:
     metadata:
-      labels: { app: kloudlite-git-otel-agent }
+      labels: { app: kloudlite-otel-agent }
     spec:
-      serviceAccountName: kloudlite-git-otel-agent
+      serviceAccountName: kloudlite-otel-agent
       # /var/log/syslog is root:adm 0640; the collector image runs unprivileged, so it joins
       # `adm` (gid 4) to read it — read-only mount, no capability, no root.
       securityContext:
@@ -374,7 +374,7 @@ spec:
             # The kubelet is dialled by IP: a node NAME is not something pod DNS resolves.
             - name: K8S_NODE_IP
               valueFrom: { fieldRef: { fieldPath: status.hostIP } }
-            - name: KLOUDLITE_GIT_REGION
+            - name: KLOUDLITE_REGION
               # Edit per region before applying — this is the value every console query filters
               # on, and it must equal the region's `Region` CR id or its charts stay empty.
               value: centralindia-k3s
@@ -382,7 +382,7 @@ spec:
               # No `optional: true`: a collector that started without the key would export nothing
               # and look healthy, which is strictly worse than the CrashLoopBackOff a missing
               # Secret gives. Create it first — deploy/clickstack/README.md.
-              valueFrom: { secretKeyRef: { name: kloudlite-git-otel, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-otel, key: key } }
           volumeMounts:
             - { name: conf, mountPath: /conf }
             - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
@@ -392,7 +392,7 @@ spec:
             limits: { memory: 512Mi }
       volumes:
         - name: conf
-          configMap: { name: kloudlite-git-otel-agent }
+          configMap: { name: kloudlite-otel-agent }
         - name: varlogpods
           hostPath: { path: /var/log/pods }
         - name: varlog
@@ -401,28 +401,28 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kloudlite-git-otel-cluster
+  name: kloudlite-otel-cluster
   namespace: kube-system
 spec:
   # ONE, and it must stay one: `k8s_cluster` reports the whole cluster, so a second replica is a
   # second copy of every cluster metric, not redundancy.
   replicas: 1
   selector:
-    matchLabels: { app: kloudlite-git-otel-cluster }
+    matchLabels: { app: kloudlite-otel-cluster }
   template:
     metadata:
-      labels: { app: kloudlite-git-otel-cluster }
+      labels: { app: kloudlite-otel-cluster }
     spec:
-      serviceAccountName: kloudlite-git-otel-agent
+      serviceAccountName: kloudlite-otel-agent
       containers:
         - name: collector
           image: otel/opentelemetry-collector-contrib:0.109.0@sha256:af0f72b2d2493fc17f06cf3bc136548240cd7ebb2c8b1c8a7be6f3eb03068389
           args: ["--config=/conf/config.yaml"]
           env:
-            - name: KLOUDLITE_GIT_REGION
+            - name: KLOUDLITE_REGION
               value: centralindia-k3s
             - name: OTEL_INGESTION_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-git-otel, key: key } }
+              valueFrom: { secretKeyRef: { name: kloudlite-otel, key: key } }
           volumeMounts:
             - { name: conf, mountPath: /conf }
           resources:
@@ -430,4 +430,4 @@ spec:
             limits: { memory: 256Mi }
       volumes:
         - name: conf
-          configMap: { name: kloudlite-git-otel-cluster }
+          configMap: { name: kloudlite-otel-cluster }

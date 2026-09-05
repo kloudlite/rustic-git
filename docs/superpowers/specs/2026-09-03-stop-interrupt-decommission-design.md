@@ -141,7 +141,7 @@ stays as it is (refuse, wait) — the sweep above is the only thing allowed to r
 
 ### Node decommission
 
-Trigger: `kubectl label node <n> kloudlite-git.io/decommission=true`. Abort: remove the label
+Trigger: `kubectl label node <n> kloudlite.io/decommission=true`. Abort: remove the label
 before `drained` is stamped.
 
 Every node's beat treats a decommissioning node like a dead one for **placement only**: it is
@@ -164,8 +164,8 @@ The decommissioning node's own agent runs a decommission beat (30 s). It stops n
    what it held; its retire pass drops each copy once the replacement is Synced.
 4. **Drained** when the node hosts no parent, owns no volume, holds no `VolumeReplica` row, and
    every volume it ever touched has `spec.replicas` Synced rows on other nodes. Stamped as the
-   annotation `kloudlite-git.io/drained: <RFC 3339>`. Progress on the way is the annotation
-   `kloudlite-git.io/decommission-status: "draining running=N owned=N copies=N thin=N"`, rewritten each
+   annotation `kloudlite.io/drained: <RFC 3339>`. Progress on the way is the annotation
+   `kloudlite.io/decommission-status: "draining running=N owned=N copies=N thin=N"`, rewritten each
    beat, readable with `kubectl describe node`. This needs `patch` on `nodes` for the agent; a
    broad verb, taken knowingly, because the agent already runs as root with the host PID
    namespace on that node.
@@ -229,7 +229,7 @@ kept for no reader. These are binding on the plan.
    is the "no volume yet" arm of `may_claim`, which becomes "any placeable node". The field is
    dropped from the status writes and the CRD (kept as a tolerated-unknown on read so old
    objects still parse).
-7. **One decommission annotation, not two.** `kloudlite-git.io/decommission-status` carries the
+7. **One decommission annotation, not two.** `kloudlite.io/decommission-status` carries the
    whole story: `draining running=N owned=N copies=N thin=N` while in progress (`thin` is the
    durability count of item 4: volumes whose bytes are still here and which other nodes do not yet
    hold `spec.replicas - 1` Synced copies of), `drained <RFC 3339>`

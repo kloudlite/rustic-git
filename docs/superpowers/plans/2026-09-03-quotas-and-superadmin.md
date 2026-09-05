@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give every owner (person or team) a per-owner allocation ceiling enforced by `/v1` and by Kubernetes, a request/approve path for raising it, a real superadmin claim to replace the email-allowlist env var, and every superadmin-only surface served by a SEPARATE `kloudlite-git-api` process that a `/v1` authorization bug cannot reach.
+**Goal:** Give every owner (person or team) a per-owner allocation ceiling enforced by `/v1` and by Kubernetes, a request/approve path for raising it, a real superadmin claim to replace the email-allowlist env var, and every superadmin-only surface served by a SEPARATE `kloudlite-api` process that a `/v1` authorization bug cannot reach.
 
-**Architecture:** Two new cluster-scoped CRDs — `Quota` (name = owner slug, plus two `default-*` fallbacks) and `QuotaRequest`. Usage is computed on every request by listing the owner's already-label-indexed `Workspace`/`Environment`/`Volume`/`Snapshot` objects; nothing is cached and no counter is stored. `/v1` refuses over-quota allocation with a 409 sentence naming the dimension; the agent additionally writes a Kubernetes `ResourceQuota` into each owner namespace as the platform-side cap on cpu/memory. Superadmin becomes a boolean claim in the session JWT, minted at sign-in from a `superadmins` collection in the mongo directory (bootstrapped from `KLOUDLITE_GIT_WORKSPACES_ADMINS`), read by two routers built from the same `kloudlite-git-api` binary and gated by one env var, `KLOUDLITE_GIT_API_ROLE=user|admin`: `api::router` (`/v1/*` — own quota read, own request create/read, regions list-active, every ordinary workspace/environment/volume route) and `api::admin::router` (`/admin/*` — regions create, quota defaults, quota request decide, superadmin list, every owner's usage, node decommission status, cross-owner list/stop/delete), the latter refusing every request without `superadmin: true` in the JWT before it is routed at all. Each is its own Deployment, Service, Ingress host and ServiceAccount; the admin ClusterRole is the only one with `create`/`patch`/`delete` on `Quota`, `QuotaRequest` and `Region`. The web's `/admin` area calls the admin host through an env var; everything else keeps calling `/v1`.
+**Architecture:** Two new cluster-scoped CRDs — `Quota` (name = owner slug, plus two `default-*` fallbacks) and `QuotaRequest`. Usage is computed on every request by listing the owner's already-label-indexed `Workspace`/`Environment`/`Volume`/`Snapshot` objects; nothing is cached and no counter is stored. `/v1` refuses over-quota allocation with a 409 sentence naming the dimension; the agent additionally writes a Kubernetes `ResourceQuota` into each owner namespace as the platform-side cap on cpu/memory. Superadmin becomes a boolean claim in the session JWT, minted at sign-in from a `superadmins` collection in the mongo directory (bootstrapped from `KLOUDLITE_WORKSPACES_ADMINS`), read by two routers built from the same `kloudlite-api` binary and gated by one env var, `KLOUDLITE_API_ROLE=user|admin`: `api::router` (`/v1/*` — own quota read, own request create/read, regions list-active, every ordinary workspace/environment/volume route) and `api::admin::router` (`/admin/*` — regions create, quota defaults, quota request decide, superadmin list, every owner's usage, node decommission status, cross-owner list/stop/delete), the latter refusing every request without `superadmin: true` in the JWT before it is routed at all. Each is its own Deployment, Service, Ingress host and ServiceAccount; the admin ClusterRole is the only one with `create`/`patch`/`delete` on `Quota`, `QuotaRequest` and `Region`. The web's `/admin` area calls the admin host through an env var; everything else keeps calling `/v1`.
 
 **Tech Stack:** Rust (`kube`/`k8s-openapi`, `axum`, `serde`, `jsonwebtoken`, `mongodb`), Kubernetes CRDs + RBAC, Next.js app router + `bun:test`.
 
@@ -18,7 +18,7 @@ These apply to every task; they are not repeated per task.
 - **Comments say WHY, never what.** Match the density of `bins/server/src/router/route.rs`. Do not narrate the code.
 - **Keep every `// ponytail:` marker** you edit near, and add one for any deliberate shortcut with a named ceiling and upgrade path.
 - **Vocabulary:** *workspace*, *environment*, *push*, *snapshot*, *working copy*. Never "fork", never "commit" for a snapshot in user-facing text, never "job" or "queue".
-- **Never authorize on a label.** `spec.owner` is the truth; `kloudlite-git.io/owner` is a listing view only. Every new listing may select on the label, but every decision re-reads `spec.owner`.
+- **Never authorize on a label.** `spec.owner` is the truth; `kloudlite.io/owner` is a listing view only. Every new listing may select on the label, but every decision re-reads `spec.owner`.
 - **Superadmin is a claim, not an owner.** It never changes who owns anything, never appears in a `spec.owner`, and never widens a quota by itself.
 - **Usage is computed from the CRDs on every request, never cached and never stored in a status field.**
 - **Detached volumes count** toward `diskGb`; deleting snapshots is how disk is returned.
@@ -39,11 +39,11 @@ These apply to every task; they are not repeated per task.
 - **Gates — run all of these before every commit, unpiped:**
 
   ```bash
-  cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+  cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
   cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
   ```
 
-  Plus, in the task that changes a CRD: `CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml` then re-run the test without `CRD_REGEN` and commit `deploy/k3s/crds.yaml` in the same commit. Plus, in any web task, from `web/`: `bun run lint`, `bunx tsc --noEmit -p apps/web/tsconfig.json`, `bun test` (all three, unpiped, `echo exit=$?` after each).
+  Plus, in the task that changes a CRD: `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml` then re-run the test without `CRD_REGEN` and commit `deploy/k3s/crds.yaml` in the same commit. Plus, in any web task, from `web/`: `bun run lint`, `bunx tsc --noEmit -p apps/web/tsconfig.json`, `bun test` (all three, unpiped, `echo exit=$?` after each).
 
   Note on clippy: `--all-targets` has pre-existing lints in test targets. The bar is **no new warnings in files you touch**; if the run is red, read the paths and confirm none is a file this task edited.
 
@@ -97,11 +97,11 @@ Also: the review plans make `trait Directory`'s methods **required** (no default
 | `web/apps/web/src/app/(shell)/admin/*` | Create | The admin area |
 | `web/apps/web/src/components/app/shell-nav.tsx` | Modify | `admin` is a root page |
 | `crates/workspaces/src/api/admin.rs` | Create | `api::admin::router()`, the superadmin-only handlers, the pre-route claim refusal |
-| `bins/api/src/main.rs` | Modify | `KLOUDLITE_GIT_API_ROLE`, mount `api::router` or `api::admin::router`, bootstrap only on `admin` |
-| `deploy/kloudlite-git.yaml` | Modify | `kloudlite-git-admin` Deployment, Service, Ingress, ServiceAccount |
-| `deploy/k3s/api-rbac.yaml` | Modify | Split into `kloudlite-git-api` (user) and `kloudlite-git-admin` ClusterRoles |
-| `web/apps/web/src/lib/api.ts` | Modify | `adminCall`, an `KLOUDLITE_GIT_ADMIN_API_URL`-based base |
-| `web/apps/web/.env.example` (or the deploy env block) | Modify | `NEXT_PUBLIC_ADMIN_API_URL` / `KLOUDLITE_GIT_ADMIN_API_URL` |
+| `bins/api/src/main.rs` | Modify | `KLOUDLITE_API_ROLE`, mount `api::router` or `api::admin::router`, bootstrap only on `admin` |
+| `deploy/kloudlite.yaml` | Modify | `kloudlite-admin` Deployment, Service, Ingress, ServiceAccount |
+| `deploy/k3s/api-rbac.yaml` | Modify | Split into `kloudlite-api` (user) and `kloudlite-admin` ClusterRoles |
+| `web/apps/web/src/lib/api.ts` | Modify | `adminCall`, an `KLOUDLITE_ADMIN_API_URL`-based base |
+| `web/apps/web/.env.example` (or the deploy env block) | Modify | `NEXT_PUBLIC_ADMIN_API_URL` / `KLOUDLITE_ADMIN_API_URL` |
 | `tests/ws_e2e.sh` | Modify | Limit → request → approve → succeed; admin calls against the admin base |
 
 ---
@@ -145,9 +145,9 @@ fn quota_kinds_are_published() {
 /// of their own gets — so a change here is a change to what every unlisted owner may allocate.
 #[test]
 fn the_bootstrap_defaults_are_the_specs_table() {
-    let u = kloudlite_git_workspaces::crd::default_quota(false);
+    let u = kloudlite_workspaces::crd::default_quota(false);
     assert_eq!((u.workspaces, u.environments, u.snapshots, u.disk_gb, u.cpu, u.memory_gb), (5, 2, 20, 100, 8, 32));
-    let t = kloudlite_git_workspaces::crd::default_quota(true);
+    let t = kloudlite_workspaces::crd::default_quota(true);
     assert_eq!((t.workspaces, t.environments, t.snapshots, t.disk_gb, t.cpu, t.memory_gb), (20, 8, 80, 400, 32, 128));
 }
 ```
@@ -160,7 +160,7 @@ In the same file, extend the existing `every_crd_has_a_status_subresource_and_th
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?`
 Expected: FAIL — `default_quota` and the two kinds do not exist (compile error), and once they do, `generated_crds_match_the_committed_manifest` fails until the manifest is regenerated.
 
 - [ ] **Step 3: Write the implementation**
@@ -177,7 +177,7 @@ In `crates/workspaces/src/crd.rs`, after `OwnerBindingStatus`:
 /// on every request (`quota::usage`), so no field of this object can drift from the truth.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "Quota",
     plural = "quotas",
@@ -256,7 +256,7 @@ pub struct RequestedQuota {
 /// deleted by the system; the record of who asked for what, and who said yes, is the point.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
-    group = "kloudlite-git.io",
+    group = "kloudlite.io",
     version = "v1alpha1",
     kind = "QuotaRequest",
     plural = "quotarequests",
@@ -321,14 +321,14 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
 - [ ] **Step 4: Regenerate the manifest and run the tests**
 
 ```bash
-CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
-cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
+CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
+cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
 ```
 Expected: PASS on the second run, with `deploy/k3s/crds.yaml` modified.
 
 - [ ] **Step 5: RBAC for the two kinds**
 
-In `deploy/k3s/api-rbac.yaml`, inside the `kloudlite-git-api` ClusterRole rules, after the `volumes` rule:
+In `deploy/k3s/api-rbac.yaml`, inside the `kloudlite-api` ClusterRole rules, after the `volumes` rule:
 
 ```yaml
   # Quotas: read on every path (usage answers and enforcement both need the owner's effective
@@ -336,16 +336,16 @@ In `deploy/k3s/api-rbac.yaml`, inside the `kloudlite-git-api` ClusterRole rules,
   # had an object of their own writes their first one, `patch` because approving one who has raises
   # the dimensions the request named and must leave the rest alone. No `delete`: removing an
   # owner's ceiling would silently promote them to the default, which is a different number.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list", "create", "patch"]
   # QuotaRequests are the one kind whose STATUS this tier writes: no controller reconciles a
   # request — a superadmin decides it — so the decision has nowhere else to live. Requests are
   # never deleted, so no `delete` here either; the record of who asked is the point.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "create"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests/status"]
     verbs: ["patch", "update"]
 ```
@@ -353,7 +353,7 @@ In `deploy/k3s/api-rbac.yaml`, inside the `kloudlite-git-api` ClusterRole rules,
 In `deploy/k3s/agent-rbac.yaml`, add to the header table (under the `ownerbindings` block):
 
 ```
-#   quotas (kloudlite-git.io)                 get,list,watch               binding/environment reconcile:
+#   quotas (kloudlite.io)                 get,list,watch               binding/environment reconcile:
 #                                                                       the owner's effective ceiling,
 #                                                                       written into the namespace as
 #                                                                       a ResourceQuota. READ ONLY —
@@ -368,7 +368,7 @@ and the rules:
   # Read-only, and deliberately so: a `Quota` is DESIRED state, written by a superadmin through
   # /v1. The agent only projects it into the namespace as a `ResourceQuota`, which is why
   # agent-admission.yaml gains nothing for this feature — there is no agent spec write to refuse.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list", "watch"]
   # The platform-side ceiling on cpu/memory, applied like every other namespaced object the agent
@@ -381,7 +381,7 @@ and the rules:
 - [ ] **Step 6: Run the gates**
 
 ```bash
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 ```
 Expected: PASS.
@@ -459,7 +459,7 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces quota:: ; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces quota:: ; echo exit=$?`
 Expected: FAIL — `crates/workspaces/src/quota.rs` is not a module yet (add `pub mod quota;` to `lib.rs` first, then it fails to compile on the missing items).
 
 - [ ] **Step 3: Write the implementation**
@@ -667,7 +667,7 @@ Add `pub mod quota;` to `crates/workspaces/src/lib.rs`.
 
 - [ ] **Step 4: Run the unit tests**
 
-Run: `cargo test -p kloudlite-git-workspaces quota:: ; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces quota:: ; echo exit=$?`
 Expected: PASS.
 
 - [ ] **Step 5: Write the failing route test**
@@ -676,18 +676,18 @@ Create `crates/workspaces/tests/api_quota.rs`. Copy the `Server`/`server()`/`tok
 
 ```rust
 //! `GET /v1/quota` and the quota-request routes, against a mocked API server
-//! (`kloudlite_git_workspaces::kube_test`) with a stub `Directory` for team membership and roles.
+//! (`kloudlite_workspaces::kube_test`) with a stub `Directory` for team membership and roles.
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 fn ws_obj(id: &str, owner: &str, state: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": id, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": id, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "team": "", "name": id, "region": "centralindia",
                  "image": "img:1", "desiredState": state, "packages": [],
                  "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
@@ -697,8 +697,8 @@ fn ws_obj(id: &str, owner: &str, state: &str) -> Value {
 
 fn vol_obj(name: &str, owner: &str, gb: u64) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "team": "", "nodeName": "node-a", "region": "centralindia", "quotaGb": gb}
     })
 }
@@ -769,7 +769,7 @@ async fn another_owners_quota_is_not_readable() {
 
 - [ ] **Step 6: Run it to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
 Expected: FAIL — no `/v1/quota` route, 404 on every case.
 
 - [ ] **Step 7: Add the route and handler**
@@ -816,13 +816,13 @@ Note `c.name` and `may_act_on(&s, &c, …)`: this task is written against the `C
 
 - [ ] **Step 8: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
 Expected: PASS.
 
 - [ ] **Step 9: Run the gates and commit**
 
 ```bash
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 git add crates/workspaces/src/quota.rs crates/workspaces/src/lib.rs crates/workspaces/src/api.rs crates/workspaces/tests/api_quota.rs
 git commit -m "Compute quota usage from the custom resources and serve it at /v1/quota"
@@ -904,8 +904,8 @@ async fn a_create_that_would_cross_the_disk_limit_is_refused_on_disk() {
 async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
     let snaps: Vec<Value> = (0..20)
         .map(|i| json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": format!("snap-{i}"), "labels": {"kloudlite-git.io/owner": "karthik"}},
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": format!("snap-{i}"), "labels": {"kloudlite.io/owner": "karthik"}},
             "spec": {"volume": "ws-1", "owner": "karthik", "transient": false},
             "status": {"phase": "ready"}
         }))
@@ -934,7 +934,7 @@ async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
 Expected: FAIL — creates and pushes currently succeed (202) or 404 on unmocked routes.
 
 - [ ] **Step 3: Add the gate**
@@ -1076,7 +1076,7 @@ Remove the constant, the check in `create_ws`/`create_env`, its doc comment and 
 
 - [ ] **Step 6: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -- --test-threads=1; echo exit=$?`
 Expected: PASS. If an existing `api_user.rs`/`api_teams.rs` create test now 404s on `{API}/quotas/...` or on a listing, add the four listing routes and the two `not_found` quota routes to that test's `routes` vec — the guard reads them on every create, and a missing mock is the mock's gap, not a behaviour change.
 
 - [ ] **Step 7: Run the gates and commit**
@@ -1123,8 +1123,8 @@ and make `teams_for` answer `vec!["acme".into()]` for both `karthik` and `bob`. 
 ```rust
 fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "QuotaRequest",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "QuotaRequest",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}
     });
     if let Some(st) = state {
@@ -1151,7 +1151,7 @@ async fn a_team_admin_may_open_a_request_for_the_team() {
     let sent = s.rec.sent("POST", &format!("{API}/quotarequests")).remove(0);
     assert_eq!(sent["spec"]["owner"], "acme");
     assert_eq!(sent["spec"]["requested"]["workspaces"], 40);
-    assert_eq!(sent["metadata"]["labels"]["kloudlite-git.io/owner"], "acme");
+    assert_eq!(sent["metadata"]["labels"]["kloudlite.io/owner"], "acme");
 }
 
 /// A plain member may not: raising a team's ceiling is a team decision, and the message says so.
@@ -1205,7 +1205,7 @@ async fn a_denied_request_does_not_block_the_next_one() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `TeamRole` and `team_role` do not exist (compile error), then 404 on the routes.
 
 - [ ] **Step 3: Implement the trait method**
@@ -1215,7 +1215,7 @@ In `crates/workspaces/src/api.rs`, beside `OwnerMaterial`:
 ```rust
 /// A person's standing in a team, as the platform directory records it.
 ///
-/// A local enum rather than `kloudlite_git_pulls::directory::Role` for the same reason the whole
+/// A local enum rather than `kloudlite_pulls::directory::Role` for the same reason the whole
 /// `Directory` trait is local: this crate must not depend on the mongo-backed one just for a
 /// lookup. `Ord` is declared by the variant ORDER — `Member < Admin < Owner` — so `>= Admin` is
 /// the rank rule, and there is no second rank table to fall out of step with the first.
@@ -1242,13 +1242,13 @@ and on the trait:
 In `bins/api/src/main.rs`, on `impl Directory for Dir`:
 
 ```rust
-    async fn team_role(&self, user: &str, team: &str) -> Option<kloudlite_git_workspaces::api::TeamRole> {
-        use kloudlite_git_pulls::directory::Role;
-        use kloudlite_git_workspaces::api::TeamRole;
+    async fn team_role(&self, user: &str, team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
+        use kloudlite_pulls::directory::Role;
+        use kloudlite_workspaces::api::TeamRole;
         let t = self.0.get(team).await.ok().flatten()?;
         // The same `user` value `slugs_for` matches on, through the same members array — one
         // identity, so membership and role can never disagree.
-        match kloudlite_git_pulls::directory::Directory::role_of(&t, user)? {
+        match kloudlite_pulls::directory::Directory::role_of(&t, user)? {
             Role::Owner => Some(TeamRole::Owner),
             Role::Admin => Some(TeamRole::Admin),
             Role::Member => Some(TeamRole::Member),
@@ -1258,7 +1258,7 @@ In `bins/api/src/main.rs`, on `impl Directory for Dir`:
 
 (`Directory::get` and `Directory::role_of` are `crates/pulls/src/directory/teams.rs`; `role_of` is an associated function taking `&Team`.)
 
-Then `cargo check -p kloudlite-git-workspaces --all-targets` and add `team_role` to every stub the compiler names — a stub whose case does not exercise roles returns `None` with a one-line comment saying so.
+Then `cargo check -p kloudlite-workspaces --all-targets` and add `team_role` to every stub the compiler names — a stub whose case does not exercise roles returns `None` with a one-line comment saying so.
 
 - [ ] **Step 4: Implement the routes**
 
@@ -1419,7 +1419,7 @@ async fn list_quota_requests(
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -- --test-threads=1; echo exit=$?`
 Expected: PASS.
 
 - [ ] **Step 6: Run the gates and commit**
@@ -1439,7 +1439,7 @@ git commit -m "Let an owner or a team admin open one pending quota request"
 - Modify: `crates/pulls/src/directory/mod.rs` — the `superadmins` collection and its four methods
 - Modify: `crates/api/src/teams.rs` — mint the claim at both mint sites; `POST`/`DELETE /api/admin/superadmins/{user}`
 - Modify: `crates/api/src/lib.rs` — mount those two routes
-- Modify: `bins/api/src/main.rs` — bootstrap from `KLOUDLITE_GIT_WORKSPACES_ADMINS` at boot
+- Modify: `bins/api/src/main.rs` — bootstrap from `KLOUDLITE_WORKSPACES_ADMINS` at boot
 - Test: `crates/core/src/jwt.rs`'s existing test module
 
 **Interfaces:**
@@ -1481,7 +1481,7 @@ Adjust the `mint_cli` call to whatever that function is actually named and retur
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p kloudlite-git-core jwt; echo exit=$?`
+Run: `cargo test -p kloudlite-core jwt; echo exit=$?`
 Expected: FAIL — no `superadmin` field, no `mint_admin`.
 
 - [ ] **Step 3: Implement the claim**
@@ -1604,7 +1604,7 @@ Add `superadmins: Collection<SuperAdmin>` to `struct Directory` and `superadmins
         Ok(())
     }
 
-    /// The `KLOUDLITE_GIT_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
+    /// The `KLOUDLITE_WORKSPACES_ADMINS` bootstrap, run once at boot. It only ever ADDS: the env
     /// is a way to get the first administrator into an empty cluster, not the list itself, so
     /// removing an email from it must not silently revoke someone the list has since granted.
     pub async fn ensure_superadmins(&self, emails: &[String]) -> Result<usize> {
@@ -1723,11 +1723,11 @@ Match the surrounding router's exact builder style and imports; if the browse ro
 In `bins/api/src/main.rs`, right after the `directory` is constructed (inside the `Ok(uri)` arm, after `tracing::info!(db = %db, …)`):
 
 ```rust
-            // `KLOUDLITE_GIT_WORKSPACES_ADMINS` is a BOOTSTRAP now, not the list: it seeds the
+            // `KLOUDLITE_WORKSPACES_ADMINS` is a BOOTSTRAP now, not the list: it seeds the
             // directory once so an empty cluster has a first administrator, and after that the
             // list is managed through /api/admin/superadmins. Additive only — dropping an address
             // from the env must not silently revoke someone.
-            let seed: Vec<String> = std::env::var("KLOUDLITE_GIT_WORKSPACES_ADMINS")
+            let seed: Vec<String> = std::env::var("KLOUDLITE_WORKSPACES_ADMINS")
                 .unwrap_or_default()
                 .split(',')
                 .map(|s| s.trim().to_lowercase())
@@ -1735,7 +1735,7 @@ In `bins/api/src/main.rs`, right after the `directory` is constructed (inside th
                 .collect();
             match d.ensure_superadmins(&seed).await {
                 Ok(0) => {}
-                Ok(n) => tracing::info!(added = n, "superadmins seeded from KLOUDLITE_GIT_WORKSPACES_ADMINS"),
+                Ok(n) => tracing::info!(added = n, "superadmins seeded from KLOUDLITE_WORKSPACES_ADMINS"),
                 Err(e) => tracing::warn!(error = %e, "superadmin bootstrap skipped"),
             }
 ```
@@ -1743,7 +1743,7 @@ In `bins/api/src/main.rs`, right after the `directory` is constructed (inside th
 - [ ] **Step 8: Run the tests and gates**
 
 ```bash
-cargo test -p kloudlite-git-core -p kloudlite-git-api -p kloudlite-git-pulls -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-core -p kloudlite-api -p kloudlite-pulls -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 ```
 Expected: PASS.
@@ -1811,7 +1811,7 @@ async fn approving_writes_the_quota_then_marks_the_request() {
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
         post(format!("{API}/quotas"), json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Quota",
             "metadata": {"name": "karthik"},
             "spec": {"workspaces": 10, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 8, "memoryGb": 32}
         })),
@@ -1865,7 +1865,7 @@ async fn a_decided_request_cannot_be_decided_again() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_quota -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `mint_admin` is in scope (Task 5a) but the routes and the claim arm are not.
 
 - [ ] **Step 3: Introduce `Caller`**
@@ -1950,7 +1950,7 @@ Delete `ApiState.admins`, the `admins` parameter of `ApiState::new`, the `use st
 ```rust
 //! Admin-gated routes (`/v1/regions` and the quota decisions) read the `superadmin` claim on the
 //! session token, minted at sign-in from the directory's own list. The static email allowlist this
-//! used to carry is gone; `KLOUDLITE_GIT_WORKSPACES_ADMINS` is a bootstrap for that list and nothing
+//! used to carry is gone; `KLOUDLITE_WORKSPACES_ADMINS` is a bootstrap for that list and nothing
 //! reads it here.
 ```
 
@@ -1967,7 +1967,7 @@ Rewrite `create_region`'s gate to use it:
 - [ ] **Step 4: Sweep the call sites**
 
 ```bash
-cargo check -p kloudlite-git-workspaces --all-targets 2>&1 | head -80
+cargo check -p kloudlite-workspaces --all-targets 2>&1 | head -80
 ```
 
 Fix each error by class, and nothing else:
@@ -2112,7 +2112,7 @@ task's tests keep passing unmodified once ported to the admin harness in Task 9'
 
 - [ ] **Step 6: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -- --test-threads=1; echo exit=$?`
 Expected: PASS.
 
 - [ ] **Step 7: Run the gates and commit**
@@ -2148,7 +2148,7 @@ Append to `crates/workspaces/src/k8s.rs`'s test module:
         let hard = rq.spec.unwrap().hard.unwrap();
         assert_eq!(hard["limits.cpu"].0, "8");
         assert_eq!(hard["limits.memory"].0, "32Gi");
-        assert_eq!(rq.metadata.labels.unwrap()["kloudlite-git.io/owner"], "alice");
+        assert_eq!(rq.metadata.labels.unwrap()["kloudlite.io/owner"], "alice");
         // No ownerReference, the same reason the namespace and the LimitRange have none: the cap
         // is shared by every workspace in here and must not vanish with any one of them.
         assert!(rq.metadata.owner_references.is_none());
@@ -2157,7 +2157,7 @@ Append to `crates/workspaces/src/k8s.rs`'s test module:
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p kloudlite-git-workspaces k8s::tests::a_resource_quota; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces k8s::tests::a_resource_quota; echo exit=$?`
 Expected: FAIL — `resource_quota` not found.
 
 - [ ] **Step 3: Implement the builder**
@@ -2211,16 +2211,16 @@ Append to `bins/agent/tests/reconcile.rs`, in the binding section (reuse `bindin
 async fn a_binding_pass_writes_the_owners_resource_quota() {
     let quota = Route {
         method: "GET",
-        path: "/apis/kloudlite-git.io/v1alpha1/quotas/alice".into(),
+        path: "/apis/kloudlite.io/v1alpha1/quotas/alice".into(),
         status: 200,
         body: serde_json::json!({
-            "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Quota",
             "metadata": {"name": "alice"},
             "spec": {"workspaces": 5, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 12, "memoryGb": 48}
         }),
     };
     let (ctx, rec) = /* the same ctx builder the neighbouring binding test uses */ binding_ctx(vec![quota]);
-    kloudlite_git_agent::binding::apply_binding(&binding_obj("alice"), &ctx).await.unwrap();
+    kloudlite_agent::binding::apply_binding(&binding_obj("alice"), &ctx).await.unwrap();
 
     let sent = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/resourcequotas/owner-quota");
     assert!(!sent.is_empty(), "{:?}", rec.calls());
@@ -2233,7 +2233,7 @@ Adjust `binding_ctx`/`binding_obj` to the helper names the file already has (rea
 
 - [ ] **Step 5: Run to verify it fails**
 
-Run: `cargo test -p kloudlite-git-agent-bin --test reconcile -- --test-threads=1 resource_quota; echo exit=$?`
+Run: `cargo test -p kloudlite-agent-bin --test reconcile -- --test-threads=1 resource_quota; echo exit=$?`
 Expected: FAIL — no such call recorded.
 
 - [ ] **Step 6: Write into both reconcilers**
@@ -2243,7 +2243,7 @@ In `bins/agent/src/binding.rs`, inside `apply_binding`'s `for team in teams_in_u
 ```rust
         // The owner's ceiling, projected. A TEAM namespace gets the TEAM's quota: the working
         // copies in it are the team's, so the team's number is the one that bounds them.
-        let q = kloudlite_git_workspaces::quota::effective(
+        let q = kloudlite_workspaces::quota::effective(
             &ctx.client,
             if team.is_empty() { owner } else { &team },
             !team.is_empty(),
@@ -2264,7 +2264,7 @@ In `bins/agent/src/controller/environment.rs`, right after the `LimitRange` ensu
 ```rust
     // The same ceiling, in the environment's own namespace: an environment's services are its
     // owner's capacity too, and the namespace is where Kubernetes can enforce it.
-    let q = kloudlite_git_workspaces::quota::effective(&ctx.client, &e.spec.owner, false).await?;
+    let q = kloudlite_workspaces::quota::effective(&ctx.client, &e.spec.owner, false).await?;
     ensure(
         &Api::<ResourceQuota>::namespaced(ctx.client.clone(), ns),
         &k8s::resource_quota(ns, &e.spec.owner, "environment", &q),
@@ -2287,7 +2287,7 @@ The `false` here is deliberate and needs the comment: an environment's `spec.own
 - [ ] **Step 7: Run the tests and gates**
 
 ```bash
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 ```
 Expected: PASS. Other binding tests will need the `quotas/{owner}` route added to their mock route list — a `not_found(...)` route is the right answer there, which exercises the fallback.
@@ -2625,12 +2625,12 @@ through `PUT /admin/quota/{owner}` (Task 9's `write_quota`, the same function
 list-active on `/v1`) and the create form, which now posts to `POST /admin/regions` on the admin
 host.
 
-`admin/nodes/page.tsx` — each node's `kloudlite-git.io/decommission-status` annotation, from
+`admin/nodes/page.tsx` — each node's `kloudlite.io/decommission-status` annotation, from
 `GET /admin/nodes` (Task 9), returning `[{name, ready, decommission, decommissionStatus}]` read
 from the `Node` list. `deploy/k3s/api-rbac.yaml`'s **admin** ClusterRole (Task 10) gains:
 
 ```yaml
-  # Read-only, for the admin area's decommission view: `kloudlite-git.io/decommission-status` is the
+  # Read-only, for the admin area's decommission view: `kloudlite.io/decommission-status` is the
   # annotation an operator watches a drain through, and it is on the Node. Admin-only: a node name
   # and its decommission state are platform topology, not something an ordinary owner needs.
   - apiGroups: [""]
@@ -2643,7 +2643,7 @@ Every call this page and the three above make goes through `adminCall`, not `cal
 - [ ] **Step 6: Run the gates and commit**
 
 ```bash
-cargo test -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-workspaces -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 cd web && bun run lint; echo exit=$?
 bunx tsc --noEmit -p apps/web/tsconfig.json; echo exit=$?
@@ -2684,7 +2684,7 @@ reconcile, from the same effective `Quota`) is the hard stop for cpu and memory.
 pending request at a time; only a superadmin approves, which writes the `Quota` **before** marking
 the request. **Superadmin is a claim, not an owner** — `superadmin: true` in the session JWT,
 minted at sign-in from a `superadmins` collection in the directory that
-`KLOUDLITE_GIT_WORKSPACES_ADMINS` merely bootstraps; `/v1`'s `require_admin` and `may_act_on`'s third
+`KLOUDLITE_WORKSPACES_ADMINS` merely bootstraps; `/v1`'s `require_admin` and `may_act_on`'s third
 arm read it (and log every cross-owner access), the web's `/admin` area is gated on it, and it
 never changes who owns anything.
 ```
@@ -2706,7 +2706,7 @@ not have; then the two roles, or the same calls 403 on the verbs.
    agent gains `quotas` read and `resourcequotas` create/patch. `agent-admission.yaml` is
    **unchanged**: the agent writes no `Quota` spec, so there is no new spec write to refuse.
 3. Repin and roll the api, server and agent images (`deploy/pin.sh`, `deploy/roll.sh`).
-4. Set `KLOUDLITE_GIT_WORKSPACES_ADMINS` on the api Deployment if it is not already set, and roll it
+4. Set `KLOUDLITE_WORKSPACES_ADMINS` on the api Deployment if it is not already set, and roll it
    once: the api seeds those addresses into the directory's `superadmins` collection at boot. After
    that first boot the env is only a bootstrap — the list is managed at
    `POST`/`DELETE /api/admin/superadmins/{user}`, and removing an address from the env revokes
@@ -2716,12 +2716,12 @@ not have; then the two roles, or the same calls 403 on the verbs.
 
    ```sh
    kubectl apply -f - <<'YAML'
-   apiVersion: kloudlite-git.io/v1alpha1
+   apiVersion: kloudlite.io/v1alpha1
    kind: Quota
    metadata: {name: default-user}
    spec: {workspaces: 5, environments: 2, snapshots: 20, diskGb: 100, cpu: 8, memoryGb: 32}
    ---
-   apiVersion: kloudlite-git.io/v1alpha1
+   apiVersion: kloudlite.io/v1alpha1
    kind: Quota
    metadata: {name: default-team}
    spec: {workspaces: 20, environments: 8, snapshots: 80, diskGb: 400, cpu: 32, memoryGb: 128}
@@ -2779,7 +2779,7 @@ log "lowering the user's workspace quota to what they already have"
 CURRENT_WS=$(curl -fsS "$BASE/v1/quota" -H "Authorization: Bearer $USER_TOKEN" | field used.workspaces)
 [ -n "$CURRENT_WS" ] || fail "GET /v1/quota returned no used.workspaces"
 kubectl apply -f - <<YAML || fail "could not write the test Quota"
-apiVersion: kloudlite-git.io/v1alpha1
+apiVersion: kloudlite.io/v1alpha1
 kind: Quota
 metadata: {name: $USER_NAME}
 spec: {workspaces: $CURRENT_WS, environments: 8, snapshots: 80, diskGb: 400, cpu: 32, memoryGb: 128}
@@ -2847,10 +2847,10 @@ Expected: exit=0 from `bash -n`.
 - [ ] **Step 5: Run every gate one last time**
 
 ```bash
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
-cargo test -p kloudlite-git-core -p kloudlite-git-api -p kloudlite-git-pulls -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-core -p kloudlite-api -p kloudlite-pulls -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
-CRD_REGEN=1 cargo test -p kloudlite-git-workspaces --test crd_yaml; cargo test -p kloudlite-git-workspaces --test crd_yaml; echo exit=$?
+CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml; cargo test -p kloudlite-workspaces --test crd_yaml; echo exit=$?
 cd web && bun run lint; bunx tsc --noEmit -p apps/web/tsconfig.json; bun test; echo exit=$?
 ```
 Expected: PASS everywhere, and `git status` shows `deploy/k3s/crds.yaml` unchanged by the regen (it was committed in Task 1).
@@ -2871,7 +2871,7 @@ git commit -m "Document quotas and superadmin and cover the request loop end to 
 - Modify: `crates/workspaces/src/api/mod.rs` — declare `pub mod admin;`, delete `create_region`,
   `approve_quota_request`, `deny_quota_request`, `pending_request`, `decide`, `overlay` and their
   `/v1` routes; `require_admin` gains a second, pre-routing use
-- Modify: `bins/api/src/main.rs` — `KLOUDLITE_GIT_API_ROLE`, mount `api::router` or
+- Modify: `bins/api/src/main.rs` — `KLOUDLITE_API_ROLE`, mount `api::router` or
   `api::admin::router`, not both
 - Test: new `crates/workspaces/tests/api_admin.rs`; `crates/workspaces/tests/api_quota.rs` (the
   approve/deny tests move here, unmodified apart from the base URL)
@@ -2895,7 +2895,7 @@ git commit -m "Document quotas and superadmin and cover the request loop end to 
 
 Create `crates/workspaces/tests/api_admin.rs`. Copy the `Server`/`server()`/`token()` harness from
 `crates/workspaces/tests/api_teams.rs:26-83` verbatim, but build the router with
-`kloudlite_git_workspaces::api::admin::router` instead of `api::router`, and add an `admin_token`
+`kloudlite_workspaces::api::admin::router` instead of `api::router`, and add an `admin_token`
 helper identical to the one in `api_quota.rs` (`jwt.mint_admin("root@example.com", "Root",
 Some("root"), true)`):
 
@@ -2903,7 +2903,7 @@ Some("root"), true)`):
 //! `api::admin::router` in isolation: every request answers 401/403 without the claim, and every
 //! `/v1` path 404s here — the two routers must never both answer the same URL.
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 /// The one property this whole task exists to guarantee: a `/v1`-shaped path finds nothing on the
 /// admin router, so a routing bug cannot make an admin process answer an ordinary user's request
@@ -2947,7 +2947,7 @@ async fn a_superadmin_may_register_a_region_on_the_admin_host() {
         method: "PATCH",
         path: format!("{API}/regions/us"),
         status: 200,
-        body: json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Region",
+        body: json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Region",
                       "metadata": {"name": "us"}, "spec": {"name": "US", "status": "active"}}),
     }];
     let s = admin_server(routes).await;
@@ -2962,7 +2962,7 @@ async fn a_superadmin_may_register_a_region_on_the_admin_host() {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_admin -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_admin -- --test-threads=1; echo exit=$?`
 Expected: FAIL — `api::admin` does not exist (compile error).
 
 - [ ] **Step 3: Write `api/admin.rs`**
@@ -3041,7 +3041,7 @@ async fn create_region(
     let r = crd::Region::new(&body.id, crd::RegionSpec { name: body.name, status: status.into() });
     let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
     let saved = api
-        .patch(&body.id, &PatchParams::apply("kloudlite-git-api").force(), &Patch::Apply(&r))
+        .patch(&body.id, &PatchParams::apply("kloudlite-api").force(), &Patch::Apply(&r))
         .await
         .map_err(kube_err)?;
     Ok((StatusCode::CREATED, Json(region_doc(&saved))).into_response())
@@ -3164,7 +3164,7 @@ struct OwnerUsage {
 /// ponytail: the owner list is derived from who has an explicit `Quota` or has ever opened a
 /// `QuotaRequest` — an owner using only the defaults and who has never asked for more is not
 /// listed. A `Node`-free way to enumerate every owner would need a third index (every distinct
-/// `kloudlite-git.io/owner` label value); add one if the admin usage page has to be exhaustive.
+/// `kloudlite.io/owner` label value); add one if the admin usage page has to be exhaustive.
 async fn usage_all(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
     let client = kube(&s)?;
     let quotas: Api<crd::Quota> = Api::all(client.clone());
@@ -3209,8 +3209,8 @@ async fn list_nodes(State(s): State<Arc<ApiState>>) -> Result<Response, Response
             NodeDoc {
                 name: n.name_any(),
                 ready,
-                decommission: labels.get("kloudlite-git.io/decommission").map(String::as_str) == Some("true"),
-                decommission_status: annotations.get("kloudlite-git.io/decommission-status").cloned(),
+                decommission: labels.get("kloudlite.io/decommission").map(String::as_str) == Some("true"),
+                decommission_status: annotations.get("kloudlite.io/decommission-status").cloned(),
             }
         })
         .collect();
@@ -3334,7 +3334,7 @@ In `crates/workspaces/src/api/mod.rs`:
   `GET /admin/quota-requests` instead. Delete that arm; `/v1`'s handler answers only the caller's
   own and their teams' requests, matching §5's table exactly (`own request: create, read own`).
 
-- [ ] **Step 4: `KLOUDLITE_GIT_API_ROLE` in `bins/api/src/main.rs`**
+- [ ] **Step 4: `KLOUDLITE_API_ROLE` in `bins/api/src/main.rs`**
 
 Right where `workspaces` (the `Router` built from `ApiState`) is assembled — after `state` is built
 and `.with_kube(...)`/`.with_directory(...)` are applied, replace the single `router(state)` call:
@@ -3344,11 +3344,11 @@ and `.with_kube(...)`/`.with_directory(...)` are applied, replace the single `ro
             // mounts ONLY /admin — no /v1 route is compiled into that router at all, so a /v1
             // authorization bug literally cannot reach an admin handler on that process; the user
             // role mounts ONLY /v1 and never sees an admin route (design doc §5).
-            let role = std::env::var("KLOUDLITE_GIT_API_ROLE").unwrap_or_else(|_| "user".into());
+            let role = std::env::var("KLOUDLITE_API_ROLE").unwrap_or_else(|_| "user".into());
             let state = Arc::new(state);
             let router = match role.as_str() {
-                "admin" => kloudlite_git_workspaces::api::admin::router(state),
-                _ => kloudlite_git_workspaces::api::router(state),
+                "admin" => kloudlite_workspaces::api::admin::router(state),
+                _ => kloudlite_workspaces::api::router(state),
             };
 ```
 
@@ -3356,14 +3356,14 @@ and thread `router` into wherever `router(state)`'s result was previously merged
 `Router` — read the ~10 lines below the current call site to match the existing merge (`.merge(...)`
 or `.nest(...)`) exactly; only the right-hand side changes.
 
-The bootstrap two lines above (`KLOUDLITE_GIT_WORKSPACES_ADMINS` → `ensure_superadmins`, Task 5a) moves
+The bootstrap two lines above (`KLOUDLITE_WORKSPACES_ADMINS` → `ensure_superadmins`, Task 5a) moves
 inside `if role == "admin"` — Task 10 makes that change explicitly; this step only introduces `role`
 so Task 10 has something to branch on. Leave the bootstrap unconditional here if Task 5a already
 landed it unconditionally; do not duplicate the branch twice.
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p kloudlite-git-workspaces -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces -- --test-threads=1; echo exit=$?`
 Expected: PASS. The approve/deny/second-pending-request tests that lived in `api_quota.rs` under
 Task 5b now target `/v1/quota-requests/{id}/approve` which 404s — move them into `api_admin.rs`,
 changing only the base path to `/admin/quota-requests/{id}/approve` and the router the harness
@@ -3382,9 +3382,9 @@ git commit -m "Serve the superadmin-only routes from their own router"
 ### Task 10: RBAC split, and the bootstrap moves to the admin role only
 
 **Files:**
-- Modify: `deploy/k3s/api-rbac.yaml` — split `kloudlite-git-api`'s ClusterRole in two
-- Modify: `bins/api/src/main.rs` — the `KLOUDLITE_GIT_WORKSPACES_ADMINS` bootstrap runs only under
-  `KLOUDLITE_GIT_API_ROLE=admin`, and DEFAULTS to `karthik@kloudlite.io` when the env is unset or
+- Modify: `deploy/k3s/api-rbac.yaml` — split `kloudlite-api`'s ClusterRole in two
+- Modify: `bins/api/src/main.rs` — the `KLOUDLITE_WORKSPACES_ADMINS` bootstrap runs only under
+  `KLOUDLITE_API_ROLE=admin`, and DEFAULTS to `karthik@kloudlite.io` when the env is unset or
   empty (owner, 2026-09-04): a fresh deployment always has one superadmin, who adds the rest
   from the admin area. `ensure_superadmins` stays add-only, so the default never removes anyone.
   Test: with the env unset the seed is exactly `["karthik@kloudlite.io"]`; with it set the env
@@ -3393,46 +3393,46 @@ git commit -m "Serve the superadmin-only routes from their own router"
 **Interfaces:**
 - Consumes: `role` (Task 9).
 - Produces: nothing new in Rust; two ClusterRoles and one ServiceAccount in the manifest
-  (`kloudlite-git-admin`'s Deployment binds to it — see Task 11).
+  (`kloudlite-admin`'s Deployment binds to it — see Task 11).
 
 - [ ] **Step 1: Split the ClusterRole**
 
 In `deploy/k3s/api-rbac.yaml`, rename the existing `quotas`/`quotarequests`/`regions` rules (added
-by Task 1 and the existing regions rule) OUT of the `kloudlite-git-api` ClusterRole and into a new
-`kloudlite-git-admin` one; leave every other rule (`workspaces`, `environments`, `snapshots`,
+by Task 1 and the existing regions rule) OUT of the `kloudlite-api` ClusterRole and into a new
+`kloudlite-admin` one; leave every other rule (`workspaces`, `environments`, `snapshots`,
 `volumes`, `volumereplicas`, `networkpolicies`, namespace list, `nodes` from Task 7b) on
-`kloudlite-git-api`, downgraded to read where the write was only ever for the admin surfaces:
+`kloudlite-api`, downgraded to read where the write was only ever for the admin surfaces:
 
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: kloudlite-git-admin
+  name: kloudlite-admin
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kloudlite-git-admin
+  name: kloudlite-admin
 rules:
   # The only role that may create, patch or delete a Quota, a QuotaRequest or a Region — the
   # design doc's whole point: RBAC, not a claim check inside a shared process, is what stops the
   # user-role process writing one of these, because that process's ServiceAccount cannot.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests/status"]
     verbs: ["patch", "update"]
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["regions"]
     verbs: ["get", "list", "create", "patch", "delete"]
   # The decommission view and the cross-owner list/stop/delete surfaces both need the full object,
   # not the read the user role keeps for its own owner-scoped routes.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "patch", "delete"]
   - apiGroups: [""]
@@ -3440,34 +3440,34 @@ rules:
     verbs: ["get", "list"]
 ```
 
-and, in the `kloudlite-git-api` (user-role) ClusterRole, replace its existing `quotas`/
+and, in the `kloudlite-api` (user-role) ClusterRole, replace its existing `quotas`/
 `quotarequests`/`regions` rules with the read-only + create-your-own-request shape §5's table
 specifies:
 
 ```yaml
   # Read for enforcement (`guard_alloc` needs the owner's effective limit) and for `GET /v1/quota`;
   # no create, patch or delete — writing a Quota is the admin role's alone.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list"]
   # A person or a team admin may open a request for themselves; deciding it is not a /v1 verb.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "create"]
   # Read-only: registering a region is `POST /admin/regions` now, and `/v1/regions` keeps only the
   # active-region GET every workspace/environment create already calls to validate `region`.
-  - apiGroups: ["kloudlite-git.io"]
+  - apiGroups: ["kloudlite.io"]
     resources: ["regions"]
     verbs: ["get", "list"]
 ```
 
-Everything else in `kloudlite-git-api`'s rules (`workspaces`/`environments` full verbs, `snapshots`,
+Everything else in `kloudlite-api`'s rules (`workspaces`/`environments` full verbs, `snapshots`,
 `volumes`, `volumereplicas`, `networkpolicies` delete, namespace list) is unchanged — those are
 owner-scoped `/v1` routes, not admin ones, and stay exactly as they are today.
 
 - [ ] **Step 2: Move the bootstrap**
 
-In `bins/api/src/main.rs`, wrap the `KLOUDLITE_GIT_WORKSPACES_ADMINS` → `ensure_superadmins` block
+In `bins/api/src/main.rs`, wrap the `KLOUDLITE_WORKSPACES_ADMINS` → `ensure_superadmins` block
 (Task 5a) in the role check Task 9 introduced:
 
 ```rust
@@ -3477,7 +3477,7 @@ In `bins/api/src/main.rs`, wrap the `KLOUDLITE_GIT_WORKSPACES_ADMINS` → `ensur
             // reversed, running it here only, a fleet with no admin replica up yet simply has no
             // bootstrap run until one is, which is the safe direction to be wrong in.
             if role == "admin" {
-                let seed: Vec<String> = std::env::var("KLOUDLITE_GIT_WORKSPACES_ADMINS")
+                let seed: Vec<String> = std::env::var("KLOUDLITE_WORKSPACES_ADMINS")
                     .unwrap_or_default()
                     .split(',')
                     .map(|s| s.trim().to_lowercase())
@@ -3485,14 +3485,14 @@ In `bins/api/src/main.rs`, wrap the `KLOUDLITE_GIT_WORKSPACES_ADMINS` → `ensur
                     .collect();
                 match d.ensure_superadmins(&seed).await {
                     Ok(0) => {}
-                    Ok(n) => tracing::info!(added = n, "superadmins seeded from KLOUDLITE_GIT_WORKSPACES_ADMINS"),
+                    Ok(n) => tracing::info!(added = n, "superadmins seeded from KLOUDLITE_WORKSPACES_ADMINS"),
                     Err(e) => tracing::warn!(error = %e, "superadmin bootstrap skipped"),
                 }
             }
 ```
 
 `role` must be read before this point rather than where Task 9 placed it (right before building the
-router) — hoist the one `std::env::var("KLOUDLITE_GIT_API_ROLE")` read to right after `jwt` is
+router) — hoist the one `std::env::var("KLOUDLITE_API_ROLE")` read to right after `jwt` is
 resolved, and have Task 9's router-selection `match` reuse that same binding rather than reading the
 env var twice.
 
@@ -3509,44 +3509,44 @@ git commit -m "Split api RBAC by role and bootstrap superadmins on the admin pro
 ### Task 11: Deploy the admin server as its own Deployment, Service and Ingress
 
 **Files:**
-- Modify: `deploy/kloudlite-git.yaml` — `kloudlite-git-admin` Deployment, Service, Ingress
-- Modify: `deploy/pin.sh` — repin the admin Deployment's image alongside `kloudlite-git-api`'s (same
+- Modify: `deploy/kloudlite.yaml` — `kloudlite-admin` Deployment, Service, Ingress
+- Modify: `deploy/pin.sh` — repin the admin Deployment's image alongside `kloudlite-api`'s (same
   SHA, same image — see the note below)
 
 **Interfaces:**
-- Consumes: `KLOUDLITE_GIT_API_ROLE` (Task 9), the split RBAC and `kloudlite-git-admin` ServiceAccount
+- Consumes: `KLOUDLITE_API_ROLE` (Task 9), the split RBAC and `kloudlite-admin` ServiceAccount
   (Task 10).
 - Produces: nothing Rust; three new manifest objects plus one repin site.
 
 - [ ] **Step 1: The Deployment**
 
-Copy `kloudlite-git-api`'s Deployment (`deploy/kloudlite-git.yaml`, `name: kloudlite-git-api`) as the
-template — same image, same env block, same `command: ["kloudlite-git-api"]` (one binary, two
+Copy `kloudlite-api`'s Deployment (`deploy/kloudlite.yaml`, `name: kloudlite-api`) as the
+template — same image, same env block, same `command: ["kloudlite-api"]` (one binary, two
 processes) — and change exactly: the name, `replicas: 1` (design doc §5: one replica, an admin
 outage is a paged incident, not a capacity problem), the pod anti-affinity's `matchLabels` (there is
 only ever one pod, so drop the `podAntiAffinity` block entirely rather than keep a rule that can
-never fire), `KLOUDLITE_GIT_API_ROLE: admin`, and `automountServiceAccountToken` stays `false` for the
+never fire), `KLOUDLITE_API_ROLE: admin`, and `automountServiceAccountToken` stays `false` for the
 same reason it is on the user Deployment — this process reaches the k3s cluster with its own mounted
 kubeconfig Secret, not a projected ServiceAccount token:
 
 ```yaml
-# The superadmin-only surface. Same image and binary as kloudlite-git-api, one env apart
-# (KLOUDLITE_GIT_API_ROLE=admin) — see CLAUDE.md "Admin APIs live on their own server". One replica:
+# The superadmin-only surface. Same image and binary as kloudlite-api, one env apart
+# (KLOUDLITE_API_ROLE=admin) — see CLAUDE.md "Admin APIs live on their own server". One replica:
 # losing this pod for a few minutes during a roll is acceptable (nothing here is on any ordinary
-# request's path), and two would mean two places `KLOUDLITE_GIT_WORKSPACES_ADMINS` seeds from, which
+# request's path), and two would mean two places `KLOUDLITE_WORKSPACES_ADMINS` seeds from, which
 # is harmless but pointless.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kloudlite-git-admin
-  namespace: kloudlite-git
+  name: kloudlite-admin
+  namespace: kloudlite
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: kloudlite-git-admin }
+    matchLabels: { app: kloudlite-admin }
   template:
     metadata:
-      labels: { app: kloudlite-git-admin }
+      labels: { app: kloudlite-admin }
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9464"
@@ -3560,45 +3560,45 @@ spec:
         fsGroup: 1001
       containers:
         - name: admin
-          image: ghcr.io/kloudlite/kloudlite-git:1f24e39cc8182345f04e2e69d52e071db8d82e37
-          command: ["kloudlite-git-api"]
+          image: ghcr.io/kloudlite/kloudlite:1f24e39cc8182345f04e2e69d52e071db8d82e37
+          command: ["kloudlite-api"]
           ports:
             - { name: http, containerPort: 8090 }
           env:
             - name: TOKIO_WORKER_THREADS
               value: "2"
-            - name: KLOUDLITE_GIT_API_ROLE
+            - name: KLOUDLITE_API_ROLE
               value: admin
-            - name: KLOUDLITE_GIT_S3_URL
-              value: az://kloudlite-git
+            - name: KLOUDLITE_S3_URL
+              value: az://kloudlite
             - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
+              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: key } }
-            - name: KLOUDLITE_GIT_UPSTREAM
-              value: http://kloudlite-git:8081
-            - name: KLOUDLITE_GIT_API_ADDR
+              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: key } }
+            - name: KLOUDLITE_UPSTREAM
+              value: http://kloudlite:8081
+            - name: KLOUDLITE_API_ADDR
               value: 0.0.0.0:8090
-            - name: KLOUDLITE_GIT_METRICS_ADDR
+            - name: KLOUDLITE_METRICS_ADDR
               value: 0.0.0.0:9464
             # The bootstrap: seeds these addresses into the directory's superadmins collection at
             # boot (Task 10). Unset here and the admin process starts with no administrator except
             # whoever the directory already lists — fine after the first boot, fatal on a fresh
             # cluster, so this must be set on THIS Deployment's first rollout.
-            - name: KLOUDLITE_GIT_WORKSPACES_ADMINS
+            - name: KLOUDLITE_WORKSPACES_ADMINS
               value: karthik@kloudlite.io
-            - name: KLOUDLITE_GIT_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-git-jwt, key: secret } }
-            - name: KLOUDLITE_GIT_MONGO_URI
-              valueFrom: { secretKeyRef: { name: kloudlite-git-mongo, key: uri } }
+            - name: KLOUDLITE_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
+            - name: KLOUDLITE_MONGO_URI
+              valueFrom: { secretKeyRef: { name: kloudlite-mongo, key: uri } }
           envFrom:
-            - secretRef: { name: kloudlite-git-kubeconfig }
+            - secretRef: { name: kloudlite-kubeconfig }
           resources:
             requests: { cpu: 50m, memory: 64Mi }
             limits: { cpu: 250m, memory: 256Mi }
 ```
 
-Read the actual `kloudlite-git-api` Deployment in full (`deploy/kloudlite-git.yaml:352-495`) before
+Read the actual `kloudlite-api` Deployment in full (`deploy/kloudlite.yaml:352-495`) before
 writing this — copy every env var and volume it has that this list omits (kubeconfig mount details,
 any `envFrom`/`volumeMounts` your read finds), matching its exact names; the list above is the
 DELTA, not the complete env block.
@@ -3609,11 +3609,11 @@ DELTA, not the complete env block.
 apiVersion: v1
 kind: Service
 metadata:
-  name: kloudlite-git-admin
-  namespace: kloudlite-git
+  name: kloudlite-admin
+  namespace: kloudlite
 spec:
   type: ClusterIP
-  selector: { app: kloudlite-git-admin }
+  selector: { app: kloudlite-admin }
   ports:
     - { name: http, port: 80, targetPort: http }
 ```
@@ -3628,8 +3628,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: kloudlite-git-admin
-  namespace: kloudlite-git
+  name: kloudlite-admin
+  namespace: kloudlite
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
     # Same reasoning as the app ingress: verify with `dig admin.khost.dev` before assuming this
@@ -3640,7 +3640,7 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts: [admin.khost.dev]
-      secretName: kloudlite-git-admin-tls
+      secretName: kloudlite-admin-tls
   rules:
     - host: admin.khost.dev
       http:
@@ -3649,24 +3649,24 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: kloudlite-git-admin
+                name: kloudlite-admin
                 port:
                   number: 80
 ```
 
 - [ ] **Step 4: Repin**
 
-`deploy/pin.sh` currently repins `kloudlite-git-api`'s image by matching `name: kloudlite-git-api` (or
-similar) in `deploy/kloudlite-git.yaml`. Read the script (`rg -n "kloudlite-git-api" deploy/pin.sh`) and
-extend whatever selector it uses so the same SHA lands on `kloudlite-git-admin` too — same image, same
+`deploy/pin.sh` currently repins `kloudlite-api`'s image by matching `name: kloudlite-api` (or
+similar) in `deploy/kloudlite.yaml`. Read the script (`rg -n "kloudlite-api" deploy/pin.sh`) and
+extend whatever selector it uses so the same SHA lands on `kloudlite-admin` too — same image, same
 build, so there is exactly one pin site conceptually even though two Deployments read it. Do not
-give `kloudlite-git-admin` an independent pin: two admin processes running different SHAs of the same
+give `kloudlite-admin` an independent pin: two admin processes running different SHAs of the same
 router code is a state nobody should be able to reach.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add deploy/kloudlite-git.yaml deploy/pin.sh
+git add deploy/kloudlite.yaml deploy/pin.sh
 git commit -m "Deploy the admin api as its own Deployment, Service and Ingress"
 ```
 
@@ -3679,8 +3679,8 @@ the one check to run before committing if the script's shape changed.)
 
 **Files:**
 - Modify: `web/apps/web/src/lib/api.ts` — `adminCall`
-- Modify: whatever env-var surface the web already uses for `KLOUDLITE_GIT_API_URL`
-  (`rg -n "KLOUDLITE_GIT_API_URL" web/apps/web` names it) — add the admin equivalent beside it
+- Modify: whatever env-var surface the web already uses for `KLOUDLITE_API_URL`
+  (`rg -n "KLOUDLITE_API_URL" web/apps/web` names it) — add the admin equivalent beside it
 
 **Interfaces:**
 - Consumes: nothing from earlier web tasks (this task is a prerequisite of Task 7b, not a
@@ -3695,8 +3695,8 @@ In `web/apps/web/src/lib/api.ts`, beside the existing `BASE`/`call`:
 ```ts
 // A second base, because the admin surface is a SEPARATE process on a separate host (design doc
 // §5) — pointing this at the same host as `BASE` would be a silent way to lose the whole point of
-// the split, so there is no fallback to `KLOUDLITE_GIT_API_URL` here.
-const ADMIN_BASE = (process.env.KLOUDLITE_GIT_ADMIN_API_URL ?? "http://kloudlite-git-admin").replace(/\/$/, "");
+// the split, so there is no fallback to `KLOUDLITE_API_URL` here.
+const ADMIN_BASE = (process.env.KLOUDLITE_ADMIN_API_URL ?? "http://kloudlite-admin").replace(/\/$/, "");
 
 /** Every call the /admin area makes. Same shape as `call<T>`, against the admin host — never the
  *  ordinary one, so an admin page cannot accidentally fall back to a route that does not exist
@@ -3760,11 +3760,11 @@ export function createRegion(body: { id: string; name: string }, token: string) 
 
 - [ ] **Step 3: The env var**
 
-Add `KLOUDLITE_GIT_ADMIN_API_URL` beside `KLOUDLITE_GIT_API_URL` wherever the web's server-side runtime
-env is declared (a `.env.example`, or the web Deployment's env block in `deploy/kloudlite-git.yaml`
+Add `KLOUDLITE_ADMIN_API_URL` beside `KLOUDLITE_API_URL` wherever the web's server-side runtime
+env is declared (a `.env.example`, or the web Deployment's env block in `deploy/kloudlite.yaml`
 if the web reads it server-side only, which `adminCall`'s use inside server actions/RSCs requires —
 this must NOT be `NEXT_PUBLIC_...`: the admin host is never fetched from the browser). Point it at
-`http://kloudlite-git-admin` in-cluster, matching `KLOUDLITE_GIT_API_URL`'s own pattern.
+`http://kloudlite-admin` in-cluster, matching `KLOUDLITE_API_URL`'s own pattern.
 
 - [ ] **Step 4: Run the web gates and commit**
 
@@ -3772,7 +3772,7 @@ this must NOT be `NEXT_PUBLIC_...`: the admin host is never fetched from the bro
 cd web && bun run lint; echo exit=$?
 bunx tsc --noEmit -p apps/web/tsconfig.json; echo exit=$?
 bun test; echo exit=$?
-git add web/apps/web/src deploy/kloudlite-git.yaml
+git add web/apps/web/src deploy/kloudlite.yaml
 git commit -m "Add an admin-host client for the web /admin area"
 ```
 
@@ -3817,7 +3817,7 @@ async fn the_user_router_has_never_heard_of_admin() {
 
 - [ ] **Step 2: Run to verify both pass**
 
-Run: `cargo test -p kloudlite-git-workspaces --test api_quota --test api_admin -- --test-threads=1; echo exit=$?`
+Run: `cargo test -p kloudlite-workspaces --test api_quota --test api_admin -- --test-threads=1; echo exit=$?`
 Expected: PASS — both routers were already built with disjoint route tables by Task 9; this task
 only pins that fact down as a test so a future route added to the wrong module fails CI instead of
 being noticed in a security review.
@@ -3828,7 +3828,7 @@ In `tests/ws_e2e.sh`, near where `BASE` is set from the deployed api's URL, add:
 
 ```sh
 # The admin host, set independently — see deploy/k3s/README.md's release note for this feature.
-# Falls back to $BASE only for a single-process local run where KLOUDLITE_GIT_API_ROLE was never
+# Falls back to $BASE only for a single-process local run where KLOUDLITE_API_ROLE was never
 # split (the admin routes still exist there under /admin during local dev, since main.rs mounts
 # whichever router the role says — this fallback exists for that convenience, not for prod).
 ADMIN_BASE="${ADMIN_BASE:-$BASE}"
@@ -3858,7 +3858,7 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/quota-requests/$
 - [ ] **Step 4: Run every gate one last time and commit**
 
 ```bash
-cargo test -p kloudlite-git-workspaces -p kloudlite-git-agent-bin -- --test-threads=1; echo exit=$?
+cargo test -p kloudlite-workspaces -p kloudlite-agent-bin -- --test-threads=1; echo exit=$?
 cargo clippy --workspace --all-targets --locked -- -D warnings; echo exit=$?
 bash -n tests/ws_e2e.sh; echo exit=$?
 git add crates/workspaces/tests tests/ws_e2e.sh
@@ -3869,7 +3869,7 @@ git commit -m "Prove the user and admin routers cannot answer each other's paths
 
 ## Self-Review
 
-**Spec coverage.** §1 One quota per owner → Tasks 1 (CRD, defaults table), 2 (usage, `GET /v1/quota`). §2 Enforcement → Task 3 (`/v1`, all six live routes plus the note on the two that have no route), Task 6 (`ResourceQuota`). §3 Quota requests → Tasks 1 (CRD), 4 (create/list, the role rule, the one-pending rule), 5b/9 (approve/deny, the decided-once rule — written in 5b, relocated to the admin router in 9 with the note in 5b marking exactly what moves). §4 Superadmin → Task 5a (directory list, bootstrap, JWT claim), 5b (`Caller`, `require_admin`, `may_act_on`'s third arm with the audit line), 7b (`/admin`: queue, usage, defaults, regions, node decommission status). §5 Admin APIs live on their own server → Task 9 (`api::admin` router, the pre-routing claim refusal, every handler the spec's table lists moved out of `/v1`), Task 10 (the RBAC split — only the admin ClusterRole may write `Quota`/`QuotaRequest`/`Region` — and the bootstrap gated to the admin role), Task 11 (separate Deployment/Service/Ingress/ServiceAccount, identity as the only gate, one shared image pin), Task 12 (the web's `NEXT_PUBLIC`-free `KLOUDLITE_GIT_ADMIN_API_URL` and `adminCall`), Task 13 (the two-router 404 tests and the e2e's `$ADMIN_BASE` proof). Rules → the Global Constraints block, plus "Admin writes only happen on the admin server" → Task 10's RBAC split is what makes that literally true rather than a convention. Cases table → the recorder tests in Tasks 3, 4, 5b/9 and 13, plus the e2e in Tasks 8 and 13. Testing → Tasks 2/3/4/5b (`/v1` recorder), 6 (agent recorder), 7a (`bun:test`), 9/13 (admin recorder, the cross-router 404s), 8/13 (live).
+**Spec coverage.** §1 One quota per owner → Tasks 1 (CRD, defaults table), 2 (usage, `GET /v1/quota`). §2 Enforcement → Task 3 (`/v1`, all six live routes plus the note on the two that have no route), Task 6 (`ResourceQuota`). §3 Quota requests → Tasks 1 (CRD), 4 (create/list, the role rule, the one-pending rule), 5b/9 (approve/deny, the decided-once rule — written in 5b, relocated to the admin router in 9 with the note in 5b marking exactly what moves). §4 Superadmin → Task 5a (directory list, bootstrap, JWT claim), 5b (`Caller`, `require_admin`, `may_act_on`'s third arm with the audit line), 7b (`/admin`: queue, usage, defaults, regions, node decommission status). §5 Admin APIs live on their own server → Task 9 (`api::admin` router, the pre-routing claim refusal, every handler the spec's table lists moved out of `/v1`), Task 10 (the RBAC split — only the admin ClusterRole may write `Quota`/`QuotaRequest`/`Region` — and the bootstrap gated to the admin role), Task 11 (separate Deployment/Service/Ingress/ServiceAccount, identity as the only gate, one shared image pin), Task 12 (the web's `NEXT_PUBLIC`-free `KLOUDLITE_ADMIN_API_URL` and `adminCall`), Task 13 (the two-router 404 tests and the e2e's `$ADMIN_BASE` proof). Rules → the Global Constraints block, plus "Admin writes only happen on the admin server" → Task 10's RBAC split is what makes that literally true rather than a convention. Cases table → the recorder tests in Tasks 3, 4, 5b/9 and 13, plus the e2e in Tasks 8 and 13. Testing → Tasks 2/3/4/5b (`/v1` recorder), 6 (agent recorder), 7a (`bun:test`), 9/13 (admin recorder, the cross-router 404s), 8/13 (live).
 
 **Placeholders.** None: every code step carries the code, every test step the assertions. The three places that say "copy the sibling" name the exact sibling file and line range (`api_teams.rs:26-83`, `reconcile.rs:386-500`, `new-token-dialog.tsx`), because the harnesses are long and duplicating them here would be the drift. Task 9's `list_for_owner`/`stop_as`/`delete_as` split is named as a refactor with the exact shape to copy (`guard_alloc`'s owner-as-parameter pattern), not a placeholder — the existing `list_ws`/`stop_ws`/`delete_ws` bodies are what move, unchanged in logic.
 

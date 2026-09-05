@@ -46,7 +46,7 @@ databases:
   live_environments, snapshots, disk_gb, cpu, memory_gb, pool_used_bytes, pool_total_bytes`;
   2 y), `alerts` (ReplacingMergeTree; `region, rule, state, detail`; 400 d).
 
-Credentials: the chart's ClickHouse secret; the admin process gets `KLOUDLITE_GIT_CLICKHOUSE_URL`
+Credentials: the chart's ClickHouse secret; the admin process gets `KLOUDLITE_CLICKHOUSE_URL`
 (HTTP, 8123, user with rights on `kloudlite` and read on `default`). Optional everywhere — a
 process without it runs as today and the console shows "history unavailable" for a series.
 Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in,
@@ -56,11 +56,11 @@ Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in
 
 - **Gateway collector** — the chart's OTel collector in `clickstack` (OTLP gRPC 4317 / HTTP
   4318, `authorization: <ingestion API key>` from HyperDX Team Settings; the key lives in
-  Secret `kloudlite-git-otel` and is what every sender uses). Exposed to the regions through an
+  Secret `kloudlite-otel` and is what every sender uses). Exposed to the regions through an
   Ingress path `otel-dev.kloudlite.io` (TLS, HTTP/2 for gRPC) — the k3s clusters cannot reach
   a ClusterIP on AKS.
 - **Agent collectors** — the official `opentelemetry-collector-contrib` as a Deployment in
-  every cluster (`deploy/k3s/otel-agent.yaml` per region; the same manifest in `kloudlite-git`
+  every cluster (`deploy/k3s/otel-agent.yaml` per region; the same manifest in `kloudlite`
   on AKS), config in a ConfigMap: `prometheus` receiver scraping every pod annotated
   `prometheus.io/scrape: "true"` (`kubernetes_sd_configs`, 15 s), `k8s_cluster` and
   `kubeletstats` receivers for node/pod CPU, memory and filesystem, `k8sattributes` +
@@ -71,7 +71,7 @@ Access from Rust is ClickHouse's HTTP interface over `reqwest` (`JSONEachRow` in
 - **Logs** — the same agent collectors ship pod logs (`filelog` receiver on
   `/var/log/pods`) so HyperDX has logs beside metrics; our binaries keep plain `tracing`
   output, unchanged.
-- **Node gauges** — `kloudlite-git-agent` gains a 15 s stats beat on its own `/metrics`:
+- **Node gauges** — `kloudlite-agent` gains a 15 s stats beat on its own `/metrics`:
   `node_pool_bytes_total`, `node_pool_bytes_used` (btrfs usage of the pool),
   `node_working_copies_running`. CPU, memory and load come from `kubeletstats`, not from us.
 
@@ -105,22 +105,22 @@ needs (`pending_requests`, `firing_signals`, `owners_over_80`, `live_workspaces`
 SQL statement in `history/series.rs` over `kloudlite.*` or `otel_metrics_*`; unknown series 404;
 no ClickHouse → `503 history unavailable` (the web renders a flat placeholder).
 `GET /admin/history/events?kind=&owner=&region=&from=&to=&cursor=` pages `kloudlite.events`.
-A "Open in HyperDX" link on Monitoring uses `KLOUDLITE_GIT_HYPERDX_URL` when set.
+A "Open in HyperDX" link on Monitoring uses `KLOUDLITE_HYPERDX_URL` when set.
 
 ### A6. Deploy
 
 `deploy/clickstack/` — the two Helm value files (operators, clickstack: one ClickHouse
 replica with the PVC, HyperDX behind `hyperdx-dev.kloudlite.io` gated to superadmin emails at
 the Ingress, the gateway collector with its Ingress), a README with the exact `helm` commands
-and the one manual step (create the ingestion API key, store it in `kloudlite-git-otel`).
-`deploy/kloudlite-git.yaml`: `KLOUDLITE_GIT_CLICKHOUSE_URL` and `KLOUDLITE_GIT_HYPERDX_URL` on the admin
+and the one manual step (create the ingestion API key, store it in `kloudlite-otel`).
+`deploy/kloudlite.yaml`: `KLOUDLITE_CLICKHOUSE_URL` and `KLOUDLITE_HYPERDX_URL` on the admin
 Deployment, the AKS agent collector. `deploy/k3s/otel-agent.yaml` per region;
 `agent-peer.yaml`'s metrics NetworkPolicy admits the collector's namespace. `deploy/alerts.md`
 gains the HyperDX alert definitions.
 
 ## B. Generic requests
 
-One cluster-scoped CRD `Request` (`kloudlite-git.io/v1alpha1`) replaces `QuotaRequest` for new
+One cluster-scoped CRD `Request` (`kloudlite.io/v1alpha1`) replaces `QuotaRequest` for new
 requests; existing `QuotaRequest` objects stay readable (the admin list unions both until a
 one-shot migration copies them, then the old CRD is retired in a later release).
 

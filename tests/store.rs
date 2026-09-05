@@ -1,6 +1,6 @@
 mod common;
 use gix_hash::ObjectId;
-use kloudlite_git_gitbase::refs::{RefUpdate, UpdateRefsExt};
+use kloudlite_gitbase::refs::{RefUpdate, UpdateRefsExt};
 
 #[tokio::test]
 async fn repo_and_refs() {
@@ -209,7 +209,7 @@ async fn create_repo_rejects_duplicates() {
 #[tokio::test]
 async fn probing_an_unknown_repo_opens_nothing() {
     let tmp = tempfile::tempdir().unwrap();
-    let s = kloudlite_git_storage::store::Store::open(
+    let s = kloudlite_storage::store::Store::open(
         std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
         tmp.path().join("c"),
         false,
@@ -235,7 +235,7 @@ async fn visibility_defaults_private_and_round_trips() {
 
 #[test]
 fn authorize_allows_anonymous_reads_only_when_public() {
-    use kloudlite_git_storage::auth::authorize;
+    use kloudlite_storage::auth::authorize;
     assert!(!authorize(None, "alice", false));
     assert!(authorize(None, "alice", true));
     assert!(authorize(Some("alice"), "alice", false));
@@ -247,7 +247,7 @@ fn authorize_allows_anonymous_reads_only_when_public() {
 /// The write half catches the opposite mistake — public must grant read, never identity.
 #[test]
 fn public_grants_read_to_everyone_and_write_to_nobody_but_the_owner() {
-    use kloudlite_git_storage::auth::authorize;
+    use kloudlite_storage::auth::authorize;
     // reads on a public repo: callers pass public_read = true
     assert!(authorize(None, "alice", true), "anonymous may read a public repo");
     assert!(authorize(Some("bob"), "alice", true), "a stranger's token may read a public repo");
@@ -280,8 +280,8 @@ async fn api_is_a_reserved_owner_name() {
 /// forever — its page showing the namespace's feed instead of the repo.
 #[test]
 fn a_repo_cannot_be_named_after_a_page_in_the_namespace() {
-    use kloudlite_git_storage::store::reserved_repo_name;
-    for name in kloudlite_git_storage::store::RESERVED_REPO_NAMES {
+    use kloudlite_storage::store::reserved_repo_name;
+    for name in kloudlite_storage::store::RESERVED_REPO_NAMES {
         assert!(reserved_repo_name(name), "{name} must be refused");
         assert!(reserved_repo_name(&name.to_uppercase()), "{name} in any case");
     }
@@ -291,7 +291,7 @@ fn a_repo_cannot_be_named_after_a_page_in_the_namespace() {
         assert!(reserved_repo_name(name), "{name} must be refused");
     }
     // Everything else is still a name. The check must not creep.
-    for ok in ["kloudlite-git", "api", "activities", "repository", "ci-runner", "settings-ui"] {
+    for ok in ["kloudlite", "api", "activities", "repository", "ci-runner", "settings-ui"] {
         assert!(!reserved_repo_name(ok), "{ok} must still be allowed");
     }
 }
@@ -317,14 +317,14 @@ fn the_web_and_the_server_reserve_the_same_names() {
         .collect();
     let mut web = web;
     web.sort_unstable();
-    let mut server: Vec<&str> = kloudlite_git_storage::store::RESERVED_REPO_NAMES.to_vec();
+    let mut server: Vec<&str> = kloudlite_storage::store::RESERVED_REPO_NAMES.to_vec();
     server.sort_unstable();
     assert_eq!(web, server, "web/lib/reserved.ts and RESERVED_REPO_NAMES must agree");
 }
 
 // ── branch protection ───────────────────────────────────────────────────────
 
-use kloudlite_git_gitbase::refs::Protection;
+use kloudlite_gitbase::refs::Protection;
 
 fn rule(pattern: &str) -> Protection {
     Protection { pattern: pattern.into(), no_force: true, no_delete: true }
@@ -348,11 +348,11 @@ async fn a_protected_branch_refuses_a_delete_and_a_rewrite() {
     let s = &e.store;
 
     let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
-    let commits = kloudlite_git_git::browse::log(&repo.odb().unwrap(), head, 10).unwrap();
+    let commits = kloudlite_vcs::browse::log(&repo.odb().unwrap(), head, 10).unwrap();
     let parent: gix_hash::ObjectId = commits[1].oid.parse().unwrap();
 
     // Unprotected: rewinding master to its parent is allowed.
-    let rewind = vec![kloudlite_git_gitbase::refs::RefUpdate {
+    let rewind = vec![kloudlite_gitbase::refs::RefUpdate {
         name: "refs/heads/master".into(),
         old: Some(head),
         new: Some(parent),
@@ -360,7 +360,7 @@ async fn a_protected_branch_refuses_a_delete_and_a_rewrite() {
     assert_eq!(s.update_refs(&repo, &rewind).await.unwrap(), vec![None]);
 
     // Put it back, then protect it.
-    let forward = vec![kloudlite_git_gitbase::refs::RefUpdate {
+    let forward = vec![kloudlite_gitbase::refs::RefUpdate {
         name: "refs/heads/master".into(),
         old: Some(parent),
         new: Some(head),
@@ -374,7 +374,7 @@ async fn a_protected_branch_refuses_a_delete_and_a_rewrite() {
     assert_eq!(s.get_ref(&repo, "refs/heads/master").await.unwrap(), Some(head), "nothing moved");
 
     // So is deleting it.
-    let delete = vec![kloudlite_git_gitbase::refs::RefUpdate {
+    let delete = vec![kloudlite_gitbase::refs::RefUpdate {
         name: "refs/heads/master".into(),
         old: Some(head),
         new: None,
@@ -384,7 +384,7 @@ async fn a_protected_branch_refuses_a_delete_and_a_rewrite() {
     assert_eq!(s.get_ref(&repo, "refs/heads/master").await.unwrap(), Some(head), "still there");
 
     // An unprotected branch beside it is unaffected — rules are per pattern.
-    let other = vec![kloudlite_git_gitbase::refs::RefUpdate {
+    let other = vec![kloudlite_gitbase::refs::RefUpdate {
         name: "refs/heads/scratch".into(),
         old: None,
         new: Some(parent),
@@ -415,7 +415,7 @@ async fn a_commit_the_server_writes_is_readable_afterwards() {
     let odb = repo.odb().unwrap();
     let mut headbuf = Vec::new();
     let tree = gix_object::FindExt::find_commit(&odb, &head, &mut headbuf).unwrap().tree();
-    let squash = kloudlite_git_gitbase::objects::NewCommit {
+    let squash = kloudlite_gitbase::objects::NewCommit {
         tree,
         parents: vec![head],
         message: "squashed\n".into(),
@@ -424,7 +424,7 @@ async fn a_commit_the_server_writes_is_readable_afterwards() {
         time: 1_700_000_000,
     };
 
-    let oid = kloudlite_git_gitbase::objects::write_commit(s, &repo, squash).await.unwrap();
+    let oid = kloudlite_gitbase::objects::write_commit(s, &repo, squash).await.unwrap();
     assert_ne!(oid, head, "a new commit, not the one we started from");
 
     // Readable through a FRESH handle, so this is the stored object rather than
@@ -438,7 +438,7 @@ async fn a_commit_the_server_writes_is_readable_afterwards() {
 
     // And it can be pointed at, which is the whole purpose.
     let moved = s
-        .update_refs(&repo2, &[kloudlite_git_gitbase::refs::RefUpdate {
+        .update_refs(&repo2, &[kloudlite_gitbase::refs::RefUpdate {
             name: "refs/heads/master".into(),
             old: Some(head),
             new: Some(oid),
@@ -450,10 +450,10 @@ async fn a_commit_the_server_writes_is_readable_afterwards() {
 
     // Writing the same commit again is the same id and not an error: merges get
     // retried, and a retry must not fail or duplicate.
-    let again = kloudlite_git_gitbase::objects::write_commit(
+    let again = kloudlite_gitbase::objects::write_commit(
         s,
         &repo2,
-        kloudlite_git_gitbase::objects::NewCommit {
+        kloudlite_gitbase::objects::NewCommit {
             tree,
             parents: vec![head],
             message: "squashed\n".into(),
@@ -474,7 +474,7 @@ async fn a_commit_the_server_writes_is_readable_afterwards() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_patch_edits_adds_and_deletes_in_one_commit() {
     if !common::have_git() { eprintln!("skipping: no git"); return; }
-    use kloudlite_git_gitbase::objects::{apply_changes, Change, Staging};
+    use kloudlite_gitbase::objects::{apply_changes, Change, Staging};
     use std::collections::BTreeMap;
 
     let e = common::env().await;
@@ -486,7 +486,7 @@ async fn a_patch_edits_adds_and_deletes_in_one_commit() {
     let base = gix_object::FindExt::find_commit(&odb, &head, &mut buf).unwrap().tree();
 
     // What the fixture starts with, so the assertions below are about the patch.
-    let before: Vec<String> = kloudlite_git_git::browse::files_at(&odb, head, "", 1000)
+    let before: Vec<String> = kloudlite_vcs::browse::files_at(&odb, head, "", 1000)
         .unwrap().into_iter().map(|e| e.name).collect();
     assert!(before.contains(&"src/main.rs".to_string()), "fixture has src/main.rs: {before:?}");
 
@@ -505,21 +505,21 @@ async fn a_patch_edits_adds_and_deletes_in_one_commit() {
     // stored, so writing it before the tree it points at asks the indexer to
     // check an object against one that does not exist yet.
     staging.write(s, &repo).await.unwrap();
-    let oid = kloudlite_git_gitbase::objects::write_commit(s, &repo, kloudlite_git_gitbase::objects::NewCommit {
+    let oid = kloudlite_gitbase::objects::write_commit(s, &repo, kloudlite_gitbase::objects::NewCommit {
         tree, parents: vec![head], message: "patch\n".into(),
         author_name: "K".into(), author_email: "k@example.com".into(), time: 1_700_000_000,
     }).await.unwrap();
 
     let fresh = s.open_repo("alice", "patched").await.unwrap().unwrap();
     let odb2 = fresh.odb().unwrap();
-    let after: Vec<String> = kloudlite_git_git::browse::files_at(&odb2, oid, "", 1000)
+    let after: Vec<String> = kloudlite_vcs::browse::files_at(&odb2, oid, "", 1000)
         .unwrap().into_iter().map(|e| e.name).collect();
     assert!(after.contains(&"deep/nested/new.txt".to_string()), "new nested file: {after:?}");
     assert!(after.contains(&"src/main.rs".to_string()), "edited file still there: {after:?}");
     assert!(!after.contains(&"README.md".to_string()), "deleted file is gone: {after:?}");
 
     // The edit is really the new bytes, read back through a fresh handle.
-    let blob = kloudlite_git_git::browse::blob_at(&odb2, oid, "src/main.rs", 1 << 20).unwrap();
+    let blob = kloudlite_vcs::browse::blob_at(&odb2, oid, "src/main.rs", 1 << 20).unwrap();
     assert_eq!(blob.bytes, b"edited\n", "the edit landed");
 }
 
@@ -528,7 +528,7 @@ async fn a_patch_edits_adds_and_deletes_in_one_commit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_patch_refuses_a_path_that_escapes_the_tree() {
     if !common::have_git() { eprintln!("skipping: no git"); return; }
-    use kloudlite_git_gitbase::objects::{apply_changes, Change, Staging};
+    use kloudlite_gitbase::objects::{apply_changes, Change, Staging};
     use std::collections::BTreeMap;
 
     let e = common::env().await;
@@ -560,7 +560,7 @@ async fn a_patch_refuses_a_path_that_escapes_the_tree() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_edit_keeps_the_mode_the_file_already_had() {
     if !common::have_git() { eprintln!("skipping: no git"); return; }
-    use kloudlite_git_gitbase::objects::{apply_changes, Change, Staging};
+    use kloudlite_gitbase::objects::{apply_changes, Change, Staging};
     use std::collections::BTreeMap;
 
     let e = common::env().await;
@@ -695,7 +695,7 @@ async fn a_non_trailing_star_is_refused() {
     let e = common::env().await;
     let s = &e.store;
     s.create_repo("alice", "web").await.unwrap();
-    let p = |pattern: &str| kloudlite_git_gitbase::refs::Protection { pattern: pattern.into(), no_force: true, no_delete: true };
+    let p = |pattern: &str| kloudlite_gitbase::refs::Protection { pattern: pattern.into(), no_force: true, no_delete: true };
     assert!(s.set_protection("alice", "web", &p("rel*ease")).await.is_err());
     assert!(s.set_protection("alice", "web", &p("*/main")).await.is_err());
     assert!(s.set_protection("alice", "web", &p("release/*")).await.is_ok());

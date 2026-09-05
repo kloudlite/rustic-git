@@ -2,13 +2,13 @@
 //! `PUT /admin/quota/{owner}` — `api::admin::router` against a mocked kube API, same harness
 //! shape `api_admin.rs`/`api_admin_audit.rs` use.
 
-use kloudlite_git_core::jwt::Jwt;
-use kloudlite_git_workspaces::api::{admin::router, ApiState};
-use kloudlite_git_workspaces::kube_test::{get, mock_client, not_found, Route};
+use kloudlite_core::jwt::Jwt;
+use kloudlite_workspaces::api::{admin::router, ApiState};
+use kloudlite_workspaces::kube_test::{get, mock_client, not_found, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const API: &str = "/apis/kloudlite-git.io/v1alpha1";
+const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 struct Server {
     base: String,
@@ -19,7 +19,7 @@ async fn admin_server(routes: Vec<Route>) -> Server {
     admin_server_with_keys(routes, None).await
 }
 
-async fn admin_server_with_keys(routes: Vec<Route>, keys: Option<Arc<kloudlite_git_storage::store::Store>>) -> Server {
+async fn admin_server_with_keys(routes: Vec<Route>, keys: Option<Arc<kloudlite_storage::store::Store>>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let mut state = ApiState::new(jwt.clone());
     let (client, _rec) = mock_client(routes);
@@ -34,10 +34,10 @@ async fn admin_server_with_keys(routes: Vec<Route>, keys: Option<Arc<kloudlite_g
     Server { base: format!("http://{addr}"), jwt }
 }
 
-async fn keys_store() -> Arc<kloudlite_git_storage::store::Store> {
+async fn keys_store() -> Arc<kloudlite_storage::store::Store> {
     let tmp = tempfile::tempdir().unwrap();
     Arc::new(
-        kloudlite_git_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
+        kloudlite_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
             .await
             .unwrap(),
     )
@@ -48,13 +48,13 @@ fn admin_token(jwt: &Jwt) -> String {
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
-    json!({"apiVersion": "kloudlite-git.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
+    json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": format!("{kind}List"), "metadata": {}, "items": items})
 }
 
 fn ws_obj(name: &str, owner: &str) -> Value {
     json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "team": "", "name": name, "region": "centralindia",
                  "image": "img:1", "desiredState": "running", "packages": [],
                  "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
@@ -64,8 +64,8 @@ fn ws_obj(name: &str, owner: &str) -> Value {
 
 fn req_obj(name: &str, owner: &str, state: Option<&str>) -> Value {
     let mut o = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "QuotaRequest",
-        "metadata": {"name": name, "labels": {"kloudlite-git.io/owner": owner}},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "QuotaRequest",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "requested": {"workspaces": 10}, "reason": "more room"}
     });
     if let Some(st) = state {
@@ -104,7 +104,7 @@ async fn owners_list_includes_an_owner_with_only_live_objects_and_no_quota_or_re
 #[tokio::test]
 async fn owners_list_sorts_tightest_first_and_reports_source_own() {
     let dana_quota = json!({
-        "apiVersion": "kloudlite-git.io/v1alpha1", "kind": "Quota",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Quota",
         "metadata": {"name": "dana"},
         "spec": {"workspaces": 1, "environments": 5, "snapshots": 5, "diskGb": 100, "cpu": 4, "memoryGb": 8}
     });
@@ -156,7 +156,7 @@ async fn owner_detail_composes_usage_limit_objects_requests_and_audit() {
         ),
     ];
     let keys = keys_store().await;
-    let entry = kloudlite_git_workspaces::audit::AuditEntry {
+    let entry = kloudlite_workspaces::audit::AuditEntry {
         ts: "2026-09-04T00:00:00Z".into(),
         actor: "root".into(),
         action: "set-quota".into(),
@@ -164,7 +164,7 @@ async fn owner_detail_composes_usage_limit_objects_requests_and_audit() {
         reason: Some("initial grant".into()),
         result: "ok".into(),
     };
-    kloudlite_git_workspaces::audit::record(&keys.os, &entry).await.unwrap();
+    kloudlite_workspaces::audit::record(&keys.os, &entry).await.unwrap();
     let s = admin_server_with_keys(routes, Some(keys)).await;
 
     let body: Value = reqwest::Client::new()

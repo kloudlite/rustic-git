@@ -92,7 +92,7 @@ pub fn unauthorized() -> axum::response::Response {
     use axum::response::IntoResponse;
     (
         axum::http::StatusCode::UNAUTHORIZED,
-        [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"kloudlite-git\"")],
+        [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"kloudlite\"")],
         "auth required",
     )
         .into_response()
@@ -101,9 +101,9 @@ pub fn unauthorized() -> axum::response::Response {
 /// Cap on a single request body (compressed bytes on the wire). Axum enforces this in the
 /// extractor, BEFORE the handler runs, so an unauthenticated client cannot make the server
 /// buffer more than this; the git handlers apply it by hand AFTER authenticating, so that client
-/// cannot make them buffer anything at all. Override with KLOUDLITE_GIT_MAX_BODY (bytes).
+/// cannot make them buffer anything at all. Override with KLOUDLITE_MAX_BODY (bytes).
 pub fn max_body() -> usize {
-    std::env::var("KLOUDLITE_GIT_MAX_BODY")
+    std::env::var("KLOUDLITE_MAX_BODY")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2 * 1024 * 1024 * 1024) // 2 GiB

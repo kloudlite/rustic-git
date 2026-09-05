@@ -260,7 +260,7 @@ async fn visibility(c: &mut Ctx, image: &str) {
 /// and the step skips.
 async fn canary(c: &mut Ctx, secret: &str) {
     let Some(want) = c.cfg.canary_digest.clone() else {
-        return c.skip("reg.canary", "KLOUDLITE_GIT_SLO_CANARY_DIGEST is not set");
+        return c.skip("reg.canary", "KLOUDLITE_SLO_CANARY_DIGEST is not set");
     };
     let host = host(c);
     let reference = format!("{host}/{PROBE_USER}/canary:latest");
@@ -283,7 +283,7 @@ async fn canary(c: &mut Ctx, secret: &str) {
 }
 
 /// `bootstrap`: push `slo-probe/canary` if it is not there, and answer its digest for a human to
-/// pin into `KLOUDLITE_GIT_SLO_CANARY_DIGEST`.
+/// pin into `KLOUDLITE_SLO_CANARY_DIGEST`.
 ///
 /// Its layer is FIXED bytes, not random: bootstrap re-runs on every deploy, and a canary whose
 /// digest moved would fail `reg.canary` on every probe until somebody re-pinned it.

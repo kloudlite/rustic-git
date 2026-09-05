@@ -1,6 +1,6 @@
 # Copy to deploy/k3s/env.sh (git-ignored) and edit. NO SECRETS HERE — tokens go via scp/kubectl.
 CLOUD=azure                     # azure | oci  — only this file differs between them
-RG=kloudlite-git-k3s
+RG=kloudlite-k3s
 LOC=centralindia                # where the directory's Cosmos account and blob storage already live
 IMAGE=Canonical:ubuntu-24_04-lts:server:latest
 ADMIN=azureuser

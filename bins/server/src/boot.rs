@@ -32,7 +32,7 @@ pub fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
 
 /// One copy, in core: `crates/api` needs the same parse and `storage` must not carry the ssh
 /// dependency, so neither of those two is a home for it.
-pub(crate) use kloudlite_git_core::sshkeys::ssh_fingerprint;
+pub(crate) use kloudlite_core::sshkeys::ssh_fingerprint;
 
 /// Same either-variable "is a fleet configured" test as `set-visibility`/`set-image-visibility`
 /// (keying on the secret alone would let an operator whose shell doesn't export it take the
@@ -44,7 +44,7 @@ pub(crate) use kloudlite_git_core::sshkeys::ssh_fingerprint;
 /// nothing configured (single node, or an offline run) does it proceed, saying out loud what
 /// it is assuming.
 pub(crate) fn fleet_guard(cmd: &str, path: &str) -> Result<()> {
-    fleet_check(cmd, path, std::env::var("KLOUDLITE_GIT_UPSTREAM").ok(), std::env::var("KLOUDLITE_GIT_PEER_SECRET").ok())
+    fleet_check(cmd, path, std::env::var("KLOUDLITE_UPSTREAM").ok(), std::env::var("KLOUDLITE_PEER_SECRET").ok())
 }
 
 /// The decision itself, with the environment already read — so the test can state both variables
@@ -52,13 +52,13 @@ pub(crate) fn fleet_guard(cmd: &str, path: &str) -> Result<()> {
 fn fleet_check(cmd: &str, path: &str, upstream: Option<String>, secret: Option<String>) -> Result<()> {
     if upstream.is_some() || secret.is_some() {
         return Err(crate::err(format!(
-            "{cmd}: a fleet is configured (KLOUDLITE_GIT_UPSTREAM or KLOUDLITE_GIT_PEER_SECRET set) but \
+            "{cmd}: a fleet is configured (KLOUDLITE_UPSTREAM or KLOUDLITE_PEER_SECRET set) but \
              there is no routed endpoint to deliver this to the node serving {path} — refusing to \
              run it here. Run this only when no node is currently serving that repo."
         )));
     }
     eprintln!(
-        "{cmd}: no KLOUDLITE_GIT_UPSTREAM or KLOUDLITE_GIT_PEER_SECRET set — running against {path} \
+        "{cmd}: no KLOUDLITE_UPSTREAM or KLOUDLITE_PEER_SECRET set — running against {path} \
          directly, assuming NO node is currently serving it. If one is, opening its database here \
          fences the serving node's writer."
     ); // CLI output: a person ran this admin subcommand; RUST_LOG must not be able to suppress it.
@@ -66,7 +66,7 @@ fn fleet_check(cmd: &str, path: &str, upstream: Option<String>, secret: Option<S
 }
 
 /// Ceiling on the whole `post_to_owner` call, and on reading its reply — this binary must not
-/// depend on `kloudlite-git-api` (that crate carries `pgp`/`mongodb`/`russh` this process has no
+/// depend on `kloudlite-api` (that crate carries `pgp`/`mongodb`/`russh` this process has no
 /// other reason to link) just to reuse its identical constant.
 const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -81,13 +81,13 @@ pub(crate) async fn post_to_owner(
     upstream: Option<String>,
     secret: Option<String>,
 ) -> Result<()> {
-    let upstream = upstream.unwrap_or_else(|| "http://kloudlite-git:8081".into());
+    let upstream = upstream.unwrap_or_else(|| "http://kloudlite:8081".into());
     let res = reqwest::Client::builder()
         .timeout(UPSTREAM_TIMEOUT)
         .build()?
         .post(format!("{}{route}", upstream.trim_end_matches('/')))
-        .header(kloudlite_git_core::peer::PEER_HEADER, secret.unwrap_or_default())
-        .header(kloudlite_git_core::peer::OWNER_HEADER, owner)
+        .header(kloudlite_core::peer::PEER_HEADER, secret.unwrap_or_default())
+        .header(kloudlite_core::peer::OWNER_HEADER, owner)
         .send()
         .await
         .map_err(|e| crate::err(format!("{cmd}: {e}")))?;
@@ -95,7 +95,7 @@ pub(crate) async fn post_to_owner(
     if status.is_success() {
         return Ok(());
     }
-    let body = kloudlite_git_core::httpx::read_bounded(res)
+    let body = kloudlite_core::httpx::read_bounded(res)
         .await
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
@@ -244,11 +244,11 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             // whose shell happens not to export it take the direct path silently, reintroducing
             // exactly that window. Neither set is still a guess — this process cannot see whether a
             // node is serving the repo — so the direct path says out loud what it is assuming.
-            let upstream = std::env::var("KLOUDLITE_GIT_UPSTREAM").ok();
-            let secret = std::env::var("KLOUDLITE_GIT_PEER_SECRET").ok();
+            let upstream = std::env::var("KLOUDLITE_UPSTREAM").ok();
+            let secret = std::env::var("KLOUDLITE_PEER_SECRET").ok();
             if upstream.is_none() && secret.is_none() {
                 eprintln!(
-                    "set-visibility: no KLOUDLITE_GIT_UPSTREAM or KLOUDLITE_GIT_PEER_SECRET set — \
+                    "set-visibility: no KLOUDLITE_UPSTREAM or KLOUDLITE_PEER_SECRET set — \
                      writing {path} directly, assuming NO node is currently serving it. If one is, \
                      it keeps authorizing from its own view for several seconds; set both and \
                      re-run to route the flip through the owner."
@@ -266,11 +266,11 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             // (by the IMAGE key), so with a fleet configured the flip is delivered to the node
             // that owns the image's database rather than written here under a live writer.
             // Same either-variable test for "configured", for the same reason.
-            let upstream = std::env::var("KLOUDLITE_GIT_UPSTREAM").ok();
-            let secret = std::env::var("KLOUDLITE_GIT_PEER_SECRET").ok();
+            let upstream = std::env::var("KLOUDLITE_UPSTREAM").ok();
+            let secret = std::env::var("KLOUDLITE_PEER_SECRET").ok();
             if upstream.is_none() && secret.is_none() {
                 eprintln!(
-                    "set-image-visibility: no KLOUDLITE_GIT_UPSTREAM or KLOUDLITE_GIT_PEER_SECRET set — \
+                    "set-image-visibility: no KLOUDLITE_UPSTREAM or KLOUDLITE_PEER_SECRET set — \
                      writing {path} directly, assuming NO node is currently serving it. If one is, it \
                      keeps answering from its own view for several seconds."
                 ); // CLI output: a person ran this admin subcommand; RUST_LOG must not be able to suppress it.
@@ -286,7 +286,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             .await
         }
         _ => Err(crate::err(
-            "usage: kloudlite-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin ownership-gc [min-age-secs] | admin repack <owner>/<name> | admin add-token <owner> | admin revoke-tokens <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name>",
+            "usage: kloudlite serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin ownership-gc [min-age-secs] | admin repack <owner>/<name> | admin add-token <owner> | admin revoke-tokens <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name>",
         )),
     }
 }
@@ -310,7 +310,7 @@ mod tests {
     }
 
     // `set_visibility_routes_unless_nothing_is_configured` and `set_image_visibility_writes_it`
-    // both mutate the process-wide KLOUDLITE_GIT_UPSTREAM/KLOUDLITE_GIT_PEER_SECRET env vars; without
+    // both mutate the process-wide KLOUDLITE_UPSTREAM/KLOUDLITE_PEER_SECRET env vars; without
     // this they race each other across threads.
     // An async mutex, not a std one: both tests await while holding it, and a std guard held
     // across `.await` can park the whole runtime thread on a lock another task must release.
@@ -344,19 +344,19 @@ mod tests {
         run(&["admin", "create-repo", "alice/web"], &store).await.unwrap();
 
         // Nothing configured: a single node or an offline run. Writes directly (with a warning).
-        std::env::remove_var("KLOUDLITE_GIT_PEER_SECRET");
-        std::env::remove_var("KLOUDLITE_GIT_UPSTREAM");
+        std::env::remove_var("KLOUDLITE_PEER_SECRET");
+        std::env::remove_var("KLOUDLITE_UPSTREAM");
         run(&["admin", "set-visibility", "alice/web", "public"], &store).await.unwrap();
         assert!(store.is_public("alice", "web").await.unwrap());
 
         // An upstream configured but no secret in this shell: must still go to the fleet, and fail
         // loudly when it cannot reach it — never write here.
-        std::env::set_var("KLOUDLITE_GIT_UPSTREAM", "http://127.0.0.1:1");
+        std::env::set_var("KLOUDLITE_UPSTREAM", "http://127.0.0.1:1");
         let e = run(&["admin", "set-visibility", "alice/web", "private"], &store)
             .await
             .expect_err("an unreachable fleet must fail, not fall back to a direct write");
         assert!(store.is_public("alice", "web").await.unwrap(), "nothing written here: {e}");
-        std::env::remove_var("KLOUDLITE_GIT_UPSTREAM");
+        std::env::remove_var("KLOUDLITE_UPSTREAM");
         store.pool.close().await;
     }
 
@@ -370,8 +370,8 @@ mod tests {
     #[tokio::test]
     async fn set_image_visibility_writes_it() {
         let _guard = ENV_LOCK.lock().await;
-        std::env::remove_var("KLOUDLITE_GIT_PEER_SECRET");
-        std::env::remove_var("KLOUDLITE_GIT_UPSTREAM");
+        std::env::remove_var("KLOUDLITE_PEER_SECRET");
+        std::env::remove_var("KLOUDLITE_UPSTREAM");
         let store = store().await;
         use crate::index::{self, Kind};
         use slatedb::object_store::ObjectStoreExt;
@@ -396,14 +396,14 @@ mod tests {
 
         // An upstream configured but no secret in this shell: must go to the fleet (the routed
         // `imagevisibility` endpoint) and fail loudly when it cannot reach it — never write here.
-        std::env::set_var("KLOUDLITE_GIT_UPSTREAM", "http://127.0.0.1:1");
+        std::env::set_var("KLOUDLITE_UPSTREAM", "http://127.0.0.1:1");
         let e = run(&["admin", "set-image-visibility", "acme/nginx", "public"], &store)
             .await
             .expect_err("an unreachable fleet must fail, not fall back to a direct write");
         assert!(!store.image_is_public("acme", "nginx").await.unwrap(), "nothing written here: {e}");
         assert!(e.to_string().contains("set-image-visibility"), "{e}");
         assert!(!e.to_string().contains("no routed endpoint"), "{e}");
-        std::env::remove_var("KLOUDLITE_GIT_UPSTREAM");
+        std::env::remove_var("KLOUDLITE_UPSTREAM");
 
         store.pool.close().await;
     }

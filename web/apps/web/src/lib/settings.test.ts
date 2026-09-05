@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { conflictMessage, effectiveValue, fmt, rolloutStateLabel, settled } from "@/lib/settings";
 
 test("conflictMessage turns a workloads::conflict body into a plain sentence", () => {
-  expect(conflictMessage('{"name":"kloudlite-git-worker","ready":2,"desired":3}')).toBe(
-    "kloudlite-git-worker is still rolling out (2/3 ready); try again shortly",
+  expect(conflictMessage('{"name":"kloudlite-worker","ready":2,"desired":3}')).toBe(
+    "kloudlite-worker is still rolling out (2/3 ready); try again shortly",
   );
 });
 

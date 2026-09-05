@@ -10,8 +10,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use kloudlite_git_core::httpx::{basic_creds, unauthorized, Trusted};
-use kloudlite_git_storage::store::Store;
+use kloudlite_core::httpx::{basic_creds, unauthorized, Trusted};
+use kloudlite_storage::store::Store;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, Cursor, Read, Seek, SeekFrom, Write};
@@ -303,11 +303,11 @@ async fn attempt(
 /// from starving the repos already served here. Upload-pack is not gated: its request bodies
 /// are small.
 // ponytail: whole-pod counter, not per repo or per owner.
-const KLOUDLITE_GIT_MAX_CONCURRENT_RECEIVE: usize = 2;
+const KLOUDLITE_MAX_CONCURRENT_RECEIVE: usize = 2;
 
 fn receive_permits() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| Semaphore::new(KLOUDLITE_GIT_MAX_CONCURRENT_RECEIVE))
+    SEM.get_or_init(|| Semaphore::new(KLOUDLITE_MAX_CONCURRENT_RECEIVE))
 }
 
 fn too_many_pushes() -> Response {

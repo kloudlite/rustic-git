@@ -1,18 +1,18 @@
 [package]
-name = "kloudlite-git-app"
+name = "kloudlite-app"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
 
 [lib]
-name = "kloudlite_git_app"
+name = "kloudlite_app"
 
 [dependencies]
 tracing = { workspace = true }
 metrics = { workspace = true }
-kloudlite-git-core = { path = "../core" }
-kloudlite-git-storage = { path = "../storage" }
-kloudlite-git-pulls = { path = "../pulls" }
+kloudlite-core = { path = "../core" }
+kloudlite-storage = { path = "../storage" }
+kloudlite-pulls = { path = "../pulls" }
 tokio = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }

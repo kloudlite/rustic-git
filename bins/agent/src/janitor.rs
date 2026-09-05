@@ -1,4 +1,4 @@
-//! Local storage janitor for `kloudlite-git-agent`: the ten-minute beat that reclaims attach
+//! Local storage janitor for `kloudlite-agent`: the ten-minute beat that reclaims attach
 //! directories and stale nix profile index entries, plus the full local reclaim a deleted volume
 //! triggers. Split out of `lib.rs`, which is process setup and nothing else.
 //!
@@ -8,7 +8,7 @@
 //! reconcile, not this beat.
 
 use crate::nix;
-use kloudlite_git_workspaces::engine::{is_subvolume, Engine};
+use kloudlite_workspaces::engine::{is_subvolume, Engine};
 use std::sync::Arc;
 
 /// Local storage janitor: every ten minutes, reclaims `{pool}/attach/*` orphans and stale nix
@@ -339,8 +339,8 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
 #[cfg(test)]
 mod janitor_tests {
     use super::*;
-    use kloudlite_git_workspaces::engine::have_btrfs;
-    use kloudlite_git_workspaces::engine::Pool;
+    use kloudlite_workspaces::engine::have_btrfs;
+    use kloudlite_workspaces::engine::Pool;
 
     /// Mirrors `crates/workspaces/tests/engine_pool.rs`'s `LoopbackPool`: a truncated sparse
     /// btrfs image, mounted for the test and unmounted on drop.

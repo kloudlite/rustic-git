@@ -12,9 +12,9 @@ use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
-use kloudlite_git_workspaces::crd::{self, DesiredState};
-use kloudlite_git_workspaces::k8s;
-use kloudlite_git_workspaces::model;
+use kloudlite_workspaces::crd::{self, DesiredState};
+use kloudlite_workspaces::k8s;
+use kloudlite_workspaces::model;
 use std::sync::Arc;
 
 /// `ATTACHED_ENV_LABEL` is `spec.attachedEnvironment`'s listing view, same rule as `heal_labels`
@@ -72,7 +72,7 @@ async fn ensure_profile(
     prev: &mut crd::WorkspaceStatus,
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
-    use kloudlite_git_workspaces::packages;
+    use kloudlite_workspaces::packages;
     // An empty list still builds: the pod mounts `{profiles_dir}/{id}` as a subPath of the
     // READ-ONLY `nix` hostPath, so a missing directory is an unmountable pod, not a pod without
     // extras. An empty

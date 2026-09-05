@@ -6,7 +6,7 @@
 
 ## Problem
 
-`/v1` writes CRDs. CRDs live in a workload cluster. `kloudlite-git-api` runs somewhere else — today
+`/v1` writes CRDs. CRDs live in a workload cluster. `kloudlite-api` runs somewhere else — today
 `kolomi-cluster`, whose API server has none of them. `kube::Client::try_default()` builds exactly
 one client, so the API addresses exactly one cluster. With several clusters per region it addresses
 the wrong one, or none.

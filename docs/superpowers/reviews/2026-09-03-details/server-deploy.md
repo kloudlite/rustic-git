@@ -36,7 +36,7 @@ Every in-scope finding, grepped:
 | Med | `harden-node.sh` blanket cni0/pod-CIDR accept | yes | `harden-node.sh:57-75` — the accept is gone, with a "never widen back" note |
 | Med | repo description newline forgery | yes | `crates/api/src/repos.rs:60`, tests at `:572-573` |
 | Med | claim amplification from anonymous callers | yes | `crates/app/src/lib.rs:434-470` — `empty_prefix` gate + leader read that writes nothing; residual marked `ponytail:` |
-| Med | `/metrics` on the peer listener | yes | `bins/server/src/router/mod.rs:30` — own listener (`KLOUDLITE_GIT_METRICS_ADDR`) |
+| Med | `/metrics` on the peer listener | yes | `bins/server/src/router/mod.rs:30` — own listener (`KLOUDLITE_METRICS_ADDR`) |
 | Med | `max_layer` default vs the 5 GiB copy cap | yes | `crates/registry/src/blobs.rs:20` `DEFAULT_MAX_LAYER = 5 GiB` |
 | Med | blob-row backfill lock / not-held on error | yes | `crates/registry/src/store.rs:229-262` — `keyed_lock`, re-read under the lock, incomplete walk withholds the mark |
 | Med | unbounded `join_all` fan-out | yes | `manifests.rs:199` and `store.rs:268` use `buffered(STAT_CONCURRENCY)` |
@@ -59,7 +59,7 @@ Important 1 below.
 `deploy/k3s/agent-admission.yaml:88-92` (the header) and `:96-118` (resourceRules);
 `deploy/k3s/agent-rbac.yaml` `services` rule.
 
-`kloudlite-git-agent-tenant-namespaces-only` matches `operations: ["CREATE", "UPDATE"]` only. The
+`kloudlite-agent-tenant-namespaces-only` matches `operations: ["CREATE", "UPDATE"]` only. The
 header states the accepted residual: *"the residual is denial of service on a kube-system pod the
 kubelet recreates — not a privilege gain like CREATE is."* Commit `4c7e94c9` added
 `services: ["create","patch","delete"]` to the ClusterRole. A Service is not recreated by any
@@ -97,7 +97,7 @@ and, ahead of the existing expression in `validations`:
           || oldObject.metadata.namespace.startsWith('ws-')
           || oldObject.metadata.namespace.startsWith('wt-')
           || oldObject.metadata.namespace.startsWith('env-')
-      message: "kloudlite-git-agent may only delete namespaced objects in ws-/wt-/env- namespaces"
+      message: "kloudlite-agent may only delete namespaced objects in ws-/wt-/env- namespaces"
 ```
 
 (The existing expression dereferences `object.kind`, which is null on a DELETE, so the new rule
@@ -176,9 +176,9 @@ otherwise catch.
 
 ## Minor
 
-4. **First-party images are pinned by commit-SHA tag, not by digest.** `deploy/kloudlite-git.yaml:58,398,579`,
+4. **First-party images are pinned by commit-SHA tag, not by digest.** `deploy/kloudlite.yaml:58,398,579`,
    `deploy/k3s/agent-daemonset.yaml:114`, `deploy/k3s/gateway.yaml:131`,
-   `deploy/kloudlite-git-web.yaml:49`. Third-party images in the same files *are* digest-pinned
+   `deploy/kloudlite-web.yaml:49`. Third-party images in the same files *are* digest-pinned
    (`zerofs.yaml:112`, the `alpine/git` init image), so the asymmetry is now the odd one out. A
    GHCR tag is mutable; a re-pushed `:<sha>` silently changes what a `IfNotPresent` node pulls next.
    Fix (cost S): have `deploy/pin.sh` resolve each SHA to a digest
@@ -195,7 +195,7 @@ otherwise catch.
 
 6. **The hostPath allow-list is owner-scoped for homes but not for volumes.**
    `deploy/k3s/workspace-admission.yaml:77` admits anything under `/wspool-prod/vol/`, while
-   `:79-82` correctly pin `homes`/`homecache` to `object.metadata.labels['kloudlite-git.io/owner']`.
+   `:79-82` correctly pin `homes`/`homecache` to `object.metadata.labels['kloudlite.io/owner']`.
    A pod-builder bug can still mount another tenant's volume subvolume. Not exploitable from
    outside — the path comes from the agent, and volume ids are opaque — but the 2026-09-02 finding
    asked for the owner segment on all four subtrees and it landed on two.
@@ -261,18 +261,18 @@ otherwise catch.
 
 ## RBAC: verbs granted vs verbs used
 
-`kloudlite-git-agent` (ClusterRole `kloudlite-git-agent` + per-namespace `kloudlite-git-agent-ws-secrets`).
+`kloudlite-agent` (ClusterRole `kloudlite-agent` + per-namespace `kloudlite-agent-ws-secrets`).
 "Used" = a call site found in `bins/agent/src/**` or `crates/workspaces/src/**`.
 
 | Resource (group) | Granted | Used | Verdict |
 |---|---|---|---|
-| workspaces, environments (kloudlite-git.io) | get, list, watch, patch | all four (controllers, `heal_labels`, finalizers) | exact |
-| volumes (kloudlite-git.io) | get, list, watch, create, patch, delete | all six (`ensure_child_volume`, `restore_gate`, `resolve_volume`, `collect_unreferenced_volumes`) | exact |
-| ownerbindings (kloudlite-git.io) | get, list, watch, create | all four (`binding.rs:73,156`, `claim.rs:327`, `run.rs:224`) | exact |
-| snapshots (kloudlite-git.io) | get, list, watch, create, patch, delete | all six (`sync.rs:91`, `snapshot.rs:92,155,190,267`, retention) | exact |
-| volumereplicas (kloudlite-git.io) | get, list, watch, create, patch, delete | all six (`listing.rs:185`, `claim.rs:68,420`, `stop.rs:159,225`, `reap_dead_replicas`) | exact |
-| */status ×6 (kloudlite-git.io) | patch, update | both (`patch_status` apply, `replace_status` CAS) | exact |
-| */finalizers ×4 (kloudlite-git.io) | update | yes (+ OwnerReferencesPermissionEnforcement) | exact |
+| workspaces, environments (kloudlite.io) | get, list, watch, patch | all four (controllers, `heal_labels`, finalizers) | exact |
+| volumes (kloudlite.io) | get, list, watch, create, patch, delete | all six (`ensure_child_volume`, `restore_gate`, `resolve_volume`, `collect_unreferenced_volumes`) | exact |
+| ownerbindings (kloudlite.io) | get, list, watch, create | all four (`binding.rs:73,156`, `claim.rs:327`, `run.rs:224`) | exact |
+| snapshots (kloudlite.io) | get, list, watch, create, patch, delete | all six (`sync.rs:91`, `snapshot.rs:92,155,190,267`, retention) | exact |
+| volumereplicas (kloudlite.io) | get, list, watch, create, patch, delete | all six (`listing.rs:185`, `claim.rs:68,420`, `stop.rs:159,225`, `reap_dead_replicas`) | exact |
+| */status ×6 (kloudlite.io) | patch, update | both (`patch_status` apply, `replace_status` CAS) | exact |
+| */finalizers ×4 (kloudlite.io) | update | yes (+ OwnerReferencesPermissionEnforcement) | exact |
 | namespaces ("") | get, create, patch | all three (`namespace_ready` get, `ensure` apply) | exact |
 | limitranges ("") | create, patch | both (`binding.rs:106`, `environment.rs:374`) | exact |
 | services ("") | create, patch, delete | all three (delete added `4c7e94c9`) | **exact, but DELETE is unfenced — Important 1** |
@@ -285,15 +285,15 @@ otherwise catch.
 | clusterroles (rbac) | bind [2 names] | yes | exact; narrowed by policy 2 |
 | secrets ("") — per-ns role | get, create | both (`ensure_ssh`) | exact; deliberately not cluster-wide |
 
-`kloudlite-git-api` (ClusterRole `kloudlite-git-api` + per-namespace `kloudlite-git-api-secrets`).
+`kloudlite-api` (ClusterRole `kloudlite-api` + per-namespace `kloudlite-api-secrets`).
 "Used" = a call site in `crates/workspaces/src/api.rs`.
 
 | Resource (group) | Granted | Used | Verdict |
 |---|---|---|---|
-| workspaces, environments (kloudlite-git.io) | get, list, **watch**, create, patch, **update**, delete | get, list, create, patch, delete | **`watch` and `update` unused — Minor 7** |
-| snapshots (kloudlite-git.io) | get, list, create, delete | all four (`:378,1080,1258,1905,2183,2326,…`) | exact; no `/status`, deliberately |
-| volumes (kloudlite-git.io) | get, list, delete | all three (`:1275,1289,1944,2288-2289`) | exact; no `create` (the agent authors children) |
-| volumereplicas (kloudlite-git.io) | get, list | both (`:1107`) | exact |
+| workspaces, environments (kloudlite.io) | get, list, **watch**, create, patch, **update**, delete | get, list, create, patch, delete | **`watch` and `update` unused — Minor 7** |
+| snapshots (kloudlite.io) | get, list, create, delete | all four (`:378,1080,1258,1905,2183,2326,…`) | exact; no `/status`, deliberately |
+| volumes (kloudlite.io) | get, list, delete | all three (`:1275,1289,1944,2288-2289`) | exact; no `create` (the agent authors children) |
+| volumereplicas (kloudlite.io) | get, list | both (`:1107`) | exact |
 | networkpolicies (networking) | delete | yes (`:993-995`, `delete_ws`'s environment-side half) | exact |
 | namespaces ("") | list | yes (`:658`) | exact |
 | secrets ("") — per-ns role | get, update, patch on `user-key`; create unnamed | yes (`:701,714,748-750`) | exact; the `create` split is correct and the reason is written down |

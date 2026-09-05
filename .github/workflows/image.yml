@@ -32,7 +32,7 @@ jobs:
         ports:
           - 27017:27017
     env:
-      KLOUDLITE_GIT_TEST_MONGO_URI: mongodb://localhost:27017
+      KLOUDLITE_TEST_MONGO_URI: mongodb://localhost:27017
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -49,7 +49,7 @@ jobs:
       # A runner without git must FAIL the git-dependent tests, not skip them green.
       - run: cargo test --locked
         env:
-          KLOUDLITE_GIT_REQUIRE_GIT: "1"
+          KLOUDLITE_REQUIRE_GIT: "1"
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -88,13 +88,13 @@ jobs:
           cache-on-failure: true
       - run: >
           cargo build --release --locked
-          --bin kloudlite-git --bin kloudlite-git-api --bin kloudlite-git-worker
-          --bin kloudlite-git-agent --bin kloudlite-git-gateway
-          --bin kloudlite-git-slo --bin kl
+          --bin kloudlite --bin kloudlite-api --bin kloudlite-worker
+          --bin kloudlite-agent --bin kloudlite-gateway
+          --bin kloudlite-slo --bin kl
       - name: glibc ceiling
         run: |
           set -eu
-          for b in kloudlite-git kloudlite-git-api kloudlite-git-worker kloudlite-git-agent kloudlite-git-gateway kloudlite-git-slo kl; do
+          for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-slo kl; do
             need=$(objdump -T "target/release/$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
             echo "$b needs $need"
             if [ "$(printf '%s\nGLIBC_2.36\n' "$need" | sort -V | tail -1)" != GLIBC_2.36 ]; then
@@ -105,12 +105,12 @@ jobs:
         with:
           name: bins
           path: |
-            target/release/kloudlite-git
-            target/release/kloudlite-git-api
-            target/release/kloudlite-git-worker
-            target/release/kloudlite-git-agent
-            target/release/kloudlite-git-gateway
-            target/release/kloudlite-git-slo
+            target/release/kloudlite
+            target/release/kloudlite-api
+            target/release/kloudlite-worker
+            target/release/kloudlite-agent
+            target/release/kloudlite-gateway
+            target/release/kloudlite-slo
             target/release/kl
           if-no-files-found: error
           retention-days: 1
@@ -135,7 +135,7 @@ jobs:
           name: bins
           path: target/release
       # upload-artifact drops the mode bits and the Dockerfile COPYs the files as they are.
-      - run: chmod +x target/release/kloudlite-git* target/release/kl
+      - run: chmod +x target/release/kloudlite* target/release/kl
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         # Default docker-container driver: required for `type=gha` cache, which the classic
         # `docker` driver cannot export to.
@@ -154,8 +154,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/kloudlite/kloudlite-git:latest
-            ghcr.io/kloudlite/kloudlite-git:${{ github.sha }}
+            ghcr.io/kloudlite/kloudlite:latest
+            ghcr.io/kloudlite/kloudlite:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -165,8 +165,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/kloudlite/kloudlite-git-agent:latest
-            ghcr.io/kloudlite/kloudlite-git-agent:${{ github.sha }}
+            ghcr.io/kloudlite/kloudlite-agent:latest
+            ghcr.io/kloudlite/kloudlite-agent:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -176,8 +176,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/kloudlite/kloudlite-git-gateway:latest
-            ghcr.io/kloudlite/kloudlite-git-gateway:${{ github.sha }}
+            ghcr.io/kloudlite/kloudlite-gateway:latest
+            ghcr.io/kloudlite/kloudlite-gateway:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha
       # The SLO probe. Same commit as the tier it probes, deliberately: a probe pinned behind the
@@ -189,8 +189,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/kloudlite/kloudlite-git-slo:latest
-            ghcr.io/kloudlite/kloudlite-git-slo:${{ github.sha }}
+            ghcr.io/kloudlite/kloudlite-slo:latest
+            ghcr.io/kloudlite/kloudlite-slo:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha
       # No binary of ours inside: the default workspace image is alpine plus what sshd and VS
@@ -203,7 +203,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/kloudlite/kloudlite-git-workspace:latest
-            ghcr.io/kloudlite/kloudlite-git-workspace:${{ github.sha }}
+            ghcr.io/kloudlite/kloudlite-workspace:latest
+            ghcr.io/kloudlite/kloudlite-workspace:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha
