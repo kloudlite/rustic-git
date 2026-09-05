@@ -28,6 +28,9 @@ pub struct State {
     pub clone: Option<String>,
     pub environment: Option<String>,
     pub token: Option<String>,
+    /// The CLI token `id.cli.flow` minted. Held so teardown can revoke it by id even when the
+    /// name sweep cannot see it.
+    pub cli_token: Option<String>,
     pub key: Option<String>,
     pub request: Option<String>,
 }
@@ -55,6 +58,9 @@ pub struct Ctx {
     pub kube: Option<kube::Client>,
     /// Between report attempts. A field only so the retry test does not sleep six seconds.
     pub retry_delay: Duration,
+    /// Which binary `git`, `ssh-keygen` and `ssh-keyscan` are. A field so a test can point one at
+    /// a program that succeeds — see `tools::Programs`.
+    pub programs: crate::tools::Programs,
     /// Set by the parent when the child died without leaving a failing step behind — a panic, an
     /// abort, a non-zero exit. The step list alone cannot express "the journey stopped", so
     /// without this a run that crashed on its first stage would be reported as passed.
@@ -115,6 +121,7 @@ impl Ctx {
             tmp: std::env::temp_dir().join(format!("slo-{}", started.timestamp())),
             stage: String::new(),
             retry_delay: Duration::from_secs(2),
+            programs: crate::tools::Programs::default(),
             run_failed: false,
             report_failed: false,
             cfg,

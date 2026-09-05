@@ -20,17 +20,23 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use tokio::process::Command;
 
-/// Lets a test point `git`/`ssh` at a program that succeeds or fails on demand. Nothing else in
-/// the binary can make a real `ssh` refuse a connection, and `ssh.unregistered.refused` is a step
-/// whose whole meaning is that it did. Never set in a deployment — the same shape as
-/// `suite::PANIC_ENV`.
-const PROGRAM_OVERRIDE: &str = "KLOUDLITE_GIT_SLO_TEST_PROGRAM";
+/// Which binary each tool actually is.
+///
+/// A field on `Ctx` rather than a lookup in the process environment: `ssh.unregistered.refused`
+/// is the one step whose meaning is that a command FAILED, and the only way to test it is to point
+/// `git` at something that succeeds. Process env is global to the test binary, so two tests
+/// running in parallel would set and unset each other's overrides.
+#[derive(Debug, Clone)]
+pub struct Programs {
+    pub git: String,
+    pub ssh_keygen: String,
+    pub ssh_keyscan: String,
+}
 
-fn program(name: &str) -> String {
-    std::env::var(format!("{PROGRAM_OVERRIDE}_{}", name.to_uppercase()))
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| name.to_string())
+impl Default for Programs {
+    fn default() -> Self {
+        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into() }
+    }
 }
 
 /// Everything after `Bearer` / `Authorization:` in one line of text, replaced.
@@ -73,7 +79,7 @@ pub async fn run(
     dir: Option<&Path>,
     timeout: Duration,
 ) -> Result<String> {
-    let mut cmd = Command::new(program(name));
+    let mut cmd = Command::new(name);
     cmd.args(args).envs(env).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(d) = dir {
         cmd.current_dir(d);

@@ -110,10 +110,13 @@ async fn open(c: &mut Ctx, name: &str) -> Result<i64> {
 /// that happened an hour ago.
 fn merge_event(feed: &serde_json::Value, repo: &str) -> bool {
     let events = feed.get("events").and_then(|v| v.as_array()).or_else(|| feed.as_array());
+    // Exact, not a suffix: `run-fast-1` is a suffix of `run-fast-11`, and the sweep leaves
+    // yesterday's runs listed long enough for that to matter.
+    let want = format!("{PROBE_USER}/{repo}");
     events.is_some_and(|rows| {
         rows.iter().any(|e| {
             e.get("kind").and_then(|v| v.as_str()) == Some("pull_merged")
-                && e.get("repo").and_then(|v| v.as_str()).is_some_and(|r| r.ends_with(repo))
+                && e.get("repo").and_then(|v| v.as_str()) == Some(want.as_str())
         })
     })
 }
@@ -129,7 +132,8 @@ mod tests {
             { "kind": "commit", "repo": "slo-probe/run-fast-2" },
         ]);
         assert!(merge_event(&feed, "run-fast-1"));
-        // A leftover run's merge, and a commit on this one, are both the wrong event.
+        // A commit on another run, and a name this one is only a suffix of, are both wrong.
         assert!(!merge_event(&feed, "run-fast-2"));
+        assert!(!merge_event(&feed, "fast-1"));
     }
 }

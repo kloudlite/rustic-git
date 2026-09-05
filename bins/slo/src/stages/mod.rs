@@ -70,7 +70,10 @@ pub(crate) async fn raw(
     if let Some(b) = body {
         req = req.json(&b);
     }
-    let r = req.send().await.map_err(|e| anyhow!("{e}"))?;
+    // `without_url`: reqwest puts the whole URL in its Display, and these URLs carry query
+    // strings — `?poll=` on the CLI handshake is a one-shot credential. A connection error is the
+    // one path where a secret reaches a step detail without anyone formatting it there.
+    let r = req.send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
     Ok((status, r.text().await.unwrap_or_default()))
 }
@@ -284,5 +287,26 @@ mod tests {
         assert!(!stale("run-anything-1000-x", now));
         assert!(!stale("run-fast-notanumber-repo", now));
         assert!(!stale("run-fast", now));
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use crate::testkit;
+
+    /// A URL is not a safe thing to put in a step detail. `/v1/cli/token?poll=…` carries a
+    /// one-shot credential in its query string, and reqwest's own `Display` prints the whole URL —
+    /// so a connection error is the one path where a secret reaches ClickHouse with nobody having
+    /// formatted it there.
+    #[tokio::test]
+    async fn a_connection_error_never_carries_the_url() {
+        let c = testkit::ctx().await;
+        // Port 1, refused: the failure is reqwest's, which is the one that carries the URL.
+        let url = format!("{}/v1/cli/token?poll=SECRETPOLLVALUE", c.cfg.api_url);
+        let e = get(&c, &url, "").await.expect_err("nothing is listening");
+        let detail = format!("{e:#}");
+        assert!(!detail.contains("SECRETPOLLVALUE"), "the poll secret leaked: {detail}");
+        assert!(!detail.contains("/v1/cli/token"), "the url leaked: {detail}");
     }
 }

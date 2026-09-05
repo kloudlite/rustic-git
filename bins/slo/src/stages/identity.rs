@@ -7,10 +7,10 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context};
 use futures::FutureExt;
 
-use super::{api, get, post, raw};
+use super::{api, get, post};
 use crate::ctx::{Ctx, PROBE_USER};
 use crate::step::DEFAULT_TIMEOUT;
 use crate::tools;
@@ -37,17 +37,14 @@ pub async fn run(c: &mut Ctx) {
     .await;
 
     let name = c.prefix();
-    if c.step("id.token.mint", DEFAULT_TIMEOUT, |c| {
+    c.step("id.token.mint", DEFAULT_TIMEOUT, |c| {
         let (name, jwt) = (name.clone(), c.probe_jwt.clone());
         async move {
             let body = serde_json::json!({ "owner": PROBE_USER, "name": name });
             let out = post(c, &api(c, "/v1/tokens"), &jwt, body).await?;
             // Recorded so teardown revokes it by id even if the name sweep somehow misses it.
-            c.state.token = out
-                .pointer("/meta/_id")
-                .or_else(|| out.pointer("/meta/id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            // `_id` at the root: the answer is `IssuedToken`, whose `meta` is flattened into it.
+            c.state.token = out.pointer("/_id").and_then(|v| v.as_str()).map(str::to_string);
             // The one time it is readable, and it is never logged: a token in a step detail would
             // outlive the run in ClickHouse.
             out.get("token")
@@ -58,14 +55,10 @@ pub async fn run(c: &mut Ctx) {
         }
         .boxed()
     })
-    .await
-    {
-        tracing::info!("slo.identity.token.ready");
-    }
+    .await;
 
     key(c, &name).await;
     cli_flow(c, &name).await;
-    tiers(c).await;
 }
 
 /// Register the public half of the mounted key and confirm the directory lists it.
@@ -74,13 +67,13 @@ pub async fn run(c: &mut Ctx) {
 /// object store's `authorized_keys` view, which is built from these rows, so a key that was
 /// accepted but never listed is one `ssh.clone.ok` would fail on with no clue why.
 async fn key(c: &mut Ctx, name: &str) {
-    let ok = c
-        .step("id.key.usable", KEY_TIMEOUT, |c| {
-            let (name, jwt, key_path) = (name.to_string(), c.probe_jwt.clone(), c.cfg.ssh_key_path.clone());
+    c.step("id.key.usable", KEY_TIMEOUT, |c| {
+            let (name, jwt) = (name.to_string(), c.probe_jwt.clone());
+            let (key_path, keygen) = (c.cfg.ssh_key_path.clone(), c.programs.ssh_keygen.clone());
             async move {
                 // Derived from the private half rather than mounted beside it: two files that must
                 // agree are two files that can disagree, and the Secret holds only the one.
-                let public = tools::plain("ssh-keygen", &["-y", "-f", &key_path], Duration::from_secs(10))
+                let public = tools::plain(&keygen, &["-y", "-f", &key_path], Duration::from_secs(10))
                     .await
                     .context("could not read the probe's public key")?;
                 let public = public.trim().to_string();
@@ -97,11 +90,8 @@ async fn key(c: &mut Ctx, name: &str) {
                 Ok(())
             }
             .boxed()
-        })
-        .await;
-    if !ok {
-        tracing::warn!("slo.identity.key.unusable");
-    }
+    })
+    .await;
 }
 
 /// The whole device-code handshake a person walks when they run `kl login`: ask for a code with no
@@ -122,51 +112,54 @@ async fn cli_flow(c: &mut Ctx, name: &str) {
             // One poll, not a loop: approve is synchronous, so a 202 here means the row the
             // approval wrote is not visible to the replica that answered — which is the failure.
             let out = get(c, &api(c, &format!("/v1/cli/token?poll={poll}")), "").await?;
-            out.get("token")
-                .and_then(|v| v.as_str())
-                .filter(|t| !t.is_empty())
-                .map(|_| ())
-                .ok_or_else(|| anyhow!("the approved login handed back no token"))
+            if out.get("token").and_then(|v| v.as_str()).is_none_or(str::is_empty) {
+                return Err(anyhow!("the approved login handed back no token"));
+            }
+            // The id, not the token: the id is what revokes it, and the token itself must never be
+            // held anywhere a report could reach.
+            c.state.cli_token = list_cli_token_id(c, &name).await;
+            Ok(())
         }
         .boxed()
     })
     .await;
+}
+
+/// The id of the CLI login named `name`, for teardown. Best-effort: the name sweep gets it too,
+/// and a failure here must not turn a working login flow into a red SLO.
+async fn list_cli_token_id(c: &Ctx, name: &str) -> Option<String> {
+    let rows = get(c, &api(c, "/v1/cli/tokens"), &c.probe_jwt).await.ok()?;
+    rows.as_array()?
+        .iter()
+        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))
+        .and_then(|r| r.get("id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// One JWT, three tiers: `/v1`, the git fleet's browse API through the api's forwarder, and the
-/// web app. A token honoured by two of the three is the failure this exists to name — each tier
-/// verifies it against its own copy of the secret, and a rotation that reached two of them is
-/// invisible to any single-tier check.
-async fn tiers(c: &mut Ctx) {
+/// git protocol itself over HTTP.
+///
+/// Each tier verifies the token against its own copy of the secret, so a rotation that reached two
+/// of the three is invisible to any single-tier check — and that is the failure this names. It
+/// runs from the git stage rather than stage 1 because two of the three legs need a repo to point
+/// at; the step is stamped `1 · Identity` regardless, which is where the journey puts it.
+pub(crate) async fn tiers(c: &mut Ctx, repo: &str) {
+    let was = std::mem::replace(&mut c.stage, super::IDENTITY.to_string());
     c.step("id.jwt.tiers", DEFAULT_TIMEOUT, |c| {
         let jwt = c.probe_jwt.clone();
+        let refs = api(c, &format!("/api/{PROBE_USER}/{repo}/refs"));
+        let url = format!("{}/{PROBE_USER}/{repo}.git", c.cfg.git_url.trim_end_matches('/'));
+        let args = super::git::authed(c, &["ls-remote", &url]);
+        let (git, env) = (c.programs.git.clone(), super::git::git_env(c));
         async move {
             get(c, &api(c, &format!("/v1/repos?owner={PROBE_USER}")), &jwt).await.context("/v1")?;
-            // Owner-scoped, so it needs no repo and can run before stage 2 creates one — and it is
-            // still a real hop onto the git tier through the api's browse forwarder.
-            get(c, &api(c, &format!("/api/{PROBE_USER}/images")), &jwt).await.context("browse")?;
-            web_page(c, &format!("/{PROBE_USER}")).await.context("web")
+            get(c, &refs, &jwt).await.context("browse")?;
+            tools::run(&git, &args, &env, None, Duration::from_secs(30)).await.context("git over HTTP")?;
+            Ok(())
         }
         .boxed()
     })
     .await;
-}
-
-/// A signed-in `GET` of a web page. The web app authenticates with an Auth.js session cookie
-/// rather than a bearer, so the probe presents the JWT as that cookie: what is measured is the
-/// PAGE rendering, and a page that renders signed-out is a different measurement.
-pub(crate) async fn web_page(c: &Ctx, path: &str) -> Result<()> {
-    let url = format!("{}{path}", c.cfg.web_url.trim_end_matches('/'));
-    // The web picks its cookie name from whether AUTH_URL is https (`web/apps/web/src/auth.ts`),
-    // and the probe reaches the same web over the same scheme, so the scheme decides it here too.
-    let name = match c.cfg.web_url.starts_with("https") {
-        true => "__Secure-authjs.session-token",
-        false => "authjs.session-token",
-    };
-    let cookie = format!("{name}={}", c.probe_jwt);
-    let (status, body) = raw(c, reqwest::Method::GET, &url, "", None, &[("cookie", cookie)]).await?;
-    if !status.is_success() {
-        return Err(anyhow!("{path} answered {status}: {}", body.chars().take(200).collect::<String>()));
-    }
-    Ok(())
+    c.stage = was;
 }

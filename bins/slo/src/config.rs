@@ -43,13 +43,15 @@ fn opt(k: &str, default: &str) -> String {
 
 impl Config {
     pub fn from_env() -> Result<Config> {
+        let ssh_host = req("KLOUDLITE_GIT_SSH_HOST")?;
+        check_ssh_host(&ssh_host)?;
         Ok(Config {
             admin_url: req("KLOUDLITE_GIT_ADMIN_API_URL")?,
             api_url: req("KLOUDLITE_GIT_API_URL")?,
             web_url: req("KLOUDLITE_GIT_WEB_URL")?,
             git_url: req("KLOUDLITE_GIT_URL")?,
             registry: req("KLOUDLITE_GIT_REGISTRY")?,
-            ssh_host: req("KLOUDLITE_GIT_SSH_HOST")?,
+            ssh_host,
             region: req("KLOUDLITE_GIT_REGION")?,
             hosts: opt("KLOUDLITE_GIT_SLO_HOSTS", "")
                 .split(',')
@@ -66,10 +68,54 @@ impl Config {
 impl Config {
     /// `ssh_host` with its port split off. The deployment sets one value because that is what the
     /// web's clone box prints, and everything that dials it needs the two halves apart.
+    ///
+    /// Accepted shapes, and only these: `host`, `host:port`, `[v6addr]`, `[v6addr]:port`. A bare
+    /// IPv6 address is ambiguous — every colon in it looks like a port separator — so it is
+    /// REFUSED at boot by `check_ssh_host` rather than silently dialling the wrong port.
     pub fn ssh_endpoint(&self) -> (&str, u16) {
-        match self.ssh_host.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse().unwrap_or(22)),
-            None => (self.ssh_host.as_str(), 22),
-        }
+        split_ssh_host(&self.ssh_host).unwrap_or((self.ssh_host.as_str(), 22))
+    }
+}
+
+fn split_ssh_host(v: &str) -> Option<(&str, u16)> {
+    if let Some(rest) = v.strip_prefix('[') {
+        let (addr, tail) = rest.split_once(']')?;
+        return match tail {
+            "" => Some((addr, 22)),
+            t => Some((addr, t.strip_prefix(':')?.parse().ok()?)),
+        };
+    }
+    match v.rsplit_once(':') {
+        // Two colons and no brackets is a bare IPv6 address; `check_ssh_host` refused it already.
+        Some((h, p)) if !h.contains(':') => Some((h, p.parse().ok()?)),
+        Some(_) => None,
+        None => Some((v, 22)),
+    }
+}
+
+/// Refused at boot, not guessed at: `KLOUDLITE_GIT_SSH_HOST` decides which port every SSH step
+/// dials, and a value this cannot read would send all three of them at port 22 of the wrong host.
+fn check_ssh_host(v: &str) -> Result<()> {
+    match split_ssh_host(v) {
+        Some(_) => Ok(()),
+        None => Err(anyhow::anyhow!(
+            "KLOUDLITE_GIT_SSH_HOST must be host, host:port, [v6] or [v6]:port; got `{v}`"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ssh_host_is_split_or_refused_never_guessed() {
+        assert_eq!(split_ssh_host("git.example.com"), Some(("git.example.com", 22)));
+        assert_eq!(split_ssh_host("git.example.com:2222"), Some(("git.example.com", 2222)));
+        assert_eq!(split_ssh_host("[::1]:2222"), Some(("::1", 2222)));
+        assert_eq!(split_ssh_host("[::1]"), Some(("::1", 22)));
+        // A bare v6 address, and a port that is not a number: both refused rather than dialled.
+        assert!(check_ssh_host("::1").is_err());
+        assert!(check_ssh_host("git.example.com:ssh").is_err());
     }
 }
