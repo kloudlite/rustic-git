@@ -187,6 +187,9 @@ impl Directory for StubMembership {
     async fn is_team(&self, slug: &str) -> bool {
         slug == "acme"
     }
+    async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+        Err("no directory".into())
+    }
 }
 
 async fn server_with_teams(routes: Vec<Route>) -> Server {
@@ -1181,6 +1184,9 @@ impl Directory for StubCliTokens {
     async fn is_team(&self, _slug: &str) -> bool {
         false
     }
+    async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+        Err("no directory".into())
+    }
 }
 
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
@@ -1361,6 +1367,9 @@ impl Directory for StubKeys {
     async fn is_team(&self, _slug: &str) -> bool {
         false
     }
+    async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+        Err("no directory".into())
+    }
 }
 
 fn ns_obj(name: &str, owner: &str) -> Value {
@@ -1398,6 +1407,9 @@ impl Directory for KeyTeams {
     // Every slug `teams_for` above returns is by definition a team.
     async fn is_team(&self, slug: &str) -> bool {
         slug == "team1" || slug == self.0
+    }
+    async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+        Err("no directory".into())
     }
 }
 

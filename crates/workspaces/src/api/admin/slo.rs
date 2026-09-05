@@ -268,3 +268,37 @@ pub(crate) async fn pipeline(State(s): State<Arc<ApiState>>) -> Result<Response,
     })
     .into_response())
 }
+
+/// One person the probe runs as. `username` is the owner slug every later call is keyed by.
+#[derive(serde::Deserialize)]
+pub struct BootstrapUser {
+    pub email: String,
+    pub name: String,
+    pub username: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BootstrapBody {
+    pub users: Vec<BootstrapUser>,
+}
+
+/// `POST /admin/slo/bootstrap`: create the probe's identities. Sign-in is the only other path
+/// that creates a person, and a synthetic user never signs in — so this is the one place a user
+/// comes to exist without a browser, behind the superadmin claim like every `/admin/*` route.
+/// Idempotent: an existing user with the same handle answers 204 too. Capped at four so a typo
+/// cannot bulk-create accounts.
+pub async fn bootstrap(State(state): State<Arc<ApiState>>, Json(body): Json<BootstrapBody>) -> Response {
+    let Some(dir) = state.directory.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "directory unavailable").into_response();
+    };
+    if body.users.is_empty() || body.users.len() > 4 {
+        return (StatusCode::BAD_REQUEST, "one to four users").into_response();
+    }
+    for u in &body.users {
+        if let Err(e) = dir.ensure_user(&u.email, &u.name, &u.username).await {
+            return (StatusCode::BAD_REQUEST, format!("{}: {e}", u.username)).into_response();
+        }
+        tracing::info!(username = %u.username, "slo.bootstrap.ensured");
+    }
+    StatusCode::NO_CONTENT.into_response()
+}

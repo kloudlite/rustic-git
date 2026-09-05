@@ -183,6 +183,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/history/{series}", get(history::series))
         .route("/admin/slo", get(slo::overview))
         // Before the `{id}` captures below, so the literal paths win.
+        .route("/admin/slo/bootstrap", axum::routing::post(slo::bootstrap))
         .route("/admin/slo/coverage", get(slo::coverage))
         .route("/admin/slo/pipeline", get(slo::pipeline))
         .route("/admin/slo/marker/{run_id}", get(slo::marker))

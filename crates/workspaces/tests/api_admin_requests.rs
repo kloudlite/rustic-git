@@ -62,6 +62,9 @@ impl Directory for StubMembership {
     async fn is_team(&self, _slug: &str) -> bool {
         false
     }
+    async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+        Err("no directory".into())
+    }
 
     async fn is_live(&self, _jti: &str) -> bool {
         false

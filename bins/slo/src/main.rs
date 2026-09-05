@@ -203,23 +203,24 @@ async fn bootstrap(cfg: Config) -> i32 {
         }
     };
     let mut code = 0;
-    for (email, user, jwt) in
-        [(PROBE_EMAIL, PROBE_USER, &c.probe_jwt), (OTHER_EMAIL, OTHER_USER, &c.other_jwt)]
-    {
-        let url = format!("{}/v1/users/username", c.cfg.api_url.trim_end_matches('/'));
-        match c
-            .http
-            .post(&url)
-            .header("authorization", c.bearer(jwt))
-            .json(&serde_json::json!({ "username": user }))
-            .send()
-            .await
-        {
-            Ok(r) => tracing::info!(email, name = user, code = r.status().as_u16(), "slo.bootstrap.completed"),
-            Err(e) => {
-                tracing::error!(email, name = user, error = %e, "slo.bootstrap.failed");
-                code = EXIT_FAILED;
-            }
+    // One admin call creates both identities: the api tier only creates a person at sign-in, and a
+    // synthetic user never signs in, so `/v1/users/username` alone answered 400 "no such user".
+    let url = format!("{}/admin/slo/bootstrap", c.cfg.admin_url.trim_end_matches('/'));
+    let body = serde_json::json!({ "users": [
+        { "email": PROBE_EMAIL, "name": "SLO probe", "username": PROBE_USER },
+        { "email": OTHER_EMAIL, "name": "SLO other", "username": OTHER_USER },
+    ]});
+    match c.http.post(&url).header("authorization", c.bearer(&c.admin_jwt)).json(&body).send().await {
+        Ok(r) if r.status().is_success() => tracing::info!(kind = "users", "slo.bootstrap.completed"),
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let detail = r.text().await.unwrap_or_default();
+            tracing::error!(kind = "users", code = status, detail, "slo.bootstrap.failed");
+            code = EXIT_FAILED;
+        }
+        Err(e) => {
+            tracing::error!(kind = "users", error = %e.without_url(), "slo.bootstrap.failed");
+            code = EXIT_FAILED;
         }
     }
     // The digest is printed, never stored: `reg.canary` reads it from the environment, so a human

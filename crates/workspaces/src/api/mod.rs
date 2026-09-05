@@ -166,6 +166,12 @@ pub trait Directory: Send + Sync {
     /// `user` is the HANDLE the request was opened under, the same identity `team_role` takes; an
     /// implementation whose store keys memberships on something else (the directory keys on email)
     /// resolves it itself, and answers `NoSuchUser` when it cannot.
+    /// Create-or-find a person by email and give them `username` (a no-op when they already hold
+    /// it). Only the SLO probe's bootstrap calls this, through `/admin/slo/bootstrap`: sign-in is the
+    /// one other way a person comes to exist, and a synthetic user never signs in. `Err` carries
+    /// the directory's own sentence.
+    async fn ensure_user(&self, email: &str, name: &str, username: &str) -> Result<(), String>;
+
     async fn grant_access(&self, _team: &str, _user: &str, _role: TeamRole) -> GrantAccess {
         GrantAccess::Unsupported
     }
@@ -962,6 +968,9 @@ mod tests {
             }
             async fn is_team(&self, _s: &str) -> bool {
                 false
+            }
+            async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+                Err("no directory".into())
             }
         }
         assert_eq!(

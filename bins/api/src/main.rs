@@ -90,6 +90,17 @@ impl kloudlite_git_workspaces::api::Directory for Dir {
         self.0.get(slug).await.ok().flatten().is_some()
     }
 
+    async fn ensure_user(&self, email: &str, name: &str, username: &str) -> std::result::Result<(), String> {
+        self.0.upsert_user(email, name).await.map_err(|e| e.to_string())?;
+        // `claim_username` treats re-asking for the handle you hold as success and a handle held
+        // by somebody else as `Ok(None)` — that second case is the one worth a sentence.
+        match self.0.claim_username(email, username).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(format!("username {username} is taken")),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     async fn grant_access(
         &self,
         team: &str,
