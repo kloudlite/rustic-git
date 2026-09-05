@@ -230,19 +230,31 @@ async fn seed(c: &Ctx, name: &str, repo: &str) -> Result<String> {
 /// which is mounted at `~/workspaces/{name}`, NOT into a directory named after the repo.
 async fn clone_subject(c: &Ctx, id: &str, name: &str) -> Result<()> {
     let dir = kloudlite_workspaces::k8s::workspace_dir(name);
-    let script = format!("git -C {dir} log -1 --format=%s");
+    let script = format!("git -C {dir} rev-parse HEAD");
     let (code, out, err) = ws_exec(c, id, &script, EXEC).await?;
     if code != 0 {
         return Err(anyhow!("the clone is not there: exit {code}: {}", err.trim()));
     }
-    if out.trim() != SEED_SUBJECT {
-        return Err(anyhow!("the checked-out commit is {:?}", out.trim()));
+    // Against the branch's CURRENT tip, not a remembered subject: by stage 14 the fast journey
+    // has merged a change into `main`, so "seed" is no longer what a fresh clone checks out.
+    let refs = api(c, &format!("/api/{}/{}/refs", c.probe_user, c.state.repo.clone().unwrap_or_default()));
+    let listed = super::get(c, &refs, &c.probe_jwt).await.context("could not read the branch tip")?;
+    let tip = listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r.get("name").and_then(Value::as_str) == Some("refs/heads/main"))
+        .and_then(|r| r.get("oid").and_then(Value::as_str))
+        .ok_or_else(|| anyhow!("the branch has no tip"))?;
+    if out.trim() != tip {
+        return Err(anyhow!("the checked-out commit is {} but main is {tip}", out.trim()));
     }
     Ok(())
 }
 
 /// `git.push.ok`'s own commit message. Repeated rather than imported because it is a literal in the
 /// push step's argv; the test below is what keeps the two from drifting apart.
+#[cfg(test)]
 const SEED_SUBJECT: &str = "seed";
 
 /// Replace the declared package list. A merge patch on `spec.packages` alone, which is what

@@ -18,7 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// The region the bytes actually live in, read off the detached `Volume` a restore grafts onto.
@@ -437,7 +437,26 @@ async fn snapshots_for_caller_maybe_empty(s: &ApiState, caller_id: &Caller, name
     let mut items: Vec<crd::Snapshot> = list.items.into_iter().filter(|sn| owners.contains(&sn.spec.owner)).collect();
     // F2: NEWEST first, matching the registry path's order (`records.first()` is always its
     // tip) — a consumer rendering history the old way would show it backwards otherwise.
-    items.sort_by_key(|sn| std::cmp::Reverse(sn.creation_timestamp().map(|t| t.0)));
+    // Two pushes inside one second share a creationTimestamp, so the chain decides: a snapshot is
+    // newer than the one it names as its parent, however close the clocks. Depth along that chain
+    // is the primary key; the timestamp only orders snapshots the chain does not relate.
+    let parent_of: HashMap<String, String> =
+        items.iter().map(|sn| (sn.metadata.name.clone().unwrap_or_default(), sn.spec.parent.clone())).collect();
+    let depth_of = |sn: &crd::Snapshot| -> usize {
+        let mut d = 0;
+        let mut cur = sn.spec.parent.as_str();
+        while let Some(next) = parent_of.get(cur) {
+            d += 1;
+            if d > parent_of.len() {
+                break;
+            }
+            cur = next;
+        }
+        d
+    };
+    items.sort_by(|a, b| {
+        depth_of(b).cmp(&depth_of(a)).then_with(|| b.creation_timestamp().map(|t| t.0).cmp(&a.creation_timestamp().map(|t| t.0)))
+    });
     Ok(items)
 }
 
