@@ -211,12 +211,25 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "env.attach", feature: "Environments", sli: "Attaching a workspace to an environment takes effect", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.detach", feature: "Environments", sli: "Detaching a workspace from an environment takes effect", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.push.p95", feature: "Environments", sli: "Pushing an environment snapshot completes", target: p95(90_000), suite: Suite::Fast, stage: "6 · Environment" },
+    Slo { id: "env.exec.ok", feature: "Environments", sli: "Exec into a running service pod of the environment succeeds", target: avail(99.9), suite: Suite::Fast, stage: "6 · Environment" },
+    // 120 s, not the workspace clone's 60: an environment copies LIVE bytes from the node that
+    // holds it and then waits for every service's StatefulSet, where a workspace clone grafts onto
+    // a cut. `env.clone` (hourly) is the same verb on a STOPPED source; this one is the running
+    // source, which is what a person actually clicks.
+    Slo { id: "env.clone.p95", feature: "Environments", sli: "Cloning a running environment completes with its services ready", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },
 
     // Stage 7 · lifecycle
     Slo { id: "ws.stop.p95", feature: "Workspace lifecycle", sli: "Stopping a workspace completes", target: p95(15_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.replicated", feature: "Workspace lifecycle", sli: "A stopped workspace's final sync point reaches a replica", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.start.p95", feature: "Workspace lifecycle", sli: "Starting a workspace completes", target: p95(30_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.restore", feature: "Workspace lifecycle", sli: "Restoring a workspace from a past snapshot succeeds", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    // The environment twin of the four ids above — the owner's rule is that every workspace SLO
+    // has an environment counterpart at the same cadence, because the two control planes converge
+    // through different reconcilers and a green workspace says nothing about an environment.
+    Slo { id: "env.stop.p95", feature: "Environments", sli: "Stopping an environment completes", target: p95(30_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    Slo { id: "env.replicated", feature: "Environments", sli: "A stopped environment's final sync point reaches a replica", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    Slo { id: "env.start.p95", feature: "Environments", sli: "Starting an environment completes", target: p95(60_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    Slo { id: "env.restore", feature: "Environments", sli: "Restoring an environment from a past snapshot succeeds", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.refusals", feature: "Workspace lifecycle", sli: "Deleting a sync point or a running worktree's base snapshot is refused", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.detached.restorable", feature: "Workspace lifecycle", sli: "A detached volume's snapshot can still be restored", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.orphan.collected", feature: "Workspace lifecycle", sli: "An orphaned volume directory is collected", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
@@ -283,6 +296,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "ws.profile.reuse", feature: "Workspaces", sli: "A repeat package set is published from the profile index, not rebuilt", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "ws.cross.node", feature: "Workspaces", sli: "A workspace started on a peer node reads its replica correctly", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "homes.cross.node", feature: "Workspaces", sli: "The shared home is consistent across nodes", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "env.cross.node", feature: "Environments", sli: "An environment started on a peer node reads its replica correctly", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "cp.failover", feature: "Control plane", sli: "The leader lease fails over to another pod", target: bound(30_000), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "settings.live", feature: "Control plane", sli: "A live settings change takes effect on the next beat", target: bound(60_000), suite: Suite::Weekly, stage: "12 · Weekly" },
 

@@ -65,6 +65,7 @@ pub async fn run(c: &mut Ctx) {
     large_layer(c).await;
     let cold = profiles(c).await;
     cross_node(c, cold.as_deref()).await;
+    env_cross_node(c).await;
     failover(c).await;
     settings_live(c).await;
 }
@@ -323,6 +324,65 @@ async fn cross_node(c: &mut Ctx, ws: Option<&str>) {
     .await;
 }
 
+/// `env.cross.node`: `ws.cross.node`'s twin — the fast journey's environment comes back on a
+/// DIFFERENT node, with its service running there off the replica that node holds.
+///
+/// The exec is the "reads its replica correctly" half: an environment that reports `running` on a
+/// peer node whose subvolume never arrived would have no pod to answer it. Same cordon-with-undo
+/// as the workspace's, for the same reason — the undo must outlive a start that never converges.
+async fn env_cross_node(c: &mut Ctx) {
+    let (Some(env), Some(k)) = (c.state.environment.clone(), c.kube.clone()) else {
+        let why = if c.kube.is_none() { "no kubeconfig" } else { "no environment" };
+        return c.skip("env.cross.node", why);
+    };
+    let Some(owner) = env_placement(c, &env).await else {
+        return c.skip("env.cross.node", "the environment names no node");
+    };
+    c.step("env.cross.node", step_cap(CROSS_BODY), move |c| {
+        let (jwt, tmp) = (c.probe_jwt.clone(), c.tmp.clone());
+        let (stop, start) = (
+            api(c, &format!("/v1/environments/{env}/stop")),
+            api(c, &format!("/v1/environments/{env}/start")),
+        );
+        let doc = api(c, &format!("/v1/environments/{env}"));
+        async move {
+            post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
+            poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
+                v.get("state").and_then(Value::as_str) == Some("stopped")
+            })
+            .await
+            .context("it never stopped")?;
+            let body = async {
+                post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
+                poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
+                    v.get("state").and_then(Value::as_str) == Some("running")
+                        && v.get("placement").and_then(Value::as_str).is_some_and(|n| n != owner)
+                })
+                .await
+                .with_context(|| format!("it did not come back running on a node other than {owner}"))?;
+                let ns = kloudlite_workspaces::crd::env_namespace(&env);
+                let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+                // `redis-0`: stage 6's one service, one StatefulSet, one replica.
+                let (code, out, err) =
+                    crate::kube::exec(k, &ns, "redis-0", None, &["sh", "-c", "echo slo"], EXEC_CEILING).await?;
+                if code != 0 || out.trim() != "slo" {
+                    return Err(anyhow!("the service on the peer node exited {code}: {}", err.trim()));
+                }
+                Ok(())
+            };
+            drill::with_cordon(&k, &tmp, &owner, CROSS_BODY, body).await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The node an environment is on, or `None` while nothing has claimed it.
+async fn env_placement(c: &Ctx, env: &str) -> Option<String> {
+    let url = api(c, &format!("/v1/environments/{env}"));
+    get(c, &url, &c.probe_jwt).await.ok()?.get("placement").and_then(Value::as_str).map(str::to_string)
+}
+
 /// The node a workspace is on, or `None` while nothing has claimed it.
 async fn placement(c: &Ctx, ws: &str) -> Option<String> {
     let url = api(c, &format!("/v1/workspaces/{ws}"));
@@ -434,7 +494,7 @@ mod tests {
     use super::*;
 
     /// Every id exactly once, whatever the fleet is doing. With no repo, no token, no workspace
-    /// and nothing reachable, this stage still owes the console eight rows — a stage that dropped
+    /// and nothing reachable, this stage still owes the console nine rows — a stage that dropped
     /// ids when its preconditions were gone would make a broken run look like a short one.
     #[tokio::test]
     async fn weekly_produces_every_id_once() {
@@ -452,6 +512,7 @@ mod tests {
                 "ws.profile.reuse",
                 "ws.cross.node",
                 "homes.cross.node",
+                "env.cross.node",
                 "cp.failover",
                 "settings.live",
             ]

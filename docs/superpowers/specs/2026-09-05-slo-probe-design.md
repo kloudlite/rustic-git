@@ -317,3 +317,32 @@ One tenant pair PER SUITE, from the CronJob's `KLOUDLITE_SLO_USER`/`_OTHER`: fas
 also mounts its OWN SSH Secret (`kloudlite-slo`, `-hourly`, `-drill`). Sharing one pair meant a
 fast run under a live hourly one failed `id.key.usable` with "that key is already added", and read
 the hourly's `superadmin.grant` and raised quota as its own `sec.*`/`quota.refused` state.
+
+## Addendum, 2026-09-05: environments mirror workspaces
+
+The owner's rule: everything tested on a workspace is tested on an environment too, at the SAME
+suite and cadence — the two control planes converge through different reconcilers, so a green
+workspace says nothing about an environment. Seven ids, each the twin of a workspace one:
+
+| id | Twin | Suite · stage | Target |
+| --- | --- | --- | --- |
+| `env.exec.ok` | `ws.exec.ok` | fast · 6 · Environment | 99.9 % |
+| `env.clone.p95` | `ws.clone.p95` | fast · 6 · Environment | 95 % ≤ 120 s |
+| `env.stop.p95` | `ws.stop.p95` | fast · 7 · Lifecycle | 95 % ≤ 30 s |
+| `env.replicated` | `ws.replicated` | fast · 7 · Lifecycle | 99.9 % ≤ 300 s |
+| `env.start.p95` | `ws.start.p95` | fast · 7 · Lifecycle | 95 % ≤ 60 s |
+| `env.restore` | `ws.restore` | fast · 7 · Lifecycle | 99.9 % |
+| `env.cross.node` | `ws.cross.node` | weekly · 12 · Weekly | 99.9 % |
+
+Where they differ from their twin, and why: `env.clone.p95` clones a RUNNING source (an
+environment copies live bytes, so there is nothing to stop first, and the hourly `env.clone` stays
+the stopped-source variant) and gets twice the workspace's ceiling because it also waits for every
+service's StatefulSet; `env.stop.p95` and `env.start.p95` are slower than the workspace's because
+StatefulSets go down and come back rather than one pod; `env.restore` ends at the ACCEPT — the
+`POST /v1/environments/restore` body carries name and snapshot only, so the services default to
+the ones the snapshot froze, and `env.create.p95` is the id that measures an environment
+converging. Lifecycle is now two independent halves: a missing workspace no longer costs the
+environment ids their samples, and vice versa. The added fast ceilings sum to 295 s, inside the
+fast suite's 720 s budget beside a ~2 min run. The fast run now holds the environment, its clone
+and a restore at once, so `environments` goes from 3 to 4 in `deploy/k3s/quotas-slo.yaml` and in
+`probe_quota()` (the parity test) for the three primary tenants.

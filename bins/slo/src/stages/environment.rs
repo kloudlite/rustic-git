@@ -1,7 +1,8 @@
 //! Stage 6 · Environment: one environment with one service, and the attachment that makes it
 //! reachable from a workspace by bare name.
 //!
-//! Worst case 290 s if every step times out (120 + 20 + 20 + 20 + 90); see `workspace.rs`'s note
+//! Worst case 420 s if every step times out (120 + 20 + 20 + 20 + 90 + 30 + 120); see
+//! `workspace.rs`'s note
 //! on how the three stages' sums sit against the fast suite's 900 s deadline.
 //!
 //! `env.dns`, `env.attach` and `env.detach` are all resolver questions asked from INSIDE a pod,
@@ -23,6 +24,12 @@ const ATTACH_CEILING: Duration = Duration::from_secs(20);
 // The catalogue allows 90 s for an environment push; the ceiling may never be under its own
 // target, or a breach and a cut-off step become the same sample.
 const PUSH_CEILING: Duration = Duration::from_secs(90);
+/// The clone's own ceiling — the catalogue's 120 s for `env.clone.p95`, which is twice a
+/// workspace clone's because an environment copies live bytes and then waits for every service.
+const CLONE_CEILING: Duration = Duration::from_secs(120);
+/// `env.exec.ok` is one command in one pod, exactly like `ws.exec.ok`.
+const SVC_EXEC_CEILING: Duration = Duration::from_secs(30);
+
 /// One lookup inside a pod. The loop below is what waits out an attachment taking effect; a single
 /// exec that needs more than this is a wedged API server, not a slow resolver.
 const EXEC_CEILING: Duration = Duration::from_secs(10);
@@ -36,7 +43,8 @@ const PORT: u16 = 6379;
 const QUOTA_GB: u64 = 1;
 
 /// Every id after the create, in journey order.
-const AFTER_CREATE: [&str; 4] = ["env.dns", "env.attach", "env.detach", "env.push.p95"];
+const AFTER_CREATE: [&str; 6] =
+    ["env.exec.ok", "env.dns", "env.attach", "env.detach", "env.push.p95", "env.clone.p95"];
 
 pub async fn run(c: &mut Ctx) {
     if !create(c).await {
@@ -51,9 +59,92 @@ pub async fn run(c: &mut Ctx) {
         }
         return;
     };
+    exec_ok(c, &env).await;
     dns(c, &env).await;
     attach(c, &env).await;
     push(c, &env).await;
+    clone(c, &env).await;
+}
+
+/// `env.exec.ok`: a command inside a running service pod — `ws.exec.ok`'s twin, and the smallest
+/// thing that says the environment is a place code runs rather than an object reporting `running`.
+async fn exec_ok(c: &mut Ctx, env: &str) {
+    if c.kube.is_none() {
+        return c.skip("env.exec.ok", "no kubeconfig");
+    }
+    let env = env.to_string();
+    c.step("env.exec.ok", SVC_EXEC_CEILING, move |c| {
+        async move {
+            let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+            let ns = kloudlite_workspaces::crd::env_namespace(&env);
+            let pod = format!("{SERVICE}-0");
+            let (code, out, err) =
+                crate::kube::exec(k, &ns, &pod, None, &["sh", "-c", "echo slo"], SVC_EXEC_CEILING).await?;
+            if code != 0 || out.trim() != "slo" {
+                return Err(anyhow!("exec exited {code}: {}", err.trim()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `env.clone.p95`: `ws.clone.p95`'s twin on a RUNNING source — no stop first, because an
+/// environment clone copies the source's live subvolume and that is the shape a person clicks.
+/// (`env.clone`, hourly, is the stopped-source variant.)
+///
+/// The copy's own id goes into `extra_volumes`: a fresh environment's Volume is named after the
+/// environment, and teardown's prefix sweep sees the environment but not the volume behind it.
+async fn clone(c: &mut Ctx, env: &str) {
+    let name = format!("{}-envclone", c.prefix());
+    let env = env.to_string();
+    c.step("env.clone.p95", CLONE_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, &format!("/v1/environments/{env}/clone"));
+        let body = serde_json::json!({ "name": name });
+        async move {
+            let doc = post(c, &url, &jwt, body).await.context("could not clone the environment")?;
+            let id = doc
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("the clone answered no environment id"))?
+                .to_string();
+            // Only the volume is recorded: `env_clone` is stage 14's field, and the environment
+            // itself carries the run prefix, which teardown's sweep already finds.
+            c.state.extra_volumes.push(id.clone());
+            let read = api(c, &format!("/v1/environments/{id}"));
+            poll_json(c, &read, &jwt, CLONE_CEILING, |v| {
+                v.get("state").and_then(Value::as_str) == Some("running")
+            })
+            .await
+            .context("the clone never became running")?;
+            // Same reason the create waits on the StatefulSet: `running` is the record, and the
+            // SLI says "with its services ready".
+            service_ready(c, &id, CLONE_CEILING).await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// Wait until `SERVICE`'s StatefulSet in this environment reports a ready replica. Without a
+/// kubeconfig there is nothing to read, and the caller has already measured the record.
+async fn service_ready(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
+    let Some(k) = c.kube.as_ref() else { return Ok(()) };
+    let ns = kloudlite_workspaces::crd::env_namespace(env);
+    let sts: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(k.clone(), &ns);
+    let start = std::time::Instant::now();
+    loop {
+        let ready = sts.get(SERVICE).await.ok().and_then(|s| s.status).and_then(|st| st.ready_replicas).unwrap_or(0);
+        if ready >= 1 {
+            return Ok(());
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("{SERVICE}'s pod never became ready"));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// `env.create.p95`: the create and the wait for `ready` — same reason `ws.create.p95` waits.
@@ -92,18 +183,7 @@ async fn create(c: &mut Ctx) -> bool {
             .await?;
             // `running` is the environment's own word; the service pod behind it is what `env.dns`
             // execs into, so the create is not done until that StatefulSet reports a ready replica.
-            if let Some(k) = c.kube.as_ref() {
-                let ns = kloudlite_workspaces::crd::env_namespace(&id);
-                let sts: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(k.clone(), &ns);
-                let start = std::time::Instant::now();
-                loop {
-                    let ready = sts.get(SERVICE).await.ok().and_then(|s| s.status).and_then(|st| st.ready_replicas).unwrap_or(0);
-                    if ready >= 1 { break; }
-                    if start.elapsed() >= CREATE_CEILING { return Err(anyhow!("{SERVICE}'s pod never became ready")); }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-            Ok(())
+            service_ready(c, &id, CREATE_CEILING).await
         }
         .boxed()
     })

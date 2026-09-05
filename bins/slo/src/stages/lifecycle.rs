@@ -1,11 +1,12 @@
 //! Stage 7 · Lifecycle: stop, replicate, start, restore, and the refusals and collection that
 //! bound what a person can destroy.
 //!
-//! Worst case 335 s if every step times out (15 + 60 + 30 + 60 + 30 + 20 + 60 + 60); see
-//! `workspace.rs`'s note on how the three stages' sums sit against the fast suite's deadline.
+//! Worst case 500 s if every step times out — the workspace half's 335 s (15 + 60 + 30 + 60 + 20 +
+//! 60 + 60) plus the environment half's 165 s (30 + 30 + 60 + 45); see `workspace.rs`'s note on
+//! how the stages' sums sit against the fast suite's deadline.
 //!
-//! Every id here is about the workspace stage 5 created and pushed, so with no workspace the whole
-//! stage skips with one reason.
+//! Two halves: the workspace stage 5 created and pushed, and the environment stage 6 did. Each
+//! skips its own ids with one reason when its object is missing, and neither costs the other.
 
 use std::time::Duration;
 
@@ -28,8 +29,16 @@ const REFUSAL_CEILING: Duration = Duration::from_secs(20);
 /// How long the finalizers get to drop this run's worktrees before the detached restore.
 const DETACH_CEILING: Duration = Duration::from_secs(60);
 const ORPHAN_CEILING: Duration = Duration::from_secs(60);
+/// The environment twins. Each is at or above its own catalogue target — except `env.replicated`,
+/// which waits 30 s against a 300 s bound for the same reason `ws.replicated` waits 60: the wake
+/// the owner sends right after the stop cut finishes this in seconds on a healthy fleet, and the
+/// fast suite's budget is not there to be spent waiting out a broken one.
+const ENV_STOP_CEILING: Duration = Duration::from_secs(30);
+const ENV_REPLICATED_CEILING: Duration = Duration::from_secs(30);
+const ENV_START_CEILING: Duration = Duration::from_secs(60);
+const ENV_RESTORE_CEILING: Duration = Duration::from_secs(45);
 
-/// Every id in this stage, in journey order — the list a missing precondition skips.
+/// Every workspace id in this stage, in journey order — the list a missing workspace skips.
 const IDS: [&str; 7] = [
     "ws.stop.p95",
     "ws.replicated",
@@ -40,7 +49,16 @@ const IDS: [&str; 7] = [
     "vol.orphan.collected",
 ];
 
+/// The environment twins, in journey order. A separate list because they stand on stage 6's
+/// environment, not on stage 5's workspace: one half being absent must not cost the other its ids.
+const ENV_IDS: [&str; 4] = ["env.stop.p95", "env.replicated", "env.start.p95", "env.restore"];
+
 pub async fn run(c: &mut Ctx) {
+    workspace_half(c).await;
+    environment_half(c).await;
+}
+
+async fn workspace_half(c: &mut Ctx) {
     let (Some(ws), Some(volume)) = (c.state.workspace.clone(), c.state.volume.clone()) else {
         for id in IDS {
             c.skip(id, "no workspace");
@@ -62,6 +80,120 @@ pub async fn run(c: &mut Ctx) {
     refusals(c, &volume, &snapshot).await;
     detached_restorable(c, &snapshot).await;
     orphan_collected(c, &volume).await;
+}
+
+/// The same four verbs on stage 6's environment — the owner's rule that every workspace SLO has an
+/// environment counterpart at the same cadence. They chain like the workspace half: a stop that
+/// never converged leaves a state the start would measure instead of the start.
+async fn environment_half(c: &mut Ctx) {
+    let Some(env) = c.state.environment.clone() else {
+        for id in ENV_IDS {
+            c.skip(id, "no environment");
+        }
+        return;
+    };
+    if !env_stop(c, &env).await {
+        for id in &ENV_IDS[1..] {
+            c.skip(id, "the environment never stopped");
+        }
+        return;
+    }
+    env_replicated(c, &env).await;
+    env_start(c, &env).await;
+    match c.state.env_snapshot.clone() {
+        Some(snap) => env_restore(c, &snap).await,
+        None => c.skip("env.restore", "the environment was never pushed"),
+    }
+}
+
+/// `env.stop.p95`: the stop, and the wait for `stopped` — an environment tears its StatefulSets
+/// down after the stop cut, so a 202 says nothing about whether that landed.
+async fn env_stop(c: &mut Ctx, env: &str) -> bool {
+    let env = env.to_string();
+    c.step("env.stop.p95", ENV_STOP_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, &format!("/v1/environments/{env}/stop"));
+        let doc = api(c, &format!("/v1/environments/{env}"));
+        async move {
+            post(c, &url, &jwt, Value::Null).await.context("could not stop")?;
+            poll_json(c, &doc, &jwt, ENV_STOP_CEILING, |v| {
+                v.get("state").and_then(Value::as_str) == Some("stopped")
+            })
+            .await
+        }
+        .boxed()
+    })
+    .await
+}
+
+/// `env.replicated`: read off the `Replicated` condition the owner computes, exactly as
+/// `ws.replicated` is — the same condition placement itself reads.
+async fn env_replicated(c: &mut Ctx, env: &str) {
+    let env = env.to_string();
+    c.step("env.replicated", ENV_REPLICATED_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let doc = api(c, &format!("/v1/environments/{env}"));
+        async move {
+            poll_json(c, &doc, &jwt, ENV_REPLICATED_CEILING, |v| {
+                // `ready`, not `status`: the wire shape is a `ConditionDoc`, as it is for a
+                // workspace — see `replicated` above.
+                v.pointer("/replicated/ready").and_then(Value::as_bool) == Some(true)
+            })
+            .await
+            .context("no other node reported holding the final sync point")
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `env.start.p95`: the services come back. `running` is the environment's own word for `ready`.
+async fn env_start(c: &mut Ctx, env: &str) {
+    let env = env.to_string();
+    c.step("env.start.p95", ENV_START_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, &format!("/v1/environments/{env}/start"));
+        let doc = api(c, &format!("/v1/environments/{env}"));
+        async move {
+            post(c, &url, &jwt, Value::Null).await.context("could not start")?;
+            poll_json(c, &doc, &jwt, ENV_START_CEILING, |v| {
+                v.get("state").and_then(Value::as_str) == Some("running")
+            })
+            .await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `env.restore`: a NEW environment grafted onto stage 6's push — `ws.restore`'s twin.
+///
+/// The services are left out of the body deliberately: absent means "the ones the snapshot froze",
+/// which is what a person restoring gets. The step ends at the ACCEPT rather than at `running`: an
+/// environment create is a two-minute wait the fast suite has no budget for twice, the accept has
+/// already resolved the snapshot, its volume and the caller's right to it, and `env.create.p95`
+/// is the id that measures an environment converging.
+async fn env_restore(c: &mut Ctx, snapshot: &str) {
+    let name = format!("{}-envrestore", c.prefix());
+    let snapshot = snapshot.to_string();
+    c.step("env.restore", ENV_RESTORE_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, "/v1/environments/restore");
+        let body = serde_json::json!({ "name": name, "snapshot_id": snapshot });
+        async move {
+            let doc = post(c, &url, &jwt, body).await.context("could not restore the environment")?;
+            let id = doc
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("the restore answered no environment id"))?
+                .to_string();
+            // Its Volume is named after it and no prefix sweep can see one.
+            c.state.extra_volumes.push(id);
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// `ws.stop.p95`: the stop, and the wait for the workspace to actually be `stopped` — a stop cuts
@@ -341,10 +473,16 @@ mod tests {
     async fn lifecycle_skips_when_no_workspace_in_state() {
         let mut c = crate::testkit::ctx().await;
         run(&mut c).await;
-        assert_eq!(c.steps.len(), IDS.len());
+        assert_eq!(c.steps.len(), IDS.len() + ENV_IDS.len());
         for id in IDS {
             let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no workspace", "{s:?}");
+        }
+        // The two halves are independent: no environment costs the env ids nothing but their own
+        // reason, and every id in the stage is still produced exactly once.
+        for id in ENV_IDS {
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
+            assert!(s.skipped && s.detail == "no environment", "{s:?}");
         }
         assert_eq!(c.failed(), 0, "a skip is not a failure");
     }
