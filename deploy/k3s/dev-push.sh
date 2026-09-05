@@ -32,7 +32,7 @@ if [ "${1:-}" = "--slo" ]; then
   # — the pin lives in deploy/kloudlite-git.yaml, which the next `deploy/roll.sh` reasserts, so
   # there is no yaml claiming a SHA that is not running.
   echo "==> building and pushing the slo image"
-  ssh "$BUILD_HOST" "cd ~/kloudlite-git && \
+  ssh "$BUILD_HOST" ". \$HOME/.cargo/env; cd ~/kloudlite-git && \
     cargo build --profile dev-image --locked --bin kloudlite-git-slo --bin kl && \
     sudo docker build --build-arg PROFILE=dev-image --target slo -t '$REG/kloudlite-git-slo:$TAG' . && \
     sudo docker push '$REG/kloudlite-git-slo:$TAG'"
@@ -51,7 +51,7 @@ echo "==> building $TAG (profile dev-image)"
 # The Dockerfile is runtime-only (see its header): cargo runs on the VM itself, against its warm
 # target dir, and the two docker builds only COPY target/dev-image/. The VM needs rustup's stable
 # toolchain; the compile lands binaries for bookworm as long as the VM's glibc is <= 2.36.
-ssh "$BUILD_HOST" "cd ~/kloudlite-git && \
+ssh "$BUILD_HOST" ". \$HOME/.cargo/env; cd ~/kloudlite-git && \
   cargo build --profile dev-image --locked && \
   sudo docker build --build-arg PROFILE=dev-image --target server -t '$REG/kloudlite-git:$TAG' . && \
   sudo docker build --build-arg PROFILE=dev-image --target agent  -t '$REG/kloudlite-git-agent:$TAG' ."
