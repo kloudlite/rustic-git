@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { fixtureFor } from "./superadmin";
+import { CATALOGUE, fixtureFor } from "./superadmin";
 import type { OwnerRow } from "@/lib/api";
 import type { HistorySeries } from "@/lib/history";
 
@@ -65,4 +65,26 @@ test("the requests queue narrows by state and by owner, as the pages ask it to",
   expect(pending.every((r) => r.state === "pending")).toBe(true);
   const acme = fixtureFor("/admin/quota-requests?owner=acme") as { owner: string }[];
   expect(acme.every((r) => r.owner === "acme")).toBe(true);
+});
+
+// The fixture catalogue is the offline console's whole spine: `KLOUDLITE_ADMIN_FIXTURES=1` renders
+// every /superadmin screen from it, and an id or a target that drifts from the real catalogue
+// makes the screenshots a picture of a system nobody runs. `deploy/slo.md` is the human twin Rust
+// already holds itself to (`the_catalogue_matches_deploy_slo_md`), so holding this file to the
+// same doc chains all three together without the fixture importing Rust.
+test("the fixture catalogue is deploy/slo.md, row for row", async () => {
+  const md = await Bun.file(`${import.meta.dir}/../../../../../../deploy/slo.md`).text();
+  const want = md
+    .split("\n")
+    .filter((l) => l.startsWith("| `"))
+    .map((l) => l.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()))
+    .map(([id, feature, sli, target, suite, stage]) => [
+      id.replace(/`/g, ""),
+      feature,
+      sli,
+      target,
+      suite,
+      stage,
+    ]);
+  expect(CATALOGUE).toEqual(want as typeof CATALOGUE);
 });

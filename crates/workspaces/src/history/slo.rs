@@ -713,7 +713,11 @@ mod tests {
     fn sql_joins_the_catalogue_instead_of_inlining_it() {
         for sql in [statuses_sql(), burn_sql()] {
             assert!(!sql.contains("multiIf"), "the catalogue is inlined again: {sql}");
-            assert!(sql.len() < 8_000, "{} bytes of SQL", sql.len());
+            // The cap is per-catalogue-row, not absolute: the join emits one short `VALUES` tuple
+            // per SLO (~60 bytes), where the inlined `multiIf` emitted ~210. Anything under 100 B
+            // a row is still the joined shape; the constant is what would catch a regression to
+            // the other one, whatever the catalogue has grown to.
+            assert!(sql.len() < 100 * CATALOGUE.len() + 2_000, "{} bytes of SQL", sql.len());
         }
     }
 }

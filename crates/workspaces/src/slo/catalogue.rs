@@ -169,6 +169,11 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "id.key.usable", feature: "Identity", sli: "A freshly minted platform SSH key is usable", target: bound(30_000), suite: Suite::Fast, stage: "1 · Identity" },
     Slo { id: "id.cli.flow", feature: "Identity", sli: "The kl CLI's login-to-command flow completes", target: bound(15_000), suite: Suite::Fast, stage: "1 · Identity" },
     Slo { id: "id.jwt.tiers", feature: "Identity", sli: "A JWT is honoured across every tier", target: avail(99.9), suite: Suite::Fast, stage: "1 · Identity" },
+    // NOT "sign-in with a passkey succeeds": WebAuthn is verified in the web app, which holds the
+    // relying-party identity and the challenge (`crates/api/src/passkeys.rs`) — this tier only
+    // stores the credential and answers the lookup a sign-in makes. So the SLI is the half a
+    // headless probe can honestly walk: the store round trip, and that the lookup stays peer-only.
+    Slo { id: "id.signin.passkey", feature: "Identity", sli: "A passkey registers, lists back and its sign-in lookup is peer-only", target: avail(99.9), suite: Suite::Fast, stage: "1 · Identity" },
 
     // Stage 2 · git
     Slo { id: "git.push.ok", feature: "Git hosting", sli: "Push of one commit over HTTP succeeds", target: avail(99.9), suite: Suite::Fast, stage: "2 · Git" },
@@ -181,6 +186,13 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "browse.p95", feature: "Git hosting", sli: "The Browse API renders a repo page", target: p95(500), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "browse.commit.visible", feature: "Git hosting", sli: "A pushed commit becomes visible in Browse", target: bound(5_000), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "web.repo.page", feature: "Git hosting", sli: "The web app's repo page loads", target: p95(1_500), suite: Suite::Fast, stage: "2 · Git" },
+    Slo { id: "git.push.ssh", feature: "Git hosting", sli: "Push of one commit over SSH succeeds", target: avail(99.9), suite: Suite::Fast, stage: "2 · Git" },
+    Slo { id: "repo.lifecycle", feature: "Git hosting", sli: "A repo is created, listed, deleted and its slug freed", target: bound(10_000), suite: Suite::Fast, stage: "2 · Git" },
+    // The three page loads beside `web.repo.page`, in the same stage for the same reason: they are
+    // the app's own front door, and the only thing that says the shell renders at all.
+    Slo { id: "web.org.page", feature: "Git hosting", sli: "The web app's org page loads", target: p95(1_500), suite: Suite::Fast, stage: "2 · Git" },
+    Slo { id: "web.repo.settings", feature: "Git hosting", sli: "The web app's repo settings page loads", target: p95(1_500), suite: Suite::Fast, stage: "2 · Git" },
+    Slo { id: "web.workspaces.page", feature: "Workspaces", sli: "The web app's workspaces and environments pages load", target: p95(1_500), suite: Suite::Fast, stage: "2 · Git" },
 
     // Stage 3 · pull request
     Slo { id: "pr.merge.p95", feature: "Pull requests", sli: "A pull request merge completes", target: p95(60_000), suite: Suite::Fast, stage: "3 · Pull request" },
@@ -194,20 +206,33 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "reg.shared.layer", feature: "Container registry", sli: "A shared layer is not re-uploaded by a sibling image", target: avail(99.9), suite: Suite::Fast, stage: "4 · Registry" },
     Slo { id: "reg.canary", feature: "Container registry", sli: "The registry canary image pulls successfully", target: avail(99.9), suite: Suite::Fast, stage: "4 · Registry" },
     Slo { id: "reg.visibility", feature: "Container registry", sli: "Image visibility (public vs. private) is enforced", target: avail(99.9), suite: Suite::Fast, stage: "4 · Registry" },
+    Slo { id: "reg.image.delete", feature: "Container registry", sli: "Deleting a tag removes it from the tag list and deleting an image removes it from the catalogue", target: bound(10_000), suite: Suite::Fast, stage: "4 · Registry" },
+    // `_catalog` and `/api/{owner}/images` are the two any-node exceptions to the routing rule, so
+    // a routing regression shows here before it shows anywhere a person would notice.
+    Slo { id: "reg.catalogue", feature: "Container registry", sli: "The image catalogue lists a pushed image from any node", target: bound(5_000), suite: Suite::Fast, stage: "4 · Registry" },
 
     // Stage 5 · workspace
     Slo { id: "ws.create.p95", feature: "Workspaces", sli: "Creating a workspace completes", target: p95(90_000), suite: Suite::Fast, stage: "5 · Workspace" },
-    Slo { id: "ws.exec.ok", feature: "Workspaces", sli: "Exec into a running workspace pod succeeds", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // "…and its home is the shared export": a pod started before its node's NFS mount is up
+    // hostPaths an empty local directory and strands the owner's dotfiles, which an exec that only
+    // opened a channel — or only echoed — would pass straight through.
+    Slo { id: "ws.exec.ok", feature: "Workspaces", sli: "Exec into a running workspace pod returns the command's output, from a pod whose home is the shared export", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "homes.rw.p95", feature: "Workspaces", sli: "A read/write round trip on the shared home completes", target: p95(200), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "gw.tunnel.p95", feature: "Workspaces", sli: "Opening a gateway SSH tunnel completes", target: p95(3_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "gw.unregistered.refused", feature: "Workspaces", sli: "The gateway refuses an unregistered key", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.push.p95", feature: "Workspaces", sli: "Pushing a workspace snapshot completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.clone.p95", feature: "Workspaces", sli: "Cloning a workspace completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
-    Slo { id: "quota.refused", feature: "Workspaces", sli: "An over-quota create is refused with 409", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // The sentence, not merely the status: `quota::refuse` answers `"{dimension}: {used} of
+    // {limit} in use; request more under Quota"`, and a 409 naming the wrong dimension is a gate
+    // that refused for a reason nobody asked about.
+    Slo { id: "quota.refused", feature: "Workspaces", sli: "An over-quota create is refused with 409 naming the dimension, what is used and the limit", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // Create is only one of the four verbs behind `guard_alloc`; restore, clone and push route
+    // through the same gate and none was probed.
+    Slo { id: "env.quota.refused", feature: "Workspaces", sli: "An over-quota restore, clone and push are each refused with 409", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
 
     // Stage 6 · environment
     Slo { id: "env.create.p95", feature: "Environments", sli: "Creating an environment completes", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },
-    Slo { id: "env.dns", feature: "Environments", sli: "Service-to-service DNS resolves inside an environment's namespace", target: avail(99.9), suite: Suite::Fast, stage: "6 · Environment" },
+    Slo { id: "env.dns", feature: "Environments", sli: "A service in an environment resolves a sibling by bare name and connects to it", target: avail(99.9), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.attach", feature: "Environments", sli: "Attaching a workspace to an environment takes effect", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.detach", feature: "Environments", sli: "Detaching a workspace from an environment takes effect", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.push.p95", feature: "Environments", sli: "Pushing an environment snapshot completes", target: p95(90_000), suite: Suite::Fast, stage: "6 · Environment" },
@@ -220,7 +245,7 @@ pub const CATALOGUE: &[Slo] = &[
 
     // Stage 7 · lifecycle
     Slo { id: "ws.stop.p95", feature: "Workspace lifecycle", sli: "Stopping a workspace completes", target: p95(15_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
-    Slo { id: "ws.replicated", feature: "Workspace lifecycle", sli: "A stopped workspace's final sync point reaches a replica", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    Slo { id: "ws.replicated", feature: "Workspace lifecycle", sli: "A stopped workspace's final sync point reaches a replica, named by that replica", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.start.p95", feature: "Workspace lifecycle", sli: "Starting a workspace completes", target: p95(30_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.restore", feature: "Workspace lifecycle", sli: "Restoring a workspace from a past snapshot succeeds", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     // The environment twin of the four ids above — the owner's rule is that every workspace SLO
@@ -232,12 +257,18 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "env.restore", feature: "Environments", sli: "Restoring an environment from a past snapshot succeeds", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.refusals", feature: "Workspace lifecycle", sli: "Deleting a sync point or a running worktree's base snapshot is refused", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.detached.restorable", feature: "Workspace lifecycle", sli: "A detached volume's snapshot can still be restored", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
-    Slo { id: "vol.orphan.collected", feature: "Workspace lifecycle", sli: "An orphaned volume directory is collected", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    // `retire_pass` is the rule at BOTH ends, so the SLI names both: the sweep that takes an
+    // orphaned tree, and the Volume with no owner entry and no snapshot behind it.
+    Slo { id: "vol.orphan.collected", feature: "Workspace lifecycle", sli: "An orphaned volume directory is collected, and a Volume with no owner entry and no snapshot is deleted", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    // `cleanup_parent`'s detach-or-keep rule, which is exactly where a lost detach strands bytes
+    // nothing on any tier can find again. Both directions, or neither says anything.
+    Slo { id: "wt.delete", feature: "Workspace lifecycle", sli: "Deleting a workspace or environment drops the worktree and leaves the volume iff a snapshot remains", target: bound(60_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    Slo { id: "snap.delete", feature: "Workspace lifecycle", sli: "Deleting a snapshot removes it from history, and the last one of a detached volume takes the volume with it", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
 
     // Stage 8 · admin
     Slo { id: "req.queue", feature: "Admin", sli: "A Request CR is queued and answerable by an admin", target: bound(5_000), suite: Suite::Fast, stage: "8 · Admin" },
-    Slo { id: "audit.row", feature: "Admin", sli: "Every admin write produces an audit row", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
-    Slo { id: "signals.fresh", feature: "Admin", sli: "The Signals table reflects a rule transition", target: bound(120_000), suite: Suite::Fast, stage: "8 · Admin" },
+    Slo { id: "audit.row", feature: "Admin", sli: "Every admin write produces an audit row, and the same write reaches `kloudlite.events` as `admin.<action>`", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
+    Slo { id: "signals.fresh", feature: "Admin", sli: "The Signals table reflects a rule transition, and a rule with no covering samples reads `unknown` rather than `ok`", target: bound(120_000), suite: Suite::Fast, stage: "8 · Admin" },
     Slo { id: "history.api", feature: "Admin", sli: "The history API answers a chart query", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
 
     // Stage 9 · security
@@ -245,8 +276,12 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "sec.cross.owner", feature: "Security", sli: "One owner's objects are invisible to another owner", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
     Slo { id: "sec.admin.claim", feature: "Security", sli: "An admin route refuses a token without the superadmin claim", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
     Slo { id: "sec.user.process", feature: "Security", sli: "The ordinary API process has no admin route mounted", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
-    Slo { id: "sec.agent.spec", feature: "Security", sli: "The admission policy refuses a spec write outside the allowed fields", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
+    // Both halves: the ClusterRole allows exactly three spec writes (`Volume.spec.restoreTo`,
+    // `Volume.spec.quotaGb`, `take_volume`'s test-patch), and a policy that refused EVERYTHING
+    // would pass an SLI that only watched the refusal.
+    Slo { id: "sec.agent.spec", feature: "Security", sli: "The admission policy refuses a spec write outside the allowed fields and still admits the allowed ones", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
     Slo { id: "id.token.revoked", feature: "Security", sli: "A revoked token is refused", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
+    Slo { id: "repo.visibility", feature: "Security", sli: "Flipping a repo private hides it from a non-collaborator and flipping it public restores it", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
 
     // Stage 10 · edge and pipeline
     Slo { id: "edge.dns", feature: "Edge and pipeline", sli: "The public hostname resolves", target: avail(99.99), suite: Suite::Fast, stage: "10 · Edge" },
@@ -287,7 +322,31 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "admin.stop.workspace", feature: "Admin", sli: "An admin stop is visible to the owner as `stopped`", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "superadmin.grant", feature: "Security", sli: "Granting superadmin adds the account to the roster and revoking takes it off", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "feed.experience", feature: "Pull requests", sli: "The feed shows the team and repo events of this run", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "home.persists", feature: "Workspaces", sli: "A file written in one workspace is read from a fresh workspace's home", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "home.persists", feature: "Workspaces", sli: "A file written in one workspace is read from a fresh workspace's home, with the cache and state directories still local", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The 2026-09-05 coverage review's remaining verbs. Each sits in the Experience stage because
+    // its nearest existing twin does — every one of them is a whole flow rather than a request.
+    Slo { id: "id.username", feature: "Identity", sli: "Claiming a username succeeds once and the second claim is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "id.cli.tokens", feature: "Identity", sli: "A CLI token is listed and, once revoked, is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "id.profile.upsert", feature: "Identity", sli: "A profile upsert is saved and read back", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "id.cli.sshconfig", feature: "Identity", sli: "`kl ws sshconfig` writes a host block naming a running workspace", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "key.ssh.lifecycle", feature: "Identity", sli: "A newly added SSH key clones, and after removal the same key is refused", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "repo.description", feature: "Git hosting", sli: "A repo description is saved and read back", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "pr.merge.strategies", feature: "Pull requests", sli: "Each merge strategy — merge, squash, rebase, fast-forward — lands the expected tree", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "pr.mergeability", feature: "Pull requests", sli: "Mergeability is reported clean for a clean change and dirty for a conflicting one", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.invite.revoke", feature: "Teams", sli: "A revoked invite token is refused", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.environment", feature: "Teams", sli: "A team environment lands in the team namespace and its services resolve", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.attach.pair", feature: "Environments", sli: "Deleting an attached workspace removes the environment-side policy", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "vol.list", feature: "Workspace lifecycle", sli: "The volume list names every volume the run holds", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "admin.stop.environment", feature: "Admin", sli: "An admin stop of an environment is visible to the owner as `stopped`", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "admin.delete.workload", feature: "Admin", sli: "An admin delete takes a workspace and an environment away", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "admin.screens", feature: "Admin", sli: "The owners, clusters and overview console screens answer", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "admin.workloads.read", feature: "Admin", sli: "`GET /admin/workloads` lists every roll target", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "audit.export", feature: "Admin", sli: "The audit CSV export answers with a header and this run's rows", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "req.decide.kinds", feature: "Admin", sli: "An access request grants membership and a denied request is closed with its reason", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "req.legacy.union", feature: "Admin", sli: "The retired quota-request queue is unioned into the admin queue and migrates", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The region CREATE is deliberately not probed: `crd::Region` has no delete on any tier — a
+    // second POST only retires or renames one — so a probe region would be permanent shared state.
+    Slo { id: "region.status", feature: "Admin", sli: "The region list and this run's cluster status answer", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
     // Weekly
     Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit over HTTP succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -299,6 +358,13 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "env.cross.node", feature: "Environments", sli: "An environment started on a peer node reads its replica correctly", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "cp.failover", feature: "Control plane", sli: "The leader lease fails over to another pod", target: bound(30_000), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "settings.live", feature: "Control plane", sli: "A live settings change takes effect on the next beat", target: bound(60_000), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "settings.revert", feature: "Control plane", sli: "Reverting to a stored settings version restores it", target: bound(60_000), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "settings.roll", feature: "Control plane", sli: "A Boot-marked save is refused with 409 while one of its readers is mid-rollout", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    // Weekly, and only the KEEP-BIASED half: `BLOB_GRACE` is a fixed hour and the weekly CronJob's
+    // own `activeDeadlineSeconds` is 3600, so no run can watch an unreferenced blob be reclaimed
+    // in-band. What it CAN prove is the rule the sweep is written around — a sibling's layer
+    // survives a delete — which is the failure that loses somebody's image.
+    Slo { id: "reg.gc.sweep", feature: "Container registry", sli: "A blob a sibling image still references survives that image's deletion and a GC pass", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly
     Slo { id: "bak.tarball.age", feature: "Backups", sli: "The latest backup tarball is recent", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
@@ -308,6 +374,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "drill.dead.node", feature: "Resilience drills", sli: "A dead-node drill heals every replica onto a live node", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.drain", feature: "Resilience drills", sli: "A drain drill succeeds without interrupting a running worktree", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.redis.down", feature: "Resilience drills", sli: "The system keeps operating correctly with Redis down", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    Slo { id: "cluster.decommission", feature: "Resilience drills", sli: "A decommission is refused until the agent stamps `drained`, then cordons the node", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
 ];
 
 #[cfg(test)]
