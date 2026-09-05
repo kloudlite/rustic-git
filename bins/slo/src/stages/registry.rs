@@ -359,7 +359,7 @@ fn base(c: &Ctx) -> String {
 }
 
 /// The same value as an image-reference prefix: `crane` takes a host, never a URL.
-fn host(c: &Ctx) -> String {
+pub(crate) fn host(c: &Ctx) -> String {
     base(c).trim_start_matches("https://").trim_start_matches("http://").to_string()
 }
 
@@ -367,7 +367,7 @@ fn pull_scope(image: &str) -> String {
     format!("repository:{PROBE_USER}/{image}:pull,push")
 }
 
-fn authed(c: &Ctx) -> Crane {
+pub(crate) fn authed(c: &Ctx) -> Crane {
     Crane::new(&c.programs.crane, c.tmp.join("docker"))
 }
 
@@ -441,7 +441,7 @@ fn random_layer() -> Vec<u8> {
 /// The layer is raw bytes with the uncompressed `…tar` media type rather than a real tar: nothing
 /// in the journey ever unpacks it, and building a tar to satisfy a reader that does not exist is
 /// code that can only rot.
-fn write_layout(dir: &Path, layer: &[u8], image: &str) -> Result<String> {
+pub(crate) fn write_layout(dir: &Path, layer: &[u8], image: &str) -> Result<String> {
     let blobs = dir.join("blobs/sha256");
     std::fs::create_dir_all(&blobs)?;
     let layer_digest = blob(&blobs, layer)?;

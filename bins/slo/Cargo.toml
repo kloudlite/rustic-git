@@ -44,6 +44,13 @@ rustls = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
+# The drills' three cluster mutations sit behind one trait so `drills_always_undo` can record them
+# with a fake; `async-trait` is what makes that trait object-safe with async methods.
+async-trait = { workspace = true }
+# `bak.*` lists the backup container with the storage account key the monthly CronJob mounts.
+# `object_store` directly, NOT `crates/storage`: that crate would pull SlateDB into a client whose
+# whole contract is that it never opens a database.
+object_store = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

@@ -45,9 +45,15 @@ fn fast() -> Vec<Stage> {
 
 pub fn suite(kind: Suite) -> Vec<Stage> {
     let mut stages = fast();
-    // Weekly and monthly are the fast journey plus their own stages, which the stage tasks append
-    // here; today they add nothing, so every suite is the fast one.
-    let _ = kind;
+    // Weekly and monthly are the fast journey PLUS their own stage, appended in that order —
+    // monthly is weekly plus one, never a third journey, which is the same rule `journey()` in the
+    // catalogue is built on.
+    if matches!(kind, Suite::Weekly | Suite::Monthly) {
+        stages.push(Stage { name: stages::WEEKLY, run: |c| Box::pin(stages::weekly::run(c)) });
+    }
+    if kind == Suite::Monthly {
+        stages.push(Stage { name: stages::MONTHLY, run: |c| Box::pin(stages::monthly::run(c)) });
+    }
     if std::env::var(PANIC_ENV).as_deref() == Ok("1") {
         stages.push(Stage { name: "· Panic", run: |_| Box::pin(async { panic!("test panic") }) });
     }

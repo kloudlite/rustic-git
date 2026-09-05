@@ -25,6 +25,8 @@ pub async fn ctx() -> Ctx {
         ssh_key_path: "/dev/null".into(),
         ssh_hostkey: String::new(),
         canary_digest: None,
+        azure: None,
+        redis_host: None,
     };
     Ctx::new(cfg, Suite::Fast, None).await.expect("ctx")
 }

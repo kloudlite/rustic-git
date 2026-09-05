@@ -8,6 +8,7 @@
 pub mod config;
 pub mod crane;
 pub mod ctx;
+pub mod drill;
 pub mod kube;
 pub mod report;
 pub mod stages;

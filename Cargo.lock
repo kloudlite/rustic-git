@@ -3712,6 +3712,7 @@ name = "kloudlite-git-slo-bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -3722,6 +3723,7 @@ dependencies = [
  "kloudlite-git-workspaces",
  "kube",
  "metrics",
+ "object_store",
  "rand 0.8.7",
  "reqwest",
  "rustls",

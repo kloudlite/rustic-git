@@ -86,8 +86,9 @@ async fn main() {
 
 /// Spawn the journey, then clean up after it and file the run — whatever it did.
 async fn parent(cfg: Config, kind: Suite) -> i32 {
-    // The monthly suite's CronJob fires on a day-of-month schedule, and the drills in it are
-    // expensive enough that a misconfigured schedule must not run them daily.
+    // The monthly CronJob fires `0 3 * * 0` — every SUNDAY, because cron cannot say "the first
+    // Sunday of the month". This guard is the other half of that expression: past the 7th it is
+    // not the first Sunday, and the drills below are far too destructive to run four times a month.
     if kind == Suite::Monthly && chrono::Utc::now().day() > 7 {
         tracing::info!(reason = "not the first week of the month", "slo.run.skipped");
         return 0;

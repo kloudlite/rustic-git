@@ -15,9 +15,11 @@ pub mod environment;
 pub mod git;
 pub mod identity;
 pub mod lifecycle;
+pub mod monthly;
 pub mod pr;
 pub mod registry;
 pub mod security;
+pub mod weekly;
 pub mod workspace;
 
 /// The journey stages this file's neighbours implement, named as the catalogue's "Journey
@@ -34,6 +36,10 @@ pub const ADMIN: &str = "8 · Admin";
 pub const SECURITY: &str = "9 · Security";
 /// Edge AND pipeline: the two halves are one journey step, and `deploy/slo.md` names it once.
 pub const EDGE: &str = "10 · Edge";
+/// The two suite-only stages. Both run AFTER the whole fast journey — weekly and monthly are the
+/// fast journey plus their own stage, never a different journey.
+pub const WEEKLY: &str = "12 · Weekly";
+pub const MONTHLY: &str = "13 · Monthly";
 
 /// One HTTP call, with the body carried into the error.
 ///
@@ -155,10 +161,38 @@ pub async fn boot(c: &mut Ctx) {
 /// best-effort: a leak is swept by the next run's boot, while an error propagated from here would
 /// lose the report that says why the run failed in the first place.
 pub async fn teardown(c: &mut Ctx) {
+    hide(c).await;
     let prefix = c.prefix();
     let mut swept = sweep(c, move |name| name.starts_with(&prefix)).await;
     swept += drop_env_volume(c).await;
     tracing::info!(count = swept, "slo.teardown.completed");
+}
+
+/// Flip everything this run may have published back to private, BEFORE the deletes.
+///
+/// `web.repo.page` and `reg.visibility` both publish on purpose and both restore on their own — but
+/// a run that died between the two halves leaves a public repo or a public image standing until the
+/// next run's boot sweep reaches it, and until then stage 9's `sec.private.repo` reads a hole and
+/// calls it a passing security check. Deleting a public object is not the same as making it
+/// private first: a delete that is refused (a volume still referenced, an image the registry is
+/// mid-GC on) leaves it public. Best effort and logged, like every other line in teardown.
+async fn hide(c: &mut Ctx) {
+    if let Some(repo) = c.state.repo.clone() {
+        let url = api(c, &format!("/v1/repos/{PROBE_USER}/{repo}"));
+        let body = serde_json::json!({ "visibility": "private" });
+        match call(c, reqwest::Method::PATCH, &url, &c.probe_jwt.clone(), Some(body)).await {
+            Ok(_) => tracing::info!(kind = "repo", name = %repo, "slo.teardown.hidden"),
+            Err(e) => tracing::warn!(kind = "repo", op = "hide", name = %repo, error = %format!("{e:#}"), "slo.teardown.failed"),
+        }
+    }
+    let prefix = c.prefix();
+    for name in images(c, &|n: &str| n.starts_with(&prefix)).await {
+        let url = api(c, &format!("/api/{PROBE_USER}/{name}/imagevisibility?visibility=private"));
+        match post(c, &url, &c.probe_jwt.clone(), Value::Null).await {
+            Ok(_) => tracing::info!(kind = "image", name = %name, "slo.teardown.hidden"),
+            Err(e) => tracing::warn!(kind = "image", op = "hide", name = %name, error = %format!("{e:#}"), "slo.teardown.failed"),
+        }
+    }
 }
 
 /// The environment's volume, by name.
@@ -282,21 +316,8 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
 /// browse API, which the api process proxies at `/api/{owner}/…`. A delete is a POST with no body
 /// (`crates/api/src/images.rs`), not a DELETE, which is why this cannot be another `Kind`.
 async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
-    let url = api(c, &format!("/api/{PROBE_USER}/images"));
-    let rows: Vec<serde_json::Value> = match get(c, &url, &c.probe_jwt.clone()).await {
-        Ok(v) => serde_json::from_value(v).unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(kind = "image", op = "list", error = %format!("{e:#}"), "slo.teardown.failed");
-            return 0;
-        }
-    };
     let mut gone = 0;
-    let names: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(str::to_string))
-        .filter(|n| matches(n))
-        .collect();
-    for name in names {
+    for name in images(c, matches).await {
         let del = api(c, &format!("/api/{PROBE_USER}/{name}/imagedelete"));
         match post(c, &del, &c.probe_jwt.clone(), Value::Null).await {
             Ok(_) => {
@@ -307,6 +328,23 @@ async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
         }
     }
     gone
+}
+
+/// The probe-owned image names `matches` claims. A listing that fails is an empty list, like every
+/// other read in teardown.
+async fn images<M: Fn(&str) -> bool + ?Sized>(c: &Ctx, matches: &M) -> Vec<String> {
+    let url = api(c, &format!("/api/{PROBE_USER}/images"));
+    let rows: Vec<serde_json::Value> = match get(c, &url, &c.probe_jwt.clone()).await {
+        Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(kind = "image", op = "list", error = %format!("{e:#}"), "slo.teardown.failed");
+            return vec![];
+        }
+    };
+    rows.iter()
+        .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|n| matches(n))
+        .collect()
 }
 
 /// `(name, id)` for every object of one kind under the probe's owner. A list that fails is an

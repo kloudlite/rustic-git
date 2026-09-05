@@ -1526,6 +1526,15 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "delete"]
+  # `drill.redis.down` only: the monthly drill writes ONE NetworkPolicy named `slo-drill-redis`
+  # that denies the srv and worker pods egress to Redis for five minutes, and deletes it again on
+  # every path out of the drill (`bins/slo/src/drill.rs`). No `resourceNames` because a policy that
+  # does not exist yet cannot be named in RBAC; the namespace and the verbs are the boundary, and
+  # `update`/`patch` are deliberately absent — the drill may create its own and remove it, never
+  # touch the `attach-{ws}` policies that carry a workspace's own traffic.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -1804,6 +1813,40 @@ spec:
                   value: /etc/kloudlite-git/k3s/config
                 - name: HOME
                   value: /tmp
+                # THE MONTHLY SUITE ONLY. Every `bak.*` id reads a switch nobody watches, and there
+                # is no way to read one without the credential that owns it — so the probe holds
+                # the storage account key and the Monitoring Reader service principal HERE and in
+                # no other CronJob. The fast and weekly suites keep the property the design opens
+                # with: a client of everything, holding no object-store credential at all.
+                # `object_store` reads the first pair from the environment itself, under exactly
+                # these names (`crates/storage/src/config.rs`'s `MicrosoftAzureBuilder::from_env`).
+                - name: AZURE_STORAGE_ACCOUNT_NAME
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: account } }
+                - name: AZURE_STORAGE_ACCOUNT_KEY
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-storage, key: key } }
+                # `bak.versioning` and `bak.cosmos` are ARM reads; this is the same Monitoring
+                # Reader principal the OTel collector already uses, which is read-only on both.
+                - name: AZURE_TENANT_ID
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-azuremonitor, key: tenant } }
+                - name: AZURE_CLIENT_ID
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-azuremonitor, key: client-id } }
+                - name: AZURE_CLIENT_SECRET
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-azuremonitor, key: client-secret } }
+                # Which account, group and Cosmos account those two URLs name. All four or none:
+                # an ARM URL with one blank segment is a 404 the step would report as a missing
+                # backup, so a partial set skips both ids instead.
+                - name: KLOUDLITE_GIT_SLO_AZURE_SUBSCRIPTION
+                  value: "9941afe7-e220-492f-bfab-63f539dc0b69"
+                - name: KLOUDLITE_GIT_SLO_AZURE_RESOURCE_GROUP
+                  value: kolomi-rg
+                - name: KLOUDLITE_GIT_SLO_AZURE_STORAGE_ACCOUNT
+                  value: ""
+                - name: KLOUDLITE_GIT_SLO_AZURE_COSMOS_ACCOUNT
+                  value: kloudlite-git-mongo
+                # The host `drill.redis.down` denies egress to. Unset, the drill SKIPS: a probe
+                # that guessed an address would write a policy denying nothing and report a pass.
+                - name: KLOUDLITE_GIT_SLO_REDIS_HOST
+                  value: ""
               resources:
                 requests: { cpu: 100m, memory: 128Mi }
                 limits: { memory: 512Mi }

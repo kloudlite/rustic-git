@@ -39,6 +39,29 @@ pub struct Config {
     /// `reg.canary` green through the substitution it exists to catch. `None` means unpinned,
     /// and the step skips rather than passing.
     pub canary_digest: Option<String>,
+    /// The monthly `bak.*` reads, all OPTIONAL: a cluster with none of them configured skips those
+    /// four ids rather than failing them — an unconfigured probe is a deployment gap, not a backup
+    /// that stopped running. The account name and key themselves are NOT here: `object_store`
+    /// reads `AZURE_STORAGE_ACCOUNT_NAME`/`_KEY` from the environment itself, which is the same
+    /// pair every other tier's Secret sets.
+    pub azure: Option<Azure>,
+    /// The Redis host `drill.redis.down` cuts the fleet off from. Unset skips the drill: a probe
+    /// that guessed an address would write a NetworkPolicy denying nothing and report a pass.
+    pub redis_host: Option<String>,
+}
+
+/// What the ARM reads need beyond the service principal (which is `AZURE_TENANT_ID`/`_CLIENT_ID`/
+/// `_CLIENT_SECRET`, the collector's own Secret). All four or none: an ARM URL with one blank
+/// segment is a 404 the step would report as a missing backup.
+#[derive(Debug, Clone)]
+pub struct Azure {
+    pub subscription: String,
+    pub resource_group: String,
+    /// The storage account holding both `kloudlite-git` and `k3s-backup` — the same account, per
+    /// deploy/BACKUPS.md's store table.
+    pub storage_account: String,
+    /// The Cosmos account behind the directory and the PR store (`kloudlite-git-mongo`).
+    pub cosmos_account: String,
 }
 
 fn req(k: &str) -> Result<String> {
@@ -71,8 +94,22 @@ impl Config {
             ssh_key_path: opt("KLOUDLITE_GIT_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
             ssh_hostkey: opt("KLOUDLITE_GIT_SLO_SSH_HOSTKEY", ""),
             canary_digest: Some(opt("KLOUDLITE_GIT_SLO_CANARY_DIGEST", "")).filter(|d| !d.is_empty()),
+            azure: azure(),
+            redis_host: Some(opt("KLOUDLITE_GIT_SLO_REDIS_HOST", "")).filter(|v| !v.is_empty()),
         })
     }
+}
+
+/// All four, or `None`. Partial configuration is the one shape that would let `bak.versioning`
+/// report a missing backup for a URL the operator simply never filled in.
+fn azure() -> Option<Azure> {
+    let v = |k: &str| Some(opt(k, "")).filter(|v| !v.is_empty());
+    Some(Azure {
+        subscription: v("KLOUDLITE_GIT_SLO_AZURE_SUBSCRIPTION")?,
+        resource_group: v("KLOUDLITE_GIT_SLO_AZURE_RESOURCE_GROUP")?,
+        storage_account: v("KLOUDLITE_GIT_SLO_AZURE_STORAGE_ACCOUNT")?,
+        cosmos_account: v("KLOUDLITE_GIT_SLO_AZURE_COSMOS_ACCOUNT")?,
+    })
 }
 
 impl Config {

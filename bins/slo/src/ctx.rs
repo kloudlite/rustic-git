@@ -65,8 +65,14 @@ pub struct Ctx {
     /// `None` when no kubeconfig was reachable — every step that needs it skips rather than
     /// failing, because a missing kubeconfig is a deployment gap, not an SLO breach.
     pub kube: Option<kube::Client>,
-    /// Between report attempts. A field only so the retry test does not sleep six seconds.
+    /// The UNIT the report's backoff schedule is measured in — one second in a deployment. A field
+    /// only so a test can shrink the whole schedule without reimplementing it.
     pub retry_delay: Duration,
+    /// The admin process's clock minus this pod's, from the first report that landed. `None` until
+    /// then. Every step's `ts` is the probe's and every window the console reads is the admin's, so
+    /// a drifted pod files samples into minutes they did not happen in and nothing downstream can
+    /// tell — this is the one number that can say so.
+    pub clock_skew_ms: Option<i64>,
     /// Which binary `git`, `ssh-keygen` and `ssh-keyscan` are. A field so a test can point one at
     /// a program that succeeds — see `tools::Programs`.
     pub programs: crate::tools::Programs,
@@ -129,7 +135,8 @@ impl Ctx {
             state: State::default(),
             tmp: std::env::temp_dir().join(format!("slo-{}", started.timestamp())),
             stage: String::new(),
-            retry_delay: Duration::from_secs(2),
+            retry_delay: Duration::from_secs(1),
+            clock_skew_ms: None,
             programs: crate::tools::Programs::default(),
             run_failed: false,
             report_failed: false,

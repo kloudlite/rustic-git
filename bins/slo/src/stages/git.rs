@@ -131,7 +131,7 @@ pub(crate) fn authed(c: &Ctx, rest: &[&str]) -> Vec<String> {
     args
 }
 
-async fn git(c: &Ctx, args: Vec<String>, dir: Option<&Path>) -> Result<String> {
+pub(crate) async fn git(c: &Ctx, args: Vec<String>, dir: Option<&Path>) -> Result<String> {
     tools::run(&c.programs.git, &args, &git_env(c), dir, GIT_TIMEOUT).await
 }
 
@@ -203,7 +203,7 @@ async fn clone_http(c: &mut Ctx, name: &str) {
 /// Never from `ssh-keyscan`: learning the key from the host being measured makes
 /// `StrictHostKeyChecking=yes` a formality that passes through exactly the substitution it exists
 /// to refuse.
-async fn known_hosts(c: &Ctx) -> Result<PathBuf> {
+pub(crate) async fn known_hosts(c: &Ctx) -> Result<PathBuf> {
     if c.cfg.ssh_hostkey.trim().is_empty() {
         return Err(anyhow!("no host key is pinned (KLOUDLITE_GIT_SLO_SSH_HOSTKEY)"));
     }
@@ -256,7 +256,7 @@ async fn keyscan(c: &Ctx, host: &str, port: u16) -> Result<String> {
         .context("could not read the served host key")
 }
 
-fn ssh_command(c: &Ctx, key: &str, hosts: &Path) -> String {
+pub(crate) fn ssh_command(c: &Ctx, key: &str, hosts: &Path) -> String {
     let (_, port) = c.cfg.ssh_endpoint();
     format!(
         "ssh -i {key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile={} -o BatchMode=yes -p {port}",
@@ -264,7 +264,7 @@ fn ssh_command(c: &Ctx, key: &str, hosts: &Path) -> String {
     )
 }
 
-fn ssh_url(c: &Ctx, name: &str) -> String {
+pub(crate) fn ssh_url(c: &Ctx, name: &str) -> String {
     let (host, port) = c.cfg.ssh_endpoint();
     // The user name is ignored by the listener — it authenticates on the key's fingerprint — but
     // `git@` is what the web's clone box prints, so it is what the probe walks.
