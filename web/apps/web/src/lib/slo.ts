@@ -1,14 +1,25 @@
 import type { SloJourneyStage, SloRunState, SloStatus, SloStep } from "@/lib/api";
 import type { Tone } from "@/lib/console";
 
-/** How much of the error budget is left, as the console words it. The api reports a fraction and
- *  lets it go negative — a breaching SLO has spent more than it had — and "-30 % left" reads as a
- *  rendering bug, so an overspend is said in its own words instead. `null` is no sample at all in
- *  the window, which is never 0 %. */
-export function budgetLabel(left: number | null): string {
+/** How much of the error budget is left, as the console words it. Both numbers from the api are
+ *  COUNTS of bad samples — what the window can afford and what is still unspent, signed — so the
+ *  percentage is their ratio. A 100 % target affords nothing: there is no ratio, and the row
+ *  says so in bad samples instead. `null` is no sample at all in the window. */
+export function budgetLabel(left: number | null, budget: number): string {
   if (left == null) return "—";
-  const p = Math.round(Math.abs(left) * 100);
+  if (budget <= 0) {
+    const bad = Math.round(-left);
+    return bad === 0 ? "no budget · 0 bad" : `no budget · ${bad} bad`;
+  }
+  const p = Math.round((Math.abs(left) / budget) * 100);
   return left < 0 ? `${p} % over` : `${p} % left`;
+}
+
+/** The share of the budget spent, 0–100, for the bar: full at the wall, never past it. */
+export function budgetSpentPct(left: number | null, budget: number): number {
+  if (left == null) return 0;
+  if (budget <= 0) return left < 0 ? 100 : 0;
+  return Math.min(100, Math.max(0, Math.round((1 - left / budget) * 100)));
 }
 
 /** A burn rate is a multiple of the budget's own spend rate: 1× is exactly on budget. `null` is a

@@ -1541,6 +1541,8 @@ export type SloStatus = {
   suite: string;
   attainment_30d: number | null;
   total_30d: number;
+  /** Bad samples the window can afford; 0 for a 100 % target. A count, like `budget_left`. */
+  budget_30d: number;
   budget_left: number | null;
   burn_short: number | null;
   burn_long: number | null;

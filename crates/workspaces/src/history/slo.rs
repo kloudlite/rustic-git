@@ -130,6 +130,10 @@ pub struct SloStatus {
     /// `None` when the window holds no sample at all — a fresh cluster, not 0 %.
     pub attainment_30d: Option<f64>,
     pub total_30d: u64,
+    /// Bad samples the 30 d window can afford at this target: `(1 - target) * total`. A count,
+    /// not a fraction, like `budget_left` — the console divides the two, and a 100 % target has
+    /// a budget of exactly zero, which no fraction could say.
+    pub budget_30d: f64,
     pub budget_left: Option<f64>,
     /// The burn rates over this SLO's own two windows, and what those windows are — a weekly or
     /// monthly SLO has no short window at all (`None`), because a 1 h window over one sample a
@@ -468,6 +472,7 @@ pub async fn statuses(h: &History) -> Result<Vec<SloStatus>, HistoryError> {
                 suite: slo.suite.as_str().to_string(),
                 attainment_30d,
                 total_30d: total,
+                budget_30d: (1.0 - good_pct / 100.0) * total as f64,
                 budget_left: (total > 0).then(|| budget_left(good, total, good_pct)),
                 burn_short,
                 burn_long,

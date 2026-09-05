@@ -1,5 +1,5 @@
 import type { SloStatus } from "@/lib/api";
-import { budgetLabel, burnLabel, groupByFeature, sloTone, windowLabel } from "@/lib/slo";
+import { budgetLabel, budgetSpentPct, burnLabel, groupByFeature, sloTone, windowLabel } from "@/lib/slo";
 import { when } from "@/lib/time";
 import { Section } from "../ui/section";
 import { CapacityBar } from "../ui/capacity-bar";
@@ -76,10 +76,12 @@ function Fragmentish({ feature, slos }: { feature: string; slos: SloStatus[] }) 
               // Spent, clamped at the wall: a breached budget is 100 % of a bar, and the label
               // beside it is what says by how much it was overspent.
               <CapacityBar
-                used={Math.min(100, Math.round((1 - s.budget_left) * 100))}
+                used={budgetSpentPct(s.budget_left, s.budget_30d)}
                 limit={100}
                 unit="%"
-                label={`${budgetLabel(s.budget_left)} · ${s.total_30d} samples`}
+                label={`${budgetLabel(s.budget_left, s.budget_30d)} · ${s.total_30d} samples`}
+                quiet
+                className="whitespace-nowrap"
               />
             )}
           </Td>

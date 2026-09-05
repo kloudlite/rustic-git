@@ -612,6 +612,7 @@ const SLOS: SloStatus[] = CATALOGUE.map(([id, feature, sli, target, suite, ,]) =
     suite,
     attainment_30d: attainment,
     total_30d: attainment == null ? 0 : suite === "fast" ? 8_640 : 12,
+    budget_30d: budget == null ? 0 : Math.max(budget, 1),
     budget_left: budget,
     burn_short: suite === "fast" ? burn[0] : null,
     burn_long: burn[1],

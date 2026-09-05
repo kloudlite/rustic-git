@@ -79,7 +79,7 @@ export default async function SloPage({ searchParams }: { searchParams: Promise<
         />
         <KpiTile
           label="Lowest budget"
-          value={lowest ? budgetLabel(lowest.budget_left) : "—"}
+          value={lowest ? budgetLabel(lowest.budget_left, lowest.budget_30d) : "—"}
           sub={lowest ? lowest.id : "no SLO has a sample in the window"}
         />
       </KpiStrip>

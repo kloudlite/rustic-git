@@ -10,6 +10,7 @@ const slo = (id: string, feature: string, state: SloStatus["state"]): SloStatus 
   suite: "fast",
   attainment_30d: 0.999,
   total_30d: 100,
+  budget_30d: 1,
   budget_left: 0.5,
   burn_short: null,
   burn_long: null,
@@ -31,14 +32,18 @@ const step = (slo_id: string, stage: string): SloStep => ({
 
 describe("budgetLabel", () => {
   test("reads as what is left", () => {
-    expect(budgetLabel(0.12)).toBe("12 % left");
+    expect(budgetLabel(1.08, 9)).toBe("12 % left");
   });
   // A breaching SLO has spent more budget than it had; "-30 % left" would read as a bug.
   test("says an overspend in its own words", () => {
-    expect(budgetLabel(-0.3)).toBe("30 % over");
+    expect(budgetLabel(-2.7, 9)).toBe("30 % over");
   });
   test("no sample is a dash, never 0 %", () => {
-    expect(budgetLabel(null)).toBe("—");
+    expect(budgetLabel(null, 9)).toBe("—");
+  });
+  test("a 100 % target has no budget to divide by", () => {
+    expect(budgetLabel(0, 0)).toBe("no budget · 0 bad");
+    expect(budgetLabel(-4, 0)).toBe("no budget · 4 bad");
   });
 });
 

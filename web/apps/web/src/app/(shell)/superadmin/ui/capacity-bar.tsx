@@ -15,6 +15,7 @@ const FILL: Record<Tone, string> = {
  *  (`6.4 / 8 TB`). */
 export function CapacityBar({
   used,
+  quiet,
   limit,
   unit,
   label,
@@ -24,6 +25,8 @@ export function CapacityBar({
   limit: number;
   unit: string;
   label?: string;
+  /** Drop the bare percentage: a label that already carries the number would show it twice. */
+  quiet?: boolean;
   className?: string;
 }) {
   const p = pct(used, limit);
@@ -34,7 +37,7 @@ export function CapacityBar({
         <div className={cn("h-full", FILL[tone])} style={{ width: `${p}%` }} />
       </div>
       <div className="mt-1 flex items-baseline justify-between gap-2 text-caption tabular-nums text-muted-foreground">
-        <span>{p}%</span>
+        {!quiet && <span>{p}%</span>}
         <span>{label ?? `${used} / ${limit} ${unit}`}</span>
       </div>
     </div>
