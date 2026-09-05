@@ -16,9 +16,12 @@ use super::{api, poll_json, post, raw};
 use crate::ctx::{Ctx, PROBE_USER};
 use crate::tools;
 
-/// Per-step ceilings. Each is above its catalogue target — a slow answer must be a breach with a
-/// number, not a step the probe cut off — and the three workspace stages together are budgeted to
-/// leave room inside the fast suite's own 540 s deadline.
+/// Per-step ceilings. Each is at least its catalogue target — a slow answer must be a breach with a
+/// number, not a step the probe cut off. This stage sums to 310 s if every single step times out;
+/// stages 6 and 7 add 290 s and 335 s, so the three are 935 s of pure worst case against the fast
+/// suite's 900 s deadline. That is deliberate: the sum is only reachable by a fleet that is wedged
+/// in every dimension at once, where the CronJob deadline is the right backstop and the run is
+/// already a failure whatever it reports.
 const CREATE_CEILING: Duration = Duration::from_secs(90);
 const EXEC_CEILING: Duration = Duration::from_secs(20);
 const TUNNEL_CEILING: Duration = Duration::from_secs(20);
@@ -138,11 +141,10 @@ async fn home_round_trip(c: &mut Ctx, id: &str) {
         return c.skip("homes.rw.p95", "no kubeconfig");
     }
     let sample = Arc::new(AtomicU32::new(0));
-    let (id, seen) = (id.to_string(), sample.clone());
+    let (id, seen, want) = (id.to_string(), sample.clone(), c.run_id.clone());
     c.step("homes.rw.p95", EXEC_CEILING, move |c| {
         async move {
-            let script = "d=$(date +%s%N); echo x > /home/kl/.slo && sync /home/kl/.slo && cat /home/kl/.slo >/dev/null; echo $(( ($(date +%s%N)-d)/1000000 ))";
-            let (code, out, err) = ws_exec(c, &id, script, EXEC_CEILING).await?;
+            let (code, out, err) = ws_exec(c, &id, &home_script(&want), EXEC_CEILING).await?;
             if code != 0 {
                 return Err(anyhow!("the home round trip exited {code}: {}", err.trim()));
             }
@@ -165,6 +167,32 @@ async fn home_round_trip(c: &mut Ctx, id: &str) {
             s.ms = sample.load(Ordering::SeqCst);
         }
     }
+}
+
+/// Write, `sync`, read back, and time it INSIDE the pod.
+///
+/// `set -e` and the final `[ … ]` are both load-bearing: an NFS export that answered a write and
+/// then handed back somebody else's bytes would exit 0 with a duration to report, and this SLO
+/// would stay green through the one failure that loses a person's work. So the read-back is
+/// compared to what was written, and the comparison decides the exit code.
+///
+/// `/proc/uptime` rather than `date +%s%N`: BusyBox `date` has no `%N`, and the workspace image is
+/// not guaranteed to be the one with GNU coreutils. Its second field is centiseconds, so the
+/// resolution is 10 ms against a 200 ms target — coarse, and the honest ceiling of what every
+/// image can measure.
+fn home_script(want: &str) -> String {
+    format!(
+        r#"set -e
+want={want}
+up() {{ read -r a _ < /proc/uptime; echo "${{a%.*}}${{a#*.}}"; }}
+s=$(up)
+echo "$want" > /home/kl/.slo
+sync /home/kl/.slo
+got=$(cat /home/kl/.slo)
+e=$(up)
+[ "$got" = "$want" ]
+echo $(( (e - s) * 10 ))"#
+    )
 }
 
 pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> Result<(i32, String, String)> {
@@ -393,6 +421,18 @@ mod tests {
         assert!(args.iter().any(|a| a == "StrictHostKeyChecking=no"), "{args:?}");
         let env = session_env(r#"{"id":"ws-abc"}"#);
         assert_eq!(env.get("KL_SSH_SESSION").map(String::as_str), Some(r#"{"id":"ws-abc"}"#));
+    }
+
+    /// The read-back comparison is the whole point: an export that took the write and handed back
+    /// somebody else's bytes must fail the step, not report a fast round trip.
+    #[test]
+    fn the_home_script_fails_on_a_bad_read_back_and_times_with_proc_uptime() {
+        let script = home_script("fast-42");
+        assert!(script.starts_with("set -e"), "{script}");
+        assert!(script.contains(r#"[ "$got" = "$want" ]"#), "{script}");
+        assert!(script.contains("/proc/uptime"), "{script}");
+        // BusyBox `date` has no `%N`, so a nanosecond clock would fail on some images.
+        assert!(!script.contains("%N"), "{script}");
     }
 
     /// No kubeconfig is a deployment gap, not an SLO breach: the two ids that need one skip with a

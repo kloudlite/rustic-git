@@ -1,6 +1,9 @@
 //! Stage 6 · Environment: one environment with one service, and the attachment that makes it
 //! reachable from a workspace by bare name.
 //!
+//! Worst case 290 s if every step times out (120 + 20 + 20 + 20 + 90); see `workspace.rs`'s note
+//! on how the three stages' sums sit against the fast suite's 900 s deadline.
+//!
 //! `env.dns`, `env.attach` and `env.detach` are all resolver questions asked from INSIDE a pod,
 //! because that is the only place the answer means anything: CoreDNS answering the api process
 //! says nothing about what a service in the environment's namespace can reach.
@@ -17,7 +20,12 @@ use crate::ctx::Ctx;
 const CREATE_CEILING: Duration = Duration::from_secs(120);
 const DNS_CEILING: Duration = Duration::from_secs(20);
 const ATTACH_CEILING: Duration = Duration::from_secs(20);
-const PUSH_CEILING: Duration = Duration::from_secs(60);
+// The catalogue allows 90 s for an environment push; the ceiling may never be under its own
+// target, or a breach and a cut-off step become the same sample.
+const PUSH_CEILING: Duration = Duration::from_secs(90);
+/// One lookup inside a pod. The loop below is what waits out an attachment taking effect; a single
+/// exec that needs more than this is a wedged API server, not a slow resolver.
+const EXEC_CEILING: Duration = Duration::from_secs(10);
 
 /// The one service. `redis:7-alpine` because it is small, starts in a second and answers on a port
 /// — the journey needs a name to resolve, not a database to use.
@@ -120,8 +128,7 @@ async fn resolves(c: &Ctx, env: &str, cap: Duration) -> Result<bool> {
     // `{service}-0`: one StatefulSet per service, one replica, so the ordinal is always zero.
     let pod = format!("{SERVICE}-0");
     let script = format!("getent hosts {SERVICE} || nslookup {SERVICE}");
-    let (code, _, _) =
-        crate::kube::exec(k, &ns, &pod, None, &["sh", "-c", &script], cap).await?;
+    let (code, _, _) = crate::kube::exec(k, &ns, &pod, None, &["sh", "-c", &script], cap).await?;
     Ok(code == 0)
 }
 
@@ -176,7 +183,7 @@ async fn until(c: &Ctx, ws: &str, want: bool, cap: Duration) -> Result<()> {
         // A failed exec is not "does not resolve": the pod may be mid-restart, and reading that as
         // a detach having taken effect would pass this SLO through a broken workspace.
         let script = format!("getent hosts {SERVICE} || nslookup {SERVICE}");
-        let (code, _, _) = super::workspace::ws_exec(c, ws, &script, cap).await?;
+        let (code, _, _) = super::workspace::ws_exec(c, ws, &script, EXEC_CEILING).await?;
         if (code == 0) == want {
             return Ok(());
         }
@@ -190,11 +197,12 @@ async fn until(c: &Ctx, ws: &str, want: bool, cap: Duration) -> Result<()> {
 
 /// `env.push.p95`: the environment's own snapshot, waited to `ready` like the workspace's.
 async fn push(c: &mut Ctx, env: &str) {
+    // An environment's Volume carries its own id, exactly as a workspace's does.
+    c.state.env_volume = Some(env.to_string());
     let env = env.to_string();
     c.step("env.push.p95", PUSH_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let url = api(c, &format!("/v1/environments/{env}/push"));
-        // An environment's Volume carries its own id, exactly as a workspace's does.
         let history = api(c, &format!("/v1/volumes/{env}/history"));
         async move {
             let doc = post(c, &url, &jwt, Value::Null).await.context("could not push")?;
@@ -203,6 +211,9 @@ async fn push(c: &mut Ctx, env: &str) {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("the push answered no snapshot id"))?
                 .to_string();
+            // Both, so teardown can delete them by name: the environment's Volume outlives the
+            // environment for as long as this snapshot references it.
+            c.state.env_snapshot = Some(snap.clone());
             poll_json(c, &history, &jwt, PUSH_CEILING, |v| super::workspace::row_ready(v, &snap))
                 .await
                 .context("the snapshot never turned ready")

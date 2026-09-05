@@ -28,6 +28,11 @@ pub struct State {
     /// stage 5's outputs and stage 7's inputs, which is the whole reason they live here.
     pub volume: Option<String>,
     pub snapshot: Option<String>,
+    /// The environment's own volume and the push on it. Teardown deletes these BY NAME: an
+    /// environment's `Volume` outlives the environment for as long as a snapshot references it,
+    /// so without these two the probe would leak one subvolume per run forever.
+    pub env_volume: Option<String>,
+    pub env_snapshot: Option<String>,
     pub token: Option<String>,
     /// The token's VALUE, not its id — stage 4 logs in to the registry with it. Held in memory
     /// only: it is never reported, never logged, and dies with the process.

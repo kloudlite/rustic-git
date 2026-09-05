@@ -143,8 +143,36 @@ pub async fn boot(c: &mut Ctx) {
 /// lose the report that says why the run failed in the first place.
 pub async fn teardown(c: &mut Ctx) {
     let prefix = c.prefix();
-    let swept = sweep(c, move |name| name.starts_with(&prefix)).await;
+    let mut swept = sweep(c, move |name| name.starts_with(&prefix)).await;
+    swept += drop_env_volume(c).await;
     tracing::info!(count = swept, "slo.teardown.completed");
+}
+
+/// The environment's volume, by name.
+///
+/// The prefix sweep above cannot always reach it: a `Volume` is reference-counted, and the delete
+/// is refused while the environment's own finalizer is still running — so this runs AFTER the
+/// sweep, snapshot first (the last snapshot of a detached volume takes the volume with it) and
+/// then the volume itself. Best effort, like every other delete here: what is left is litter the
+/// next run's boot sweep collects.
+async fn drop_env_volume(c: &mut Ctx) -> usize {
+    let Some(volume) = c.state.env_volume.clone() else { return 0 };
+    let mut gone = 0;
+    let snapshot = c.state.env_snapshot.clone();
+    for url in snapshot
+        .map(|s| api(c, &format!("/v1/volumes/{volume}/snapshots/{s}")))
+        .into_iter()
+        .chain(std::iter::once(api(c, &format!("/v1/volumes/{volume}"))))
+    {
+        match call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await {
+            Ok(_) => {
+                gone += 1;
+                tracing::info!(kind = "volume", name = %volume, "slo.teardown.deleted");
+            }
+            Err(e) => tracing::warn!(kind = "volume", op = "delete", name = %volume, error = %format!("{e:#}"), "slo.teardown.failed"),
+        }
+    }
+    gone
 }
 
 /// One `/v1` collection teardown owns: how to list it, which field carries the name the prefix is
@@ -166,7 +194,10 @@ struct Kind {
 const KINDS: &[Kind] = &[
     Kind { kind: "workspace", list: "/v1/workspaces", name_field: "name", id_field: "id", del: |id| format!("/v1/workspaces/{id}") },
     Kind { kind: "environment", list: "/v1/environments", name_field: "name", id_field: "id", del: |id| format!("/v1/environments/{id}") },
-    Kind { kind: "volume", list: "/v1/volumes", name_field: "name", id_field: "name", del: |n| format!("/v1/volumes/{n}") },
+    // `display_name`, not `name`: a volume's `name` is the ws/env id (`ws-a1b2…`), which carries no
+    // run prefix at all — the caller-chosen name only survives on `display_name`, so matching on
+    // `name` swept nothing and every probe volume leaked.
+    Kind { kind: "volume", list: "/v1/volumes", name_field: "display_name", id_field: "name", del: |n| format!("/v1/volumes/{n}") },
     Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |n| format!("/v1/repos/{PROBE_USER}/{n}") },
     Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |id| format!("/v1/tokens/{id}") },
     Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id| format!("/v1/keys/{id}") },

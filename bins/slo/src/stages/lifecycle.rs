@@ -1,6 +1,9 @@
 //! Stage 7 · Lifecycle: stop, replicate, start, restore, and the refusals and collection that
 //! bound what a person can destroy.
 //!
+//! Worst case 335 s if every step times out (15 + 60 + 30 + 60 + 30 + 20 + 60 + 60); see
+//! `workspace.rs`'s note on how the three stages' sums sit against the fast suite's deadline.
+//!
 //! Every id here is about the workspace stage 5 created and pushed, so with no workspace the whole
 //! stage skips with one reason.
 
@@ -22,6 +25,8 @@ const REPLICATED_CEILING: Duration = Duration::from_secs(60);
 const START_CEILING: Duration = Duration::from_secs(30);
 const RESTORE_CEILING: Duration = Duration::from_secs(60);
 const REFUSAL_CEILING: Duration = Duration::from_secs(20);
+/// How long the finalizers get to drop this run's worktrees before the detached restore.
+const DETACH_CEILING: Duration = Duration::from_secs(30);
 const ORPHAN_CEILING: Duration = Duration::from_secs(60);
 
 /// Every id in this stage, in journey order — the list a missing precondition skips.
@@ -55,7 +60,7 @@ pub async fn run(c: &mut Ctx) {
     };
     restore(c, &snapshot).await;
     refusals(c, &volume, &snapshot).await;
-    detached_restorable(c, &volume, &snapshot).await;
+    detached_restorable(c, &snapshot).await;
     orphan_collected(c, &volume).await;
 }
 
@@ -89,7 +94,11 @@ async fn replicated(c: &mut Ctx, ws: &str) {
         let doc = api(c, &format!("/v1/workspaces/{ws}"));
         async move {
             poll_json(c, &doc, &jwt, REPLICATED_CEILING, |v| {
-                v.pointer("/replicated/status").and_then(Value::as_str) == Some("True")
+                // `ready`, not `status`: the wire shape is a `ConditionDoc` (`ready`/`reason`/
+                // `message`), and the CRD's `status: "True"` string never reaches the client. A
+                // pointer at a field that is not there is never true, so this SLO would have
+                // failed on every run of a perfectly healthy fleet.
+                v.pointer("/replicated/ready").and_then(Value::as_bool) == Some(true)
             })
             .await
             .context("no other node reported holding the final sync point")
@@ -173,6 +182,25 @@ async fn refusals(c: &mut Ctx, volume: &str, snapshot: &str) {
     .await;
 }
 
+/// Delete every working copy this run made and wait until `/v1` reports none left.
+async fn detach_all(c: &Ctx, cap: Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        let live = worktrees(c).await;
+        if live.is_empty() {
+            return Ok(());
+        }
+        for id in &live {
+            let url = api(c, &format!("/v1/workspaces/{id}"));
+            let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("{} working copies were still on the volume after {} ms", live.len(), cap.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// One DELETE that must answer 409.
 async fn refused(c: &Ctx, url: &str, jwt: &str, what: &str) -> Result<()> {
     let (status, body) = raw(c, reqwest::Method::DELETE, url, jwt, None, &[]).await?;
@@ -204,13 +232,13 @@ async fn sync_point(k: &kube::Client, volume: &str) -> Result<String> {
 /// a detached volume's record can still be reached at all — a restore that the API takes has
 /// already resolved the snapshot, its volume and the caller's right to it, and `ws.restore` above
 /// is the id that measures a restore converging.
-async fn detached_restorable(c: &mut Ctx, volume: &str, snapshot: &str) {
-    // Every working copy on the volume goes first — that is what "detached" means, and the
-    // deletes are the journey's own cleanup either way.
-    let names = worktrees(c, volume).await;
-    for id in &names {
-        let url = api(c, &format!("/v1/workspaces/{id}"));
-        let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
+async fn detached_restorable(c: &mut Ctx, snapshot: &str) {
+    // Every working copy on the volume goes first — that is what "detached" means — and the delete
+    // is only ACCEPTED synchronously: the `WORKTREE_FINALIZER` drops the worktree and detaches the
+    // Volume afterwards, so restoring straight after the DELETE would measure a volume that is
+    // still attached and prove nothing this SLO is about.
+    if let Err(e) = detach_all(c, DETACH_CEILING).await {
+        return c.skip("vol.detached.restorable", &format!("{e:#}"));
     }
     let name = format!("{}-detached", c.prefix());
     let snapshot = snapshot.to_string();
@@ -247,7 +275,7 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
         async move {
             let start = std::time::Instant::now();
             loop {
-                for id in worktrees(c, &volume).await {
+                for id in worktrees(c).await {
                     let url = api(c, &format!("/v1/workspaces/{id}"));
                     let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
                 }
@@ -272,22 +300,21 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
     .await;
 }
 
-/// Every workspace of the probe's whose working copy is on `volume`. A listing that fails is an
-/// empty list: the steps that use it re-read on their next pass.
-async fn worktrees(c: &Ctx, volume: &str) -> Vec<String> {
+/// Every workspace THIS RUN created, by name prefix — the same contract teardown sweeps on.
+///
+/// Not by the doc's `volume` field: that field is null until the volume has a push AND it is the
+/// owner's pushed set, so a clone or a restore taken before the first push simply would not appear
+/// and would be left standing on the volume this stage is trying to empty.
+///
+/// A listing that fails is an empty list; every caller re-reads on its next pass.
+async fn worktrees(c: &Ctx) -> Vec<String> {
     let url = api(c, "/v1/workspaces");
+    let prefix = c.prefix();
     let rows = get(c, &url, &c.probe_jwt).await.unwrap_or(Value::Null);
     rows.as_array()
         .map(|rows| {
             rows.iter()
-                // The doc's `volume` is `vol/{owner}/{volume}` — the pointer, whose last segment is
-                // the `Volume` CR's own name.
-                .filter(|r| {
-                    r.get("volume")
-                        .and_then(Value::as_str)
-                        .and_then(|v| v.rsplit('/').next())
-                        == Some(volume)
-                })
+                .filter(|r| r.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(&prefix)))
                 .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
                 .collect()
         })

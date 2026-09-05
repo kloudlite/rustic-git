@@ -21,8 +21,14 @@ spec:
   # is caught within a day rather than never.
   snapshots: 10
   diskGb: 5
-  cpu: 2
-  memoryGb: 4
+  # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
+  # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
+  # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
+  # journey holds three working copies at once (the workspace, its clone and a restore) plus the
+  # one-service environment (2 vCPU / 4 GiB): 14 vCPU and 28 GiB at peak, rounded up for headroom.
+  # `quota.refused` is unaffected — it refuses on diskGb, which no amount of cpu headroom widens.
+  cpu: 16
+  memoryGb: 32
 ---
 # The second tenant. It exists ONLY to be refused: `sec.cross.owner` proves one owner cannot read
 # another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any
