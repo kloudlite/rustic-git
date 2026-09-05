@@ -124,6 +124,13 @@ const MISSING_CACHE_MAX: usize = 4096;
 /// See `App::claim_gate`.
 pub const MAX_WAITING_CLAIMS: usize = 64;
 
+/// The whole handover's budget, inside the endpoint's own 30s bound and well inside the pod's 90s
+/// grace period. Whatever is not handed over by then is left owned and released by SIGTERM.
+pub const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(25);
+/// One repo's share of it. `release` alone can retry for ~21s against an unreachable leader
+/// (`Patience::Release`), which would spend the whole budget on the first of sixteen repos.
+pub const PER_REPO: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Pacing between repos in the visibility repair lane, mirroring the gc sweep's per-owner gap:
 /// the lane is a backstop, not a deadline, so it yields object-store bandwidth to real requests.
 pub const RECONCILE_GAP: std::time::Duration = std::time::Duration::from_millis(200);
@@ -381,6 +388,13 @@ impl App {
         self.draining.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Claim the drain: `true` if one was already running or done. A `swap`, not a read then a
+    /// write — two preStop hooks (or a hand-run curl beside one) would otherwise both pass the
+    /// check and run two handovers over each other.
+    pub fn begin_draining(&self) -> bool {
+        self.draining.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Hand every repo this pod owns to a live peer, before the process stops answering.
     ///
     /// This is what a roll used to pay for in 502s: SIGTERM released the leases and the repos sat
@@ -394,52 +408,95 @@ impl App {
     /// 2. resign the lease. A draining writer cannot hand anything over — every reassignment is a
     ///    map write, and the writer is about to close. `resign` is idempotent and also stops the
     ///    election beat retaking it; then wait for somebody else to take it, bounded.
-    /// 3. per repo: release our entry, grant it to the chosen peer, and only then close the local
-    ///    database. The entry is visible before the handle goes, which is the whole point; the
-    ///    cost is a window where the peer may open the database and fence us, the same trade
-    ///    `decide_force_claim` documents — and this pod is leaving anyway.
+    /// 3. per repo: release our entry, then CLOSE the local database (after the same drain a
+    ///    retire takes, so a request in flight here finishes), and only then name the peer.
     ///
-    /// Returns how many repos moved. Idempotent: the caller checks `is_draining` and answers a
-    /// second call at once. Bounded by the caller (`drain` endpoint), not here.
-    pub async fn drain(&self) -> usize {
-        self.draining.store(true, std::sync::atomic::Ordering::Relaxed);
+    /// That last order is the one that was wrong first time round. Naming the peer while this
+    /// pod still holds the handle open lets the peer open it and FENCE us, and a fenced request
+    /// here answers 503 — which git does not retry, i.e. exactly the sample this exists to
+    /// remove. Closing first costs nothing the goal cares about: `release` has already deleted
+    /// the entry, so for the length of the window a follower sees an unowned repo either way,
+    /// which is the pre-change behaviour and is handled (421, then the recovery path).
+    ///
+    /// Returns `(moved, kept)`. A repo is `kept` when the leader refuses to grant it away — the
+    /// entry is put back to us and the ordinary SIGTERM release deals with it — because the one
+    /// thing that must never happen is reporting a repo handed over while the map still names a
+    /// pod that has closed it.
+    ///
+    /// Bounded twice: `PER_REPO` on each handover, so one unreachable-leader repo cannot eat the
+    /// budget for the other fifteen, and `DRAIN_BUDGET` overall, after which the rest are left as
+    /// they are — still ours, still released by the SIGTERM path.
+    pub async fn drain(&self) -> (usize, usize) {
+        self.begin_draining();
+        let deadline = std::time::Instant::now() + DRAIN_BUDGET;
         let was_leader = self.is_leader();
         self.resign().await;
         if was_leader {
             self.await_new_leader().await;
         }
-        let mut moved = 0;
+        let (mut moved, mut kept) = (0, 0);
         for repo in self.store.pool.warm_repos() {
-            let Some(target) = self.handover_target(&repo).await else {
-                // Nobody to hand it to: fall back to the old behaviour — release and close, and
-                // whichever node is asked next claims it. Never keep it: this pod is going.
-                tracing::warn!(repo = %repo, "ownership.handover.nopeer");
-                self.close_after_release(&repo).await;
-                continue;
-            };
-            if let Err(e) = self.release(&repo).await {
-                tracing::warn!(repo = %repo, reason = "drain", error = %e, "ownership.release.failed");
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(repo = %repo, "ownership.handover.deadline");
+                break;
             }
-            match self.claim_for(&repo, &target).await {
-                Ok(_) => moved += 1,
-                Err(e) => tracing::warn!(repo = %repo, peer = %target, error = %e, "ownership.handover.failed"),
+            match tokio::time::timeout(PER_REPO, self.hand_over(&repo)).await {
+                Ok(true) => moved += 1,
+                Ok(false) => kept += 1,
+                // Out of time mid-handover: the entry may be anything, so make it nothing. An
+                // unowned repo is claimed by whoever is asked next; one naming a pod that is
+                // leaving is a dead end for a whole LEASE_TTL.
+                Err(_) => {
+                    tracing::warn!(repo = %repo, timeout_s = PER_REPO.as_secs(), "ownership.handover.timeout");
+                    let _ = tokio::time::timeout(PER_REPO, self.release(&repo)).await;
+                }
             }
-            self.evict(&repo).await;
         }
-        moved
+        (moved, kept)
     }
 
-    async fn close_after_release(&self, repo: &str) {
+    /// One repo's handover. `true` when a live peer now owns it in the map.
+    async fn hand_over(&self, repo: &str) -> bool {
+        let target = self.handover_target(repo).await;
         if let Err(e) = self.release(repo).await {
+            // The entry still names us and is live, so the peer would be refused anyway. Close and
+            // keep it: the SIGTERM release is the fallback, exactly as before this existed.
             tracing::warn!(repo = %repo, reason = "drain", error = %e, "ownership.release.failed");
+            self.close_local(repo).await;
+            return false;
         }
-        self.evict(repo).await;
+        self.close_local(repo).await;
+        let Some(target) = target else {
+            // Nobody to hand it to. The entry is already gone, so whichever node is asked next
+            // claims it — the pre-change behaviour, and never this pod.
+            tracing::warn!(repo = %repo, "ownership.handover.nopeer");
+            return false;
+        };
+        match self.claim_for(repo, &target).await {
+            Ok(Grant::Granted(_)) => true,
+            // Refused, or the leader could not be reached: the move did NOT happen. Take the repo
+            // back so the map names a node that is at least still answering until SIGTERM releases
+            // it; a `HeldBy` naming a third node is already owned, and the re-claim is refused in
+            // its turn, which is the right answer too.
+            other => {
+                match other {
+                    Ok(g) => tracing::warn!(repo = %repo, peer = %target, grant = ?g, "ownership.handover.refused"),
+                    Err(e) => tracing::warn!(repo = %repo, peer = %target, error = %e, "ownership.handover.failed"),
+                }
+                if let Err(e) = self.claim_for(repo, &self.self_name.clone()).await {
+                    tracing::warn!(repo = %repo, error = %e, "ownership.handover.reclaim.failed");
+                }
+                false
+            }
+        }
     }
 
-    /// Close this node's handle without touching the map — the entry already names the new owner.
-    async fn evict(&self, repo: &str) {
+    /// Close this node's handle. The entry is already gone, so this must NOT go through the
+    /// release hook — and it drains first, because unlike every other `evict` caller this node
+    /// may still be serving the repo.
+    async fn close_local(&self, repo: &str) {
         if let Some((o, n)) = repo.split_once('/') {
-            self.store.pool.evict(o, n).await;
+            self.store.pool.evict_after_drain(o, n).await;
         }
     }
 

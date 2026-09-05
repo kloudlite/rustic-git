@@ -52,26 +52,26 @@ pub(crate) async fn livez(State(app): State<Arc<App>>) -> Response {
     (StatusCode::OK, "ok").into_response()
 }
 
-/// How long the whole handover may take. `terminationGracePeriodSeconds` is 90 and the preStop
-/// hook runs inside it, so this has to leave room for the SIGTERM path that follows.
+/// The endpoint's own bound, outside `App::DRAIN_BUDGET` so a handover that overruns its own
+/// budget still answers rather than sitting out the pod's 90s grace period.
 const DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `POST /peer/v1/drain` — this pod is going away: hand every repo it owns to a live peer while it
 /// is still answering. Peer-only, like everything on this listener. Called by the preStop hook.
 ///
-/// Idempotent: a second call answers 200 at once rather than starting a second handover over the
-/// top of the first. Bounded, because a preStop hook that overruns the grace period is a SIGKILL —
-/// and a partial handover is strictly better than none, since whatever is left behind falls back
-/// to the lease TTL exactly as it did before this existed.
+/// Idempotent, and the flag is claimed with a `swap`: two hooks firing at once must not run two
+/// handovers over each other. Bounded, because a preStop hook that overruns the grace period is a
+/// SIGKILL — and a partial handover is strictly better than none, since whatever is left behind
+/// falls back to the lease TTL exactly as it did before this existed.
 pub(crate) async fn drain(State(app): State<Arc<App>>) -> Response {
-    if app.is_draining() {
+    if app.begin_draining() {
         return (StatusCode::OK, "draining").into_response();
     }
     let began = std::time::Instant::now();
     match tokio::time::timeout(DRAIN_BOUND, app.drain()).await {
-        Ok(repos) => {
-            tracing::info!(repos, ms = began.elapsed().as_millis() as u64, "ownership.drained");
-            (StatusCode::OK, format!("drained {repos}")).into_response()
+        Ok((repos, kept)) => {
+            tracing::info!(repos, kept, ms = began.elapsed().as_millis() as u64, "ownership.drained");
+            (StatusCode::OK, format!("drained {repos} kept {kept}")).into_response()
         }
         Err(_) => {
             tracing::warn!(timeout_s = DRAIN_BOUND.as_secs(), "ownership.drain.stalled");

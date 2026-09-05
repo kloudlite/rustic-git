@@ -2106,8 +2106,9 @@ async fn healthz_is_unready_only_while_no_leader_lives() {
 /// into a socket that has gone. That gap — released, unowned, and reclaimed only on somebody's
 /// next claim — was 1-2 failed requests per pod on every roll (`bins/server/src/main.rs`).
 ///
-/// Asserts the ORDER as well as the outcome: the entry names the peer, this node's handle is gone,
-/// and a client request for the repo is still served, through a different node, immediately after.
+/// Asserts the outcome — the entry names a live peer, this node's handle is gone, and a client
+/// request for the repo is still served through a different node immediately after. The ORDER
+/// (close before the peer is named) is pinned by `a_drain_closes_its_handle_before_naming_a_peer`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_drain_hands_its_repos_to_a_live_peer() {
     let e = common::env().await;
@@ -2179,4 +2180,70 @@ async fn a_draining_leader_resigns_before_it_hands_over() {
         "the entry was written through the NEW writer, naming the only live peer",
     );
     assert_eq!(a.store.pool.warm_count(), 0);
+}
+
+/// The handle must be CLOSED before the map names the peer. Naming it first lets the peer open the
+/// database while this pod still holds it, which fences this pod — and a fenced request here is
+/// answered 503 (`fenced_elsewhere`), which git does not retry: the very sample the handover
+/// exists to remove. Watched from the leader, whose map is the authority: at the moment the entry
+/// stops naming the drained node, that node must already be holding nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_closes_its_handle_before_naming_a_peer() {
+    let e = common::env().await;
+    let f = fleet(3);
+    let repo = "alice/web";
+    e.store.create_repo("alice", "web").await.unwrap();
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let _b = node(e.store.os.clone(), "kloudlite-2", &f).await;
+    a.app.claim(repo).await.unwrap();
+    a.store.pool.get("alice", "web").await.unwrap();
+
+    let (app, store) = (a.app.clone(), a.store.clone());
+    let drained = tokio::spawn(async move { app.drain().await });
+    // Poll the leader's own map. `evict_after_drain` sleeps `DRAIN` (500 ms) before closing, so
+    // this has a wide window to catch a handover that named the peer too early.
+    let mut saw_handover = false;
+    for _ in 0..600 {
+        match leader.app.owner(repo).await.unwrap() {
+            Some(o) if o.node != "kloudlite-1" => {
+                assert_eq!(store.pool.warm_count(), 0, "the peer was named while we still held the database open");
+                saw_handover = true;
+                break;
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+        }
+    }
+    assert_eq!(drained.await.unwrap(), (1, 0), "one repo moved, none kept");
+    assert!(saw_handover, "the entry never named a peer");
+}
+
+/// A handover the leader will not grant must not be counted as one. The repo stays THIS pod's on
+/// the record — it is still answering, and SIGTERM releases it as it always did — because a repo
+/// reported as moved while the map names a pod that has closed it is a dead end for every node for
+/// a full LEASE_TTL. Here the leader is unreachable, which is what a roll actually looks like.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_handover_keeps_the_repo_instead_of_reporting_it_moved() {
+    let e = common::env().await;
+    let f = fleet(3);
+    let repo = "alice/web";
+    e.store.create_repo("alice", "web").await.unwrap();
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let _b = node(e.store.os.clone(), "kloudlite-2", &f).await;
+    a.app.claim(repo).await.unwrap();
+    a.store.pool.get("alice", "web").await.unwrap();
+
+    // A's every ask — release, then the grant to the peer — lands on a refused port.
+    blackholed().lock().unwrap().insert(f[0].1.clone());
+    let (moved, kept) = a.app.drain().await;
+    blackholed().lock().unwrap().remove(&f[0].1);
+
+    assert_eq!((moved, kept), (0, 1), "an unreachable leader granted nothing: kept, not moved");
+    assert_eq!(
+        leader.app.owner(repo).await.unwrap().map(|x| x.node),
+        Some("kloudlite-1".to_string()),
+        "the entry must still name the node that is still answering",
+    );
+    assert_eq!(a.store.pool.warm_count(), 0, "the handle is closed either way");
 }

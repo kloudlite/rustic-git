@@ -158,6 +158,11 @@ spec:
           # that has gone. Bounded to 30s inside the handler, well within the 90s grace period the
           # SIGTERM path still needs after it. localhost, so no DNS and no TLS; the peer secret is
           # the same one the process itself authenticates peers with.
+          # The sleep AFTER the handover is what the old one bought and readiness cannot: endpoint
+          # removal is still propagating through the ingress and every peer's DNS, and a request
+          # already dispatched here has to land while the listeners are still up. `-f` so a refused
+          # or misconfigured drain (a 403 from trust_peer) is a failure and falls back to the plain
+          # sleep — without it curl exits 0 on any status and the pod would get neither.
           lifecycle:
             preStop:
               exec:
@@ -165,9 +170,9 @@ spec:
                   - /bin/sh
                   - -c
                   - >-
-                    curl -sS -m 35 -X POST
+                    curl -fsS -m 35 -X POST
                     -H "X-Kloudlite-Peer: $KLOUDLITE_PEER_SECRET"
-                    http://127.0.0.1:8081/peer/v1/drain || sleep 15
+                    http://127.0.0.1:8081/peer/v1/drain && sleep 10 || sleep 15
           # Readiness gates DNS membership: a pod is in the headless Service only while Ready, so
           # this is what puts a restarted pod back into every peer's view. 5s keeps that gap short
           # without hammering /healthz.

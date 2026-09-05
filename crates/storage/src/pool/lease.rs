@@ -191,6 +191,16 @@ impl Pool {
         }
     }
 
+    /// `evict`, but after the same `DRAIN` a retire takes, so a request already in flight on this
+    /// handle finishes before the database closes. For the drain handover, which gives the lease
+    /// back ITSELF (the entry is gone before this runs) and so must not go through the release
+    /// hook — but which is closing a database this node may still be serving, unlike every
+    /// `evict` caller.
+    pub async fn evict_after_drain(&self, owner: &str, name: &str) {
+        tokio::time::sleep(crate::ownership::DRAIN).await;
+        self.evict(owner, name).await;
+    }
+
     /// Evict only if the map still holds the exact handle the caller saw as closed. A blind evict
     /// races a concurrent reopen: two requests observing the same fenced handle would otherwise
     /// have the second one close the first's fresh, healthy database.
