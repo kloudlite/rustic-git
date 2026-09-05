@@ -22,6 +22,7 @@ pub mod beats;
 pub mod events;
 pub mod schema;
 pub mod series;
+pub mod slo;
 pub mod watch;
 
 use std::time::Duration;

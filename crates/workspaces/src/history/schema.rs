@@ -207,6 +207,47 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
     (13, "INSERT INTO kloudlite.fleet_hourly_v2 SELECT * FROM kloudlite.fleet_hourly"),
     (14, "EXCHANGE TABLES kloudlite.fleet_hourly AND kloudlite.fleet_hourly_v2"),
     (15, "DROP TABLE IF EXISTS kloudlite.fleet_hourly_v2"),
+    // The SLO probe's two tables. Both are ReplacingMergeTree on the PROBE's own coordinates, so a
+    // re-sent report collapses instead of double-counting an attainment — which only holds because
+    // `ts` is the step's own timestamp from the probe and never insert time. `updated` is the
+    // version, so the last write of a run wins (running -> passed/failed is an update, not a
+    // second row). 400 days to match `alerts`: a 30-day window needs no more, and a year of
+    // history is what makes "was this ever better?" answerable.
+    (
+        16,
+        "CREATE TABLE IF NOT EXISTS kloudlite.slo_runs (\
+            run_id String, \
+            suite LowCardinality(String), \
+            region LowCardinality(String), \
+            started DateTime64(3), \
+            finished Nullable(DateTime64(3)), \
+            state LowCardinality(String), \
+            stage String, \
+            steps_total UInt16, \
+            steps_failed UInt16, \
+            failed_step String, \
+            failed_detail String, \
+            updated DateTime64(3)\
+         ) ENGINE = ReplacingMergeTree(updated) \
+           ORDER BY (run_id) \
+           TTL toDateTime(started) + INTERVAL 400 DAY",
+    ),
+    (
+        17,
+        "CREATE TABLE IF NOT EXISTS kloudlite.slo_results (\
+            run_id String, \
+            slo_id LowCardinality(String), \
+            ts DateTime64(3), \
+            ok UInt8, \
+            ms UInt32, \
+            skipped UInt8, \
+            detail String, \
+            stage LowCardinality(String), \
+            updated DateTime64(3)\
+         ) ENGINE = ReplacingMergeTree(updated) \
+           ORDER BY (slo_id, ts, run_id) \
+           TTL toDateTime(ts) + INTERVAL 400 DAY",
+    ),
 ];
 
 /// Applies every migration this server has not recorded yet. Returns how many ran, so boot logs
