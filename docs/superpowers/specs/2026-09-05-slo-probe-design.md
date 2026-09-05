@@ -129,7 +129,7 @@ Weekly adds `git.push.large`, `reg.push.large`, `ws.cold.profile`, `ws.profile.r
 `ws.cross.node`, `homes.cross.node`, `cp.failover`, `settings.live`. Monthly adds
 `bak.tarball.age`, `bak.daily.slots`, `bak.versioning`, `bak.cosmos`, `drill.dead.node`,
 `drill.drain`, `drill.redis.down`. `vol.orphan.collected` waits up to five minutes and is the
-long pole of the fast suite; the fast suite's `activeDeadlineSeconds` is 540.
+long pole of the fast suite; the fast suite's `activeDeadlineSeconds` is 900 (a slow run skips the next tick under `Forbid`).
 
 ## The store and the maths
 
@@ -213,7 +213,7 @@ Every caller-shaped value in the SQL goes through `series::ident` or a typed par
 - `image.yml`: the `slo` Dockerfile stage → `ghcr.io/kloudlite/kloudlite-git-slo:{sha}`;
   `deploy/pin.sh` rewrites it with the other Rust images.
 - `deploy/kloudlite-git.yaml`: `CronJob/slo-fast` `*/5 * * * *`, `concurrencyPolicy: Forbid`,
-  `activeDeadlineSeconds: 540`, `successfulJobsHistoryLimit: 3`, `failedJobsHistoryLimit: 5`;
+  `activeDeadlineSeconds: 900`, `successfulJobsHistoryLimit: 3`, `failedJobsHistoryLimit: 5`;
   `slo-weekly` `0 2 * * 0`; `slo-monthly` `0 3 * * 0` with the binary exiting 0 and doing
   nothing when the day of month is past 7. All three: `KLOUDLITE_GIT_LOG_FORMAT=json`,
   `prometheus.io/scrape: "false"`, `restartPolicy: Never`, `backoffLimit: 0`.

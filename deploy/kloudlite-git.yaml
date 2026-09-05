@@ -1589,8 +1589,10 @@ data:
 ---
 # The fast suite, every five minutes. `Forbid`: a run that overshoots its window is a symptom, and
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.
-# `activeDeadlineSeconds: 540` is 60 s inside the schedule — `vol.orphan.collected` waits up to
-# five minutes and is the long pole.
+# `activeDeadlineSeconds: 900`: every step's ceiling sits at or above its catalogue target so a
+# slow answer is recorded as a breach with a number rather than cut off, and those ceilings sum
+# past one schedule on a bad day. `Forbid` skips the next tick while a run is still going, so a
+# slow run costs one missed sample, never two probes on one cluster.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -1603,7 +1605,7 @@ spec:
   failedJobsHistoryLimit: 5
   jobTemplate:
     spec:
-      activeDeadlineSeconds: 540
+      activeDeadlineSeconds: 900
       # No retry. A failed journey is a SAMPLE, already reported and already counted against the
       # budget; running it again would file a second run under a second id and quietly halve the
       # measured failure rate.
