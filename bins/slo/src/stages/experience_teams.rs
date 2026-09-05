@@ -540,8 +540,11 @@ async fn refuse_then_merge(
     }
 
     // The way through: a branch, a change on it, and a pull request. `main` never moves by hand.
-    git(c, vec!["checkout".into(), "-q".into(), BASE_BRANCH.into()], Some(work)).await?;
-    git(c, vec!["checkout".into(), "-q".into(), "-b".into(), branch.into()], Some(work)).await?;
+    // From the branch's CURRENT tip, fetched now: this clone's `main` is stage 2's, and the PR
+    // stage has merged past it since, so a branch off the local copy is not a fast-forward.
+    let fetch = super::git::authed(c, &["fetch", "-q", url, BASE_BRANCH]);
+    git(c, fetch, Some(work)).await.context("could not fetch the base branch")?;
+    git(c, vec!["checkout".into(), "-q".into(), "-B".into(), branch.into(), "FETCH_HEAD".into()], Some(work)).await?;
     std::fs::write(work.join("protected.txt"), format!("{run_id}\n")).context("could not write protected.txt")?;
     git(c, vec!["add".into(), "-A".into()], Some(work)).await?;
     git(c, vec!["commit".into(), "-q".into(), "-m".into(), "through a pull request".into()], Some(work)).await?;
