@@ -690,7 +690,10 @@ pub(super) async fn invite_revoke(c: &mut Ctx) {
             get(c, &api(c, &format!("/v1/invites/{token}")), &other)
                 .await
                 .context("a fresh invitation could not be previewed")?;
-            call(c, reqwest::Method::DELETE, &api(c, &format!("{invites}/{id}")), &jwt, None)
+            // `invites` is ALREADY absolute; wrapping it in `api()` again concatenated two full
+            // URLs and reqwest refused to send the result — a transport error, which is why this
+            // read as "could not revoke" rather than as any answer the api gave.
+            call(c, reqwest::Method::DELETE, &format!("{invites}/{id}"), &jwt, None)
                 .await
                 .context("could not revoke the invitation")?;
             let accept = api(c, &format!("/v1/invites/{token}/accept"));
@@ -766,28 +769,53 @@ pub(super) async fn team_environment(c: &mut Ctx) {
 }
 
 /// The team environment is running, and its service resolves inside its own namespace.
+///
+/// `running` is the RECORD, not a pod that answers — the same distinction `env.create.p95` makes
+/// by waiting on the StatefulSet before it execs. Without that wait this exec'd `redis-0` the
+/// instant the environment reported running, hit a pod that did not exist yet, and reported an
+/// empty stderr in 600 ms as "the service does not resolve".
+///
+/// The namespace is not the difference: `env_namespace` answers `env-{id}` for a team's
+/// environment exactly as it does for a person's, which the failure's own `env-d874…` shows.
 async fn team_env_ready(c: &Ctx, id: &str, one: &str, jwt: &str) -> Result<()> {
-    poll_json(c, one, jwt, TEAM_ENV_CEILING - Duration::from_secs(60), |v| {
-        v.get("state").and_then(Value::as_str) == Some("running")
-    })
-    .await
-    .context("the team environment never reported running")?;
-    let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+    let cap = TEAM_ENV_CEILING - Duration::from_secs(60);
+    poll_json(c, one, jwt, cap, |v| v.get("state").and_then(Value::as_str) == Some("running"))
+        .await
+        .context("the team environment never reported running")?;
+    // The StatefulSet's own ready replica, through the same helper stage 6 uses.
+    super::environment::service_ready(c, id, cap)
+        .await
+        .context("the team environment's service never became ready")?;
     let ns = kloudlite_workspaces::crd::env_namespace(id);
-    let (code, out, err) = crate::kube::exec(
-        k,
-        &ns,
-        "redis-0",
-        None,
-        &["sh", "-c", "getent hosts redis >/dev/null && redis-cli -h redis ping"],
-        Duration::from_secs(20),
-    )
-    .await?;
-    if code != 0 || !out.trim().eq_ignore_ascii_case("pong") {
-        return Err(anyhow!("the service in {ns} does not resolve and answer: {}", err.trim()));
+    // And retried, like `env.dns`'s own loop: a pod that is Ready is a pod the kubelet has
+    // started, which is a beat ahead of redis being willing to answer on its port.
+    let start = std::time::Instant::now();
+    let mut why;
+    loop {
+        let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+        match crate::kube::exec(
+            k,
+            &ns,
+            "redis-0",
+            None,
+            &["sh", "-c", "getent hosts redis >/dev/null && redis-cli -h redis ping"],
+            Duration::from_secs(20),
+        )
+        .await
+        {
+            Ok((0, out, _)) if out.trim().eq_ignore_ascii_case("pong") => return Ok(()),
+            Ok((code, _, err)) => why = format!("exit {code}: {}", err.trim()),
+            Err(e) => why = format!("{e:#}"),
+        }
+        if start.elapsed() >= SVC_ANSWERS {
+            return Err(anyhow!("the service in {ns} does not resolve and answer: {why}"));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    Ok(())
 }
+
+/// How long `redis` has to answer once its StatefulSet reports a ready replica.
+const SVC_ANSWERS: Duration = Duration::from_secs(30);
 
 /// `env.attach.pair`: deleting an attached workspace takes the ENVIRONMENT-side policy with it.
 ///

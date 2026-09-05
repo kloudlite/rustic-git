@@ -118,7 +118,6 @@ async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>)
     c.step("wt.delete", DELETE_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let env_url = api(c, &format!("/v1/environments/{env}"));
-        let vol_url = api(c, &format!("/v1/volumes/{volume}"));
         async move {
             // The workspace direction: the clone was never pushed, so nothing references its
             // Volume once the working copy is gone and Kubernetes GC must take it. The clone's own
@@ -129,8 +128,7 @@ async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>)
                 // have taken it: a 404 from the delete is not a failure.
                 let _ = super::call(c, reqwest::Method::DELETE, &ws, &jwt, None).await;
                 gone(c, &ws, &jwt, WAIT, "the clone's worktree").await?;
-                gone(c, &api(c, &format!("/v1/volumes/{clone}")), &jwt, WAIT, "the clone's volume with no snapshot")
-                    .await?;
+                volume_gone(c, &jwt, &clone, WAIT, "the clone's volume with no snapshot").await?;
             }
             // The environment direction: a snapshot still references the Volume, so the worktree
             // goes and the Volume stays — detached, with its history readable.
@@ -138,10 +136,12 @@ async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>)
                 .await
                 .context("could not delete the environment")?;
             gone(c, &env_url, &jwt, WAIT, "the environment's worktree").await?;
-            get(c, &vol_url, &jwt)
-                .await
-                .context("the volume was taken with the environment even though a snapshot remains")
-                .map(|_| ())
+            match volume_listed(c, &jwt, &volume).await? {
+                true => Ok(()),
+                false => Err(anyhow!(
+                    "the volume was taken with the environment even though a snapshot remains"
+                )),
+            }
         }
         .boxed()
     })
@@ -158,19 +158,45 @@ async fn snap_delete(c: &mut Ctx, volume: &str, snapshot: &str) {
     let (volume, snapshot) = (volume.to_string(), snapshot.to_string());
     c.step("snap.delete", SNAP_DELETE_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let vol = api(c, &format!("/v1/volumes/{volume}"));
         let one = api(c, &format!("/v1/volumes/{volume}/snapshots/{snapshot}"));
         async move {
             super::call(c, reqwest::Method::DELETE, &one, &jwt, None)
                 .await
                 .context("could not delete the snapshot")?;
-            // The volume goes with its last snapshot, so its history is a 404 rather than an
-            // empty list — which is why "gone" is asked of the volume and not of the listing.
-            gone(c, &vol, &jwt, SNAP_DELETE_CEILING, "the detached volume's last snapshot").await
+            // The volume goes with its last snapshot.
+            volume_gone(c, &jwt, &volume, SNAP_DELETE_CEILING, "the detached volume's last snapshot").await
         }
         .boxed()
     })
     .await;
+}
+
+/// Whether `/v1/volumes` still lists this volume.
+///
+/// The LIST, never `GET /v1/volumes/{name}` — there is no such route. `/v1/volumes/{name}` is
+/// registered DELETE-only (`crates/workspaces/src/api/mod.rs:334`), so a GET there answers 405
+/// forever: not a state a wait can converge on, which is exactly how `wt.delete` spent its whole
+/// budget asking. A volume's `name` in the listing is its ws/env id, which is what every caller
+/// here holds (`display_name` is the caller-chosen one teardown matches on).
+async fn volume_listed(c: &Ctx, jwt: &str, name: &str) -> Result<bool> {
+    let rows = get(c, &api(c, "/v1/volumes"), jwt).await.context("could not list the volumes")?;
+    Ok(rows
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(Value::as_str) == Some(name))))
+}
+
+/// Poll the listing until the volume is no longer in it.
+async fn volume_gone(c: &Ctx, jwt: &str, name: &str, cap: Duration, what: &str) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        if !volume_listed(c, jwt, name).await? {
+            return Ok(());
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("{what} is still listed after {} ms", cap.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Poll `url` until it 404s. The deletes above are all wishes — a finalizer drops the worktree
@@ -655,6 +681,31 @@ async fn snapshots(c: &Ctx, volume: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The volume checks read the LISTING, because `/v1/volumes/{name}` is DELETE-only and a GET
+    /// there answers 405 forever — a status no wait converges on, which is how `wt.delete` spent
+    /// its entire budget. And they match on `name` (the ws/env id), not `display_name`: the two
+    /// differ, and picking the wrong one is the trap that once made teardown's sweep find nothing.
+    #[tokio::test]
+    async fn a_volume_is_looked_for_in_the_listing_by_its_id() {
+        let app = axum::Router::new().route(
+            "/v1/volumes",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!([
+                    { "name": "ws-kept", "display_name": "run-fast-1-clone" },
+                ]))
+            }),
+        );
+        let c = crate::testkit::ctx_against(app).await;
+        let jwt = c.probe_jwt.clone();
+        assert!(volume_listed(&c, &jwt, "ws-kept").await.expect("listed"));
+        // The caller-chosen name is NOT what these match on.
+        assert!(!volume_listed(&c, &jwt, "run-fast-1-clone").await.expect("listed"));
+        assert!(!volume_listed(&c, &jwt, "ws-gone").await.expect("listed"));
+        // And "gone" converges on absence rather than on a status.
+        assert!(volume_gone(&c, &jwt, "ws-gone", Duration::from_millis(50), "x").await.is_ok());
+        assert!(volume_gone(&c, &jwt, "ws-kept", Duration::from_millis(50), "x").await.is_err());
+    }
 
     /// Stage 5 failing must not cost stage 7 its ids: every one is produced exactly once, skipped
     /// with the reason, so a broken workspace is one failure rather than eight.
