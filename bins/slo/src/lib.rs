@@ -11,6 +11,7 @@ pub mod report;
 pub mod stages;
 pub mod step;
 pub mod suite;
+pub mod tools;
 
 #[cfg(test)]
 mod testkit;

@@ -22,8 +22,34 @@ pub async fn ctx() -> Ctx {
         hosts: vec![],
         jwt_secret: "0123456789abcdef0123456789abcdef".into(),
         ssh_key_path: "/dev/null".into(),
+        ssh_hostkey: String::new(),
     };
     Ctx::new(cfg, Suite::Fast, None).await.expect("ctx")
+}
+
+/// Serve a hand-built router and answer its base url. For the stage tests, which need particular
+/// routes to fail rather than one blanket status.
+pub async fn serve(app: axum::Router) -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = l.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(l, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// A `Ctx` whose `/v1` is `app`. Nothing else is reachable, which is the point: a stage that
+/// reaches past the api under test fails loudly rather than hanging on a real hostname.
+pub async fn ctx_against(app: axum::Router) -> Ctx {
+    let url = serve(app).await;
+    let mut c = ctx().await;
+    c.cfg.api_url = url;
+    // The stage tests write nothing, but `Ctx::tmp` is under the real temp dir and two tests must
+    // not share one.
+    static NTH: AtomicUsize = AtomicUsize::new(0);
+    c.tmp = std::env::temp_dir()
+        .join(format!("slo-test-{}-{}", std::process::id(), NTH.fetch_add(1, Ordering::SeqCst)));
+    c
 }
 
 /// A server that answers every `PUT` with `status()` and counts the calls.

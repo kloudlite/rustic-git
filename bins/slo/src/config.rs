@@ -26,6 +26,11 @@ pub struct Config {
     pub jwt_secret: String,
     /// The private half of the key `bootstrap` registered for `slo-probe`.
     pub ssh_key_path: String,
+    /// The `known_hosts` line the git tier's SSH listener must present, set from the server's
+    /// published key. PINNED, not learned: a probe that ran `ssh-keyscan` and trusted the answer
+    /// would report `ssh.hostkey` green through the exact substitution the SLO exists to catch.
+    /// Empty means the operator has not pinned one, and `ssh.hostkey` skips rather than passing.
+    pub ssh_hostkey: String,
 }
 
 fn req(k: &str) -> Result<String> {
@@ -53,6 +58,18 @@ impl Config {
                 .collect(),
             jwt_secret: req("KLOUDLITE_GIT_JWT_SECRET")?,
             ssh_key_path: opt("KLOUDLITE_GIT_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
+            ssh_hostkey: opt("KLOUDLITE_GIT_SLO_SSH_HOSTKEY", ""),
         })
+    }
+}
+
+impl Config {
+    /// `ssh_host` with its port split off. The deployment sets one value because that is what the
+    /// web's clone box prints, and everything that dials it needs the two halves apart.
+    pub fn ssh_endpoint(&self) -> (&str, u16) {
+        match self.ssh_host.rsplit_once(':') {
+            Some((h, p)) => (h, p.parse().unwrap_or(22)),
+            None => (self.ssh_host.as_str(), 22),
+        }
     }
 }

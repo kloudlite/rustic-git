@@ -28,7 +28,12 @@ const PANIC_ENV: &str = "KLOUDLITE_GIT_SLO_TEST_PANIC";
 /// own extra stages, never a different journey — an SLO whose only samples came from a monthly
 /// run would have nothing to compare against.
 fn fast() -> Vec<Stage> {
-    vec![Stage { name: "0 · Boot", run: |c| Box::pin(stages::boot(c)) }]
+    vec![
+        Stage { name: "0 · Boot", run: |c| Box::pin(stages::boot(c)) },
+        Stage { name: stages::IDENTITY, run: |c| Box::pin(stages::identity::run(c)) },
+        Stage { name: stages::GIT, run: |c| Box::pin(stages::git::run(c)) },
+        Stage { name: stages::PULL_REQUEST, run: |c| Box::pin(stages::pr::run(c)) },
+    ]
 }
 
 pub fn suite(kind: Suite) -> Vec<Stage> {

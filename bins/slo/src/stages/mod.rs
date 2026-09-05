@@ -3,9 +3,112 @@
 
 use std::time::Duration;
 
+use anyhow::{anyhow, Result};
 use kloudlite_git_workspaces::slo::catalogue::Suite;
+use serde_json::Value;
 
 use crate::ctx::{Ctx, PROBE_USER};
+
+pub mod git;
+pub mod identity;
+pub mod pr;
+
+/// The three journey stages this file's neighbours implement, named as the catalogue's "Journey
+/// step" column names them. Stamped onto every step, so a failed run reads as a place in the
+/// journey rather than an id.
+pub const IDENTITY: &str = "1 · Identity";
+pub const GIT: &str = "2 · Git";
+pub const PULL_REQUEST: &str = "3 · Pull request";
+
+/// One HTTP call, with the body carried into the error.
+///
+/// A non-2xx is an `Err` rather than a value: every caller here is a step whose meaning is "this
+/// worked", and the few places that care about a REFUSAL ask for the status explicitly through
+/// `status`. The body is clipped because a 500 from a tier can be a whole HTML page, and the
+/// interesting part is always its first line.
+pub(crate) async fn call(
+    c: &Ctx,
+    method: reqwest::Method,
+    url: &str,
+    token: &str,
+    body: Option<Value>,
+) -> Result<Value> {
+    let (status, text) = raw(c, method, url, token, body, &[]).await?;
+    if !status.is_success() {
+        return Err(anyhow!("{status}: {}", text.chars().take(300).collect::<String>()));
+    }
+    // Every route here answers JSON except the ones that answer nothing (204, and the api's
+    // plain-text 202 on a merge); `Null` is the honest reading of both.
+    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+pub(crate) async fn get(c: &Ctx, url: &str, token: &str) -> Result<Value> {
+    call(c, reqwest::Method::GET, url, token, None).await
+}
+
+pub(crate) async fn post(c: &Ctx, url: &str, token: &str, body: Value) -> Result<Value> {
+    call(c, reqwest::Method::POST, url, token, Some(body)).await
+}
+
+/// The status and body, whatever they are. For the steps that measure a REFUSAL, and for the web
+/// app, which answers HTML.
+pub(crate) async fn raw(
+    c: &Ctx,
+    method: reqwest::Method,
+    url: &str,
+    token: &str,
+    body: Option<Value>,
+    headers: &[(&str, String)],
+) -> Result<(reqwest::StatusCode, String)> {
+    let mut req = c.http.request(method, url);
+    if !token.is_empty() {
+        req = req.header("authorization", c.bearer(token));
+    }
+    for (k, v) in headers {
+        req = req.header(*k, v.clone());
+    }
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.map_err(|e| anyhow!("{e}"))?;
+    let status = r.status();
+    Ok((status, r.text().await.unwrap_or_default()))
+}
+
+/// `{api_url}{path}`, with the trailing slash the deployment may or may not have set removed once.
+pub(crate) fn api(c: &Ctx, path: &str) -> String {
+    format!("{}{path}", c.cfg.api_url.trim_end_matches('/'))
+}
+
+/// `GET url` until `want` is satisfied, or `cap` elapses.
+///
+/// Concrete rather than a generic "poll this closure": all three waits in the journey are the same
+/// shape — a read that converges — and an async closure over `&Ctx` is exactly the thing that does
+/// not survive being boxed into a `Send` step future.
+///
+/// The interval is fixed and short: these waits are seconds, and a backoff would turn a 900 ms
+/// convergence into a 2 s sample and quietly reshape every latency SLO built on one.
+pub(crate) async fn poll_json(
+    c: &Ctx,
+    url: &str,
+    token: &str,
+    cap: Duration,
+    want: impl Fn(&Value) -> bool,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    let mut why;
+    loop {
+        match get(c, url, token).await {
+            Ok(v) if want(&v) => return Ok(()),
+            Ok(_) => why = "the answer does not have it yet".into(),
+            Err(e) => why = format!("{e:#}"),
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("not there after {} ms: {why}", cap.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
 
 /// A leftover this old cannot belong to a run still in flight — the fast suite's own
 /// `activeDeadlineSeconds` is 540 — so boot may sweep it. Without the age test, two overlapping
@@ -56,6 +159,10 @@ const KINDS: &[Kind] = &[
     Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |n| format!("/v1/repos/{PROBE_USER}/{n}") },
     Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |id| format!("/v1/tokens/{id}") },
     Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id| format!("/v1/keys/{id}") },
+    // `id.cli.flow` mints a real 30-day CLI token every five minutes. Its own collection, because
+    // a CLI token is not listed by `/v1/tokens` — without this the probe would leak one credential
+    // per run forever, which is a worse thing to own than the SLO is to measure.
+    Kind { kind: "cli-token", list: "/v1/cli/tokens", name_field: "name", id_field: "id", del: |id| format!("/v1/cli/tokens/{id}") },
 ];
 
 /// List every probe-owned object and delete the ones `matches` claims. Returns how many went.
