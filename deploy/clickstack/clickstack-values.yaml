@@ -109,6 +109,14 @@ hyperdx:
     # lands otherwise.
     FRONTEND_URL: https://hyperdx-dev.kloudlite.io
   deployment:
+    # Requests are what keep this pod off ClickHouse's node: without them the scheduler put it on
+    # the node ClickHouse already fills (2.8 GiB allocatable, 1.7 GiB ClickHouse), and the kernel
+    # killed the app at every boot (exit 137, 118 restarts) with nothing in its log. The chart has
+    # no affinity key for this deployment, so the request IS the anti-affinity — the full node
+    # cannot admit 768 MiB. The limit stops a leak taking a second node down the same way.
+    resources:
+      requests: { cpu: 100m, memory: 768Mi }
+      limits: { memory: 1536Mi }
     env:
       # A container's own `env` beats the chart's envFrom ConfigMap, so this overrides the
       # in-cluster MONGO_URI the chart still renders there.
