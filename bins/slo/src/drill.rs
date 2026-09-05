@@ -35,6 +35,11 @@ pub trait Cluster: Send + Sync {
     async fn tainted_nodes(&self) -> Result<Vec<String>>;
 }
 
+/// The minute every `undoing` step's ceiling adds on top of its body cap. `Ctx::step` drops the
+/// whole future when ITS timeout fires, undo included, so the body's own ceiling must always be
+/// the one that fires first — with this much room left for the undo to run in.
+pub const UNDO_SLACK: u64 = 60;
+
 /// Run `body` under `cap`, then run `undo` — on EVERY path out of it, the timeout included.
 ///
 /// The `cap` is the whole reason this takes one: `Ctx::step` runs a step inside its own
@@ -45,11 +50,6 @@ pub trait Cluster: Send + Sync {
 /// A failed undo turns a passing body into a failure: a drill that proved the fleet heals and then
 /// left a node tainted has not passed, it has broken something quietly. When both fail the BODY's
 /// error is the one reported — that is what the drill was measuring — and the undo's is logged.
-/// The minute every `undoing` step's ceiling adds on top of its body cap. `Ctx::step` drops the
-/// whole future when ITS timeout fires, undo included, so the body's own ceiling must always be
-/// the one that fires first — with this much room left for the undo to run in.
-pub const UNDO_SLACK: u64 = 60;
-
 pub async fn undoing<T, B, U, UF>(cap: Duration, body: B, undo: U) -> Result<T>
 where
     B: Future<Output = Result<T>>,

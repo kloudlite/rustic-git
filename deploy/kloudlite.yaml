@@ -1729,9 +1729,9 @@ metadata:
   name: kloudlite-slo-hourly
   namespace: kloudlite
 spec:
-  # SUSPENDED on arrival: stage 14 is a scaffold that skips every id, and an unsuspended CronJob
-  # would file 28 skips an hour and burn an hour of cluster time on a fast run nobody asked for.
-  # The owner unsuspends it once the Experience stage is implemented.
+  # Suspended until the first hand-run hourly job has passed on the cluster (deploy/k3s/README.md):
+  # the Experience suite holds a team, two environments and a seeded workspace at once, so its
+  # first run is watched, not scheduled. Unsuspended by hand after that.
   suspend: true
   schedule: "7 * * * *"
   concurrencyPolicy: Forbid
