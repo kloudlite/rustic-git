@@ -71,6 +71,13 @@ const QUOTA_GB: u64 = 1;
 /// `run-{id}-team`. Lowercase, dashes and digits only, and 26 characters for a typical run id:
 /// `check_handle` caps a handle at 39.
 fn slug(c: &Ctx) -> String {
+    team_slug(c)
+}
+
+/// The same value, for the siblings that read back what this file wrote — `experience_gaps`'
+/// `team.invite.revoke` and `team.environment` both act on THIS team, and a second `format!`
+/// there would be a second place the name has to be remembered.
+pub(super) fn team_slug(c: &Ctx) -> String {
     format!("{}-team", c.prefix())
 }
 

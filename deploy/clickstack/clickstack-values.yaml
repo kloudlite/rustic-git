@@ -15,14 +15,14 @@ clickhouse:
   # capped at 1.8 GiB fails whichever query lands while the alert evaluator, HyperDX and the SLO
   # status read overlap ("memory limit exceeded", the console's "history layer unavailable").
   # Sized for pool2's E4s_v5 (32 GB): room for the evaluator's 25 rules every 30 s plus a console.
-  containerTemplate:
-    resources:
-      requests: { cpu: "1", memory: 4Gi }
-      limits: { memory: 8Gi }
   cluster:
     # Rendered verbatim into the ClickHouseCluster CR, so these are the operator's field names,
     # not the chart's.
     spec:
+      containerTemplate:
+        resources:
+          requests: { cpu: "1", memory: 4Gi }
+          limits: { memory: 8Gi }
       replicas: 1
       shards: 1
       dataVolumeClaimSpec:
