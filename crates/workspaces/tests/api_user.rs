@@ -190,6 +190,9 @@ impl Directory for StubMembership {
     async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
         Err("no directory".into())
     }
+    async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 async fn server_with_teams(routes: Vec<Route>) -> Server {
@@ -1187,6 +1190,9 @@ impl Directory for StubCliTokens {
     async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
         Err("no directory".into())
     }
+    async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
@@ -1370,6 +1376,9 @@ impl Directory for StubKeys {
     async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
         Err("no directory".into())
     }
+    async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn ns_obj(name: &str, owner: &str) -> Value {
@@ -1410,6 +1419,9 @@ impl Directory for KeyTeams {
     }
     async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
         Err("no directory".into())
+    }
+    async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 

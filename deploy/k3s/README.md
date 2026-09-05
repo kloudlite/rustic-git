@@ -51,21 +51,27 @@ everything in one command:
 kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml
 ```
 
-### The SLO probe's two owners
+### The SLO probe's six owners
 
-`quotas-slo.yaml` is above because the probe (`deploy/kloudlite.yaml`'s three CronJobs) runs
-as `slo-probe` and `slo-other` in THIS cluster, and without the two `Quota` objects it inherits
+`quotas-slo.yaml` is above because the probe (`deploy/kloudlite.yaml`'s four CronJobs) runs with
+ONE tenant pair per suite in THIS cluster — fast as `slo-probe`/`slo-other`, hourly as
+`slo-hourly`/`slo-hourly-other`, the weekly and monthly drills as `slo-drill`/`slo-drill-other`
+(they are serial) — so a ~50-minute suite never shares an SSH key or a grant with the five-minute
+one. Without the six `Quota` objects a probe owner inherits
 `default-user` — a real person's allowance, which makes `quota.refused` cost a person's worth of
 workspaces before it sees its 409. Safe to re-apply; nothing else references them.
 
 ```sh
 kubectl apply -f quotas-slo.yaml
 
-# The probe's SSH key, once, on the AKS side (it is a Secret there, not here). Generate it and
-# register the public half; the runs use the private one for every SSH step.
-ssh-keygen -t ed25519 -N '' -C slo-probe -f /tmp/slo_ed25519
-kubectl -n kloudlite create secret generic kloudlite-slo --from-file=ssh_key=/tmp/slo_ed25519
-shred -u /tmp/slo_ed25519            # the cluster has it now; a copy on a laptop is a second key to lose
+# One SSH key PER SUITE, once, on the AKS side (they are Secrets there, not here). Generate each
+# and let the runs register the public half themselves. Three keys, because two suites adding the
+# same public key at once is the 409 ("that key is already added") this split exists to end.
+for s in kloudlite-slo kloudlite-slo-hourly kloudlite-slo-drill; do
+  ssh-keygen -t ed25519 -N '' -C "$s" -f /tmp/$s
+  kubectl -n kloudlite create secret generic "$s" --from-file=ssh_key=/tmp/$s
+  shred -u /tmp/$s                   # the cluster has it now; a copy on a laptop is a second key to lose
+done
 
 # The probe's own identity on this region: apply slo-rbac.yaml (the header table is the role —
 # exec into its pods, cordon/taint for the drills, impersonate the agent for one dry-run), then
@@ -74,7 +80,8 @@ shred -u /tmp/slo_ed25519            # the cluster has it now; a copy on a lapto
 # kloudlite-slo-k3s-kubeconfig. Without it stages 5-7 cannot see the workspace CRDs.
 kubectl apply -f slo-rbac.yaml
 
-# Then claim the two usernames, once. Idempotent.
+# Then claim all six usernames, once — `bootstrap` sends every suite's pair whatever env it runs
+# with, so one job is the whole of it. Idempotent.
 # `create job --from` copies the pod template verbatim and takes no argument override, so the
 # subcommand is swapped in on the way past.
 kubectl -n kloudlite create job slo-bootstrap --from=cronjob/kloudlite-slo-fast \

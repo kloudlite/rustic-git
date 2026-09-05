@@ -1,8 +1,10 @@
-# The two owners the SLO probe runs as. Applied by hand on the k3s cluster, like every other
+# The six owners the SLO probe runs as: one tenant pair PER SUITE — fast (`slo-probe`/`slo-other`),
+# hourly (`slo-hourly*`) and the weekly/monthly drills (`slo-drill*`) — because the suites overlap
+# in time and the hourly one grants itself superadmin and a raised quota mid-run. Applied by hand on the k3s cluster, like every other
 # `Quota` — `bins/api` writes these only through a superadmin decision on a `Request`, and the
 # probe's own allocation is a deploy-time fact, not a request anyone made.
 #
-# Cluster-scoped and named by the owner slug (crates/workspaces/src/crd/mod.rs). Without these two
+# Cluster-scoped and named by the owner slug (crates/workspaces/src/crd/mod.rs). Without these
 # objects the probe falls back to `default-user`, which is a real person's allowance — and
 # `quota.refused` (the fast suite's check that /v1 refuses an over-quota create) would then need to
 # create a person's worth of workspaces before it saw a 409.
@@ -44,6 +46,102 @@ apiVersion: kloudlite.io/v1alpha1
 kind: Quota
 metadata:
   name: slo-other
+spec:
+  workspaces: 0
+  environments: 0
+  snapshots: 0
+  diskGb: 0
+  cpu: 0
+  memoryGb: 0
+
+---
+# The hourly Experience suite's own pair. Three pairs, one per suite (fast / hourly / drills):
+# they overlap in time and the hourly suite grants itself superadmin and a raised quota, so a
+# shared pair meant the five-minute run read the hourly's grants — see bins/slo/src/ctx.rs's
+# SUITE_TENANTS. Same limits as the fast pair, deliberately: the suites walk the same journey.
+apiVersion: kloudlite.io/v1alpha1
+kind: Quota
+metadata:
+  name: slo-hourly
+spec:
+  # A run holds the workspace, its clone and a restore at once, and a run the deadline killed keeps
+  # its objects until the next boot sweep (one hour), so the count fits two runs, not one;
+  # `quota.refused` therefore refuses on diskGb (a create asking for more than 20 GiB), never on the
+  # count. Leftovers from a crashed run are swept by `run-{id}` prefix on the next run's boot.
+  # The hourly Experience suite runs on top of the fast run's objects and holds more at once: a
+  # team workspace and a seeded workspace beside the fast journey's three working copies, and a
+  # second environment (the two-service one, plus its clone) beside the fast run's one.
+  workspaces: 8
+  environments: 3
+  # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
+  # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
+  # is caught within a day rather than never.
+  snapshots: 20
+  diskGb: 40
+  # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
+  # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
+  # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
+  # journey holds three working copies at once (the workspace, its clone and a restore) plus the
+  # one-service environment (2 vCPU / 4 GiB): 14 vCPU and 28 GiB at peak, rounded up for headroom.
+  # `quota.refused` is unaffected — it refuses on diskGb, which no amount of cpu headroom widens.
+  # Raised with the counts above for the hourly suite's extra workspace and environment, and these
+  # are the values `request.approve` writes back after it has raised and used the quota.
+  cpu: 40
+  memoryGb: 80
+
+---
+# The hourly suite's second tenant, all zero for the same reason as `slo-other`.
+apiVersion: kloudlite.io/v1alpha1
+kind: Quota
+metadata:
+  name: slo-hourly-other
+spec:
+  workspaces: 0
+  environments: 0
+  snapshots: 0
+  diskGb: 0
+  cpu: 0
+  memoryGb: 0
+
+---
+# The weekly and monthly drills' pair. They are serial (Sunday 02:00 and 03:00), so one pair
+# covers both; same limits as the fast pair for the same reason.
+apiVersion: kloudlite.io/v1alpha1
+kind: Quota
+metadata:
+  name: slo-drill
+spec:
+  # A run holds the workspace, its clone and a restore at once, and a run the deadline killed keeps
+  # its objects until the next boot sweep (one hour), so the count fits two runs, not one;
+  # `quota.refused` therefore refuses on diskGb (a create asking for more than 20 GiB), never on the
+  # count. Leftovers from a crashed run are swept by `run-{id}` prefix on the next run's boot.
+  # The hourly Experience suite runs on top of the fast run's objects and holds more at once: a
+  # team workspace and a seeded workspace beside the fast journey's three working copies, and a
+  # second environment (the two-service one, plus its clone) beside the fast run's one.
+  workspaces: 8
+  environments: 3
+  # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
+  # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
+  # is caught within a day rather than never.
+  snapshots: 20
+  diskGb: 40
+  # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
+  # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
+  # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
+  # journey holds three working copies at once (the workspace, its clone and a restore) plus the
+  # one-service environment (2 vCPU / 4 GiB): 14 vCPU and 28 GiB at peak, rounded up for headroom.
+  # `quota.refused` is unaffected — it refuses on diskGb, which no amount of cpu headroom widens.
+  # Raised with the counts above for the hourly suite's extra workspace and environment, and these
+  # are the values `request.approve` writes back after it has raised and used the quota.
+  cpu: 40
+  memoryGb: 80
+
+---
+# The drills' second tenant, all zero for the same reason as `slo-other`.
+apiVersion: kloudlite.io/v1alpha1
+kind: Quota
+metadata:
+  name: slo-drill-other
 spec:
   workspaces: 0
   environments: 0

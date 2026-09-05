@@ -17,7 +17,9 @@ The hourly suite (`14 · Experience`) is the owner's addendum: everything a pers
 five-minute run has no room for — packages, teams and invitations, branch protection, a
 two-service environment, an approved quota request. It runs the fast journey first, so every
 hourly run is also a fast sample, and its burn pair is 24 h / 4 h because one sample an hour
-cannot fill a five-minute window.
+cannot fill a five-minute window. It runs as its own tenant pair (`slo-hourly`/`slo-hourly-other`,
+and the drills as `slo-drill*`) with its own SSH key, so a ~50-minute run never shares an SSH key,
+a superadmin grant or a quota with the five-minute suite underneath it.
 
 | id | Feature | SLI | Target | Suite | Journey step |
 | --- | --- | --- | --- | --- | --- |

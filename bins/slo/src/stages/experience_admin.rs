@@ -13,7 +13,7 @@ use futures::FutureExt;
 use serde_json::{json, Value};
 
 use super::{admin, api, call, get, poll_json, post, raw};
-use crate::ctx::{Ctx, OTHER_EMAIL, PROBE_USER};
+use crate::ctx::Ctx;
 use crate::drill::{undoing, UNDO_SLACK};
 
 /// Per-step ceilings, each looser than the catalogue target it measures (10 s for the create after
@@ -74,13 +74,14 @@ pub async fn request_approve(c: &mut Ctx) {
 /// The step's whole body, with the body's ceiling as an argument so a test can watch the
 /// compensation run when the body times out.
 async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result<()> {
+    let probe = c.probe_user.clone();
     let jwt = c.probe_jwt.clone();
     let admin_jwt = c.admin_jwt.clone();
     let region = c.cfg.region.clone();
     let quota_url = api(c, "/v1/quota");
     let ws_url = api(c, "/v1/workspaces");
     let req_url = api(c, "/v1/requests");
-    let write_back = admin(c, &format!("/admin/quota/{PROBE_USER}"));
+    let write_back = admin(c, &format!("/admin/quota/{probe}"));
     // What the body made, for the undo — which cannot be handed the body's return value, because
     // it must also run on the path where the body was cut off and returned nothing at all.
     let made: Arc<Mutex<Option<String>>> = Arc::default();
@@ -219,9 +220,10 @@ pub async fn admin_stop(c: &mut Ctx) {
 /// a secret this probe holds, so it would pass before the grant as well as after and prove nothing
 /// about the directory. `refuse_without_claim` is covered by `sec.admin.claim` instead.
 pub async fn superadmin_grant(c: &mut Ctx) {
+    let other_email = c.other_email.clone();
     c.step("superadmin.grant", GRANT_CEILING, |c| {
         let jwt = c.admin_jwt.clone();
-        let one = admin(c, &format!("/api/admin/superadmins/{OTHER_EMAIL}"));
+        let one = admin(c, &format!("/api/admin/superadmins/{other_email}"));
         let all = admin(c, "/api/admin/superadmins");
         async move {
             let body = json!({ "note": NOTE });
@@ -254,9 +256,10 @@ pub async fn superadmin_grant(c: &mut Ctx) {
 /// Whether the second tenant is on the roster. Case-insensitive: the roster's `_id` is an email
 /// address, and nothing normalises the casing on the way in.
 async fn listed(c: &Ctx, url: &str, jwt: &str) -> Result<bool> {
+    let other_email = c.other_email.clone();
     let v = get(c, url, jwt).await?;
     Ok(v.as_array().unwrap_or(&vec![]).iter().any(|r| {
-        r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(OTHER_EMAIL))
+        r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(&other_email))
     }))
 }
 
@@ -266,13 +269,14 @@ async fn listed(c: &Ctx, url: &str, jwt: &str) -> Result<bool> {
 /// read from the listing markers, so any repo of this run's proves the same path, and a step that
 /// depended on another stage's object would skip on every run that reordered them.
 pub async fn feed(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     let name = format!("{}-f", c.prefix());
     c.step("feed.experience", FEED_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let repos = api(c, "/v1/repos");
-        let feed = api(c, &format!("/v1/activity?owner={PROBE_USER}&limit=100"));
+        let feed = api(c, &format!("/v1/activity?owner={probe}&limit=100"));
         async move {
-            let body = json!({ "owner": PROBE_USER, "name": name, "visibility": "private" });
+            let body = json!({ "owner": probe, "name": name, "visibility": "private" });
             post(c, &repos, &jwt, body).await.context("could not create the repo")?;
             // Two seconds inside the step's own ceiling, so a feed that never carries the repo
             // reports what it last saw rather than the step's bare "timed out".
@@ -364,7 +368,7 @@ mod tests {
             let s = s.clone();
             async move {
                 let rows = if s.granted.load(Ordering::SeqCst) {
-                    vec![json!({ "_id": OTHER_EMAIL })]
+                    vec![json!({ "_id": crate::ctx::email_of(crate::ctx::OTHER_USER) })]
                 } else {
                     vec![]
                 };
@@ -534,15 +538,25 @@ mod tests {
 
 #[cfg(test)]
 mod quota_yaml {
-    /// `probe_quota` is a hand copy of the `slo-probe` object in deploy/k3s/quotas-slo.yaml; an
-    /// edit to one without the other makes teardown quietly restore the wrong limits.
+    /// `probe_quota` is a hand copy of the PRIMARY tenant's object in deploy/k3s/quotas-slo.yaml;
+    /// an edit to one without the other makes teardown quietly restore the wrong limits. Checked
+    /// for all three primary users — one pair per suite (ctx::SUITE_TENANTS), and teardown restores
+    /// whichever one the run owns, so a pair added with different limits is the same bug.
     #[test]
-    fn the_probe_quota_matches_the_yaml_applied_on_the_region() {
+    fn every_primary_quota_matches_the_yaml_applied_on_the_region() {
         let yaml = include_str!("../../../../deploy/k3s/quotas-slo.yaml");
-        let probe = yaml.split("name: slo-other").next().unwrap();
-        for (k, v) in super::probe_quota().as_object().unwrap() {
-            let line = format!("\n  {k}: {v}\n");
-            assert!(probe.contains(&line), "quotas-slo.yaml slo-probe lacks `{}`", line.trim());
+        let want = super::probe_quota();
+        let mut seen = 0;
+        for doc in yaml.split("\n---\n").map(|d| format!("{}\n", d.trim_end())) {
+            if !crate::ctx::SUITE_TENANTS.iter().any(|(p, _)| doc.contains(&format!("name: {p}\n"))) {
+                continue;
+            }
+            seen += 1;
+            for (k, v) in want.as_object().unwrap() {
+                let line = format!("\n  {k}: {v}\n");
+                assert!(doc.contains(&line), "a quotas-slo.yaml primary object lacks `{}`", line.trim());
+            }
         }
+        assert_eq!(seen, crate::ctx::SUITE_TENANTS.len(), "one primary Quota object per suite");
     }
 }

@@ -75,6 +75,11 @@ pub struct Ctx {
     pub suite: Suite,
     pub http: reqwest::Client,
     pub probe_jwt: String,
+    /// Who this run IS. From the CronJob's env — see `SUITE_TENANTS`.
+    pub probe_user: String,
+    pub other_user: String,
+    pub probe_email: String,
+    pub other_email: String,
     /// The second tenant, for `sec.cross.owner`. Never used to create anything teardown sweeps.
     pub other_jwt: String,
     pub admin_jwt: String,
@@ -108,10 +113,21 @@ pub struct Ctx {
     pub report_failed: bool,
 }
 
-pub const PROBE_EMAIL: &str = "slo-probe@kloudlite.io";
-pub const OTHER_EMAIL: &str = "slo-other@kloudlite.io";
 pub const PROBE_USER: &str = "slo-probe";
 pub const OTHER_USER: &str = "slo-other";
+
+/// The tenant pair for one suite. One pair PER SUITE, not one for the fleet: the hourly suite runs
+/// for ~50 minutes and grants itself superadmin and a raised quota on the way, and the fast suite
+/// ticks every five minutes underneath it — sharing a pair meant the fast run's `id.key.usable`
+/// hit "that key is already added" and its `sec.*`/`quota.refused` checks read the hourly's
+/// grants. The names come from the CronJob's env, so a suite is isolated by its yaml, not by code.
+/// Every `slo-*` user is created by `bootstrap` and capped by deploy/k3s/quotas-slo.yaml.
+pub const SUITE_TENANTS: &[(&str, &str)] =
+    &[(PROBE_USER, OTHER_USER), ("slo-hourly", "slo-hourly-other"), ("slo-drill", "slo-drill-other")];
+
+pub fn email_of(user: &str) -> String {
+    format!("{user}@kloudlite.io")
+}
 
 impl Ctx {
     /// `run_id` is `Some` only in the child process, which must report under the SAME id its
@@ -131,11 +147,15 @@ impl Ctx {
             .unwrap_or_else(Utc::now);
         Ok(Ctx {
             run_id: run_id.unwrap_or_else(|| format!("{}-{}", suite.as_str(), started.timestamp())),
-            probe_jwt: mint(PROBE_EMAIL, PROBE_USER)?,
-            other_jwt: mint(OTHER_EMAIL, OTHER_USER)?,
+            probe_jwt: mint(&email_of(&cfg.probe_user), &cfg.probe_user)?,
+            other_jwt: mint(&email_of(&cfg.other_user), &cfg.other_user)?,
             admin_jwt: jwt
-                .mint_admin(PROBE_EMAIL, PROBE_USER, Some(PROBE_USER), true)
+                .mint_admin(&email_of(&cfg.probe_user), &cfg.probe_user, Some(&cfg.probe_user), true)
                 .map_err(|e| anyhow::anyhow!("mint admin: {e}"))?,
+            probe_user: cfg.probe_user.clone(),
+            other_user: cfg.other_user.clone(),
+            probe_email: email_of(&cfg.probe_user),
+            other_email: email_of(&cfg.other_user),
             // One client for the whole run: connection reuse is the difference between a p95 that
             // measures the fleet and one that measures TLS handshakes.
             http: reqwest::Client::builder()

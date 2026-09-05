@@ -240,6 +240,9 @@ mod tests {
             async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
                 Err("no directory".into())
             }
+            async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+                Err("no directory".into())
+            }
         }
         let state = ApiState::new(
             Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),

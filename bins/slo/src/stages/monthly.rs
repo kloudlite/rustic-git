@@ -18,7 +18,7 @@ use futures::{FutureExt, TryStreamExt};
 use serde_json::{json, Value};
 
 use super::{admin, api, get, poll_json, post};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 use crate::{drill, tools};
 
 /// The container and the fixed slot names `deploy/k3s/backup-controlplane.sh` writes: 24 hourly
@@ -562,8 +562,9 @@ async fn resolve(c: &Ctx, host: &str) -> Result<Vec<String>> {
 /// The work that must still happen with the stream cut off: a repo created and visible in the feed,
 /// a push, and a PR that merges.
 async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
+    let probe = c.probe_user.clone();
     let jwt = c.probe_jwt.clone();
-    let body = json!({ "owner": PROBE_USER, "name": name, "visibility": "private" });
+    let body = json!({ "owner": probe, "name": name, "visibility": "private" });
     post(c, &api(c, "/v1/repos"), &jwt, body).await.context("the repo would not create")?;
 
     let work = c.tmp.join("git").join(name);
@@ -573,7 +574,7 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     std::fs::write(work.join("README.md"), format!("# {name}\n")).context("could not write")?;
     g(vec!["add".into(), "-A".into()]).await?;
     g(vec!["commit".into(), "-q".into(), "-m".into(), "seed".into()]).await?;
-    let url = format!("{}/{PROBE_USER}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
+    let url = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
     let push = super::git::authed(c, &["push", "-q", &url, "main"]);
     super::git::git(c, push, Some(&work)).await.context("the push failed with Redis down")?;
 
@@ -584,15 +585,15 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     let push = super::git::authed(c, &["push", "-q", &url, "slo"]);
     super::git::git(c, push, Some(&work)).await.context("the branch push failed")?;
 
-    let refs = api(c, &format!("/api/{PROBE_USER}/{name}/refs"));
+    let refs = api(c, &format!("/api/{probe}/{name}/refs"));
     let head = super::git::oid_of(&get(c, &refs, &jwt).await?, "slo")
         .ok_or_else(|| anyhow!("the branch never appeared"))?;
-    let pulls = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/pulls"));
+    let pulls = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
     let pr = post(c, &pulls, &jwt, json!({ "title": "slo redis drill", "base": "main", "head": "slo" }))
         .await
         .context("the pull request would not open")?;
     let number = pr.get("number").and_then(Value::as_i64).ok_or_else(|| anyhow!("no pull number"))?;
-    let merge = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/pulls/{number}/merge?strategy=fast-forward"));
+    let merge = api(c, &format!("/v1/repos/{probe}/{name}/pulls/{number}/merge?strategy=fast-forward"));
     post(c, &merge, &jwt, Value::Null).await.context("the merge was refused")?;
     // The merge runs in the worker, which is announced through the stream AND re-announced on the
     // owner's own 15 s beat — that fallback is what this half of the drill is about.
@@ -605,8 +606,8 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     // `repo_created` specifically: the PR half of the feed is stream-only ON PURPOSE
     // (`feed.rs`, "no fallback here"), so with Redis down it is expected to be quiet and asserting
     // on it would fail a drill that the system passed by design.
-    let feed = api(c, &format!("/v1/activity?owner={PROBE_USER}"));
-    let want = format!("{PROBE_USER}/{name}");
+    let feed = api(c, &format!("/v1/activity?owner={probe}"));
+    let want = format!("{probe}/{name}");
     poll_json(c, &feed, &jwt, Duration::from_secs(60), |v| created(v, &want))
         .await
         .context("the activity feed never showed the repo")

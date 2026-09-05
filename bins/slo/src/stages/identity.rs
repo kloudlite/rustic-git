@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context};
 use futures::FutureExt;
 
 use super::{api, get, post};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 use crate::step::DEFAULT_TIMEOUT;
 use crate::tools;
 
@@ -21,11 +21,12 @@ use crate::tools;
 const KEY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub async fn run(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     // The owner's PLATFORM key is generated on the first read of `/v1/platform-key`, and the api
     // writes a workspace's `authorized_keys` Secret only for an owner who has one (see
     // `write_user_key`). A person reaches that page in the web; the probe never does, so it reads
     // it here — otherwise every gateway login answers "Permission denied (publickey)".
-    if let Err(e) = get(c, &api(c, &format!("/v1/platform-key?owner={PROBE_USER}")), &c.probe_jwt.clone()).await {
+    if let Err(e) = get(c, &api(c, &format!("/v1/platform-key?owner={probe}")), &c.probe_jwt.clone()).await {
         tracing::warn!(reason = "platform-key", error = %e, "slo.identity.degraded");
     }
     // The session JWT is minted in-process from the Secret, so there is no password path to walk:
@@ -47,7 +48,7 @@ pub async fn run(c: &mut Ctx) {
     c.step("id.token.mint", DEFAULT_TIMEOUT, |c| {
         let (name, jwt) = (name.clone(), c.probe_jwt.clone());
         async move {
-            let body = serde_json::json!({ "owner": PROBE_USER, "name": name });
+            let body = serde_json::json!({ "owner": probe, "name": name });
             let out = post(c, &api(c, "/v1/tokens"), &jwt, body).await?;
             // Recorded so teardown revokes it by id even if the name sweep somehow misses it.
             // `_id` at the root: the answer is `IssuedToken`, whose `meta` is flattened into it.
@@ -76,6 +77,7 @@ pub async fn run(c: &mut Ctx) {
 /// object store's `authorized_keys` view, which is built from these rows, so a key that was
 /// accepted but never listed is one `ssh.clone.ok` would fail on with no clue why.
 async fn key(c: &mut Ctx, name: &str) {
+    let probe = c.probe_user.clone();
     c.step("id.key.usable", KEY_TIMEOUT, |c| {
             let (name, jwt) = (name.to_string(), c.probe_jwt.clone());
             let (key_path, keygen) = (c.cfg.ssh_key_path.clone(), c.programs.ssh_keygen.clone());
@@ -86,9 +88,9 @@ async fn key(c: &mut Ctx, name: &str) {
                     .await
                     .context("could not read the probe's public key")?;
                 let public = public.trim().to_string();
-                let body = serde_json::json!({ "owner": PROBE_USER, "name": name, "key": public });
+                let body = serde_json::json!({ "owner": probe, "name": name, "key": public });
                 post(c, &api(c, "/v1/keys"), &jwt, body).await.context("could not register the key")?;
-                let listed = get(c, &api(c, &format!("/v1/keys?owner={PROBE_USER}")), &jwt).await?;
+                let listed = get(c, &api(c, &format!("/v1/keys?owner={probe}")), &jwt).await?;
                 let found = listed
                     .as_array()
                     .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(|v| v.as_str()) == Some(&name)));
@@ -154,15 +156,16 @@ async fn list_cli_token_id(c: &Ctx, name: &str) -> Option<String> {
 /// runs from the git stage rather than stage 1 because two of the three legs need a repo to point
 /// at; the step is stamped `1 · Identity` regardless, which is where the journey puts it.
 pub(crate) async fn tiers(c: &mut Ctx, repo: &str) {
+    let probe = c.probe_user.clone();
     let was = std::mem::replace(&mut c.stage, super::IDENTITY.to_string());
     c.step("id.jwt.tiers", DEFAULT_TIMEOUT, |c| {
         let jwt = c.probe_jwt.clone();
-        let refs = api(c, &format!("/api/{PROBE_USER}/{repo}/refs"));
-        let url = format!("{}/{PROBE_USER}/{repo}.git", c.cfg.git_url.trim_end_matches('/'));
+        let refs = api(c, &format!("/api/{probe}/{repo}/refs"));
+        let url = format!("{}/{probe}/{repo}.git", c.cfg.git_url.trim_end_matches('/'));
         let args = super::git::authed(c, &["ls-remote", &url]);
         let (git, env) = (c.programs.git.clone(), super::git::git_env(c));
         async move {
-            get(c, &api(c, &format!("/v1/repos?owner={PROBE_USER}")), &jwt).await.context("/v1")?;
+            get(c, &api(c, &format!("/v1/repos?owner={probe}")), &jwt).await.context("/v1")?;
             get(c, &refs, &jwt).await.context("browse")?;
             tools::run(&git, &args, &env, None, Duration::from_secs(30)).await.context("git over HTTP")?;
             Ok(())

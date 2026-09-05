@@ -853,13 +853,18 @@ pub fn git_init_container(
         command: Some(vec![
             "sh".to_string(),
             "-c".to_string(),
-            format!("set -e; [ \"$(ls -A {SEED_DIR})\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR}")
-                .to_string(),
+            // The key volume is 0444 on purpose (`user_key_volume`), which ssh accepts from `kl`
+            // and refuses from ROOT — and this container is root. A private copy at 0600 is the
+            // one form both callers accept; the root filesystem here is writable, so /tmp exists.
+            format!(
+                "set -e; [ \"$(ls -A {SEED_DIR})\" ] || {{ install -m 600 {USER_KEY_PATH}/id_ed25519 /tmp/seed_key; \
+                 GIT_SSH_COMMAND=\"ssh -i /tmp/seed_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\" \
+                 git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR}; }}"
+            ),
         ]),
         env: Some(vec![
             EnvVar { name: "URL".to_string(), value: Some(url), ..Default::default() },
             EnvVar { name: "BRANCH".to_string(), value: Some(branch.clone()), ..Default::default() },
-            git_ssh_command(),
         ]),
         volume_mounts: Some(vec![
             VolumeMount { name: "live".to_string(), mount_path: SEED_DIR.to_string(), ..Default::default() },

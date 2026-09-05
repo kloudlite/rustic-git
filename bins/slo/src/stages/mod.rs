@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use kloudlite_workspaces::slo::catalogue::Suite;
 use serde_json::Value;
 
-use crate::ctx::{Ctx, OTHER_EMAIL, OTHER_USER, PROBE_USER};
+use crate::ctx::Ctx;
 
 pub mod admin;
 pub mod edge;
@@ -220,20 +220,22 @@ async fn undo_drills(c: &mut Ctx) {
 /// neither has a name teardown's prefix sweep could ever match. A raised quota is allocation
 /// nobody decided on; a second superadmin is the whole authorization model.
 async fn undo_grants(c: &mut Ctx) {
+    let other_email = c.other_email.clone();
+    let probe = c.probe_user.clone();
     // Read first, for the same reason as the roster below: the PUT files an audit row, and the
     // fast suite never touches the quota, so every five minutes would otherwise log a restore of
     // a limit that was never moved. Only the six limits are compared — `regions` is a grant this
     // probe never writes and the PUT body never mentions.
     let want = experience_admin::probe_quota();
-    let detail = admin(c, &format!("/admin/owners/{PROBE_USER}"));
+    let detail = admin(c, &format!("/admin/owners/{probe}"));
     let same = get(c, &detail, &c.admin_jwt.clone()).await.ok().and_then(|v| v.get("limit").cloned()).is_some_and(|have| {
         want.as_object().unwrap().iter().all(|(k, v)| have.get(k) == Some(v))
     });
     if !same {
-        let url = admin(c, &format!("/admin/quota/{PROBE_USER}"));
+        let url = admin(c, &format!("/admin/quota/{probe}"));
         let body = serde_json::json!({ "spec": want, "note": "slo probe quota restore" });
         match call(c, reqwest::Method::PUT, &url, &c.admin_jwt.clone(), Some(body)).await {
-            Ok(_) => tracing::info!(kind = "quota", name = PROBE_USER, "slo.teardown.restored"),
+            Ok(_) => tracing::info!(kind = "quota", name = probe, "slo.teardown.restored"),
             Err(e) => tracing::warn!(kind = "quota", op = "restore", error = %format!("{e:#}"), "slo.teardown.failed"),
         }
     }
@@ -242,14 +244,14 @@ async fn undo_grants(c: &mut Ctx) {
     let all = admin(c, "/api/admin/superadmins");
     let listed = get(c, &all, &c.admin_jwt.clone()).await.ok().is_some_and(|v| {
         v.as_array().unwrap_or(&vec![]).iter().any(|r| {
-            r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(OTHER_EMAIL))
+            r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(&other_email))
         })
     });
     if listed {
-        let one = admin(c, &format!("/api/admin/superadmins/{OTHER_EMAIL}"));
+        let one = admin(c, &format!("/api/admin/superadmins/{other_email}"));
         let body = serde_json::json!({ "note": "slo probe teardown" });
         match call(c, reqwest::Method::DELETE, &one, &c.admin_jwt.clone(), Some(body)).await {
-            Ok(_) => tracing::info!(kind = "superadmin", name = OTHER_EMAIL, "slo.teardown.restored"),
+            Ok(_) => tracing::info!(kind = "superadmin", name = other_email, "slo.teardown.restored"),
             Err(e) => tracing::warn!(kind = "superadmin", op = "revoke", error = %format!("{e:#}"), "slo.teardown.failed"),
         }
     }
@@ -262,17 +264,18 @@ async fn undo_grants(c: &mut Ctx) {
 /// best-effort like every other one here: a rule left on a repo that survives is what breaks the
 /// NEXT run's stage 2 push, and this is the only thing that removes it.
 async fn unprotect(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     let prefix = c.prefix();
     let jwt = c.probe_jwt.clone();
     let repos = list(
         c,
         &Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |_, _| String::new() },
-        PROBE_USER,
+        &probe,
         &jwt,
     )
     .await;
     for (name, _) in repos.into_iter().filter(|(n, _)| n.starts_with(&prefix)) {
-        let url = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/protection"));
+        let url = api(c, &format!("/v1/repos/{probe}/{name}/protection"));
         let body = serde_json::json!({ "pattern": "main", "remove": true });
         if let Err(e) = post(c, &url, &jwt, body).await {
             tracing::warn!(kind = "repo", op = "unprotect", name = %name, error = %format!("{e:#}"), "slo.teardown.failed");
@@ -289,8 +292,9 @@ async fn unprotect(c: &mut Ctx) {
 /// private first: a delete that is refused (a volume still referenced, an image the registry is
 /// mid-GC on) leaves it public. Best effort and logged, like every other line in teardown.
 async fn hide(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     if let Some(repo) = c.state.repo.clone() {
-        let url = api(c, &format!("/v1/repos/{PROBE_USER}/{repo}"));
+        let url = api(c, &format!("/v1/repos/{probe}/{repo}"));
         let body = serde_json::json!({ "visibility": "private" });
         match call(c, reqwest::Method::PATCH, &url, &c.probe_jwt.clone(), Some(body)).await {
             Ok(_) => tracing::info!(kind = "repo", name = %repo, "slo.teardown.hidden"),
@@ -298,8 +302,8 @@ async fn hide(c: &mut Ctx) {
         }
     }
     let prefix = c.prefix();
-    for name in images(c, PROBE_USER, &c.probe_jwt.clone(), &|n: &str| n.starts_with(&prefix)).await {
-        let url = api(c, &format!("/api/{PROBE_USER}/{name}/imagevisibility?visibility=private"));
+    for name in images(c, &probe, &c.probe_jwt.clone(), &|n: &str| n.starts_with(&prefix)).await {
+        let url = api(c, &format!("/api/{probe}/{name}/imagevisibility?visibility=private"));
         match post(c, &url, &c.probe_jwt.clone(), Value::Null).await {
             Ok(_) => tracing::info!(kind = "image", name = %name, "slo.teardown.hidden"),
             Err(e) => tracing::warn!(kind = "image", op = "hide", name = %name, error = %format!("{e:#}"), "slo.teardown.failed"),
@@ -389,8 +393,10 @@ const KINDS: &[Kind] = &[
 /// own (a key, a token, an accepted invite's membership), and a sweep that only ever ran as
 /// `slo-probe` would leak every one of them.
 async fn sweep_all<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
-    let mut gone = sweep(c, PROBE_USER, c.probe_jwt.clone(), &matches).await;
-    gone += sweep(c, OTHER_USER, c.other_jwt.clone(), &matches).await;
+    let other = c.other_user.clone();
+    let probe = c.probe_user.clone();
+    let mut gone = sweep(c, &probe, c.probe_jwt.clone(), &matches).await;
+    gone += sweep(c, &other, c.other_jwt.clone(), &matches).await;
     gone
 }
 

@@ -18,7 +18,7 @@ use rand::RngCore;
 use serde_json::Value;
 
 use super::{admin, api, get, poll_json, post};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 use crate::{drill, tools};
 
 /// 100 MiB, written a mebibyte at a time so the probe never holds the commit in memory — the pod's
@@ -78,6 +78,7 @@ pub async fn run(c: &mut Ctx) {
 /// same commit goes twice, which is also what makes the second push cheap enough to afford: the
 /// objects are already there, so the SSH half measures the protocol and not the bytes again.
 async fn large_push(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     let Some(name) = c.state.repo.clone() else {
         return c.skip("git.push.large", "no repo");
     };
@@ -97,7 +98,7 @@ async fn large_push(c: &mut Ctx) {
             None
         }
     };
-    let http = format!("{}/{PROBE_USER}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
+    let http = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
     c.step("git.push.large", PUSH_CEILING, move |c| {
         let key = c.cfg.ssh_key_path.clone();
         let ssh = hosts.as_ref().map(|h| (crate::stages::git::ssh_url(c, &name), crate::stages::git::ssh_command(c, &key, h)));
@@ -148,6 +149,7 @@ fn fill(path: &std::path::Path, n: u64) -> Result<()> {
 /// the git one — a different hostname, a different Cloudflare setting and its own body limit
 /// (`max_layer`, 5 GiB).
 async fn large_layer(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     let Some(secret) = c.state.token_value.clone() else {
         return c.skip("reg.push.large", "no personal token");
     };
@@ -160,8 +162,8 @@ async fn large_layer(c: &mut Ctx) {
             let mut layer = vec![0u8; LARGE_LAYER_BYTES];
             rand::thread_rng().fill_bytes(&mut layer);
             crate::stages::registry::write_layout(&dir, &layer, &name).context("could not build the image")?;
-            crane.login(&host, PROBE_USER, &secret).await.context("could not log in")?;
-            crane.push(&dir, &format!("{host}/{PROBE_USER}/{name}:latest")).await
+            crane.login(&host, &probe, &secret).await.context("could not log in")?;
+            crane.push(&dir, &format!("{host}/{probe}/{name}:latest")).await
         }
         .boxed()
     })

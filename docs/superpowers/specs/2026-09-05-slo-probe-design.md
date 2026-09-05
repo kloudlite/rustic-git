@@ -48,7 +48,7 @@ separate ClickHouse writer (the single-writer rule for `kloudlite.*` stays).
 | Rules | `history::alerts` catalogue, `deploy/alerts.md` | `SloProbeMissing`, `SloBurn`. Tier `Central`. |
 | Notify | `history::notify` | One JSON line to `KLOUDLITE_SLO_WEBHOOK` on run failure and on a `SloBurn` transition. Optional; unset means nothing. |
 | Console | `web/apps/web/src/app/(shell)/superadmin/slo/` | Area nine. Running-now tracker, SLO table with budgets, runs table, run detail. Overview tile. Fixtures. |
-| Deploy | `deploy/kloudlite.yaml` | Three `CronJob`s, ServiceAccount + Role, Secret `kloudlite-slo`, `Quota` CRs for the two probe owners (applied on k3s). |
+| Deploy | `deploy/kloudlite.yaml` | Three `CronJob`s, ServiceAccount + Role, Secret `kloudlite-slo`, `Quota` CRs for the six probe owners — one pair per suite (applied on k3s). |
 
 ## The catalogue
 
@@ -309,3 +309,11 @@ Teardown covers the new objects (team, second repo, team workspace, second envir
 same `run-{id}` prefix; the team slug is `run-{id}-team`. Everything the suite creates for the
 `slo-other` user is deleted from `slo-other`'s side too. The quota it raises through
 `request.approve` is written back to `deploy/k3s/quotas-slo.yaml`'s values at the end of the step.
+
+### Isolation
+
+One tenant pair PER SUITE, from the CronJob's `KLOUDLITE_SLO_USER`/`_OTHER`: fast keeps
+`slo-probe`/`slo-other`, hourly is `slo-hourly*`, the two drills share `slo-drill*`. Each suite
+also mounts its OWN SSH Secret (`kloudlite-slo`, `-hourly`, `-drill`). Sharing one pair meant a
+fast run under a live hourly one failed `id.key.usable` with "that key is already added", and read
+the hourly's `superadmin.grant` and raised quota as its own `sec.*`/`quota.refused` state.

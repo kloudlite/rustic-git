@@ -14,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
 
 use super::{api, get, poll_json, post};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 use crate::step::DEFAULT_TIMEOUT;
 use crate::tools;
 
@@ -97,7 +97,8 @@ pub async fn run(c: &mut Ctx) {
 /// Private, and named for the run: private because a public probe repo is a namespace anybody can
 /// watch churn in, and named for the run because that prefix is the whole of teardown's contract.
 async fn create(c: &mut Ctx, name: &str) -> Result<()> {
-    let body = serde_json::json!({ "owner": PROBE_USER, "name": name, "visibility": "private" });
+    let probe = c.probe_user.clone();
+    let body = serde_json::json!({ "owner": probe, "name": name, "visibility": "private" });
     let jwt = c.probe_jwt.clone();
     post(c, &api(c, "/v1/repos"), &jwt, body).await.map(|_| ())
 }
@@ -108,11 +109,12 @@ async fn create(c: &mut Ctx, name: &str) -> Result<()> {
 /// without one fails with an error about `user.email` that reads like a fleet problem. `GIT_TERMINAL_PROMPT=0`
 /// turns a rejected credential into an exit code instead of a process waiting on a tty nobody has.
 pub(crate) fn git_env(c: &Ctx) -> HashMap<String, String> {
+    let probe_email = c.probe_email.clone();
     HashMap::from([
         ("GIT_AUTHOR_NAME".into(), "kloudlite slo probe".into()),
-        ("GIT_AUTHOR_EMAIL".into(), crate::ctx::PROBE_EMAIL.into()),
+        ("GIT_AUTHOR_EMAIL".into(), probe_email.clone()),
         ("GIT_COMMITTER_NAME".into(), "kloudlite slo probe".into()),
-        ("GIT_COMMITTER_EMAIL".into(), crate::ctx::PROBE_EMAIL.into()),
+        ("GIT_COMMITTER_EMAIL".into(), probe_email.into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_CONFIG_GLOBAL".into(), c.tmp.join("gitconfig").display().to_string()),
         ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
@@ -148,7 +150,8 @@ pub(crate) async fn git(c: &Ctx, args: Vec<String>, dir: Option<&Path>) -> Resul
 /// The first push: make the tree, commit, push `main`. All of it inside the step, so a local
 /// failure is `git.push.ok` failing with the reason rather than a lost sample (H1).
 async fn push_base(c: &mut Ctx, work: &Path, name: &str) -> bool {
-    let url = format!("{}/{PROBE_USER}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
+    let probe = c.probe_user.clone();
+    let url = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
     let (work, name) = (work.to_path_buf(), name.to_string());
     c.step("git.push.ok", GIT_TIMEOUT, move |c| {
         let args = authed(c, &["push", "-q", &url, BASE_BRANCH]);
@@ -170,7 +173,8 @@ async fn push_base(c: &mut Ctx, work: &Path, name: &str) -> bool {
 /// needed anyway rather than a push invented for a number. Same shape as `push_base`: the local
 /// half is inside the step, and a failure preparing it fails `git.push.p95` rather than vanishing.
 async fn push_head(c: &mut Ctx, work: &Path, name: &str) -> bool {
-    let url = format!("{}/{PROBE_USER}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
+    let probe = c.probe_user.clone();
+    let url = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
     let (work, run_id) = (work.to_path_buf(), c.run_id.clone());
     c.step("git.push.p95", GIT_TIMEOUT, move |c| {
         let args = authed(c, &["push", "-q", &url, HEAD_BRANCH]);
@@ -192,7 +196,8 @@ fn write(dir: &Path, name: &str, body: &str) -> Result<()> {
 
 /// Two clones, for the same reason there are two pushes.
 async fn clone_http(c: &mut Ctx, name: &str) {
-    let url = format!("{}/{PROBE_USER}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
+    let probe = c.probe_user.clone();
+    let url = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
     for (id, into) in [("git.clone.ok", "clone-a"), ("git.clone.p95", "clone-b")] {
         let dest = c.tmp.join(into);
         // A leftover from a run that died mid-clone would make git refuse the directory, which
@@ -275,10 +280,11 @@ pub(crate) fn ssh_command(c: &Ctx, key: &str, hosts: &Path) -> String {
 }
 
 pub(crate) fn ssh_url(c: &Ctx, name: &str) -> String {
+    let probe = c.probe_user.clone();
     let (host, port) = c.cfg.ssh_endpoint();
     // The user name is ignored by the listener — it authenticates on the key's fingerprint — but
     // `git@` is what the web's clone box prints, so it is what the probe walks.
-    format!("ssh://git@{host}:{port}/{PROBE_USER}/{name}.git")
+    format!("ssh://git@{host}:{port}/{probe}/{name}.git")
 }
 
 /// What the listener actually serves, compared against the pin.
@@ -412,13 +418,14 @@ async fn unregistered_refused(c: &mut Ctx, name: &str) {
 
 /// The Browse API, through the api tier's forwarder — the same hop the web app makes.
 async fn browse(c: &mut Ctx, name: &str, head: Option<&str>) {
+    let probe = c.probe_user.clone();
     let Some(head) = head else {
         c.skip("browse.p95", "nothing was pushed");
         c.skip("browse.commit.visible", "nothing was pushed");
         return;
     };
     let head = head.to_string();
-    let refs_url = api(c, &format!("/api/{PROBE_USER}/{name}/refs"));
+    let refs_url = api(c, &format!("/api/{probe}/{name}/refs"));
 
     {
         let (head, url) = (head.clone(), refs_url.clone());
@@ -437,7 +444,7 @@ async fn browse(c: &mut Ctx, name: &str, head: Option<&str>) {
 
     // The repo page is a tree listing at the head, which is what the web renders and therefore
     // what the 500 ms target is about.
-    let tree = api(c, &format!("/api/{PROBE_USER}/{name}/tree/{head}"));
+    let tree = api(c, &format!("/api/{probe}/{name}/tree/{head}"));
     c.step("browse.p95", DEFAULT_TIMEOUT, move |c| {
         let jwt = c.probe_jwt.clone();
         async move { get(c, &tree, &jwt).await.map(|_| ()) }.boxed()
@@ -466,11 +473,12 @@ pub(crate) fn oid_of(refs: &serde_json::Value, branch: &str) -> Option<String> {
 /// `sec.private.repo` reads this same repo, and a probe repo left public is a hole the next run
 /// would report as a passing security check.
 async fn web_repo_page(c: &mut Ctx, name: &str) {
+    let probe = c.probe_user.clone();
     let name = name.to_string();
     c.step("web.repo.page", DEFAULT_TIMEOUT, move |c| {
         let jwt = c.probe_jwt.clone();
-        let url = format!("{}/{PROBE_USER}/{name}", c.cfg.web_url.trim_end_matches('/'));
-        let patch = api(c, &format!("/v1/repos/{PROBE_USER}/{name}"));
+        let url = format!("{}/{probe}/{name}", c.cfg.web_url.trim_end_matches('/'));
+        let patch = api(c, &format!("/v1/repos/{probe}/{name}"));
         async move {
             visibility(c, &patch, &jwt, "public").await.context("could not publish the repo")?;
             let rendered = rendered(c, &url, &name).await;

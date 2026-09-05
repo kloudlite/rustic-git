@@ -12,7 +12,7 @@ use futures::FutureExt;
 use kloudlite_workspaces::crd;
 
 use super::{admin, api, raw};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 
 /// Six refusals, 10 s each: every one is a single request against a tier that either says no
 /// immediately or is not answering at all, and 60 s is this stage's whole share of the fast
@@ -76,8 +76,9 @@ pub async fn run(c: &mut Ctx) {
 /// `git ls-remote` makes exactly this request first, and its exit code cannot tell a 401 from a
 /// 500 — which is the one distinction every step in this stage rests on.
 fn refs_url(c: &Ctx, repo: &str) -> String {
+    let probe = c.probe_user.clone();
     format!(
-        "{}/{PROBE_USER}/{repo}.git/info/refs?service=git-upload-pack",
+        "{}/{probe}/{repo}.git/info/refs?service=git-upload-pack",
         c.cfg.git_url.trim_end_matches('/')
     )
 }

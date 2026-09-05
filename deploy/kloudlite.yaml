@@ -1778,6 +1778,15 @@ spec:
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
                 # run both, and a run that reported nothing cannot be told from a CronJob that
                 # never fired.
+                # ISOLATION: this suite runs for ~50 minutes and grants itself superadmin and
+                # a raised quota on the way, while the fast suite ticks every five minutes
+                # underneath it. On a shared tenant pair the fast run's `id.key.usable` hit
+                # "that key is already added" and its `sec.*`/`quota.refused` checks read this
+                # suite's grants — so every suite owns its OWN pair and its OWN SSH key.
+                - name: KLOUDLITE_SLO_USER
+                  value: "slo-hourly"
+                - name: KLOUDLITE_SLO_OTHER
+                  value: "slo-hourly-other"
                 - name: KLOUDLITE_SLO_BUDGET_SECS
                   value: "3000"
                 - name: KLOUDLITE_JWT_SECRET
@@ -1812,7 +1821,7 @@ spec:
             # looks broken. See deploy/k3s/README.md for the recipe.
             - name: ssh-key
               secret:
-                secretName: kloudlite-slo
+                secretName: kloudlite-slo-hourly
                 defaultMode: 0400
                 items:
                   # The filename is config.rs's KLOUDLITE_SLO_SSH_KEY default. `fsGroup: 1001`
@@ -1875,6 +1884,13 @@ spec:
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
                 # run both, and a run that reported nothing cannot be told from a CronJob that
                 # never fired.
+                # Its own tenant pair and key, like the hourly suite — the drills are serial
+                # (Sunday 02:00 and 03:00) so they share one pair with each other, never with the
+                # five-minute suite. See the hourly CronJob for why.
+                - name: KLOUDLITE_SLO_USER
+                  value: "slo-drill"
+                - name: KLOUDLITE_SLO_OTHER
+                  value: "slo-drill-other"
                 - name: KLOUDLITE_SLO_BUDGET_SECS
                   value: "3300"
                 - name: KLOUDLITE_JWT_SECRET
@@ -1900,7 +1916,7 @@ spec:
                 sizeLimit: 4Gi
             - name: ssh-key
               secret:
-                secretName: kloudlite-slo
+                secretName: kloudlite-slo-drill
                 defaultMode: 0400
                 items:
                   - { key: ssh_key, path: id_ed25519 }
@@ -1959,6 +1975,11 @@ spec:
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
                 # run both, and a run that reported nothing cannot be told from a CronJob that
                 # never fired.
+                # The weekly suite's pair — the two drills are serial and never overlap.
+                - name: KLOUDLITE_SLO_USER
+                  value: "slo-drill"
+                - name: KLOUDLITE_SLO_OTHER
+                  value: "slo-drill-other"
                 - name: KLOUDLITE_SLO_BUDGET_SECS
                   value: "6900"
                 - name: KLOUDLITE_JWT_SECRET
@@ -2019,7 +2040,7 @@ spec:
                 sizeLimit: 4Gi
             - name: ssh-key
               secret:
-                secretName: kloudlite-slo
+                secretName: kloudlite-slo-drill
                 defaultMode: 0400
                 items:
                   - { key: ssh_key, path: id_ed25519 }

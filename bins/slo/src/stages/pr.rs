@@ -12,7 +12,7 @@ use futures::FutureExt;
 
 use super::git::{oid_of, BASE_BRANCH, HEAD_BRANCH};
 use super::{api, get, poll_json, post};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 
 /// The catalogue's own target for `pr.merge.p95`, used here as the wait: a merge that has not
 /// landed inside its target has failed the SLO whether the probe waits longer or not.
@@ -21,6 +21,7 @@ const MERGE_CAP: Duration = Duration::from_secs(60);
 const FEED_CAP: Duration = Duration::from_secs(30);
 
 pub async fn run(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     let Some(name) = c.state.repo.clone() else {
         c.skip("pr.merge.p95", "no repo");
         c.skip("feed.latency", "no repo");
@@ -30,7 +31,7 @@ pub async fn run(c: &mut Ctx) {
     // The head oid BEFORE the merge, so the wait below is "the base moved to the change", not
     // "the base is some value" — a repo whose main already equalled the head would otherwise
     // report an instant merge that never happened.
-    let refs_url = api(c, &format!("/api/{PROBE_USER}/{name}/refs"));
+    let refs_url = api(c, &format!("/api/{probe}/{name}/refs"));
     let jwt = c.probe_jwt.clone();
     let target = match get(c, &refs_url, &jwt).await.ok().and_then(|r| oid_of(&r, HEAD_BRANCH)) {
         Some(oid) => oid,
@@ -56,7 +57,7 @@ pub async fn run(c: &mut Ctx) {
         let (name, refs_url, target) = (name.clone(), refs_url.clone(), target.clone());
         c.step("pr.merge.p95", MERGE_CAP + Duration::from_secs(30), move |c| {
             let jwt = c.probe_jwt.clone();
-            let url = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/pulls/{number}/merge?strategy=fast-forward"));
+            let url = api(c, &format!("/v1/repos/{probe}/{name}/pulls/{number}/merge?strategy=fast-forward"));
             async move {
                 post(c, &url, &jwt, serde_json::Value::Null).await.context("could not ask for the merge")?;
                 poll_json(c, &refs_url, &jwt, MERGE_CAP, |refs| {
@@ -78,8 +79,9 @@ pub async fn run(c: &mut Ctx) {
     }
 
     c.step("feed.latency", FEED_CAP + Duration::from_secs(10), move |c| {
+        let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let url = api(c, &format!("/v1/activity?owner={PROBE_USER}"));
+        let url = api(c, &format!("/v1/activity?owner={probe}"));
         let repo = name.clone();
         async move {
             poll_json(c, &url, &jwt, FEED_CAP, |feed| merge_event(feed, &repo)).await
@@ -92,8 +94,9 @@ pub async fn run(c: &mut Ctx) {
 /// Open the change. Untimed: it is a precondition, not an SLO — the catalogue has no id for it,
 /// and inventing one here would put a number in ClickHouse that `deploy/slo.md` cannot explain.
 async fn open(c: &mut Ctx, name: &str) -> Result<i64> {
+    let probe = c.probe_user.clone();
     let jwt = c.probe_jwt.clone();
-    let url = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/pulls"));
+    let url = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
     let body = serde_json::json!({
         "title": format!("slo probe {}", c.run_id),
         "base": BASE_BRANCH,

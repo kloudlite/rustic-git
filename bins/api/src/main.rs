@@ -90,6 +90,10 @@ impl kloudlite_workspaces::api::Directory for Dir {
         self.0.get(slug).await.ok().flatten().is_some()
     }
 
+    async fn add_superadmin(&self, email: &str, by: &str) -> std::result::Result<(), String> {
+        self.0.add_superadmin(email, by).await.map_err(|e| e.to_string())
+    }
+
     async fn ensure_user(&self, email: &str, name: &str, username: &str) -> std::result::Result<(), String> {
         self.0.upsert_user(email, name).await.map_err(|e| e.to_string())?;
         // `claim_username` treats re-asking for the handle you hold as success and a handle held

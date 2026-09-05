@@ -197,6 +197,13 @@ impl Membership {
             .map(|(yes, _)| *yes)
     }
 
+    /// Drop one answer. The process that removes a member is this one, so the minute of grace the
+    /// TTL allows is never needed for a removal it performed itself.
+    pub(crate) fn forget(&self, user: &str, owner: &str) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.remove(&(user.to_string(), owner.to_string()));
+    }
+
     fn put(&self, user: &str, owner: &str, yes: bool) {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if m.len() >= MEMBERSHIP_CAP {

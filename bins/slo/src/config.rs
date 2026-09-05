@@ -27,7 +27,12 @@ pub struct Config {
     /// The `kloudlite-jwt` Secret. The probe mints its own tokens rather than holding a
     /// password, so this is the only credential in the pod.
     pub jwt_secret: String,
-    /// The private half of the key `bootstrap` registered for `slo-probe`.
+    /// The tenant pair THIS suite runs as, one pair per suite so a long suite never collides with
+    /// the five-minute one — see `ctx::SUITE_TENANTS`. Not serialized into `state.json`: the parent
+    /// reads the same env the child did.
+    pub probe_user: String,
+    pub other_user: String,
+    /// The private half of the key `bootstrap` registered for `probe_user`.
     pub ssh_key_path: String,
     /// The `known_hosts` line the git tier's SSH listener must present, set from the server's
     /// published key. PINNED, not learned: a probe that ran `ssh-keyscan` and trusted the answer
@@ -91,6 +96,8 @@ impl Config {
                 .collect(),
             origin_ip: Some(opt("KLOUDLITE_SLO_ORIGIN_IP", "")).filter(|v| !v.is_empty()),
             jwt_secret: req("KLOUDLITE_JWT_SECRET")?,
+            probe_user: opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER),
+            other_user: opt("KLOUDLITE_SLO_OTHER", crate::ctx::OTHER_USER),
             ssh_key_path: opt("KLOUDLITE_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
             ssh_hostkey: opt("KLOUDLITE_SLO_SSH_HOSTKEY", ""),
             canary_digest: Some(opt("KLOUDLITE_SLO_CANARY_DIGEST", "")).filter(|d| !d.is_empty()),
@@ -164,5 +171,20 @@ mod tests {
         // A bare v6 address, and a port that is not a number: both refused rather than dialled.
         assert!(check_ssh_host("::1").is_err());
         assert!(check_ssh_host("git.example.com:ssh").is_err());
+    }
+
+    /// The one wire that keeps two suites off each other's state: the tenant pair is env, and the
+    /// emails follow from it. A default that ignored the env would put every suite back on
+    /// `slo-probe` with no test failing.
+    #[test]
+    fn the_tenant_pair_comes_from_the_environment() {
+        assert_eq!(opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER), "slo-probe");
+        std::env::set_var("KLOUDLITE_SLO_USER", "slo-hourly");
+        std::env::set_var("KLOUDLITE_SLO_OTHER", "slo-hourly-other");
+        let user = opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER);
+        assert_eq!(crate::ctx::email_of(&user), "slo-hourly@kloudlite.io");
+        assert_eq!(opt("KLOUDLITE_SLO_OTHER", crate::ctx::OTHER_USER), "slo-hourly-other");
+        std::env::remove_var("KLOUDLITE_SLO_USER");
+        std::env::remove_var("KLOUDLITE_SLO_OTHER");
     }
 }

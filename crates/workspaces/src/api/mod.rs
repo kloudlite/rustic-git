@@ -171,6 +171,9 @@ pub trait Directory: Send + Sync {
     /// one other way a person comes to exist, and a synthetic user never signs in. `Err` carries
     /// the directory's own sentence.
     async fn ensure_user(&self, email: &str, name: &str, username: &str) -> Result<(), String>;
+    /// Seat `email` on the superadmin roster, idempotently. Same single caller as `ensure_user`:
+    /// the roster routes read the caller's ROW, so a probe that grants and revokes needs one.
+    async fn add_superadmin(&self, email: &str, by: &str) -> Result<(), String>;
 
     async fn grant_access(&self, _team: &str, _user: &str, _role: TeamRole) -> GrantAccess {
         GrantAccess::Unsupported
@@ -970,6 +973,9 @@ mod tests {
                 false
             }
             async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+                Err("no directory".into())
+            }
+            async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
                 Err("no directory".into())
             }
         }

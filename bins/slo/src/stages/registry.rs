@@ -16,7 +16,7 @@ use rand::RngCore;
 
 use super::{api, poll_json, post};
 use crate::crane::Crane;
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 /// Per-step ceilings. Each is well above its catalogue target — a slow answer must be a BREACH
 /// with a number, not a step the probe cut off — and the sum is under the fast suite's own budget
 /// so a wedged registry cannot cost the later stages their samples.
@@ -77,7 +77,7 @@ pub async fn run(c: &mut Ctx) {
 /// `reg.token.p95`: the `/v2/token` exchange every spec-following client makes before it pulls.
 async fn token(c: &mut Ctx, secret: &str, image: &str) {
     c.step("reg.token.p95", TOKEN_CEILING, |c| {
-        let (secret, scope) = (secret.to_string(), pull_scope(image));
+        let (secret, scope) = (secret.to_string(), pull_scope(c, image));
         async move {
             bearer(c, Some(&secret), &scope).await.map(|_| ())
         }
@@ -93,6 +93,7 @@ async fn token(c: &mut Ctx, secret: &str, image: &str) {
 /// entirely would report a green run with no push in it. Image B is built here and pushed by
 /// `reg.shared.layer`, whose whole assertion is about what B's push does NOT re-upload.
 async fn push(c: &mut Ctx, secret: &str, a: &str) -> Result<String> {
+    let probe = c.probe_user.clone();
     let layer = random_layer();
     let digest = sha256(&layer);
     let host = host(c);
@@ -104,8 +105,8 @@ async fn push(c: &mut Ctx, secret: &str, a: &str) -> Result<String> {
             async move {
                 write_layout(&dir_a, &layer, &a).context("could not build image a")?;
                 write_layout(&dir_b, &layer, &b).context("could not build image b")?;
-                crane.login(&host, PROBE_USER, &secret).await.context("could not log in")?;
-                crane.push(&dir_a, &format!("{host}/{PROBE_USER}/{a}:latest")).await
+                crane.login(&host, &probe, &secret).await.context("could not log in")?;
+                crane.push(&dir_a, &format!("{host}/{probe}/{a}:latest")).await
             }
             .boxed()
         })
@@ -122,12 +123,13 @@ async fn push(c: &mut Ctx, secret: &str, a: &str) -> Result<String> {
 /// The bearer is fetched BEFORE the step: `reg.token.p95` is the token call's own SLI, and folding
 /// it into this sample would make one slow token look like a slow manifest read.
 async fn manifest(c: &mut Ctx, secret: &str, image: &str) {
-    let scope = pull_scope(image);
+    let probe = c.probe_user.clone();
+    let scope = pull_scope(c, image);
     let bearer = match bearer(c, Some(secret), &scope).await {
         Ok(t) => t,
         Err(e) => return c.skip("reg.manifest.p95", &format!("no registry token: {e:#}")),
     };
-    let url = format!("{}/v2/{PROBE_USER}/{image}/manifests/latest", base(c));
+    let url = format!("{}/v2/{probe}/{image}/manifests/latest", base(c));
     c.step("reg.manifest.p95", MANIFEST_CEILING, move |c| {
         async move {
             let (status, body) = super::raw(
@@ -156,15 +158,16 @@ async fn manifest(c: &mut Ctx, secret: &str, image: &str) {
 /// Both, sharing ONE 5 s budget: the SLI is how long after a push the fleet agrees the image is
 /// there, and two separate 5 s waits would report 10 s as a pass.
 async fn tags(c: &mut Ctx, secret: &str, image: &str) {
-    let bearer = match bearer(c, Some(secret), &format!("{} registry:catalog:*", pull_scope(image)))
+    let probe = c.probe_user.clone();
+    let bearer = match bearer(c, Some(secret), &format!("{} registry:catalog:*", pull_scope(c, image)))
         .await
     {
         Ok(t) => t,
         Err(e) => return c.skip("reg.tags.visible", &format!("no registry token: {e:#}")),
     };
-    let tags_url = format!("{}/v2/{PROBE_USER}/{image}/tags/list", base(c));
+    let tags_url = format!("{}/v2/{probe}/{image}/tags/list", base(c));
     let catalog_url = format!("{}/v2/_catalog", base(c));
-    let want = format!("{PROBE_USER}/{image}");
+    let want = format!("{probe}/{image}");
     c.step("reg.tags.visible", TAGS_CEILING, move |c| {
         async move {
             let start = Instant::now();
@@ -191,27 +194,28 @@ async fn tags(c: &mut Ctx, secret: &str, image: &str) {
 /// there is — a manifest path deleting a blob a sibling still references (`crates/registry/src/gc.rs`'s
 /// "only two things ever delete a blob").
 async fn shared_layer(c: &mut Ctx, secret: &str, a: &str, b: &str, layer: &str) {
-    let bearer = match bearer(c, Some(secret), &pull_scope(b)).await {
+    let probe = c.probe_user.clone();
+    let bearer = match bearer(c, Some(secret), &pull_scope(c, b)).await {
         Ok(t) => t,
         Err(e) => return c.skip("reg.shared.layer", &format!("no registry token: {e:#}")),
     };
     let dest = c.tmp.join("pull-a");
     let dir_b = c.tmp.join("img-b");
-    let head = format!("{}/v2/{PROBE_USER}/{b}/blobs/{layer}", base(c));
+    let head = format!("{}/v2/{probe}/{b}/blobs/{layer}", base(c));
     let (host, a, b, layer) = (host(c), a.to_string(), b.to_string(), layer.to_string());
     c.step("reg.shared.layer", SHARED_CEILING, move |c| {
         let crane = authed(c);
-        let (jwt, del) = (c.probe_jwt.clone(), api(c, &format!("/api/{PROBE_USER}/{b}/imagedelete")));
+        let (jwt, del) = (c.probe_jwt.clone(), api(c, &format!("/api/{probe}/{b}/imagedelete")));
         async move {
             let (status, _) =
                 super::raw(c, reqwest::Method::HEAD, &head, &bearer, None, &[]).await?;
             if !status.is_success() {
                 return Err(anyhow!("the layer image a pushed is not there for b to mount: {status}"));
             }
-            crane.push(&dir_b, &format!("{host}/{PROBE_USER}/{b}:latest")).await.context("could not push the sibling")?;
+            crane.push(&dir_b, &format!("{host}/{probe}/{b}:latest")).await.context("could not push the sibling")?;
             post(c, &del, &jwt, serde_json::Value::Null).await.context("could not delete the sibling")?;
             let _ = std::fs::remove_dir_all(&dest);
-            crane.pull(&format!("{host}/{PROBE_USER}/{a}:latest"), &dest).await.context("could not pull")?;
+            crane.pull(&format!("{host}/{probe}/{a}:latest"), &dest).await.context("could not pull")?;
             let got = std::fs::read(dest.join("blobs/sha256").join(layer.trim_start_matches("sha256:")))
                 .context("the shared layer is not in the pulled image")?;
             if sha256(&got) != layer {
@@ -229,13 +233,14 @@ async fn shared_layer(c: &mut Ctx, secret: &str, a: &str, b: &str, layer: &str) 
 /// Both halves, in one step and in that order: a registry that answered everything would pass the
 /// public half alone, and a registry that answered nothing would pass the private half alone.
 async fn visibility(c: &mut Ctx, image: &str) {
+    let probe = c.probe_user.clone();
     let host = host(c);
     let dest = c.tmp.join("pull-anon");
     c.step("reg.visibility", VISIBILITY_CEILING, move |c| {
         let anon = anonymous(c);
         let (jwt, image) = (c.probe_jwt.clone(), image.to_string());
-        let flip = api(c, &format!("/api/{PROBE_USER}/{image}/imagevisibility?visibility=public"));
-        let reference = format!("{host}/{PROBE_USER}/{image}:latest");
+        let flip = api(c, &format!("/api/{probe}/{image}/imagevisibility?visibility=public"));
+        let reference = format!("{host}/{probe}/{image}:latest");
         async move {
             let _ = std::fs::remove_dir_all(&dest);
             if anon.pull(&reference, &dest).await.is_ok() {
@@ -259,18 +264,20 @@ async fn visibility(c: &mut Ctx, image: &str) {
 /// would report green through exactly the substitution this exists to catch. Unset means no pin,
 /// and the step skips.
 async fn canary(c: &mut Ctx, secret: &str) {
+    let probe = c.probe_user.clone();
     let Some(want) = c.cfg.canary_digest.clone() else {
         return c.skip("reg.canary", "KLOUDLITE_SLO_CANARY_DIGEST is not set");
     };
     let host = host(c);
-    let reference = format!("{host}/{PROBE_USER}/canary:latest");
+    let reference = format!("{host}/{probe}/canary:latest");
     let secret = secret.to_string();
     c.step("reg.canary", CANARY_CEILING, move |c| {
+        let probe = c.probe_user.clone();
         let crane = authed(c);
         async move {
             // Repeated rather than assumed: a canary that only passed after `reg.push.ok` had
             // logged in would go red for the wrong reason the day the push fails.
-            crane.login(&host, PROBE_USER, &secret).await.context("could not log in")?;
+            crane.login(&host, &probe, &secret).await.context("could not log in")?;
             let got = crane.digest(&reference).await?;
             if got != want {
                 return Err(anyhow!("the canary is {got}, not the pinned {want}"));
@@ -288,8 +295,9 @@ async fn canary(c: &mut Ctx, secret: &str) {
 /// Its layer is FIXED bytes, not random: bootstrap re-runs on every deploy, and a canary whose
 /// digest moved would fail `reg.canary` on every probe until somebody re-pinned it.
 pub async fn ensure_canary(c: &Ctx) -> Result<String> {
+    let probe = c.probe_user.clone();
     let host = host(c);
-    let reference = format!("{host}/{PROBE_USER}/canary:latest");
+    let reference = format!("{host}/{probe}/canary:latest");
     let crane = authed(c);
     // A token of its own, minted and revoked here: the registry's Basic auth takes a personal
     // token and nothing else (`registry::auth::caller`), and bootstrap runs before any run has
@@ -300,7 +308,7 @@ pub async fn ensure_canary(c: &Ctx) -> Result<String> {
         c,
         &api(c, "/v1/tokens"),
         &c.probe_jwt.clone(),
-        serde_json::json!({ "owner": PROBE_USER, "name": "slo-bootstrap-canary" }),
+        serde_json::json!({ "owner": probe, "name": "slo-bootstrap-canary" }),
     )
     .await
     .context("could not mint a registry credential")?;
@@ -334,7 +342,8 @@ async fn push_canary(
     reference: &str,
     secret: &str,
 ) -> Result<String> {
-    crane.login(host, PROBE_USER, secret).await.context("could not log in")?;
+    let probe = c.probe_user.clone();
+    crane.login(host, &probe, secret).await.context("could not log in")?;
     let dir = c.tmp.join("canary");
     std::fs::create_dir_all(&c.tmp)?;
     let want = write_layout(&dir, &vec![0x5c; LAYER_BYTES], "canary")?;
@@ -363,8 +372,9 @@ pub(crate) fn host(c: &Ctx) -> String {
     base(c).trim_start_matches("https://").trim_start_matches("http://").to_string()
 }
 
-fn pull_scope(image: &str) -> String {
-    format!("repository:{PROBE_USER}/{image}:pull,push")
+fn pull_scope(c: &Ctx, image: &str) -> String {
+    let probe = &c.probe_user;
+    format!("repository:{probe}/{image}:pull,push")
 }
 
 pub(crate) fn authed(c: &Ctx) -> Crane {
@@ -380,11 +390,12 @@ fn anonymous(c: &Ctx) -> Crane {
 /// A registry bearer for `scope`. `secret: None` asks anonymously, which the registry answers with
 /// a token for nobody — the one a public pull uses.
 async fn bearer(c: &Ctx, secret: Option<&str>, scope: &str) -> Result<String> {
+    let probe = c.probe_user.clone();
     use base64::Engine;
     let url = format!("{}/v2/token?service={}&scope={}", base(c), host(c), urlencoding(scope));
     let mut req = c.http.get(&url);
     if let Some(s) = secret {
-        let basic = base64::engine::general_purpose::STANDARD.encode(format!("{PROBE_USER}:{s}"));
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!("{probe}:{s}"));
         req = req.header("authorization", format!("Basic {basic}"));
     }
     // `without_url`: the URL is not a secret here, but the rule is the module's, not the caller's.

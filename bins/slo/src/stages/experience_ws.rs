@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use super::git::BASE_BRANCH;
 use super::workspace::ws_exec;
 use super::{api, call, poll_json, post};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 
 /// Per-step ceilings, each at or above its catalogue target so a slow answer is a breach with a
 /// number rather than a step the probe cut off. `key.platform.regenerate` and `home.persists` are
@@ -118,6 +118,7 @@ pub async fn seeded(c: &mut Ctx) {
 /// only that a key was written, and the failure this exists to catch is a rotation that leaves the
 /// git tier authorising the old fingerprint — which nothing but a fresh clone can show.
 pub async fn platform_key(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
     if c.kube.is_none() {
         return c.skip("key.platform.regenerate", "no kubeconfig");
     }
@@ -126,7 +127,7 @@ pub async fn platform_key(c: &mut Ctx) {
     };
     let name = format!("{}-seed2", c.prefix());
     c.step("key.platform.regenerate", KEY_CEILING, move |c| {
-        let url = api(c, &format!("/v1/platform-key?owner={PROBE_USER}"));
+        let url = api(c, &format!("/v1/platform-key?owner={probe}"));
         async move {
             // The answer carries the PUBLIC key and its fingerprint only — no private half — so
             // nothing here can reach a step detail. It is dropped regardless: the step's claim is
@@ -216,9 +217,10 @@ async fn create(c: &Ctx, name: &str, extra: Value) -> Result<String> {
 
 /// A workspace seeded from the run's own repo, on the branch stage 2 pushed first.
 async fn seed(c: &Ctx, name: &str, repo: &str) -> Result<String> {
+    let probe = c.probe_user.clone();
     // `owner/name`, never a URL: that is what `/v1` accepts, deliberately (a URL here would be an
     // egress primitive for anyone who can create a workspace).
-    let extra = json!({ "repo": format!("{PROBE_USER}/{repo}"), "branch": BASE_BRANCH, "packages": [] });
+    let extra = json!({ "repo": format!("{probe}/{repo}"), "branch": BASE_BRANCH, "packages": [] });
     create(c, name, extra).await
 }
 

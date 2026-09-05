@@ -443,7 +443,8 @@ password, minting its own tokens from `kloudlite-jwt`. The catalogue is Rust
 (`crates/workspaces/src/slo/catalogue.rs`) with `deploy/slo.md` held equal to it by a test, exactly
 as `deploy/alerts.md` is held to `history::alerts`, so a target lives in one place and the yaml
 carries none. Teardown deletes by the `run-{id}` name prefix, so a crashed run is swept by the
-next one and a run can never delete another's live objects; the two owners it runs as are capped
+next one and a run can never delete another's live objects; one owner pair per suite (fast / hourly /
+drills), so a long suite never collides with the five-minute one — six owners in all, capped
 by `deploy/k3s/quotas-slo.yaml`, applied by hand on the region.
 
 `KLOUDLITE_CLICKHOUSE_URL` is optional everywhere: without it every process runs exactly as today

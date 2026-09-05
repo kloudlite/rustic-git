@@ -783,7 +783,10 @@ pub(crate) async fn remove_member(
         return (StatusCode::FORBIDDEN, "your role does not allow that").into_response();
     }
     match db.remove_member(&slug, &email).await {
-        Ok(Membership::Done) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Membership::Done) => {
+            api.membership.forget(&email, &slug);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(Membership::NotAMember) => (StatusCode::NOT_FOUND, "not a member").into_response(),
         Ok(Membership::LastOwner) => (
             StatusCode::CONFLICT,

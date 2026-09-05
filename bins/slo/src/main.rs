@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use chrono::Datelike;
 use clap::{Parser, Subcommand};
 use kloudlite_core::metrics::{register, Kind};
-use kloudlite_slo::ctx::{Ctx, OTHER_EMAIL, OTHER_USER, PROBE_EMAIL, PROBE_USER};
+use kloudlite_slo::ctx::{email_of, Ctx, SUITE_TENANTS};
 use kloudlite_slo::stages;
 use kloudlite_slo::suite::TEARDOWN;
 use kloudlite_slo::Config;
@@ -226,7 +226,7 @@ async fn child(cfg: Config, kind: Suite, run_id: Option<String>, budget: Duratio
     }
 }
 
-/// Claims both usernames. A name already claimed by this probe answers a 4xx, which is a success
+/// Claims every suite's usernames. A name already claimed by this probe answers a 4xx, which is a success
 /// here — `bootstrap` is re-run on every deploy and must never fail on the second one.
 async fn bootstrap(cfg: Config) -> i32 {
     let c = match Ctx::new(cfg, Suite::Fast, None).await {
@@ -240,10 +240,16 @@ async fn bootstrap(cfg: Config) -> i32 {
     // One admin call creates both identities: the api tier only creates a person at sign-in, and a
     // synthetic user never signs in, so `/v1/users/username` alone answered 400 "no such user".
     let url = format!("{}/admin/slo/bootstrap", c.cfg.admin_url.trim_end_matches('/'));
-    let body = serde_json::json!({ "users": [
-        { "email": PROBE_EMAIL, "name": "SLO probe", "username": PROBE_USER },
-        { "email": OTHER_EMAIL, "name": "SLO other", "username": OTHER_USER },
-    ]});
+    // Every suite's pair, not just this process's: `bootstrap` is run once per deploy and the
+    // suites are isolated from each other by owning DIFFERENT tenants (ctx::SUITE_TENANTS), so a
+    // bootstrap that only claimed the pair its own env named would leave the hourly and drill
+    // suites with no accounts at all until somebody ran it again with a different env.
+    let users: Vec<_> = SUITE_TENANTS
+        .iter()
+        .flat_map(|(p, o)| [(*p, "SLO probe"), (*o, "SLO other")])
+        .map(|(user, name)| serde_json::json!({ "email": email_of(user), "name": name, "username": user }))
+        .collect();
+    let body = serde_json::json!({ "users": users });
     match c.http.post(&url).header("authorization", c.bearer(&c.admin_jwt)).json(&body).send().await {
         Ok(r) if r.status().is_success() => tracing::info!(kind = "users", "slo.bootstrap.completed"),
         Ok(r) => {

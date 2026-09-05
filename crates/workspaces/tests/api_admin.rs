@@ -29,6 +29,9 @@ impl Directory for StubMembership {
     async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
         Err("no directory".into())
     }
+    async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+        Ok(())
+    }
 
     // This stub exercises team membership and admin routing only; CLI tokens and ssh keys are
     // not part of its case, and an unwired revocation list must refuse rather than admit.

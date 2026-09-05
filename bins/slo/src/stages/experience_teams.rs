@@ -34,7 +34,7 @@ use serde_json::Value;
 use super::git::{git, BASE_BRANCH};
 use super::{api, drain_team, get, poll_json, post, raw, TEAM_DRAIN};
 use crate::drill::{undoing, UNDO_SLACK};
-use crate::ctx::{Ctx, OTHER_EMAIL, PROBE_USER};
+use crate::ctx::Ctx;
 
 // Per-step ceilings. Each is at least its catalogue target, for the reason stage 5 states: a slow
 // answer must be a breach with a number, never a step the probe cut off.
@@ -129,9 +129,10 @@ pub(super) async fn invite_accept(c: &mut Ctx) {
         return c.skip("team.invite.accept", "the team was never created");
     }
     c.step("team.invite.accept", QUICK, |c| {
+        let other_email = c.other_email.clone();
         let (slug, jwt, other) = (slug(c), c.probe_jwt.clone(), c.other_jwt.clone());
         async move {
-            let body = serde_json::json!({ "email": OTHER_EMAIL, "role": "member" });
+            let body = serde_json::json!({ "email": other_email, "role": "member" });
             let issued = post(c, &api(c, &format!("/v1/teams/{slug}/invites")), &jwt, body)
                 .await
                 .context("could not invite")?;
@@ -162,15 +163,16 @@ pub(super) async fn role_set(c: &mut Ctx) {
         return c.skip("team.role.set", "the second user never joined the team");
     }
     c.step("team.role.set", QUICK, |c| {
+        let other_email = c.other_email.clone();
         let (slug, jwt) = (slug(c), c.probe_jwt.clone());
-        let url = api(c, &format!("/v1/teams/{slug}/members/{OTHER_EMAIL}"));
+        let url = api(c, &format!("/v1/teams/{slug}/members/{other_email}"));
         async move {
             let body = serde_json::json!({ "role": "admin" });
             super::call(c, reqwest::Method::PATCH, &url, &jwt, Some(body))
                 .await
                 .context("could not change the role")?;
             let team = get(c, &api(c, &format!("/v1/teams/{slug}")), &jwt).await?;
-            if role_of(&team, OTHER_EMAIL).as_deref() != Some("admin") {
+            if role_of(&team, &other_email).as_deref() != Some("admin") {
                 return Err(anyhow!("the profile still does not show them as an admin"));
             }
             Ok(())
@@ -317,6 +319,7 @@ pub(super) async fn workspace(c: &mut Ctx) {
         return c.skip("team.workspace", "the team was never created");
     }
     c.step("team.workspace", TEAM_WS_CEILING, |c| {
+        let probe = c.probe_user.clone();
         let (slug, jwt) = (slug(c), c.probe_jwt.clone());
         let body = serde_json::json!({
             "team": slug,
@@ -340,7 +343,7 @@ pub(super) async fn workspace(c: &mut Ctx) {
             .await
             .context("the team workspace never became ready")?;
 
-            let ns = kloudlite_workspaces::crd::ws_namespace(PROBE_USER, &slug);
+            let ns = kloudlite_workspaces::crd::ws_namespace(&probe, &slug);
             if !ns.starts_with("wt-") {
                 return Err(anyhow!("a team workspace's namespace is {ns}, not a team one"));
             }
@@ -369,9 +372,10 @@ pub(super) async fn member_remove(c: &mut Ctx) {
         return c.skip("team.member.remove", "the second user never joined the team");
     }
     c.step("team.member.remove", QUICK, |c| {
+        let other_email = c.other_email.clone();
         let (slug, name) = (slug(c), shared_repo(c));
         let (jwt, other) = (c.probe_jwt.clone(), c.other_jwt.clone());
-        let remove = api(c, &format!("/v1/teams/{slug}/members/{OTHER_EMAIL}"));
+        let remove = api(c, &format!("/v1/teams/{slug}/members/{other_email}"));
         let refs = api(c, &format!("/api/{slug}/{name}/refs"));
         let tokens = api(c, "/v1/tokens");
         async move {
@@ -471,11 +475,12 @@ pub(super) async fn protection(c: &mut Ctx) {
     }
     let branch = prot_branch(c);
     c.step("repo.protection", PROTECTION_CEILING, move |c| {
+        let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let url = format!("{}/{PROBE_USER}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
-        let rule = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/protection"));
-        let refs = api(c, &format!("/api/{PROBE_USER}/{name}/refs"));
-        let pulls = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/pulls"));
+        let url = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
+        let rule = api(c, &format!("/v1/repos/{probe}/{name}/protection"));
+        let refs = api(c, &format!("/api/{probe}/{name}/refs"));
+        let pulls = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
         let run_id = c.run_id.clone();
         async move {
             post(c, &rule, &jwt, serde_json::json!({ "pattern": BASE_BRANCH }))
@@ -570,9 +575,10 @@ pub(super) async fn commit_patch(c: &mut Ctx) {
     };
     let branch = patch_branch(c);
     c.step("repo.commit.patch", PULL_CEILING, move |c| {
+        let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let url = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/commits"));
-        let log = api(c, &format!("/api/{PROBE_USER}/{name}/log"));
+        let url = api(c, &format!("/v1/repos/{probe}/{name}/commits"));
+        let log = api(c, &format!("/api/{probe}/{name}/log"));
         let run_id = c.run_id.clone();
         async move {
             let oid = patch(c, &url, &jwt, BASE_BRANCH, &branch, &format!("slo edit {run_id}"), "experience.txt").await?;
@@ -629,8 +635,9 @@ pub(super) async fn compare(c: &mut Ctx) {
         return c.skip("repo.compare", "the edit never made a branch to compare");
     };
     c.step("repo.compare", QUICK, move |c| {
+        let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let url = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/compare?base={BASE_BRANCH}&head={branch}"));
+        let url = api(c, &format!("/v1/repos/{probe}/{name}/compare?base={BASE_BRANCH}&head={branch}"));
         async move {
             let seen = get(c, &url, &jwt).await.context("could not compare")?;
             let commits = seen.get("commits").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
@@ -647,7 +654,8 @@ pub(super) async fn compare(c: &mut Ctx) {
 /// The tip of one branch, from the browse refs. `None` when it is not there — which is a SKIP for
 /// the ids that need it, not a second failure for the step that should have pushed it.
 async fn branch_oid(c: &Ctx, name: &str, branch: &str) -> Option<String> {
-    let refs = get(c, &api(c, &format!("/api/{PROBE_USER}/{name}/refs")), &c.probe_jwt).await.ok()?;
+    let probe = c.probe_user.clone();
+    let refs = get(c, &api(c, &format!("/api/{probe}/{name}/refs")), &c.probe_jwt).await.ok()?;
     super::git::oid_of(&refs, branch)
 }
 
@@ -661,8 +669,9 @@ pub(super) async fn comment(c: &mut Ctx) {
         return c.skip("pr.comment", "the edit never made a branch to open a change from");
     }
     c.step("pr.comment", PULL_CEILING, move |c| {
+        let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let pulls = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/pulls"));
+        let pulls = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
         let said = format!("slo probe {}", c.run_id);
         async move {
             let number = open_pull(c, &pulls, &jwt, &branch, &said).await?;
@@ -695,7 +704,8 @@ pub(super) async fn close(c: &mut Ctx) {
         return c.skip("pr.close", "no repo");
     };
     let branch = closed_branch(c);
-    let commits = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/commits"));
+    let probe = c.probe_user.clone();
+    let commits = api(c, &format!("/v1/repos/{probe}/{name}/commits"));
     let jwt = c.probe_jwt.clone();
     let run = c.run_id.clone();
     // Untimed precondition, like `pr.rs`'s `open`: the catalogue has no id for making a branch.
@@ -703,8 +713,9 @@ pub(super) async fn close(c: &mut Ctx) {
         return c.skip("pr.close", &format!("no change to close: {e:#}"));
     }
     c.step("pr.close", PULL_CEILING, move |c| {
+        let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let pulls = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/pulls"));
+        let pulls = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
         let run = c.run_id.clone();
         async move {
             let number = open_pull(c, &pulls, &jwt, &branch, &format!("slo close {run}")).await?;
@@ -747,8 +758,9 @@ pub(super) async fn verify(c: &mut Ctx) {
         return c.skip("commit.verify", "nothing was pushed");
     };
     c.step("commit.verify", QUICK, move |c| {
+        let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let url = api(c, &format!("/api/{PROBE_USER}/{name}/signature/{oid}"));
+        let url = api(c, &format!("/api/{probe}/{name}/signature/{oid}"));
         async move { get(c, &url, &jwt).await.map(|_| ()) }.boxed()
     })
     .await;
@@ -822,7 +834,7 @@ mod tests {
     async fn every_team_id_is_reported_exactly_once_when_the_team_exists() {
         let team = serde_json::json!({
             "slug": "run-fast-1-team",
-            "members": [{ "email": OTHER_EMAIL, "role": "admin" }],
+            "members": [{ "email": crate::ctx::email_of(crate::ctx::OTHER_USER), "role": "admin" }],
         });
         let app = axum::Router::new()
             .route("/v1/teams", axpost(|| async { (StatusCode::CREATED, axum::Json(serde_json::json!({}))) }))

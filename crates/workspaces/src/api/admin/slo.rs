@@ -287,14 +287,15 @@ pub struct BootstrapBody {
 /// `POST /admin/slo/bootstrap`: create the probe's identities. Sign-in is the only other path
 /// that creates a person, and a synthetic user never signs in — so this is the one place a user
 /// comes to exist without a browser, behind the superadmin claim like every `/admin/*` route.
-/// Idempotent: an existing user with the same handle answers 204 too. Capped at four so a typo
-/// cannot bulk-create accounts.
+/// Idempotent: an existing user with the same handle answers 204 too. The probe sends SIX — one
+/// tenant pair per suite (fast, hourly, drills), so a long suite never shares state with the
+/// five-minute one — and the cap is eight so a typo cannot bulk-create accounts.
 pub async fn bootstrap(State(state): State<Arc<ApiState>>, Json(body): Json<BootstrapBody>) -> Response {
     let Some(dir) = state.directory.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "directory unavailable").into_response();
     };
-    if body.users.is_empty() || body.users.len() > 4 {
-        return (StatusCode::BAD_REQUEST, "one to four users").into_response();
+    if body.users.is_empty() || body.users.len() > 8 {
+        return (StatusCode::BAD_REQUEST, "one to eight users").into_response();
     }
     for u in &body.users {
         if let Err(e) = dir.ensure_user(&u.email, &u.name, &u.username).await {

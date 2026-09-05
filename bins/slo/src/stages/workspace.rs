@@ -13,7 +13,7 @@ use futures::FutureExt;
 use serde_json::Value;
 
 use super::{api, poll_json, post, raw};
-use crate::ctx::{Ctx, PROBE_USER};
+use crate::ctx::Ctx;
 use crate::tools;
 
 /// Per-step ceilings. Each is at least its catalogue target — a slow answer must be a breach with a
@@ -203,9 +203,10 @@ echo $(( (e - s) * 10 ))"#
 }
 
 pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> Result<(i32, String, String)> {
+    let probe = c.probe_user.clone();
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
     // The probe's workspaces are personal, never a team's, so the namespace is `ws-slo-probe`.
-    let ns = kloudlite_workspaces::crd::ws_namespace(PROBE_USER, "");
+    let ns = kloudlite_workspaces::crd::ws_namespace(&probe, "");
     crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["sh", "-c", script], cap).await
 }
 

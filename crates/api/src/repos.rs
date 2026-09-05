@@ -429,7 +429,17 @@ pub(crate) async fn list_protection(
         return r;
     }
     let url = format!("{}/api/{}/{}/protect", api.upstream, encode(&owner), encode(&name));
-    let r = match api.client.get(url).header(kloudlite_core::peer::PEER_HEADER, &api.secret).send().await {
+    // The owner header is what lets the server open a PRIVATE repo for this read: `settings_caller`
+    // has already established the caller may act under `owner`, exactly as the browse proxy does
+    // before it forwards the same header. Without it the server sees an anonymous read and 401s.
+    let r = match api
+        .client
+        .get(url)
+        .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
+        .header(kloudlite_core::peer::OWNER_HEADER, &owner)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(reason = "protection", owner = %owner, name = %name, error = %e, "upstream.request.failed");
