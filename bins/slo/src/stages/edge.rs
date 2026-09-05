@@ -36,7 +36,8 @@ const PIPELINE_CEILING: Duration = Duration::from_secs(10);
 
 /// A certificate this close to expiring is a page, not a surprise: two weeks is longer than any
 /// renewal cycle here and longer than a weekend nobody is on call for.
-const CERT_MIN_DAYS: i64 = 14;
+// Cloudflare's edge certificates are renewed about ten days out, so 14 pages on every rotation.
+const CERT_MIN_DAYS: i64 = 7;
 /// Above this the consumer is keeping up; a real backlog is orders of magnitude larger.
 const MAX_STREAM_PENDING: f64 = 1000.0;
 /// ClickHouse holds 400-day rollups; under a fifth free is the point somebody must act.

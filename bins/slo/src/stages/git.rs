@@ -5,6 +5,7 @@
 //! ten separate failures for one broken thing (the design's "Error handling": skipped is no
 //! sample, and the failure was already counted where it happened).
 
+use base64::Engine as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -118,14 +119,23 @@ pub(crate) fn git_env(c: &Ctx) -> HashMap<String, String> {
     ])
 }
 
-/// `-c http.extraHeader=…` carrying the probe's JWT, ahead of the subcommand.
+/// `-c http.extraHeader=…` carrying the probe's PERSONAL TOKEN as git's `x:<token>` Basic pair —
+/// the one shape the git listener accepts (`httpx::basic_creds`); a session JWT is not a git
+/// credential there. Without a token (identity stage failed) the JWT rides along so the failure
+/// reads as a 401 rather than a missing header.
 ///
 /// The header is never anywhere else: `tools::run` refuses to put an argv in an error, so this is
 /// the only place the token appears and it goes no further than the child's own memory.
 pub(crate) fn authed(c: &Ctx, rest: &[&str]) -> Vec<String> {
     let mut args = vec![
         "-c".to_string(),
-        format!("http.extraHeader=Authorization: Bearer {}", c.probe_jwt),
+        match c.state.token_value.as_deref() {
+            Some(t) => format!(
+                "http.extraHeader=Authorization: Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("x:{t}"))
+            ),
+            None => format!("http.extraHeader=Authorization: Bearer {}", c.probe_jwt),
+        },
     ];
     args.extend(rest.iter().map(|a| a.to_string()));
     args

@@ -40,8 +40,10 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list"]
   - apiGroups: [""]
+    # `get` as well as `create`: the WebSocket exec the kube crate speaks is a GET upgrade, and
+    # the API server authorizes it as `get` on pods/exec — `create` alone answers 403.
     resources: ["pods/exec"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]

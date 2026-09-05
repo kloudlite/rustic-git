@@ -213,6 +213,10 @@ async fn may_impersonate(client: &kube::Client) -> bool {
             resource_attributes: Some(ResourceAttributes {
                 resource: Some("serviceaccounts".into()),
                 verb: Some("impersonate".into()),
+                // The grant is scoped by resourceName (slo-rbac.yaml); an unnamed review reads as
+                // "may impersonate ANY serviceaccount", which is exactly what we are not allowed.
+                name: Some("kloudlite-git-agent".into()),
+                namespace: Some("kube-system".into()),
                 ..Default::default()
             }),
             ..Default::default()

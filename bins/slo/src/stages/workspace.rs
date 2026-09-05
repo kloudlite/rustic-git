@@ -319,7 +319,7 @@ async fn push(c: &mut Ctx, id: &str) {
         let url = api(c, &format!("/v1/workspaces/{id}/push"));
         let history = api(c, &format!("/v1/volumes/{volume}/history"));
         async move {
-            let doc = post(c, &url, &jwt, Value::Null).await.context("could not push")?;
+            let doc = post(c, &url, &jwt, serde_json::json!({})).await.context("could not push")?;
             let snap = doc
                 .get("id")
                 .and_then(Value::as_str)
