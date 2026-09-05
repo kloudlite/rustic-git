@@ -23,11 +23,11 @@ use crate::ctx::{Ctx, PROBE_USER};
 /// number rather than a step the probe cut off. `key.platform.regenerate` and `home.persists` are
 /// availability SLOs with no target latency; theirs is a whole seeded create plus an exec, which
 /// is the same 180 s the seeded step itself is given, plus room for the second create.
-const ADD_CEILING: Duration = Duration::from_secs(190);
-const REMOVE_CEILING: Duration = Duration::from_secs(130);
-const SEEDED_CEILING: Duration = Duration::from_secs(190);
-const KEY_CEILING: Duration = Duration::from_secs(210);
-const HOME_CEILING: Duration = Duration::from_secs(210);
+const ADD_CEILING: Duration = Duration::from_secs(150);
+const REMOVE_CEILING: Duration = Duration::from_secs(90);
+const SEEDED_CEILING: Duration = Duration::from_secs(150);
+const KEY_CEILING: Duration = Duration::from_secs(150);
+const HOME_CEILING: Duration = Duration::from_secs(150);
 
 /// How long a create is given to reach `ready` INSIDE a step. Below every ceiling above, so a
 /// workspace that never starts leaves room for the step to say so.

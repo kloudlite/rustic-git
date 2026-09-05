@@ -3,11 +3,11 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use kloudlite_workspaces::slo::catalogue::Suite;
 use serde_json::Value;
 
-use crate::ctx::{Ctx, OTHER_USER, PROBE_USER};
+use crate::ctx::{Ctx, OTHER_EMAIL, OTHER_USER, PROBE_USER};
 
 pub mod admin;
 pub mod edge;
@@ -178,7 +178,9 @@ pub async fn boot(c: &mut Ctx) {
 /// lose the report that says why the run failed in the first place.
 pub async fn teardown(c: &mut Ctx) {
     undo_drills(c).await;
+    undo_grants(c).await;
     hide(c).await;
+    unprotect(c).await;
     let prefix = c.prefix();
     let mut swept = sweep_all(c, move |name| name.starts_with(&prefix)).await;
     swept += drop_env_volume(c).await;
@@ -208,6 +210,62 @@ async fn undo_drills(c: &mut Ctx) {
             }
         }
         Err(e) => tracing::debug!(error = %format!("{e:#}"), "slo.drill.sweep.skipped"),
+    }
+}
+
+/// Put the two GRANTS stage 14 makes back, on every run and whatever the child did.
+///
+/// Both are the same class of leftover as a taint: they are made by a step and undone by the same
+/// step, so the run that is killed mid-step is exactly the one that leaves them standing — and
+/// neither has a name teardown's prefix sweep could ever match. A raised quota is allocation
+/// nobody decided on; a second superadmin is the whole authorization model.
+async fn undo_grants(c: &mut Ctx) {
+    let url = admin(c, &format!("/admin/quota/{PROBE_USER}"));
+    let body = serde_json::json!({ "spec": experience_admin::probe_quota(), "note": "slo probe quota restore" });
+    match call(c, reqwest::Method::PUT, &url, &c.admin_jwt.clone(), Some(body)).await {
+        Ok(_) => tracing::info!(kind = "quota", name = PROBE_USER, "slo.teardown.restored"),
+        Err(e) => tracing::warn!(kind = "quota", op = "restore", error = %format!("{e:#}"), "slo.teardown.failed"),
+    }
+    // Read first: the DELETE is an admin write with an audit row of its own, and filing one per
+    // run for an account that is not on the roster is noise in the log a human reads.
+    let all = admin(c, "/api/admin/superadmins");
+    let listed = get(c, &all, &c.admin_jwt.clone()).await.ok().is_some_and(|v| {
+        v.as_array().unwrap_or(&vec![]).iter().any(|r| {
+            r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(OTHER_EMAIL))
+        })
+    });
+    if listed {
+        let one = admin(c, &format!("/api/admin/superadmins/{OTHER_EMAIL}"));
+        let body = serde_json::json!({ "note": "slo probe teardown" });
+        match call(c, reqwest::Method::DELETE, &one, &c.admin_jwt.clone(), Some(body)).await {
+            Ok(_) => tracing::info!(kind = "superadmin", name = OTHER_EMAIL, "slo.teardown.restored"),
+            Err(e) => tracing::warn!(kind = "superadmin", op = "revoke", error = %format!("{e:#}"), "slo.teardown.failed"),
+        }
+    }
+}
+
+/// Take the protection rule off every `run-*` repo, BEFORE the deletes.
+///
+/// `repo.protection` protects `main` and unprotects it again, so only a run killed between the two
+/// leaves one — and it leaves it on a repo the sweep below is about to delete. That delete is
+/// best-effort like every other one here: a rule left on a repo that survives is what breaks the
+/// NEXT run's stage 2 push, and this is the only thing that removes it.
+async fn unprotect(c: &mut Ctx) {
+    let prefix = c.prefix();
+    let jwt = c.probe_jwt.clone();
+    let repos = list(
+        c,
+        &Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |_, _| String::new() },
+        PROBE_USER,
+        &jwt,
+    )
+    .await;
+    for (name, _) in repos.into_iter().filter(|(n, _)| n.starts_with(&prefix)) {
+        let url = api(c, &format!("/v1/repos/{PROBE_USER}/{name}/protection"));
+        let body = serde_json::json!({ "pattern": "main", "remove": true });
+        if let Err(e) = post(c, &url, &jwt, body).await {
+            tracing::warn!(kind = "repo", op = "unprotect", name = %name, error = %format!("{e:#}"), "slo.teardown.failed");
+        }
     }
 }
 
@@ -379,9 +437,57 @@ async fn sweep_teams<M: Fn(&str) -> bool>(c: &mut Ctx, jwt: &str, matches: &M) -
                 gone += del(c, "repo", &name, &api(c, &format!("/v1/repos/{slug}/{name}")), jwt).await as usize;
             }
         }
+        // Every credential minted UNDER the team, not only the ones whose name carries the run
+        // prefix: `team.repo.shared`'s token is named after the run id without it, and a git
+        // credential that outlives its team is a credential nobody can see to revoke.
+        for (name, id) in list(
+            c,
+            &Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |_, _| String::new() },
+            &slug,
+            jwt,
+        )
+        .await
+        {
+            gone += del(c, "token", &name, &api(c, &format!("/v1/tokens/{id}")), jwt).await as usize;
+        }
+        // A team with an orphaned workspace is worse than a leaked team: the workspace is billed
+        // to an owner that no longer exists and no listing anywhere shows it. So the team is
+        // deleted only once its workspaces are gone, and the sweep gives up on it otherwise.
+        if let Err(e) = drain_team(c, &slug, jwt).await {
+            tracing::warn!(kind = "team", op = "drain", name = %slug, error = %format!("{e:#}"), "slo.teardown.failed");
+            continue;
+        }
         gone += del(c, "team", &slug, &api(c, &format!("/v1/teams/{slug}")), jwt).await as usize;
     }
     gone
+}
+
+/// How long a team's workspaces have to actually go before the team may be deleted.
+pub(crate) const TEAM_DRAIN: Duration = Duration::from_secs(60);
+
+/// Delete every workspace a team holds and wait until the listing is empty.
+///
+/// `Err` means DO NOT DELETE THE TEAM — a listing that failed, a delete that was refused, or a
+/// workspace still standing at the cap. Deleting the team then would strand a subvolume under an
+/// owner that no longer resolves, which no sweep on any tier can find again; a leaked team is a
+/// row the next run's prefix sweep picks up.
+pub(crate) async fn drain_team(c: &Ctx, slug: &str, jwt: &str) -> Result<()> {
+    let url = api(c, &format!("/v1/workspaces?team={slug}"));
+    let rows = get(c, &url, jwt).await.context("could not list the team's workspaces")?;
+    let ids: Vec<String> = rows
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string)).collect())
+        .unwrap_or_default();
+    for id in ids {
+        call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{id}")), jwt, None)
+            .await
+            .with_context(|| format!("could not delete the team workspace {id}"))?;
+    }
+    // The delete is a wish — the workspace goes when its finalizer has dropped the worktree — so
+    // the listing going empty is the only thing that says the team is safe to take.
+    poll_json(c, &url, jwt, TEAM_DRAIN, |v| v.as_array().is_some_and(|rows| rows.is_empty()))
+        .await
+        .context("the team still holds a workspace")
 }
 
 /// One best-effort DELETE, logged the way every other line in teardown logs. `true` when it went.

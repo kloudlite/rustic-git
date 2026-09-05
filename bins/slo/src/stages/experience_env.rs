@@ -23,9 +23,9 @@ use crate::ctx::Ctx;
 /// Per-step ceilings, each at or above its catalogue target — a slow answer must be a breach with a
 /// number, never a step the probe cut off. The three without a latency target still need one, or a
 /// wedged environment holds the whole hourly run to the CronJob deadline.
-const MULTI_CEILING: Duration = Duration::from_secs(240);
-const CLONE_CEILING: Duration = Duration::from_secs(240);
-const RESTORE_CEILING: Duration = Duration::from_secs(240);
+const MULTI_CEILING: Duration = Duration::from_secs(180);
+const CLONE_CEILING: Duration = Duration::from_secs(180);
+const RESTORE_CEILING: Duration = Duration::from_secs(180);
 const STOP_START_CEILING: Duration = Duration::from_secs(150);
 /// The catalogue asks for 1 s. The ceiling is five, so a slow read is a breach with a duration
 /// rather than a timeout with none.
@@ -36,6 +36,10 @@ const EXEC_CEILING: Duration = Duration::from_secs(15);
 /// How long the vol.history workspace has to come up. Its own step measures nothing but the two
 /// reads at the end, so this is a precondition ceiling, not an SLO.
 const WS_CEILING: Duration = Duration::from_secs(120);
+/// The whole preparation — a workspace and two pushes waited out one after the other. Every part
+/// of it has a cap of its own, but nothing bounded the SUM until this did, and an unbounded
+/// precondition is a stage that runs until the CronJob's deadline kills the pod.
+const PREPARE_CEILING: Duration = Duration::from_secs(WS_CEILING.as_secs() * 3);
 const QUOTA_GB: u64 = 1;
 
 /// The two services. `redis` holds the marker `env.restore.inplace` puts back — on a MOUNT, because
@@ -66,7 +70,14 @@ pub async fn environments(c: &mut Ctx) {
         }
         return;
     };
-    clone(c, &env).await;
+    // The chain, all the way down: `env.clone` leaves the environment STOPPED and the restore's
+    // first act is to start it again, so a clone that failed leaves a state the restore would
+    // measure instead of the restore.
+    if !clone(c, &env).await {
+        c.skip("env.restore.inplace", "the clone left the environment mid-flight");
+        c.skip("env.stop.start", "the clone left the environment mid-flight");
+        return;
+    }
     // A restore that failed leaves the environment mid-flight — services scaled down, a wish
     // written — and stopping THAT measures the restore, not the stop.
     if restore_in_place(c, &env).await {
@@ -138,7 +149,7 @@ async fn multi(c: &mut Ctx) -> Option<String> {
 /// Stopped first because that is the shape a person clones in — and because an environment clone
 /// copies the source's live subvolume, so a stopped source is the one whose bytes are not moving
 /// under the copy.
-async fn clone(c: &mut Ctx, env: &str) {
+async fn clone(c: &mut Ctx, env: &str) -> bool {
     let name = format!("{}-e2c", c.prefix());
     let env = env.to_string();
     c.step("env.clone", CLONE_CEILING, move |c| {
@@ -159,7 +170,7 @@ async fn clone(c: &mut Ctx, env: &str) {
         }
         .boxed()
     })
-    .await;
+    .await
 }
 
 /// `env.restore.inplace`: a value written into redis, pushed, deleted, and put back by a restore of
@@ -238,14 +249,20 @@ async fn stop_start(c: &mut Ctx, env: &str) {
 
 /// `vol.history`: two pushes with messages, read back newest first, and `refs` naming the tip.
 ///
-/// The pushes are a PRECONDITION, outside the step: the catalogue's target is one second, which is
-/// a history read, not two snapshots being cut.
+/// The pushes are a PRECONDITION, outside the step but under `PREPARE_CEILING`: the catalogue's
+/// target is one second, which is a history read, not two snapshots being cut.
 pub async fn history(c: &mut Ctx) {
-    let (volume, tip) = match prepare(c).await {
+    // Under a ceiling of its own, and reported as `vol.history` when it fails: a workspace that
+    // never comes up would otherwise hold the hourly run for as long as it took the CronJob's
+    // deadline to notice, and the id would report nothing at all. A skip is the wrong answer too
+    // — the fleet WAS asked, and the pushes the read needs are what failed.
+    let prepared = match tokio::time::timeout(PREPARE_CEILING, prepare(c)).await {
+        Ok(out) => out,
+        Err(_) => Err(anyhow!("the two pushes did not happen within {} ms", PREPARE_CEILING.as_millis())),
+    };
+    let (volume, tip) = match prepared {
         Ok(v) => v,
         Err(e) => {
-            // The id still reports, and it reports the reason: a skip here would say the fleet was
-            // never asked, when in fact the pushes it needs are what failed.
             let why = format!("{e:#}");
             c.step("vol.history", HISTORY_CEILING, move |_| async move { Err(anyhow!("{why}")) }.boxed()).await;
             return;

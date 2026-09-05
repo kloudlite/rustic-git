@@ -5,6 +5,7 @@
 //! once, and one file per group of ids is what keeps them out of each other's way. Every function
 //! here is one step and records exactly one id, whatever happens inside it.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -13,14 +14,22 @@ use serde_json::{json, Value};
 
 use super::{admin, api, call, get, poll_json, post, raw};
 use crate::ctx::{Ctx, OTHER_EMAIL, PROBE_USER};
+use crate::drill::{undoing, UNDO_SLACK};
 
 /// Per-step ceilings, each looser than the catalogue target it measures (10 s for the create after
 /// an approve, 30 s for the stop and the feed) so a slow fleet is a breach with a number rather
 /// than a step the probe cut off. `admin.stop.workspace` carries a workspace CREATE inside it,
 /// which is why it is the large one.
-const APPROVE_CEILING: Duration = Duration::from_secs(90);
+///
+/// Two of them are a BODY cap and a step ceiling: `request.approve` and `superadmin.grant` both
+/// compensate — a raised quota, a granted roster seat — and `Ctx::step`'s own timeout drops the
+/// whole future, undo included, when it fires. So the body runs under its own ceiling inside
+/// `drill::undoing` and the step's is that plus `UNDO_SLACK`, which can therefore never fire first.
+const APPROVE_BODY: Duration = Duration::from_secs(90);
+const APPROVE_CEILING: Duration = Duration::from_secs(APPROVE_BODY.as_secs() + UNDO_SLACK);
 const STOP_CEILING: Duration = Duration::from_secs(150);
-const GRANT_CEILING: Duration = Duration::from_secs(20);
+const GRANT_BODY: Duration = Duration::from_secs(20);
+const GRANT_CEILING: Duration = Duration::from_secs(GRANT_BODY.as_secs() + UNDO_SLACK);
 const FEED_CEILING: Duration = Duration::from_secs(45);
 
 /// How long the once-refused create is retried after the approve — the catalogue's target for the
@@ -36,89 +45,126 @@ const HEADROOM: u64 = 5;
 /// Every admin write on this platform carries a note onto its audit row, and an empty one is a 422.
 const NOTE: &str = "slo probe";
 
+/// `deploy/k3s/quotas-slo.yaml`'s `slo-probe` spec, verbatim — the ONE place either half of the
+/// probe writes the quota back from.
+///
+/// The step used to write back whatever it had read a moment earlier, which restores nothing when
+/// the run it is repairing is the one that raised it. The yaml is what the owner decided; anything
+/// else in the object is a leftover, and teardown writes this on every run whatever the step did.
+pub(crate) fn probe_quota() -> Value {
+    json!({
+        "workspaces": 8,
+        "environments": 3,
+        "snapshots": 20,
+        "diskGb": 40,
+        "cpu": 40,
+        "memoryGb": 80,
+    })
+}
+
+/// `request.approve`: an over-quota create is refused, a request raises the limit, and the same
+/// create then fits.
 pub async fn request_approve(c: &mut Ctx) {
     let name = format!("{}-q", c.prefix());
     let reason = format!("{} slo probe quota", c.prefix());
-    c.step("request.approve", APPROVE_CEILING, move |c| {
-        let jwt = c.probe_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
-        let region = c.cfg.region.clone();
-        let quota_url = api(c, "/v1/quota");
-        let ws_url = api(c, "/v1/workspaces");
-        let req_url = api(c, "/v1/requests");
-        let write_back = admin(c, &format!("/admin/quota/{PROBE_USER}"));
-        async move {
-            let q = get(c, &quota_url, &jwt).await.context("could not read the quota")?;
-            // Kept whole rather than field by field: it is written back verbatim below, and a
-            // restore that rebuilt the spec from the dimensions this step cares about would erase
-            // every other limit somebody granted.
-            let limit =
-                q.get("limit").cloned().ok_or_else(|| anyhow!("the quota answer carried no limit"))?;
-            let cap = disk_gb(&limit).ok_or_else(|| anyhow!("the quota limit carries no diskGb"))?;
-            let used = q.get("used").and_then(disk_gb).unwrap_or(0);
-            let create = json!({
-                "name": name,
-                "region": region,
-                "quota_gb": cap.saturating_sub(used) + HEADROOM,
-                "packages": [],
-            });
-            let attempt = async {
-                let (status, text) =
-                    raw(c, reqwest::Method::POST, &ws_url, &jwt, Some(create.clone()), &[]).await?;
-                if status != reqwest::StatusCode::CONFLICT {
-                    return Err(anyhow!("an over-quota create answered {status}: {}", clip(&text)));
-                }
-                let body = json!({
-                    "kind": "quota",
-                    "reason": reason,
-                    "quota": { "diskGb": cap + HEADROOM },
-                });
-                let made =
-                    post(c, &req_url, &jwt, body).await.context("could not open the quota request")?;
-                let id = made
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("the answer carried no request id"))?
-                    .to_string();
-                let approve = admin(c, &format!("/admin/requests/{id}/approve"));
-                post(c, &approve, &admin_jwt, json!({ "note": NOTE }))
-                    .await
-                    .context("could not approve the quota request")?;
-                created_now(c, &ws_url, &jwt, &create).await
-            };
-            let out = attempt.await;
-            // The finally path, in this order: the workspace holds the disk the ORIGINAL limit
-            // does not allow, so it goes before the limit it would otherwise contradict. Both run
-            // whatever happened above — a raised probe quota is the one leftover teardown's name
-            // sweep cannot see.
-            if let Ok(Some(id)) = &out {
-                let url = api(c, &format!("/v1/workspaces/{id}"));
-                if let Err(e) = call(c, reqwest::Method::DELETE, &url, &jwt, None).await {
-                    tracing::warn!(kind = "workspace", op = "delete", error = %format!("{e:#}"), "slo.experience.failed");
-                }
-            }
-            let body = json!({ "spec": limit, "note": "slo probe quota restore" });
-            let back = call(c, reqwest::Method::PUT, &write_back, &admin_jwt, Some(body)).await;
-            out?;
-            back.context("the probe's quota was left RAISED")?;
-            Ok(())
-        }
-        .boxed()
-    })
-    .await;
+    c.step("request.approve", APPROVE_CEILING, move |c| approve(c, APPROVE_BODY, name, reason).boxed())
+        .await;
 }
 
-/// The create the quota refused, retried until the approved grant reaches it. Answers the new
-/// workspace's id when one was made, so the caller can take it back out.
-async fn created_now(c: &Ctx, url: &str, jwt: &str, body: &Value) -> Result<Option<String>> {
+/// The step's whole body, with the body's ceiling as an argument so a test can watch the
+/// compensation run when the body times out.
+async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result<()> {
+    let jwt = c.probe_jwt.clone();
+    let admin_jwt = c.admin_jwt.clone();
+    let region = c.cfg.region.clone();
+    let quota_url = api(c, "/v1/quota");
+    let ws_url = api(c, "/v1/workspaces");
+    let req_url = api(c, "/v1/requests");
+    let write_back = admin(c, &format!("/admin/quota/{PROBE_USER}"));
+    // What the body made, for the undo — which cannot be handed the body's return value, because
+    // it must also run on the path where the body was cut off and returned nothing at all.
+    let made: Arc<Mutex<Option<String>>> = Arc::default();
+    let created = made.clone();
+    let body = async {
+        let q = get(c, &quota_url, &jwt).await.context("could not read the quota")?;
+        let limit =
+            q.get("limit").cloned().ok_or_else(|| anyhow!("the quota answer carried no limit"))?;
+        let cap = disk_gb(&limit).ok_or_else(|| anyhow!("the quota limit carries no diskGb"))?;
+        let used = q.get("used").and_then(disk_gb).unwrap_or(0);
+        let create = json!({
+            "name": name,
+            "region": region,
+            "quota_gb": cap.saturating_sub(used) + HEADROOM,
+            "packages": [],
+        });
+        let (status, text) =
+            raw(c, reqwest::Method::POST, &ws_url, &jwt, Some(create.clone()), &[]).await?;
+        if status != reqwest::StatusCode::CONFLICT {
+            // Recorded even here: a create that SUCCEEDED is a workspace the undo must take back.
+            *created.lock().expect("lock") = id_of(&text);
+            return Err(anyhow!("an over-quota create answered {status}: {}", clip(&text)));
+        }
+        let body = json!({
+            "kind": "quota",
+            "reason": reason,
+            "quota": { "diskGb": cap + HEADROOM },
+        });
+        let made =
+            post(c, &req_url, &jwt, body).await.context("could not open the quota request")?;
+        let id = made
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("the answer carried no request id"))?
+            .to_string();
+        let approve = admin(c, &format!("/admin/requests/{id}/approve"));
+        post(c, &approve, &admin_jwt, json!({ "note": NOTE }))
+            .await
+            .context("could not approve the quota request")?;
+        created_now(c, &ws_url, &jwt, &create, &created).await
+    };
+    // The compensation, OUTSIDE the cancellable region, in this order: the workspace holds the
+    // disk the yaml limit does not allow, so it goes before the limit it would otherwise
+    // contradict. A raised probe quota is the one leftover teardown's name sweep cannot see.
+    let undo = || async {
+        // Cloned out of the guard before the await: a `MutexGuard` held across one is a future
+        // `Ctx::step` cannot box.
+        let held = made.lock().expect("lock").clone();
+        let dropped = match held {
+            Some(id) => call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{id}")), &jwt, None)
+                .await
+                .map(|_| ())
+                .with_context(|| format!("the over-quota workspace {id} was left RUNNING")),
+            None => Ok(()),
+        };
+        let body = json!({ "spec": probe_quota(), "note": "slo probe quota restore" });
+        // The quota goes back whatever the delete did — a raised limit is allocation nobody
+        // decided on, and it outlives the workspace by definition.
+        call(c, reqwest::Method::PUT, &write_back, &admin_jwt, Some(body))
+            .await
+            .context("the probe's quota was left RAISED")?;
+        dropped
+    };
+    undoing(cap, body, undo).await
+}
+
+/// The create the quota refused, retried until the approved grant reaches it. The id of whatever
+/// it made lands in `made`, which is what the compensation takes back out.
+async fn created_now(
+    c: &Ctx,
+    url: &str,
+    jwt: &str,
+    body: &Value,
+    made: &Mutex<Option<String>>,
+) -> Result<()> {
     let start = Instant::now();
     loop {
         let (status, text) =
             raw(c, reqwest::Method::POST, url, jwt, Some(body.clone()), &[]).await?;
         if status.is_success() {
-            return Ok(serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string)));
+            // Written down BEFORE the step can return: the undo takes it back, and a create the
+            // probe forgot is one workspace of the owner's allocation held for good.
+            *made.lock().expect("lock") = id_of(&text);
+            return Ok(());
         }
         if start.elapsed() >= AFTER_APPROVE {
             return Err(anyhow!(
@@ -179,15 +225,22 @@ pub async fn superadmin_grant(c: &mut Ctx) {
         let all = admin(c, "/api/admin/superadmins");
         async move {
             let body = json!({ "note": NOTE });
-            post(c, &one, &jwt, body.clone()).await.context("the grant was refused")?;
-            let added = listed(c, &all, &jwt).await;
-            // The revoke runs whatever the read said: the probe must not leave a second
-            // superadmin standing in the directory.
-            let removed = call(c, reqwest::Method::DELETE, &one, &jwt, Some(body)).await;
-            if !added.context("could not read the roster after the grant")? {
-                return Err(anyhow!("the roster does not list the account the grant added"));
-            }
-            removed.context("the account was left a SUPERADMIN")?;
+            let granted = async {
+                post(c, &one, &jwt, body.clone()).await.context("the grant was refused")?;
+                match listed(c, &all, &jwt).await.context("could not read the roster after the grant")? {
+                    true => Ok(()),
+                    false => Err(anyhow!("the roster does not list the account the grant added")),
+                }
+            };
+            // Outside the cancellable region: the probe must not leave a second superadmin
+            // standing in the directory because its own step ran out of time.
+            let revoke = || async {
+                call(c, reqwest::Method::DELETE, &one, &jwt, Some(body.clone()))
+                    .await
+                    .map(|_| ())
+                    .context("the account was left a SUPERADMIN")
+            };
+            undoing(GRANT_BODY, granted, revoke).await?;
             match listed(c, &all, &jwt).await.context("could not read the roster after the revoke")? {
                 true => Err(anyhow!("the roster still lists the account after the revoke")),
                 false => Ok(()),
@@ -221,7 +274,9 @@ pub async fn feed(c: &mut Ctx) {
         async move {
             let body = json!({ "owner": PROBE_USER, "name": name, "visibility": "private" });
             post(c, &repos, &jwt, body).await.context("could not create the repo")?;
-            poll_json(c, &feed, &jwt, FEED_CEILING, |v| {
+            // Two seconds inside the step's own ceiling, so a feed that never carries the repo
+            // reports what it last saw rather than the step's bare "timed out".
+            poll_json(c, &feed, &jwt, FEED_CEILING - Duration::from_secs(2), |v| {
                 v.as_array().unwrap_or(&vec![]).iter().any(|e| {
                     e.get("kind").and_then(Value::as_str) == Some("repo_created")
                         && e.get("repo").and_then(Value::as_str) == Some(name.as_str())
@@ -233,6 +288,12 @@ pub async fn feed(c: &mut Ctx) {
         .boxed()
     })
     .await;
+}
+
+/// The `id` off a create's body, whatever the body is. `None` for anything that is not a JSON
+/// object with one — a refusal, an HTML error page, an empty 204.
+fn id_of(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text).ok()?.get("id").and_then(Value::as_str).map(str::to_string)
 }
 
 fn disk_gb(v: &Value) -> Option<u64> {
@@ -371,6 +432,90 @@ mod tests {
         for s in &c.steps {
             assert!(s.ok, "{}: {}", s.slo_id, s.detail);
         }
+    }
+
+    /// The compensation runs when the BODY is cut off — the rule `drill::undoing` exists for, and
+    /// the reason the quota write-back is not simply the last line of the step. A create that never
+    /// answers used to mean a probe quota left RAISED for good: `Ctx::step`'s timeout drops the
+    /// whole future, undo included.
+    #[tokio::test]
+    async fn the_quota_is_written_back_when_the_body_times_out() {
+        let puts = Arc::new(AtomicUsize::new(0));
+        let p = puts.clone();
+        let app = Router::new()
+            .route(
+                "/v1/quota",
+                get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}})) }),
+            )
+            // Never answers: the body can only end at its ceiling.
+            .route(
+                "/v1/workspaces",
+                post(|| async {
+                    tokio::time::sleep(Duration::from_secs(600)).await;
+                    Json(json!({}))
+                }),
+            )
+            .route(
+                "/admin/quota/{owner}",
+                put(move |Json(b): Json<Value>| {
+                    let p = p.clone();
+                    async move {
+                        // The yaml's values, not whatever the step happened to read.
+                        assert_eq!(b["spec"], probe_quota());
+                        p.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({}))
+                    }
+                }),
+            );
+        let mut c = crate::testkit::ctx().await;
+        let url = crate::testkit::serve(app).await;
+        c.cfg.api_url = url.clone();
+        c.cfg.admin_url = url;
+
+        let out = approve(&c, Duration::from_millis(50), "ws".into(), "why".into()).await;
+        let detail = format!("{:#}", out.expect_err("the body cannot finish"));
+        assert!(detail.contains("timed out"), "{detail}");
+        assert_eq!(puts.load(Ordering::SeqCst), 1, "the quota was left RAISED");
+    }
+
+    /// And a workspace the undo cannot take back FAILS the step — after the write-back, which is
+    /// the leftover that outlives it. A warning here would leave a probe workspace holding disk
+    /// the yaml limit does not allow, with a green SLO on top of it.
+    #[tokio::test]
+    async fn a_workspace_the_undo_cannot_delete_fails_the_step() {
+        let puts = Arc::new(AtomicUsize::new(0));
+        let p = puts.clone();
+        let app = Router::new()
+            .route(
+                "/v1/quota",
+                get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}})) }),
+            )
+            // A create that is NOT refused: the quota did not do its job, and the workspace it
+            // made is the undo's problem.
+            .route("/v1/workspaces", post(|| async { Json(json!({ "id": "ws-probe" })) }))
+            .route(
+                "/v1/workspaces/{id}",
+                delete(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route(
+                "/admin/quota/{owner}",
+                put(move || {
+                    let p = p.clone();
+                    async move {
+                        p.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({}))
+                    }
+                }),
+            );
+        let mut c = crate::testkit::ctx().await;
+        let url = crate::testkit::serve(app).await;
+        c.cfg.api_url = url.clone();
+        c.cfg.admin_url = url;
+
+        let out = approve(&c, Duration::from_secs(10), "ws".into(), "why".into()).await;
+        let detail = format!("{:#}", out.expect_err("the create was not refused"));
+        assert!(detail.contains("an over-quota create answered 200"), "{detail}");
+        assert_eq!(puts.load(Ordering::SeqCst), 1, "the quota was left RAISED");
     }
 
     /// Nothing reachable: still exactly one sample per id, each a failure with a reason rather

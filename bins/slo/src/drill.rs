@@ -45,6 +45,11 @@ pub trait Cluster: Send + Sync {
 /// A failed undo turns a passing body into a failure: a drill that proved the fleet heals and then
 /// left a node tainted has not passed, it has broken something quietly. When both fail the BODY's
 /// error is the one reported — that is what the drill was measuring — and the undo's is logged.
+/// The minute every `undoing` step's ceiling adds on top of its body cap. `Ctx::step` drops the
+/// whole future when ITS timeout fires, undo included, so the body's own ceiling must always be
+/// the one that fires first — with this much room left for the undo to run in.
+pub const UNDO_SLACK: u64 = 60;
+
 pub async fn undoing<T, B, U, UF>(cap: Duration, body: B, undo: U) -> Result<T>
 where
     B: Future<Output = Result<T>>,
@@ -53,7 +58,7 @@ where
 {
     let out = match tokio::time::timeout(cap, body).await {
         Ok(out) => out,
-        Err(_) => Err(anyhow!("the drill timed out after {} ms", cap.as_millis())),
+        Err(_) => Err(anyhow!("timed out after {} ms", cap.as_millis())),
     };
     match (out, undo().await) {
         (out, Ok(())) => out,
@@ -352,7 +357,7 @@ pub(crate) mod tests {
             })
             .await;
         assert!(!ok, "an overrunning drill is a failed sample");
-        assert!(c.steps[0].detail.contains("the drill timed out"), "{}", c.steps[0].detail);
+        assert!(c.steps[0].detail.contains("timed out"), "{}", c.steps[0].detail);
         assert_eq!(k.calls(), ["taint node-a true", "taint node-a false"]);
     }
 

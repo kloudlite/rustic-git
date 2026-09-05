@@ -62,6 +62,10 @@ impl Ctx {
             detail: clip(detail),
             stage: self.stage.clone(),
         });
+        // After every step, not every stage: a child the parent kills at the wall-clock budget
+        // hands over the names it recorded a second ago rather than the ones its last stage
+        // boundary saw (`Ctx::save_state`).
+        self.save_state();
         ok
     }
 

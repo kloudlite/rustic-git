@@ -1660,6 +1660,13 @@ spec:
               env:
                 # The probe holds no password: it MINTS its own user and admin tokens with this
                 # key, which is why it needs the same Secret the server tier signs with.
+                # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
+                # and the parent kills it a minute later, so teardown and the final report still
+                # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
+                # run both, and a run that reported nothing cannot be told from a CronJob that
+                # never fired.
+                - name: KLOUDLITE_SLO_BUDGET_SECS
+                  value: "720"
                 - name: KLOUDLITE_JWT_SECRET
                   valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 # The workspace CRDs and the pods to exec into live in the k3s cluster, so the
@@ -1709,10 +1716,10 @@ spec:
 # The hourly Experience suite: the fast journey plus stage 14, which walks every remaining verb a
 # person can perform (packages, teams, invitations, branch protection, a two-service environment,
 # an approved quota request). `:07` so it never shares a minute with the fast suite's own tick.
-# `activeDeadlineSeconds: 3300`: the fast journey plus ~25 more steps, several of which wait out a
+# `activeDeadlineSeconds: 3540`: the fast journey plus ~25 more steps, several of which wait out a
 # workspace start or an environment with two services.
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.
-# `activeDeadlineSeconds: 3300`: every step's ceiling sits at or above its catalogue target so a
+# `activeDeadlineSeconds: 3540`: every step's ceiling sits at or above its catalogue target so a
 # slow answer is recorded as a breach with a number rather than cut off, and those ceilings sum
 # past one schedule on a bad day. `Forbid` skips the next tick while a run is still going, so a
 # slow run costs one missed sample, never two probes on one cluster.
@@ -1732,7 +1739,7 @@ spec:
   failedJobsHistoryLimit: 5
   jobTemplate:
     spec:
-      activeDeadlineSeconds: 3300
+      activeDeadlineSeconds: 3540
       # No retry. A failed journey is a SAMPLE, already reported and already counted against the
       # budget; running it again would file a second run under a second id and quietly halve the
       # measured failure rate.
@@ -1766,6 +1773,13 @@ spec:
               env:
                 # The probe holds no password: it MINTS its own user and admin tokens with this
                 # key, which is why it needs the same Secret the server tier signs with.
+                # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
+                # and the parent kills it a minute later, so teardown and the final report still
+                # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
+                # run both, and a run that reported nothing cannot be told from a CronJob that
+                # never fired.
+                - name: KLOUDLITE_SLO_BUDGET_SECS
+                  value: "3000"
                 - name: KLOUDLITE_JWT_SECRET
                   valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 # The workspace CRDs and the pods to exec into live in the k3s cluster, so the
@@ -1856,6 +1870,13 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
+                # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
+                # and the parent kills it a minute later, so teardown and the final report still
+                # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
+                # run both, and a run that reported nothing cannot be told from a CronJob that
+                # never fired.
+                - name: KLOUDLITE_SLO_BUDGET_SECS
+                  value: "3300"
                 - name: KLOUDLITE_JWT_SECRET
                   valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 - name: KUBECONFIG
@@ -1933,6 +1954,13 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
+                # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
+                # and the parent kills it a minute later, so teardown and the final report still
+                # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
+                # run both, and a run that reported nothing cannot be told from a CronJob that
+                # never fired.
+                - name: KLOUDLITE_SLO_BUDGET_SECS
+                  value: "6900"
                 - name: KLOUDLITE_JWT_SECRET
                   valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 - name: KUBECONFIG

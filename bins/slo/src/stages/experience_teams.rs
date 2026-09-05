@@ -32,16 +32,25 @@ use futures::FutureExt;
 use serde_json::Value;
 
 use super::git::{git, BASE_BRANCH};
-use super::{api, get, poll_json, post, raw};
+use super::{api, drain_team, get, poll_json, post, raw, TEAM_DRAIN};
+use crate::drill::{undoing, UNDO_SLACK};
 use crate::ctx::{Ctx, OTHER_EMAIL, PROBE_USER};
 
 // Per-step ceilings. Each is at least its catalogue target, for the reason stage 5 states: a slow
 // answer must be a breach with a number, never a step the probe cut off.
 const QUICK: Duration = Duration::from_secs(20);
-const TEAM_REPO_CEILING: Duration = Duration::from_secs(90);
+///
+/// `team.repo.shared` and `repo.protection` are a BODY cap plus `UNDO_SLACK`: both compensate — a
+/// team credential to revoke, a protected `main` to unprotect — and `Ctx::step`'s own timeout
+/// drops the whole future, undo included, when it fires. The body runs inside `drill::undoing`
+/// under the first, so the step's can never fire first. `team.delete` carries the drain of the
+/// team's workspaces, which is `TEAM_DRAIN` on its own.
+const TEAM_REPO_BODY: Duration = Duration::from_secs(90);
+const TEAM_REPO_CEILING: Duration = Duration::from_secs(TEAM_REPO_BODY.as_secs() + UNDO_SLACK);
 const TEAM_WS_CEILING: Duration = Duration::from_secs(120);
-const DELETE_CEILING: Duration = Duration::from_secs(30);
-const PROTECTION_CEILING: Duration = Duration::from_secs(150);
+const DELETE_CEILING: Duration = Duration::from_secs(TEAM_DRAIN.as_secs() + 30);
+const PROTECTION_BODY: Duration = Duration::from_secs(150);
+const PROTECTION_CEILING: Duration = Duration::from_secs(PROTECTION_BODY.as_secs() + UNDO_SLACK);
 const PULL_CEILING: Duration = Duration::from_secs(30);
 
 /// `repo.commit.patch` is bounded at 5 s and `pr.merge.p95` at 60 s; both waits are given their
@@ -229,15 +238,16 @@ pub(super) async fn repo_shared(c: &mut Ctx) {
                 .to_string();
             let id = minted.get("_id").and_then(Value::as_str).map(str::to_string);
 
-            let walked = push_and_clone(c, &work, &dest, &url, &token, &refs).await;
-            // Revoked whatever happened above, and BEFORE the verdict, so a failing clone never
+            // Revoked outside the cancellable region, so a clone that runs out of time never
             // leaves a live credential for a team that teardown is about to delete.
-            if let Some(id) = id {
-                if let Err(e) = super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/tokens/{id}")), &other, None).await {
-                    tracing::error!(kind = "token", op = "revoke", error = %format!("{e:#}"), "slo.experience.failed");
-                }
-            }
-            walked
+            let revoke = || async {
+                let Some(id) = id else { return Ok(()) };
+                super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/tokens/{id}")), &other, None)
+                    .await
+                    .map(|_| ())
+                    .context("the team credential was left LIVE")
+            };
+            undoing(TEAM_REPO_BODY, push_and_clone(c, &work, &dest, &url, &token, &refs), revoke).await
         }
         .boxed()
     })
@@ -408,16 +418,8 @@ pub(super) async fn delete(c: &mut Ctx) {
         return c.skip("team.delete", "the team was never created");
     }
     let slug = slug(c);
-    let jwt = c.probe_jwt.clone();
-    for id in team_workspaces(c, &slug).await {
-        let url = api(c, &format!("/v1/workspaces/{id}"));
-        match super::call(c, reqwest::Method::DELETE, &url, &jwt, None).await {
-            Ok(_) => tracing::info!(kind = "workspace", name = %id, "slo.teardown.deleted"),
-            Err(e) => tracing::warn!(kind = "workspace", op = "delete", name = %id, error = %format!("{e:#}"), "slo.teardown.failed"),
-        }
-    }
     let repo = api(c, &format!("/v1/repos/{slug}/{}", shared_repo(c)));
-    if let Err(e) = super::call(c, reqwest::Method::DELETE, &repo, &jwt, None).await {
+    if let Err(e) = super::call(c, reqwest::Method::DELETE, &repo, &c.probe_jwt.clone(), None).await {
         tracing::warn!(kind = "repo", op = "delete", error = %format!("{e:#}"), "slo.teardown.failed");
     }
 
@@ -425,6 +427,10 @@ pub(super) async fn delete(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         let (del, read) = (api(c, &format!("/v1/teams/{slug}")), api(c, &format!("/v1/teams/{slug}")));
         async move {
+            // Inside the step, and fatal to it: a team workspace is billed to the team and listed
+            // only under it, so deleting the team over one strands a subvolume nothing can find
+            // again. A leaked team is the far cheaper failure (`stages::drain_team`).
+            drain_team(c, &slug, &jwt).await?;
             super::call(c, reqwest::Method::DELETE, &del, &jwt, None)
                 .await
                 .context("could not delete the team")?;
@@ -433,16 +439,6 @@ pub(super) async fn delete(c: &mut Ctx) {
         .boxed()
     })
     .await;
-}
-
-/// Every workspace the team holds. `/v1/workspaces?team=` is the only listing that shows them —
-/// the default one is personal, which is exactly why teardown's sweep cannot reach these.
-async fn team_workspaces(c: &Ctx, slug: &str) -> Vec<String> {
-    let url = api(c, &format!("/v1/workspaces?team={slug}"));
-    let Ok(rows) = get(c, &url, &c.probe_jwt).await else { return vec![] };
-    rows.as_array()
-        .map(|rows| rows.iter().filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string)).collect())
-        .unwrap_or_default()
 }
 
 /// Whether the team this run creates is there. A read, not a remembered flag: the step that made
@@ -492,17 +488,16 @@ pub(super) async fn protection(c: &mut Ctx) {
             if !protected {
                 return Err(anyhow!("the rule was accepted but is not listed"));
             }
-            // Everything after this point must run even when a step fails, or the run leaves
-            // `main` protected for the next one — which would break stage 2's push.
-            let walked = refuse_then_merge(c, &work, &url, &branch, &refs, &pulls, &jwt, &run_id).await;
-            let unprotected = post(c, &rule, &jwt, serde_json::json!({ "pattern": BASE_BRANCH, "remove": true }))
-                .await
-                .map(|_| ());
-            if let Err(e) = &unprotected {
-                tracing::error!(op = "unprotect", error = %format!("{e:#}"), "slo.experience.failed");
-            }
-            walked?;
-            unprotected.context("`main` was left PROTECTED")
+            // Outside the cancellable region: a run that leaves `main` protected breaks the NEXT
+            // run's stage 2 push, and the step's own timeout would drop this with the body.
+            let unprotect = || async {
+                post(c, &rule, &jwt, serde_json::json!({ "pattern": BASE_BRANCH, "remove": true }))
+                    .await
+                    .map(|_| ())
+                    .context("`main` was left PROTECTED")
+            };
+            let walked = refuse_then_merge(c, &work, &url, &branch, &refs, &pulls, &jwt, &run_id);
+            undoing(PROTECTION_BODY, walked, unprotect).await
         }
         .boxed()
     })
@@ -716,13 +711,15 @@ pub(super) async fn close(c: &mut Ctx) {
             post(c, &format!("{pulls}/{number}/close"), &jwt, Value::Null)
                 .await
                 .context("could not close the change")?;
-            // 409 from `merge_pull` — "this change is not open". Not in `refused`'s set: this is a
-            // state conflict, not an authorization refusal, and the two must not share a helper
-            // that would let a 403 here read as a pass.
+            // 409 from `merge_pull` — "this change is not open" — and nothing else. Not in
+            // `refused`'s set: this is a state conflict, not an authorization refusal, and the two
+            // must not share a helper that would let a 403 here read as a pass. A 400 was in this
+            // set too, which is the api's answer to a body it could not read at all: a merge
+            // request the tier never understood would have passed as a refusal it never made.
             let url = format!("{pulls}/{number}/merge?strategy=fast-forward");
             let (status, body) = raw(c, reqwest::Method::POST, &url, &jwt, None, &[]).await?;
             match status.as_u16() {
-                409 | 400 => Ok(()),
+                409 => Ok(()),
                 _ => Err(anyhow!("merging a closed change answered {status}: {}", clip(&body))),
             }
         }

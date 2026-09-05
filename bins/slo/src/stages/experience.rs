@@ -1,20 +1,22 @@
 //! Stage 14 · Experience: every remaining verb a person can perform, walked once an hour.
 //!
-//! A SCAFFOLD. The catalogue, the windows, the CronJob and the teardown sweeps are in place; the
-//! steps themselves are not, and every id skips with "not implemented yet" until they are. That is
-//! deliberate rather than an empty stage: a run is exactly-once complete — every id in the suite
-//! reports on every path — so the console renders the stage as grey rather than as a run that
-//! silently reported 77 of 105 ids, and `SloProbeMissing` stays honest for the fast ids the hourly
-//! run does produce.
+//! This file is the DISPATCH TABLE and nothing else: `IDS` is the order the stage reports in, and
+//! `run` is one arm per id calling into a sibling module. The steps themselves live in
+//! `experience_ws`, `experience_teams`, `experience_env` and `experience_admin` — one file per
+//! group of ids, because the stage is one catalogue and several hands, and a stage file everyone
+//! edits is a stage file nobody can merge.
 //!
-//! `IDS` is the order the stage will run in, which is the addendum's own table order: identity and
-//! packages, then teams (create → invite → role → shared repo → workspace → remove → delete), then
-//! the repo and PR verbs, then environments, then the volume/quota/admin reads, and the two
-//! whole-journey observations (`feed.experience`, `home.persists`) last, because both assert
-//! something about what everything BEFORE them did.
+//! `IDS` is the addendum's own table order: identity and packages, then teams (create → invite →
+//! role → shared repo → workspace → remove → delete), then the repo and PR verbs, then
+//! environments, then the volume/quota/admin reads, and the two whole-journey observations
+//! (`feed.experience`, `home.persists`) last, because both assert something about what everything
+//! BEFORE them did.
 //!
-//! ponytail: skips only, no probe code — the second implementer fills `run` in id order and
-//! deletes this note when the last skip is gone.
+//! A few arms are empty (`{}`): several ids are one journey on one object — the packages pair, the
+//! four environment ids — and the call that walks them reports all of them. The empty arm is what
+//! keeps the id in the order, and `ids_are_the_catalogues_experience_stage` is what keeps the list
+//! and the catalogue equal. Nothing here may report an id twice or skip one silently: a run is
+//! exactly-once complete, which is what lets the console tell a grey stage from a broken one.
 
 use super::experience_env;
 use crate::ctx::Ctx;
@@ -54,9 +56,9 @@ pub const IDS: &[&str] = &[
     "home.persists",
 ];
 
-/// One arm per id, walked in `IDS` order. An id whose arm is still `_` skips, which is what keeps
-/// the run exactly-once complete while the stage is half-filled — and what lets four implementers
-/// land their own ids without editing each other's lines.
+/// One arm per id, walked in `IDS` order. The `_` arm is what keeps a run exactly-once complete
+/// while an id is being added: the catalogue names it before anyone has written its step, and a
+/// skip with a reason is a truthful sample where a missing one is a hole nobody can see.
 pub async fn run(c: &mut Ctx) {
     for id in IDS {
         match *id {

@@ -35,14 +35,21 @@ pub struct State {
     pub env_volume: Option<String>,
     pub env_snapshot: Option<String>,
     pub token: Option<String>,
-    /// The token's VALUE, not its id — stage 4 logs in to the registry with it. Held in memory
-    /// only: it is never reported, never logged, and dies with the process.
+    /// The token's VALUE, not its id — stage 4 logs in to the registry with it. `skip`, so it
+    /// never reaches `state.json`: this struct is written to disk after every step for the
+    /// parent's teardown, and a live git credential does not belong in a file.
+    #[serde(skip)]
     pub token_value: Option<String>,
     /// `sec.agent.spec` already ran (from the workspace stage) — the security stage must not repeat it.
     pub agent_spec_done: bool,
-    /// The CLI token `id.cli.flow` minted. Held so teardown can revoke it by id even when the
-    /// name sweep cannot see it.
+    /// The CLI token `id.cli.flow` minted, by id. `skip` for the same reason as `token_value`:
+    /// it addresses a live credential, and teardown reaches it anyway through the `cli-token`
+    /// entry in `KINDS`, whose name carries the run prefix.
+    #[serde(skip)]
     pub cli_token: Option<String>,
+    /// The name the probe's SSH key is registered under. `skip`: it names the one private key in
+    /// the pod, and nothing the parent does needs it.
+    #[serde(skip)]
     pub key: Option<String>,
     /// The Experience stage's own workspace (`run-{id}-x`): `ws.packages.*` create it and
     /// `home.persists` writes the file it later reads from a fresh one. Every workspace that
@@ -177,9 +184,27 @@ impl Ctx {
 
     /// The child's `State`, handed to the parent the same way its steps are: the parent runs
     /// teardown and needs every name the child recorded (the environment's volume, the extra
-    /// volumes, tokens), or it deletes only what the prefix sweep can see. This is what leaked
-    /// one environment volume per run before it existed.
+    /// volumes), or it deletes only what the prefix sweep can see. This is what leaked
+    /// one environment volume per run before it existed. The credential fields are `serde(skip)`
+    /// — the file is a handover of NAMES.
     pub fn state_path(&self) -> std::path::PathBuf {
         self.tmp.join("state.json")
+    }
+
+    /// Write it out. Called after every STEP, not every stage: a child the parent kills at the
+    /// budget hands over the names it had made a second earlier, and a stage is minutes long.
+    pub fn save_state(&self) {
+        // No directory means no run (a unit test): nothing to hand over, and nothing to warn about.
+        if !self.tmp.is_dir() {
+            return;
+        }
+        match serde_json::to_vec(&self.state) {
+            Ok(b) => {
+                if let Err(e) = std::fs::write(self.state_path(), b) {
+                    tracing::warn!(error = %e, "slo.state.failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "slo.state.failed"),
+        }
     }
 }
