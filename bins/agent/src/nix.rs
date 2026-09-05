@@ -374,13 +374,15 @@ mod tests {
         // direct child would leave the grandchild `sleep` running, still holding the piped
         // stdout/stderr write ends open, so the drain threads (and this test) would hang past
         // the deadline. Only a process-group kill reaps both, which is what this proves.
-        std::fs::write(bin.join("nix"), "#!/bin/sh\nsleep 5 &\nwait\n").unwrap();
+        // A 20 s grandchild against a 10 s bound: a leaked grandchild still fails the test, and a
+        // loaded CI runner (two slots, a release build beside it) no longer trips a 3 s bound.
+        std::fs::write(bin.join("nix"), "#!/bin/sh\nsleep 20 &\nwait\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
         let started = std::time::Instant::now();
         let err = nix.build("1", Duration::from_millis(300)).await.unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
         assert!(err.contains("timed out"), "{err}");
     }
 
