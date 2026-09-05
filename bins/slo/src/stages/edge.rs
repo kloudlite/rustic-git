@@ -183,10 +183,11 @@ async fn log_latency(c: &mut Ctx) {
 
 /// `tel.pod.coverage`: every workload of ours that has a ready pod is being scraped.
 ///
-/// Matched by name rather than by pod: `service.instance.id` is a pod name, and the workload list
-/// names Deployments and StatefulSets — a workload with at least one instance reporting is the
-/// strongest claim the two lists can make together, and it catches the failure that matters (a
-/// collector that stopped seeing a whole workload).
+/// Matched on the `{workload}-` prefix rather than anywhere in the string: `service.instance.id`
+/// is a pod name, which is the workload's name plus a hash, and a substring match would let
+/// `kloudlite-git-api` be "covered" by a `kloudlite-git-api-admin` pod. A workload with at least
+/// one instance reporting is the strongest claim the two lists can make together, and it catches
+/// the failure that matters (a collector that stopped seeing a whole workload).
 async fn pod_coverage(c: &mut Ctx) {
     c.step("tel.pod.coverage", READ_CEILING, |c| {
         let jwt = c.admin_jwt.clone();
@@ -207,7 +208,7 @@ async fn pod_coverage(c: &mut Ctx) {
                 .iter()
                 .filter(|w| w.get("ready").and_then(Value::as_i64).unwrap_or(0) > 0)
                 .filter_map(|w| w.get("name").and_then(Value::as_str))
-                .filter(|name| !instances.iter().any(|i| i.contains(*name)))
+                .filter(|name| !instances.iter().any(|i| i.starts_with(&format!("{name}-"))))
                 .map(str::to_string)
                 .collect();
             if !missing.is_empty() {

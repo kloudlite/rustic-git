@@ -22,13 +22,40 @@ const REFUSAL_CEILING: Duration = Duration::from_secs(10);
 /// The agent's identity, exactly as `deploy/k3s/agent-rbac.yaml` declares it.
 const AGENT_SA: &str = "system:serviceaccount:kube-system:kloudlite-git-agent";
 
-/// The three statuses that mean "refused". A 5xx is NOT one of them: the SLI is that the platform
-/// says no, and a tier that is down says nothing at all.
-fn refused(what: &str, status: reqwest::StatusCode) -> Result<()> {
+/// The statuses that mean "refused" — `allowed` names which ones this caller accepts. A 5xx is
+/// never one of them: the SLI is that the platform says no, and a tier that is down says nothing
+/// at all.
+fn refused_with(what: &str, status: reqwest::StatusCode, allowed: &[u16]) -> Result<()> {
     match status.as_u16() {
-        401 | 403 | 404 => Ok(()),
+        code if allowed.contains(&code) => Ok(()),
         _ if status.is_success() => Err(anyhow!("{what} was ALLOWED ({status})")),
         _ => Err(anyhow!("{what} answered {status}, which is not a refusal")),
+    }
+}
+
+/// A read that must not happen: 404 counts, because hiding an object is a refusal.
+fn refused(what: &str, status: reqwest::StatusCode) -> Result<()> {
+    refused_with(what, status, &[401, 403, 404])
+}
+
+/// The admin router's own claim check. A 404 is NOT a pass here — that is `sec.user.process`'s
+/// answer, and reading it as one would let a missing route stand in for a working guard.
+fn refused_by_claim(what: &str, status: reqwest::StatusCode) -> Result<()> {
+    refused_with(what, status, &[401, 403])
+}
+
+/// What the API server said to the impersonated spec patch.
+///
+/// Only a 403 that is NOT about impersonation is a pass: that is the admission policy (or the
+/// agent's ClusterRole) refusing the write, which is the SLI. A 400 or 422 means the probe sent a
+/// patch the API server could not even apply — our bug, and a refusal of nothing.
+fn refused_by_admission(code: u16, message: &str) -> Result<()> {
+    match code {
+        403 if message.contains("impersonate") => {
+            Err(anyhow!("the probe could not impersonate at all: {message}"))
+        }
+        403 => Ok(()),
+        _ => Err(anyhow!("the attempt answered {code}: {message}")),
     }
 }
 
@@ -110,7 +137,7 @@ async fn admin_claim(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         async move {
             let (status, _) = raw(c, reqwest::Method::GET, &url, &jwt, None, &[]).await?;
-            refused("an admin route reached without the superadmin claim", status)
+            refused_by_claim("an admin route reached without the superadmin claim", status)
         }
         .boxed()
     })
@@ -146,6 +173,11 @@ async fn agent_spec(c: &mut Ctx) {
     let Some(client) = c.kube.clone() else {
         return c.skip("sec.agent.spec", "no kubeconfig: the admission policy cannot be tested");
     };
+    // Pre-flight: without the `impersonate` verb every attempt below is refused for the WRONG
+    // reason, and a step that passes on the probe's own missing grant measures nothing.
+    if !may_impersonate(&client).await {
+        return c.skip("sec.agent.spec", "probe identity cannot impersonate");
+    }
     let Some(name) = a_workspace(&client, c.state.workspace.clone()).await else {
         return c.skip("sec.agent.spec", "no Workspace exists to attempt a spec write on");
     };
@@ -160,13 +192,39 @@ async fn agent_spec(c: &mut Ctx) {
             match api.patch(&name, &params, &kube::api::Patch::Merge(&patch)).await {
                 // A 2xx IS the failure here: admission let the agent rewrite desired state.
                 Ok(_) => Err(anyhow!("the agent was ALLOWED to write spec.desiredState")),
-                Err(kube::Error::Api(e)) if e.code == 403 || e.code == 400 || e.code == 422 => Ok(()),
+                Err(kube::Error::Api(e)) => refused_by_admission(e.code, &e.message),
                 Err(e) => Err(anyhow!("the attempt answered {e}, which is not a refusal")),
             }
         }
         .boxed()
     })
     .await;
+}
+
+/// Whether the probe's own identity may impersonate a ServiceAccount at all. A review the API
+/// server would not answer is a `false`: the step then skips rather than reporting a refusal that
+/// was really our own missing grant.
+async fn may_impersonate(client: &kube::Client) -> bool {
+    use k8s_openapi::api::authorization::v1::{
+        ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
+    };
+    let review = SelfSubjectAccessReview {
+        spec: SelfSubjectAccessReviewSpec {
+            resource_attributes: Some(ResourceAttributes {
+                resource: Some("serviceaccounts".into()),
+                verb: Some("impersonate".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let api: kube::Api<SelfSubjectAccessReview> = kube::Api::all(client.clone());
+    api.create(&kube::api::PostParams::default(), &review)
+        .await
+        .ok()
+        .and_then(|r| r.status)
+        .is_some_and(|s| s.allowed)
 }
 
 /// A Workspace to attempt the write on: ours if it is still there, otherwise any — the policy is
@@ -231,6 +289,21 @@ mod tests {
         assert!(refused("x", StatusCode::OK).is_err());
         assert!(refused("x", StatusCode::INTERNAL_SERVER_ERROR).is_err());
         assert!(refused("x", StatusCode::BAD_GATEWAY).is_err());
+    }
+
+    #[test]
+    fn only_an_admission_403_is_a_refusal_of_the_spec_write() {
+        assert!(refused_by_admission(403, "denied by validating admission policy").is_ok());
+        // Our own missing grant, and our own malformed patch: neither is the platform refusing.
+        assert!(refused_by_admission(403, "cannot impersonate resource serviceaccounts").is_err());
+        assert!(refused_by_admission(400, "invalid patch").is_err());
+        assert!(refused_by_admission(422, "unprocessable").is_err());
+    }
+
+    #[test]
+    fn the_claim_step_does_not_accept_a_404() {
+        assert!(refused_by_claim("x", StatusCode::FORBIDDEN).is_ok());
+        assert!(refused_by_claim("x", StatusCode::NOT_FOUND).is_err());
     }
 
     /// A tier that ALLOWS the thing fails the step; one that refuses passes it. The whole stage's

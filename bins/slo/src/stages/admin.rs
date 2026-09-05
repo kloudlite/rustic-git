@@ -47,8 +47,7 @@ pub async fn run(c: &mut Ctx) {
 /// per owner per kind).
 async fn queue(c: &mut Ctx) -> Option<String> {
     let reason = format!("{} slo probe", c.prefix());
-    let ok = c
-        .step("req.queue", QUEUE_CEILING, move |c| {
+    c.step("req.queue", QUEUE_CEILING, move |c| {
             let jwt = c.probe_jwt.clone();
             let admin_jwt = c.admin_jwt.clone();
             let url = api(c, "/v1/requests");
@@ -76,12 +75,12 @@ async fn queue(c: &mut Ctx) -> Option<String> {
                 .await
                 .context("the request never appeared as pending in the admin queue")
             }
-            .boxed()
-        })
-        .await;
+        .boxed()
+    })
+    .await;
     // The id survives a failed WAIT: the request may well have been created, and denying it is
     // what keeps the next run's create from being refused.
-    ok.then(|| c.state.request.clone()).flatten().or_else(|| c.state.request.clone())
+    c.state.request.clone()
 }
 
 /// `audit.row`: the deny, and the append-only row it must leave behind.

@@ -28,6 +28,12 @@ async fn stub() -> (String, Reports, Arc<AtomicUsize>) {
                 }
             }),
         )
+        // `tel.log.latency` polls this for its full minute otherwise, and this test is about the
+        // process split, not about a marker never landing.
+        .route(
+            "/admin/slo/marker/{id}",
+            axum::routing::get(|| async { Json(serde_json::json!({ "found": true, "ts": "" })) }),
+        )
         .fallback(axum::routing::any(move || {
             let l = l.clone();
             async move {
