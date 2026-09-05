@@ -3641,9 +3641,12 @@ async fn a_failing_build_backs_off_from_a_minute_towards_an_hour() {
         k8s_openapi::jiff::Timestamp::now() - std::time::Duration::from_secs(600),
     );
     ws.status.as_mut().unwrap().conditions = vec![c];
-    assert_eq!(
-        fail_once(&ws, &ctx).await,
-        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(600))
+    // The elapsed time is measured against the wall clock, so the two applies above add a few
+    // seconds on a loaded box: assert the ten-minute bucket, not the exact second.
+    let ten_minutes = fail_once(&ws, &ctx).await;
+    assert!(
+        (600..=660).any(|s| ten_minutes == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(s))),
+        "ten minutes in: {ten_minutes:?}"
     );
 }
 
