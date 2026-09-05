@@ -181,6 +181,9 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                 .await;
             }
             Err(e) => {
+                // The sentence goes on the condition for the API and here for the operator: a
+                // volume the API tier deletes seconds later takes its condition with it.
+                tracing::warn!(volume = %v.name_any(), error = %e, "volume.work.failed");
                 let st = crd::VolumeStatus {
                     phase: Phase::Error,
                     observed_generation: v.status.as_ref().and_then(|s| s.observed_generation),
