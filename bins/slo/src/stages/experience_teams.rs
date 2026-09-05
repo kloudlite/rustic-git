@@ -70,11 +70,7 @@ const QUOTA_GB: u64 = 1;
 
 /// `run-{id}-team`. Lowercase, dashes and digits only, and 26 characters for a typical run id:
 /// `check_handle` caps a handle at 39.
-fn slug(c: &Ctx) -> String {
-    team_slug(c)
-}
-
-/// The same value, for the siblings that read back what this file wrote — `experience_gaps`'
+/// `pub(super)` because the siblings read back what this file wrote — `experience_gaps`'
 /// `team.invite.revoke` and `team.environment` both act on THIS team, and a second `format!`
 /// there would be a second place the name has to be remembered.
 pub(super) fn team_slug(c: &Ctx) -> String {
@@ -107,7 +103,7 @@ fn closed_branch(c: &Ctx) -> String {
 /// writes, so a 201 whose team nobody can then open is exactly the failure worth catching.
 pub(super) async fn create(c: &mut Ctx) {
     c.step("team.create", QUICK, |c| {
-        let (slug, jwt) = (slug(c), c.probe_jwt.clone());
+        let (slug, jwt) = (team_slug(c), c.probe_jwt.clone());
         let url = api(c, "/v1/teams");
         async move {
             let body = serde_json::json!({ "slug": slug, "name": "kloudlite slo probe" });
@@ -137,7 +133,7 @@ pub(super) async fn invite_accept(c: &mut Ctx) {
     }
     c.step("team.invite.accept", QUICK, |c| {
         let other_email = c.other_email.clone();
-        let (slug, jwt, other) = (slug(c), c.probe_jwt.clone(), c.other_jwt.clone());
+        let (slug, jwt, other) = (team_slug(c), c.probe_jwt.clone(), c.other_jwt.clone());
         async move {
             let body = serde_json::json!({ "email": other_email, "role": "member" });
             let issued = post(c, &api(c, &format!("/v1/teams/{slug}/invites")), &jwt, body)
@@ -171,7 +167,7 @@ pub(super) async fn role_set(c: &mut Ctx) {
     }
     c.step("team.role.set", QUICK, |c| {
         let other_email = c.other_email.clone();
-        let (slug, jwt) = (slug(c), c.probe_jwt.clone());
+        let (slug, jwt) = (team_slug(c), c.probe_jwt.clone());
         let url = api(c, &format!("/v1/teams/{slug}/members/{other_email}"));
         async move {
             let body = serde_json::json!({ "role": "admin" });
@@ -211,7 +207,7 @@ pub(super) async fn repo_shared(c: &mut Ctx) {
     if !is_member(c).await {
         return c.skip("team.repo.shared", "the second user never joined the team");
     }
-    let slug = slug(c);
+    let slug = team_slug(c);
     let name = shared_repo(c);
     // Untimed: the repository is a precondition, not an SLO of its own — the catalogue has no id
     // for it, and a failure here is reported as the step it blocked.
@@ -327,7 +323,7 @@ pub(super) async fn workspace(c: &mut Ctx) {
     }
     c.step("team.workspace", TEAM_WS_CEILING, |c| {
         let probe = c.probe_user.clone();
-        let (slug, jwt) = (slug(c), c.probe_jwt.clone());
+        let (slug, jwt) = (team_slug(c), c.probe_jwt.clone());
         let body = serde_json::json!({
             "team": slug,
             "name": format!("{}-teamws", c.prefix()),
@@ -380,7 +376,7 @@ pub(super) async fn member_remove(c: &mut Ctx) {
     }
     c.step("team.member.remove", QUICK, |c| {
         let other_email = c.other_email.clone();
-        let (slug, name) = (slug(c), shared_repo(c));
+        let (slug, name) = (team_slug(c), shared_repo(c));
         let (jwt, other) = (c.probe_jwt.clone(), c.other_jwt.clone());
         let remove = api(c, &format!("/v1/teams/{slug}/members/{other_email}"));
         let refs = api(c, &format!("/api/{slug}/{name}/refs"));
@@ -428,7 +424,7 @@ pub(super) async fn delete(c: &mut Ctx) {
     if !team_exists(c).await {
         return c.skip("team.delete", "the team was never created");
     }
-    let slug = slug(c);
+    let slug = team_slug(c);
     let repo = api(c, &format!("/v1/repos/{slug}/{}", shared_repo(c)));
     if let Err(e) = super::call(c, reqwest::Method::DELETE, &repo, &c.probe_jwt.clone(), None).await {
         tracing::warn!(kind = "repo", op = "delete", error = %format!("{e:#}"), "slo.teardown.failed");
@@ -455,13 +451,13 @@ pub(super) async fn delete(c: &mut Ctx) {
 /// Whether the team this run creates is there. A read, not a remembered flag: the step that made
 /// it reports its own outcome, and every later id wants to know what the platform holds now.
 async fn team_exists(c: &Ctx) -> bool {
-    get(c, &api(c, &format!("/v1/teams/{}", slug(c))), &c.probe_jwt).await.is_ok()
+    get(c, &api(c, &format!("/v1/teams/{}", team_slug(c))), &c.probe_jwt).await.is_ok()
 }
 
 /// Whether the second user is in it — asked as THEM, because `/v1/teams/{slug}` answers 404 to a
 /// non-member and that is precisely the question.
 async fn is_member(c: &Ctx) -> bool {
-    get(c, &api(c, &format!("/v1/teams/{}", slug(c))), &c.other_jwt).await.is_ok()
+    get(c, &api(c, &format!("/v1/teams/{}", team_slug(c))), &c.other_jwt).await.is_ok()
 }
 
 // ── the repo and pull-request verbs ─────────────────────────────────────────
@@ -963,12 +959,12 @@ mod tests {
         let mut c = testkit::ctx().await;
         c.run_id = "hourly-1757000000".into();
         let p = c.prefix();
-        for name in [slug(&c), shared_repo(&c), prot_branch(&c), patch_branch(&c), closed_branch(&c)] {
+        for name in [team_slug(&c), shared_repo(&c), prot_branch(&c), patch_branch(&c), closed_branch(&c)] {
             assert!(name.starts_with(&p), "{name} is not swept by the {p} prefix");
         }
         // A team slug is a handle: `check_handle` caps it at 39 characters and permits only
         // lowercase letters, digits and dashes.
-        let slug = slug(&c);
+        let slug = team_slug(&c);
         assert!(slug.len() <= 39, "{slug} is too long to be a handle");
         assert!(slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'), "{slug}");
         assert!(!slug.starts_with('-') && !slug.ends_with('-'), "{slug}");

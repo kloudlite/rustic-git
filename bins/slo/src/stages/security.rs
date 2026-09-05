@@ -5,6 +5,7 @@
 //! that fell over refused nothing — it just could not answer. `refused` is the one place that
 //! judgement is written down, and every step here goes through it.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -83,15 +84,21 @@ pub async fn run(c: &mut Ctx) {
 /// stage before teardown, and a probe repo left public is a hole the next run's `sec.private.repo`
 /// would read as a passing security check.
 async fn visibility(c: &mut Ctx) {
-    let Some(repo) = c.state.repo.clone() else {
-        return c.skip("repo.visibility", "no repo");
+    let (Some(repo), probe) = (c.state.repo.clone(), c.probe_user.clone()) else {
+        c.skip("repo.visibility", "no repo");
+        return c.skip("repo.visibility.public", "no repo");
     };
-    let probe = c.probe_user.clone();
+    // What the public flip did, for the second id. `Arc<Mutex<_>>` rather than a return value
+    // because the flip happens inside the 100 % step and its own outcome must not depend on it.
+    let seen: Arc<Mutex<Option<String>>> = Arc::default();
+    let public = seen.clone();
+    let name = repo.clone();
+    let owner = probe.clone();
     c.step("repo.visibility", Duration::from_secs(15), move |c| {
         let jwt = c.probe_jwt.clone();
         let other = c.other_jwt.clone();
-        let patch = api(c, &format!("/v1/repos/{probe}/{repo}"));
-        let refs = refs_url(c, &repo);
+        let patch = api(c, &format!("/v1/repos/{owner}/{name}"));
+        let refs = refs_url(c, &name);
         async move {
             // Private first — where stage 2 left it — so the two reads below are the flip itself
             // rather than whatever state some earlier step happened to leave.
@@ -102,17 +109,46 @@ async fn visibility(c: &mut Ctx) {
             };
             let shown = async {
                 flip(c, &patch, &jwt, "public").await.context("could not publish the repo")?;
+                // Recorded, NOT judged here: whether a public repo reads is a positive, and this
+                // id is at 100 % — where only refusals belong, because a 100 % budget cannot
+                // absorb one flake. `repo.visibility.public` is the id that judges it.
                 let (status, body) = raw(c, reqwest::Method::GET, &refs, &other, None, &[]).await?;
-                if status.is_success() {
-                    return Ok(());
-                }
-                Err(anyhow!("a public repo answered {status} to another owner: {}", body.chars().take(200).collect::<String>()))
+                *public.lock().expect("lock") = Some(match status.is_success() {
+                    true => String::new(),
+                    false => format!("{status}: {}", body.chars().take(200).collect::<String>()),
+                });
+                Ok(())
             };
             crate::drill::undoing(Duration::from_secs(10), shown, hide).await?;
             // And the flip back took effect, not merely answered: a `visibility` write that
             // reported success and stored nothing is the failure this whole id is about.
             let (status, _) = raw(c, reqwest::Method::GET, &refs, &other, None, &[]).await?;
             refused("reading the repo after it was made private again", status)
+        }
+        .boxed()
+    })
+    .await;
+    public_readable(c, seen).await;
+}
+
+/// `repo.visibility.public`: the other half of the flip, at 99.9 %.
+///
+/// Split off `repo.visibility` deliberately. The two halves fail for opposite reasons — a private
+/// repo that leaks is a security breach, a public repo that will not read is an availability one —
+/// and a 100 % target has no budget for the second. So the refusal keeps the 100 % id and this
+/// carries the positive, judged on what the flip above already observed rather than by flipping a
+/// second time.
+async fn public_readable(c: &mut Ctx, seen: Arc<Mutex<Option<String>>>) {
+    let out = seen.lock().expect("lock").clone();
+    let Some(detail) = out else {
+        return c.skip("repo.visibility.public", "the repo was never made public");
+    };
+    c.step("repo.visibility.public", Duration::from_secs(5), move |_| {
+        async move {
+            match detail.is_empty() {
+                true => Ok(()),
+                false => Err(anyhow!("a public repo refused another owner: {detail}")),
+            }
         }
         .boxed()
     })
@@ -228,22 +264,26 @@ async fn user_process(c: &mut Ctx) {
 /// collects everything it made.
 /// Runs from the WORKSPACE stage while the probe's own workspace exists (the security stage comes
 /// after lifecycle has deleted it, and an empty fleet has no other object to try); the security
-/// stage only re-runs it when that early attempt never happened.
+/// stage only re-runs it when that early attempt never happened. `agent.spec.allowed` — the
+/// positive half, at 99.9 % — rides along with it for the same reason.
 pub(crate) async fn agent_spec(c: &mut Ctx) {
     if c.state.agent_spec_done {
         return;
     }
     c.state.agent_spec_done = true;
     let Some(client) = c.kube.clone() else {
-        return c.skip("sec.agent.spec", "no kubeconfig: the admission policy cannot be tested");
+        c.skip("sec.agent.spec", "no kubeconfig: the admission policy cannot be tested");
+        return c.skip("agent.spec.allowed", "no kubeconfig: the admission policy cannot be tested");
     };
     // Pre-flight: without the `impersonate` verb every attempt below is refused for the WRONG
     // reason, and a step that passes on the probe's own missing grant measures nothing.
     if !may_impersonate(&client).await {
-        return c.skip("sec.agent.spec", "probe identity cannot impersonate");
+        c.skip("sec.agent.spec", "probe identity cannot impersonate");
+        return c.skip("agent.spec.allowed", "probe identity cannot impersonate");
     }
     let Some(name) = a_workspace(&client, c.state.workspace.clone()).await else {
-        return c.skip("sec.agent.spec", "no Workspace exists to attempt a spec write on");
+        c.skip("sec.agent.spec", "no Workspace exists to attempt a spec write on");
+        return c.skip("agent.spec.allowed", "no Workspace exists to attempt a spec write on");
     };
     let volume = a_volume(&client).await;
     c.step("sec.agent.spec", REFUSAL_CEILING, move |_| {
@@ -262,37 +302,72 @@ pub(crate) async fn agent_spec(c: &mut Ctx) {
                 Err(kube::Error::Api(e)) => refused_by_admission(e.code, &e.message)?,
                 Err(e) => return Err(anyhow!("the attempt answered {e}, which is not a refusal")),
             }
-            // The other half of the SLI, and the reason it is not enough to watch the refusal: the
-            // ClusterRole allows the agent exactly two spec fields a parent's reconciler copies
-            // into its child, and a policy that had been tightened into refusing EVERYTHING would
-            // pass the check above while stopping every restore and every quota change on the
-            // fleet. Both are dry-run, so nothing is written either way.
-            allowed(&as_agent, volume.as_deref()).await
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+    agent_spec_allowed(c, volume).await;
+}
+
+/// `agent.spec.allowed`: the two spec writes the agent's ClusterRole DOES allow, at 99.9 %.
+///
+/// Split off `sec.agent.spec` deliberately. The refusal belongs at 100 % — a policy that let the
+/// agent rewrite desired state is a breach with no acceptable rate — but this half is a POSITIVE
+/// against an object the probe did not create, over a kube transport that can flake, and a 100 %
+/// budget cannot absorb that. It is still worth an id: `restoreTo` and `quotaGb` are what
+/// `deploy/k3s/agent-rbac.yaml`'s header table grants and what the ValidatingAdmissionPolicy lets
+/// through, so a policy tightened into refusing EVERYTHING would pass the refusal check while
+/// stopping every restore and every quota change on the fleet.
+///
+/// Both patches are dry-run, so nothing is written either way.
+async fn agent_spec_allowed(c: &mut Ctx, volume: Option<String>) {
+    if c.kube.is_none() {
+        return c.skip("agent.spec.allowed", "no kubeconfig");
+    }
+    let Some(volume) = volume else {
+        return c.skip("agent.spec.allowed", "no Volume exists to attempt an allowed write on");
+    };
+    c.step("agent.spec.allowed", REFUSAL_CEILING, move |_| {
+        async move {
+            let mut cfg = kube::Config::infer().await.context("no kubeconfig")?;
+            cfg.auth_info.impersonate = Some(AGENT_SA.to_string());
+            let as_agent = kube::Client::try_from(cfg).context("could not build the client")?;
+            let api: kube::Api<crd::Volume> = kube::Api::all(as_agent);
+            let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
+            for (field, patch) in [
+                ("spec.restoreTo", serde_json::json!({ "spec": { "restoreTo": "" } })),
+                ("spec.quotaGb", serde_json::json!({ "spec": { "quotaGb": 1 } })),
+            ] {
+                match api.patch(&volume, &params, &kube::api::Patch::Merge(&patch)).await {
+                    Ok(_) => {}
+                    Err(kube::Error::Api(e)) => return denied_or_noise(field, e.code, &e.message),
+                    // NOT a refusal: a connection reset, a TLS error or a timeout is the probe's
+                    // own path to the API server, and calling that "the agent was refused" would
+                    // burn this budget on infrastructure noise.
+                    Err(e) => return Err(anyhow!("the API server could not be reached for {field}: {e}")),
+                }
+            }
+            Ok(())
         }
         .boxed()
     })
     .await;
 }
 
-/// The two spec writes the agent's ClusterRole DOES allow, both dry-run.
+/// An API error on an ALLOWED write: only an actual denial is this id's failure.
 ///
-/// `restoreTo` and `quotaGb` on a `Volume` are what `deploy/k3s/agent-rbac.yaml`'s header table
-/// grants and what `deploy/k3s/agent-admission.yaml` lets through; a refusal of either is the
-/// policy having been tightened past what the reconcilers need. With no Volume on the cluster
-/// there is nothing to try it on, which is not a failure of the policy.
-async fn allowed(as_agent: &kube::Client, volume: Option<&str>) -> Result<()> {
-    let Some(volume) = volume else { return Ok(()) };
-    let api: kube::Api<crd::Volume> = kube::Api::all(as_agent.clone());
-    let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
-    for (field, patch) in [
-        ("spec.restoreTo", serde_json::json!({ "spec": { "restoreTo": "" } })),
-        ("spec.quotaGb", serde_json::json!({ "spec": { "quotaGb": 1 } })),
-    ] {
-        api.patch(volume, &params, &kube::api::Patch::Merge(&patch))
-            .await
-            .map_err(|e| anyhow!("the agent was REFUSED {field}, which its reconcilers need: {e}"))?;
+/// A 403 or a policy 422 is the grant having been taken away, which is the thing worth knowing. A
+/// 404 (the Volume went between the list and the patch, which this run's own teardown does), a 429
+/// or a 5xx is the cluster being busy, and neither is the policy refusing anything.
+fn denied_or_noise(field: &str, code: u16, message: &str) -> Result<()> {
+    match code {
+        403 => Err(anyhow!("the agent was REFUSED {field}, which its reconcilers need: {message}")),
+        422 if message.contains("ValidatingAdmissionPolicy") => {
+            Err(anyhow!("the admission policy refused {field}, which its reconcilers need: {message}"))
+        }
+        _ => Err(anyhow!("the {field} write answered {code}, which is not a policy decision: {message}")),
     }
-    Ok(())
 }
 
 /// Any `Volume` to try the allowed writes on — the policy is cluster-wide, so any object proves
@@ -432,6 +507,48 @@ mod tests {
             for s in &c.steps {
                 assert_eq!(s.ok, want_ok, "{code}: {s:?}");
             }
+        }
+    }
+
+    /// The split the review asked for: a 100 % id asserts only refusals, so each of the two now
+    /// has a 99.9 % sibling carrying its positive — and BOTH must still emit exactly once on every
+    /// path, or a run stops being exactly-once complete.
+    #[tokio::test]
+    async fn each_hundred_percent_id_has_its_positive_split_off_and_both_emit_once() {
+        let app = axum::Router::new().fallback(any(|| async { StatusCode::FORBIDDEN }));
+        let mut c = crate::testkit::ctx_against(app).await;
+        c.kube = None;
+        c.cfg.git_url = c.cfg.api_url.clone();
+        c.state.repo = Some("run-fast-1-repo".into());
+
+        visibility(&mut c).await;
+        agent_spec(&mut c).await;
+
+        for id in ["repo.visibility", "repo.visibility.public", "sec.agent.spec", "agent.spec.allowed"] {
+            assert_eq!(c.steps.iter().filter(|s| s.slo_id == id).count(), 1, "{id}");
+        }
+        // This fleet refuses the PATCH too, so the flip never happens — and the positive sibling
+        // SKIPS rather than failing, which is the property the split is for: a repo that was never
+        // published cannot say anything about whether a published one reads.
+        let public = c.steps.iter().find(|s| s.slo_id == "repo.visibility.public").expect("id");
+        assert!(public.skipped && public.detail == "the repo was never made public", "{public:?}");
+        // No kubeconfig is a deployment gap for both agent ids, never a breach.
+        for id in ["sec.agent.spec", "agent.spec.allowed"] {
+            assert!(c.steps.iter().find(|s| s.slo_id == id).expect(id).skipped, "{id}");
+        }
+    }
+
+    /// Only a real DENIAL fails `agent.spec.allowed`. A 404 (this run's own teardown took the
+    /// Volume), a 429 or a 5xx is the cluster being busy, and burning a budget on that is what
+    /// splitting this off a 100 % id was meant to avoid.
+    #[test]
+    fn only_a_denial_fails_the_allowed_writes() {
+        assert!(denied_or_noise("spec.quotaGb", 403, "denied").unwrap_err().to_string().contains("REFUSED"));
+        let policy = denied_or_noise("spec.restoreTo", 422, "ValidatingAdmissionPolicy denied");
+        assert!(policy.unwrap_err().to_string().contains("admission policy refused"));
+        for code in [404, 429, 500, 503] {
+            let e = denied_or_noise("spec.quotaGb", code, "busy").unwrap_err().to_string();
+            assert!(e.contains("not a policy decision"), "{code}: {e}");
         }
     }
 

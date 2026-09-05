@@ -276,12 +276,17 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "sec.cross.owner", feature: "Security", sli: "One owner's objects are invisible to another owner", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
     Slo { id: "sec.admin.claim", feature: "Security", sli: "An admin route refuses a token without the superadmin claim", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
     Slo { id: "sec.user.process", feature: "Security", sli: "The ordinary API process has no admin route mounted", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
-    // Both halves: the ClusterRole allows exactly three spec writes (`Volume.spec.restoreTo`,
-    // `Volume.spec.quotaGb`, `take_volume`'s test-patch), and a policy that refused EVERYTHING
-    // would pass an SLI that only watched the refusal.
-    Slo { id: "sec.agent.spec", feature: "Security", sli: "The admission policy refuses a spec write outside the allowed fields and still admits the allowed ones", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
+    // A 100 % id asserts REFUSALS and nothing else: there is no budget here for a positive that a
+    // flaky kube transport can fail. The other half — that the two spec writes the ClusterRole
+    // does allow still succeed — is `agent.spec.allowed` below, at 99.9 %.
+    Slo { id: "sec.agent.spec", feature: "Security", sli: "The admission policy refuses a spec write outside the allowed fields", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
     Slo { id: "id.token.revoked", feature: "Security", sli: "A revoked token is refused", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
-    Slo { id: "repo.visibility", feature: "Security", sli: "Flipping a repo private hides it from a non-collaborator and flipping it public restores it", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
+    Slo { id: "repo.visibility", feature: "Security", sli: "A repo flipped private is hidden from a non-collaborator, and is hidden again after being flipped back", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
+    // The positive halves of the two ids above, split out for the same reason: a repo that will
+    // not read when public is an availability failure, not a leak, and neither belongs in a budget
+    // that allows no failures at all.
+    Slo { id: "repo.visibility.public", feature: "Git hosting", sli: "A repo flipped public becomes readable to another owner", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
+    Slo { id: "agent.spec.allowed", feature: "Security", sli: "The two spec writes the agent's ClusterRole grants are still admitted", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
 
     // Stage 10 · edge and pipeline
     Slo { id: "edge.dns", feature: "Edge and pipeline", sli: "The public hostname resolves", target: avail(99.99), suite: Suite::Fast, stage: "10 · Edge" },
@@ -359,7 +364,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "cp.failover", feature: "Control plane", sli: "The leader lease fails over to another pod", target: bound(30_000), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "settings.live", feature: "Control plane", sli: "A live settings change takes effect on the next beat", target: bound(60_000), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "settings.revert", feature: "Control plane", sli: "Reverting to a stored settings version restores it", target: bound(60_000), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "settings.roll", feature: "Control plane", sli: "A Boot-marked save is refused with 409 while one of its readers is mid-rollout", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "settings.roll", feature: "Control plane", sli: "A Boot-marked save is refused with 409 while one of its readers is mid-rollout, and nothing is written", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     // Weekly, and only the KEEP-BIASED half: `BLOB_GRACE` is a fixed hour and the weekly CronJob's
     // own `activeDeadlineSeconds` is 3600, so no run can watch an unreferenced blob be reclaimed
     // in-band. What it CAN prove is the rule the sweep is written around — a sibling's layer

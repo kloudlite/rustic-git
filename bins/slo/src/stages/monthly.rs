@@ -70,8 +70,10 @@ pub async fn run(c: &mut Ctx) {
 /// order — a fleet that refused everything would pass the first alone, and one that cordoned
 /// anything would pass the second.
 ///
-/// Everything it does is undone: the drain is lifted and the cordon taken off on every path out,
-/// including a stamp that never arrives. It never deletes anything — the console stops at the
+/// Everything it does is undone: the drain is lifted and the cordon taken off on every path out —
+/// including the path where the GATE IS OPEN and the first POST cordons the node, which is why
+/// both decommission attempts live inside the `undoing` region rather than in front of it. It
+/// never deletes anything — the console stops at the
 /// cordon by design, and deleting the VM is a human's separate step.
 async fn decommission(c: &mut Ctx) {
     let (Some(k), region) = (c.kube.clone(), c.cfg.region.clone()) else {
@@ -92,13 +94,11 @@ async fn decommission(c: &mut Ctx) {
         let base = admin(c, &format!("/admin/clusters/{region}/nodes/{node}"));
         let reason = json!({ "reason": format!("slo probe decommission drill {}", c.run_id) });
         async move {
-            // Before the drain: nothing has stamped `drained`, so this must be refused. A node an
-            // earlier run left stamped would pass here for the wrong reason, which is why the
-            // undrain below is part of the compensation rather than an afterthought.
-            refused_until_drained(c, &base, &jwt, &reason).await?;
-            verb(c, &base, "drain", &jwt, &reason).await.context("the drain was refused")?;
-            // Both mutations go back on every path out, in the order that leaves the node usable:
-            // the cordon first, then the label placement reads.
+            // The undo is established BEFORE the first decommission POST, not after it. The gate
+            // being OPEN is the very failure this id exists to catch — and it is also the state a
+            // node an earlier run left stamped `drained` is in — so a POST outside this region
+            // would cordon the node and return `Err` with nothing to uncordon it. Both mutations
+            // go back on every path out, in the order that leaves the node usable.
             let undo = || async {
                 use crate::drill::Cluster;
                 let uncordon = k.cordon(&node, false).await.context("the node was left CORDONED");
@@ -106,6 +106,9 @@ async fn decommission(c: &mut Ctx) {
                 uncordon.and(undrained)
             };
             let body = async {
+                // Before the drain: nothing has stamped `drained`, so this must be refused.
+                refused_until_drained(c, &base, &jwt, &reason).await?;
+                verb(c, &base, "drain", &jwt, &reason).await.context("the drain was refused")?;
                 stamped(&k, &node, DRAIN_CAP - Duration::from_secs(60))
                     .await
                     .context("the node never finished draining, so the gate could not be tried")?;

@@ -1665,8 +1665,12 @@ spec:
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
                 # run both, and a run that reported nothing cannot be told from a CronJob that
                 # never fired.
+                # 840, raised with the 2026-09-05 coverage batch: the added ceilings put the fast
+                # journey's worst case past 720, and the parent kills the child at budget + 60 —
+                # which is exactly `activeDeadlineSeconds`, so teardown and the final report still
+                # land inside the pod's own deadline.
                 - name: KLOUDLITE_SLO_BUDGET_SECS
-                  value: "720"
+                  value: "840"
                 - name: KLOUDLITE_JWT_SECRET
                   valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 # The workspace CRDs and the pods to exec into live in the k3s cluster, so the

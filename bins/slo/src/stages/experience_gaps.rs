@@ -409,10 +409,11 @@ pub(super) async fn merge_strategies(c: &mut Ctx) {
         let commits = api(c, &format!("/v1/repos/{probe}/{name}/commits"));
         let pulls = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
         let files = api(c, &format!("/api/{probe}/{name}/refs"));
+        let blobs = api(c, &format!("/api/{probe}/{name}/blob"));
         let run = c.run_id.clone();
         async move {
             for strategy in STRATEGIES {
-                one_strategy(c, &commits, &pulls, &files, &jwt, &run, strategy)
+                one_strategy(c, &commits, &pulls, &files, &blobs, &jwt, &run, strategy)
                     .await
                     .with_context(|| format!("the {strategy} strategy"))?;
             }
@@ -431,11 +432,13 @@ const STRATEGIES: [&str; 4] = ["merge", "squash", "rebase", "fast-forward"];
 /// The branch is cut by the web's own commit endpoint rather than by git, so this needs no working
 /// tree — and a fast-forward is only offered when the branch has not diverged, which is why each
 /// runs to completion before the next one starts.
+#[allow(clippy::too_many_arguments)]
 async fn one_strategy(
     c: &Ctx,
     commits: &str,
     pulls: &str,
     refs: &str,
+    blobs: &str,
     jwt: &str,
     run: &str,
     strategy: &str,
@@ -466,19 +469,70 @@ async fn one_strategy(
     post(c, &format!("{pulls}/{number}/merge?strategy={strategy}"), jwt, Value::Null)
         .await
         .context("the merge was refused")?;
-    // The TREE, not the status: `main` must carry the file this branch alone wrote. A merge that
-    // answered 202 and moved nothing, or replayed some other branch, is what this catches.
-    poll_json(c, refs, jwt, Duration::from_secs(60), |r| {
-        super::git::oid_of(r, BASE_BRANCH).is_some()
-    })
-    .await
-    .context("the base branch stopped answering")?;
-    let landed = poll_json(c, &format!("{pulls}/{number}"), jwt, Duration::from_secs(60), |p| {
+    poll_json(c, &format!("{pulls}/{number}"), jwt, Duration::from_secs(60), |p| {
         p.get("state").and_then(Value::as_str) == Some("merged")
     })
-    .await;
-    landed.context("the change never reached `merged`")
+    .await
+    .context("the change never reached `merged`")?;
+    // The TREE, not the status. `merged` is the record the worker wrote; what the SLI promises is
+    // that the strategy LANDED the expected tree, and the four strategies build that tree in four
+    // different ways (a merge commit, a squashed one, a replayed one, a moved ref). So the file
+    // this branch alone wrote is read back off `main` and its CONTENT compared: a merge that
+    // answered 202 and moved nothing, or replayed the wrong branch, gets no further than here.
+    let want = format!("{run} {strategy}\n");
+    landed_on_main(c, refs, blobs, jwt, &path, &want).await
 }
+
+/// The file `path` as `main` now has it, compared to what the branch wrote.
+///
+/// Polled rather than read once: the merge is recorded by the owner and the refs move with it, so
+/// a read that raced the ref update would report the base branch's old tree and blame the strategy.
+async fn landed_on_main(
+    c: &Ctx,
+    refs: &str,
+    blobs: &str,
+    jwt: &str,
+    path: &str,
+    want: &str,
+) -> Result<()> {
+    use base64::Engine as _;
+    let start = std::time::Instant::now();
+    let mut why;
+    loop {
+        let seen = async {
+            let r = get(c, refs, jwt).await.context("could not read the refs")?;
+            let head = super::git::oid_of(&r, BASE_BRANCH)
+                .ok_or_else(|| anyhow!("`{BASE_BRANCH}` has no tip"))?;
+            let blob = get(c, &format!("{blobs}/{head}/{path}"), jwt)
+                .await
+                .with_context(|| format!("`{path}` is not on `{BASE_BRANCH}` at {head}"))?;
+            let b64 = blob
+                .get("bytes_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("the blob answer carried no bytes"))?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .context("the blob is not base64")?;
+            let got = String::from_utf8_lossy(&bytes).to_string();
+            if got == want {
+                return Ok(());
+            }
+            Err(anyhow!("`{path}` on `{BASE_BRANCH}` holds {got:?}, not {want:?}"))
+        }
+        .await;
+        match seen {
+            Ok(()) => return Ok(()),
+            Err(e) => why = format!("{e:#}"),
+        }
+        if start.elapsed() >= MERGE_LAND {
+            return Err(anyhow!("the merge did not land the expected tree: {why}"));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// How long one strategy's tree has to appear on `main` after its change reports `merged`.
+const MERGE_LAND: Duration = Duration::from_secs(30);
 
 /// `pr.mergeability`: the answer the web's merge button is drawn from.
 ///
@@ -665,14 +719,21 @@ pub(super) async fn team_environment(c: &mut Ctx) {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("the answer carried no environment id"))?
                 .to_string();
+            // Registered BEFORE anything else can fail: a team environment is billed to the TEAM
+            // and listed only under it, so teardown's per-user prefix sweep cannot see one — this
+            // is the seam that does (`drop_extra_volumes`, by name, after the sweep).
+            c.state.extra_volumes.push(id.clone());
             let one = api(c, &format!("/v1/environments/{id}"));
             let out = team_env_ready(c, &id, &one, &jwt).await;
-            // Whatever the checks said: an environment nobody can list is a subvolume nothing on
-            // any tier can find again.
-            if let Err(e) = call(c, reqwest::Method::DELETE, &one, &jwt, None).await {
-                tracing::warn!(kind = "environment", op = "delete", name = %id, error = %format!("{e:#}"), "slo.experience.failed");
-            }
-            out
+            // And the delete FAILS the step rather than warning: a leaked team environment is a
+            // subvolume under an owner that will not outlive the team, and a green SLO on top of
+            // it is how it would go unnoticed. The `extra_volumes` entry above is the backstop for
+            // the run that is killed before it gets here.
+            let dropped = call(c, reqwest::Method::DELETE, &one, &jwt, None)
+                .await
+                .map(|_| ())
+                .with_context(|| format!("the team environment {id} was left standing"));
+            out.and(dropped)
         }
         .boxed()
     })

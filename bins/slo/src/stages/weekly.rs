@@ -52,6 +52,13 @@ const EXEC_CEILING: Duration = Duration::from_secs(30);
 const FAILOVER_CAP: Duration = Duration::from_secs(30);
 /// Same for `settings.live` at 60 s.
 const SETTINGS_CAP: Duration = Duration::from_secs(60);
+/// `settings.revert` waits TWICE — for its own change, then for the revert — inside one step whose
+/// ceiling is `step_cap(SETTINGS_CAP)` = 120 s. Half each keeps the body plus its undo under that,
+/// so a slow settings beat is a verdict rather than the step's own timeout swallowing it.
+const REVERT_HALF: Duration = Duration::from_secs(SETTINGS_CAP.as_secs() / 2);
+/// How long the agent DaemonSet gets to finish the roll `settings.roll` starts, and to be seen
+/// mid-roll before it does. A DaemonSet across a handful of nodes, not a deployment of one.
+const ROLL_CAP: Duration = Duration::from_secs(240);
 
 /// A step's ceiling for a body that has an undo: always the body's own plus a minute. `Ctx::step`
 /// times out by DROPPING the step's future, so an outer timeout that fired first would take the
@@ -85,6 +92,10 @@ pub async fn run(c: &mut Ctx) {
 /// can observe.
 async fn settings_revert(c: &mut Ctx) {
     c.step("settings.revert", step_cap(SETTINGS_CAP), |c| {
+        // Every wait inside this step shares REVERT_HALF, not SETTINGS_CAP: there are TWO polls
+        // (the change landing, then the old value coming back) plus the reads between them, and
+        // two full caps plus the undo would overrun the step's own ceiling and report a timeout
+        // where the fleet had given a verdict.
         let jwt = c.admin_jwt.clone();
         let url = admin(c, "/admin/settings/central");
         let revert = admin(c, "/admin/settings/central/revert");
@@ -111,15 +122,15 @@ async fn settings_revert(c: &mut Ctx) {
                 }
             };
             let seen = async {
-                poll_json(c, &url, &jwt, SETTINGS_CAP, |v| {
+                poll_json(c, &url, &jwt, REVERT_HALF, |v| {
                     v.get("uploadGraceSecs").and_then(Value::as_u64) == Some(to)
                 })
                 .await
                 .context("the change the revert is meant to undo never landed")
             };
-            drill::undoing(SETTINGS_CAP, seen, back).await?;
+            drill::undoing(REVERT_HALF, seen, back).await?;
             // The point of the whole step: the STORED value is the one from before.
-            poll_json(c, &url, &jwt, SETTINGS_CAP, |v| {
+            poll_json(c, &url, &jwt, REVERT_HALF, |v| {
                 v.get("uploadGraceSecs").and_then(Value::as_u64) == Some(was)
             })
             .await
@@ -130,70 +141,155 @@ async fn settings_revert(c: &mut Ctx) {
     .await;
 }
 
-/// `settings.roll`: a `Mark::Boot` save is refused while one of its readers is mid-rollout.
+/// `settings.roll`: a `Mark::Boot` save is refused with 409 while one of its readers is
+/// mid-rollout, and nothing is written.
 ///
-/// The REFUSAL is the SLI, not the roll. A Boot field only takes effect at process start, so a
-/// save that ran ahead of the pods that read it would leave the settings document describing a
-/// fleet that does not exist — `precheck_readers` is what stops that, and it is a guard nothing
-/// exercises until the day it matters. The probe never rolls anything: a rollout it started would
-/// be a restart of the whole server tier every Sunday, which is a far worse thing to own than the
-/// SLO is to measure.
+/// Two things the review turned up, and both move this off the central scope entirely. First,
+/// there is no `Mark::Boot` field in `CENTRAL_SETTING_META` at all — every central knob is `Live`
+/// — so a Boot precheck could never fire on `PUT /admin/settings/central` and an id pointed there
+/// was measuring a liveness check wearing the roll id. The Boot fields are the agent's three
+/// (`crd::CLUSTER_SETTING_META`: `defaultImage`, `gitInitImage`, `runtimeClass`), so the guard
+/// lives on `PUT /admin/settings/clusters/{region}`.
 ///
-/// So the check is on the precheck's other side: with every reader `ready == desired`, a Boot save
-/// of the value the field ALREADY has must be accepted (the precheck passed and nothing rolled),
-/// and the readers it names must be exactly the ones `/admin/workloads` lists. A fleet mid-rollout
-/// answers 409, which is the same guard reporting the other outcome, and is also a pass — the SLI
-/// is that the guard runs, not which way it fell on the Sunday the probe asked.
+/// Second, accepting "2xx or 409" proved nothing: delete `precheck_readers` and the id stays
+/// green. So the path is made DETERMINISTIC — the probe puts the reader mid-rollout itself and
+/// then requires the refusal:
+///
+/// 1. wait until `kloudlite-agent` is `ready == desired`, so the roll below is this step's;
+/// 2. roll it through the console's own route, which is the button an operator has;
+/// 3. WHILE it is rolling, a Boot save must answer 409 — and the stored value must be unchanged
+///    afterwards, which is the "nothing is written" half a status alone cannot say;
+/// 4. wait for it to settle, so the next weekly run starts from a ready fleet.
+///
+/// It changes no configuration: the Boot save it attempts is REFUSED by design, and the roll is a
+/// restart of a stateless controller that the settings machinery performs on its own whenever
+/// anyone saves one of those three fields.
 async fn settings_roll(c: &mut Ctx) {
-    c.step("settings.roll", step_cap(SETTINGS_CAP), |c| {
+    let region = c.cfg.region.clone();
+    c.step("settings.roll", step_cap(ROLL_CAP), move |c| {
         let jwt = c.admin_jwt.clone();
-        let schema = admin(c, "/admin/settings/schema");
         let workloads = admin(c, "/admin/workloads");
-        let url = admin(c, "/admin/settings/central");
+        let roll = admin(c, &format!("/admin/workloads/{region}/{AGENT}/roll"));
+        let settings = admin(c, &format!("/admin/settings/clusters/{region}"));
         async move {
-            // The schema is the `Mark`/range/reader table the console renders from, and it is what
-            // says which fields are Boot at all — a probe that hard-coded one would go quiet the
-            // day a field changed mark.
-            let schema = get(c, &schema, &jwt).await.context("could not read the settings schema")?;
-            let field = boot_field(&schema)
-                .ok_or_else(|| anyhow!("the schema names no Mark::Boot field to try"))?;
-            let rows = get(c, &workloads, &jwt).await.context("could not read the roll targets")?;
-            if rows.get("workloads").and_then(Value::as_array).or_else(|| rows.as_array()).is_none_or(|r| r.is_empty()) {
-                return Err(anyhow!("no roll target is listed, so no Boot save could ever be prechecked"));
-            }
-            // The value it already has: accepted means the precheck ran and passed with nothing to
-            // roll; 409 means it ran and found a reader mid-rollout. Either is the guard working.
-            let doc = get(c, &url, &jwt).await.context("could not read the settings")?;
-            let Some(current) = doc.get(&field).cloned() else {
-                return Err(anyhow!("`{field}` is Boot-marked but the document does not carry it"));
+            // A fleet that is already mid-rollout is somebody else's roll, and the 409 below would
+            // be theirs rather than this step's — a skip-shaped precondition, not a breach.
+            settled(c, &workloads, &jwt, ROLL_CAP / 4)
+                .await
+                .context("the agent was not ready to begin with, so this step's roll is not its own")?;
+            let before = get(c, &settings, &jwt).await.context("could not read the cluster settings")?;
+            let field = boot_field_of(&before)
+                .ok_or_else(|| anyhow!("the cluster settings carry none of the Boot fields"))?;
+            let held = before.pointer(&format!("/spec/{field}")).cloned().unwrap_or(Value::Null);
+            let body = serde_json::json!({ "reason": SETTINGS_NOTE });
+            post(c, &roll, &jwt, body).await.context("the roll was refused")?;
+            // The roll is a real fleet action, so it is waited out on EVERY path — including the
+            // one where the refusal below never comes. `undoing` is what guarantees that.
+            let settle = || async {
+                settled(c, &workloads, &jwt, ROLL_CAP)
+                    .await
+                    .context("the agent was left mid-rollout")
             };
-            let body = serde_json::json!({ &field: current });
-            let (status, text) =
-                super::raw(c, reqwest::Method::PUT, &url, &jwt, Some(body), &[]).await?;
-            match status.as_u16() {
-                200..=299 | 409 => Ok(()),
-                other => Err(anyhow!(
-                    "a Boot save of `{field}`'s own value answered {other}: {}",
-                    text.chars().take(200).collect::<String>()
-                )),
-            }
+            let refused = async {
+                // Mid-rollout: the roll has just been asked for, so the reader is below desired
+                // until it comes back. Catching that window is what makes the save refusable.
+                mid_rollout(c, &workloads, &jwt, ROLL_CAP / 4).await?;
+                let save = serde_json::json!({ &field: boot_value(&held), "note": SETTINGS_NOTE });
+                let (status, text) =
+                    super::raw(c, reqwest::Method::PUT, &settings, &jwt, Some(save), &[]).await?;
+                if status.as_u16() != 409 {
+                    return Err(anyhow!(
+                        "a Boot save of `{field}` during a rollout answered {status}, not 409: {}",
+                        text.chars().take(200).collect::<String>()
+                    ));
+                }
+                // "Nothing is written" — the half the status cannot say, and the one that makes
+                // the precheck worth having: a 409 AFTER the document was persisted would leave
+                // the settings describing a fleet that never read them.
+                let after = get(c, &settings, &jwt).await.context("could not re-read the cluster settings")?;
+                let now = after.pointer(&format!("/spec/{field}")).cloned().unwrap_or(Value::Null);
+                if now != held {
+                    return Err(anyhow!("the refused save still changed `{field}` from {held} to {now}"));
+                }
+                Ok(())
+            };
+            drill::undoing(ROLL_CAP, refused, settle).await
         }
         .boxed()
     })
     .await;
 }
 
-/// The first `Mark::Boot` field the schema names, whatever shape it wraps its rows in.
+/// The DaemonSet every Boot field in `crd::CLUSTER_SETTING_META` names as its reader.
+const AGENT: &str = "kloudlite-agent";
+
+/// The three cluster-scoped Boot fields, in the order `CLUSTER_SETTING_META` lists them. Repeated
+/// rather than imported: what this step needs is a field the SAVE will carry, which is a fact
+/// about the wire shape, and the test below is what holds the two lists together.
+const BOOT_FIELDS: [&str; 3] = ["defaultImage", "gitInitImage", "runtimeClass"];
+
+/// The first Boot field the region's settings actually carry.
+fn boot_field_of(doc: &Value) -> Option<String> {
+    BOOT_FIELDS
+        .iter()
+        .find(|f| doc.pointer(&format!("/spec/{f}")).is_some())
+        .map(|f| (*f).to_string())
+}
+
+/// A value for the refused save. Deliberately DIFFERENT from what is stored — a save of the same
+/// value changes no Boot field, computes an empty roll set and is never prechecked at all, which
+/// is the shape that made this id unfalsifiable in the first place. It is never written: the whole
+/// step is the assertion that the precheck refuses it.
+fn boot_value(held: &Value) -> Value {
+    match held.as_str() {
+        Some(s) => Value::String(format!("{s}-slo-probe-never-written")),
+        None => Value::String("slo-probe-never-written".into()),
+    }
+}
+
+/// Wait until `kloudlite-agent` reports `ready == desired` in every region it is listed for.
+async fn settled(c: &Ctx, url: &str, jwt: &str, cap: Duration) -> Result<()> {
+    agent_rows_until(c, url, jwt, cap, "settle", |ready, desired| ready >= desired).await
+}
+
+/// Wait until it reports `ready < desired` — the window the precheck refuses a save in.
+async fn mid_rollout(c: &Ctx, url: &str, jwt: &str, cap: Duration) -> Result<()> {
+    agent_rows_until(c, url, jwt, cap, "start rolling", |ready, desired| ready < desired).await
+}
+
+/// Poll `/admin/workloads` until every agent row satisfies `want`.
 ///
-/// A function of its own so the one thing this step depends on — that the schema still says which
-/// fields are Boot — is testable without an admin process behind it.
-fn boot_field(schema: &Value) -> Option<String> {
-    let rows = schema.get("fields").and_then(Value::as_array).or_else(|| schema.as_array())?;
-    rows.iter()
-        .find(|r| r.get("mark").and_then(Value::as_str).is_some_and(|m| m.eq_ignore_ascii_case("boot")))
-        .and_then(|r| r.get("name").or_else(|| r.get("field")))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+/// A listing that FAILS is not an answer: reading an error as "the condition holds" would let this
+/// step pass through an admin process that stopped answering, which is the failure mode the whole
+/// id exists inside of.
+async fn agent_rows_until(
+    c: &Ctx,
+    url: &str,
+    jwt: &str,
+    cap: Duration,
+    what: &str,
+    want: impl Fn(i64, i64) -> bool,
+) -> Result<()> {
+    let start = Instant::now();
+    let mut seen;
+    loop {
+        let doc = get(c, url, jwt).await.context("could not read the workloads")?;
+        let rows = doc.get("workloads").and_then(Value::as_array).or_else(|| doc.as_array()).cloned().unwrap_or_default();
+        let agents: Vec<&Value> =
+            rows.iter().filter(|r| r.get("name").and_then(Value::as_str) == Some(AGENT)).collect();
+        if agents.is_empty() {
+            return Err(anyhow!("`{AGENT}` is not listed as a roll target at all"));
+        }
+        let n = |r: &Value, k: &str| r.get(k).and_then(Value::as_i64).unwrap_or(0);
+        if agents.iter().all(|r| want(n(r, "ready"), n(r, "desired"))) {
+            return Ok(());
+        }
+        seen = agents.iter().map(|r| format!("{}/{}", n(r, "ready"), n(r, "desired"))).collect::<Vec<_>>().join(" ");
+        if start.elapsed() >= cap {
+            return Err(anyhow!("`{AGENT}` did not {what} after {} ms: ready/desired {seen}", cap.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// `reg.gc.sweep`: a blob a sibling still references survives that image's deletion and a GC pass.
@@ -665,10 +761,18 @@ async fn settings_live(c: &mut Ctx) {
     .await;
 }
 
+/// One settings write. The `note` is NOT optional: `put_central` calls `require_note` on the
+/// body before it validates anything else, so a write without one is a 422 — a probe bug that
+/// would have failed `settings.live`, `settings.revert` and `settings.roll` on every run and read
+/// as the fleet refusing the save.
 async fn put(c: &Ctx, url: &str, jwt: &str, v: u64) -> Result<()> {
-    let body = serde_json::json!({ "uploadGraceSecs": v });
+    let body = serde_json::json!({ "uploadGraceSecs": v, "note": SETTINGS_NOTE });
     super::call(c, reqwest::Method::PUT, url, jwt, Some(body)).await.map(|_| ())
 }
+
+/// The reason every settings write this probe makes carries onto its audit row. One constant: a
+/// human reading the log should see the same sentence whichever of the three ids wrote it.
+const SETTINGS_NOTE: &str = "slo probe settings check";
 
 /// `crates/core/src/settings.rs`: the compiled default, and the top of the range `validate_stored`
 /// enforces. Repeated rather than imported for the range — importing `validate_stored` would let
@@ -718,21 +822,37 @@ mod tests {
         }
     }
 
-    /// `settings.roll` reads which fields are Boot-marked off the schema rather than hard-coding
-    /// one, so it goes quiet rather than wrong the day a field changes mark.
+    /// `BOOT_FIELDS` is the wire half of `crd::CLUSTER_SETTING_META`'s Boot entries; a field that
+    /// changed mark there without changing here would leave `settings.roll` saving a `Live` knob
+    /// and calling a missing 409 a breach.
     #[test]
-    fn the_boot_field_comes_from_the_schema() {
-        let schema = serde_json::json!({ "fields": [
-            { "name": "uploadGraceSecs", "mark": "live" },
-            { "name": "workspaceImage", "mark": "boot" },
-        ]});
-        assert_eq!(boot_field(&schema).as_deref(), Some("workspaceImage"));
-        // A bare array is the other shape the route may answer.
-        let bare = serde_json::json!([{ "field": "runtimeClass", "mark": "Boot" }]);
-        assert_eq!(boot_field(&bare).as_deref(), Some("runtimeClass"));
-        // No Boot field at all is a skip-shaped answer, never a wrong guess.
-        assert!(boot_field(&serde_json::json!({ "fields": [{ "name": "a", "mark": "live" }] })).is_none());
-        assert!(boot_field(&serde_json::json!({})).is_none());
+    fn the_boot_fields_are_the_crds_boot_fields() {
+        let want: Vec<&str> = kloudlite_workspaces::crd::CLUSTER_SETTING_META
+            .iter()
+            .filter(|(_, mark, _)| matches!(mark, kloudlite_core::settings::Mark::Boot))
+            .map(|(name, _, _)| *name)
+            .collect();
+        assert_eq!(BOOT_FIELDS.to_vec(), want);
+        // And every one of them names the DaemonSet this step rolls.
+        for (name, _, readers) in kloudlite_workspaces::crd::CLUSTER_SETTING_META {
+            if BOOT_FIELDS.contains(name) {
+                assert!(readers.contains(&AGENT), "{name} does not name {AGENT}");
+            }
+        }
+    }
+
+    /// The refused save must carry a DIFFERENT value: a Boot save of the stored value changes no
+    /// field, computes an empty roll set and is never prechecked — the shape that made this id
+    /// impossible to fail.
+    #[test]
+    fn the_refused_save_is_never_the_value_already_stored() {
+        let held = Value::String("ghcr.io/kloudlite/workspace:v1".into());
+        assert_ne!(boot_value(&held), held);
+        assert_ne!(boot_value(&Value::Null), Value::Null);
+        // And the first Boot field the document actually carries is the one that is tried.
+        let doc = serde_json::json!({ "spec": { "gitInitImage": "x", "runtimeClass": "gvisor" } });
+        assert_eq!(boot_field_of(&doc).as_deref(), Some("gitInitImage"));
+        assert!(boot_field_of(&serde_json::json!({ "spec": { "nodeDeadSecs": 180 } })).is_none());
     }
 
     /// The bytes have to be incompressible: git packs a commit, and a hundred megabytes of zeroes

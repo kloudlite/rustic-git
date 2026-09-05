@@ -61,7 +61,10 @@ const ENV_IDS: [&str; 4] = ["env.stop.p95", "env.replicated", "env.start.p95", "
 /// after them that could want one back.
 const DELETE_IDS: [&str; 2] = ["wt.delete", "snap.delete"];
 
-const DELETE_CEILING: Duration = Duration::from_secs(45);
+/// 75, not 45: `wt.delete`'s catalogue target is `bound(60_000)`, and a ceiling BELOW its own
+/// target inverts the rule every stage here states — a slow-but-passing delete would be cut off
+/// instead of measured as the breach it is. Target plus slack, like everything else.
+const DELETE_CEILING: Duration = Duration::from_secs(75);
 const SNAP_DELETE_CEILING: Duration = Duration::from_secs(25);
 
 pub async fn run(c: &mut Ctx) {

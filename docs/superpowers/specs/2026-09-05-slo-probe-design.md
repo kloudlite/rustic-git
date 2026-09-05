@@ -413,3 +413,39 @@ workspace and `admin.delete.workload`'s, each deleted inside its own step) and o
 environment, so the three primary tenants go `workspaces: 8 → 10`, `environments: 4 → 5`,
 `cpu: 40 → 48`, `memoryGb: 80 → 96` in `deploy/k3s/quotas-slo.yaml` and in `probe_quota()`, which
 the parity test holds equal. `deploy/k3s/quotas-slo.yaml` is applied BY HAND on the region.
+
+### Fix round 1 (review `gaps-review.md`)
+
+- **`put()` sent no `note`.** `require_note` runs before anything else on `put_central`, so
+  `settings.live`, `settings.revert` and `settings.roll` would all have 422'd on every run and read
+  as the fleet refusing the save. One constant, `SETTINGS_NOTE`, in the one helper.
+- **`cluster.decommission` could leave a node CORDONED.** The first `/decommission` POST is now
+  INSIDE the `undoing` region: an open gate — the failure the id exists to catch — cordons the node
+  and returns `Err`, and only a compensation established beforehand puts it back.
+- **The fast budget.** The added ceilings really sum to ~300 s, not 250. `KLOUDLITE_SLO_BUDGET_SECS`
+  goes 720 → 840 for the fast CronJob (parent kill = budget + 60 = the 900 s deadline), and
+  `wt.delete`'s ceiling goes 45 → 75 s because 45 was BELOW its own 60 s target — the one inversion
+  of the rule every other stage states.
+- **`pr.merge.strategies` now asserts the tree.** Each strategy's `{strategy}.txt` is read back off
+  `main` through the browse blob route and its CONTENT compared, so a merge that landed nothing or
+  replayed the wrong branch fails where it used to pass on `merged` plus "main has some oid".
+- **`settings.roll` was pointed at a scope with no Boot field.** Every entry in
+  `CENTRAL_SETTING_META` is `Mark::Live`; the Boot fields are the agent's three in
+  `crd::CLUSTER_SETTING_META`. It now runs on the cluster scope and is deterministic: wait for
+  `kloudlite-agent` to be `ready == desired`, roll it through the console's own route, require a
+  Boot save during the rollout to answer **409 with the stored value unchanged**, then wait for it
+  to settle inside `undoing`. It writes no configuration — the save it makes is refused by design.
+- **`cache_is_local`'s state check was a tautology** (`readlink -f` of the state dir compared to
+  itself). It now reads `/proc/mounts`: the state dir must be a mount of its own and must not be
+  the NFS export.
+- **Two 100 % ids asserted positives.** `repo.visibility` keeps only the refusals; the public read
+  is `repo.visibility.public` (99.9 %). `sec.agent.spec` keeps only the refusal; the two allowed
+  spec writes are `agent.spec.allowed` (99.9 %), which now distinguishes a real denial (403, or a
+  policy 422) from kube transport noise (404/429/5xx) instead of calling everything a refusal.
+- **`team.environment` could leak.** Its id is registered in `state.extra_volumes` before anything
+  can fail — teardown's per-user prefix sweep cannot see a team-owned environment — and the delete
+  now FAILS the step rather than warning.
+- **`settings.revert` could time itself out.** Both waits share `REVERT_HALF`, so body + undo fit
+  under the step's own ceiling and a slow beat is a verdict rather than a lost sample.
+- Two LOWs: `slug()` collapsed onto `team_slug`, and the `su` comment corrected — it is not a login
+  shell, and the environment it reads is the container spec's.

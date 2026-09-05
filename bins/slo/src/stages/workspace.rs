@@ -259,6 +259,10 @@ pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> R
     // As `kl`, the user sshd hands a person: the container's own user is root, and root's git
     // refuses a repository `kl` owns ("dubious ownership"), which is exactly the vantage point a
     // user never has. What the probe measures is what the person sees.
+    //
+    // `su … -c`, NOT a login shell: the environment the script reads is the one the container spec
+    // sets (`k8s::login_env`), not a profile's. That is what `cache_is_local` is reading back, and
+    // calling it "the login shell" was wrong.
     let user = kloudlite_workspaces::k8s::SSH_USER;
     crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["su", user, "-s", "/bin/sh", "-c", script], cap).await
 }
