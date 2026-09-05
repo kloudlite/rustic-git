@@ -1534,9 +1534,16 @@ fn the_retire_pass_does_not_walk_the_pool_on_the_reactor() {
     for i in 0..8000 {
         std::fs::create_dir_all(tmp.path().join("vol").join("orphan").join("snap").join(format!("c{i}"))).unwrap();
     }
+    // Past the grace, or the sweep rightly leaves a directory the listing may simply predate.
+    let old = std::time::SystemTime::now() - super::sweeps::ORPHAN_GRACE - std::time::Duration::from_secs(60);
+    std::fs::File::open(tmp.path().join("vol").join("orphan")).unwrap().set_modified(old).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (ctx, _rec) = test_ctx(tmp.path(), "node-a", vec![get(SNAPSHOTS, list_of("Snapshot", vec![]))]);
+        let (ctx, _rec) = test_ctx(
+            tmp.path(),
+            "node-a",
+            vec![get(SNAPSHOTS, list_of("Snapshot", vec![])), not_found(format!("{VOLUMES}/orphan"))],
+        );
 
         let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let t = ticks.clone();

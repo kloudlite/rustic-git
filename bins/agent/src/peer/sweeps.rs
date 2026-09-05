@@ -473,11 +473,16 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     for id in orphan_voldirs(&ctx.engine.pool.root.join("vol"), &known) {
         // The listing is a beat old; a drop is forever. Ask the API server once more, and keep
         // the bytes on any answer that is not a definite "no such Volume".
-        match Api::<crd::Volume>::all(ctx.client.clone()).get_opt(&id).await {
-            Ok(None) => {}
-            Ok(Some(_)) => continue,
-            Err(e) => {
+        let recheck = tokio::time::timeout(std::time::Duration::from_secs(5), Api::<crd::Volume>::all(ctx.client.clone()).get_opt(&id)).await;
+        match recheck {
+            Ok(Ok(None)) => {}
+            Ok(Ok(Some(_))) => continue,
+            Ok(Err(e)) => {
                 tracing::warn!(volume = %id, reason = "recheck", error = %e, "volume.drop.skipped");
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!(volume = %id, reason = "recheck-timeout", "volume.drop.skipped");
                 continue;
             }
         }
