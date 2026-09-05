@@ -28,8 +28,10 @@ use crate::{drill, tools};
 const BACKUP_CONTAINER: &str = "k3s-backup";
 const SLOT_SUFFIX: &str = ".tgz.enc";
 /// The timer runs hourly, so anything past two hours has MISSED one — the same threshold
-/// `deploy/BACKUPS.md`'s verification step names.
-const MAX_TARBALL_AGE_HOURS: i64 = 2;
+/// `deploy/BACKUPS.md`'s verification step names. In MINUTES because `num_hours` truncates: a
+/// backup 119 minutes old and one 60 minutes old are both "1 hour", and the comparison would let
+/// the age drift most of an hour past the threshold before anyone heard about it.
+const MAX_TARBALL_AGE_MINS: i64 = 120;
 
 const READ_CEILING: Duration = Duration::from_secs(60);
 /// The dead-node drill waits out `nodeDeadSecs` and then a start elsewhere; the drain waits out the
@@ -43,6 +45,13 @@ const NODE_DEAD_FALLBACK: u64 = 180;
 /// The grace on top of it: the sweep is a beat, not an instant, and a drill that started asking one
 /// second after the deadline would report a flake as a failure.
 const DEAD_SLACK: u64 = 60;
+
+/// A step's ceiling for a body that has an undo: always the body's own plus a minute. `Ctx::step`
+/// times out by DROPPING the step's future, so an outer timeout that fired first would take the
+/// undo with it — the drill's own cap has to be the one that wins.
+fn step_cap(body: Duration) -> Duration {
+    body + Duration::from_secs(60)
+}
 
 pub async fn run(c: &mut Ctx) {
     backups(c).await;
@@ -91,9 +100,9 @@ async fn tarball_age(c: &mut Ctx) {
                 .map(|(_, at)| at)
                 .max()
                 .ok_or_else(|| anyhow!("the backup container holds no hourly tarball at all"))?;
-            let hours = (Utc::now() - newest).num_hours();
-            if hours >= MAX_TARBALL_AGE_HOURS {
-                return Err(anyhow!("the newest backup is {hours} hours old"));
+            let mins = (Utc::now() - newest).num_minutes();
+            if mins >= MAX_TARBALL_AGE_MINS {
+                return Err(anyhow!("the newest backup is {mins} minutes old"));
             }
             Ok(())
         }
@@ -270,11 +279,19 @@ async fn dead_node(c: &mut Ctx) {
         return c.skip("drill.dead.node", &format!("the workspace never stopped: {e:#}"));
     }
     let Some(owner) = node_of(c, &ws).await else {
+        // The stop above is this function's own mutation, and it undoes it: a workspace left
+        // stopped is one the LATER stages of a monthly run would find missing, and one a person
+        // watching the console would have to start by hand.
+        let start = api(c, &format!("/v1/workspaces/{ws}/start"));
+        if let Err(e) = post(c, &start, &jwt, Value::Null).await {
+            tracing::warn!(op = "restart", name = %ws, error = %format!("{e:#}"), "slo.drill.undo.failed");
+        }
         return c.skip("drill.dead.node", "the workspace names no node");
     };
     let wait = Duration::from_secs(node_dead_secs(c).await + DEAD_SLACK);
+    let body_cap = wait + DRAIN_CAP;
     let ws = ws.to_string();
-    c.step("drill.dead.node", wait + DRAIN_CAP, move |c| {
+    c.step("drill.dead.node", step_cap(body_cap), move |c| {
         let jwt = c.probe_jwt.clone();
         let start = api(c, &format!("/v1/workspaces/{ws}/start"));
         let doc = api(c, &format!("/v1/workspaces/{ws}"));
@@ -291,7 +308,7 @@ async fn dead_node(c: &mut Ctx) {
                 .await
                 .with_context(|| format!("it never came back on a node other than {owner2}"))
             };
-            drill::with_taint(&k, &owner, body).await
+            drill::with_taint(&k, &owner, body_cap, body).await
         }
         .boxed()
     })
@@ -345,7 +362,7 @@ async fn drain(c: &mut Ctx) {
         Ok(n) => n,
         Err(e) => return c.skip("drill.drain", &format!("{e:#}")),
     };
-    c.step("drill.drain", DRAIN_CAP + Duration::from_secs(60), move |c| {
+    c.step("drill.drain", step_cap(DRAIN_CAP), move |c| {
         let jwt = c.admin_jwt.clone();
         let base = admin(c, &format!("/admin/clusters/{region}/nodes/{node}"));
         let reason = json!({ "reason": format!("slo probe drill {}", c.run_id) });
@@ -354,7 +371,7 @@ async fn drain(c: &mut Ctx) {
             let body = async {
                 stamped(&k, &node, DRAIN_CAP).await.context("the node never finished draining")
             };
-            drill::undoing(body, || verb(c, &base, "undrain", &jwt, &reason)).await
+            drill::undoing(DRAIN_CAP, body, || verb(c, &base, "undrain", &jwt, &reason)).await
         }
         .boxed()
     })
@@ -367,23 +384,66 @@ async fn verb(c: &Ctx, base: &str, v: &str, jwt: &str, reason: &Value) -> Result
     post(c, &format!("{base}/{v}"), jwt, reason.clone()).await.map(|_| ())
 }
 
-/// A node in the cluster that is not the one holding this run's workspace and is not already being
-/// retired. A drill that drained a busy node would be measuring an eviction, not a drain.
-async fn idle_node(k: &kube::Client, busy: Option<&str>) -> Result<String> {
+/// A node holding nothing that is running, not already being retired, and not the one the taint
+/// drill just used.
+///
+/// "Nothing running" is read off the WORKTREES, not the node: a drain only sets a label, and the
+/// agent's beat releases volumes as they become releasable — but whatever is RUNNING there keeps
+/// running, so a node with a live worktree on it would never stamp `drained` inside the drill's ten
+/// minutes and the id would fail for the fleet behaving exactly as designed. Anyone's worktree
+/// counts, not only the probe's: this drill touches a shared cluster.
+async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<String> {
     use kloudlite_git_workspaces::crd;
+    let busy = running_nodes(k).await?;
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
     let list = api.list(&kube::api::ListParams::default()).await.map_err(|e| anyhow!("could not list the nodes: {e}"))?;
     list.items
         .iter()
-        .map(kube::ResourceExt::name_any)
         .find(|n| {
-            Some(n.as_str()) != busy
-                && !list.items.iter().any(|o| {
-                    kube::ResourceExt::name_any(o) == *n
-                        && o.metadata.labels.as_ref().is_some_and(|l| l.contains_key(crd::DECOMMISSION_LABEL))
-                })
+            let name = kube::ResourceExt::name_any(*n);
+            Some(name.as_str()) != avoid
+                && !busy.contains(&name)
+                && !n.metadata.labels.as_ref().is_some_and(|l| l.contains_key(crd::DECOMMISSION_LABEL))
+                // A node already cordoned by a person is one somebody is retiring by hand.
+                && !n.spec.as_ref().and_then(|s| s.unschedulable).unwrap_or(false)
         })
-        .ok_or_else(|| anyhow!("every node is busy or already draining"))
+        .map(kube::ResourceExt::name_any)
+        .ok_or_else(|| anyhow!("every node holds a running worktree, or is already draining"))
+}
+
+/// Every node with a Running workspace or environment placed on it.
+async fn running_nodes(k: &kube::Client) -> Result<Vec<String>> {
+    use kloudlite_git_workspaces::crd;
+    let mut out = vec![];
+    let ws: kube::Api<crd::Workspace> = kube::Api::all(k.clone());
+    let env: kube::Api<crd::Environment> = kube::Api::all(k.clone());
+    let p = kube::api::ListParams::default();
+    for (node, running) in ws
+        .list(&p)
+        .await
+        .map_err(|e| anyhow!("could not list the workspaces: {e}"))?
+        .items
+        .iter()
+        .map(|w| (w.status.as_ref().map(|s| s.node_name.clone()), is_running(w.status.as_ref().map(|s| s.phase.as_str()))))
+        .chain(
+            env.list(&p)
+                .await
+                .map_err(|e| anyhow!("could not list the environments: {e}"))?
+                .items
+                .iter()
+                .map(|e| (e.status.as_ref().map(|s| s.node_name.clone()), is_running(e.status.as_ref().map(|s| s.phase.as_str())))),
+        )
+    {
+        if let (Some(node), true) = (node.filter(|n| !n.is_empty()), running) {
+            out.push(node);
+        }
+    }
+    Ok(out)
+}
+
+/// Anything but a stopped or failed phase is something a person could be typing into.
+fn is_running(phase: Option<&str>) -> bool {
+    !matches!(phase.unwrap_or_default(), "" | "Stopped" | "stopped" | "Failed" | "failed")
 }
 
 /// Wait for the agent's sticky `drained <RFC 3339>` stamp.
@@ -427,10 +487,7 @@ async fn redis_down(c: &mut Ctx) {
     let Some(host) = c.cfg.redis_host.clone() else {
         return c.skip("drill.redis.down", "no KLOUDLITE_GIT_SLO_REDIS_HOST to deny");
     };
-    let k = match kube::Config::incluster()
-        .map_err(|e| anyhow!("{e}"))
-        .and_then(|cfg| kube::Client::try_from(cfg).map_err(|e| anyhow!("{e}")))
-    {
+    let k = match drill::incluster() {
         Ok(k) => k,
         Err(e) => return c.skip("drill.redis.down", &format!("no in-cluster client: {e:#}")),
     };
@@ -439,7 +496,8 @@ async fn redis_down(c: &mut Ctx) {
         Err(e) => return c.skip("drill.redis.down", &format!("{e:#}")),
     };
     let name = format!("{}-redis", c.prefix());
-    c.step("drill.redis.down", REDIS_DOWN + Duration::from_secs(300), move |c| {
+    let body_cap = REDIS_DOWN + Duration::from_secs(300);
+    c.step("drill.redis.down", step_cap(body_cap), move |c| {
         async move {
             let body = async {
                 // Long enough that anything holding a Redis connection has noticed, then the work
@@ -447,14 +505,16 @@ async fn redis_down(c: &mut Ctx) {
                 tokio::time::sleep(REDIS_DOWN).await;
                 without_redis(c, &name).await
             };
-            drill::with_netpol(&k, "kloudlite-git", NETPOL, deny_egress(&ips), body).await
+            drill::with_netpol(&k, "kloudlite-git", NETPOL, deny_egress(&ips), body_cap, body).await
         }
         .boxed()
     })
     .await;
 }
 
-const NETPOL: &str = "slo-drill-redis";
+/// The one NetworkPolicy this probe ever writes, named here because teardown deletes it blind on
+/// every run — including runs that never went near a drill.
+pub const NETPOL: &str = "slo-drill-redis";
 
 /// Everywhere but Redis, for the two tiers that nudge it.
 ///

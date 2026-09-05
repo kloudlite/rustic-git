@@ -1528,13 +1528,19 @@ rules:
     verbs: ["get", "list", "delete"]
   # `drill.redis.down` only: the monthly drill writes ONE NetworkPolicy named `slo-drill-redis`
   # that denies the srv and worker pods egress to Redis for five minutes, and deletes it again on
-  # every path out of the drill (`bins/slo/src/drill.rs`). No `resourceNames` because a policy that
-  # does not exist yet cannot be named in RBAC; the namespace and the verbs are the boundary, and
-  # `update`/`patch` are deliberately absent — the drill may create its own and remove it, never
-  # touch the `attach-{ws}` policies that carry a workspace's own traffic.
+  # every path out of the drill — and every run's teardown deletes it blind as well, in case a
+  # killed pod never got there (`bins/slo/src/drill.rs`). A plain `create` rather than a
+  # server-side apply is what keeps this grant narrow: apply needs `patch` on EVERY policy in the
+  # namespace, and the `attach-{ws}` policies that carry a workspace's own traffic live here.
+  # `create` cannot be name-restricted — an object that does not exist yet has no name to match —
+  # so the namespace is that verb's boundary; `delete` is pinned to the one name.
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "delete"]
+    verbs: ["create"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    resourceNames: ["slo-drill-redis"]
+    verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

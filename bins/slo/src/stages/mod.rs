@@ -161,11 +161,37 @@ pub async fn boot(c: &mut Ctx) {
 /// best-effort: a leak is swept by the next run's boot, while an error propagated from here would
 /// lose the report that says why the run failed in the first place.
 pub async fn teardown(c: &mut Ctx) {
+    undo_drills(c).await;
     hide(c).await;
     let prefix = c.prefix();
     let mut swept = sweep(c, move |name| name.starts_with(&prefix)).await;
     swept += drop_env_volume(c).await;
     tracing::info!(count = swept, "slo.teardown.completed");
+}
+
+/// Put the three fleet mutations a drill makes back, on EVERY run — not only the monthly one.
+///
+/// A drill undoes itself (`crate::drill`), and that undo is the first thing a killed pod loses:
+/// the journey runs in a child process, and a child that is OOM-killed or hits the CronJob's
+/// deadline mid-drill leaves a node tainted, a node cordoned or the fleet cut off from Redis with
+/// nothing running that would put it back. This is the parent's sweep, so it runs after the child
+/// whatever the child did — and unconditionally, because the run that left the mess is by
+/// definition not the run that is cleaning it up.
+async fn undo_drills(c: &mut Ctx) {
+    if let Some(k) = c.kube.clone() {
+        crate::drill::sweep_nodes(&k, &c.tmp).await;
+    }
+    // The NetworkPolicy is on the OTHER cluster — the one the probe runs in — so it needs its own
+    // client, and not having one is the ordinary case outside a pod.
+    match crate::drill::incluster() {
+        Ok(k) => {
+            use crate::drill::Cluster;
+            if let Err(e) = k.netpol("kloudlite-git", crate::stages::monthly::NETPOL, None).await {
+                tracing::warn!(kind = "netpol", error = %format!("{e:#}"), "slo.drill.sweep.failed");
+            }
+        }
+        Err(e) => tracing::debug!(error = %format!("{e:#}"), "slo.drill.sweep.skipped"),
+    }
 }
 
 /// Flip everything this run may have published back to private, BEFORE the deletes.

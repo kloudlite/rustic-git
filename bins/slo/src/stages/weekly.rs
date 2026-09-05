@@ -41,13 +41,24 @@ const REUSE_CEILING_MS: u128 = 30_000;
 const PUSH_CEILING: Duration = Duration::from_secs(600);
 const COLD_CEILING: Duration = Duration::from_secs(600);
 const REUSE_CEILING: Duration = Duration::from_secs(120);
-const CROSS_CEILING: Duration = Duration::from_secs(300);
+/// The cross-node body: a stop that converges and a start that converges, one after the other,
+/// each given half. The STEP gets a minute on top (`step_cap`) so `Ctx::step`'s own timeout can
+/// never fire first and drop the uncordon with it.
+const CROSS_BODY: Duration = Duration::from_secs(300);
+const CROSS_POLL: Duration = Duration::from_secs(150);
 const EXEC_CEILING: Duration = Duration::from_secs(30);
 /// The catalogue bounds `cp.failover` at 30 s, and that bound IS the wait: a lease that has not
 /// moved inside it has failed the SLI whether the probe keeps looking or not.
 const FAILOVER_CAP: Duration = Duration::from_secs(30);
 /// Same for `settings.live` at 60 s.
 const SETTINGS_CAP: Duration = Duration::from_secs(60);
+
+/// A step's ceiling for a body that has an undo: always the body's own plus a minute. `Ctx::step`
+/// times out by DROPPING the step's future, so an outer timeout that fired first would take the
+/// undo with it — the drill's cap has to be the one that wins.
+fn step_cap(body: Duration) -> Duration {
+    body + Duration::from_secs(60)
+}
 
 pub async fn run(c: &mut Ctx) {
     large_push(c).await;
@@ -255,8 +266,8 @@ async fn cross_node(c: &mut Ctx, ws: Option<&str>) {
     };
     let moved = {
         let (ws, owner) = (ws.to_string(), owner.clone());
-        c.step("ws.cross.node", CROSS_CEILING, move |c| {
-            let jwt = c.probe_jwt.clone();
+        c.step("ws.cross.node", step_cap(CROSS_BODY), move |c| {
+            let (jwt, tmp) = (c.probe_jwt.clone(), c.tmp.clone());
             let (stop, start) = (
                 api(c, &format!("/v1/workspaces/{ws}/stop")),
                 api(c, &format!("/v1/workspaces/{ws}/start")),
@@ -264,7 +275,7 @@ async fn cross_node(c: &mut Ctx, ws: Option<&str>) {
             let doc = api(c, &format!("/v1/workspaces/{ws}"));
             async move {
                 post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
-                poll_json(c, &doc, &jwt, CROSS_CEILING, |v| {
+                poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
                     v.get("state").and_then(Value::as_str) == Some("stopped")
                 })
                 .await
@@ -273,14 +284,14 @@ async fn cross_node(c: &mut Ctx, ws: Option<&str>) {
                     post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
                     // Ready AND elsewhere, in one predicate: a workspace that came back on the
                     // cordoned node is this SLI failing, not a slow start.
-                    poll_json(c, &doc, &jwt, CROSS_CEILING, |v| {
+                    poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
                         v.get("state").and_then(Value::as_str) == Some("ready")
                             && v.get("placement").and_then(Value::as_str).is_some_and(|n| n != owner)
                     })
                     .await
                     .with_context(|| format!("it did not come back ready on a node other than {owner}"))
                 };
-                drill::with_cordon(&k, &owner, body).await
+                drill::with_cordon(&k, &tmp, &owner, CROSS_BODY, body).await
             }
             .boxed()
         })
@@ -329,9 +340,7 @@ async fn placement(c: &Ctx, ws: &str) -> Option<String> {
 /// follows `KUBECONFIG` and lands in k3s, where the server tier does not run at all — without this
 /// the drill would delete a workspace node's pod and then wait out a lease that never moved.
 async fn failover(c: &mut Ctx) {
-    let k = match kube::Config::incluster().map_err(|e| anyhow!("{e}")).and_then(|cfg| {
-        kube::Client::try_from(cfg).map_err(|e| anyhow!("{e}"))
-    }) {
+    let k = match drill::incluster() {
         Ok(k) => k,
         // Not running in a cluster is a deployment gap, not a failover that did not happen.
         Err(e) => return c.skip("cp.failover", &format!("no in-cluster client: {e:#}")),
@@ -378,7 +387,7 @@ async fn leader(c: &Ctx, url: &str, jwt: &str) -> Result<String> {
 /// something dials. The revert is in the undo path, so an admin process that answered the write
 /// and then stopped answering still leaves the fleet on its own value.
 async fn settings_live(c: &mut Ctx) {
-    c.step("settings.live", SETTINGS_CAP + Duration::from_secs(30), |c| {
+    c.step("settings.live", step_cap(SETTINGS_CAP), |c| {
         let jwt = c.admin_jwt.clone();
         let url = admin(c, "/admin/settings/central");
         async move {
@@ -388,14 +397,15 @@ async fn settings_live(c: &mut Ctx) {
             let was = doc.get("uploadGraceSecs").and_then(Value::as_u64).unwrap_or(DEFAULT_GRACE);
             let to = if was + STEP <= GRACE_MAX { was + STEP } else { was - STEP };
             put(c, &url, &jwt, to).await.context("the settings write was refused")?;
-            let body = poll_json(c, &url, &jwt, SETTINGS_CAP, |v| {
+            // The same undo mechanism the drills use, for the same reason: the revert must survive
+            // a read-back that never converges, and `Ctx::step`'s timeout would drop it.
+            let read = poll_json(c, &url, &jwt, SETTINGS_CAP, |v| {
                 v.get("uploadGraceSecs").and_then(Value::as_u64) == Some(to)
+            });
+            drill::undoing(SETTINGS_CAP, async { read.await.context("the change never read back") }, || async {
+                put(c, &url, &jwt, was).await.context("the settings change was NOT reverted")
             })
             .await
-            .context("the change never read back");
-            let back = put(c, &url, &jwt, was).await.context("the settings change was NOT reverted");
-            body?;
-            back
         }
         .boxed()
     })
