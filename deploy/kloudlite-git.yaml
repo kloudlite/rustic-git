@@ -1601,6 +1601,9 @@ data:
   # To obtain it, after `kloudlite-git-slo bootstrap` has pushed the canary:
   #   crane digest cr.khost.dev/slo-probe/canary:latest
   KLOUDLITE_GIT_SLO_CANARY_DIGEST: ""
+  # The ingress controller's public IP, for `edge.origin` (curl with --resolve past Cloudflare).
+  # Empty: that id skips. `kubectl -n ingress-nginx get svc` shows it.
+  KLOUDLITE_GIT_SLO_ORIGIN_IP: ""
 ---
 # The fast suite, every five minutes. `Forbid`: a run that overshoots its window is a symptom, and
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.

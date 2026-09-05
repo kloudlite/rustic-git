@@ -434,7 +434,7 @@ every caller-shaped value (range, step, region, owner, dimension) through an all
 **The SLO probe is a synthetic user, not a metric.** `bins/slo` (`kloudlite-git-slo`, its own
 image) walks one tenant's whole day — sign in, push over HTTP and SSH, a PR, the registry, a
 workspace, an environment, the lifecycle verbs, the admin queue, the security refusals, the edge —
-as three `CronJob`s in `deploy/kloudlite-git.yaml`: `*/5 * * * *` (`Forbid`, 540 s), weekly and
+as three `CronJob`s in `deploy/kloudlite-git.yaml`: `*/5 * * * *` (`Forbid`, 900 s), weekly and
 monthly, all `restartPolicy: Never` / `backoffLimit: 0`, because a failed journey is a SAMPLE
 already counted and a retry would file a second run under a second id. It reports WHILE IT RUNS —
 a `PUT /admin/slo/runs/{id}` after every stage — to the admin process, which stays the single

@@ -128,7 +128,7 @@ RUN apk add --no-cache libstdc++ libgcc \
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS slo
 # git + openssh-client: stage 2 pushes and clones over both transports, with a real client, because
 # a probe that used our own library would pass on a bug only a real client trips.
-# curl: fetching the two tools below at build time, and the edge stage's origin check.
+# curl is the build-time tool fetch below; the edge stage dials the origin with reqwest.
 # openssl + bind9-dnsutils: `edge.cert` reads the served certificate and `edge.dns` resolves the
 # hostnames without trusting the pod's resolver cache.
 # bash: the edge stage opens `/dev/tcp/host/port` to prove a listener answers, which is a bash
