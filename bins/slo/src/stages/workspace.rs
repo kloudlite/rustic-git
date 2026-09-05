@@ -207,7 +207,11 @@ pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> R
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
     // The probe's workspaces are personal, never a team's, so the namespace is `ws-slo-probe`.
     let ns = kloudlite_workspaces::crd::ws_namespace(&probe, "");
-    crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["sh", "-c", script], cap).await
+    // As `kl`, the user sshd hands a person: the container's own user is root, and root's git
+    // refuses a repository `kl` owns ("dubious ownership"), which is exactly the vantage point a
+    // user never has. What the probe measures is what the person sees.
+    let user = kloudlite_workspaces::k8s::SSH_USER;
+    crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["su", user, "-s", "/bin/sh", "-c", script], cap).await
 }
 
 /// `gw.tunnel.p95`: the whole `kl ssh` path — mint a session, then let `ssh` reach the pod through

@@ -255,32 +255,35 @@ async fn a_workspace(client: &kube::Client, ours: Option<String>) -> Option<Stri
     ours.filter(|o| names.contains(o)).or_else(|| names.into_iter().next())
 }
 
-/// `id.token.revoked`: the personal token stage 1 minted stops working the moment it is revoked.
+/// `id.token.revoked`: a personal token stops working the moment it is revoked.
 ///
+/// A THROWAWAY token, minted here and revoked here — never the one stage 1 minted, which every
+/// later git push (`repo.protection` in stage 14 among them) still signs with; the git tier takes
+/// Basic `x:<token>` and nothing else, so revoking that one turns the rest of the run into 401s.
 /// Sent the way git sends one — Basic `x:<token>` — because that is the shape a leaked token would
 /// actually be replayed in.
 async fn token_revoked(c: &mut Ctx) {
-    let (Some(id), Some(secret), Some(repo)) =
-        (c.state.token.clone(), c.state.token_value.clone(), c.state.repo.clone())
-    else {
-        return c.skip("id.token.revoked", "no personal token, or no repo to try it against");
+    let Some(repo) = c.state.repo.clone() else {
+        return c.skip("id.token.revoked", "no repo to try it against");
     };
-    // Gone from the state either way: teardown lists tokens by name and a second delete of a
-    // revoked one is a warning nobody needs.
-    c.state.token = None;
+    let name = format!("{}-revoked", c.prefix());
+    let probe = c.probe_user.clone();
     c.step("id.token.revoked", REFUSAL_CEILING, move |c| {
-        let url = api(c, &format!("/v1/tokens/{id}"));
+        let tokens = api(c, "/v1/tokens");
         let refs = refs_url(c, &repo);
         let jwt = c.probe_jwt.clone();
-        let basic = basic(&secret);
         async move {
+            let body = serde_json::json!({ "owner": probe, "name": name });
+            let out = super::post(c, &tokens, &jwt, body).await.context("could not mint a token to revoke")?;
+            let id = out.pointer("/_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("the answer carried no id"))?;
+            let secret = out.get("token").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("the answer carried no token"))?;
+            let basic = basic(secret);
+            let url = format!("{tokens}/{id}");
             super::call(c, reqwest::Method::DELETE, &url, &jwt, None)
                 .await
                 .context("could not revoke the token")?;
             let (status, _) =
                 raw(c, reqwest::Method::GET, &refs, "", None, &[("authorization", basic)]).await?;
-            // The git listener answers a credential it no longer knows with 400, not 401: the
-            // token is gone from the store, so the request itself is malformed to it.
             refused_with("a revoked token", status, &[400, 401, 403])
         }
         .boxed()
@@ -288,7 +291,6 @@ async fn token_revoked(c: &mut Ctx) {
     .await;
 }
 
-/// `Basic x:<token>` — git's own shape (`httpx::basic_token`'s placeholder username).
 fn basic(secret: &str) -> String {
     use base64::Engine;
     format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("x:{secret}")))
