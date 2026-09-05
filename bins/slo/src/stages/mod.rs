@@ -1,0 +1,174 @@
+//! Stage 0 (boot) and the last stage (teardown). Every journey stage between them lands here as
+//! its own module.
+
+use std::time::Duration;
+
+use crate::ctx::{Ctx, PROBE_USER};
+
+/// A leftover this old cannot belong to a run still in flight — the fast suite's own
+/// `activeDeadlineSeconds` is 540 — so boot may sweep it. Without the age test, two overlapping
+/// runs would delete each other's live objects, which is a far worse failure than a leak.
+const STALE_SECS: i64 = 3600;
+
+/// Stage 0: make the working tree, and sweep what a crashed earlier run left behind.
+///
+/// Sweeping at boot rather than only at teardown is what makes a killed run self-healing: the
+/// probe's owner holds nothing but probe objects, so anything older than `STALE_SECS` is litter.
+pub async fn boot(c: &mut Ctx) {
+    if let Err(e) = std::fs::create_dir_all(&c.tmp) {
+        tracing::error!(path = %c.tmp.display(), error = %e, "slo.boot.tmp.failed");
+    }
+    let swept = sweep(c, |name| stale(name, chrono::Utc::now().timestamp())).await;
+    tracing::info!(swept, "slo.boot.swept");
+}
+
+/// The last stage. It runs unconditionally, including after a panic, and every delete is
+/// best-effort: a leak is swept by the next run's boot, while an error propagated from here would
+/// lose the report that says why the run failed in the first place.
+pub async fn teardown(c: &mut Ctx) {
+    let prefix = c.prefix();
+    let swept = sweep(c, move |name| name.starts_with(&prefix)).await;
+    tracing::info!(swept, "slo.teardown.done");
+}
+
+/// One `/v1` collection teardown owns: how to list it, which field carries the name the prefix is
+/// matched against, and how to address one for delete.
+struct Kind {
+    kind: &'static str,
+    list: &'static str,
+    /// The caller-chosen name — the only field a prefix means anything in. A `Request`'s
+    /// generated `req-…` id would match nothing, which is why requests are swept separately.
+    name_field: &'static str,
+    /// What the delete path takes. Often the same field; `_id` for a credential, whose name is
+    /// not unique.
+    id_field: &'static str,
+    del: fn(&str) -> String,
+}
+
+/// Order matters at exactly one point: a volume is reference-counted, so its workspace and
+/// environment must be gone before a volume delete can succeed at all.
+const KINDS: &[Kind] = &[
+    Kind { kind: "workspace", list: "/v1/workspaces", name_field: "name", id_field: "id", del: |id| format!("/v1/workspaces/{id}") },
+    Kind { kind: "environment", list: "/v1/environments", name_field: "name", id_field: "id", del: |id| format!("/v1/environments/{id}") },
+    Kind { kind: "volume", list: "/v1/volumes", name_field: "name", id_field: "name", del: |n| format!("/v1/volumes/{n}") },
+    Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |n| format!("/v1/repos/{PROBE_USER}/{n}") },
+    Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |id| format!("/v1/tokens/{id}") },
+    Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id| format!("/v1/keys/{id}") },
+];
+
+/// List every probe-owned object and delete the ones `matches` claims. Returns how many went.
+async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
+    let mut gone = 0;
+    for k in KINDS {
+        for (name, id) in list(c, k).await {
+            if !matches(&name) {
+                continue;
+            }
+            let url = format!("{}{}", c.cfg.api_url.trim_end_matches('/'), (k.del)(&id));
+            match c.http.delete(&url).header("authorization", c.bearer(&c.probe_jwt)).send().await {
+                Ok(r) if r.status().is_success() => {
+                    gone += 1;
+                    tracing::info!(kind = k.kind, name = %name, "slo.teardown.deleted");
+                }
+                // Best-effort by design: a 409 here is usually "something still references it",
+                // and the next run's boot sweep gets it once that reference is gone.
+                Ok(r) => tracing::warn!(kind = k.kind, name = %name, status = %r.status(), "slo.teardown.delete.failed"),
+                Err(e) => tracing::warn!(kind = k.kind, name = %name, error = %e, "slo.teardown.delete.failed"),
+            }
+        }
+    }
+    gone += deny_requests(c, &matches).await;
+    // Images are not a `/v1` collection — they are deleted through the server tier's browse API,
+    // which stage 4 is the first thing to need. Until then this is honestly nothing.
+    tracing::info!(kind = "image", "slo.teardown.skipped");
+    gone
+}
+
+/// `Request` has no delete on any tier — only a superadmin decision — so the sweep DENIES a
+/// leftover instead. That is what teardown actually needs: a pending request blocks the next
+/// run's `req.queue` step (one pending per owner per kind), and a denied one does not.
+async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
+    let mut gone = 0;
+    // The reason, not the name: the id is a server-generated `req-…` that no prefix can match.
+    for (reason, id) in
+        list(c, &Kind { kind: "request", list: "/v1/requests", name_field: "reason", id_field: "id", del: |_| String::new() }).await
+    {
+        if !matches(&reason) {
+            continue;
+        }
+        let url = format!("{}/admin/requests/{id}/deny", c.cfg.admin_url.trim_end_matches('/'));
+        match c
+            .http
+            .post(&url)
+            .header("authorization", c.bearer(&c.admin_jwt))
+            .json(&serde_json::json!({ "note": "slo probe teardown" }))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                gone += 1;
+                tracing::info!(kind = "request", name = %id, "slo.teardown.deleted");
+            }
+            Ok(r) => tracing::warn!(kind = "request", name = %id, status = %r.status(), "slo.teardown.delete.failed"),
+            Err(e) => tracing::warn!(kind = "request", name = %id, error = %e, "slo.teardown.delete.failed"),
+        }
+    }
+    gone
+}
+
+/// `(name, id)` for every object of one kind under the probe's owner. A list that fails is an
+/// empty list: teardown cannot fix an unreachable API, and the next run tries again.
+async fn list(c: &Ctx, k: &Kind) -> Vec<(String, String)> {
+    let url = format!("{}{}?owner={PROBE_USER}", c.cfg.api_url.trim_end_matches('/'), k.list);
+    let rows: Vec<serde_json::Value> = match c
+        .http
+        .get(&url)
+        .header("authorization", c.bearer(&c.probe_jwt))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+        Ok(r) => {
+            tracing::warn!(kind = k.kind, status = %r.status(), "slo.teardown.list.failed");
+            return vec![];
+        }
+        Err(e) => {
+            tracing::warn!(kind = k.kind, error = %e, "slo.teardown.list.failed");
+            return vec![];
+        }
+    };
+    rows.iter()
+        .filter_map(|v| {
+            Some((v.get(k.name_field)?.as_str()?.to_string(), v.get(k.id_field)?.as_str()?.to_string()))
+        })
+        .collect()
+}
+
+/// `run-{suite}-{unix}-…` older than `STALE_SECS`. Anything that is not shaped like a probe
+/// object, or whose timestamp will not parse, is left alone — the sweep only ever deletes what it
+/// can positively identify as its own litter.
+fn stale(name: &str, now: i64) -> bool {
+    let Some(rest) = name.strip_prefix("run-") else { return false };
+    let mut parts = rest.split('-');
+    let (Some(_suite), Some(ts)) = (parts.next(), parts.next()) else { return false };
+    ts.parse::<i64>().map(|t| now - t > STALE_SECS).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_probe_object_past_the_deadline_is_stale() {
+        let now = 10_000_000;
+        assert!(stale("run-fast-1000-repo", now));
+        assert!(stale("run-fast-1000", now));
+        // Inside the window: another run may still be using it.
+        assert!(!stale(&format!("run-fast-{}-repo", now - 60), now));
+        // Not ours, and not shaped like ours.
+        assert!(!stale("someones-repo", now));
+        assert!(!stale("run-fast-notanumber-repo", now));
+        assert!(!stale("run-fast", now));
+    }
+}

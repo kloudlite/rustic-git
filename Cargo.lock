@@ -3708,6 +3708,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "kloudlite-git-slo-bin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "futures",
+ "kloudlite-git-core",
+ "kloudlite-git-workspaces",
+ "kube",
+ "metrics",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "kloudlite-git-storage"
 version = "0.1.0"
 dependencies = [

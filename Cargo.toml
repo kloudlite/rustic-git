@@ -2,7 +2,7 @@
 members = [
     ".",
     "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
-    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/kl",
+    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/kl", "bins/slo",
 ]
 # This root package is ALSO the workspace root ([workspace] + [package] in one file), which makes
 # a bare `cargo build`/`cargo test` here default to building only `.` — a lib with no `[[bin]]`
@@ -12,7 +12,7 @@ members = [
 default-members = [
     ".",
     "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
-    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/kl",
+    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/kl", "bins/slo",
 ]
 resolver = "2"
 
@@ -99,6 +99,7 @@ mongodb = { version = "3", default-features = false, features = ["rustls-tls", "
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 # Already in the tree transitively (object_store's `last_modified`, and SlateDB); declared
 # directly because the blob sweep compares it against a grace-window cutoff.
+anyhow = "1"
 chrono = "0.4"
 # OpenPGP, for verifying GPG-signed commits. default-features off: the defaults
 # pull bzip2 (a C library) for compressed packets, which a signature never needs.

@@ -1,0 +1,40 @@
+[package]
+name = "kloudlite-git-slo-bin"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "kloudlite_git_slo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kloudlite-git-slo"
+path = "src/main.rs"
+
+[dependencies]
+kloudlite-git-core = { path = "../../crates/core" }
+# The catalogue and the wire types are the workspaces crate's: the probe reports what the admin
+# process validates, so both sides must read one definition of `RunReport`, never two copies.
+kloudlite-git-workspaces = { path = "../../crates/workspaces" }
+clap = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+# `BoxFuture` is what lets a stage be a plain `fn` pointer in a table, and `catch_unwind` is how
+# teardown still runs after a stage panics.
+futures = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+# The drills exec into pods and taint nodes; the client is on `Ctx` so every stage shares one
+# connection rather than building its own.
+kube = { workspace = true }
+# `reqwest` is pinned `rustls-no-provider` workspace-wide, so main() must install a provider
+# explicitly — with `ring` and `aws-lc-rs` both reachable rustls 0.23 refuses to choose.
+rustls = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

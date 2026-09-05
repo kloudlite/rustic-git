@@ -1,0 +1,47 @@
+//! A `Ctx` with no fleet behind it, and a one-route stub for the report tests.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use kloudlite_git_workspaces::slo::catalogue::Suite;
+
+use crate::config::Config;
+use crate::ctx::Ctx;
+
+pub async fn ctx() -> Ctx {
+    // `Ctx::new` builds the rustls-backed client, and the binary installs the provider in main().
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cfg = Config {
+        admin_url: "http://127.0.0.1:1".into(),
+        api_url: "http://127.0.0.1:1".into(),
+        web_url: "http://127.0.0.1:1".into(),
+        git_url: "http://127.0.0.1:1".into(),
+        registry: "127.0.0.1:1".into(),
+        ssh_host: "127.0.0.1".into(),
+        region: "test".into(),
+        hosts: vec![],
+        jwt_secret: "0123456789abcdef0123456789abcdef".into(),
+        ssh_key_path: "/dev/null".into(),
+        kubeconfig: None,
+    };
+    Ctx::new(cfg, Suite::Fast).await.expect("ctx")
+}
+
+/// A server that answers every `PUT` with `status()` and counts the calls.
+pub async fn stub(status: fn() -> axum::http::StatusCode) -> (String, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    let app = axum::Router::new().fallback(axum::routing::any(move || {
+        let h = h.clone();
+        async move {
+            h.fetch_add(1, Ordering::SeqCst);
+            status()
+        }
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = l.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(l, app).await;
+    });
+    (format!("http://{addr}"), hits)
+}
