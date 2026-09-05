@@ -191,7 +191,7 @@ fn home_script(want: &str) -> String {
     format!(
         r#"set -e
 want={want}
-up() {{ read -r a _ < /proc/uptime; echo "${{a%.*}}${{a#*.}}"; }}
+up() {{ read -r a _ < /proc/uptime; echo "$(( 10#${{a%.*}}${{a#*.}} ))"; }}
 s=$(up)
 echo "$want" > /home/kl/.slo
 sync /home/kl/.slo
