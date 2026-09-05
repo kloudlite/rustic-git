@@ -114,7 +114,7 @@ pub(crate) fn git_env(c: &Ctx) -> HashMap<String, String> {
         ("GIT_AUTHOR_NAME".into(), "kloudlite slo probe".into()),
         ("GIT_AUTHOR_EMAIL".into(), probe_email.clone()),
         ("GIT_COMMITTER_NAME".into(), "kloudlite slo probe".into()),
-        ("GIT_COMMITTER_EMAIL".into(), probe_email.into()),
+        ("GIT_COMMITTER_EMAIL".into(), probe_email),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_CONFIG_GLOBAL".into(), c.tmp.join("gitconfig").display().to_string()),
         ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
