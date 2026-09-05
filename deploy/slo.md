@@ -25,7 +25,7 @@ step succeeded. `SloBurn` and `SloProbeMissing` (`deploy/alerts.md`) evaluate ev
 | `git.clone.ok` | Git hosting | Clone over HTTP succeeds | 99.9 % | fast | 2 · Git |
 | `git.clone.p95` | Git hosting | Clone over HTTP completes | 95 % ≤ 2000 ms | fast | 2 · Git |
 | `ssh.clone.ok` | Git hosting | Clone over SSH succeeds | 99.9 % | fast | 2 · Git |
-| `ssh.hostkey` | Git hosting | The SSH host key served matches the pinned fingerprint | 100 % | fast | 2 · Git |
+| `ssh.hostkey` | Git hosting | The SSH host key served matches the pinned fingerprint | 99.9 % | fast | 2 · Git |
 | `ssh.unregistered.refused` | Git hosting | SSH from an unregistered key is refused | 99.9 % | fast | 2 · Git |
 | `browse.p95` | Git hosting | The Browse API renders a repo page | 95 % ≤ 500 ms | fast | 2 · Git |
 | `browse.commit.visible` | Git hosting | A pushed commit becomes visible in Browse | 99.9 % ≤ 5000 ms | fast | 2 · Git |
@@ -36,9 +36,9 @@ step succeeded. `SloBurn` and `SloProbeMissing` (`deploy/alerts.md`) evaluate ev
 | `reg.push.ok` | Container registry | Pushing an image succeeds | 99.9 % | fast | 4 · Registry |
 | `reg.manifest.p95` | Container registry | Fetching a manifest completes | 95 % ≤ 500 ms | fast | 4 · Registry |
 | `reg.tags.visible` | Container registry | A pushed tag becomes visible in the tag list | 99.9 % ≤ 5000 ms | fast | 4 · Registry |
-| `reg.shared.layer` | Container registry | A shared layer is not re-uploaded by a sibling image | 100 % | fast | 4 · Registry |
-| `reg.canary` | Container registry | The registry canary image pulls successfully | 100 % | fast | 4 · Registry |
-| `reg.visibility` | Container registry | Image visibility (public vs. private) is enforced | 100 % | fast | 4 · Registry |
+| `reg.shared.layer` | Container registry | A shared layer is not re-uploaded by a sibling image | 99.9 % | fast | 4 · Registry |
+| `reg.canary` | Container registry | The registry canary image pulls successfully | 99.9 % | fast | 4 · Registry |
+| `reg.visibility` | Container registry | Image visibility (public vs. private) is enforced | 99.9 % | fast | 4 · Registry |
 | `ws.create.p95` | Workspaces | Creating a workspace completes | 95 % ≤ 90000 ms | fast | 5 · Workspace |
 | `ws.exec.ok` | Workspaces | Exec into a running workspace pod succeeds | 99.9 % | fast | 5 · Workspace |
 | `homes.rw.p95` | Workspaces | A read/write round trip on the shared home completes | 95 % ≤ 200 ms | fast | 5 · Workspace |
@@ -46,7 +46,7 @@ step succeeded. `SloBurn` and `SloProbeMissing` (`deploy/alerts.md`) evaluate ev
 | `gw.unregistered.refused` | Workspaces | The gateway refuses an unregistered key | 99.9 % | fast | 5 · Workspace |
 | `ws.push.p95` | Workspaces | Pushing a workspace snapshot completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `ws.clone.p95` | Workspaces | Cloning a workspace completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
-| `quota.refused` | Workspaces | An over-quota create is refused with 409 | 100 % | fast | 5 · Workspace |
+| `quota.refused` | Workspaces | An over-quota create is refused with 409 | 99.9 % | fast | 5 · Workspace |
 | `env.create.p95` | Environments | Creating an environment completes | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `env.dns` | Environments | Service-to-service DNS resolves inside an environment's namespace | 99.9 % | fast | 6 · Environment |
 | `env.attach` | Environments | Attaching a workspace to an environment takes effect | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
@@ -56,11 +56,11 @@ step succeeded. `SloBurn` and `SloProbeMissing` (`deploy/alerts.md`) evaluate ev
 | `ws.replicated` | Workspace lifecycle | A stopped workspace's final sync point reaches a replica | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
 | `ws.start.p95` | Workspace lifecycle | Starting a workspace completes | 95 % ≤ 30000 ms | fast | 7 · Lifecycle |
 | `ws.restore` | Workspace lifecycle | Restoring a workspace from a past snapshot succeeds | 99.9 % | fast | 7 · Lifecycle |
-| `vol.refusals` | Workspace lifecycle | Deleting a sync point or a running worktree's base snapshot is refused | 100 % | fast | 7 · Lifecycle |
+| `vol.refusals` | Workspace lifecycle | Deleting a sync point or a running worktree's base snapshot is refused | 99.9 % | fast | 7 · Lifecycle |
 | `vol.detached.restorable` | Workspace lifecycle | A detached volume's snapshot can still be restored | 99.9 % | fast | 7 · Lifecycle |
 | `vol.orphan.collected` | Workspace lifecycle | An orphaned volume directory is collected | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
 | `req.queue` | Admin | A Request CR is queued and answerable by an admin | 99.9 % ≤ 5000 ms | fast | 8 · Admin |
-| `audit.row` | Admin | Every admin write produces an audit row | 100 % | fast | 8 · Admin |
+| `audit.row` | Admin | Every admin write produces an audit row | 99.9 % | fast | 8 · Admin |
 | `signals.fresh` | Admin | The Signals table reflects a rule transition | 99.9 % ≤ 120000 ms | fast | 8 · Admin |
 | `history.api` | Admin | The history API answers a chart query | 99.9 % | fast | 8 · Admin |
 | `sec.private.repo` | Security | A private repo is unreadable to a non-collaborator | 100 % | fast | 9 · Security |

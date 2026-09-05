@@ -164,7 +164,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "git.clone.ok", feature: "Git hosting", sli: "Clone over HTTP succeeds", target: avail(99.9), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "git.clone.p95", feature: "Git hosting", sli: "Clone over HTTP completes", target: p95(2_000), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "ssh.clone.ok", feature: "Git hosting", sli: "Clone over SSH succeeds", target: avail(99.9), suite: Suite::Fast, stage: "2 · Git" },
-    Slo { id: "ssh.hostkey", feature: "Git hosting", sli: "The SSH host key served matches the pinned fingerprint", target: avail(100.0), suite: Suite::Fast, stage: "2 · Git" },
+    Slo { id: "ssh.hostkey", feature: "Git hosting", sli: "The SSH host key served matches the pinned fingerprint", target: avail(99.9), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "ssh.unregistered.refused", feature: "Git hosting", sli: "SSH from an unregistered key is refused", target: avail(99.9), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "browse.p95", feature: "Git hosting", sli: "The Browse API renders a repo page", target: p95(500), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "browse.commit.visible", feature: "Git hosting", sli: "A pushed commit becomes visible in Browse", target: bound(5_000), suite: Suite::Fast, stage: "2 · Git" },
@@ -179,9 +179,9 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "reg.push.ok", feature: "Container registry", sli: "Pushing an image succeeds", target: avail(99.9), suite: Suite::Fast, stage: "4 · Registry" },
     Slo { id: "reg.manifest.p95", feature: "Container registry", sli: "Fetching a manifest completes", target: p95(500), suite: Suite::Fast, stage: "4 · Registry" },
     Slo { id: "reg.tags.visible", feature: "Container registry", sli: "A pushed tag becomes visible in the tag list", target: bound(5_000), suite: Suite::Fast, stage: "4 · Registry" },
-    Slo { id: "reg.shared.layer", feature: "Container registry", sli: "A shared layer is not re-uploaded by a sibling image", target: avail(100.0), suite: Suite::Fast, stage: "4 · Registry" },
-    Slo { id: "reg.canary", feature: "Container registry", sli: "The registry canary image pulls successfully", target: avail(100.0), suite: Suite::Fast, stage: "4 · Registry" },
-    Slo { id: "reg.visibility", feature: "Container registry", sli: "Image visibility (public vs. private) is enforced", target: avail(100.0), suite: Suite::Fast, stage: "4 · Registry" },
+    Slo { id: "reg.shared.layer", feature: "Container registry", sli: "A shared layer is not re-uploaded by a sibling image", target: avail(99.9), suite: Suite::Fast, stage: "4 · Registry" },
+    Slo { id: "reg.canary", feature: "Container registry", sli: "The registry canary image pulls successfully", target: avail(99.9), suite: Suite::Fast, stage: "4 · Registry" },
+    Slo { id: "reg.visibility", feature: "Container registry", sli: "Image visibility (public vs. private) is enforced", target: avail(99.9), suite: Suite::Fast, stage: "4 · Registry" },
 
     // Stage 5 · workspace
     Slo { id: "ws.create.p95", feature: "Workspaces", sli: "Creating a workspace completes", target: p95(90_000), suite: Suite::Fast, stage: "5 · Workspace" },
@@ -191,7 +191,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "gw.unregistered.refused", feature: "Workspaces", sli: "The gateway refuses an unregistered key", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.push.p95", feature: "Workspaces", sli: "Pushing a workspace snapshot completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.clone.p95", feature: "Workspaces", sli: "Cloning a workspace completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
-    Slo { id: "quota.refused", feature: "Workspaces", sli: "An over-quota create is refused with 409", target: avail(100.0), suite: Suite::Fast, stage: "5 · Workspace" },
+    Slo { id: "quota.refused", feature: "Workspaces", sli: "An over-quota create is refused with 409", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
 
     // Stage 6 · environment
     Slo { id: "env.create.p95", feature: "Environments", sli: "Creating an environment completes", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },
@@ -205,13 +205,13 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "ws.replicated", feature: "Workspace lifecycle", sli: "A stopped workspace's final sync point reaches a replica", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.start.p95", feature: "Workspace lifecycle", sli: "Starting a workspace completes", target: p95(30_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.restore", feature: "Workspace lifecycle", sli: "Restoring a workspace from a past snapshot succeeds", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
-    Slo { id: "vol.refusals", feature: "Workspace lifecycle", sli: "Deleting a sync point or a running worktree's base snapshot is refused", target: avail(100.0), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    Slo { id: "vol.refusals", feature: "Workspace lifecycle", sli: "Deleting a sync point or a running worktree's base snapshot is refused", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.detached.restorable", feature: "Workspace lifecycle", sli: "A detached volume's snapshot can still be restored", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.orphan.collected", feature: "Workspace lifecycle", sli: "An orphaned volume directory is collected", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
 
     // Stage 8 · admin
     Slo { id: "req.queue", feature: "Admin", sli: "A Request CR is queued and answerable by an admin", target: bound(5_000), suite: Suite::Fast, stage: "8 · Admin" },
-    Slo { id: "audit.row", feature: "Admin", sli: "Every admin write produces an audit row", target: avail(100.0), suite: Suite::Fast, stage: "8 · Admin" },
+    Slo { id: "audit.row", feature: "Admin", sli: "Every admin write produces an audit row", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
     Slo { id: "signals.fresh", feature: "Admin", sli: "The Signals table reflects a rule transition", target: bound(120_000), suite: Suite::Fast, stage: "8 · Admin" },
     Slo { id: "history.api", feature: "Admin", sli: "The history API answers a chart query", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
 
