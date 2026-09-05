@@ -465,8 +465,12 @@ pub async fn delete_manifest(
                 Ok(()) => {}
                 Err(r) => return r,
             }
-            if let Err(e) = super::referrers::unindex(&app, &owner, &name, &d).await {
-                return crate::oci_internal(e);
+            if let Err(r) = crate::fenced_retry(&app, &owner, &name, false, || {
+                super::referrers::unindex(&app, &owner, &name, &d)
+            })
+            .await
+            {
+                return r;
             }
             // The media-type row lives in the image DB, not the object store, so
             // it survives independently of the manifest object below — delete it
@@ -513,8 +517,14 @@ pub async fn tags_list(
         Ok(t) => t,
         Err(r) => return r,
     };
-    if all.is_empty() && !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
-        return oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
+    if all.is_empty() {
+        // A fence here must not read as "no such image": swallowing it answered 404 NAME_UNKNOWN
+        // for an image that is merely being served by another node now.
+        match crate::fenced_retry(&app, &owner, &name, false, || app.store.image_exists(&owner, &name)).await {
+            Ok(false) => return oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image"),
+            Ok(true) => {}
+            Err(r) => return r,
+        }
     }
     let (page, truncated) = super::paginate(&all, &q);
     let body = serde_json::json!({"name": format!("{owner}/{name}"), "tags": page});

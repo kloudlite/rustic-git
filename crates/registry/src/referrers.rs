@@ -79,32 +79,24 @@ pub async fn list(
     let Some(d) = Digest::parse(&digest) else {
         return super::oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
-    let mut out = vec![];
-    match app.store.image_exists(&owner, &name).await {
-        Ok(true) => {
-            let db = match app.store.image_db(&owner, &name).await {
-                Ok(db) => db,
-                Err(e) => return crate::oci_internal(e),
-            };
-            let mut it = match db.scan_prefix(subject_prefix(&d), ..).await {
-                Ok(it) => it,
-                Err(e) => return crate::oci_internal(e.into()),
-            };
-            loop {
-                match it.next().await {
-                    Ok(Some(kv)) => {
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&kv.value) {
-                            out.push(v);
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => return crate::oci_internal(e.into()),
+    let mut out = match crate::fenced_retry(&app, &owner, &name, false, || async {
+        let mut out = vec![];
+        if app.store.image_exists(&owner, &name).await? {
+            let db = app.store.image_db(&owner, &name).await?;
+            let mut it = db.scan_prefix(subject_prefix(&d), ..).await?;
+            while let Some(kv) = it.next().await? {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&kv.value) {
+                    out.push(v);
                 }
             }
         }
-        Ok(false) => {}
-        Err(e) => return crate::oci_internal(e),
-    }
+        Ok(out)
+    })
+    .await
+    {
+        Ok(out) => out,
+        Err(r) => return r,
+    };
     let filter = q.get("artifactType").cloned();
     if let Some(f) = &filter {
         out.retain(|v| v.get("artifactType").and_then(|a| a.as_str()) == Some(f.as_str()));
