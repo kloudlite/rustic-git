@@ -25,6 +25,10 @@ const TS_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 const MAX_STEPS: usize = 200;
 /// A step's detail is a failure message for a human, not a log.
 const MAX_DETAIL: usize = 2000;
+/// A stage name is "5 · Workspace", never a sentence.
+const MAX_STAGE: usize = 64;
+/// A Kubernetes-shaped region name, whose own ceiling is a DNS label.
+const MAX_REGION: usize = 63;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -180,6 +184,20 @@ pub fn validate(r: &RunReport) -> Result<(), String> {
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return Err(format!("run id {:?} is not {suite}-{{digits}}", r.run_id));
     }
+    // `stage` and `region` are stored verbatim and `region` is a LowCardinality column: an
+    // unbounded value there is an unbounded set of column values, and both are short labels a
+    // probe writes, never free text.
+    if r.stage.len() > MAX_STAGE {
+        return Err(format!("stage is over {MAX_STAGE} bytes"));
+    }
+    if crate::history::series::ident(&r.region).is_none() || r.region.len() > MAX_REGION {
+        return Err(format!("region {:?} is not an identifier of at most {MAX_REGION} bytes", r.region));
+    }
+    for s in &r.steps {
+        if s.stage.len() > MAX_STAGE {
+            return Err(format!("stage for {} is over {MAX_STAGE} bytes", s.slo_id));
+        }
+    }
     if r.steps.len() > MAX_STEPS {
         return Err(format!("{} steps, at most {MAX_STEPS}", r.steps.len()));
     }
@@ -304,8 +322,8 @@ pub fn burn_sql() -> String {
                   {long} AS w_long, {longc} AS w_longc, \
                   {short} AS w_short, {shortc} AS w_shortc, \
                   (ok = 1 AND (mx = 0 OR ms <= mx)) AS good, \
-                  (ts > now() - toIntervalSecond(w_long)) AS in_long, \
-                  (ts > now() - toIntervalSecond(w_longc)) AS in_longc, \
+                  (w_long > 0 AND ts > now() - toIntervalSecond(w_long)) AS in_long, \
+                  (w_longc > 0 AND ts > now() - toIntervalSecond(w_longc)) AS in_longc, \
                   (w_short > 0 AND ts > now() - toIntervalSecond(w_short)) AS in_short, \
                   (w_shortc > 0 AND ts > now() - toIntervalSecond(w_shortc)) AS in_shortc \
              SELECT slo_id, {cl}, {clc}, {cs}, {csc} \

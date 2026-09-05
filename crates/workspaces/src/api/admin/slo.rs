@@ -146,22 +146,23 @@ pub(crate) async fn marker(
     // The one caller-shaped value on this path, checked rather than escaped like every other id.
     let id = ident(&run_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "run id is not an identifier").into_response())?;
+    // `max()` over no rows is the zero date, not a missing row, so the SQL answers "found"
+    // itself rather than the handler pattern-matching a date string.
     let rows = h
         .query(&format!(
-            "SELECT toString(max(Timestamp)) FROM default.otel_logs \
+            "SELECT max(Timestamp) > toDateTime(0) AS found, toString(max(Timestamp)) \
+             FROM default.otel_logs \
              WHERE LogAttributes['run_id'] = '{id}' AND Timestamp > now() - INTERVAL 1 HOUR"
         ))
         .await
         .map_err(bad_gateway)?;
-    let ts = rows
-        .first()
-        .and_then(|r| r.first())
+    let row = rows.first();
+    let found = num(row.and_then(|r| r.first())).unwrap_or(0.0) > 0.0;
+    let ts = row
+        .and_then(|r| r.get(1))
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    // ClickHouse's `max()` over no rows is the zero date, not an empty string, so "found" is the
-    // absence of that rather than the absence of a row.
-    let found = !ts.is_empty() && !ts.starts_with("1970-01-01");
     Ok(Json(Marker { found, ts }).into_response())
 }
 

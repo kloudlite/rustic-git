@@ -64,10 +64,11 @@ fn the_catalogue_matches_deploy_alerts_md() {
         assert!(md.contains(&format!("**{}**", rule.name)), "{} is not in deploy/alerts.md", rule.name);
         // Every rule must produce SQL for a region without panicking on the substitution.
         let sql = rule.sql_for("westeurope-k3s").expect("a region name is an identifier");
-        // The SLO rules read OUR tables, whose rows are one fleet-wide journey rather than a
+        // The two SLO rules read OUR tables, whose rows are one fleet-wide journey rather than a
         // per-region series — scoping them by region could only ever produce an empty window and
-        // a permanent `unknown`, so they are the one kind of rule that ignores it on purpose.
-        if !sql.contains("kloudlite.slo_") {
+        // a permanent `unknown`. Named explicitly, so a THIRD rule that forgets its region is
+        // still caught rather than excused by whatever its SQL happens to contain.
+        if !matches!(rule.name, "SloBurn" | "SloProbeMissing") {
             assert!(sql.contains("westeurope-k3s"), "{} ignores its region", rule.name);
         }
         assert!(sql.to_uppercase().starts_with("SELECT"), "{} is not a SELECT", rule.name);
@@ -153,9 +154,12 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         for f in [&table[..], metric].iter().chain(fragments.iter()) {
             assert!(sql.contains(f), "{name} is missing {f}: {sql}");
         }
-        // `for_secs: 0` is one bucket in `state_of`, which is what a rule whose window is already
-        // inside its SQL wants — a second `for` on top would only delay it.
-        assert!(rule.for_secs == 0 || rule.for_secs >= 30, "{name} has a sub-bucket for window");
+        // `for_secs: 0` is one bucket in `state_of`, which is what the two SLO rules want — their
+        // windows are already in the SQL and a second `for` on top would only delay them. By name
+        // again: a sub-bucket window on any other rule is still a bug.
+        if !matches!(*name, "SloBurn" | "SloProbeMissing") {
+            assert!(rule.for_secs >= 30, "{name} has a sub-bucket for window");
+        }
     }
     // Every counter delta is computed inside one series before it is summed: `max - min` across two
     // pods is the spread between two cumulative counters, not an increase.

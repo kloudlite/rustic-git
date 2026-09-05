@@ -40,6 +40,27 @@ async fn serve(state: ApiState) -> (String, Arc<Jwt>) {
     (format!("http://{addr}"), jwt)
 }
 
+/// A webhook that counts what it received, so a test can assert "exactly one line" rather than
+/// "some line eventually".
+async fn webhook() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+    let got = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let g = got.clone();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let g = g.clone();
+            async move {
+                g.lock().unwrap().push(body);
+                "ok"
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (format!("http://{addr}/"), got)
+}
+
 fn report(run_id: &str) -> Value {
     json!({
         "run_id": run_id, "suite": "fast", "region": "central",
@@ -120,4 +141,59 @@ async fn the_slo_routes_are_behind_the_superadmin_gate() {
     let (base, _) = serve(ApiState::new(jwt())).await;
     let r = reqwest::Client::new().get(format!("{base}/admin/slo")).send().await.unwrap();
     assert_eq!(r.status(), 401);
+}
+
+/// The probe's happy path, and the one thing the webhook exists for: a FAILED run is one line to
+/// whoever is on call, carrying the step that failed. Exactly one — a report is one event.
+#[tokio::test]
+async fn a_failed_report_is_stored_and_notified_once() {
+    let (hook, got) = webhook().await;
+    let url = clickhouse(json!([])).await;
+    let state = ApiState::new(jwt())
+        .with_history(Arc::new(History::new(&url, "", "")))
+        .with_slo_webhook(Some(hook));
+    let (base, jwt) = serve(state).await;
+    let mut body = report("fast-3");
+    body["state"] = json!("failed");
+    body["steps"] = json!([{
+        "slo_id": "git.push.ok", "ts": "2026-09-05T10:00:01Z", "ok": false, "ms": 12,
+        "skipped": false, "detail": "connection refused", "stage": "2 · Git",
+    }]);
+    let r = reqwest::Client::new()
+        .put(format!("{base}/admin/slo/runs/fast-3"))
+        .bearer_auth(token(&jwt))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let got = got.lock().unwrap();
+    assert_eq!(got.len(), 1, "one failed run is one line: {got:?}");
+    assert_eq!(got[0]["kind"], "slo.run.failed");
+    assert_eq!(got[0]["failed_step"], "git.push.ok");
+    assert_eq!(got[0]["detail"], "connection refused");
+}
+
+/// A run that passed is not news. The webhook is for a broken journey, and a line per green run
+/// would train everyone to ignore the channel.
+#[tokio::test]
+async fn a_passing_report_notifies_nobody() {
+    let (hook, got) = webhook().await;
+    let url = clickhouse(json!([])).await;
+    let state = ApiState::new(jwt())
+        .with_history(Arc::new(History::new(&url, "", "")))
+        .with_slo_webhook(Some(hook));
+    let (base, jwt) = serve(state).await;
+    let mut body = report("fast-4");
+    body["state"] = json!("passed");
+    body["finished"] = json!("2026-09-05T10:05:00Z");
+    let r = reqwest::Client::new()
+        .put(format!("{base}/admin/slo/runs/fast-4"))
+        .bearer_auth(token(&jwt))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    assert!(got.lock().unwrap().is_empty(), "a green run must not page anyone");
 }

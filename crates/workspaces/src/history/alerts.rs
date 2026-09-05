@@ -789,6 +789,40 @@ pub(crate) async fn region_names(state: &crate::api::ApiState) -> Option<Vec<Str
     Some(regions.iter().map(|r| r.name_any()).collect())
 }
 
+/// The `slo.burning` line. The rule itself yields one state for the whole catalogue (the worst SLO
+/// decides), so the ids come from a SECOND read of the same samples — without it the message says
+/// "something is burning" and the reader has to open the console to learn what.
+///
+/// A read that fails still sends the line: knowing an SLO is burning is worth more than knowing
+/// which, and the console has both either way.
+async fn burning_body(h: &super::History) -> serde_json::Value {
+    use super::slo::SloState;
+    let burning: Vec<super::slo::SloStatus> = super::slo::statuses(h)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.state == SloState::Burning)
+        .collect();
+    let ids: Vec<&str> = burning.iter().map(|s| s.id.as_str()).collect();
+    // The worst suite present: a burning monthly SLO is a worse fact than a burning fast one,
+    // because its window is months of budget rather than an hour of it.
+    let suite = ["monthly", "weekly", "fast"]
+        .into_iter()
+        .find(|w| burning.iter().any(|s| s.suite == *w))
+        .unwrap_or_default();
+    super::notify::body(
+        "slo.burning",
+        "",
+        suite,
+        &ids.join(","),
+        &match ids.len() {
+            0 => "an SLO is burning its error budget; the console says which".to_string(),
+            1 => format!("{} is burning its error budget", ids[0]),
+            n => format!("{n} SLOs are burning their error budgets: {}", ids.join(", ")),
+        },
+    )
+}
+
 /// Evaluate every rule for every region on a 30 s beat, writing ONLY transitions.
 ///
 /// Only transitions, because `kloudlite.alerts` answers "when did this start", and a row per
@@ -821,6 +855,7 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
             regions.push(super::watch::CENTRAL.to_string());
         }
         let now = chrono::Utc::now();
+        let mut burning = false;
         let mut writes = std::mem::take(&mut pending);
         for region in &regions {
             let mut results = Vec::with_capacity(CATALOGUE.len());
@@ -839,18 +874,18 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
             let new = evaluate_once(region, now, &results, &mut last);
             // Only the TRANSITION into firing, which is what `evaluate_once` returns at all — a
             // rule that keeps firing writes nothing and so notifies nobody a second time.
-            if let Some(url) = state.slo_webhook.as_deref() {
-                for row in new.iter().filter(|r| {
-                    r["rule"] == "SloBurn" && r["state"] == "firing"
-                }) {
-                    let detail = row["detail"].as_str().unwrap_or_default();
-                    super::notify::post(url, &super::notify::body("slo.burning", "", "", "", detail))
-                        .await;
-                }
-            }
+            burning = burning
+                || new.iter().any(|r| r["rule"] == "SloBurn" && r["state"] == "firing");
             writes.extend(new);
         }
         let wrote = h.insert("alerts", &writes).await;
+        // AFTER the write, like `put_run`: the transition is the record and the webhook is a
+        // nudge, so a webhook that hangs must never come between the fact and its row.
+        if burning {
+            if let Some(url) = state.slo_webhook.as_deref() {
+                super::notify::post(url, &burning_body(h).await).await;
+            }
+        }
         if let Err(e) = wrote {
             // The in-memory `last` already moved, so a dropped batch would simply be lost. The
             // ROWS are carried to the next beat rather than recomputed: recomputing would re-stamp
