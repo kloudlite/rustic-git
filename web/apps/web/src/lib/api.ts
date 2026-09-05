@@ -1495,3 +1495,79 @@ export function removeSuperadmin(user: string, token: string, note: string) {
   });
 }
 
+
+// ── SLO probe (`crates/workspaces/src/history/slo.rs`) ────────────────────────
+// None of these structs carry `rename_all`, so every field below is the wire name verbatim.
+
+export type SloRunState = "running" | "passed" | "failed";
+
+/** One row of `slo_runs`. `finished` is `null` while the run is in flight, and `duration_ms` is
+ *  then the elapsed time so far — the probe recomputes it on every report. */
+export type SloRun = {
+  run_id: string;
+  suite: string;
+  region: string;
+  started: string;
+  finished: string | null;
+  state: SloRunState;
+  stage: string;
+  steps_total: number;
+  steps_failed: number;
+  failed_step: string;
+  failed_detail: string;
+  duration_ms: number;
+};
+
+/** A `skipped` step is stored but counts neither way — the probe could not attempt it. */
+export type SloStep = {
+  slo_id: string;
+  ts: string;
+  ok: boolean;
+  ms: number;
+  skipped: boolean;
+  detail: string;
+  /** The journey stage the step ran in ("5 · Workspace"), which is what the tracker groups by. */
+  stage: string;
+};
+
+/** `attainment_30d`, `budget_left` and both burn rates are `null` when the window holds no sample
+ *  at all — a fresh cluster, never 0 %. A weekly SLO has no short window either, so its
+ *  `burn_short` stays `null` while `window_short_secs` is still reported. */
+export type SloStatus = {
+  id: string;
+  feature: string;
+  sli: string;
+  target: string;
+  suite: string;
+  attainment_30d: number | null;
+  total_30d: number;
+  budget_left: number | null;
+  burn_short: number | null;
+  burn_long: number | null;
+  window_short_secs: number;
+  window_long_secs: number;
+  last: { ts: string; ok: boolean; ms: number } | null;
+  state: "ok" | "burning" | "breaching" | "unknown";
+};
+
+export type SloOverview = { slos: SloStatus[]; running: SloRun | null; runs: SloRun[]; generated: string };
+
+export type SloRunDetail = SloRun & { steps: SloStep[] };
+
+/** The whole area in one call — the console polls it every 10 s, and three requests would be
+ *  three chances for the page to render halves of different moments. */
+export function adminSlo(token: string) {
+  return adminCall<SloOverview>("/admin/slo", { method: "GET", token });
+}
+
+export function adminSloRuns(token: string, opts: { suite?: string; limit?: number } = {}) {
+  const q = new URLSearchParams();
+  if (opts.suite) q.set("suite", opts.suite);
+  if (opts.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return adminCall<SloRun[]>(`/admin/slo/runs${qs ? `?${qs}` : ""}`, { method: "GET", token });
+}
+
+export function adminSloRun(token: string, id: string) {
+  return adminCall<SloRunDetail>(`/admin/slo/runs/${encodeURIComponent(id)}`, { method: "GET", token });
+}

@@ -12,6 +12,10 @@ import type {
   RequestDoc,
   SettingsSchema,
   SignalsResponse,
+  SloOverview,
+  SloRun,
+  SloRunDetail,
+  SloStep,
   SuperAdmin,
   WorkloadDoc,
 } from "@/lib/api";
@@ -401,12 +405,148 @@ const SERIES: Record<string, number[]> = {
  *  twice. The EU region runs colder — it was brought up for the load tests last week. */
 const REGION_SCALE: Record<string, number> = { "westeurope-k3s": 0.55 };
 
+
+// ── SLO probe ────────────────────────────────────────────────────────────────
+// One passing run, one failed run and one in flight, because those are the three shapes the
+// screens have to render and a seed of only green runs proves nothing about the red path.
+
+const mins = (m: number) => new Date(now - m * 60_000).toISOString();
+
+const slo = (
+  id: string,
+  feature: string,
+  sli: string,
+  target: string,
+  suite: string,
+  state: SloOverview["slos"][number]["state"],
+  attainment: number | null,
+  budget: number | null,
+  burn: [number | null, number | null],
+  windows: [number, number],
+  ms: number,
+): SloOverview["slos"][number] => ({
+  id,
+  feature,
+  sli,
+  target,
+  suite,
+  attainment_30d: attainment,
+  total_30d: attainment == null ? 0 : 8_640,
+  budget_left: budget,
+  burn_short: burn[0],
+  burn_long: burn[1],
+  window_short_secs: windows[0],
+  window_long_secs: windows[1],
+  last: attainment == null ? null : { ts: mins(3), ok: state !== "breaching", ms },
+  state,
+});
+
+const FAST: [number, number] = [3_600, 21_600];
+const WEEK: [number, number] = [604_800, 2_419_200];
+
+const SLOS = [
+  slo("git.clone.ok", "Git", "A clone of a 50 MB repo succeeds", "99.9 %", "fast", "ok", 0.9994, 0.4, [0.3, 0.5], FAST, 1_840),
+  slo("git.push.ok", "Git", "A push of one commit succeeds", "99.9 %", "fast", "burning", 0.9982, 0.12, [4.1, 1.9], FAST, 2_310),
+  slo("registry.pull.ok", "Registry", "A layer pull returns 200", "99.95 %", "fast", "ok", 0.9998, 0.71, [0.2, 0.3], FAST, 410),
+  slo("registry.push.ok", "Registry", "A manifest push is accepted", "99.9 %", "fast", "breaching", 0.9971, -0.3, [7.4, 3.2], FAST, 5_120),
+  slo("ws.start.p95", "Workspaces", "A stopped workspace starts within 45 s", "95 %", "slow", "ok", 0.968, 0.36, [0.6, 0.8], FAST, 31_400),
+  slo("ws.clone.ok", "Workspaces", "A clone lands on an up-to-date node", "99 %", "slow", "unknown", null, null, [null, null], FAST, 0),
+  slo("env.restore.ok", "Environments", "A restore from a snapshot serves traffic", "99 %", "weekly", "ok", 0.994, 0.55, [null, 0.9], WEEK, 74_200),
+  slo("tel.log.latency", "Telemetry", "A log line reaches ClickHouse within 60 s", "99 %", "fast", "ok", 0.9962, 0.62, [0.4, 0.4], FAST, 12_800),
+];
+
+const step = (slo_id: string, stage: string, ok: boolean, ms: number, at: number, detail = "", skipped = false): SloStep => ({
+  slo_id,
+  stage,
+  ts: mins(at),
+  ok,
+  ms,
+  skipped,
+  detail,
+});
+
+const FAILED_STEPS: SloStep[] = [
+  step("edge.https.ok", "1 · Edge", true, 180, 74),
+  step("git.clone.ok", "2 · Git", true, 1_820, 73),
+  step("git.push.ok", "2 · Git", true, 2_260, 73),
+  step("registry.pull.ok", "3 · Registry", true, 402, 72),
+  step("registry.push.ok", "3 · Registry", false, 5_004, 72, "manifest PUT answered 500 after 5.0 s (image img/acme/api)"),
+  step("ws.start.p95", "5 · Workspace", false, 0, 71, "skipped: the registry stage failed", true),
+  step("env.restore.ok", "7 · Environment", false, 0, 71, "skipped: the registry stage failed", true),
+];
+
+const RUNNING_STEPS: SloStep[] = [
+  step("edge.https.ok", "1 · Edge", true, 172, 2),
+  step("git.clone.ok", "2 · Git", true, 1_744, 2),
+  step("git.push.ok", "2 · Git", true, 2_118, 1),
+  step("registry.pull.ok", "3 · Registry", true, 388, 1),
+];
+
+const PASSED_STEPS: SloStep[] = [
+  step("edge.https.ok", "1 · Edge", true, 168, 190),
+  step("git.clone.ok", "2 · Git", true, 1_790, 189),
+  step("git.push.ok", "2 · Git", true, 2_204, 189),
+  step("registry.pull.ok", "3 · Registry", true, 396, 188),
+  step("registry.push.ok", "3 · Registry", true, 1_402, 188),
+  step("ws.start.p95", "5 · Workspace", true, 30_900, 187),
+  step("env.restore.ok", "7 · Environment", true, 71_800, 185),
+];
+
+const run = (
+  run_id: string,
+  suite: string,
+  state: SloRun["state"],
+  stage: string,
+  startedMins: number,
+  duration_ms: number,
+  steps: SloStep[],
+): SloRun => ({
+  run_id,
+  suite,
+  region: "centralindia-k3s",
+  started: mins(startedMins),
+  finished: state === "running" ? null : mins(startedMins - duration_ms / 60_000),
+  state,
+  stage,
+  steps_total: steps.length,
+  steps_failed: steps.filter((s) => !s.ok && !s.skipped).length,
+  failed_step: steps.find((s) => !s.ok && !s.skipped)?.slo_id ?? "",
+  failed_detail: steps.find((s) => !s.ok && !s.skipped)?.detail ?? "",
+  duration_ms,
+});
+
+const RUNNING_RUN = run("r-20260905-0412", "full", "running", "3 · Registry", 2, 128_000, RUNNING_STEPS);
+const FAILED_RUN = run("r-20260905-0258", "full", "failed", "3 · Registry", 74, 214_000, FAILED_STEPS);
+const PASSED_RUN = run("r-20260905-0011", "full", "passed", "10 · Pipeline", 190, 342_000, PASSED_STEPS);
+const FAST_RUNS: SloRun[] = [12, 27, 42, 57].map((m, i) =>
+  run(`r-fast-${1000 + i}`, "fast", "passed", "3 · Registry", m, 41_000 + i * 900, PASSED_STEPS.slice(0, 5)),
+);
+
+const SLO_RUNS: SloRun[] = [RUNNING_RUN, ...FAST_RUNS, FAILED_RUN, PASSED_RUN];
+
+const SLO_OVERVIEW: SloOverview = {
+  slos: SLOS,
+  running: RUNNING_RUN,
+  runs: SLO_RUNS,
+  generated: new Date(now).toISOString(),
+};
+
+const SLO_DETAILS: Record<string, SloRunDetail> = Object.fromEntries(
+  [
+    [RUNNING_RUN, RUNNING_STEPS] as const,
+    [FAILED_RUN, FAILED_STEPS] as const,
+    [PASSED_RUN, PASSED_STEPS] as const,
+    ...FAST_RUNS.map((r) => [r, PASSED_STEPS.slice(0, 5)] as const),
+  ].map(([r, steps]) => [r.run_id, { ...r, steps }]),
+);
+
 const EXACT: Record<string, unknown> = {
   "/admin/overview": OVERVIEW,
   "/admin/owners": OWNERS,
   "/admin/clusters": CLUSTERS,
   "/admin/workloads": WORKLOADS,
   "/admin/monitoring/signals": SIGNALS,
+  "/admin/slo": SLO_OVERVIEW,
   "/admin/settings/schema": SCHEMA,
   "/admin/settings/central": CENTRAL_SETTINGS,
   // Read through the ordinary api host, not /admin — but the same single funnel, so the same seed.
@@ -468,6 +608,13 @@ export function fixtureFor(path: string): unknown | undefined {
     const state = q.get("state");
     return REQUESTS.filter((r) => (!owner || r.owner === owner) && (!state || r.state === state));
   }
+  if (bare === "/admin/slo/runs") {
+    const q = new URLSearchParams(query);
+    const suite = q.get("suite");
+    const limit = Number(q.get("limit") ?? SLO_RUNS.length);
+    return SLO_RUNS.filter((r) => !suite || r.suite === suite).slice(0, limit);
+  }
+  if (bare.startsWith("/admin/slo/runs/")) return SLO_DETAILS[decodeURIComponent(bare.slice("/admin/slo/runs/".length))];
   if (bare === "/admin/audit") return auditPage(query);
   if (bare.startsWith("/admin/owners/")) return ownerDetail(decodeURIComponent(bare.slice("/admin/owners/".length)));
   if (bare.startsWith("/admin/clusters/")) return CLUSTER_DETAIL[decodeURIComponent(bare.slice("/admin/clusters/".length))];

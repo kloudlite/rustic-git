@@ -1,4 +1,4 @@
-/** The eight areas of the superadmin rail, in the spec's order — the single source both the
+/** The nine areas of the superadmin rail, in the spec's order — the single source both the
  *  desktop rail and the narrow tab row read, so they can never drift apart. */
 export const SUPERADMIN_AREAS: { href: string; label: string }[] = [
   { href: "/superadmin", label: "Overview" },
@@ -6,6 +6,7 @@ export const SUPERADMIN_AREAS: { href: string; label: string }[] = [
   { href: "/superadmin/owners", label: "Owners" },
   { href: "/superadmin/clusters", label: "Clusters" },
   { href: "/superadmin/monitoring", label: "Monitoring" },
+  { href: "/superadmin/slo", label: "SLOs" },
   { href: "/superadmin/audit", label: "Audit" },
   { href: "/superadmin/access", label: "Access" },
   { href: "/superadmin/configuration", label: "Configuration" },

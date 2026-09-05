@@ -42,6 +42,8 @@ const ROUTES = [
   ["clusters", "/superadmin/clusters"],
   ["cluster", "/superadmin/clusters/centralindia-k3s"],
   ["monitoring", "/superadmin/monitoring"],
+  ["slo", "/superadmin/slo"],
+  ["slo-run", "/superadmin/slo/runs/r-20260905-0258"],
   ["audit", "/superadmin/audit"],
   ["access", "/superadmin/access"],
   ["configuration", "/superadmin/configuration"],

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { sparkPath } from "@/lib/console";
 import type { HistorySeries } from "@/lib/history";
@@ -29,33 +30,41 @@ export function Sparkline({ series, className }: { series: HistorySeries; classN
   );
 }
 
+/** `href` makes the whole tile the link to the area it summarises — a number an operator wants
+ *  to act on should not need them to find the rail entry for it. */
 export function KpiTile({
   label,
   value,
   sub,
   series,
+  href,
 }: {
   label: string;
   value: string | number;
   sub: string;
   series?: HistorySeries;
+  href?: string;
 }) {
+  const Box = href ? Link : "div";
   return (
-    <div className="flex min-w-0 flex-col gap-1 border border-border bg-card p-4">
+    <Box
+      href={href as string}
+      className={cn("flex min-w-0 flex-col gap-1 border border-border bg-card p-4", href && "hover:bg-muted")}
+    >
       <p className="text-micro font-medium tracking-eyebrow text-muted-foreground uppercase">{label}</p>
       <p className="text-title font-semibold tabular-nums leading-title">{value}</p>
       {series && <Sparkline series={series} />}
       <p className="line-clamp-2 text-caption text-muted-foreground">{sub}</p>
-    </div>
+    </Box>
   );
 }
 
 /** Four or five tiles across at desktop, stacking down to one — the strip is the first thing on
  *  every screen and must not force a horizontal scroll on a laptop. `cols` is the tile count, so a
  *  four-tile screen fills the row rather than leaving a fifth column of empty page. */
-export function KpiStrip({ children, cols = 5 }: { children: React.ReactNode; cols?: 4 | 5 }) {
+export function KpiStrip({ children, cols = 5 }: { children: React.ReactNode; cols?: 4 | 5 | 6 }) {
   return (
-    <div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", cols === 4 ? "xl:grid-cols-4" : "xl:grid-cols-5")}>
+    <div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", cols === 4 ? "xl:grid-cols-4" : cols === 6 ? "xl:grid-cols-6" : "xl:grid-cols-5")}>
       {children}
     </div>
   );

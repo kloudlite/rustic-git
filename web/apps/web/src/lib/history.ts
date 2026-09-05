@@ -113,7 +113,7 @@ export function eventSummary(e: HistoryEvent): string {
  *  Unknown kinds are `warn`, never `neutral`: a row reached the needs-attention feed because
  *  something wanted a person, and greying it out would hide the new thing. */
 export function attentionTone(kind: string): Tone {
-  if (kind.startsWith("signal.firing") || kind === "critical" || kind === "not_ready") return "critical";
+  if (kind.startsWith("signal.firing") || kind === "slo.failed" || kind === "critical" || kind === "not_ready") return "critical";
   if (kind === "draining" || kind === "rolling" || kind === "info") return "info";
   return "warn";
 }

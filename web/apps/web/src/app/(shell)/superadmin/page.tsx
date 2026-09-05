@@ -32,7 +32,7 @@ const HHMM = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit",
 export default async function OverviewPage() {
   const { token } = await requireSuperadmin("/superadmin");
   const opts = { range: "7d", step: "1d" };
-  const [o, clusters, events, queued, pendingS, firingS, over80S, wsS, envS] = await Promise.all([
+  const [o, clusters, events, queued, pendingS, firingS, over80S, wsS, envS, slo] = await Promise.all([
     api.adminOverview(token),
     api.adminClusters(token),
     api.adminHistoryEvents({ limit: 5 }, token),
@@ -42,11 +42,16 @@ export default async function OverviewPage() {
     api.adminSeries("owners_over_80", opts, token),
     api.adminSeries("live_workspaces", opts, token),
     api.adminSeries("live_environments", opts, token),
+    api.adminSlo(token),
   ]);
   if (!o.ok) throw new Error(o.message);
   const ov = o.value;
   const regions = clusters.ok ? clusters.value : [];
   const queue = queued.ok ? queued.value : [];
+  // The SLO area degrades on its own like every history read: no ClickHouse is a dash on the
+  // tile, never a zero that would read as "nothing is burning".
+  const sloBurning = slo.ok ? slo.value.slos.filter((s) => s.state === "burning" || s.state === "breaching").length : null;
+  const lastRun = slo.ok ? slo.value.runs.find((r) => r.state !== "running") : undefined;
 
   // Three more series per region. Regions are a handful, so this is one more round of parallelism
   // rather than a nested waterfall — awaiting them one at a time would cost 3n round trips.
@@ -85,12 +90,18 @@ export default async function OverviewPage() {
         <p className="border border-border bg-muted/50 px-3 py-2 text-sm2 text-muted-foreground">{ov.errors.join(" · ")}</p>
       )}
 
-      <KpiStrip>
+      <KpiStrip cols={6}>
         <KpiTile label="Pending requests" value={queue.length} sub={deltaLabel(pendingS)} series={pendingS} />
         <KpiTile label="Firing signals" value={firingS.available ? firingS.summary.last : "—"} sub={deltaLabel(firingS)} series={firingS} />
         <KpiTile label="Owners over 80%" value={over80S.available ? over80S.summary.last : "—"} sub={deltaLabel(over80S)} series={over80S} />
         <KpiTile label="Live workspaces" value={ov.fleet.workspaces} sub={deltaLabel(wsS)} series={wsS} />
         <KpiTile label="Live environments" value={ov.fleet.environments} sub={deltaLabel(envS)} series={envS} />
+        <KpiTile
+          label="SLO"
+          value={sloBurning ?? "—"}
+          sub={lastRun ? `last run ${lastRun.state} ${when(new Date(lastRun.started).getTime())}` : slo.ok ? "no probe run has reported yet" : "history unavailable"}
+          href="/superadmin/slo"
+        />
       </KpiStrip>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
