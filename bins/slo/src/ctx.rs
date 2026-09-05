@@ -37,6 +37,8 @@ pub struct State {
     /// The token's VALUE, not its id — stage 4 logs in to the registry with it. Held in memory
     /// only: it is never reported, never logged, and dies with the process.
     pub token_value: Option<String>,
+    /// `sec.agent.spec` already ran (from the workspace stage) — the security stage must not repeat it.
+    pub agent_spec_done: bool,
     /// The CLI token `id.cli.flow` minted. Held so teardown can revoke it by id even when the
     /// name sweep cannot see it.
     pub cli_token: Option<String>,

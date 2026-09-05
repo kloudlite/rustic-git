@@ -89,7 +89,21 @@ async fn create(c: &mut Ctx) -> bool {
             poll_json(c, &env, &jwt, CREATE_CEILING, |v| {
                 v.get("state").and_then(Value::as_str) == Some("running")
             })
-            .await
+            .await?;
+            // `running` is the environment's own word; the service pod behind it is what `env.dns`
+            // execs into, so the create is not done until that StatefulSet reports a ready replica.
+            if let Some(k) = c.kube.as_ref() {
+                let ns = kloudlite_workspaces::crd::env_namespace(&id);
+                let sts: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(k.clone(), &ns);
+                let start = std::time::Instant::now();
+                loop {
+                    let ready = sts.get(SERVICE).await.ok().and_then(|s| s.status).and_then(|st| st.ready_replicas).unwrap_or(0);
+                    if ready >= 1 { break; }
+                    if start.elapsed() >= CREATE_CEILING { return Err(anyhow!("{SERVICE}'s pod never became ready")); }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            Ok(())
         }
         .boxed()
     })

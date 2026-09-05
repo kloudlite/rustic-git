@@ -169,7 +169,14 @@ async fn user_process(c: &mut Ctx) {
 /// `--dry-run=server` runs admission and writes nothing, which is what makes it safe to point at
 /// a workspace this run does not own — and the probe often owns none by now, since stage 7
 /// collects everything it made.
-async fn agent_spec(c: &mut Ctx) {
+/// Runs from the WORKSPACE stage while the probe's own workspace exists (the security stage comes
+/// after lifecycle has deleted it, and an empty fleet has no other object to try); the security
+/// stage only re-runs it when that early attempt never happened.
+pub(crate) async fn agent_spec(c: &mut Ctx) {
+    if c.state.agent_spec_done {
+        return;
+    }
+    c.state.agent_spec_done = true;
     let Some(client) = c.kube.clone() else {
         return c.skip("sec.agent.spec", "no kubeconfig: the admission policy cannot be tested");
     };

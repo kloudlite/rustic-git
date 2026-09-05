@@ -111,12 +111,12 @@ async fn open(c: &mut Ctx, name: &str) -> Result<i64> {
 fn merge_event(feed: &serde_json::Value, repo: &str) -> bool {
     let events = feed.get("events").and_then(|v| v.as_array()).or_else(|| feed.as_array());
     // Exact, not a suffix: `run-fast-1` is a suffix of `run-fast-11`, and the sweep leaves
-    // yesterday's runs listed long enough for that to matter.
-    let want = format!("{PROBE_USER}/{repo}");
+    // yesterday's runs listed long enough for that to matter. The feed's `repo` is the BARE name
+    // (`feed.rs` writes it without the owner), which the first live run proved.
     events.is_some_and(|rows| {
         rows.iter().any(|e| {
             e.get("kind").and_then(|v| v.as_str()) == Some("pull_merged")
-                && e.get("repo").and_then(|v| v.as_str()) == Some(want.as_str())
+                && e.get("repo").and_then(|v| v.as_str()) == Some(repo)
         })
     })
 }
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn only_this_repos_merge_counts() {
         let feed = serde_json::json!([
-            { "kind": "pull_merged", "repo": "slo-probe/run-fast-1" },
+            { "kind": "pull_merged", "repo": "run-fast-1" },
             { "kind": "commit", "repo": "slo-probe/run-fast-2" },
         ]);
         assert!(merge_event(&feed, "run-fast-1"));

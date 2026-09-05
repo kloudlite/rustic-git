@@ -88,7 +88,9 @@ async fn cert(c: &mut Ctx) {
         let (bash, openssl) = (c.programs.bash.clone(), c.programs.openssl.clone());
         async move {
             for h in &hosts {
-                let out = tls::enddate(&bash, &openssl, h, CERT_CEILING)
+                // Five seconds per host, not the whole ceiling: a host whose DNS points at a
+                // dead address makes `s_client` hang, and one such host must not eat the rest.
+                let out = tls::enddate(&bash, &openssl, h, Duration::from_secs(5))
                     .await
                     .with_context(|| format!("could not read {h}'s certificate"))?;
                 let days = tls::days_left(&out, chrono::Utc::now())

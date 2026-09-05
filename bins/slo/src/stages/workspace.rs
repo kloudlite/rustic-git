@@ -49,7 +49,13 @@ const AFTER_CREATE: [&str; 7] = [
 ];
 
 pub async fn run(c: &mut Ctx) {
-    if !create(c).await {
+    let created = create(c).await;
+    // The one moment a Workspace of ours certainly exists: the admission-policy probe runs here
+    // (under the security stage's id), because the security stage itself comes after teardown.
+    if created {
+        super::security::agent_spec(c).await;
+    }
+    if !created {
         for id in AFTER_CREATE {
             c.skip(id, "the workspace never became ready");
         }
@@ -95,6 +101,7 @@ async fn create(c: &mut Ctx) -> bool {
             // Recorded BEFORE the wait: a workspace that never becomes ready still exists, and
             // teardown finds it by name — but the later stages need the id whatever happened here.
             c.state.workspace = Some(id.clone());
+            // The one moment a Workspace of ours certainly exists: the admission-policy probe runs here.
             // The Volume a fresh workspace gets is named after the workspace itself
             // (`stop_workspace`'s `volume_ref … unwrap_or_else(|| w.name_any())`), which is what
             // makes the volume routes addressable before the first push has published a pointer.

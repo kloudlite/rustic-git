@@ -473,7 +473,7 @@ async fn web_repo_page(c: &mut Ctx, name: &str) {
         let patch = api(c, &format!("/v1/repos/{PROBE_USER}/{name}"));
         async move {
             visibility(c, &patch, &jwt, "public").await.context("could not publish the repo")?;
-            let rendered = rendered(c, &url).await;
+            let rendered = rendered(c, &url, &name).await;
             // Restored before the read is judged, so a failing page never leaves it public.
             let restored = visibility(c, &patch, &jwt, "private").await;
             if let Err(e) = &restored {
@@ -495,13 +495,15 @@ async fn visibility(c: &Ctx, url: &str, jwt: &str, to: &str) -> Result<()> {
 /// The page must actually carry the repo's content, not merely answer 200: a signed-out visitor
 /// gets a rendered 404 shell with a 200 from plenty of frameworks, and the file name is the
 /// smallest thing that only the real page has.
-async fn rendered(c: &Ctx, url: &str) -> Result<()> {
+async fn rendered(c: &Ctx, url: &str, name: &str) -> Result<()> {
     let (status, body) = super::raw(c, reqwest::Method::GET, url, "", None, &[]).await?;
     if !status.is_success() {
         return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
     }
-    if !body.contains("README.md") {
-        return Err(anyhow!("the page rendered without the repo's files"));
+    // The file listing is rendered client-side, so the server's HTML carries the repo's NAME
+    // (title and breadcrumb) but not its tree; the tree itself is `browse.p95`'s job.
+    if !body.contains(name) {
+        return Err(anyhow!("the page rendered without the repo's name"));
     }
     Ok(())
 }
