@@ -1511,7 +1511,11 @@ async fn retire_pass_drops_a_voldir_whose_volume_cr_is_gone() {
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 5, "replicas": 2},
         "status": {"phase": "ready"},
     });
-    let (ctx, _rec) = test_ctx(tmp.path(), "node-a", Vec::new());
+    let old = std::time::SystemTime::now() - super::sweeps::ORPHAN_GRACE - std::time::Duration::from_secs(60);
+    for d in ["vol/v-gone", "vol/v-live"] {
+        std::fs::File::open(tmp.path().join(d)).unwrap().set_modified(old).unwrap();
+    }
+    let (ctx, _rec) = test_ctx(tmp.path(), "node-a", vec![not_found(format!("{VOLUMES}/v-gone"))]);
     retire_pass(&ctx, &beat_of(vec![volume], vec![], vec![]), &["node-a".to_string()]).await;
     assert!(!ctx.engine.pool.voldir("v-gone").exists(), "no CR: the copy goes");
     assert!(ctx.engine.pool.voldir("v-live").exists(), "listed: untouched");
