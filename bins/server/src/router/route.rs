@@ -19,6 +19,12 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     if !app.store.healthy() {
         return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
     }
+    // Draining: the Service must stop sending this pod traffic while it hands its repos over.
+    // Ahead of the leader check because it is the more specific answer, and because a drain that
+    // resigned the lease would otherwise report "no live leader" for a beat.
+    if app.is_draining() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response();
+    }
     if !app.leader_live() {
         return (StatusCode::SERVICE_UNAVAILABLE, "no live leader").into_response();
     }
@@ -44,6 +50,34 @@ pub(crate) async fn livez(State(app): State<Arc<App>>) -> Response {
         return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
     }
     (StatusCode::OK, "ok").into_response()
+}
+
+/// How long the whole handover may take. `terminationGracePeriodSeconds` is 90 and the preStop
+/// hook runs inside it, so this has to leave room for the SIGTERM path that follows.
+const DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `POST /peer/v1/drain` — this pod is going away: hand every repo it owns to a live peer while it
+/// is still answering. Peer-only, like everything on this listener. Called by the preStop hook.
+///
+/// Idempotent: a second call answers 200 at once rather than starting a second handover over the
+/// top of the first. Bounded, because a preStop hook that overruns the grace period is a SIGKILL —
+/// and a partial handover is strictly better than none, since whatever is left behind falls back
+/// to the lease TTL exactly as it did before this existed.
+pub(crate) async fn drain(State(app): State<Arc<App>>) -> Response {
+    if app.is_draining() {
+        return (StatusCode::OK, "draining").into_response();
+    }
+    let began = std::time::Instant::now();
+    match tokio::time::timeout(DRAIN_BOUND, app.drain()).await {
+        Ok(repos) => {
+            tracing::info!(repos, ms = began.elapsed().as_millis() as u64, "ownership.drained");
+            (StatusCode::OK, format!("drained {repos}")).into_response()
+        }
+        Err(_) => {
+            tracing::warn!(timeout_s = DRAIN_BOUND.as_secs(), "ownership.drain.stalled");
+            (StatusCode::OK, "drain timed out").into_response()
+        }
+    }
 }
 
 /// The ownership protocol, on the peer listener only.
@@ -491,6 +525,12 @@ async fn route_inner(
             // Keep enough to rebuild a bodyless request, in case the owner has just left. Only
             // GET qualifies: a request with a body cannot be replayed once it has been streamed,
             // and info/refs — the request that actually fails here — is a GET.
+            // Extending this to SMALL bodies (buffer up to a cap, then replay) was tried and
+            // reverted: nothing here buffers — `DefaultBodyLimit` is a limit, not a buffer, and a
+            // push streams — so it would mean buffering on the hot path, and worse, this runs
+            // BEFORE authentication, so an anonymous client that can make a forward fail on
+            // purpose could then move a repo with a four-byte POST. See
+            // `a_failed_push_forward_does_not_burn_the_recovery_window`, which pins exactly that.
             let replay = (req.method() == axum::http::Method::GET).then(|| {
                 (
                     req.method().clone(),

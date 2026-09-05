@@ -52,6 +52,11 @@ pub struct App {
     /// election beat keeps running through the drain, and a released lease is exactly the kind
     /// it would take.
     retiring: std::sync::atomic::AtomicBool,
+    /// Set by `drain`: this pod is leaving and must take NO new ownership, while the repos it
+    /// still holds keep serving until each is handed to a peer. Distinct from `retiring` (which
+    /// only concerns the leader lease) and from `pool.is_closed()` (which is the end of the
+    /// shutdown, after which nothing here serves at all). `/healthz` reports it as not-ready.
+    draining: std::sync::atomic::AtomicBool,
     pub addr_of: AddrOf,
     pub forwarder: Arc<proxy::Forwarder>,
     /// When this node last asked the leader about a repo because a forward to its owner failed.
@@ -170,6 +175,7 @@ impl App {
             lease_expires_ms: std::sync::atomic::AtomicU64::new(0),
             held_expires_ms: std::sync::atomic::AtomicU64::new(0),
             retiring: std::sync::atomic::AtomicBool::new(false),
+            draining: std::sync::atomic::AtomicBool::new(false),
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             recovery_asked: Default::default(),
@@ -240,7 +246,9 @@ impl App {
     /// their next tick. Solo mode has no store to read and returns at once.
     pub async fn election_tick(&self) -> Result<()> {
         let Some(os) = self.ownership.object_store() else { return Ok(()) };
-        if self.retiring.load(std::sync::atomic::Ordering::Relaxed) {
+        // A draining pod resigns and never leads again: `drain` sets `retiring` through `resign`,
+        // and this is the beat that would otherwise take a lease it is about to hand back.
+        if self.retiring.load(std::sync::atomic::Ordering::Relaxed) || self.is_draining() {
             return Ok(());
         }
         let now = self.now_ms();
@@ -369,6 +377,125 @@ impl App {
         self.demote("shutdown").await;
     }
 
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Hand every repo this pod owns to a live peer, before the process stops answering.
+    ///
+    /// This is what a roll used to pay for in 502s: SIGTERM released the leases and the repos sat
+    /// unowned until some node's next claim — up to a lease cycle, and longer if the dying pod was
+    /// the map's writer. Handing them over instead means the map names the new owner while this
+    /// pod is still answering, so a follower's next read routes there rather than into a socket
+    /// that has gone.
+    ///
+    /// Order, and each step is load-bearing:
+    /// 1. `draining` first, so nothing claims a new repo behind the handover's back.
+    /// 2. resign the lease. A draining writer cannot hand anything over — every reassignment is a
+    ///    map write, and the writer is about to close. `resign` is idempotent and also stops the
+    ///    election beat retaking it; then wait for somebody else to take it, bounded.
+    /// 3. per repo: release our entry, grant it to the chosen peer, and only then close the local
+    ///    database. The entry is visible before the handle goes, which is the whole point; the
+    ///    cost is a window where the peer may open the database and fence us, the same trade
+    ///    `decide_force_claim` documents — and this pod is leaving anyway.
+    ///
+    /// Returns how many repos moved. Idempotent: the caller checks `is_draining` and answers a
+    /// second call at once. Bounded by the caller (`drain` endpoint), not here.
+    pub async fn drain(&self) -> usize {
+        self.draining.store(true, std::sync::atomic::Ordering::Relaxed);
+        let was_leader = self.is_leader();
+        self.resign().await;
+        if was_leader {
+            self.await_new_leader().await;
+        }
+        let mut moved = 0;
+        for repo in self.store.pool.warm_repos() {
+            let Some(target) = self.handover_target(&repo).await else {
+                // Nobody to hand it to: fall back to the old behaviour — release and close, and
+                // whichever node is asked next claims it. Never keep it: this pod is going.
+                tracing::warn!(repo = %repo, "ownership.handover.nopeer");
+                self.close_after_release(&repo).await;
+                continue;
+            };
+            if let Err(e) = self.release(&repo).await {
+                tracing::warn!(repo = %repo, reason = "drain", error = %e, "ownership.release.failed");
+            }
+            match self.claim_for(&repo, &target).await {
+                Ok(_) => moved += 1,
+                Err(e) => tracing::warn!(repo = %repo, peer = %target, error = %e, "ownership.handover.failed"),
+            }
+            self.evict(&repo).await;
+        }
+        moved
+    }
+
+    async fn close_after_release(&self, repo: &str) {
+        if let Err(e) = self.release(repo).await {
+            tracing::warn!(repo = %repo, reason = "drain", error = %e, "ownership.release.failed");
+        }
+        self.evict(repo).await;
+    }
+
+    /// Close this node's handle without touching the map — the entry already names the new owner.
+    async fn evict(&self, repo: &str) {
+        if let Some((o, n)) = repo.split_once('/') {
+            self.store.pool.evict(o, n).await;
+        }
+    }
+
+    /// Wait for a leader that is not us, so the reassignments below have a writer to reach.
+    /// Bounded by `LEADER_TTL + LEADER_RENEW`: the released lease is takeable at once, so this
+    /// normally returns within a tick, and waiting longer than a full cycle would eat the drain's
+    /// own budget for a leader that is evidently not coming.
+    async fn await_new_leader(&self) {
+        let Some(os) = self.ownership.object_store() else { return };
+        let deadline = std::time::Instant::now() + LEADER_TTL + lease::LEADER_RENEW;
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(c)) = lease::read(os.as_ref()).await {
+                if c.lease.node != self.self_name && !lease::is_expired(&c.lease, self.now_ms()) {
+                    self.note_live(&c.lease);
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        tracing::warn!("ownership.drain.noleader");
+    }
+
+    /// Which peer takes `repo`. Rendezvous over the nodes we can see, so a drain spreads its repos
+    /// rather than piling them all on one pod, and two drains agree without coordinating.
+    ///
+    /// The candidate set is the one this process actually has: the nodes named by live entries in
+    /// the map, plus the leader. There is no membership service here — `addr_of` is a name
+    /// template, not a directory — and a node holding nothing is one nothing routes to yet, so
+    /// missing it costs balance, never correctness.
+    // ponytail: a node that owns nothing and is not the leader is invisible to this, so a
+    // freshly-started peer gets no repos; a real membership list (or the StatefulSet's replica
+    // count) is the upgrade if the spread ever matters more than the handover.
+    async fn handover_target(&self, repo: &str) -> Option<String> {
+        let now = self.now_ms();
+        let mut nodes: Vec<String> = self
+            .ownership
+            .all()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, e)| !ownership::is_expired(e, now))
+            .map(|(_, e)| e.node)
+            .chain(self.leader())
+            .filter(|n| *n != self.self_name)
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes.into_iter().max_by_key(|n| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            repo.hash(&mut h);
+            n.hash(&mut h);
+            h.finish()
+        })
+    }
+
     /// `demote` for a caller already holding `leader_lock` (the grants).
     async fn demote_locked(&self, why: &str) {
         if !self.is_leader() {
@@ -435,7 +562,12 @@ impl App {
                 // to know the asker is seconds from exiting and may well grant it: then `pool.get`
                 // fails with "pool is closed", and every other node forwards here for a full
                 // LEASE_TTL. One dead end becomes a ten second one.
-                if self.store.pool.is_closed() {
+                // Same for a pod that is draining: it is handing back everything it owns, so
+                // taking a NEW repo would only mean handing that one back too — or, if the drain
+                // has already passed it, holding it open with nobody left to give it to. What it
+                // already owns keeps serving (the entry below names us and is live); only the
+                // claim path is closed.
+                if self.store.pool.is_closed() || self.is_draining() {
                     return Route::Unavailable;
                 }
                 // A repo the map does not name is CLAIMED before anyone opens it. Routing on
@@ -609,7 +741,7 @@ impl App {
         // Same admission as a forced claim: a node that is unhealthy or on its way out must not be
         // granted a repo it will then fail to open. (It would self-heal through the release on a
         // failed open, but that costs the client a request for nothing.)
-        if !self.store.healthy() || self.store.pool.is_closed() {
+        if !self.store.healthy() || self.store.pool.is_closed() || self.is_draining() {
             return Err(err("this node may not take a repo over right now"));
         }
         self.claim_inner(repo, false, Patience::Recover).await
@@ -624,7 +756,7 @@ impl App {
     /// to fence a live database for nothing. Its lease lapses on the TTL and the ordinary claim
     /// path takes it from there. `exists` erring falls back to asking, as it does in `route()`.
     pub async fn force_claim(&self, repo: &str) -> Result<Grant> {
-        if !self.store.healthy() || self.store.pool.is_closed() {
+        if !self.store.healthy() || self.store.pool.is_closed() || self.is_draining() {
             return Err(err("this node may not take a repo over right now"));
         }
         if let Some((o, n)) = repo.split_once('/') {
@@ -660,14 +792,25 @@ impl App {
         }
     }
 
+    /// Claim `repo` ON BEHALF OF another node — the handover half of a drain. The wire protocol
+    /// already carries the asker's name, and the leader grants to whoever the body names, so this
+    /// is `claim` with a different name in it and nothing else.
+    pub async fn claim_for(&self, repo: &str, node: &str) -> Result<Grant> {
+        self.claim_as(repo, node, false, Patience::Recover).await
+    }
+
     async fn claim_inner(&self, repo: &str, force: bool, patience: Patience) -> Result<Grant> {
+        self.claim_as(repo, &self.self_name.clone(), force, patience).await
+    }
+
+    async fn claim_as(&self, repo: &str, asker: &str, force: bool, patience: Patience) -> Result<Grant> {
         if self.is_leader() {
-            return self.grant_claim(repo, &self.self_name.clone(), force).await;
+            return self.grant_claim(repo, asker, force).await;
         }
         let body = if force {
-            format!("{repo}\n{}\nforce", self.self_name)
+            format!("{repo}\n{asker}\nforce")
         } else {
-            format!("{repo}\n{}", self.self_name)
+            format!("{repo}\n{asker}")
         };
         let reply = self.ask_leader_with("claim", body, patience).await?;
         let mut lines = reply.lines();

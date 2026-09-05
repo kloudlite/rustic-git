@@ -2100,3 +2100,83 @@ async fn healthz_is_unready_only_while_no_leader_lives() {
     assert!(one.app.is_leader());
     assert_eq!(healthz(&one).await, 200);
 }
+
+/// The handover a preStop hook performs: the repos a pod owns are named to a LIVE PEER in the map
+/// before the pod closes them, so a follower's next read routes to a node that is up rather than
+/// into a socket that has gone. That gap — released, unowned, and reclaimed only on somebody's
+/// next claim — was 1-2 failed requests per pod on every roll (`bins/server/src/main.rs`).
+///
+/// Asserts the ORDER as well as the outcome: the entry names the peer, this node's handle is gone,
+/// and a client request for the repo is still served, through a different node, immediately after.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_hands_its_repos_to_a_live_peer() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(3);
+    let repo = "alice/web";
+    e.store.create_repo("alice", "web").await.unwrap();
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
+    a.app.claim(repo).await.unwrap();
+    a.store.pool.get("alice", "web").await.unwrap(); // warm, as serving one request would leave it
+    assert_eq!(a.store.pool.warm_count(), 1);
+
+    let c = client().await;
+    let drain = |n: &Node| {
+        let url = format!("http://{}/peer/v1/drain", n.peer);
+        let c = c.clone();
+        async move { c.post(url).header(kloudlite_core::peer::PEER_HEADER, SECRET).send().await.unwrap() }
+    };
+    assert_eq!(drain(&a).await.status(), 200);
+
+    let owner = leader.app.owner(repo).await.unwrap().expect("the repo is still owned by somebody");
+    assert_ne!(owner.node, "kloudlite-1", "a drained pod must not still own the repo");
+    assert_eq!(a.store.pool.warm_count(), 0, "the database is closed once the entry has moved");
+    assert!(a.app.is_draining());
+    // Not-ready, so the Service drops it — while the peer listener keeps answering.
+    let health = c.get(format!("http://{}/healthz", a.peer))
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET).send().await.unwrap();
+    assert_eq!(health.status(), 503, "a draining pod must report not-ready");
+    // Idempotent: the hook may fire twice, and a second handover over the top of the first is
+    // exactly what must not happen.
+    assert_eq!(drain(&a).await.status(), 200);
+
+    // And the whole point: the repo still serves, at once, through another node.
+    let res = c.get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.public))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 200, "the handover left the repo servable with no gap");
+}
+
+/// A draining node that holds the leader lease resigns it FIRST. Every reassignment is a write to
+/// the ownership map, and the map's writer is this process — so handing repos over before giving
+/// the lease up would write them through a writer that is about to close, and the last of them
+/// would be lost. Resign, wait for a successor, then reassign, then close.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draining_leader_resigns_before_it_hands_over() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let repo = "alice/web";
+    e.store.create_repo("alice", "web").await.unwrap();
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    assert!(a.app.is_leader());
+    a.app.claim(repo).await.unwrap();
+    a.store.pool.get("alice", "web").await.unwrap();
+
+    let res = client().await
+        .post(format!("http://{}/peer/v1/drain", a.peer))
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
+        .send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert!(!a.app.is_leader(), "the lease is given back before anything is handed over");
+    assert!(b.app.is_leader(), "and a peer has taken it: the map has a writer for the handover");
+    assert_eq!(
+        b.app.owner(repo).await.unwrap().map(|e| e.node),
+        Some("kloudlite-1".to_string()),
+        "the entry was written through the NEW writer, naming the only live peer",
+    );
+    assert_eq!(a.store.pool.warm_count(), 0);
+}

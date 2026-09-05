@@ -36,7 +36,7 @@ spec:
       # cluster with its own mounted kubeconfig), so a projected token is a credential with no
       # user — and one an RCE in the git server would otherwise find at a well-known path.
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
+      terminationGracePeriodSeconds: 90 # preStop handover (<=30s) + pool.close() flush + drain
       # uid 1001 is the image's `kloudlite` user. fsGroup is what makes the mounted Secret readable
       # and the emptyDir writable without root: the kubelet chowns volume contents to this group.
       securityContext:
@@ -147,14 +147,27 @@ spec:
             - { name: peer-stream, containerPort: 8082 }
             - { name: metrics, containerPort: 9464 }
           # On termination Kubernetes removes the pod from endpoints and sends SIGTERM at once.
-          # Sleep first so endpoint removal reaches every node's DNS (TTL 5s) plus every node's
-          # membership cache (TTL 2s) plus margin, so no peer forwards into a dying pod. Then the
-          # SIGTERM handler RELEASES the pool first — so the peer that is next sent one of this
-          # pod's repos claims and opens it without fencing us — and only then drains the listeners.
+          # A sleep here used to be the whole story: wait out DNS (TTL 5s) and the membership cache
+          # (TTL 2s) so no peer forwards into a dying pod, then let the SIGTERM handler release the
+          # pool. That still cost 1-2 failed requests per pod per roll, because releasing leaves
+          # every repo this pod held UNOWNED until some node's next claim — up to a lease cycle.
+          # So the hook HANDS THEM OVER instead: /peer/v1/drain marks the pod not-ready (so it
+          # leaves the Service at once, which is what the sleep was buying), resigns the lease if it
+          # holds it, and writes each repo's map entry to a live peer before closing the local
+          # database. Followers then route to the new owner immediately rather than into a socket
+          # that has gone. Bounded to 30s inside the handler, well within the 90s grace period the
+          # SIGTERM path still needs after it. localhost, so no DNS and no TLS; the peer secret is
+          # the same one the process itself authenticates peers with.
           lifecycle:
             preStop:
               exec:
-                command: ["sleep", "15"]
+                command:
+                  - /bin/sh
+                  - -c
+                  - >-
+                    curl -sS -m 35 -X POST
+                    -H "X-Kloudlite-Peer: $KLOUDLITE_PEER_SECRET"
+                    http://127.0.0.1:8081/peer/v1/drain || sleep 15
           # Readiness gates DNS membership: a pod is in the headless Service only while Ready, so
           # this is what puts a restarted pod back into every peer's view. 5s keeps that gap short
           # without hammering /healthz.

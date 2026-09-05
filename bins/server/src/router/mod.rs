@@ -41,6 +41,11 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .route("/own/renew", post(own_renew))
         .route("/own/owner", post(own_owner))
         .route("/own/release", post(own_release))
+        // The preStop hook's handover. Peer-only for the same reason the `/own/*` protocol is:
+        // anything that can move ownership must present the secret. Not a repo path, so the
+        // routing middleware passes it straight through to this node — which is the point, since
+        // it is about THIS pod and can never be forwarded.
+        .route("/peer/v1/drain", post(route::drain))
         // Shared object-store document, not a per-repo database — servable on any node, so it
         // carries no `BROWSE_TAILS` entry (`route_inner`'s `admin/settings` exemption is what lets
         // it through the "unrecognised /api/ path" 404). Peer-only like everything else here;

@@ -23,7 +23,9 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # bookworm ships 2.39, past the 2.38 that `merge-tree --write-tree` needs. One image serves all
 # three processes, so git also lands on the srv and api pods, where nothing runs it; a few MB of
 # unused binary is cheaper than a second image to keep in step with this one.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client git \
+# curl: the srv preStop hook POSTs /peer/v1/drain to its own peer port to hand ownership over
+# before the pod goes (deploy/kloudlite.yaml). Nothing in the processes shells out to it.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client git curl \
     && rm -rf /var/lib/apt/lists/*
 # All three binaries. One image, three processes: the git server, the api server
 # and the merge worker are built from the same source and deployed separately, so
