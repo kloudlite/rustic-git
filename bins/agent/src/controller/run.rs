@@ -42,6 +42,25 @@ where
 /// The mapper for the Node watch below: a change to THIS node is not about one workspace, it is
 /// about all of them, and a controller's own reflector store is exactly "the objects I host". The
 /// mapper is a sync `FnMut` that must not do I/O — reading the store is a lock, not a request.
+/// Every parent in `store` whose volume is `volume` — the mapper for a `VolumeReplica` watch. A
+/// sync scan of the reflector's state, like `all_in_store`: a mapper must not do I/O.
+fn on_volume<K>(
+    store: &kube::runtime::reflector::Store<K>,
+    volume: &str,
+    volume_of: impl Fn(&K) -> Option<&str>,
+) -> Vec<kube::runtime::reflector::ObjectRef<K>>
+where
+    K: Resource + Clone + 'static,
+    K::DynamicType: Default + Clone + std::hash::Hash + Eq,
+{
+    store
+        .state()
+        .into_iter()
+        .filter(|k| volume_of(k) == Some(volume))
+        .map(|k| kube::runtime::reflector::ObjectRef::from_obj(&*k))
+        .collect()
+}
+
 fn all_in_store<K>(store: &kube::runtime::reflector::Store<K>) -> Vec<kube::runtime::reflector::ObjectRef<K>>
 where
     K: Resource<DynamicType = ()> + Clone + 'static,
@@ -157,8 +176,18 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Every workspace this node hosts wakes on its own Node changing — see `my_node_only`. The
     // store is read at mapper time, not now, so a workspace claimed later is included too.
     let ws_store = workspaces.store();
+    let ws_store_for_replicas = ws_store.clone();
     let workspaces = workspaces
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only.clone(), move |_: Node| all_in_store(&ws_store))
+        // `Replicated` is computed by the OWNER from other nodes' `VolumeReplica` rows, so the
+        // owner must wake when one of those moves — the probe measured a stop's final sync point
+        // reaching a replica in under a second and the condition flipping 15 s later, on the tick.
+        // Every replica in the cluster, not this node's: the rows that matter are the peers'.
+        .watches(Api::<crd::VolumeReplica>::all(ctx.client.clone()), watcher::Config::default(), move |r: crd::VolumeReplica| {
+            on_volume(&ws_store_for_replicas, &r.spec.volume, |w: &crd::Workspace| {
+                w.status.as_ref().and_then(|st| st.volume_ref.as_deref())
+            })
+        })
         .shutdown_on_signal()
         .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -198,8 +227,15 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         );
     let env_store = environments.store();
     let env_store_for_quota = env_store.clone();
+    let env_store_for_replicas = env_store.clone();
     let environments = environments
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only, move |_: Node| all_in_store(&env_store))
+        // Same as the Workspace controller's `VolumeReplica` watch: `Replicated` waits on a peer's row.
+        .watches(Api::<crd::VolumeReplica>::all(ctx.client.clone()), watcher::Config::default(), move |r: crd::VolumeReplica| {
+            on_volume(&env_store_for_replicas, &r.spec.volume, |e: &crd::Environment| {
+                e.status.as_ref().and_then(|st| st.volume_ref.as_deref())
+            })
+        })
         // Same reasoning as the `bindings` controller's Quota watch just above: an Environment's
         // `spec.owner` is a plain field so filtering by it is easy, but there are few Environments
         // per cluster and this is the same "cluster-wide fact changed" shape the Node watch above
