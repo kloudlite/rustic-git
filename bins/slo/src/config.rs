@@ -26,7 +26,6 @@ pub struct Config {
     pub jwt_secret: String,
     /// The private half of the key `bootstrap` registered for `slo-probe`.
     pub ssh_key_path: String,
-    pub kubeconfig: Option<String>,
 }
 
 fn req(k: &str) -> Result<String> {
@@ -54,7 +53,6 @@ impl Config {
                 .collect(),
             jwt_secret: req("KLOUDLITE_GIT_JWT_SECRET")?,
             ssh_key_path: opt("KLOUDLITE_GIT_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
-            kubeconfig: std::env::var("KUBECONFIG").ok().filter(|v| !v.trim().is_empty()),
         })
     }
 }

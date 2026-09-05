@@ -22,9 +22,8 @@ pub async fn ctx() -> Ctx {
         hosts: vec![],
         jwt_secret: "0123456789abcdef0123456789abcdef".into(),
         ssh_key_path: "/dev/null".into(),
-        kubeconfig: None,
     };
-    Ctx::new(cfg, Suite::Fast).await.expect("ctx")
+    Ctx::new(cfg, Suite::Fast, None).await.expect("ctx")
 }
 
 /// A server that answers every `PUT` with `status()` and counts the calls.

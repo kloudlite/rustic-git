@@ -26,6 +26,18 @@ impl Suite {
         }
     }
 
+    /// The inverse of `as_str`. One parser for the CLI flag, the teardown sweep's name check and
+    /// anything else that reads a suite back out of a string — a second `match` somewhere would
+    /// be a second place a renamed variant has to be remembered.
+    pub fn parse(s: &str) -> Option<Suite> {
+        match s {
+            "fast" => Some(Suite::Fast),
+            "weekly" => Some(Suite::Weekly),
+            "monthly" => Some(Suite::Monthly),
+            _ => None,
+        }
+    }
+
     /// The catalogue's own "Suite" column, verbatim — never derive it from `Debug`, which would
     /// silently rename the column the moment someone reorders the variants.
     pub fn as_str(&self) -> &'static str {

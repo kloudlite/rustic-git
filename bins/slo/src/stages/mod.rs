@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use kloudlite_git_workspaces::slo::catalogue::Suite;
+
 use crate::ctx::{Ctx, PROBE_USER};
 
 /// A leftover this old cannot belong to a run still in flight — the fast suite's own
@@ -16,10 +18,10 @@ const STALE_SECS: i64 = 3600;
 /// probe's owner holds nothing but probe objects, so anything older than `STALE_SECS` is litter.
 pub async fn boot(c: &mut Ctx) {
     if let Err(e) = std::fs::create_dir_all(&c.tmp) {
-        tracing::error!(path = %c.tmp.display(), error = %e, "slo.boot.tmp.failed");
+        tracing::error!(op = "mkdir", name = %c.tmp.display(), error = %e, "slo.boot.failed");
     }
     let swept = sweep(c, |name| stale(name, chrono::Utc::now().timestamp())).await;
-    tracing::info!(swept, "slo.boot.swept");
+    tracing::info!(count = swept, "slo.boot.completed");
 }
 
 /// The last stage. It runs unconditionally, including after a panic, and every delete is
@@ -28,7 +30,7 @@ pub async fn boot(c: &mut Ctx) {
 pub async fn teardown(c: &mut Ctx) {
     let prefix = c.prefix();
     let swept = sweep(c, move |name| name.starts_with(&prefix)).await;
-    tracing::info!(swept, "slo.teardown.done");
+    tracing::info!(count = swept, "slo.teardown.completed");
 }
 
 /// One `/v1` collection teardown owns: how to list it, which field carries the name the prefix is
@@ -72,15 +74,15 @@ async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
                 }
                 // Best-effort by design: a 409 here is usually "something still references it",
                 // and the next run's boot sweep gets it once that reference is gone.
-                Ok(r) => tracing::warn!(kind = k.kind, name = %name, status = %r.status(), "slo.teardown.delete.failed"),
-                Err(e) => tracing::warn!(kind = k.kind, name = %name, error = %e, "slo.teardown.delete.failed"),
+                Ok(r) => tracing::warn!(kind = k.kind, op = "delete", name = %name, error = %r.status(), "slo.teardown.failed"),
+                Err(e) => tracing::warn!(kind = k.kind, op = "delete", name = %name, error = %e, "slo.teardown.failed"),
             }
         }
     }
     gone += deny_requests(c, &matches).await;
     // Images are not a `/v1` collection — they are deleted through the server tier's browse API,
     // which stage 4 is the first thing to need. Until then this is honestly nothing.
-    tracing::info!(kind = "image", "slo.teardown.skipped");
+    tracing::info!(kind = "image", reason = "needs the browse API stage 4 introduces", "slo.teardown.skipped");
     gone
 }
 
@@ -109,8 +111,8 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
                 gone += 1;
                 tracing::info!(kind = "request", name = %id, "slo.teardown.deleted");
             }
-            Ok(r) => tracing::warn!(kind = "request", name = %id, status = %r.status(), "slo.teardown.delete.failed"),
-            Err(e) => tracing::warn!(kind = "request", name = %id, error = %e, "slo.teardown.delete.failed"),
+            Ok(r) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %r.status(), "slo.teardown.failed"),
+            Err(e) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %e, "slo.teardown.failed"),
         }
     }
     gone
@@ -130,11 +132,11 @@ async fn list(c: &Ctx, k: &Kind) -> Vec<(String, String)> {
     {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
         Ok(r) => {
-            tracing::warn!(kind = k.kind, status = %r.status(), "slo.teardown.list.failed");
+            tracing::warn!(kind = k.kind, op = "list", error = %r.status(), "slo.teardown.failed");
             return vec![];
         }
         Err(e) => {
-            tracing::warn!(kind = k.kind, error = %e, "slo.teardown.list.failed");
+            tracing::warn!(kind = k.kind, op = "list", error = %e, "slo.teardown.failed");
             return vec![];
         }
     };
@@ -145,13 +147,16 @@ async fn list(c: &Ctx, k: &Kind) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `run-{suite}-{unix}-…` older than `STALE_SECS`. Anything that is not shaped like a probe
-/// object, or whose timestamp will not parse, is left alone — the sweep only ever deletes what it
-/// can positively identify as its own litter.
+/// `run-{suite}-{unix}-…` older than `STALE_SECS`. Both the suite AND the timestamp have to
+/// parse: the sweep only ever deletes what it can positively identify as its own litter, and
+/// `run-` is a prefix a person could plausibly give a repo of their own.
 fn stale(name: &str, now: i64) -> bool {
     let Some(rest) = name.strip_prefix("run-") else { return false };
     let mut parts = rest.split('-');
-    let (Some(_suite), Some(ts)) = (parts.next(), parts.next()) else { return false };
+    let (Some(suite), Some(ts)) = (parts.next(), parts.next()) else { return false };
+    if Suite::parse(suite).is_none() {
+        return false;
+    }
     ts.parse::<i64>().map(|t| now - t > STALE_SECS).unwrap_or(false)
 }
 
@@ -168,6 +173,8 @@ mod tests {
         assert!(!stale(&format!("run-fast-{}-repo", now - 60), now));
         // Not ours, and not shaped like ours.
         assert!(!stale("someones-repo", now));
+        // A `run-` prefix somebody else chose: the suite segment is not one of ours.
+        assert!(!stale("run-anything-1000-x", now));
         assert!(!stale("run-fast-notanumber-repo", now));
         assert!(!stale("run-fast", now));
     }

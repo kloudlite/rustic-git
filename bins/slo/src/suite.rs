@@ -1,5 +1,8 @@
-//! The ordered stage list per suite. The last stage is always teardown, and the runner runs it
-//! even after a panic — everything else is what the design's "Stages" paragraph names.
+//! The ordered stage list per suite.
+//!
+//! Teardown is NOT in this list. The release profile is `panic = "abort"`, so nothing in-process
+//! can survive a panicking stage — the journey runs in a child process and the parent runs
+//! teardown after it, whatever the child did. `suite()` is therefore the child's list only.
 
 use futures::future::BoxFuture;
 use kloudlite_git_workspaces::slo::catalogue::Suite;
@@ -14,6 +17,13 @@ pub struct Stage {
     pub run: fn(&mut Ctx) -> BoxFuture<'_, ()>,
 }
 
+/// The stage name the parent files teardown's own steps under.
+pub const TEARDOWN: &str = "11 · Teardown";
+
+/// Set to `1` to insert a stage that panics, which is how the out-of-process split is tested at
+/// all: nothing else in the binary can be made to abort on demand. Never set in a deployment.
+const PANIC_ENV: &str = "KLOUDLITE_GIT_SLO_TEST_PANIC";
+
 /// The fast stages, which every suite runs: weekly and monthly are the fast journey PLUS their
 /// own extra stages, never a different journey — an SLO whose only samples came from a monthly
 /// run would have nothing to compare against.
@@ -26,6 +36,8 @@ pub fn suite(kind: Suite) -> Vec<Stage> {
     // Weekly and monthly are the fast journey plus their own stages, which the stage tasks append
     // here; today they add nothing, so every suite is the fast one.
     let _ = kind;
-    stages.push(Stage { name: "11 · Teardown", run: |c| Box::pin(stages::teardown(c)) });
+    if std::env::var(PANIC_ENV).as_deref() == Ok("1") {
+        stages.push(Stage { name: "· Panic", run: |_| Box::pin(async { panic!("test panic") }) });
+    }
     stages
 }

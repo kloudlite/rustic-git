@@ -9,13 +9,11 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures::future::BoxFuture;
-use kloudlite_git_workspaces::history::slo::StepReport;
+// The admin API's own ceiling, imported rather than repeated: a copy here would silently stop
+// matching the day the validator's changed, and the whole report would start being refused.
+use kloudlite_git_workspaces::history::slo::{StepReport, MAX_DETAIL};
 
 use crate::ctx::Ctx;
-
-/// The admin API refuses a longer one; truncating here means a stack-trace-sized error costs a
-/// clipped message rather than the whole report.
-const MAX_DETAIL: usize = 2000;
 
 /// Every step gets one unless it names its own. Long enough that a slow-but-working fleet is
 /// still measured rather than cut off, short enough that the fast suite fits its 540 s deadline.
@@ -71,7 +69,7 @@ impl Ctx {
     /// the failure was already counted where it happened, and counting it twice would make one
     /// broken workspace look like eight broken SLOs.
     pub fn skip(&mut self, id: &'static str, why: &str) {
-        tracing::info!(slo_id = id, why, "slo.step.skipped");
+        tracing::info!(slo_id = id, reason = why, "slo.step.skipped");
         self.steps.push(StepReport {
             slo_id: id.to_string(),
             ts: Utc::now(),

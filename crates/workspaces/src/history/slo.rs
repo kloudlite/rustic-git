@@ -24,7 +24,7 @@ const TS_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 /// malformed or hostile PUT cannot turn into an unbounded insert.
 const MAX_STEPS: usize = 200;
 /// A step's detail is a failure message for a human, not a log.
-const MAX_DETAIL: usize = 2000;
+pub const MAX_DETAIL: usize = 2000;
 /// A stage name is "5 · Workspace", never a sentence.
 const MAX_STAGE: usize = 64;
 /// A Kubernetes-shaped region name, whose own ceiling is a DNS label.

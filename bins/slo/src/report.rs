@@ -20,10 +20,10 @@ impl Ctx {
             region: self.cfg.region.clone(),
             started: self.started,
             finished: finished.then(chrono::Utc::now),
-            state: match (finished, self.failed()) {
+            state: match (finished, self.failed() > 0 || self.run_failed) {
                 (false, _) => RunState::Running,
-                (true, 0) => RunState::Passed,
-                (true, _) => RunState::Failed,
+                (true, false) => RunState::Passed,
+                (true, true) => RunState::Failed,
             },
             stage: stage.to_string(),
             steps: self.steps.clone(),
@@ -53,7 +53,7 @@ impl Ctx {
                 }
                 Err(e) => last = e.to_string(),
             }
-            tracing::warn!(attempt, error = %last, "slo.report.retrying");
+            tracing::warn!(attempt, error = %last, "slo.report.retried");
             if attempt < ATTEMPTS {
                 tokio::time::sleep(self.retry_delay).await;
             }
