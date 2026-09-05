@@ -7,7 +7,8 @@
 # | --------------------------------------------- | ------------------------------------------------- |
 # | wait for Ready/Replicated, list worktrees     | workspaces, environments: get, list                |
 # | volume history, orphan collection             | volumes, snapshots: get, list                      |
-# | exec the home write, read /home/kl on 2nd node| pods: get, list · pods/exec: create                |
+# | exec the home write, read /home/kl on 2nd node| pods: get, list · pods/exec: create, get           |
+# | wait for an environment's service replica     | statefulsets: get, list                            |
 # | cordon (weekly), taint (monthly)              | nodes: get, list, patch                            |
 # | dead-node drill deletes ONE agent pod         | pods: delete in kube-system, DaemonSet's pods only |
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
@@ -38,6 +39,11 @@ rules:
     verbs: ["patch"]
   - apiGroups: [""]
     resources: ["pods"]
+    verbs: ["get", "list"]
+  # An environment's service is a StatefulSet; `env.create.p95` is done when its replica is ready,
+  # which the probe reads from the StatefulSet's status rather than guessing from the pod.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
     verbs: ["get", "list"]
   - apiGroups: [""]
     # `get` as well as `create`: the WebSocket exec the kube crate speaks is a GET upgrade, and
