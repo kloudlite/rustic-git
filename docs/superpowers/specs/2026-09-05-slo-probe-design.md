@@ -46,7 +46,7 @@ separate ClickHouse writer (the single-writer rule for `kloudlite.*` stays).
 | Store | `history::schema` migrations 8 and 9: `kloudlite.slo_runs`, `kloudlite.slo_results` | `ReplacingMergeTree`, 400 d TTL, keyed so a re-sent report is idempotent. |
 | Admin API | `crates/workspaces/src/api/admin/slo.rs` | `PUT /admin/slo/runs/{id}` (the probe's report), `GET /admin/slo`, `GET /admin/slo/runs`, `GET /admin/slo/runs/{id}`. |
 | Rules | `history::alerts` catalogue, `deploy/alerts.md` | `SloProbeMissing`, `SloBurn`. Tier `Central`. |
-| Notify | `history::slo::notify` | One JSON line to `KLOUDLITE_GIT_SLO_WEBHOOK` on run failure and on a `SloBurn` transition. Optional; unset means nothing. |
+| Notify | `history::notify` | One JSON line to `KLOUDLITE_GIT_SLO_WEBHOOK` on run failure and on a `SloBurn` transition. Optional; unset means nothing. |
 | Console | `web/apps/web/src/app/(shell)/superadmin/slo/` | Area nine. Running-now tracker, SLO table with budgets, runs table, run detail. Overview tile. Fixtures. |
 | Deploy | `deploy/kloudlite-git.yaml` | Three `CronJob`s, ServiceAccount + Role, Secret `kloudlite-git-slo`, `Quota` CRs for the two probe owners (applied on k3s). |
 
