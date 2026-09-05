@@ -1509,7 +1509,10 @@ metadata:
   namespace: kloudlite-git
 ---
 # Its authority over THIS cluster (AKS) is the leader-failover drill and nothing else: delete one
-# srv pod, watch the lease move. `pods: delete` with no `resourceNames` because the pod it must
+# srv pod, watch the lease move. Reached through an EXPLICIT in-cluster client the drill builds
+# for itself — the probe's default kube client follows KUBECONFIG below and lands in k3s, so
+# without that second client this grant would be unreachable and the drill would delete a
+# workspace node's pod instead. `pods: delete` with no `resourceNames` because the pod it must
 # delete is whichever one holds the lease, a name that changes every roll — the namespace is the
 # boundary instead. No secrets, no deployments, no exec here: the workspace exec and the node
 # drills happen in the k3s cluster, through the mounted kubeconfig below, which carries its own
@@ -1669,8 +1672,11 @@ spec:
                 secretName: kloudlite-git-slo
                 defaultMode: 0400
                 items:
-                  # The filename is config.rs's KLOUDLITE_GIT_SLO_SSH_KEY default; ssh refuses a
-                  # key file it can read the mode of and finds group-readable, hence 0400 above.
+                  # The filename is config.rs's KLOUDLITE_GIT_SLO_SSH_KEY default. `fsGroup: 1001`
+                  # makes the projected file root:1001 0440 whatever `defaultMode` says, and
+                  # OpenSSH's unprotected-key refusal only fires when the file's OWNER uid is the
+                  # caller's — it is not, so the group bit is never what stops us. 0400 is here as
+                  # the narrowest mode that still works, not as a fix for that check.
                   - { key: ssh_key, path: id_ed25519 }
             - name: k3s-kubeconfig
               secret:

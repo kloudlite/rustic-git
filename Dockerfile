@@ -131,8 +131,11 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # curl: fetching the two tools below at build time, and the edge stage's origin check.
 # openssl + bind9-dnsutils: `edge.cert` reads the served certificate and `edge.dns` resolves the
 # hostnames without trusting the pod's resolver cache.
+# bash: the edge stage opens `/dev/tcp/host/port` to prove a listener answers, which is a bash
+# builtin — debian's default /bin/sh is dash and has no such thing. Explicit rather than relying
+# on bookworm-slim shipping it, because a base-image slim-down would break the edge stage silently.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git openssh-client curl openssl bind9-dnsutils \
+      bash ca-certificates git openssh-client curl openssl bind9-dnsutils \
     && rm -rf /var/lib/apt/lists/*
 # crane and kubectl are pinned by CONTENT, not by tag: both are fetched from a release URL a
 # third party controls, and a moved tag would silently change what the probe runs. A checksum

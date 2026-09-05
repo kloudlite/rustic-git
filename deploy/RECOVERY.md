@@ -107,7 +107,7 @@ kubectl -n kloudlite-git create secret generic kloudlite-git-slo-k3s-kubeconfig 
 kubectl -n kloudlite-git create secret generic kloudlite-git-slo-webhook --from-literal=url='<chat webhook>'   # optional
 ```
 
-Verify: `kubectl -n kloudlite-git get secrets` lists all thirteen. Nothing else creates them.
+Verify: `kubectl -n kloudlite-git get secrets` lists all twelve. Nothing else creates them.
 
 ### A.3 Apply and roll
 
