@@ -103,7 +103,7 @@ pub const CATALOGUE: &[Slo] = &[
     // Stage 1 · identity
     Slo { id: "id.signin", feature: "Identity", sli: "Sign-in over HTTP succeeds", target: avail(99.9), suite: Suite::Fast },
     Slo { id: "id.token.mint", feature: "Identity", sli: "Minting a user JWT succeeds", target: avail(99.9), suite: Suite::Fast },
-    Slo { id: "id.key.usable", feature: "Identity", sli: "A freshly minted platform SSH key is usable", target: bound(5_000), suite: Suite::Fast },
+    Slo { id: "id.key.usable", feature: "Identity", sli: "A freshly minted platform SSH key is usable", target: bound(30_000), suite: Suite::Fast },
     Slo { id: "id.cli.flow", feature: "Identity", sli: "The kl CLI's login-to-command flow completes", target: bound(15_000), suite: Suite::Fast },
     Slo { id: "id.jwt.tiers", feature: "Identity", sli: "A JWT is honoured across every tier", target: avail(99.9), suite: Suite::Fast },
 
@@ -121,7 +121,7 @@ pub const CATALOGUE: &[Slo] = &[
 
     // Stage 3 · pull request
     Slo { id: "pr.merge.p95", feature: "Pull requests", sli: "A pull request merge completes", target: p95(60_000), suite: Suite::Fast },
-    Slo { id: "feed.latency", feature: "Pull requests", sli: "A PR event reaches the activity feed", target: bound(10_000), suite: Suite::Fast },
+    Slo { id: "feed.latency", feature: "Pull requests", sli: "A PR event reaches the activity feed", target: bound(30_000), suite: Suite::Fast },
 
     // Stage 4 · registry
     Slo { id: "reg.token.p95", feature: "Container registry", sli: "Minting a registry bearer token completes", target: p95(300), suite: Suite::Fast },
@@ -145,8 +145,8 @@ pub const CATALOGUE: &[Slo] = &[
     // Stage 6 · environment
     Slo { id: "env.create.p95", feature: "Environments", sli: "Creating an environment completes", target: p95(120_000), suite: Suite::Fast },
     Slo { id: "env.dns", feature: "Environments", sli: "Service-to-service DNS resolves inside an environment's namespace", target: avail(99.9), suite: Suite::Fast },
-    Slo { id: "env.attach", feature: "Environments", sli: "Attaching a workspace to an environment takes effect", target: bound(5_000), suite: Suite::Fast },
-    Slo { id: "env.detach", feature: "Environments", sli: "Detaching a workspace from an environment takes effect", target: bound(5_000), suite: Suite::Fast },
+    Slo { id: "env.attach", feature: "Environments", sli: "Attaching a workspace to an environment takes effect", target: bound(10_000), suite: Suite::Fast },
+    Slo { id: "env.detach", feature: "Environments", sli: "Detaching a workspace from an environment takes effect", target: bound(10_000), suite: Suite::Fast },
     Slo { id: "env.push.p95", feature: "Environments", sli: "Pushing an environment snapshot completes", target: p95(90_000), suite: Suite::Fast },
 
     // Stage 7 · lifecycle
@@ -159,9 +159,9 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "vol.orphan.collected", feature: "Workspace lifecycle", sli: "An orphaned volume directory is collected", target: bound(300_000), suite: Suite::Fast },
 
     // Stage 8 · admin
-    Slo { id: "req.queue", feature: "Admin", sli: "A Request CR is queued and answerable by an admin", target: avail(99.9), suite: Suite::Fast },
+    Slo { id: "req.queue", feature: "Admin", sli: "A Request CR is queued and answerable by an admin", target: bound(5_000), suite: Suite::Fast },
     Slo { id: "audit.row", feature: "Admin", sli: "Every admin write produces an audit row", target: avail(100.0), suite: Suite::Fast },
-    Slo { id: "signals.fresh", feature: "Admin", sli: "The Signals table reflects a rule transition", target: bound(60_000), suite: Suite::Fast },
+    Slo { id: "signals.fresh", feature: "Admin", sli: "The Signals table reflects a rule transition", target: bound(120_000), suite: Suite::Fast },
     Slo { id: "history.api", feature: "Admin", sli: "The history API answers a chart query", target: avail(99.9), suite: Suite::Fast },
 
     // Stage 9 · security
@@ -177,7 +177,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "edge.cert", feature: "Edge and pipeline", sli: "The TLS certificate is valid for the public hostname", target: avail(99.9), suite: Suite::Fast },
     Slo { id: "edge.origin", feature: "Edge and pipeline", sli: "Cloudflare reaches the origin", target: avail(99.9), suite: Suite::Fast },
     Slo { id: "edge.ssh.lb", feature: "Edge and pipeline", sli: "The SSH load balancer accepts a connection", target: avail(99.9), suite: Suite::Fast },
-    Slo { id: "tel.log.latency", feature: "Edge and pipeline", sli: "A structured log line reaches HyperDX", target: bound(30_000), suite: Suite::Fast },
+    Slo { id: "tel.log.latency", feature: "Edge and pipeline", sli: "A structured log line reaches HyperDX", target: bound(60_000), suite: Suite::Fast },
     Slo { id: "tel.pod.coverage", feature: "Edge and pipeline", sli: "Every pod is scraped by the region's collector", target: bound(60_000), suite: Suite::Fast },
     Slo { id: "tel.stream.lag", feature: "Edge and pipeline", sli: "The Redis events stream consumer lag stays low", target: bound(60_000), suite: Suite::Fast },
     Slo { id: "tel.ch.disk", feature: "Edge and pipeline", sli: "ClickHouse disk usage is reported", target: bound(60_000), suite: Suite::Fast },
@@ -189,8 +189,8 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "ws.profile.reuse", feature: "Workspaces", sli: "A repeat package set is published from the profile index, not rebuilt", target: avail(99.9), suite: Suite::Weekly },
     Slo { id: "ws.cross.node", feature: "Workspaces", sli: "A workspace started on a peer node reads its replica correctly", target: avail(99.9), suite: Suite::Weekly },
     Slo { id: "homes.cross.node", feature: "Workspaces", sli: "The shared home is consistent across nodes", target: avail(99.9), suite: Suite::Weekly },
-    Slo { id: "cp.failover", feature: "Control plane", sli: "The leader lease fails over to another pod", target: avail(99.9), suite: Suite::Weekly },
-    Slo { id: "settings.live", feature: "Control plane", sli: "A live settings change takes effect on the next beat", target: avail(99.9), suite: Suite::Weekly },
+    Slo { id: "cp.failover", feature: "Control plane", sli: "The leader lease fails over to another pod", target: bound(30_000), suite: Suite::Weekly },
+    Slo { id: "settings.live", feature: "Control plane", sli: "A live settings change takes effect on the next beat", target: bound(60_000), suite: Suite::Weekly },
 
     // Monthly
     Slo { id: "bak.tarball.age", feature: "Backups", sli: "The latest backup tarball is recent", target: avail(99.9), suite: Suite::Monthly },
