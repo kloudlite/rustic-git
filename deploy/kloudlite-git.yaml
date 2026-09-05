@@ -1703,6 +1703,10 @@ metadata:
   name: kloudlite-git-slo-weekly
   namespace: kloudlite-git
 spec:
+  # DRILLS TOUCH LIVE PODS: this suite cordons a node, deletes the leader pod and (monthly) taints
+  # a node and blocks Redis for five minutes. Dev cluster only, and shipped SUSPENDED — the owner
+  # unsuspends it by hand once the fast suite has run green for a week.
+  suspend: true
   schedule: "0 2 * * 0"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
@@ -1777,6 +1781,10 @@ metadata:
   name: kloudlite-git-slo-monthly
   namespace: kloudlite-git
 spec:
+  # DRILLS TOUCH LIVE PODS: this suite cordons a node, deletes the leader pod and (monthly) taints
+  # a node and blocks Redis for five minutes. Dev cluster only, and shipped SUSPENDED — the owner
+  # unsuspends it by hand once the fast suite has run green for a week.
+  suspend: true
   schedule: "0 3 * * 0"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
@@ -1840,13 +1848,14 @@ spec:
                 - name: KLOUDLITE_GIT_SLO_AZURE_RESOURCE_GROUP
                   value: kolomi-rg
                 - name: KLOUDLITE_GIT_SLO_AZURE_STORAGE_ACCOUNT
-                  value: ""
+                  value: rusticgitkolomi
                 - name: KLOUDLITE_GIT_SLO_AZURE_COSMOS_ACCOUNT
-                  value: kloudlite-git-mongo
+                  # The Cosmos ACCOUNT (ARM resource name), not the `kloudlite-git-mongo` Secret.
+                  value: kloudlite-rustic-git
                 # The host `drill.redis.down` denies egress to. Unset, the drill SKIPS: a probe
                 # that guessed an address would write a policy denying nothing and report a pass.
                 - name: KLOUDLITE_GIT_SLO_REDIS_HOST
-                  value: ""
+                  value: rustic-git-redis.centralindia.redis.azure.net
               resources:
                 requests: { cpu: 100m, memory: 128Mi }
                 limits: { memory: 512Mi }
