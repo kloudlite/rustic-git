@@ -88,8 +88,9 @@ claims the two usernames through `POST /v1/users/username`, pushes the registry 
 precondition failed earlier (no workspace to ssh into) reports `skipped: true` with the reason;
 skipped is **no sample**, never a failure — the failure was already counted where it happened.
 Every step has a timeout (`Ctx::deadline`, default 120 s, per-step overrides for create/wait
-steps). The last stage is teardown and runs unconditionally, including after a panic
-(`catch_unwind` around every stage). Run ids are `{suite}-{unix seconds}`.
+steps). The last stage is teardown and runs unconditionally, including after a panic: the release
+profile aborts on panic, so the stages run in a child process (`run --inner`, a re-exec of the
+same binary) and the parent tears down and files the final report whatever the child's exit. Run ids are `{suite}-{unix seconds}`.
 
 **Reporting while running.** After every stage the probe `PUT`s the whole run so far —
 `{ run_id, suite, region, started, finished: null, state: "running", stage: "5 · Workspace",
