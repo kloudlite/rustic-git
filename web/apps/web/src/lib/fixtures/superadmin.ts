@@ -407,6 +407,11 @@ const REGION_SCALE: Record<string, number> = { "westeurope-k3s": 0.55 };
 
 
 // ── SLO probe ────────────────────────────────────────────────────────────────
+// Every id, SLI sentence, target, suite and stage below is copied from `deploy/slo.md`, which is
+// the catalogue's human twin and is held equal to the Rust `CATALOGUE` by a test. An invented id
+// here would render a screen nobody can find in the catalogue, and would hide exactly the bug
+// worth catching — a console row whose id does not exist.
+//
 // One passing run, one failed run and one in flight, because those are the three shapes the
 // screens have to render and a seed of only green runs proves nothing about the red path.
 
@@ -441,18 +446,24 @@ const slo = (
   state,
 });
 
+/** The two window pairs the api reports: 1 h / 6 h for a suite that runs every 5 min, and
+ *  4 w / 12 w for a weekly one, whose short column is a "—" because a 1 h window over a weekly
+ *  sample could only ever be empty. */
 const FAST: [number, number] = [3_600, 21_600];
-const WEEK: [number, number] = [604_800, 2_419_200];
+const WEEKLY: [number, number] = [2_419_200, 7_257_600];
 
 const SLOS = [
-  slo("git.clone.ok", "Git", "A clone of a 50 MB repo succeeds", "99.9 %", "fast", "ok", 0.9994, 0.4, [0.3, 0.5], FAST, 1_840),
-  slo("git.push.ok", "Git", "A push of one commit succeeds", "99.9 %", "fast", "burning", 0.9982, 0.12, [4.1, 1.9], FAST, 2_310),
-  slo("registry.pull.ok", "Registry", "A layer pull returns 200", "99.95 %", "fast", "ok", 0.9998, 0.71, [0.2, 0.3], FAST, 410),
-  slo("registry.push.ok", "Registry", "A manifest push is accepted", "99.9 %", "fast", "breaching", 0.9971, -0.3, [7.4, 3.2], FAST, 5_120),
-  slo("ws.start.p95", "Workspaces", "A stopped workspace starts within 45 s", "95 %", "slow", "ok", 0.968, 0.36, [0.6, 0.8], FAST, 31_400),
-  slo("ws.clone.ok", "Workspaces", "A clone lands on an up-to-date node", "99 %", "slow", "unknown", null, null, [null, null], FAST, 0),
-  slo("env.restore.ok", "Environments", "A restore from a snapshot serves traffic", "99 %", "weekly", "ok", 0.994, 0.55, [null, 0.9], WEEK, 74_200),
-  slo("tel.log.latency", "Telemetry", "A log line reaches ClickHouse within 60 s", "99 %", "fast", "ok", 0.9962, 0.62, [0.4, 0.4], FAST, 12_800),
+  slo("id.signin", "Identity", "Sign-in over HTTP succeeds", "99.9 %", "fast", "ok", 0.9994, 0.4, [0.3, 0.5], FAST, 640),
+  slo("git.push.ok", "Git hosting", "Push of one commit over HTTP succeeds", "99.9 %", "fast", "burning", 0.9982, 0.12, [4.1, 1.9], FAST, 2_310),
+  slo("git.clone.p95", "Git hosting", "Clone over HTTP completes", "95 % ≤ 2000 ms", "fast", "ok", 0.9712, 0.44, [0.6, 0.7], FAST, 1_840),
+  slo("reg.push.ok", "Container registry", "Pushing an image succeeds", "99.9 %", "fast", "breaching", 0.9971, -0.3, [7.4, 3.2], FAST, 5_120),
+  slo("reg.manifest.p95", "Container registry", "Fetching a manifest completes", "95 % ≤ 500 ms", "fast", "ok", 0.9834, 0.66, [0.2, 0.3], FAST, 410),
+  slo("ws.create.p95", "Workspaces", "Creating a workspace completes", "95 % ≤ 90000 ms", "fast", "ok", 0.9683, 0.36, [0.6, 0.8], FAST, 61_400),
+  slo("ws.push.p95", "Workspaces", "Pushing a workspace snapshot completes", "95 % ≤ 60000 ms", "fast", "unknown", null, null, [null, null], FAST, 0),
+  slo("gw.tunnel.p95", "Workspaces", "Opening a gateway SSH tunnel completes", "95 % ≤ 3000 ms", "fast", "ok", 0.9761, 0.52, [0.4, 0.6], FAST, 2_120),
+  slo("env.create.p95", "Environments", "Creating an environment completes", "95 % ≤ 120000 ms", "fast", "ok", 0.9604, 0.21, [1.2, 0.9], FAST, 96_800),
+  slo("tel.log.latency", "Edge and pipeline", "A structured log line reaches HyperDX", "99.9 % ≤ 60000 ms", "fast", "ok", 0.9962, 0.62, [0.4, 0.4], FAST, 12_800),
+  slo("cp.failover", "Control plane", "The leader lease fails over to another pod", "99.9 % ≤ 30000 ms", "weekly", "ok", 0.9941, 0.55, [null, 0.9], WEEKLY, 14_200),
 ];
 
 const step = (slo_id: string, stage: string, ok: boolean, ms: number, at: number, detail = "", skipped = false): SloStep => ({
@@ -466,34 +477,38 @@ const step = (slo_id: string, stage: string, ok: boolean, ms: number, at: number
 });
 
 const FAILED_STEPS: SloStep[] = [
-  step("edge.https.ok", "1 · Edge", true, 180, 74),
-  step("git.clone.ok", "2 · Git", true, 1_820, 73),
-  step("git.push.ok", "2 · Git", true, 2_260, 73),
-  step("registry.pull.ok", "3 · Registry", true, 402, 72),
-  step("registry.push.ok", "3 · Registry", false, 5_004, 72, "manifest PUT answered 500 after 5.0 s (image img/acme/api)"),
-  step("ws.start.p95", "5 · Workspace", false, 0, 71, "skipped: the registry stage failed", true),
-  step("env.restore.ok", "7 · Environment", false, 0, 71, "skipped: the registry stage failed", true),
+  step("id.signin", "1 · identity", true, 612, 74),
+  step("git.push.ok", "2 · git", true, 2_260, 73),
+  step("git.clone.p95", "2 · git", true, 1_820, 73),
+  step("reg.manifest.p95", "4 · registry", true, 402, 72),
+  step("reg.push.ok", "4 · registry", false, 5_004, 72, "manifest PUT answered 500 after 5.0 s (image img/acme/api)"),
+  step("ws.create.p95", "5 · workspace", false, 0, 71, "skipped: the registry stage failed", true),
+  step("env.create.p95", "6 · environment", false, 0, 71, "skipped: the registry stage failed", true),
 ];
 
 const RUNNING_STEPS: SloStep[] = [
-  step("edge.https.ok", "1 · Edge", true, 172, 2),
-  step("git.clone.ok", "2 · Git", true, 1_744, 2),
-  step("git.push.ok", "2 · Git", true, 2_118, 1),
-  step("registry.pull.ok", "3 · Registry", true, 388, 1),
+  step("id.signin", "1 · identity", true, 598, 2),
+  step("git.push.ok", "2 · git", true, 2_118, 2),
+  step("git.clone.p95", "2 · git", true, 1_744, 1),
+  step("reg.manifest.p95", "4 · registry", true, 388, 1),
 ];
 
 const PASSED_STEPS: SloStep[] = [
-  step("edge.https.ok", "1 · Edge", true, 168, 190),
-  step("git.clone.ok", "2 · Git", true, 1_790, 189),
-  step("git.push.ok", "2 · Git", true, 2_204, 189),
-  step("registry.pull.ok", "3 · Registry", true, 396, 188),
-  step("registry.push.ok", "3 · Registry", true, 1_402, 188),
-  step("ws.start.p95", "5 · Workspace", true, 30_900, 187),
-  step("env.restore.ok", "7 · Environment", true, 71_800, 185),
+  step("id.signin", "1 · identity", true, 604, 190),
+  step("git.push.ok", "2 · git", true, 2_204, 189),
+  step("git.clone.p95", "2 · git", true, 1_790, 189),
+  step("reg.manifest.p95", "4 · registry", true, 396, 188),
+  step("reg.push.ok", "4 · registry", true, 1_402, 188),
+  step("ws.create.p95", "5 · workspace", true, 60_900, 187),
+  step("gw.tunnel.p95", "5 · workspace", true, 2_040, 186),
+  step("env.create.p95", "6 · environment", true, 91_800, 185),
+  step("tel.log.latency", "10 · edge", true, 12_400, 183),
 ];
 
+/** The probe's own shape: the suite it ran and the unix second it started at. */
+const runId = (suite: string, startedMins: number) => `${suite}-${Math.floor((now - startedMins * 60_000) / 1000)}`;
+
 const run = (
-  run_id: string,
   suite: string,
   state: SloRun["state"],
   stage: string,
@@ -501,7 +516,7 @@ const run = (
   duration_ms: number,
   steps: SloStep[],
 ): SloRun => ({
-  run_id,
+  run_id: runId(suite, startedMins),
   suite,
   region: "centralindia-k3s",
   started: mins(startedMins),
@@ -515,14 +530,14 @@ const run = (
   duration_ms,
 });
 
-const RUNNING_RUN = run("r-20260905-0412", "full", "running", "3 · Registry", 2, 128_000, RUNNING_STEPS);
-const FAILED_RUN = run("r-20260905-0258", "full", "failed", "3 · Registry", 74, 214_000, FAILED_STEPS);
-const PASSED_RUN = run("r-20260905-0011", "full", "passed", "10 · Pipeline", 190, 342_000, PASSED_STEPS);
+const RUNNING_RUN = run("fast", "running", "4 · registry", 2, 128_000, RUNNING_STEPS);
+const FAILED_RUN = run("fast", "failed", "4 · registry", 74, 214_000, FAILED_STEPS);
+const WEEKLY_RUN = run("weekly", "passed", "weekly · failover", 190, 342_000, PASSED_STEPS);
 const FAST_RUNS: SloRun[] = [12, 27, 42, 57].map((m, i) =>
-  run(`r-fast-${1000 + i}`, "fast", "passed", "3 · Registry", m, 41_000 + i * 900, PASSED_STEPS.slice(0, 5)),
+  run("fast", "passed", "10 · edge", m, 41_000 + i * 900, PASSED_STEPS.slice(0, 6)),
 );
 
-const SLO_RUNS: SloRun[] = [RUNNING_RUN, ...FAST_RUNS, FAILED_RUN, PASSED_RUN];
+const SLO_RUNS: SloRun[] = [RUNNING_RUN, ...FAST_RUNS, FAILED_RUN, WEEKLY_RUN];
 
 const SLO_OVERVIEW: SloOverview = {
   slos: SLOS,
@@ -535,10 +550,11 @@ const SLO_DETAILS: Record<string, SloRunDetail> = Object.fromEntries(
   [
     [RUNNING_RUN, RUNNING_STEPS] as const,
     [FAILED_RUN, FAILED_STEPS] as const,
-    [PASSED_RUN, PASSED_STEPS] as const,
-    ...FAST_RUNS.map((r) => [r, PASSED_STEPS.slice(0, 5)] as const),
+    [WEEKLY_RUN, PASSED_STEPS] as const,
+    ...FAST_RUNS.map((r) => [r, PASSED_STEPS.slice(0, 6)] as const),
   ].map(([r, steps]) => [r.run_id, { ...r, steps }]),
 );
+
 
 const EXACT: Record<string, unknown> = {
   "/admin/overview": OVERVIEW,
@@ -614,7 +630,14 @@ export function fixtureFor(path: string): unknown | undefined {
     const limit = Number(q.get("limit") ?? SLO_RUNS.length);
     return SLO_RUNS.filter((r) => !suite || r.suite === suite).slice(0, limit);
   }
-  if (bare.startsWith("/admin/slo/runs/")) return SLO_DETAILS[decodeURIComponent(bare.slice("/admin/slo/runs/".length))];
+  if (bare.startsWith("/admin/slo/runs/")) {
+    // Run ids carry the unix second the run started, so they differ on every process start and
+    // nothing can link to one. An unseeded id answers with the failed run rather than 404ing, so
+    // the screenshot script has a stable URL for the run page — the one screen whose whole point
+    // is a failure somebody has to read.
+    const id = decodeURIComponent(bare.slice("/admin/slo/runs/".length));
+    return SLO_DETAILS[id] ?? SLO_DETAILS[FAILED_RUN.run_id];
+  }
   if (bare === "/admin/audit") return auditPage(query);
   if (bare.startsWith("/admin/owners/")) return ownerDetail(decodeURIComponent(bare.slice("/admin/owners/".length)));
   if (bare.startsWith("/admin/clusters/")) return CLUSTER_DETAIL[decodeURIComponent(bare.slice("/admin/clusters/".length))];

@@ -43,7 +43,8 @@ const ROUTES = [
   ["cluster", "/superadmin/clusters/centralindia-k3s"],
   ["monitoring", "/superadmin/monitoring"],
   ["slo", "/superadmin/slo"],
-  ["slo-run", "/superadmin/slo/runs/r-20260905-0258"],
+  ["slo-run", "/superadmin/slo/runs/latest-failed"], // under fixtures any id answers with the failed run
+
   ["audit", "/superadmin/audit"],
   ["access", "/superadmin/access"],
   ["configuration", "/superadmin/configuration"],
