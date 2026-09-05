@@ -21,7 +21,11 @@ spec:
   # team workspace and a seeded workspace beside the fast journey's three working copies, and a
   # second environment (the two-service one, plus its clone) beside the fast run's one.
   workspaces: 8
-  environments: 3
+  # Four, not three: the fast run now walks the environment through the same lifecycle as the
+  # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
+  # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
+  # sweep clears by `run-{id}` prefix.
+  environments: 4
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
@@ -72,7 +76,11 @@ spec:
   # team workspace and a seeded workspace beside the fast journey's three working copies, and a
   # second environment (the two-service one, plus its clone) beside the fast run's one.
   workspaces: 8
-  environments: 3
+  # Four, not three: the fast run now walks the environment through the same lifecycle as the
+  # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
+  # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
+  # sweep clears by `run-{id}` prefix.
+  environments: 4
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
@@ -119,7 +127,11 @@ spec:
   # team workspace and a seeded workspace beside the fast journey's three working copies, and a
   # second environment (the two-service one, plus its clone) beside the fast run's one.
   workspaces: 8
-  environments: 3
+  # Four, not three: the fast run now walks the environment through the same lifecycle as the
+  # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
+  # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
+  # sweep clears by `run-{id}` prefix.
+  environments: 4
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.

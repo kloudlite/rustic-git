@@ -60,10 +60,16 @@ a superadmin grant or a quota with the five-minute suite underneath it.
 | `env.attach` | Environments | Attaching a workspace to an environment takes effect | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
 | `env.detach` | Environments | Detaching a workspace from an environment takes effect | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
 | `env.push.p95` | Environments | Pushing an environment snapshot completes | 95 % ≤ 90000 ms | fast | 6 · Environment |
+| `env.exec.ok` | Environments | Exec into a running service pod of the environment succeeds | 99.9 % | fast | 6 · Environment |
+| `env.clone.p95` | Environments | Cloning a running environment completes with its services ready | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `ws.stop.p95` | Workspace lifecycle | Stopping a workspace completes | 95 % ≤ 15000 ms | fast | 7 · Lifecycle |
 | `ws.replicated` | Workspace lifecycle | A stopped workspace's final sync point reaches a replica | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
 | `ws.start.p95` | Workspace lifecycle | Starting a workspace completes | 95 % ≤ 30000 ms | fast | 7 · Lifecycle |
 | `ws.restore` | Workspace lifecycle | Restoring a workspace from a past snapshot succeeds | 99.9 % | fast | 7 · Lifecycle |
+| `env.stop.p95` | Environments | Stopping an environment completes | 95 % ≤ 30000 ms | fast | 7 · Lifecycle |
+| `env.replicated` | Environments | A stopped environment's final sync point reaches a replica | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
+| `env.start.p95` | Environments | Starting an environment completes | 95 % ≤ 60000 ms | fast | 7 · Lifecycle |
+| `env.restore` | Environments | Restoring an environment from a past snapshot succeeds | 99.9 % | fast | 7 · Lifecycle |
 | `vol.refusals` | Workspace lifecycle | Deleting a sync point or a running worktree's base snapshot is refused | 99.9 % | fast | 7 · Lifecycle |
 | `vol.detached.restorable` | Workspace lifecycle | A detached volume's snapshot can still be restored | 99.9 % | fast | 7 · Lifecycle |
 | `vol.orphan.collected` | Workspace lifecycle | An orphaned volume directory is collected | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
@@ -91,6 +97,7 @@ a superadmin grant or a quota with the five-minute suite underneath it.
 | `ws.profile.reuse` | Workspaces | A repeat package set is published from the profile index, not rebuilt | 99.9 % | weekly | 12 · Weekly |
 | `ws.cross.node` | Workspaces | A workspace started on a peer node reads its replica correctly | 99.9 % | weekly | 12 · Weekly |
 | `homes.cross.node` | Workspaces | The shared home is consistent across nodes | 99.9 % | weekly | 12 · Weekly |
+| `env.cross.node` | Environments | An environment started on a peer node reads its replica correctly | 99.9 % | weekly | 12 · Weekly |
 | `cp.failover` | Control plane | The leader lease fails over to another pod | 99.9 % ≤ 30000 ms | weekly | 12 · Weekly |
 | `settings.live` | Control plane | A live settings change takes effect on the next beat | 99.9 % ≤ 60000 ms | weekly | 12 · Weekly |
 | `bak.tarball.age` | Backups | The latest backup tarball is recent | 99.9 % | monthly | 13 · Monthly |
