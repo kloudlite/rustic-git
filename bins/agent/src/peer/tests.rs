@@ -1490,6 +1490,12 @@ fn orphan_voldirs_names_only_directories_no_volume_lists() {
     std::fs::create_dir_all(root.join("v-gone")).unwrap();
     std::fs::write(root.join("v-gone.lock"), b"").unwrap();
     let known: HashSet<String> = ["v-live".to_string()].into_iter().collect();
+    // Fresh directories are never orphans: the beat's listing may predate their record.
+    assert!(orphan_voldirs(&root, &known).is_empty(), "a directory younger than the grace is kept");
+    let old = std::time::SystemTime::now() - super::sweeps::ORPHAN_GRACE - std::time::Duration::from_secs(60);
+    for d in ["v-live", "v-gone"] {
+        std::fs::File::open(root.join(d)).unwrap().set_modified(old).unwrap();
+    }
     assert_eq!(orphan_voldirs(&root, &known), vec!["v-gone".to_string()]);
     assert!(orphan_voldirs(&tmp.path().join("missing"), &known).is_empty(), "no vol dir yet: nothing to name");
 }

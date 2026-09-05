@@ -335,11 +335,24 @@ pub(crate) fn should_retire(me: &str, owner: &str, targets: &[String], hosted: b
 
 /// Directories under `{pool}/vol` that no listed Volume names. Files beside them (`{id}.owner`,
 /// `{id}.lock`) are not volumes and are cleaned with their directory by `cleanup_local`.
+/// A directory younger than this is never an orphan: the beat's listing predates it. The Volume
+/// controller creates the subvolume seconds after the CR, and a beat whose listing was taken
+/// before the CR existed saw the directory but not the record — and dropped a live environment's
+/// bytes under a running service (2026-09-05, `volume.dropped no-volume-cr` 19:55:28, the CR
+/// created 19:55:1x). Ten minutes is far past any listing's age and far short of a real orphan's.
+pub(crate) const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+
 pub(crate) fn orphan_voldirs(vol_root: &std::path::Path, known: &HashSet<String>) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(vol_root) else { return Vec::new() };
     let mut out: Vec<String> = rd
         .flatten()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().unwrap_or_default() > ORPHAN_GRACE)
+                .unwrap_or(false)
+        })
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| !known.contains(n))
         .collect();
@@ -458,6 +471,16 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     // as present — garbage collection finishes on its own and the next beat sees it absent.
     let known: HashSet<String> = vols.iter().map(|v| v.name_any()).collect();
     for id in orphan_voldirs(&ctx.engine.pool.root.join("vol"), &known) {
+        // The listing is a beat old; a drop is forever. Ask the API server once more, and keep
+        // the bytes on any answer that is not a definite "no such Volume".
+        match Api::<crd::Volume>::all(ctx.client.clone()).get_opt(&id).await {
+            Ok(None) => {}
+            Ok(Some(_)) => continue,
+            Err(e) => {
+                tracing::warn!(volume = %id, reason = "recheck", error = %e, "volume.drop.skipped");
+                continue;
+            }
+        }
         tracing::info!(volume = %id, reason = "no-volume-cr", "volume.dropped");
         // A voldir walk plus one `btrfs subvolume delete` per subvolume under it: seconds to
         // minutes of a thread, and this beat shares its reactor with every reconcile and every
