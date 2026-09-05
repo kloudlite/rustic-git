@@ -87,8 +87,8 @@ pod of a three-node `file://`-less harness and asserts zero non-2xx on a push lo
 any of the KNOWN workloads (`admin::workloads::KNOWN`, the same list the settings roll uses) has
 `updatedReplicas < replicas` or `readyReplicas < replicas` on AKS, or the agent DaemonSet on the
 region has `updatedNumberScheduled < desired`. A fast run that sees one skips every id with
-"a rollout is in flight" and files no sample. RBAC: `deployments`/`statefulsets`/`daemonsets: get,list`
-on the probe's AKS Role and region ClusterRole. The hourly does not yield; it takes the sample,
+"a rollout is in flight" and files no sample. RBAC: `deployments`/`statefulsets: get,list` on the probe's AKS Role and `daemonsets: get,list` on
+the region ClusterRole (the only DaemonSet the probe watches is the region's agent). The hourly does not yield; it takes the sample,
 because its window is the operator's own choice.
 
 ## Not in scope
