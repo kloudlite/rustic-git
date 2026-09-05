@@ -121,6 +121,15 @@ impl History {
         let r = self
             .client
             .post(&self.url)
+            // Server-side caps on every statement, because the client's own timeout ends the
+            // WAIT, not the query: without these a slow rule kept running for forty minutes per
+            // beat, eleven deep, and every console read behind it timed out. 25 s is inside the
+            // evaluator's 30 s beat; a statement that needs longer is a bug, not a bigger budget.
+            .query(&[
+                ("max_execution_time", "25"),
+                ("timeout_overflow_mode", "throw"),
+                ("cancel_http_readonly_queries_on_client_close", "1"),
+            ])
             .header("X-ClickHouse-User", &self.user)
             .header("X-ClickHouse-Key", &self.password)
             .body(body)
