@@ -878,7 +878,7 @@ async fn ensure_platform_key(api: &Api, owner: &str, force: bool) -> std::result
         .rotate_user_key(owner, &private, &fingerprint, old_fp.as_deref())
         .await
         .map_err(|_| bad("could not install the key"))?;
-    tracing::info!(%owner, replaced = old_fp.is_some(), "key.platform.installed");
+    tracing::info!(%owner, replaced = old_fp.is_some(), %fingerprint, "key.platform.installed");
     Ok(PlatformKey { public, fingerprint })
 }
 

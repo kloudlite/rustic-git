@@ -863,6 +863,8 @@ pub fn git_init_container(
             format!(
                 "set -e; [ \"$(ls -A {SEED_DIR})\" ] && exit 0; \
                  for i in $(seq 1 24); do install -m 600 {USER_KEY_PATH}/id_ed25519 /tmp/seed_key; \
+                 echo \"seed key $(ssh-keygen -lf /tmp/seed_key 2>/dev/null | cut -d\" \" -f2)\"; \
+                 echo \"seed key $(ssh-keygen -lf /tmp/seed_key 2>/dev/null | cut -d\" \" -f2)\"; \
                  GIT_SSH_COMMAND=\"ssh -i /tmp/seed_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\" \
                  git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR} && exit 0; \
                  rm -rf {SEED_DIR}/* {SEED_DIR}/.[!.]* 2>/dev/null || true; sleep 5; done; exit 1"
