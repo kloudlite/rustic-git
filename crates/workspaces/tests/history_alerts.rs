@@ -333,7 +333,7 @@ fn slo_burn_sql_names_both_pairs() {
     let sql = rule.sql_for("central").expect("central is an identifier");
     assert!(sql.contains("14.4"), "the fast pair's threshold is missing: {sql}");
     assert!(sql.contains("> 6"), "the long pair's threshold is missing: {sql}");
-    assert!(sql.contains("kloudlite.slo_results FINAL"), "{sql}");
+    assert!(sql.contains("kloudlite.slo_results AS r FINAL"), "{sql}");
     // A window with no samples must never satisfy a threshold: `-1`, not 0, is what "unknown"
     // reads as in the SQL, exactly as `burn()` answers `None` in Rust.
     assert!(sql.contains(", -1)"), "an empty window could read as a burn: {sql}");

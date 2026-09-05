@@ -8,8 +8,8 @@
 //! reason.
 //!
 //! The per-SLO maths lives in one statement (`statuses_sql`) rather than one query per SLO: the
-//! target's `max_ms` and each suite's windows are compiled into a `multiIf` over `slo_id` from the
-//! catalogue, so ~70 SLOs cost one round trip and the catalogue stays the only place a target is
+//! target's `max_ms` and each suite's windows are a small inline table (`catalogue_cte`) JOINed to
+//! the samples, so ~70 SLOs cost one round trip and the catalogue stays the only place a target is
 //! written down.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -272,29 +272,60 @@ fn windows(suite: Suite) -> (u64, u64, u64, u64, u64) {
     }
 }
 
-/// A `multiIf(slo_id = 'a', va, slo_id = 'b', vb, …, fallback)` over the whole catalogue. Every id
-/// is a literal from `CATALOGUE`, never from a request, so nothing here is caller-shaped.
-fn multi_if(value: impl Fn(&catalogue::Slo) -> String, fallback: &str) -> String {
-    let mut s = String::from("multiIf(");
-    for slo in CATALOGUE {
-        s.push_str(&format!("slo_id = '{}', {}, ", slo.id, value(slo)));
+/// The catalogue's per-id constants as an inline table: one row per SLO carrying its error budget,
+/// latency ceiling (`0` = no ceiling, an availability SLO) and five window lengths (`0` = no such
+/// window). Joined to the samples, so every per-row expression is a column read instead of a
+/// 77-branch `multiIf` inlined into each of the eight counts — that shape took the analyzer alone
+/// 14 s and never finished executing. Every id is a literal from `CATALOGUE`, never caller-shaped.
+///
+/// One array per column through `ARRAY JOIN` rather than `VALUES` rows: same table, but measured
+/// at ~0.3 s against the cluster where the row-wise `VALUES(...)` form took ~1.3 s to analyse.
+fn catalogue_cte() -> String {
+    // Six decimals is enough for a 99.9999 % target and keeps the statement short — the whole
+    // table is re-sent with every query.
+    fn budget(slo: &catalogue::Slo) -> String {
+        let b = format!("{:.6}", 1.0 - slo.target.good_pct / 100.0);
+        // A 100 % target trims away to nothing; `0` is the budget it actually has.
+        match b.trim_end_matches('0').trim_end_matches('.') {
+            "" => "0".to_string(),
+            t => t.to_string(),
+        }
     }
-    s.push_str(fallback);
-    s.push(')');
-    s
+    let col = |f: &dyn Fn(&catalogue::Slo) -> String| {
+        CATALOGUE.iter().map(f).collect::<Vec<_>>().join(",")
+    };
+    let w = |pick: fn((u64, u64, u64, u64, u64)) -> u64| {
+        col(&move |s: &catalogue::Slo| pick(windows(s.suite)).to_string())
+    };
+    format!(
+        "cat AS (SELECT slo_id, budget, mx, w_att, w_long, w_longc, w_short, w_shortc \
+         FROM system.one ARRAY JOIN \
+         [{ids}] AS slo_id, [{budget}] AS budget, [{mx}] AS mx, \
+         [{att}] AS w_att, [{long}] AS w_long, [{longc}] AS w_longc, \
+         [{short}] AS w_short, [{shortc}] AS w_shortc)",
+        ids = col(&|s: &catalogue::Slo| format!("'{}'", s.id)),
+        budget = col(&|s: &catalogue::Slo| budget(s)),
+        mx = col(&|s: &catalogue::Slo| s.target.max_ms.unwrap_or(0).to_string()),
+        att = w(|x| x.0),
+        long = w(|x| x.1),
+        longc = w(|x| x.2),
+        short = w(|x| x.3),
+        shortc = w(|x| x.4),
+    )
 }
 
-/// The catalogue's latency ceilings as a `multiIf`. `0` is the sentinel for `max_ms: None` — an
-/// availability SLO has no ceiling to miss.
-fn max_ms_expr() -> String {
-    multi_if(|s| s.target.max_ms.unwrap_or(0).to_string(), "0")
-}
+/// The sample-vs-target predicates every statement here shares, reading the joined catalogue row.
+const PREDICATES: &str = "(r.ok = 1 AND (c.mx = 0 OR r.ms <= c.mx)) AS good, \
+     (r.ts > now() - toIntervalSecond(c.w_att)) AS in_att, \
+     (r.ts > now() - toIntervalSecond(c.w_long)) AS in_long, \
+     (r.ts > now() - toIntervalSecond(c.w_longc)) AS in_longc, \
+     (c.w_short > 0 AND r.ts > now() - toIntervalSecond(c.w_short)) AS in_short, \
+     (c.w_shortc > 0 AND r.ts > now() - toIntervalSecond(c.w_shortc)) AS in_shortc";
 
-/// One window from `windows` as a `multiIf` over the catalogue, so every reader of these windows
-/// (`statuses_sql` and `burn_sql`) compiles the SAME table rather than keeping a second copy of it.
-fn window_expr(pick: fn((u64, u64, u64, u64, u64)) -> u64) -> String {
-    multi_if(move |s| pick(windows(s.suite)).to_string(), "0")
-}
+/// The samples joined to their catalogue row, with the 400 d floor every reader here shares.
+const FROM_JOINED: &str = "FROM kloudlite.slo_results AS r FINAL \
+     INNER JOIN cat AS c ON c.slo_id = r.slo_id \
+     WHERE r.skipped = 0 AND r.ts > now() - INTERVAL 400 DAY";
 
 /// `SloBurn`'s inner query: one row per SLO with samples, `[slo_id, burning]`.
 ///
@@ -305,31 +336,19 @@ fn window_expr(pick: fn((u64, u64, u64, u64, u64)) -> u64) -> String {
 /// rate `-1` so it can never satisfy a threshold — the same "no samples is not zero" rule `burn`
 /// holds in Rust.
 pub fn burn_sql() -> String {
-    let max_ms = max_ms_expr();
-    let (long, longc) = (window_expr(|x| x.1), window_expr(|x| x.2));
-    let (short, shortc) = (window_expr(|x| x.3), window_expr(|x| x.4));
-    let budget = multi_if(|s| format!("{:.6}", 1.0 - s.target.good_pct / 100.0), "0");
     let counts = |w: &str| format!("countIf(in_{w}) AS t_{w}, countIf(in_{w} AND good) AS g_{w}");
-    let rate = |w: &str| {
-        format!("if(t_{w} > 0 AND budget > 0, (t_{w} - g_{w}) / t_{w} / budget, -1) AS r_{w}")
-    };
+    // Inlined rather than a second nesting level that names each rate: every rate is read once,
+    // and each extra subquery around this one measured ~0.8 s of pure analysis on the cluster.
+    let rate =
+        |w: &str| format!("if(t_{w} > 0 AND budget > 0, (t_{w} - g_{w}) / t_{w} / budget, -1)");
     format!(
         "SELECT slo_id, \
-                toUInt8((r_short > 14.4 AND r_shortc > 14.4) OR (r_long > 6 AND r_longc > 6)) \
-                    AS burning \
-         FROM (SELECT slo_id, {budget} AS budget, {rl}, {rlc}, {rs}, {rsc} FROM (\
-             WITH {max_ms} AS mx, \
-                  {long} AS w_long, {longc} AS w_longc, \
-                  {short} AS w_short, {shortc} AS w_shortc, \
-                  (ok = 1 AND (mx = 0 OR ms <= mx)) AS good, \
-                  (w_long > 0 AND ts > now() - toIntervalSecond(w_long)) AS in_long, \
-                  (w_longc > 0 AND ts > now() - toIntervalSecond(w_longc)) AS in_longc, \
-                  (w_short > 0 AND ts > now() - toIntervalSecond(w_short)) AS in_short, \
-                  (w_shortc > 0 AND ts > now() - toIntervalSecond(w_shortc)) AS in_shortc \
-             SELECT slo_id, {cl}, {clc}, {cs}, {csc} \
-             FROM kloudlite.slo_results FINAL \
-             WHERE skipped = 0 AND ts > now() - INTERVAL 400 DAY \
-             GROUP BY slo_id))",
+                toUInt8(({rs} > 14.4 AND {rsc} > 14.4) OR ({rl} > 6 AND {rlc} > 6)) AS burning \
+         FROM (WITH {cat}, {PREDICATES} \
+             SELECT r.slo_id AS slo_id, c.budget AS budget, {cl}, {clc}, {cs}, {csc} \
+             {FROM_JOINED} \
+             GROUP BY slo_id, budget)",
+        cat = catalogue_cte(),
         cl = counts("long"),
         clc = counts("longc"),
         cs = counts("short"),
@@ -361,29 +380,12 @@ pub fn statuses_sql() -> String {
         CATALOGUE.iter().all(|s| s.target.max_ms != Some(0)),
         "max_ms: Some(0) collides with the no-ceiling sentinel"
     );
-    let max_ms = max_ms_expr();
-    let w = window_expr;
-    // Every per-row expression is hoisted into the WITH clause: each window's `multiIf` over the
-    // whole catalogue is long, and it would otherwise appear twice per window in the counts.
     format!(
-        "WITH {max_ms} AS mx, \
-              {att} AS w_att, {long} AS w_long, {longc} AS w_longc, \
-              {short} AS w_short, {shortc} AS w_shortc, \
-              (ok = 1 AND (mx = 0 OR ms <= mx)) AS good, \
-              (ts > now() - toIntervalSecond(w_att)) AS in_att, \
-              (ts > now() - toIntervalSecond(w_long)) AS in_long, \
-              (ts > now() - toIntervalSecond(w_longc)) AS in_longc, \
-              (w_short > 0 AND ts > now() - toIntervalSecond(w_short)) AS in_short, \
-              (w_shortc > 0 AND ts > now() - toIntervalSecond(w_shortc)) AS in_shortc \
+        "WITH {cat}, {PREDICATES} \
          SELECT {STATUS_COLS} \
-         FROM kloudlite.slo_results FINAL \
-         WHERE skipped = 0 AND ts > now() - INTERVAL 400 DAY \
+         {FROM_JOINED} \
          GROUP BY slo_id",
-        att = w(|x| x.0),
-        long = w(|x| x.1),
-        longc = w(|x| x.2),
-        short = w(|x| x.3),
-        shortc = w(|x| x.4),
+        cat = catalogue_cte(),
     )
 }
 
@@ -652,8 +654,8 @@ mod tests {
     fn sql_for_statuses_is_one_statement_with_final() {
         let sql = statuses_sql();
         assert_eq!(sql.matches(';').count(), 0, "one statement");
-        assert!(sql.contains("kloudlite.slo_results FINAL"));
-        assert!(sql.contains("WHERE skipped = 0"));
+        assert!(sql.contains("kloudlite.slo_results AS r FINAL"));
+        assert!(sql.contains("WHERE r.skipped = 0"));
         // The reader is positional, so the alias ORDER is part of the contract: this fails the
         // moment a column is inserted, reordered or renamed on either side.
         let aliases: Vec<&str> = STATUS_COLS
@@ -681,11 +683,29 @@ mod tests {
         );
         assert!(sql.contains(STATUS_COLS), "the statement selects those columns");
 
-        // Every SLO's ceiling has to be in the statement, or its samples would be judged by
-        // somebody else's target.
-        for slo in CATALOGUE {
-            let ceiling = format!("slo_id = '{}', {}", slo.id, slo.target.max_ms.unwrap_or(0));
-            assert!(sql.contains(&ceiling), "{} missing its max_ms", slo.id);
+        // The catalogue's columns are parallel arrays, so a ceiling in the wrong POSITION would
+        // judge one SLO's samples by another's target — check them in order, not by containment.
+        let column = |name: &str| -> Vec<String> {
+            let end = sql.find(&format!("] AS {name}")).expect("column");
+            let start = sql[..end].rfind('[').expect("column start");
+            sql[start + 1..end].split(',').map(|v| v.to_string()).collect()
+        };
+        let (ids, mx) = (column("slo_id"), column("mx"));
+        for (i, slo) in CATALOGUE.iter().enumerate() {
+            assert_eq!(ids[i], format!("'{}'", slo.id));
+            assert_eq!(mx[i], slo.target.max_ms.unwrap_or(0).to_string(), "{}", slo.id);
+        }
+    }
+
+    /// The catalogue used to be inlined as six 77-branch `multiIf`s reused by eight `countIf`s,
+    /// which ClickHouse expands textually: ~16 KB of SQL, 14 s in the analyzer alone and an
+    /// execution that never finished. Joining a table keeps both statements small by construction.
+    #[test]
+    fn sql_joins_the_catalogue_instead_of_inlining_it() {
+        for sql in [statuses_sql(), burn_sql()] {
+            assert!(!sql.contains("multiIf"), "the catalogue is inlined again: {sql}");
+            assert!(sql.len() < 6_000, "{} bytes of SQL", sql.len());
         }
     }
 }
+
