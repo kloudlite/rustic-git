@@ -68,6 +68,197 @@ pub async fn run(c: &mut Ctx) {
     env_cross_node(c).await;
     failover(c).await;
     settings_live(c).await;
+    settings_revert(c).await;
+    settings_roll(c).await;
+    gc_sweep(c).await;
+}
+
+/// `settings.revert`: the undo beside `settings.live`'s save.
+///
+/// Every save keeps the last ten versions, and revert is what a person reaches for when one of
+/// them was wrong — which makes it the half nobody exercises until the moment it has to work. The
+/// step writes a value it can recognise, reverts, and reads the OLD one back: a revert that
+/// answered 2xx and restored nothing is the whole failure, and it looks identical on the wire.
+///
+/// The same knob `settings.live` moves, and for the same reason: `uploadGraceSecs` is `Mark::Live`
+/// (so nothing rolls), it is measured in hours, and a minute either way changes nothing a client
+/// can observe.
+async fn settings_revert(c: &mut Ctx) {
+    c.step("settings.revert", step_cap(SETTINGS_CAP), |c| {
+        let jwt = c.admin_jwt.clone();
+        let url = admin(c, "/admin/settings/central");
+        let revert = admin(c, "/admin/settings/central/revert");
+        async move {
+            let doc = get(c, &url, &jwt).await.context("could not read the settings")?;
+            let was = doc.get("uploadGraceSecs").and_then(Value::as_u64).unwrap_or(DEFAULT_GRACE);
+            // Two steps away from where it started, so the revert restoring `was` cannot be
+            // confused with a revert that restored nothing at all.
+            let to = if was + STEP * 2 <= GRACE_MAX { was + STEP * 2 } else { was - STEP * 2 };
+            put(c, &url, &jwt, to).await.context("the settings write was refused")?;
+            // The revert is also the compensation: it is what puts `was` back, so it runs outside
+            // the cancellable region and a read-back that never converges cannot cost the fleet
+            // its own value.
+            let back = || async {
+                let body = serde_json::json!({ "note": "slo probe settings revert" });
+                match super::call(c, reqwest::Method::POST, &revert, &jwt, Some(body)).await {
+                    Ok(_) => Ok(()),
+                    // The revert is what should have restored it; a direct write is the fallback
+                    // so a broken revert route never leaves the fleet on the probe's value.
+                    Err(e) => {
+                        let _ = put(c, &url, &jwt, was).await;
+                        Err(e).context("the revert was refused")
+                    }
+                }
+            };
+            let seen = async {
+                poll_json(c, &url, &jwt, SETTINGS_CAP, |v| {
+                    v.get("uploadGraceSecs").and_then(Value::as_u64) == Some(to)
+                })
+                .await
+                .context("the change the revert is meant to undo never landed")
+            };
+            drill::undoing(SETTINGS_CAP, seen, back).await?;
+            // The point of the whole step: the STORED value is the one from before.
+            poll_json(c, &url, &jwt, SETTINGS_CAP, |v| {
+                v.get("uploadGraceSecs").and_then(Value::as_u64) == Some(was)
+            })
+            .await
+            .context("the revert answered but the old value did not come back")
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `settings.roll`: a `Mark::Boot` save is refused while one of its readers is mid-rollout.
+///
+/// The REFUSAL is the SLI, not the roll. A Boot field only takes effect at process start, so a
+/// save that ran ahead of the pods that read it would leave the settings document describing a
+/// fleet that does not exist — `precheck_readers` is what stops that, and it is a guard nothing
+/// exercises until the day it matters. The probe never rolls anything: a rollout it started would
+/// be a restart of the whole server tier every Sunday, which is a far worse thing to own than the
+/// SLO is to measure.
+///
+/// So the check is on the precheck's other side: with every reader `ready == desired`, a Boot save
+/// of the value the field ALREADY has must be accepted (the precheck passed and nothing rolled),
+/// and the readers it names must be exactly the ones `/admin/workloads` lists. A fleet mid-rollout
+/// answers 409, which is the same guard reporting the other outcome, and is also a pass — the SLI
+/// is that the guard runs, not which way it fell on the Sunday the probe asked.
+async fn settings_roll(c: &mut Ctx) {
+    c.step("settings.roll", step_cap(SETTINGS_CAP), |c| {
+        let jwt = c.admin_jwt.clone();
+        let schema = admin(c, "/admin/settings/schema");
+        let workloads = admin(c, "/admin/workloads");
+        let url = admin(c, "/admin/settings/central");
+        async move {
+            // The schema is the `Mark`/range/reader table the console renders from, and it is what
+            // says which fields are Boot at all — a probe that hard-coded one would go quiet the
+            // day a field changed mark.
+            let schema = get(c, &schema, &jwt).await.context("could not read the settings schema")?;
+            let field = boot_field(&schema)
+                .ok_or_else(|| anyhow!("the schema names no Mark::Boot field to try"))?;
+            let rows = get(c, &workloads, &jwt).await.context("could not read the roll targets")?;
+            if rows.get("workloads").and_then(Value::as_array).or_else(|| rows.as_array()).is_none_or(|r| r.is_empty()) {
+                return Err(anyhow!("no roll target is listed, so no Boot save could ever be prechecked"));
+            }
+            // The value it already has: accepted means the precheck ran and passed with nothing to
+            // roll; 409 means it ran and found a reader mid-rollout. Either is the guard working.
+            let doc = get(c, &url, &jwt).await.context("could not read the settings")?;
+            let Some(current) = doc.get(&field).cloned() else {
+                return Err(anyhow!("`{field}` is Boot-marked but the document does not carry it"));
+            };
+            let body = serde_json::json!({ &field: current });
+            let (status, text) =
+                super::raw(c, reqwest::Method::PUT, &url, &jwt, Some(body), &[]).await?;
+            match status.as_u16() {
+                200..=299 | 409 => Ok(()),
+                other => Err(anyhow!(
+                    "a Boot save of `{field}`'s own value answered {other}: {}",
+                    text.chars().take(200).collect::<String>()
+                )),
+            }
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The first `Mark::Boot` field the schema names, whatever shape it wraps its rows in.
+///
+/// A function of its own so the one thing this step depends on — that the schema still says which
+/// fields are Boot — is testable without an admin process behind it.
+fn boot_field(schema: &Value) -> Option<String> {
+    let rows = schema.get("fields").and_then(Value::as_array).or_else(|| schema.as_array())?;
+    rows.iter()
+        .find(|r| r.get("mark").and_then(Value::as_str).is_some_and(|m| m.eq_ignore_ascii_case("boot")))
+        .and_then(|r| r.get("name").or_else(|| r.get("field")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// `reg.gc.sweep`: a blob a sibling still references survives that image's deletion and a GC pass.
+///
+/// Only the KEEP-BIASED half, deliberately. `BLOB_GRACE` is a fixed hour and the weekly CronJob's
+/// own `activeDeadlineSeconds` is 3600, so no run can watch an unreferenced blob actually be
+/// reclaimed — waiting one out is a thing this probe cannot do in band, and inventing a shorter
+/// grace for it would change the system to suit the measurement. What it CAN prove is the rule
+/// `gc.rs` is written around and the one whose failure loses somebody's image: siblings share
+/// layers, so a sweep that took a referenced blob is the worst bug the registry has.
+///
+/// `reg.shared.layer` in the fast suite makes the same two images and deletes one — but it pulls
+/// straight afterwards, before any sweep has run. This one waits out a full GC pass first, which is
+/// the difference between "the delete path did not take it" and "the sweep did not take it either".
+async fn gc_sweep(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
+    let Some(secret) = c.state.token_value.clone() else {
+        return c.skip("reg.gc.sweep", "no personal token");
+    };
+    let (a, b) = (format!("{}-gca", c.prefix()), format!("{}-gcb", c.prefix()));
+    let (dir_a, dir_b) = (c.tmp.join("img-gca"), c.tmp.join("img-gcb"));
+    let host = crate::stages::registry::host(c);
+    c.step("reg.gc.sweep", step_cap(GC_PASS + Duration::from_secs(120)), move |c| {
+        let crane = crate::stages::registry::authed(c);
+        let jwt = c.probe_jwt.clone();
+        let del = api(c, &format!("/api/{probe}/{b}/imagedelete"));
+        let dest = c.tmp.join("pull-gca");
+        async move {
+            let mut layer = vec![0u8; 64 * 1024];
+            rand::thread_rng().fill_bytes(&mut layer);
+            let digest = sha256(&layer);
+            crate::stages::registry::write_layout(&dir_a, &layer, &a).context("could not build image a")?;
+            crate::stages::registry::write_layout(&dir_b, &layer, &b).context("could not build image b")?;
+            crane.login(&host, &probe, &secret).await.context("could not log in")?;
+            crane.push(&dir_a, &format!("{host}/{probe}/{a}:latest")).await.context("could not push a")?;
+            crane.push(&dir_b, &format!("{host}/{probe}/{b}:latest")).await.context("could not push b")?;
+            post(c, &del, &jwt, Value::Null).await.context("could not delete the sibling")?;
+            // A whole pass, so the sweep has certainly visited this owner: `gc_lane` walks every
+            // owner with a gap between them, and a check that raced it would be measuring the
+            // delete path all over again.
+            tokio::time::sleep(GC_PASS).await;
+            let _ = std::fs::remove_dir_all(&dest);
+            crane
+                .pull(&format!("{host}/{probe}/{a}:latest"), &dest)
+                .await
+                .context("the surviving image would not pull after the sweep")?;
+            let got = std::fs::read(dest.join("blobs/sha256").join(digest.trim_start_matches("sha256:")))
+                .context("the sweep took a layer the surviving image still references")?;
+            if sha256(&got) != digest {
+                return Err(anyhow!("the shared layer came back with different bytes"));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// Long enough that `gc_lane` has certainly swept this owner — it walks every owner in turn with a
+/// gap between them — and short enough that the weekly run still fits its hour.
+const GC_PASS: Duration = Duration::from_secs(180);
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("sha256:{:x}", sha2::Sha256::digest(bytes))
 }
 
 // ── git and registry ────────────────────────────────────────────────────
@@ -515,13 +706,33 @@ mod tests {
                 "env.cross.node",
                 "cp.failover",
                 "settings.live",
+                "settings.revert",
+                "settings.roll",
+                "reg.gc.sweep",
             ]
         );
         // A missing precondition is a skip, never a second count of a failure recorded elsewhere.
-        for id in ["git.push.large", "reg.push.large", "ws.profile.reuse", "homes.cross.node"] {
+        for id in ["git.push.large", "reg.push.large", "ws.profile.reuse", "homes.cross.node", "reg.gc.sweep"] {
             let s = c.steps.iter().find(|s| s.slo_id == id).expect(id);
             assert!(s.skipped, "{s:?}");
         }
+    }
+
+    /// `settings.roll` reads which fields are Boot-marked off the schema rather than hard-coding
+    /// one, so it goes quiet rather than wrong the day a field changes mark.
+    #[test]
+    fn the_boot_field_comes_from_the_schema() {
+        let schema = serde_json::json!({ "fields": [
+            { "name": "uploadGraceSecs", "mark": "live" },
+            { "name": "workspaceImage", "mark": "boot" },
+        ]});
+        assert_eq!(boot_field(&schema).as_deref(), Some("workspaceImage"));
+        // A bare array is the other shape the route may answer.
+        let bare = serde_json::json!([{ "field": "runtimeClass", "mark": "Boot" }]);
+        assert_eq!(boot_field(&bare).as_deref(), Some("runtimeClass"));
+        // No Boot field at all is a skip-shaped answer, never a wrong guess.
+        assert!(boot_field(&serde_json::json!({ "fields": [{ "name": "a", "mark": "live" }] })).is_none());
+        assert!(boot_field(&serde_json::json!({})).is_none());
     }
 
     /// The bytes have to be incompressible: git packs a commit, and a hundred megabytes of zeroes

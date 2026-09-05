@@ -130,7 +130,7 @@ async fn clone(c: &mut Ctx, env: &str) {
 
 /// Wait until `SERVICE`'s StatefulSet in this environment reports a ready replica. Without a
 /// kubeconfig there is nothing to read, and the caller has already measured the record.
-async fn service_ready(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
+pub(super) async fn service_ready(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
     let Some(k) = c.kube.as_ref() else { return Ok(()) };
     let ns = kloudlite_workspaces::crd::env_namespace(env);
     let sts: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(k.clone(), &ns);

@@ -57,7 +57,104 @@ pub async fn run(c: &mut Ctx) {
     backups(c).await;
     dead_node(c).await;
     drain(c).await;
+    decommission(c).await;
     redis_down(c).await;
+}
+
+/// `cluster.decommission`: the 409 gate, and the cordon behind it.
+///
+/// Drain and decommission are two distinct actions and only drain was drilled. The interesting
+/// half is the REFUSAL: a decommission is 409 "not drained yet" until the node's own agent has
+/// stamped the sticky `drained <RFC 3339>`, and that gate is the only thing between an operator
+/// and cordoning a node that is still holding somebody's bytes. Both halves in one step, in that
+/// order — a fleet that refused everything would pass the first alone, and one that cordoned
+/// anything would pass the second.
+///
+/// Everything it does is undone: the drain is lifted and the cordon taken off on every path out,
+/// including a stamp that never arrives. It never deletes anything — the console stops at the
+/// cordon by design, and deleting the VM is a human's separate step.
+async fn decommission(c: &mut Ctx) {
+    let (Some(k), region) = (c.kube.clone(), c.cfg.region.clone()) else {
+        return c.skip("cluster.decommission", "no kubeconfig");
+    };
+    // The same choice `drill.drain` makes, and it must not be the node that drill just used: two
+    // nodes retiring at once on a shared cluster is a fleet with nowhere left to place anything.
+    let busy = match probe_workspace(c).await {
+        Some(ws) => node_of(c, &ws).await,
+        None => None,
+    };
+    let node = match idle_node(&k, busy.as_deref()).await {
+        Ok(n) => n,
+        Err(e) => return c.skip("cluster.decommission", &format!("{e:#}")),
+    };
+    c.step("cluster.decommission", step_cap(DRAIN_CAP), move |c| {
+        let jwt = c.admin_jwt.clone();
+        let base = admin(c, &format!("/admin/clusters/{region}/nodes/{node}"));
+        let reason = json!({ "reason": format!("slo probe decommission drill {}", c.run_id) });
+        async move {
+            // Before the drain: nothing has stamped `drained`, so this must be refused. A node an
+            // earlier run left stamped would pass here for the wrong reason, which is why the
+            // undrain below is part of the compensation rather than an afterthought.
+            refused_until_drained(c, &base, &jwt, &reason).await?;
+            verb(c, &base, "drain", &jwt, &reason).await.context("the drain was refused")?;
+            // Both mutations go back on every path out, in the order that leaves the node usable:
+            // the cordon first, then the label placement reads.
+            let undo = || async {
+                use crate::drill::Cluster;
+                let uncordon = k.cordon(&node, false).await.context("the node was left CORDONED");
+                let undrained = verb(c, &base, "undrain", &jwt, &reason).await.context("the node was left DRAINING");
+                uncordon.and(undrained)
+            };
+            let body = async {
+                stamped(&k, &node, DRAIN_CAP - Duration::from_secs(60))
+                    .await
+                    .context("the node never finished draining, so the gate could not be tried")?;
+                // Now it must be TAKEN, and the node must actually be cordoned afterwards: the
+                // console's own contract is that a decommission stops at `spec.unschedulable`.
+                verb(c, &base, "decommission", &jwt, &reason)
+                    .await
+                    .context("the decommission was refused even though the agent had stamped `drained`")?;
+                cordoned(&k, &node).await
+            };
+            drill::undoing(DRAIN_CAP, body, undo).await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The gate: a decommission before the stamp answers 409, and only 409.
+///
+/// A 5xx is not a refusal — the tier that fell over refused nothing, it could not answer — and a
+/// 2xx is the gate being open, which is the whole failure this id exists for.
+async fn refused_until_drained(c: &Ctx, base: &str, jwt: &str, reason: &Value) -> Result<()> {
+    let (status, body) = super::raw(
+        c,
+        reqwest::Method::POST,
+        &format!("{base}/decommission"),
+        jwt,
+        Some(reason.clone()),
+        &[],
+    )
+    .await?;
+    match status.as_u16() {
+        409 => Ok(()),
+        200..=299 => Err(anyhow!("a node that has not drained was ALLOWED to be decommissioned")),
+        other => Err(anyhow!(
+            "the decommission answered {other}, which is not the gate refusing: {}",
+            body.chars().take(200).collect::<String>()
+        )),
+    }
+}
+
+/// The node is unschedulable — where a decommission stops, and no further.
+async fn cordoned(k: &kube::Client, node: &str) -> Result<()> {
+    let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
+    let obj = api.get(node).await.map_err(|e| anyhow!("could not read {node}: {e}"))?;
+    match obj.spec.and_then(|s| s.unschedulable) {
+        Some(true) => Ok(()),
+        _ => Err(anyhow!("the decommission was taken but {node} is not cordoned")),
+    }
 }
 
 // ── backups ─────────────────────────────────────────────────────────────
@@ -670,6 +767,7 @@ mod tests {
                 "bak.cosmos",
                 "drill.dead.node",
                 "drill.drain",
+                "cluster.decommission",
                 "drill.redis.down",
             ]
         );

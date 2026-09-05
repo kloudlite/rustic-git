@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
 use serde_json::Value;
 
@@ -95,6 +95,11 @@ async fn audit_row(c: &mut Ctx, id: &str) {
         // `action` and `target` are exactly what `deny_request` records, so a row that comes back
         // is this deny's own and not some other admin's.
         let log = admin(c, &format!("/admin/audit?action=request.denied&target={id}"));
+        // The dual write: every audit row is copied into `kloudlite.events` as `admin.<action>`,
+        // where the console's own history charts read it. The object-store log stays the legal
+        // record, so a ClickHouse that is not deployed is not a breach — that is `503 history
+        // unavailable`, which this tolerates and nothing else does.
+        let events = admin(c, "/admin/history/events?limit=200");
         async move {
             post(c, &deny, &jwt, serde_json::json!({ "note": "slo probe" }))
                 .await
@@ -105,15 +110,50 @@ async fn audit_row(c: &mut Ctx, id: &str) {
                 v.get("rows").and_then(Value::as_array).is_some_and(|r| !r.is_empty())
             })
             .await
-            .context("the deny left no audit row")
+            .context("the deny left no audit row")?;
+            dual_written(c, &events, &jwt, &id).await
         }
         .boxed()
     })
     .await;
 }
 
+/// The same write, in `kloudlite.events` as `admin.request.denied`.
+///
+/// The invariant is per-write, not per-run: the object-store row and the ClickHouse row are two
+/// halves of one guarantee, and an admin process that stopped consuming its own writes into the
+/// history layer would leave the console's audit charts blank with the legal log intact — the one
+/// failure a check on the object store alone cannot see.
+///
+/// A 503 is `KLOUDLITE_CLICKHOUSE_URL` being unset, which is a supported deployment and not an SLO
+/// breach; every other answer is judged.
+async fn dual_written(c: &Ctx, url: &str, jwt: &str, target: &str) -> Result<()> {
+    let (status, body) = super::raw(c, reqwest::Method::GET, url, jwt, None, &[]).await?;
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        tracing::info!(reason = "no clickhouse", "slo.admin.degraded");
+        return Ok(());
+    }
+    if !status.is_success() {
+        return Err(anyhow!("the history events read answered {status}"));
+    }
+    let seen: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let rows = seen.get("events").and_then(Value::as_array).or_else(|| seen.as_array()).cloned().unwrap_or_default();
+    let there = rows.iter().any(|r| {
+        let carried = r.to_string();
+        carried.contains("admin.request.denied") && carried.contains(target)
+    });
+    there.then_some(()).ok_or_else(|| {
+        anyhow!("the deny left an audit row but no `admin.request.denied` in kloudlite.events")
+    })
+}
+
 /// `signals.fresh`: the Signals table is being fed by the alert evaluator rather than showing
 /// every rule as `unknown`.
+///
+/// And the load-bearing half the SLI names second: a window the samples do not cover is `unknown`,
+/// never `ok`. `signals` fills every (region, rule) the recorded set is missing with `unknown` and
+/// the reason, so an `ok` carrying that filler reason is the evaluator's verdict and the fill's
+/// detail on the same row — which is precisely the reading that retired the old on-request scrape.
 ///
 /// ponytail: freshness is read as "at least one rule in this region has a recorded state", because
 /// the route carries no timestamp — `SignalRow` is (alert, region, state, why, detail). That is
@@ -130,18 +170,12 @@ async fn signals(c: &mut Ctx) {
             if v.get("source").and_then(Value::as_str) != Some("history") {
                 return Err(anyhow!("no rule state has been recorded at all"));
             }
-            let known = v
-                .get("signals")
-                .and_then(Value::as_array)
-                .map(|rows| {
-                    rows.iter()
-                        .filter(|r| r.get("region").and_then(Value::as_str) == Some(region.as_str()))
-                        .any(|r| r.get("state").and_then(Value::as_str) != Some("unknown"))
-                })
-                .unwrap_or(false);
-            known
-                .then_some(())
-                .ok_or_else(|| anyhow!("every rule in {region} is unknown: nothing is evaluating"))
+            let rows = v.get("signals").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mine: Vec<&Value> = rows
+                .iter()
+                .filter(|r| r.get("region").and_then(Value::as_str) == Some(region.as_str()))
+                .collect();
+            evaluating(&mine, &region)
         }
         .boxed()
     })
@@ -169,6 +203,48 @@ async fn history(c: &mut Ctx) {
     .await;
 }
 
+/// The reason nothing is filled in for this region, as the fill writes it. A row carrying it is a
+/// rule the evaluator has never recorded a transition for.
+const NO_SAMPLES: &str = "no collector reporting";
+
+/// Both halves of the SLI over one region's rows.
+///
+/// A pure function so the judgement is testable without a fleet — and it is the judgement that
+/// retired the old on-request scrape: a point-in-time read cannot compute a `for 5m` window, so it
+/// left nine of ten rules `unknown`, and any reading that let an uncovered window report `ok`
+/// would have called that healthy.
+fn evaluating(rows: &[&Value], region: &str) -> anyhow::Result<()> {
+    if rows.is_empty() {
+        return Err(anyhow!("the signals table lists no rule at all for {region}"));
+    }
+    let state = |r: &Value| r.get("state").and_then(Value::as_str).unwrap_or_default().to_string();
+    // An uncovered window must be `unknown`. A row that carries the fill's own reason and any
+    // other state is the evaluator having reported a verdict for samples it never had.
+    if let Some(bad) = rows.iter().find(|r| {
+        r.get("detail").and_then(Value::as_str).is_some_and(|d| d.contains(NO_SAMPLES))
+            && state(r) != "unknown"
+    }) {
+        return Err(anyhow!(
+            "`{}` reports `{}` for a window with no samples, which must be `unknown`",
+            bad.get("alert").and_then(Value::as_str).unwrap_or("a rule"),
+            state(bad)
+        ));
+    }
+    // Every state is one of the four the evaluator writes: an unrecognised word renders as a
+    // colourless cell nobody can act on.
+    if let Some(bad) = rows.iter().find(|r| !STATES.contains(&state(r).as_str())) {
+        return Err(anyhow!("a rule in {region} reports `{}`, which is not a state", state(bad)));
+    }
+    // And something is actually being evaluated.
+    if rows.iter().all(|r| state(r) == "unknown") {
+        return Err(anyhow!("every rule in {region} is unknown: nothing is evaluating"));
+    }
+    Ok(())
+}
+
+/// The four words `history::alerts` writes, and the fill's own.
+const STATES: [&str; 4] = ["ok", "warn", "critical", "unknown"];
+
 /// The rows of a list route, whatever it wraps them in: `/admin/requests` answers a bare array.
 fn rows(v: &Value) -> Vec<Value> {
     v.as_array().cloned().unwrap_or_default()
@@ -177,6 +253,34 @@ fn rows(v: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule the old on-request scrape was retired for: a window the samples do not cover is
+    /// `unknown`, never `ok`. A point-in-time read cannot compute a `for 5m`, so anything that let
+    /// an uncovered window report a verdict would have called that healthy.
+    #[test]
+    fn an_uncovered_window_may_never_report_a_verdict() {
+        let row = |alert: &str, state: &str, detail: &str| {
+            serde_json::json!({ "alert": alert, "region": "r", "state": state, "detail": detail })
+        };
+        let ok = [row("A", "ok", ""), row("B", "unknown", "no collector reporting for this region")];
+        let rows: Vec<&Value> = ok.iter().collect();
+        assert!(evaluating(&rows, "r").is_ok());
+        // The failure: a rule with no samples reporting `ok`.
+        let bad = [row("A", "ok", "no collector reporting for this region")];
+        let rows: Vec<&Value> = bad.iter().collect();
+        assert!(evaluating(&rows, "r").unwrap_err().to_string().contains("no samples"));
+        // The failure the id already caught: nothing is evaluating at all.
+        let dead = [row("A", "unknown", ""), row("B", "unknown", "")];
+        let rows: Vec<&Value> = dead.iter().collect();
+        assert!(evaluating(&rows, "r").unwrap_err().to_string().contains("nothing is evaluating"));
+        // An empty table reads as "nothing is wrong" on the page, which is the one thing the fill
+        // exists to prevent.
+        assert!(evaluating(&[], "r").is_err());
+        // A word nobody renders is a colourless cell.
+        let odd = [row("A", "degraded", "")];
+        let rows: Vec<&Value> = odd.iter().collect();
+        assert!(evaluating(&rows, "r").is_err());
+    }
 
     /// Nothing reachable: every id is still produced exactly once, as a failure with a reason,
     /// never a missing sample.

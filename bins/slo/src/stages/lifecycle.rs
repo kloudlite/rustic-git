@@ -36,7 +36,11 @@ const ORPHAN_CEILING: Duration = Duration::from_secs(60);
 const ENV_STOP_CEILING: Duration = Duration::from_secs(30);
 const ENV_REPLICATED_CEILING: Duration = Duration::from_secs(30);
 const ENV_START_CEILING: Duration = Duration::from_secs(60);
-const ENV_RESTORE_CEILING: Duration = Duration::from_secs(45);
+/// The restore ends at `running` with its services ready, like `ws.restore` does, so it needs the
+/// room an environment actually takes to converge — 90 s, above `env.start.p95`'s own 60 s target
+/// and below `env.create.p95`'s 120: a restore grafts onto bytes the node already holds, where a
+/// create builds them.
+const ENV_RESTORE_CEILING: Duration = Duration::from_secs(90);
 
 /// Every workspace id in this stage, in journey order — the list a missing workspace skips.
 const IDS: [&str; 7] = [
@@ -286,10 +290,13 @@ async fn env_start(c: &mut Ctx, env: &str) {
 /// `env.restore`: a NEW environment grafted onto stage 6's push — `ws.restore`'s twin.
 ///
 /// The services are left out of the body deliberately: absent means "the ones the snapshot froze",
-/// which is what a person restoring gets. The step ends at the ACCEPT rather than at `running`: an
-/// environment create is a two-minute wait the fast suite has no budget for twice, the accept has
-/// already resolved the snapshot, its volume and the caller's right to it, and `env.create.p95`
-/// is the id that measures an environment converging.
+/// which is what a person restoring gets.
+///
+/// It ends at `running` WITH its services ready, not at the accept. An accept has resolved the
+/// snapshot, its volume and the caller's right to it and nothing else — and "restoring an
+/// environment succeeds" is, to the person who asked for it, the services coming back. A restore
+/// that is taken and then never converges is exactly the failure this id is named for, and ending
+/// at the 202 would have reported it green.
 async fn env_restore(c: &mut Ctx, snapshot: &str) {
     let name = format!("{}-envrestore", c.prefix());
     let snapshot = snapshot.to_string();
@@ -304,9 +311,18 @@ async fn env_restore(c: &mut Ctx, snapshot: &str) {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("the restore answered no environment id"))?
                 .to_string();
-            // Its Volume is named after it and no prefix sweep can see one.
-            c.state.extra_volumes.push(id);
-            Ok(())
+            // Its Volume is named after it and no prefix sweep can see one. Recorded BEFORE the
+            // wait: a restore that never converges still holds a subvolume.
+            c.state.extra_volumes.push(id.clone());
+            let doc = api(c, &format!("/v1/environments/{id}"));
+            poll_json(c, &doc, &jwt, ENV_RESTORE_CEILING, |v| {
+                v.get("state").and_then(Value::as_str) == Some("running")
+            })
+            .await
+            .context("the restored environment never reported running")?;
+            // `running` is the record; the services are what a person restored FOR. Without a
+            // kubeconfig there is nothing to read and the record stands alone.
+            super::environment::service_ready(c, &id, ENV_RESTORE_CEILING).await
         }
         .boxed()
     })

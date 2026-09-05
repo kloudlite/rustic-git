@@ -169,6 +169,9 @@ pub async fn home_persists(c: &mut Ctx) {
                 return Err(anyhow!("writing the home file exited {code}: {}", err.trim()));
             }
             let fresh = create(c, &name, json!({ "packages": [] })).await?;
+            // Asked of the FRESH pod, before either goes: the redirect is per-pod, and the pod a
+            // person would be typing into is the one whose caches must be local.
+            let redirects = cache_is_local(c, &fresh).await;
             let (code, out, err) = ws_exec(c, &fresh, &format!("cat {HOME_FILE}"), EXEC).await?;
             // Both workspaces go whatever the read said: a failed step must not leave two pods
             // holding the run's quota for the rest of the stage.
@@ -180,11 +183,43 @@ pub async fn home_persists(c: &mut Ctx) {
             if out.trim() != want {
                 return Err(anyhow!("the fresh workspace read back {:?}", out.trim()));
             }
-            Ok(())
+            redirects
         }
         .boxed()
     })
     .await;
+}
+
+/// The half that breaks under concurrency: the caches are LOCAL, not on the shared export.
+///
+/// Two pods on two nodes racing one cache directory over NFS is the failure the redirect exists
+/// for, and it is silent — every cache hit crosses the network and the corruption shows up as a
+/// build that fails for no reason. `login_env` points `XDG_CACHE_HOME` and the rest at
+/// `HOME_CACHE_DIR` and `~/.local/state` at `HOME_STATE_DIR`, both on the per-(owner, node)
+/// `homecache` subvolume, so this reads them back from inside the pod.
+async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
+    let cache = kloudlite_workspaces::k8s::HOME_CACHE_DIR;
+    let state = kloudlite_workspaces::k8s::HOME_STATE_DIR;
+    // The login shell, so the step reads what a person's terminal reads rather than what an exec
+    // with no profile happens to inherit.
+    let script = format!("printf '%s\\n%s\\n' \"$XDG_CACHE_HOME\" \"$CARGO_TARGET_DIR\"; readlink -f {state} || echo {state}");
+    let (code, out, err) = ws_exec(c, ws, &script, EXEC).await?;
+    if code != 0 {
+        return Err(anyhow!("reading the cache environment exited {code}: {}", err.trim()));
+    }
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    for (what, seen) in [("XDG_CACHE_HOME", lines.first()), ("CARGO_TARGET_DIR", lines.get(1))] {
+        match seen {
+            Some(v) if v.starts_with(cache) => {}
+            other => {
+                return Err(anyhow!("{what} is {other:?}, not under the local cache at {cache}"))
+            }
+        }
+    }
+    match lines.get(2) {
+        Some(v) if v.starts_with(state) || v.contains("local-cache") => Ok(()),
+        other => Err(anyhow!("~/.local/state resolves to {other:?}, not the local {state}")),
+    }
 }
 
 /// The file the two halves of `home.persists` agree on. Under the shared home, and dot-prefixed so
