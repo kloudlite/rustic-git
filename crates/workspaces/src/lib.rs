@@ -12,3 +12,4 @@ pub mod history;
 pub mod registry;
 pub mod replicate;
 pub mod settings;
+pub mod slo;
