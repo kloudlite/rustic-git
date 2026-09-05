@@ -64,7 +64,12 @@ fn the_catalogue_matches_deploy_alerts_md() {
         assert!(md.contains(&format!("**{}**", rule.name)), "{} is not in deploy/alerts.md", rule.name);
         // Every rule must produce SQL for a region without panicking on the substitution.
         let sql = rule.sql_for("westeurope-k3s").expect("a region name is an identifier");
-        assert!(sql.contains("westeurope-k3s"), "{} ignores its region", rule.name);
+        // The SLO rules read OUR tables, whose rows are one fleet-wide journey rather than a
+        // per-region series — scoping them by region could only ever produce an empty window and
+        // a permanent `unknown`, so they are the one kind of rule that ignores it on purpose.
+        if !sql.contains("kloudlite.slo_") {
+            assert!(sql.contains("westeurope-k3s"), "{} ignores its region", rule.name);
+        }
         assert!(sql.to_uppercase().starts_with("SELECT"), "{} is not a SELECT", rule.name);
     }
     // The reverse direction: every bolded alert name in the table has a rule here.
@@ -132,15 +137,25 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         // The web tier reports NUMERIC statuses, not the `class` label the Rust services emit.
         ("WebErrorRate", "otel_metrics_sum", "http_requests_total",
             &["kloudlite-git-web", "toUInt16OrZero(Attributes['status']) >= 500", "route", "total >= 20", "> 0.05"]),
+        // The two SLO rules read our own `kloudlite` tables, not the collector's, and carry the
+        // whole multiwindow decision inside the SQL — see `slo_burn_sql_names_both_pairs`.
+        ("SloBurn", "kloudlite.slo_results", "burning",
+            &["FINAL", "14.4", "countIf(burning = 1) > 0"]),
+        ("SloProbeMissing", "kloudlite.slo_runs", "suite = 'fast'",
+            &["INTERVAL 15 MINUTE", "max(n) = 0"]),
     ];
     assert_eq!(want.len(), CATALOGUE.len(), "every rule must be covered here");
     for (name, table, metric, fragments) in want {
         let rule = CATALOGUE.iter().find(|r| r.name == *name).expect(name);
         let sql = rule.sql_for("eu").expect("a plain region name is an identifier");
-        for f in [&format!("default.{table}")[..], metric].iter().chain(fragments.iter()) {
+        // Our own tables are named in full; a collector table is `default.<name>`.
+        let table = if table.contains('.') { table.to_string() } else { format!("default.{table}") };
+        for f in [&table[..], metric].iter().chain(fragments.iter()) {
             assert!(sql.contains(f), "{name} is missing {f}: {sql}");
         }
-        assert!(rule.for_secs >= 30, "{name} has a sub-bucket for window");
+        // `for_secs: 0` is one bucket in `state_of`, which is what a rule whose window is already
+        // inside its SQL wants — a second `for` on top would only delay it.
+        assert!(rule.for_secs == 0 || rule.for_secs >= 30, "{name} has a sub-bucket for window");
     }
     // Every counter delta is computed inside one series before it is summed: `max - min` across two
     // pods is the spread between two cumulative counters, not an increase.
@@ -188,6 +203,8 @@ fn a_rule_is_evaluated_only_in_its_own_tier() {
         "BlobUnavailable", "BlobLatencyHigh", "BlobThrottled", "HomesUnavailable", "HomesLatencyHigh",
         // The httpcheck receiver and our own dependency/web series are scraped centrally too.
         "ProbeDown", "DependencyErrorRate", "WebErrorRate",
+        // The probe reports one fleet-wide journey to the admin process, which is central.
+        "SloBurn", "SloProbeMissing",
     ] {
         assert!(by(name).applies_to("central"), "{name} is central");
         assert!(!by(name).applies_to("westeurope-k3s"), "{name} must not run in a region");
@@ -300,4 +317,20 @@ async fn current_signals_maps_stored_rows_onto_the_response_shape() {
     // than a panic, since the row is a fact that was recorded and the page must not hide it.
     assert_eq!(rows[1].why, "");
     assert_eq!(rows[1].detail, None);
+}
+
+/// `SloBurn` is ONE rule over every SLO (the evaluator yields one state per rule per region), so
+/// the multiwindow decision — both pairs, both thresholds — has to be in the SQL. `FINAL` is the
+/// other half: a re-sent report is a second row until the parts merge, and counting it twice would
+/// move a burn rate.
+#[test]
+fn slo_burn_sql_names_both_pairs() {
+    let rule = CATALOGUE.iter().find(|r| r.name == "SloBurn").expect("SloBurn");
+    let sql = rule.sql_for("central").expect("central is an identifier");
+    assert!(sql.contains("14.4"), "the fast pair's threshold is missing: {sql}");
+    assert!(sql.contains("> 6"), "the long pair's threshold is missing: {sql}");
+    assert!(sql.contains("kloudlite.slo_results FINAL"), "{sql}");
+    // A window with no samples must never satisfy a threshold: `-1`, not 0, is what "unknown"
+    // reads as in the SQL, exactly as `burn()` answers `None` in Rust.
+    assert!(sql.contains(", -1)"), "an empty window could read as a burn: {sql}");
 }

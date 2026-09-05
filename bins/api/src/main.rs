@@ -177,6 +177,13 @@ async fn main() {
         ("requests_decided_total", Counter, &[("kind", "other"), ("decision", "approved")]),
         ("requests_decided_total", Counter, &[("kind", "other"), ("decision", "denied")]),
             ("history_stream_pending", Gauge, &[]),
+        // The SLO probe's reports and the webhook they can trigger. Both roles register them for
+        // the same reason as the request counters above: one image, one env var choosing a router.
+        ("slo_reports_total", Counter, &[("state", "running")]),
+        ("slo_reports_total", Counter, &[("state", "passed")]),
+        ("slo_reports_total", Counter, &[("state", "failed")]),
+        ("slo_notify_total", Counter, &[("result", "ok")]),
+        ("slo_notify_total", Counter, &[("result", "error")]),
     ]);
     kloudlite_git_core::metrics::register_dependency("blob", kloudlite_git_storage::metered::OPS);
     kloudlite_git_core::metrics::register_dependency("redis", kloudlite_git_storage::cache::OPS);
@@ -269,6 +276,9 @@ async fn run() -> Result<()> {
             let mut state = kloudlite_git_workspaces::api::ApiState::new(jwt);
             // So a new workspace comes up with the owner's platform-issued git key already mounted.
             state = state.with_keys(store.clone());
+            // Optional everywhere: unset means a failed probe run is recorded and shown on the
+            // console, and nobody is messaged (design's Notify row).
+            state = state.with_slo_webhook(std::env::var("KLOUDLITE_GIT_SLO_WEBHOOK").ok());
             if let Some(dir) = directory.clone() {
                 state = state.with_directory(Arc::new(Dir(dir)));
             }

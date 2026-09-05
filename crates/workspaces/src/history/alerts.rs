@@ -608,6 +608,32 @@ pub const CATALOGUE: &[Rule] = &[
             "max(if(total >= 20, bad / total, 0)) > 0.05",
         ),
     },
+    Rule {
+        name: "SloBurn",
+        tier: &[Tier::Central],
+        why: "An SLO is spending its 30-day error budget fast enough to exhaust it: both windows of a pair are over the threshold (14.4× on 1 h/5 m, 6× on 6 h/30 m), which is what makes it a burn rather than a blip. The worst SLO decides; /superadmin/slo says which and what failed.",
+        // The multiwindow rule is inside the SQL, so the evaluator's own `for` window is one
+        // bucket — a second `for` on top would delay a page the burn pair already debounced.
+        for_secs: 0,
+        // Region-free on purpose: the probe's samples are one fleet-wide journey, not a per-region
+        // series, so scoping them by region could only ever produce an empty window and a
+        // permanent `unknown`. Central-only for the same reason.
+        sql: |_region| whole_window(&super::slo::burn_sql(), "countIf(burning = 1) > 0"),
+    },
+    Rule {
+        name: "SloProbeMissing",
+        tier: &[Tier::Central],
+        why: "No fast probe run has finished in fifteen minutes (three schedules). A probe that is stuck, failing to start or unscheduled leaves every SLO silently unknown, so its absence is itself the page.",
+        for_secs: 0,
+        // `count()` over an empty table is one row of 0, so the subquery always has a row and
+        // `whole_window`'s `HAVING count() > 0` never turns "no runs" into `unknown` — a missing
+        // probe must read as firing, which is the entire point of this rule.
+        sql: |_region| whole_window(
+            "SELECT count() AS n FROM kloudlite.slo_runs FINAL \
+             WHERE suite = 'fast' AND finished > now() - INTERVAL 15 MINUTE",
+            "max(n) = 0",
+        ),
+    },
 ];
 
 /// The one decision every rule goes through. `rows` is `[ts, breached]` newest last.
@@ -810,7 +836,19 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
                 };
                 results.push((rule.name, h.query(&sql).await.map_err(|e| e.to_string())));
             }
-            writes.extend(evaluate_once(region, now, &results, &mut last));
+            let new = evaluate_once(region, now, &results, &mut last);
+            // Only the TRANSITION into firing, which is what `evaluate_once` returns at all — a
+            // rule that keeps firing writes nothing and so notifies nobody a second time.
+            if let Some(url) = state.slo_webhook.as_deref() {
+                for row in new.iter().filter(|r| {
+                    r["rule"] == "SloBurn" && r["state"] == "firing"
+                }) {
+                    let detail = row["detail"].as_str().unwrap_or_default();
+                    super::notify::post(url, &super::notify::body("slo.burning", "", "", "", detail))
+                        .await;
+                }
+            }
+            writes.extend(new);
         }
         let wrote = h.insert("alerts", &writes).await;
         if let Err(e) = wrote {

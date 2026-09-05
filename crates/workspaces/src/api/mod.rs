@@ -229,6 +229,10 @@ pub struct ApiState {
     /// wherever the cache is disabled; the consumer then never spawns, which costs the activity
     /// feed its PR half and nothing else (CLAUDE.md: the stream is a nudge, never the record).
     pub cache: Option<Arc<kloudlite_git_storage::cache::Cache>>,
+    /// `KLOUDLITE_GIT_SLO_WEBHOOK`, read once at boot. `None` — the default — means a failed probe
+    /// run and a firing `SloBurn` are recorded and shown on the console like every other fact, and
+    /// nothing is posted anywhere: the webhook is a nudge, never the record.
+    pub slo_webhook: Option<String>,
 }
 
 impl ApiState {
@@ -243,6 +247,7 @@ impl ApiState {
             peer: None,
             history: None,
             cache: None,
+            slo_webhook: None,
         }
     }
 
@@ -278,6 +283,13 @@ impl ApiState {
 
     pub fn with_cache(mut self, cache: Arc<kloudlite_git_storage::cache::Cache>) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    /// An empty value is no webhook: an env var set to "" in a manifest must not become a post to
+    /// the empty url on every failed run.
+    pub fn with_slo_webhook(mut self, url: Option<String>) -> Self {
+        self.slo_webhook = url.filter(|u| !u.trim().is_empty());
         self
     }
 }

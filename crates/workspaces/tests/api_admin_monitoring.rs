@@ -40,6 +40,6 @@ async fn without_clickhouse_the_page_gets_a_503_not_an_error() {
 /// response, and a blank one is a row nobody can act on.
 #[test]
 fn every_catalogue_rule_carries_its_why() {
-    assert_eq!(CATALOGUE.len(), 25);
+    assert_eq!(CATALOGUE.len(), 27);
     assert!(CATALOGUE.iter().all(|r| !r.why.is_empty()));
 }

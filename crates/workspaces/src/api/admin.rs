@@ -19,6 +19,7 @@ pub(crate) mod owners;
 mod overview;
 mod schema;
 mod settings;
+mod slo;
 
 /// One row per successful write, called from the handler's own success path (see the module
 /// doc on `crate::audit` for why this isn't a middleware). Fire-and-forget: audit is evidence,
@@ -180,6 +181,13 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/history/events", get(history::events))
         // AFTER `/admin/history/events`, so the literal path wins over the `{series}` capture.
         .route("/admin/history/{series}", get(history::series))
+        .route("/admin/slo", get(slo::overview))
+        // Before the `{id}` captures below, so the literal paths win.
+        .route("/admin/slo/coverage", get(slo::coverage))
+        .route("/admin/slo/pipeline", get(slo::pipeline))
+        .route("/admin/slo/marker/{run_id}", get(slo::marker))
+        .route("/admin/slo/runs", get(slo::list_runs))
+        .route("/admin/slo/runs/{id}", get(slo::run_detail).put(slo::put_run))
         .route("/admin/audit", get(audit::list_audit))
         .route("/admin/audit.csv", get(audit::audit_csv))
         // The claim check runs BEFORE every route above, not per-handler: `route_layer` wraps only

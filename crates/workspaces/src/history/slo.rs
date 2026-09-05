@@ -266,6 +266,63 @@ fn multi_if(value: impl Fn(&catalogue::Slo) -> String, fallback: &str) -> String
     s
 }
 
+/// The catalogue's latency ceilings as a `multiIf`. `0` is the sentinel for `max_ms: None` — an
+/// availability SLO has no ceiling to miss.
+fn max_ms_expr() -> String {
+    multi_if(|s| s.target.max_ms.unwrap_or(0).to_string(), "0")
+}
+
+/// One window from `windows` as a `multiIf` over the catalogue, so every reader of these windows
+/// (`statuses_sql` and `burn_sql`) compiles the SAME table rather than keeping a second copy of it.
+fn window_expr(pick: fn((u64, u64, u64, u64, u64)) -> u64) -> String {
+    multi_if(move |s| pick(windows(s.suite)).to_string(), "0")
+}
+
+/// `SloBurn`'s inner query: one row per SLO with samples, `[slo_id, burning]`.
+///
+/// The whole multiwindow rule is in the SQL because the evaluator yields ONE state per rule per
+/// region — like `ProbeDown`, where the worst url decides, here the worst SLO does. Both windows of
+/// a pair must exceed the threshold (14.4 on the fast pair, 6 on the long one), which is what stops
+/// a single blip paging; a window with no samples, or a 100 % target with no budget to burn, gets
+/// rate `-1` so it can never satisfy a threshold — the same "no samples is not zero" rule `burn`
+/// holds in Rust.
+pub fn burn_sql() -> String {
+    let max_ms = max_ms_expr();
+    let (long, longc) = (window_expr(|x| x.1), window_expr(|x| x.2));
+    let (short, shortc) = (window_expr(|x| x.3), window_expr(|x| x.4));
+    let budget = multi_if(|s| format!("{:.6}", 1.0 - s.target.good_pct / 100.0), "0");
+    let counts = |w: &str| format!("countIf(in_{w}) AS t_{w}, countIf(in_{w} AND good) AS g_{w}");
+    let rate = |w: &str| {
+        format!("if(t_{w} > 0 AND budget > 0, (t_{w} - g_{w}) / t_{w} / budget, -1) AS r_{w}")
+    };
+    format!(
+        "SELECT slo_id, \
+                toUInt8((r_short > 14.4 AND r_shortc > 14.4) OR (r_long > 6 AND r_longc > 6)) \
+                    AS burning \
+         FROM (SELECT slo_id, {budget} AS budget, {rl}, {rlc}, {rs}, {rsc} FROM (\
+             WITH {max_ms} AS mx, \
+                  {long} AS w_long, {longc} AS w_longc, \
+                  {short} AS w_short, {shortc} AS w_shortc, \
+                  (ok = 1 AND (mx = 0 OR ms <= mx)) AS good, \
+                  (ts > now() - toIntervalSecond(w_long)) AS in_long, \
+                  (ts > now() - toIntervalSecond(w_longc)) AS in_longc, \
+                  (w_short > 0 AND ts > now() - toIntervalSecond(w_short)) AS in_short, \
+                  (w_shortc > 0 AND ts > now() - toIntervalSecond(w_shortc)) AS in_shortc \
+             SELECT slo_id, {cl}, {clc}, {cs}, {csc} \
+             FROM kloudlite.slo_results FINAL \
+             WHERE skipped = 0 AND ts > now() - INTERVAL 400 DAY \
+             GROUP BY slo_id))",
+        cl = counts("long"),
+        clc = counts("longc"),
+        cs = counts("short"),
+        csc = counts("shortc"),
+        rl = rate("long"),
+        rlc = rate("longc"),
+        rs = rate("short"),
+        rsc = rate("shortc"),
+    )
+}
+
 /// The alias list `statuses_sql` selects, in the order `statuses` reads positionally. Named once
 /// so the reader and the statement cannot drift apart silently — a shifted column would move
 /// every attainment on the console without failing anything.
@@ -286,10 +343,8 @@ pub fn statuses_sql() -> String {
         CATALOGUE.iter().all(|s| s.target.max_ms != Some(0)),
         "max_ms: Some(0) collides with the no-ceiling sentinel"
     );
-    let max_ms = multi_if(|s| s.target.max_ms.unwrap_or(0).to_string(), "0");
-    let w = |pick: fn((u64, u64, u64, u64, u64)) -> u64| {
-        multi_if(move |s| pick(windows(s.suite)).to_string(), "0")
-    };
+    let max_ms = max_ms_expr();
+    let w = window_expr;
     // Every per-row expression is hoisted into the WITH clause: each window's `multiIf` over the
     // whole catalogue is long, and it would otherwise appear twice per window in the counts.
     format!(
