@@ -144,7 +144,7 @@ CREATE TABLE kloudlite.slo_runs (
 
 CREATE TABLE kloudlite.slo_results (
   run_id String, slo_id LowCardinality(String), ts DateTime64(3),
-  ok UInt8, ms UInt32, skipped UInt8, detail String, updated DateTime64(3)
+  ok UInt8, ms UInt32, skipped UInt8, detail String, stage LowCardinality(String), updated DateTime64(3)
 ) ENGINE = ReplacingMergeTree(updated) ORDER BY (slo_id, ts, run_id)
   TTL toDateTime(ts) + INTERVAL 400 DAY;
 ```
@@ -155,9 +155,10 @@ collapses. Every reader queries `FINAL`.
 Per SLO over a window: `total = countIf(skipped = 0)`, `good = countIf(ok = 1 AND (max_ms IS
 NULL OR ms <= max_ms))`, `attainment = good / total`, `budget = (1 - good_pct/100) * total`,
 `budget_left = budget - (total - good)`, `burn(w) = ((total_w - good_w) / total_w) /
-(1 - good_pct/100)`. `state` per SLO: `unknown` (no sample in 2 × the suite's period),
-`breaching` (attainment < target over 30 d), `burning` (either burn pair fires, below),
-`ok`.
+(1 - good_pct/100)`. `state` per SLO: `unknown` (no sample in 2 × the suite's period), then `burning` (a burn pair fires, below),
+then `breaching` (attainment < target over 30 d), else `ok` — burning outranks breaching because
+it is the newer fact. `SloStatus` reports `burn_short`/`burn_long` with their window lengths;
+weekly and monthly SLOs have only the long pair.
 
 **`SloBurn`** — multiwindow, multi-burn-rate (Google SRE Workbook ch. 5): fire when
 `burn(1h) > 14.4 AND burn(5m) > 14.4`, or `burn(6h) > 6 AND burn(30m) > 6`, per `slo_id`.
@@ -175,7 +176,7 @@ probe is itself the page. Both write transitions to `kloudlite.alerts` and show 
 | `PUT /admin/slo/runs/{id}` | probe (superadmin claim, like every `/admin/*`) | `RunReport` → 204. Upserts the run row and every step as a result row. Validates `id` as `{suite}-{digits}`, steps ≤ 200, `slo_id` ∈ `CATALOGUE`. On `state: failed` posts the notify line. |
 | `GET /admin/slo` | console | `{ slos: [{ id, feature, sli, target, suite, attainment_30d, budget_left, burn_1h, burn_6h, last: { ts, ok, ms }, state }], running: Run \| null, runs: [Run; ≤20], generated }` |
 | `GET /admin/slo/runs?suite=&limit=` | console | `[Run]`, newest first, ≤100 |
-| `GET /admin/slo/runs/{id}` | console | `Run` plus `steps: [{ slo_id, ok, ms, skipped, detail, ts }]` in probe order |
+| `GET /admin/slo/runs/{id}` | console | `Run` plus `steps: [{ slo_id, stage, ok, ms, skipped, detail, ts }]` in probe order |
 
 `Run` is `{ run_id, suite, region, started, finished, state, stage, steps_total, steps_failed,
 failed_step, failed_detail, duration_ms }`. No ClickHouse → every read is `503 history
