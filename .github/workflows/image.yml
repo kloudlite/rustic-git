@@ -39,7 +39,7 @@ jobs:
       # finds the last run's compiled tests instead of starting cold.
       CARGO_TARGET_DIR: /home/azureuser/ci-target-test
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The VM's own toolchain (rustup in ~/.cargo); the runner service starts with a bare PATH.
       - run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # `--all-targets`: the test targets are gated too, so a lint there is fixed in the PR that
@@ -59,7 +59,7 @@ jobs:
       # `audit-check` above covers advisories only. This adds the three checks a repo with this
       # much crypto surface wants: banned/duplicate crates, licence policy, and source
       # allowlisting. Config lives in deny.toml, next to Cargo.toml.
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
 
@@ -99,7 +99,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: >
           cargo build --release --locked
           --bin kloudlite --bin kloudlite-api --bin kloudlite-worker
@@ -115,7 +115,7 @@ jobs:
               echo "::error::$b needs $need, bookworm-slim ships 2.36"; exit 1
             fi
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bins
           path: |
@@ -143,25 +143,25 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: bins
           path: target/release
       # upload-artifact drops the mode bits and the Dockerfile COPYs the files as they are.
       - run: chmod +x target/release/kloudlite* target/release/kl
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
         with:
           # The classic driver: the VM's own daemon keeps every layer between runs, which is the
           # cache `type=gha` used to stand in for.
           driver: docker
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       # No cache options: the VM's daemon caches every layer locally between runs.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: server
@@ -171,7 +171,7 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite:latest
             ghcr.io/kloudlite/kloudlite:${{ github.sha }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: agent
@@ -180,7 +180,7 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite-agent:latest
             ghcr.io/kloudlite/kloudlite-agent:${{ github.sha }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: gateway
@@ -191,7 +191,7 @@ jobs:
             ghcr.io/kloudlite/kloudlite-gateway:${{ github.sha }}
       # The SLO probe. Same commit as the tier it probes, deliberately: a probe pinned behind the
       # fleet reports the previous release's journey and calls it green.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: slo
@@ -203,7 +203,7 @@ jobs:
       # No binary of ours inside: the default workspace image is alpine plus what sshd and VS
       # Code need. Built here so it is pinned by the same SHA as the agent that renders pods
       # from it.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: workspace
