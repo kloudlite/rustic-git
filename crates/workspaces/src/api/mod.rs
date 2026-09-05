@@ -48,7 +48,9 @@ mod environments;
 mod push;
 pub(crate) mod scope;
 mod volumes;
-mod workloads;
+// `pub`: the SLO probe reads `KNOWN_CENTRAL` so its rollout yield asks about exactly the
+// workloads a roll moves — one list, not a second copy that drifts.
+pub mod workloads;
 mod workspaces;
 
 // The crate's public surface is unchanged by the split: `bins/api` and the tests name

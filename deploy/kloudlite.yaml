@@ -1544,6 +1544,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "delete"]
+  # The fast suite's rollout yield: a run that starts mid-roll measures the roll, not the service,
+  # so it reads `api::workloads::KNOWN_CENTRAL`'s updated/ready against desired and skips every id
+  # rather than filing a sample. Read-only — the probe never rolls anything.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list"]
   # `drill.redis.down` only: the monthly drill writes ONE NetworkPolicy named `slo-drill-redis`
   # that denies the srv and worker pods egress to Redis for five minutes, and deletes it again on
   # every path out of the drill — and every run's teardown deletes it blind as well, in case a

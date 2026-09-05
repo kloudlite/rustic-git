@@ -7,7 +7,10 @@
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
+use kloudlite_workspaces::api::workloads::{Kind, KNOWN_CENTRAL};
 use kloudlite_workspaces::slo::catalogue::{journey, Suite};
+use kube::api::Api;
 
 use crate::ctx::Ctx;
 use crate::stages;
@@ -79,6 +82,11 @@ pub const DEFAULT_BUDGET_SECS: u64 = 780;
 pub const OVER_BUDGET: &str = "run budget exhausted";
 /// The detail on every id a fast run skips because an hourly run is in flight.
 pub const HOURLY_IN_FLIGHT: &str = "an hourly run is in flight";
+/// The detail on every id a fast run skips because the fleet is mid-roll.
+pub const ROLLOUT_IN_FLIGHT: &str = "a rollout is in flight";
+
+/// The namespace every `KNOWN_CENTRAL` workload lives in on AKS.
+const CENTRAL_NS: &str = "kloudlite";
 
 /// Whether the run has spent its wall-clock budget.
 ///
@@ -144,6 +152,77 @@ pub async fn hourly_in_flight(c: &Ctx) -> bool {
     })
 }
 
+/// `(updated, ready, desired)` for a workload, or `None` when it has no status yet.
+///
+/// `None` reads as "not rolling": a status the API server has not filled in is a fact about the
+/// read, not about the fleet, and the probe's default everywhere here is to probe.
+type Counts = Option<(i32, i32, i32)>;
+
+fn deployment_counts(o: &Deployment) -> Counts {
+    let st = o.status.as_ref()?;
+    let desired = o.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+    Some((st.updated_replicas.unwrap_or(0), st.ready_replicas.unwrap_or(0), desired))
+}
+
+fn statefulset_counts(o: &StatefulSet) -> Counts {
+    let st = o.status.as_ref()?;
+    let desired = o.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+    Some((st.updated_replicas.unwrap_or(0), st.ready_replicas.unwrap_or(0), desired))
+}
+
+fn daemonset_counts(o: &DaemonSet) -> Counts {
+    let st = o.status.as_ref()?;
+    Some((st.updated_number_scheduled.unwrap_or(0), st.number_ready, st.desired_number_scheduled))
+}
+
+/// Mid-roll: some pod is not yet on the new template, or not yet ready.
+fn mid_rollout(c: Counts) -> bool {
+    c.is_some_and(|(updated, ready, desired)| updated < desired || ready < desired)
+}
+
+/// Is the fleet mid-roll right now? Asked by the fast suite before it starts anything.
+///
+/// A roll moves DB ownership between pods and restarts every tier in turn; the requests a fast
+/// run makes through it are exactly the ones the deploy work makes survivable, and a sample taken
+/// during one measures the roll rather than the service. So the fast run yields, the same way it
+/// yields to an hourly run — and the hourly, weekly and monthly never do, because their window is
+/// the operator's own choice. `false` on any error: a probe that cannot ask must still probe.
+pub async fn rollout_in_flight(c: &Ctx) -> bool {
+    match rollout_check(c).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "slo.rollout.check.failed");
+            false
+        }
+    }
+}
+
+async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
+    // The EXPLICIT in-cluster client, not `Ctx::kube`: that one follows KUBECONFIG into k3s, where
+    // none of the central tier runs (`drill::incluster`).
+    let aks = crate::drill::incluster()?;
+    for (name, kind) in KNOWN_CENTRAL {
+        let rolling = match kind {
+            Kind::StatefulSet => statefulset_counts(&Api::namespaced(aks.clone(), CENTRAL_NS).get(name).await?),
+            Kind::Deployment => deployment_counts(&Api::<Deployment>::namespaced(aks.clone(), CENTRAL_NS).get(name).await?),
+            Kind::DaemonSet => daemonset_counts(&Api::<DaemonSet>::namespaced(aks.clone(), CENTRAL_NS).get(name).await?),
+        };
+        if mid_rollout(rolling) {
+            tracing::info!(workload = name, "slo.rollout.in_flight");
+            return Ok(true);
+        }
+    }
+    // The region's agent, through the mounted k3s kubeconfig. `None` is a deployment gap, not a
+    // roll — the same rule every other step that needs a kubeconfig follows.
+    let Some(k3s) = &c.kube else { return Ok(false) };
+    let ds = Api::<DaemonSet>::namespaced(k3s.clone(), "kube-system").get("kloudlite-agent").await?;
+    if mid_rollout(daemonset_counts(&ds)) {
+        tracing::info!(workload = "kloudlite-agent", "slo.rollout.in_flight");
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// The child's whole journey: run each stage, hand the parent what it measured, report — and stop
 /// starting stages once the wall-clock budget is spent.
 ///
@@ -151,9 +230,18 @@ pub async fn hourly_in_flight(c: &Ctx) -> bool {
 /// the one path a deployment cannot be asked to reproduce.
 pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
     let stages = suite(kind);
-    if kind == Suite::Fast && hourly_in_flight(c).await {
-        let skipped = skip_remaining_because(c, kind, &stages, HOURLY_IN_FLIGHT);
-        tracing::warn!(skipped, "slo.run.yielded");
+    let yield_to = if kind != Suite::Fast {
+        None
+    } else if hourly_in_flight(c).await {
+        Some(HOURLY_IN_FLIGHT)
+    } else if rollout_in_flight(c).await {
+        Some(ROLLOUT_IN_FLIGHT)
+    } else {
+        None
+    };
+    if let Some(why) = yield_to {
+        let skipped = skip_remaining_because(c, kind, &stages, why);
+        tracing::warn!(skipped, reason = why, "slo.run.yielded");
         hand_over(c);
         let last = c.stage.clone();
         report(c, &last).await;
@@ -246,5 +334,56 @@ mod tests {
         let c = crate::testkit::ctx().await;
         assert!(!over_budget(&c, Duration::from_secs(3600)));
         assert!(over_budget(&c, Duration::ZERO));
+    }
+
+    /// The yield's whole judgement, over the three status shapes a roll actually moves. A status
+    /// the API server has not written yet must read as "not rolling" — otherwise a probe that
+    /// caught a workload mid-create would yield forever.
+    #[test]
+    fn only_a_workload_short_of_desired_is_mid_rollout() {
+        use k8s_openapi::api::apps::v1::{
+            DaemonSetSpec, DaemonSetStatus, DeploymentSpec, DeploymentStatus, StatefulSetSpec, StatefulSetStatus,
+        };
+
+        let deploy = |updated, ready| Deployment {
+            spec: Some(DeploymentSpec { replicas: Some(3), ..Default::default() }),
+            status: Some(DeploymentStatus {
+                updated_replicas: Some(updated),
+                ready_replicas: Some(ready),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(mid_rollout(deployment_counts(&deploy(2, 3))));
+        assert!(mid_rollout(deployment_counts(&deploy(3, 2))));
+        assert!(!mid_rollout(deployment_counts(&deploy(3, 3))));
+        assert!(!mid_rollout(deployment_counts(&Deployment::default())));
+
+        let sts = StatefulSet {
+            spec: Some(StatefulSetSpec { replicas: Some(3), ..Default::default() }),
+            status: Some(StatefulSetStatus {
+                updated_replicas: Some(1),
+                ready_replicas: Some(3),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(mid_rollout(statefulset_counts(&sts)));
+        assert!(!mid_rollout(statefulset_counts(&StatefulSet::default())));
+
+        let ds = |updated, ready| DaemonSet {
+            spec: Some(DaemonSetSpec::default()),
+            status: Some(DaemonSetStatus {
+                desired_number_scheduled: 4,
+                updated_number_scheduled: Some(updated),
+                number_ready: ready,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(mid_rollout(daemonset_counts(&ds(3, 4))));
+        assert!(mid_rollout(daemonset_counts(&ds(4, 3))));
+        assert!(!mid_rollout(daemonset_counts(&ds(4, 4))));
+        assert!(!mid_rollout(daemonset_counts(&DaemonSet::default())));
     }
 }
