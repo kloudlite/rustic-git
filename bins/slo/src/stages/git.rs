@@ -32,8 +32,9 @@ const VISIBLE_CAP: Duration = Duration::from_secs(20);
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Every id after the first push, in order. A precondition that fails skips exactly this list.
-const AFTER_PUSH: [&str; 8] = [
+const AFTER_PUSH: [&str; 10] = [
     "git.push.p95",
+    "git.push.ssh",
     "git.clone.ok",
     "git.clone.p95",
     "ssh.clone.ok",
@@ -41,10 +42,23 @@ const AFTER_PUSH: [&str; 8] = [
     "browse.p95",
     "browse.commit.visible",
     "web.repo.page",
+    "web.repo.settings",
 ];
+
+/// The branch `git.push.ssh` sends. Its own, not `main`: the SSH half must be a push the listener
+/// has to accept on its own terms, and re-pushing an existing ref is a no-op the daemon answers
+/// without ever writing anything.
+const SSH_BRANCH: &str = "slo-ssh";
+
+/// The two page loads that need nothing from this stage. Kept out of `AFTER_PUSH` because a repo
+/// that never pushed does not stop the app's own org and workspaces pages from rendering.
+const WEB_IDS: [&str; 2] = ["web.org.page", "web.workspaces.page"];
 
 pub async fn run(c: &mut Ctx) {
     let name = c.prefix();
+    // First, and independent of everything else here: it makes and takes back its own repo, so a
+    // stage that goes on to fail says nothing about whether a person can create one.
+    lifecycle(c).await;
     if let Err(e) = create(c, &name).await {
         // One reason, on every id the repo was the precondition for.
         let why = format!("no repo: {e:#}");
@@ -56,6 +70,7 @@ pub async fn run(c: &mut Ctx) {
         // The host key is served by the SSH listener whether or not this repo exists, so it is the
         // one step here that still means something.
         hostkey(c).await;
+        web_pages(c).await;
         return;
     }
     c.state.repo = Some(name.clone());
@@ -70,6 +85,7 @@ pub async fn run(c: &mut Ctx) {
         }
         super::identity::tiers(c, &name).await;
         hostkey(c).await;
+        web_pages(c).await;
         return;
     }
 
@@ -88,10 +104,129 @@ pub async fn run(c: &mut Ctx) {
     clone_http(c, &name).await;
     hostkey(c).await;
     ssh_clone(c, &name).await;
+    push_ssh(c, &work, &name).await;
     unregistered_refused(c, &name).await;
     browse(c, &name, head_oid.as_deref()).await;
     web_repo_page(c, &name).await;
+    web_pages(c).await;
     let _ = head_branch_pushed;
+}
+
+/// `repo.lifecycle`: the two verbs every run performs and none asserted.
+///
+/// Its OWN repo, never the journey's: a delete that half-succeeds strands a database, and proving
+/// that on the repo the next eight steps stand on would cost the whole stage its samples. The
+/// re-create is the half that says the slug was actually freed — a delete that dropped the row and
+/// left the handle reserved answers 204 and breaks the next person who wants that name.
+async fn lifecycle(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
+    let name = format!("{}-l", c.prefix());
+    c.step("repo.lifecycle", Duration::from_secs(15), move |c| {
+        let jwt = c.probe_jwt.clone();
+        let repos = api(c, "/v1/repos");
+        let one = api(c, &format!("/v1/repos/{probe}/{name}"));
+        let listing = api(c, &format!("/v1/repos?owner={probe}"));
+        async move {
+            let body = serde_json::json!({ "owner": probe, "name": name, "visibility": "private" });
+            post(c, &repos, &jwt, body.clone()).await.context("could not create the repo")?;
+            if !listed(c, &listing, &jwt, &name).await? {
+                return Err(anyhow!("the repo was created but is not listed"));
+            }
+            super::call(c, reqwest::Method::DELETE, &one, &jwt, None).await.context("could not delete it")?;
+            if listed(c, &listing, &jwt, &name).await? {
+                return Err(anyhow!("the deleted repo is still listed"));
+            }
+            // The slug is free again — the whole reason the delete is worth asserting rather than
+            // assuming. Taken back straight away so the run leaves nothing behind either way.
+            post(c, &repos, &jwt, body).await.context("the deleted repo's slug was not freed")?;
+            super::call(c, reqwest::Method::DELETE, &one, &jwt, None).await.map(|_| ())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// Whether the owner's repo listing carries `name`.
+async fn listed(c: &Ctx, url: &str, jwt: &str, name: &str) -> Result<bool> {
+    let rows = get(c, url, jwt).await.context("could not list the repos")?;
+    Ok(rows
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))))
+}
+
+/// `git.push.ssh`: the other door.
+///
+/// Push over HTTP has three ids and SSH had only a clone, so a broken `git-receive-pack` on the
+/// SSH listener was invisible — the one half of the protocol a person notices immediately. A
+/// branch of its own, from the tree stage 2 already built: the objects are on the server from the
+/// HTTP pushes, so this measures the protocol rather than the bytes a second time.
+async fn push_ssh(c: &mut Ctx, work: &Path, name: &str) {
+    if c.state.key.is_none() {
+        return c.skip("git.push.ssh", "the probe's key was never registered");
+    }
+    let hosts = match known_hosts(c).await {
+        Ok(p) => p,
+        Err(e) => return c.skip("git.push.ssh", &format!("{e:#}")),
+    };
+    let work = work.to_path_buf();
+    let name = name.to_string();
+    c.step("git.push.ssh", Duration::from_secs(40), move |c| {
+        let url = ssh_url(c, &name);
+        let cmd = ssh_command(c, &c.cfg.ssh_key_path.clone(), &hosts);
+        let mut env = git_env(c);
+        env.insert("GIT_SSH_COMMAND".into(), cmd);
+        let git = c.programs.git.clone();
+        let branch = format!("{SSH_BRANCH}-{}", c.run_id);
+        async move {
+            // From the head branch's commit, which stage 2 already made: a `push src:dst` needs no
+            // checkout at all, so this leaves the working tree exactly as the later steps want it.
+            let argv = vec!["push".to_string(), "-q".into(), url, format!("{HEAD_BRANCH}:refs/heads/{branch}")];
+            tools::run(&git, &argv, &env, Some(&work), Duration::from_secs(40)).await.map(|_| ())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `web.org.page` and `web.workspaces.page`: the app's own pages, signed out.
+///
+/// A pod holds the api's signing secret and not `AUTH_SECRET`, so it cannot mint an Auth.js
+/// session cookie — `web.repo.page` gets around that by publishing one repo for the length of the
+/// request, and there is no equivalent for a person's org page or their workspace list. What is
+/// left is still worth an SLO and is what these assert: the route renders, or redirects to the
+/// app's own sign-in, and does neither with a 5xx. A broken shell, a build that did not ship a
+/// route, or an app that cannot reach its api all fail here.
+async fn web_pages(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
+    for (id, path) in [(WEB_IDS[0], format!("/{probe}")), (WEB_IDS[1], "/workspaces".to_string())] {
+        c.step(id, Duration::from_secs(15), move |c| {
+            let url = format!("{}{path}", c.cfg.web_url.trim_end_matches('/'));
+            async move { renders(c, &url, &path).await }.boxed()
+        })
+        .await;
+    }
+}
+
+/// The page answered, and answered as itself or as the sign-in it redirects a stranger to.
+///
+/// The final URL is the assertion that makes this more than "the origin is up": a rewrite that
+/// dropped the route would land on the app's 404 with a 200 from plenty of frameworks, and a
+/// redirect anywhere but `/login` is the app sending people somewhere nobody asked for.
+async fn renders(c: &Ctx, url: &str, path: &str) -> Result<()> {
+    let r = c.http.get(url).send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
+    let status = r.status();
+    let landed = r.url().path().to_string();
+    let body = r.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
+    }
+    if landed != path && !landed.starts_with("/login") {
+        return Err(anyhow!("asking for {path} landed on {landed}"));
+    }
+    if !body.contains("<html") {
+        return Err(anyhow!("the answer is not a rendered page"));
+    }
+    Ok(())
 }
 
 /// Private, and named for the run: private because a public probe repo is a namespace anybody can
@@ -474,6 +609,7 @@ pub(crate) fn oid_of(refs: &serde_json::Value, branch: &str) -> Option<String> {
 /// would report as a passing security check.
 async fn web_repo_page(c: &mut Ctx, name: &str) {
     let probe = c.probe_user.clone();
+    let settings = name.to_string();
     let name = name.to_string();
     c.step("web.repo.page", DEFAULT_TIMEOUT, move |c| {
         let jwt = c.probe_jwt.clone();
@@ -491,6 +627,17 @@ async fn web_repo_page(c: &mut Ctx, name: &str) {
             restored.context("the repo was left PUBLIC")
         }
         .boxed()
+    })
+    .await;
+
+    // The settings page is the one place a person changes a repo, and it is signed-in only — so
+    // it is judged the way the two pages above are, and separately from the read page: they break
+    // for different reasons (a route that did not ship, versus a repo that will not render).
+    let probe = c.probe_user.clone();
+    c.step("web.repo.settings", Duration::from_secs(15), move |c| {
+        let path = format!("/{probe}/{settings}/settings");
+        let url = format!("{}{path}", c.cfg.web_url.trim_end_matches('/'));
+        async move { renders(c, &url, &path).await }.boxed()
     })
     .await;
 }
@@ -525,7 +672,7 @@ mod tests {
 
     /// Every id the stage owns, so a test can assert on the whole set rather than the two it
     /// happened to think of.
-    const IDS: [&str; 10] = [
+    const IDS: [&str; 15] = [
         "git.push.ok",
         "git.push.p95",
         "git.clone.ok",
@@ -536,7 +683,18 @@ mod tests {
         "browse.p95",
         "browse.commit.visible",
         "web.repo.page",
+        "repo.lifecycle",
+        "git.push.ssh",
+        "web.org.page",
+        "web.repo.settings",
+        "web.workspaces.page",
     ];
+
+    /// The three ids that stand on nothing this stage makes: `repo.lifecycle` brings its own
+    /// repo, and the two page loads are the app's own routes. They FAIL against a stub that
+    /// answers nothing — which is right, and which is why they are excluded wherever a test is
+    /// asserting about the ids the journey's repo is a precondition for.
+    const INDEPENDENT: [&str; 3] = ["repo.lifecycle", "web.org.page", "web.workspaces.page"];
 
     fn sample<'a>(c: &'a Ctx, id: &str) -> &'a kloudlite_workspaces::history::slo::StepReport {
         c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("no {id}"))
@@ -555,8 +713,12 @@ mod tests {
 
         run(&mut c).await;
 
-        assert_eq!(c.failed(), 0, "a create failure must not be counted a second time as an SLO");
-        for id in IDS {
+        assert_eq!(
+            c.steps.iter().filter(|s| !INDEPENDENT.contains(&s.slo_id.as_str()) && !s.ok && !s.skipped).count(),
+            0,
+            "a create failure must not be counted a second time as an SLO"
+        );
+        for id in IDS.into_iter().filter(|id| !INDEPENDENT.contains(id)) {
             assert!(sample(&c, id).skipped, "{id} should be skipped, not sampled");
         }
         assert!(c.state.repo.is_none());
@@ -588,7 +750,11 @@ mod tests {
         // One failure among the stage's OWN ids, not one per downstream id. `id.jwt.tiers` also
         // fails here — it dials a git url no test serves — and is a different stage's sample.
         assert_eq!(
-            c.steps.iter().filter(|s| IDS.contains(&s.slo_id.as_str()) && !s.ok && !s.skipped).count(),
+            c.steps
+                .iter()
+                .filter(|s| IDS.contains(&s.slo_id.as_str()) && !INDEPENDENT.contains(&s.slo_id.as_str()))
+                .filter(|s| !s.ok && !s.skipped)
+                .count(),
             1
         );
     }

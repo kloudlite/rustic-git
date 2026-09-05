@@ -38,8 +38,17 @@ const LAYER_BYTES: usize = 1024 * 1024;
 
 /// Every id this stage owns, in journey order. A precondition that fails skips the tail of this
 /// list with one reason — the failure was already counted where it happened.
-const AFTER_PUSH: [&str; 4] =
-    ["reg.manifest.p95", "reg.tags.visible", "reg.shared.layer", "reg.visibility"];
+const AFTER_PUSH: [&str; 6] = [
+    "reg.manifest.p95",
+    "reg.tags.visible",
+    "reg.shared.layer",
+    "reg.visibility",
+    "reg.catalogue",
+    "reg.image.delete",
+];
+
+const CATALOGUE_CEILING: Duration = Duration::from_secs(5);
+const DELETE_CEILING: Duration = Duration::from_secs(15);
 
 pub async fn run(c: &mut Ctx) {
     // Every id here needs the personal token, the canary included: `slo-probe/canary` is PRIVATE
@@ -63,6 +72,9 @@ pub async fn run(c: &mut Ctx) {
             tags(c, &secret, &a).await;
             shared_layer(c, &secret, &a, &b, &layer).await;
             visibility(c, &a).await;
+            catalogue(c).await;
+            // Last, because it takes image A away: everything above reads it.
+            image_delete(c, &secret, &a).await;
         }
         Err(e) => {
             let why = format!("nothing was pushed: {e:#}");
@@ -254,6 +266,95 @@ async fn visibility(c: &mut Ctx, image: &str) {
         .boxed()
     })
     .await;
+}
+
+/// `reg.catalogue`: the owner's image listing names what this run pushed.
+///
+/// `/api/{owner}/images` is one of the two handlers deliberately served on ANY node (it reads only
+/// the shared object store), so it is where a routing regression shows before anything a person
+/// would notice — and it is a different code path from the `_catalog` half `reg.tags.visible`
+/// already polls, which is the registry's own listing rather than the browse API's.
+async fn catalogue(c: &mut Ctx) {
+    let probe = c.probe_user.clone();
+    let want = format!("{}-a", c.prefix());
+    c.step("reg.catalogue", CATALOGUE_CEILING + Duration::from_secs(5), move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, &format!("/api/{probe}/images"));
+        async move {
+            poll_json(c, &url, &jwt, CATALOGUE_CEILING, |v| {
+                v.as_array().is_some_and(|rows| {
+                    rows.iter().any(|r| r.get("name").and_then(|n| n.as_str()) == Some(want.as_str()))
+                })
+            })
+            .await
+            .context("the pushed image never appeared in the owner's catalogue")
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `reg.image.delete`: the destructive half of the one feature whose push and pull are probed six
+/// ways over.
+///
+/// The tag first and the image second, in one step, because they are one SLI: a registry that
+/// dropped the tag row and kept the image is as broken as one that did neither, and each verb
+/// alone says nothing about the other. Both are asserted on the READ that follows — a 204 from a
+/// delete that wrote nothing is precisely the failure worth catching.
+async fn image_delete(c: &mut Ctx, secret: &str, image: &str) {
+    let probe = c.probe_user.clone();
+    let bearer = match bearer(c, Some(secret), &pull_scope(c, image)).await {
+        Ok(t) => t,
+        Err(e) => return c.skip("reg.image.delete", &format!("no registry token: {e:#}")),
+    };
+    let image = image.to_string();
+    c.step("reg.image.delete", DELETE_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let tags_url = format!("{}/v2/{probe}/{image}/tags/list", base(c));
+        let del_tag = api(c, &format!("/api/{probe}/{image}/imagetagdelete"));
+        let del_image = api(c, &format!("/api/{probe}/{image}/imagedelete"));
+        let listing = api(c, &format!("/api/{probe}/images"));
+        async move {
+            // The tag rides in the BODY as plain text — `imagetagdelete` reads
+            // `String::from_utf8_lossy(&body)` — so this is the one call here that cannot go
+            // through `post`, which would send it as a JSON string with its quotes.
+            delete_tag(c, &del_tag, &jwt, "latest").await.context("could not delete the tag")?;
+            let tags = super::raw(c, reqwest::Method::GET, &tags_url, &bearer, None, &[]).await?;
+            if has(&serde_json::from_str(&tags.1).unwrap_or(serde_json::Value::Null), "tags", "latest") {
+                return Err(anyhow!("the tag is still in the tag list after the delete"));
+            }
+            post(c, &del_image, &jwt, serde_json::Value::Null).await.context("could not delete the image")?;
+            let rows = super::get(c, &listing, &jwt).await.context("could not read the catalogue")?;
+            let still = rows.as_array().is_some_and(|rows| {
+                rows.iter().any(|r| r.get("name").and_then(|n| n.as_str()) == Some(image.as_str()))
+            });
+            if still {
+                return Err(anyhow!("the image is still in the catalogue after the delete"));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// One `imagetagdelete`, whose body is the bare tag rather than JSON.
+async fn delete_tag(c: &Ctx, url: &str, jwt: &str, tag: &str) -> Result<()> {
+    let r = c
+        .http
+        .post(url)
+        .header("authorization", c.bearer(jwt))
+        .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .body(tag.to_string())
+        .send()
+        .await
+        // `without_url`: the module's rule, not the caller's — see `bearer`.
+        .map_err(|e| anyhow!("{}", e.without_url()))?;
+    let status = r.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    Err(anyhow!("{status}: {}", r.text().await.unwrap_or_default().chars().take(200).collect::<String>()))
 }
 
 /// `reg.canary`: the long-lived image `bootstrap` pushed still pulls, and is still the same image.

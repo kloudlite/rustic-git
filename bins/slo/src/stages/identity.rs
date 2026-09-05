@@ -69,6 +69,69 @@ pub async fn run(c: &mut Ctx) {
 
     key(c, &name).await;
     cli_flow(c, &name).await;
+    passkey(c, &name).await;
+}
+
+/// `id.signin.passkey`: the half of a passkey sign-in this tier actually owns.
+///
+/// NOT the WebAuthn ceremony: the relying-party identity and the challenge live in the web app
+/// (`crates/api/src/passkeys.rs`'s own header says so), and the api holds no verifier — there is
+/// nothing a pod could sign an assertion against. What a sign-in DOES ask this tier is "whose
+/// credential is this", off a row somebody registered, so that is what is measured: the row goes
+/// in, is listed back, the lookup a sign-in makes stays peer-only, and the row comes out again.
+///
+/// The credential is synthetic and is deleted inside the step. A passkey the probe left behind is
+/// a standing sign-in credential for the probe's account that nobody holds the private half of —
+/// harmless, and exactly the kind of thing that should not accumulate one per five minutes.
+async fn passkey(c: &mut Ctx, name: &str) {
+    let name = name.to_string();
+    c.step("id.signin.passkey", Duration::from_secs(15), move |c| {
+        let jwt = c.probe_jwt.clone();
+        let base = api(c, "/v1/passkeys");
+        let lookup = api(c, "/v1/passkeys/lookup");
+        // The credential id a browser would hand over is opaque base64url; the run id makes this
+        // one unique per run, so two overlapping runs never collide on the 409 path.
+        let id = format!("slo-{}", c.run_id);
+        async move {
+            let body = serde_json::json!({
+                "id": id,
+                "publicKey": "slo-probe-synthetic-public-key",
+                "name": name,
+            });
+            let out = post(c, &base, &jwt, body).await.context("could not register the passkey");
+            // Deleted whatever the rest of the step said, and before the step can return: a
+            // registration nobody takes back is a sign-in credential left on the account.
+            let forget = || async {
+                super::call(c, reqwest::Method::DELETE, &format!("{base}/{id}"), &jwt, None)
+                    .await
+                    .map(|_| ())
+                    .context("the synthetic passkey was left REGISTERED")
+            };
+            let checks = async {
+                out?;
+                let listed = get(c, &base, &jwt).await.context("could not list the passkeys")?;
+                let there = listed.as_array().is_some_and(|rows| {
+                    rows.iter().any(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+                });
+                if !there {
+                    return Err(anyhow!("the passkey was accepted but is not listed"));
+                }
+                // The one route a sign-in calls before it knows who is signing in. A session must
+                // never be enough — a credential id maps to somebody's email and public key — so
+                // this JWT being refused IS the SLI's second half.
+                let body = serde_json::json!({ "id": id });
+                let (status, _) =
+                    super::raw(c, reqwest::Method::POST, &lookup, &jwt, Some(body), &[]).await?;
+                match status.as_u16() {
+                    401 | 403 => Ok(()),
+                    other => Err(anyhow!("the passkey lookup answered {other} to a session token")),
+                }
+            };
+            crate::drill::undoing(Duration::from_secs(10), checks, forget).await
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// Register the public half of the mounted key and confirm the directory lists it.

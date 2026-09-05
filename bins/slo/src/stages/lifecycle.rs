@@ -53,9 +53,126 @@ const IDS: [&str; 7] = [
 /// environment, not on stage 5's workspace: one half being absent must not cost the other its ids.
 const ENV_IDS: [&str; 4] = ["env.stop.p95", "env.replicated", "env.start.p95", "env.restore"];
 
+/// The two delete verbs, last: they take the objects the halves above measured, so nothing runs
+/// after them that could want one back.
+const DELETE_IDS: [&str; 2] = ["wt.delete", "snap.delete"];
+
+const DELETE_CEILING: Duration = Duration::from_secs(45);
+const SNAP_DELETE_CEILING: Duration = Duration::from_secs(25);
+
 pub async fn run(c: &mut Ctx) {
     workspace_half(c).await;
     environment_half(c).await;
+    deletes(c).await;
+}
+
+/// `wt.delete` and `snap.delete`: the two verbs a person uses to take something away, and the
+/// reference-counting rule that decides what survives them.
+///
+/// Both stand on the ENVIRONMENT, which by now is the last thing this run holds that has a volume
+/// with a snapshot on it — the workspace half's `orphan_collected` has already collected the
+/// workspace's. That is also why they run here rather than in either half: they are the end of the
+/// stage by construction, and there is nothing left to measure afterwards.
+async fn deletes(c: &mut Ctx) {
+    let (Some(env), Some(volume)) = (c.state.environment.clone(), c.state.env_volume.clone()) else {
+        for id in DELETE_IDS {
+            c.skip(id, "no environment");
+        }
+        return;
+    };
+    let Some(snapshot) = c.state.env_snapshot.clone() else {
+        for id in DELETE_IDS {
+            c.skip(id, "the environment was never pushed");
+        }
+        return;
+    };
+    if !wt_delete(c, &env, &volume, &c.state.clone.clone()).await {
+        return c.skip("snap.delete", "the environment's worktree never went");
+    }
+    snap_delete(c, &volume, &snapshot).await;
+}
+
+/// `wt.delete`: `cleanup_parent`'s detach-or-keep rule, both directions.
+///
+/// One step, because either direction alone is worthless: a finalizer that ALWAYS detached would
+/// pass the "collected" half, and one that never did would pass the "survives" half. The two
+/// subjects are the ones this run already holds — the workspace clone, which was never pushed and
+/// whose Volume must therefore go with it, and the environment, whose push must keep its Volume
+/// standing detached. A lost detach here is bytes nothing on any tier can find again.
+async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>) -> bool {
+    let (env, volume, clone) = (env.to_string(), volume.to_string(), clone.clone());
+    c.step("wt.delete", DELETE_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let env_url = api(c, &format!("/v1/environments/{env}"));
+        let vol_url = api(c, &format!("/v1/volumes/{volume}"));
+        async move {
+            // The workspace direction: the clone was never pushed, so nothing references its
+            // Volume once the working copy is gone and Kubernetes GC must take it. The clone's own
+            // Volume carries the clone's id, exactly as a fresh workspace's does.
+            if let Some(clone) = clone {
+                let ws = api(c, &format!("/v1/workspaces/{clone}"));
+                // Already gone is the state this half wants, and `detached_restorable` may well
+                // have taken it: a 404 from the delete is not a failure.
+                let _ = super::call(c, reqwest::Method::DELETE, &ws, &jwt, None).await;
+                gone(c, &ws, &jwt, DELETE_CEILING, "the clone's worktree").await?;
+                gone(c, &api(c, &format!("/v1/volumes/{clone}")), &jwt, DELETE_CEILING, "the clone's volume with no snapshot")
+                    .await?;
+            }
+            // The environment direction: a snapshot still references the Volume, so the worktree
+            // goes and the Volume stays — detached, with its history readable.
+            super::call(c, reqwest::Method::DELETE, &env_url, &jwt, None)
+                .await
+                .context("could not delete the environment")?;
+            gone(c, &env_url, &jwt, DELETE_CEILING, "the environment's worktree").await?;
+            get(c, &vol_url, &jwt)
+                .await
+                .context("the volume was taken with the environment even though a snapshot remains")
+                .map(|_| ())
+        }
+        .boxed()
+    })
+    .await
+}
+
+/// `snap.delete`: the ACCEPTED delete, and the rule at the end of it.
+///
+/// `vol.refusals` probes only the three deletes that must be REFUSED, so the path a person
+/// actually walks was never measured. Both halves of the SLI in one step because they are one
+/// fact: this is the environment volume's last snapshot on a volume `wt.delete` just detached, so
+/// removing it must take the snapshot out of history AND take the volume with it.
+async fn snap_delete(c: &mut Ctx, volume: &str, snapshot: &str) {
+    let (volume, snapshot) = (volume.to_string(), snapshot.to_string());
+    c.step("snap.delete", SNAP_DELETE_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let vol = api(c, &format!("/v1/volumes/{volume}"));
+        let one = api(c, &format!("/v1/volumes/{volume}/snapshots/{snapshot}"));
+        async move {
+            super::call(c, reqwest::Method::DELETE, &one, &jwt, None)
+                .await
+                .context("could not delete the snapshot")?;
+            // The volume goes with its last snapshot, so its history is a 404 rather than an
+            // empty list — which is why "gone" is asked of the volume and not of the listing.
+            gone(c, &vol, &jwt, SNAP_DELETE_CEILING, "the detached volume's last snapshot").await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// Poll `url` until it 404s. The deletes above are all wishes — a finalizer drops the worktree
+/// afterwards — so "it is gone" is a wait, never a read.
+async fn gone(c: &Ctx, url: &str, jwt: &str, cap: Duration, what: &str) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        let (status, _) = raw(c, reqwest::Method::GET, url, jwt, None, &[]).await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("{what} still answers {status} after {} ms", cap.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 async fn workspace_half(c: &mut Ctx) {
@@ -233,11 +350,38 @@ async fn replicated(c: &mut Ctx, ws: &str) {
                 v.pointer("/replicated/ready").and_then(Value::as_bool) == Some(true)
             })
             .await
-            .context("no other node reported holding the final sync point")
+            .context("no other node reported holding the final sync point")?;
+            // The condition is the owner's own summary; this is the peer's. `may_claim` reads
+            // `VolumeReplica.status.branches[worktree]` and starts the workspace elsewhere only
+            // when it names that worktree's newest Ready transient — so a condition that flipped
+            // while no replica names the cut is a workspace that cannot actually move, which is
+            // the whole thing this SLO exists to promise.
+            named_by_a_replica(c, &ws).await
         }
         .boxed()
     })
     .await;
+}
+
+/// A `VolumeReplica` on some OTHER node names this worktree's cut by name.
+///
+/// Without a kubeconfig there is nothing to read — a deployment gap, not a breach — so the
+/// condition the step already checked stands alone and this adds nothing.
+async fn named_by_a_replica(c: &Ctx, ws: &str) -> Result<()> {
+    let Some(k) = c.kube.as_ref() else { return Ok(()) };
+    let api: kube::Api<crd::VolumeReplica> = kube::Api::all(k.clone());
+    let list = api
+        .list(&kube::api::ListParams::default())
+        .await
+        .context("could not list the volume replicas")?;
+    let named = list.items.iter().any(|r| {
+        r.status
+            .as_ref()
+            .is_some_and(|s| s.branches.get(ws).is_some_and(|cut| !cut.is_empty()))
+    });
+    named
+        .then_some(())
+        .ok_or_else(|| anyhow!("`Replicated` is true but no VolumeReplica names {ws}'s cut"))
 }
 
 async fn start(c: &mut Ctx, ws: &str) {
@@ -415,6 +559,12 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
                     let url = api(c, &format!("/v1/volumes/{volume}/snapshots/{id}"));
                     let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
                 }
+                // `retire_pass` deletes a Volume with no owner entry AND no snapshot, so the
+                // detach is the half that has to happen first — a Volume that still lists its
+                // parent as an owner and vanished anyway went for some other reason, and a lost
+                // detach is an error rather than a completed finalizer. Read before the wait so a
+                // still-owned Volume is named as that rather than as a slow sweep.
+                still_owned(&k, &volume).await?;
                 let left = ORPHAN_CEILING.saturating_sub(start.elapsed());
                 if crate::kube::wait_for::<crd::Volume>(&k, &volume, left.min(Duration::from_secs(5)), |v| v.is_none())
                     .await
@@ -430,6 +580,19 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
         .boxed()
     })
     .await;
+}
+
+/// Whether the Volume still lists a parent as an owner. `Ok` means it does not — either because
+/// the finalizer detached it, or because it is already gone, which is the state the caller is
+/// waiting for anyway. A Volume that is still owned is not yet a candidate for `retire_pass` and
+/// is reported as that, so a sweep that took an OWNED volume cannot pass as a collection.
+async fn still_owned(k: &kube::Client, volume: &str) -> Result<()> {
+    let api: kube::Api<crd::Volume> = kube::Api::all(k.clone());
+    let Ok(Some(v)) = api.get_opt(volume).await else { return Ok(()) };
+    match v.metadata.owner_references.as_ref().map_or(0, Vec::len) {
+        0 => Ok(()),
+        n => Err(anyhow!("the Volume still lists {n} owner(s): the finalizer has not detached it")),
+    }
 }
 
 /// Every workspace THIS RUN created, by name prefix — the same contract teardown sweeps on.
@@ -473,7 +636,7 @@ mod tests {
     async fn lifecycle_skips_when_no_workspace_in_state() {
         let mut c = crate::testkit::ctx().await;
         run(&mut c).await;
-        assert_eq!(c.steps.len(), IDS.len() + ENV_IDS.len());
+        assert_eq!(c.steps.len(), IDS.len() + ENV_IDS.len() + DELETE_IDS.len());
         for id in IDS {
             let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no workspace", "{s:?}");
@@ -481,6 +644,12 @@ mod tests {
         // The two halves are independent: no environment costs the env ids nothing but their own
         // reason, and every id in the stage is still produced exactly once.
         for id in ENV_IDS {
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
+            assert!(s.skipped && s.detail == "no environment", "{s:?}");
+        }
+        // The two delete ids stand on the environment like the four above them, and skip with
+        // their own reason rather than the workspace half's.
+        for id in DELETE_IDS {
             let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no environment", "{s:?}");
         }

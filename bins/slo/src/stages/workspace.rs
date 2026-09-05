@@ -27,7 +27,12 @@ const EXEC_CEILING: Duration = Duration::from_secs(20);
 const TUNNEL_CEILING: Duration = Duration::from_secs(20);
 const PUSH_CEILING: Duration = Duration::from_secs(60);
 const CLONE_CEILING: Duration = Duration::from_secs(60);
+/// The body's own cap plus `UNDO_SLACK`: `env.quota.refused` brings the probe's quota DOWN and
+/// must put it back, and `Ctx::step`'s timeout drops the whole future, undo included.
+const QUOTA_BODY: Duration = Duration::from_secs(15);
 const QUOTA_CEILING: Duration = Duration::from_secs(20);
+const ENV_QUOTA_CEILING: Duration =
+    Duration::from_secs(QUOTA_BODY.as_secs() + crate::drill::UNDO_SLACK);
 
 /// The disk a probe workspace asks for, well inside `Quota/slo-probe`'s `diskGb`.
 const QUOTA_GB: u64 = 1;
@@ -38,7 +43,7 @@ const QUOTA_GB: u64 = 1;
 pub(crate) const WS_CONTAINER: &str = "workspace";
 
 /// Every id this stage owns after the create, in journey order.
-const AFTER_CREATE: [&str; 7] = [
+const AFTER_CREATE: [&str; 8] = [
     "ws.exec.ok",
     "homes.rw.p95",
     "gw.tunnel.p95",
@@ -46,7 +51,15 @@ const AFTER_CREATE: [&str; 7] = [
     "ws.push.p95",
     "ws.clone.p95",
     "quota.refused",
+    "env.quota.refused",
 ];
+
+/// The sentence `quota::refuse` builds, minus the dimension and the numbers: every refusal from
+/// the single gate carries it, and a 409 that does not is some other conflict wearing the same
+/// status. Repeated rather than imported — `kloudlite-workspaces` is a dependency, but the text is
+/// the CONTRACT with a person reading it, and a test that could be satisfied by importing the
+/// constant would not notice it being reworded.
+const REFUSAL_TAIL: &str = "in use; request more under Quota";
 
 pub async fn run(c: &mut Ctx) {
     let created = create(c).await;
@@ -74,6 +87,7 @@ pub async fn run(c: &mut Ctx) {
     push(c, &id).await;
     clone(c, &id).await;
     quota_refused(c).await;
+    env_quota_refused(c, &id).await;
 }
 
 /// `ws.create.p95`: the create AND the wait for `ready`, because "creating a workspace completes"
@@ -118,8 +132,13 @@ fn state_is(v: &Value, want: &str) -> bool {
     v.get("state").and_then(Value::as_str) == Some(want)
 }
 
-/// `ws.exec.ok`: a command inside the running pod. The smallest thing that proves the pod is a
-/// place a person can work in rather than an object that reports `ready`.
+/// `ws.exec.ok`: a command inside the running pod, its OUTPUT, and the pod's home.
+///
+/// A channel that opened proves nothing a person can use, and neither does an echo on its own: a
+/// pod started before its node's NFS mount was up hostPaths an empty local directory and silently
+/// strands the owner's dotfiles (`apply_workspace` parks a workspace in `HomeNotReady` to stop
+/// exactly that, and this is the id that would notice if it ever stopped). So the script prints a
+/// word AND the filesystem `/home/kl` is on, and the step judges both.
 async fn exec_ok(c: &mut Ctx, id: &str) {
     if c.kube.is_none() {
         return c.skip("ws.exec.ok", "no kubeconfig");
@@ -127,15 +146,45 @@ async fn exec_ok(c: &mut Ctx, id: &str) {
     let id = id.to_string();
     c.step("ws.exec.ok", EXEC_CEILING, move |c| {
         async move {
-            let (code, out, err) = ws_exec(c, &id, "echo slo", EXEC_CEILING).await?;
-            if code != 0 || out.trim() != "slo" {
+            let (code, out, err) = ws_exec(c, &id, EXEC_SCRIPT, EXEC_CEILING).await?;
+            if code != 0 {
                 return Err(anyhow!("exec exited {code}: {}", err.trim()));
             }
-            Ok(())
+            home_is_shared(&out)
         }
         .boxed()
     })
     .await;
+}
+
+/// Echo a word, then say what `/home/kl` actually is.
+///
+/// `stat -f -c %T` names the filesystem type and is in both coreutils and busybox; the
+/// `/proc/mounts` line is the fallback and the more precise answer, since a bind of a local
+/// directory and the NFS export are different lines there whatever `stat` decides to call them.
+const EXEC_SCRIPT: &str = r#"echo slo
+stat -f -c %T /home/kl 2>/dev/null || true
+awk '$2 == "/home/kl" { print $3 }' /proc/mounts 2>/dev/null || true"#;
+
+/// The exec said `slo`, and its home is the shared export rather than an empty local directory.
+///
+/// A pure function so the one judgement this id turns on is testable without a cluster. NFS is the
+/// only accepted answer: `mount_homes` mounts `{pool}/homes` over NFS 4.1 on every node, so
+/// anything else under `/home/kl` — an overlay, a tmpfs, a local btrfs subvolume — is the pod
+/// having come up before its node's mount and hostPathing an empty directory.
+fn home_is_shared(out: &str) -> Result<()> {
+    let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
+    if lines.next() != Some("slo") {
+        return Err(anyhow!("the exec printed {:?}, not its command's output", out.trim()));
+    }
+    let rest: Vec<&str> = lines.collect();
+    if rest.is_empty() {
+        return Err(anyhow!("the pod could not say what /home/kl is"));
+    }
+    if rest.iter().any(|l| l.contains("nfs")) {
+        return Ok(());
+    }
+    Err(anyhow!("/home/kl is {rest:?}, not the shared NFS export"))
 }
 
 /// `homes.rw.p95`: write, `sync`, read back on the shared NFS home, timed INSIDE the pod.
@@ -400,17 +449,114 @@ async fn quota_refused(c: &mut Ctx) {
             "quota_gb": u32::MAX,
             "packages": [],
         });
+        async move { refused_over(c, reqwest::Method::POST, &url, &jwt, Some(body), "diskGb", "a create").await }
+            .boxed()
+    })
+    .await;
+}
+
+/// One request that must be refused by `guard_alloc`, with the SENTENCE checked.
+///
+/// The status alone is not the SLI: `quota::refuse` answers `"{dimension}: {used} of {limit} in
+/// use; request more under Quota"`, and a 409 naming the wrong dimension — or a 409 from some
+/// other conflict entirely, which is what every other refusal on these routes is — would pass a
+/// check that only read the number. `dim` is the dimension the caller deliberately overshot.
+async fn refused_over(
+    c: &Ctx,
+    method: reqwest::Method,
+    url: &str,
+    jwt: &str,
+    body: Option<Value>,
+    dim: &str,
+    what: &str,
+) -> Result<()> {
+    let (status, text) = raw(c, method, url, jwt, body, &[]).await?;
+    let clipped: String = text.chars().take(200).collect();
+    if status != reqwest::StatusCode::CONFLICT {
+        return Err(anyhow!("an over-quota {what} answered {status}: {clipped}"));
+    }
+    if !text.starts_with(&format!("{dim}: ")) || !text.contains(REFUSAL_TAIL) {
+        return Err(anyhow!("the refusal of {what} does not name {dim} and its usage: {clipped}"));
+    }
+    Ok(())
+}
+
+/// `env.quota.refused`: the OTHER three verbs behind the one gate.
+///
+/// `quota.refused` above probes a create; restore, clone and push all route through the same
+/// `guard_alloc`, and a gate wired into one of four call sites is a gate that hands out
+/// allocation nobody decided on through the other three. All three in one step, first failure
+/// wins — each alone says nothing about the others.
+///
+/// The dimensions differ on purpose and are what each verb actually overshoots: a restore names
+/// its own disk, while a clone and a push cannot ask for a size at all, so they are refused on the
+/// count dimension the run is already at. The clone and the push are aimed at THIS run's own
+/// workspace, so nothing new is allocated even on the path where the gate fails open.
+async fn env_quota_refused(c: &mut Ctx, ws: &str) {
+    let ws = ws.to_string();
+    c.step("env.quota.refused", ENV_QUOTA_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let restore = api(c, "/v1/workspaces/restore");
+        let clone = api(c, &format!("/v1/workspaces/{ws}/clone"));
+        let push = api(c, &format!("/v1/workspaces/{ws}/push"));
+        let snapshot = c.state.snapshot.clone();
+        let name = format!("{}-overq", c.prefix());
         async move {
-            let (status, text) =
-                raw(c, reqwest::Method::POST, &url, &jwt, Some(body), &[]).await?;
-            if status == reqwest::StatusCode::CONFLICT {
-                return Ok(());
-            }
-            Err(anyhow!("an over-quota create answered {status}: {}", text.chars().take(200).collect::<String>()))
+            let Some(snapshot) = snapshot else {
+                return Err(anyhow!("the workspace was never pushed, so there is nothing to restore"));
+            };
+            // A restore carries a size, so it is refused the same way a create is.
+            let body = serde_json::json!({ "name": name, "snapshot_id": snapshot, "quota_gb": u32::MAX });
+            refused_over(c, reqwest::Method::POST, &restore, &jwt, Some(body), "diskGb", "a restore").await?;
+            // A clone and a push carry no size at all, so neither can be made to overshoot by
+            // asking for more — the only way to stand them against the gate is to bring the LIMIT
+            // down to what the run already holds. Not the second tenant's zero quota: `may_act_on`
+            // refuses another owner's workspace long before `guard_alloc` is reached, so that
+            // would measure ownership and call it quota.
+            let admin_jwt = c.admin_jwt.clone();
+            let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
+            let body = serde_json::json!({ "spec": pinched(c, &jwt).await?, "note": "slo probe quota.refused" });
+            super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(body))
+                .await
+                .context("could not bring the quota down to what the run holds")?;
+            // Outside the cancellable region, exactly as `request.approve`'s raise is: a probe
+            // that left the quota PINCHED would refuse its own next run's every create.
+            let restore_quota = || async {
+                let back = serde_json::json!({
+                    "spec": super::experience_admin::probe_quota(),
+                    "note": "slo probe quota restore",
+                });
+                super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(back))
+                    .await
+                    .map(|_| ())
+                    .context("the probe's quota was left PINCHED")
+            };
+            let both = async {
+                refused_over(c, reqwest::Method::POST, &clone, &jwt, Some(serde_json::json!({ "name": name })), "workspaces", "a clone").await?;
+                refused_over(c, reqwest::Method::POST, &push, &jwt, Some(serde_json::json!({})), "snapshots", "a push").await
+            };
+            crate::drill::undoing(QUOTA_BODY, both, restore_quota).await
         }
         .boxed()
     })
     .await;
+}
+
+/// The yaml's quota with the two COUNT dimensions brought down to what this run already holds, so
+/// the next clone and the next push are each one over. Everything else is left as the yaml has it
+/// — a probe that pinched disk as well would refuse things the rest of the stage still needs.
+async fn pinched(c: &Ctx, jwt: &str) -> Result<Value> {
+    let seen = super::get(c, &api(c, "/v1/quota"), jwt).await.context("could not read the quota")?;
+    let used = |dim: &str| seen.pointer(&format!("/used/{dim}")).and_then(Value::as_u64);
+    let (ws, snaps) = (used("workspaces"), used("snapshots"));
+    let (Some(ws), Some(snaps)) = (ws, snaps) else {
+        return Err(anyhow!("the quota answer carries no live counts to pinch against"));
+    };
+    let mut spec = super::experience_admin::probe_quota();
+    let o = spec.as_object_mut().ok_or_else(|| anyhow!("the quota spec is not an object"))?;
+    o.insert("workspaces".into(), ws.into());
+    o.insert("snapshots".into(), snaps.into());
+    Ok(spec)
 }
 
 #[cfg(test)]
@@ -433,6 +579,25 @@ mod tests {
         assert!(args.iter().any(|a| a == "StrictHostKeyChecking=no"), "{args:?}");
         let env = session_env(r#"{"id":"ws-abc"}"#);
         assert_eq!(env.get("KL_SSH_SESSION").map(String::as_str), Some(r#"{"id":"ws-abc"}"#));
+    }
+
+    /// The one judgement `ws.exec.ok` turns on. A pod that came up before its node's NFS mount
+    /// hostPaths an empty local directory and loses the owner's dotfiles silently — an id that
+    /// only checked the echo would pass straight through it.
+    #[test]
+    fn the_exec_check_wants_the_output_and_a_shared_home() {
+        assert!(home_is_shared("slo\nnfs\nnfs4\n").is_ok());
+        assert!(home_is_shared("slo\nnfs4\n").is_ok());
+        // The failure this exists for: a local filesystem under /home/kl.
+        assert!(home_is_shared("slo\nbtrfs\n").is_err());
+        assert!(home_is_shared("slo\noverlay\n").is_err());
+        // And the ordinary weak check: an exec that connected and said nothing useful.
+        assert!(home_is_shared("").is_err());
+        assert!(home_is_shared("slo\n").is_err());
+        assert!(home_is_shared("nfs\n").is_err());
+        // The script asks the two questions in that order.
+        assert!(EXEC_SCRIPT.starts_with("echo slo"), "{EXEC_SCRIPT}");
+        assert!(EXEC_SCRIPT.contains("/proc/mounts"), "{EXEC_SCRIPT}");
     }
 
     /// The read-back comparison is the whole point: an export that took the write and handed back

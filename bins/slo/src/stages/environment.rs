@@ -204,7 +204,7 @@ async fn dns(c: &mut Ctx, env: &str) {
         async move {
             match resolves(c, &env, DNS_CEILING).await? {
                 true => Ok(()),
-                false => Err(anyhow!("`{SERVICE}` does not resolve inside the environment")),
+                false => Err(anyhow!("`{SERVICE}` does not resolve and answer inside the environment")),
             }
         }
         .boxed()
@@ -212,7 +212,13 @@ async fn dns(c: &mut Ctx, env: &str) {
     .await;
 }
 
-/// Whether `redis` resolves from the environment's own service pod.
+/// Whether `redis` resolves from the environment's own service pod AND answers on its port.
+///
+/// The connection is the half that makes this an SLI about service-to-service traffic rather than
+/// about CoreDNS: a name that resolves to a ClusterIP nothing routes to renders as "my services
+/// cannot reach each other", and a resolver-only check passes straight through it. `redis-cli
+/// ping` is the smallest round trip that says the ClusterIP is live, and it is in the image the
+/// environment already runs.
 ///
 /// `getent` first, `nslookup` as the fallback: alpine has both, from musl and from busybox, and
 /// which one a base image ships has changed under us before.
@@ -221,9 +227,13 @@ async fn resolves(c: &Ctx, env: &str, cap: Duration) -> Result<bool> {
     let ns = kloudlite_workspaces::crd::env_namespace(env);
     // `{service}-0`: one StatefulSet per service, one replica, so the ordinal is always zero.
     let pod = format!("{SERVICE}-0");
-    let script = format!("getent hosts {SERVICE} || nslookup {SERVICE}");
-    let (code, _, _) = crate::kube::exec(k, &ns, &pod, None, &["sh", "-c", &script], cap).await?;
-    Ok(code == 0)
+    let script = format!(
+        "(getent hosts {SERVICE} || nslookup {SERVICE}) >/dev/null && redis-cli -h {SERVICE} -p {PORT} ping"
+    );
+    let (code, out, _) = crate::kube::exec(k, &ns, &pod, None, &["sh", "-c", &script], cap).await?;
+    // PONG, not merely exit 0: `redis-cli` answers zero for a connection it never made on some
+    // builds, and the word is what says the ClusterIP carried traffic.
+    Ok(code == 0 && out.trim().eq_ignore_ascii_case("pong"))
 }
 
 /// `env.attach` and `env.detach`: the attachment takes effect, and stops having effect, INSIDE the

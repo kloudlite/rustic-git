@@ -69,6 +69,59 @@ pub async fn run(c: &mut Ctx) {
     user_process(c).await;
     agent_spec(c).await;
     token_revoked(c).await;
+    visibility(c).await;
+}
+
+/// `repo.visibility`: the FLIP, in both directions.
+///
+/// `sec.private.repo` only ever reads a repo that was private from birth, so a `visibility` write
+/// that took a value and stored nothing would keep it green forever. This is the same repo, moved
+/// through both states with the read that has to change answer each time — and the second tenant
+/// is the reader, because "hidden from a non-collaborator" is what private means to a person.
+///
+/// It restores PRIVATE inside the step, and outside the cancellable region: stage 9 is the last
+/// stage before teardown, and a probe repo left public is a hole the next run's `sec.private.repo`
+/// would read as a passing security check.
+async fn visibility(c: &mut Ctx) {
+    let Some(repo) = c.state.repo.clone() else {
+        return c.skip("repo.visibility", "no repo");
+    };
+    let probe = c.probe_user.clone();
+    c.step("repo.visibility", Duration::from_secs(15), move |c| {
+        let jwt = c.probe_jwt.clone();
+        let other = c.other_jwt.clone();
+        let patch = api(c, &format!("/v1/repos/{probe}/{repo}"));
+        let refs = refs_url(c, &repo);
+        async move {
+            // Private first — where stage 2 left it — so the two reads below are the flip itself
+            // rather than whatever state some earlier step happened to leave.
+            let (status, _) = raw(c, reqwest::Method::GET, &refs, &other, None, &[]).await?;
+            refused("reading the private repo as another owner", status)?;
+            let hide = || async {
+                flip(c, &patch, &jwt, "private").await.context("the repo was left PUBLIC")
+            };
+            let shown = async {
+                flip(c, &patch, &jwt, "public").await.context("could not publish the repo")?;
+                let (status, body) = raw(c, reqwest::Method::GET, &refs, &other, None, &[]).await?;
+                if status.is_success() {
+                    return Ok(());
+                }
+                Err(anyhow!("a public repo answered {status} to another owner: {}", body.chars().take(200).collect::<String>()))
+            };
+            crate::drill::undoing(Duration::from_secs(10), shown, hide).await?;
+            // And the flip back took effect, not merely answered: a `visibility` write that
+            // reported success and stored nothing is the failure this whole id is about.
+            let (status, _) = raw(c, reqwest::Method::GET, &refs, &other, None, &[]).await?;
+            refused("reading the repo after it was made private again", status)
+        }
+        .boxed()
+    })
+    .await;
+}
+
+async fn flip(c: &Ctx, url: &str, jwt: &str, to: &str) -> Result<()> {
+    let body = serde_json::json!({ "visibility": to });
+    super::call(c, reqwest::Method::PATCH, url, jwt, Some(body)).await.map(|_| ())
 }
 
 /// The clone handshake, as a plain GET.
@@ -192,26 +245,62 @@ pub(crate) async fn agent_spec(c: &mut Ctx) {
     let Some(name) = a_workspace(&client, c.state.workspace.clone()).await else {
         return c.skip("sec.agent.spec", "no Workspace exists to attempt a spec write on");
     };
+    let volume = a_volume(&client).await;
     c.step("sec.agent.spec", REFUSAL_CEILING, move |_| {
         async move {
             let mut cfg = kube::Config::infer().await.context("no kubeconfig")?;
             cfg.auth_info.impersonate = Some(AGENT_SA.to_string());
             let as_agent = kube::Client::try_from(cfg).context("could not build the client")?;
-            let api: kube::Api<crd::Workspace> = kube::Api::all(as_agent);
+            let api: kube::Api<crd::Workspace> = kube::Api::all(as_agent.clone());
             let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
             // Lowercase: the CRD's enum is `running|stopped`; a wrong case is a 422 from the schema,
             // which is not the admission policy refusing anything.
             let patch = serde_json::json!({ "spec": { "desiredState": "stopped" } });
             match api.patch(&name, &params, &kube::api::Patch::Merge(&patch)).await {
                 // A 2xx IS the failure here: admission let the agent rewrite desired state.
-                Ok(_) => Err(anyhow!("the agent was ALLOWED to write spec.desiredState")),
-                Err(kube::Error::Api(e)) => refused_by_admission(e.code, &e.message),
-                Err(e) => Err(anyhow!("the attempt answered {e}, which is not a refusal")),
+                Ok(_) => return Err(anyhow!("the agent was ALLOWED to write spec.desiredState")),
+                Err(kube::Error::Api(e)) => refused_by_admission(e.code, &e.message)?,
+                Err(e) => return Err(anyhow!("the attempt answered {e}, which is not a refusal")),
             }
+            // The other half of the SLI, and the reason it is not enough to watch the refusal: the
+            // ClusterRole allows the agent exactly two spec fields a parent's reconciler copies
+            // into its child, and a policy that had been tightened into refusing EVERYTHING would
+            // pass the check above while stopping every restore and every quota change on the
+            // fleet. Both are dry-run, so nothing is written either way.
+            allowed(&as_agent, volume.as_deref()).await
         }
         .boxed()
     })
     .await;
+}
+
+/// The two spec writes the agent's ClusterRole DOES allow, both dry-run.
+///
+/// `restoreTo` and `quotaGb` on a `Volume` are what `deploy/k3s/agent-rbac.yaml`'s header table
+/// grants and what `deploy/k3s/agent-admission.yaml` lets through; a refusal of either is the
+/// policy having been tightened past what the reconcilers need. With no Volume on the cluster
+/// there is nothing to try it on, which is not a failure of the policy.
+async fn allowed(as_agent: &kube::Client, volume: Option<&str>) -> Result<()> {
+    let Some(volume) = volume else { return Ok(()) };
+    let api: kube::Api<crd::Volume> = kube::Api::all(as_agent.clone());
+    let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
+    for (field, patch) in [
+        ("spec.restoreTo", serde_json::json!({ "spec": { "restoreTo": "" } })),
+        ("spec.quotaGb", serde_json::json!({ "spec": { "quotaGb": 1 } })),
+    ] {
+        api.patch(volume, &params, &kube::api::Patch::Merge(&patch))
+            .await
+            .map_err(|e| anyhow!("the agent was REFUSED {field}, which its reconcilers need: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Any `Volume` to try the allowed writes on — the policy is cluster-wide, so any object proves
+/// the same thing, exactly as `a_workspace` does for the refusal.
+async fn a_volume(client: &kube::Client) -> Option<String> {
+    use kube::api::ResourceExt;
+    let api: kube::Api<crd::Volume> = kube::Api::all(client.clone());
+    api.list(&kube::api::ListParams::default()).await.ok()?.items.first().map(|v| v.name_any())
 }
 
 /// Whether the probe's own identity may impersonate a ServiceAccount at all. A review the API
