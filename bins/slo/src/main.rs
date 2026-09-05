@@ -130,6 +130,11 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
         .ok()
         .and_then(|b| serde_json::from_slice::<Vec<StepReport>>(&b).ok())
         .unwrap_or_default();
+    // And every name the child recorded, so teardown deletes by name what the prefix sweep
+    // cannot see (an environment's volume is named by the platform, not by us).
+    if let Some(state) = std::fs::read(c.state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        c.state = state;
+    }
 
     c.stage = TEARDOWN.to_string();
     let teardown_started = Instant::now();
@@ -176,6 +181,12 @@ async fn child(cfg: Config, kind: Suite, run_id: Option<String>) -> i32 {
         if let Ok(b) = serde_json::to_vec(&c.steps) {
             if let Err(e) = std::fs::write(c.steps_path(), b) {
                 tracing::warn!(op = "write", error = %e, "slo.steps.failed");
+            }
+            // The names the child holds, for the parent's teardown (see `Ctx::state_path`).
+            if let Ok(b) = serde_json::to_vec(&c.state) {
+                if let Err(e) = std::fs::write(c.state_path(), b) {
+                    tracing::warn!(error = %e, "slo.state.failed");
+                }
             }
         }
         // A failed report does NOT stop the run: the parent's final PUT may well succeed, and

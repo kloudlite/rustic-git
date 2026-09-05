@@ -1709,10 +1709,10 @@ spec:
 # The hourly Experience suite: the fast journey plus stage 14, which walks every remaining verb a
 # person can perform (packages, teams, invitations, branch protection, a two-service environment,
 # an approved quota request). `:07` so it never shares a minute with the fast suite's own tick.
-# `activeDeadlineSeconds: 2400`: the fast journey plus ~25 more steps, several of which wait out a
+# `activeDeadlineSeconds: 3300`: the fast journey plus ~25 more steps, several of which wait out a
 # workspace start or an environment with two services.
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.
-# `activeDeadlineSeconds: 2400`: every step's ceiling sits at or above its catalogue target so a
+# `activeDeadlineSeconds: 3300`: every step's ceiling sits at or above its catalogue target so a
 # slow answer is recorded as a breach with a number rather than cut off, and those ceilings sum
 # past one schedule on a bad day. `Forbid` skips the next tick while a run is still going, so a
 # slow run costs one missed sample, never two probes on one cluster.
@@ -1732,7 +1732,7 @@ spec:
   failedJobsHistoryLimit: 5
   jobTemplate:
     spec:
-      activeDeadlineSeconds: 2400
+      activeDeadlineSeconds: 3300
       # No retry. A failed journey is a SAMPLE, already reported and already counted against the
       # budget; running it again would file a second run under a second id and quietly halve the
       # measured failure rate.

@@ -17,7 +17,8 @@ use crate::config::Config;
 
 /// What the run has created, so teardown and the later stages can find it. Every id is
 /// `run-{run_id}-…`, which is what makes teardown's prefix sweep both complete and safe.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct State {
     pub repo: Option<String>,
     pub workspace: Option<String>,
@@ -172,5 +173,13 @@ impl Ctx {
     /// it measured, so the child writes this after every stage — the same moment it PUTs.
     pub fn steps_path(&self) -> PathBuf {
         self.tmp.join("steps.json")
+    }
+
+    /// The child's `State`, handed to the parent the same way its steps are: the parent runs
+    /// teardown and needs every name the child recorded (the environment's volume, the extra
+    /// volumes, tokens), or it deletes only what the prefix sweep can see. This is what leaked
+    /// one environment volume per run before it existed.
+    pub fn state_path(&self) -> std::path::PathBuf {
+        self.tmp.join("state.json")
     }
 }

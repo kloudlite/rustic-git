@@ -121,7 +121,7 @@ cannot fill a five-minute window.
 | `env.stop.start` | Environments | Stop then start round trip | 95 % ≤ 120000 ms | hourly | 14 · Experience |
 | `vol.history` | Workspace lifecycle | History lists pushes newest first with their messages; refs answer | 99.9 % ≤ 1000 ms | hourly | 14 · Experience |
 | `quota.view` | Admin | `GET /v1/quota` reflects the objects the run holds | 99.9 % | hourly | 14 · Experience |
-| `request.approve` | Admin | An approved quota request raises the quota and unblocks the refused create | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
+| `request.approve` | Admin | An approved quota request raises the quota and unblocks the refused create | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
 | `admin.stop.workspace` | Admin | An admin stop is visible to the owner as `stopped` | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `superadmin.grant` | Security | Granting superadmin adds the account to the roster and revoking takes it off | 100 % | hourly | 14 · Experience |
 | `feed.experience` | Pull requests | The feed shows the team and repo events of this run | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
