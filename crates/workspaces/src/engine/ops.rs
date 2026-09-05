@@ -262,7 +262,7 @@ impl Engine {
             return Err(EngErr::other(format!("clone source {src_id} is not materialized on this node")));
         }
         let _lock = ws_lock(&self.pool, src_id).map_err(EngErr::other)?;
-        let src = self.pool.live(src_id);
+        let src = self.clone_source(src_id);
         std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
         // A replayed reconcile must converge, not fail: `dst` already existing means a previous
         // attempt got this far. Keep it — see `create_subvol`.
@@ -270,6 +270,20 @@ impl Engine {
             run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), self.pool.live(dst_id).to_str().unwrap()])?;
         }
         Ok(())
+    }
+
+    /// The subvolume a local clone copies: the source's own worktree, `live/{id}`, once the
+    /// volume is in the snapshot model — where `live/` is a plain DIRECTORY of worktrees and
+    /// `btrfs subvolume snapshot` of it answers "Not a Btrfs subvolume" — and `live` itself only
+    /// for a volume still in the single-subvolume shape. Every environment clone failed on the
+    /// first form until the probe caught it.
+    fn clone_source(&self, src_id: &str) -> std::path::PathBuf {
+        let worktree = self.pool.worktree(src_id, src_id);
+        if worktree.exists() {
+            worktree
+        } else {
+            self.pool.live(src_id)
+        }
     }
 
     /// Seed a fresh volume from a LOCAL read-only snapshot of another one: the materialize step of
@@ -343,6 +357,16 @@ mod tests {
         let show = "vol/ws-1/live/ws-1\n\tName: ws-1\n\tGeneration: 10197\n\tGen at creation: 4\n";
         assert_eq!(parse_generation(show), Some(10197));
         assert_eq!(parse_generation("no such line"), None);
+    }
+
+    #[test]
+    fn a_clone_copies_the_worktree_when_live_is_a_directory_of_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        std::fs::create_dir_all(e.pool.worktree("env-a", "env-a")).unwrap();
+        assert_eq!(e.clone_source("env-a"), e.pool.worktree("env-a", "env-a"));
+        std::fs::create_dir_all(e.pool.live("ws-old")).unwrap();
+        assert_eq!(e.clone_source("ws-old"), e.pool.live("ws-old"));
     }
 
     #[test]

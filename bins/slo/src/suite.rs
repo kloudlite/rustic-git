@@ -124,8 +124,15 @@ pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why
 /// still probe.
 pub async fn hourly_in_flight(c: &Ctx) -> bool {
     let url = stages::admin(c, "/admin/slo/runs?suite=hourly&limit=3");
-    let Ok(v) = stages::get(c, &url, &c.admin_jwt).await else { return false };
+    let v = match stages::get(c, &url, &c.admin_jwt).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "slo.hourly.check.failed");
+            return false;
+        }
+    };
     let rows = v.get("runs").and_then(|r| r.as_array()).cloned().or_else(|| v.as_array().cloned()).unwrap_or_default();
+    tracing::info!(rows = rows.len(), first = %rows.first().map(|r| r.to_string()).unwrap_or_default(), "slo.hourly.check");
     rows.iter().any(|r| {
         let running = r.get("state").and_then(|s| s.as_str()) == Some("running");
         let fresh = r
