@@ -79,13 +79,25 @@ pub(crate) async fn relay(r: reqwest::Response) -> Response {
 /// `try_clone` is the whole safety story, and it is structural: reqwest cannot clone a request
 /// whose body is a stream, so a git receive-pack or a blob upload is sent exactly once by
 /// construction — only GET/HEAD and bodies this tier holds in memory can be replayed.
+///
+/// A held-body write is narrower still. 503 and 421 are both written by `route_inner`
+/// (`bins/server/src/router/route.rs:504,515` and `:200`) BEFORE any handler runs, so the write provably did
+/// not happen and replaying it is free; a 502 can come from anywhere, including a handler that
+/// already created the PR — so a write takes that answer as final. A transport error is retried
+/// only when the connection never opened (`is_connect`): a timeout or a mid-response error may
+/// have been a slow success, and a second `POST /pulls` would open a second pull request.
 // ponytail: fixed 250 ms, one attempt; jittered backoff when a profile says so.
 pub(crate) async fn send_retrying(req: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
     let again = req.try_clone();
+    let read_only = again
+        .as_ref()
+        .and_then(|b| b.try_clone())
+        .and_then(|b| b.build().ok())
+        .is_some_and(|r| matches!(*r.method(), reqwest::Method::GET | reqwest::Method::HEAD));
     let first = req.send().await;
     let worth = match &first {
-        Err(_) => true,
-        Ok(r) => matches!(r.status().as_u16(), 421 | 502 | 503),
+        Err(e) => e.is_connect(),
+        Ok(r) => matches!(r.status().as_u16(), 421 | 503) || (read_only && r.status().as_u16() == 502),
     };
     let Some(again) = again.filter(|_| worth) else {
         return first;
@@ -125,6 +137,43 @@ mod tests {
         let r = super::send_retrying(c.get(&url)).await.unwrap();
         assert_eq!(r.status().as_u16(), 200);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Catches: a 502 the node's own handler wrote being replayed as a write — a second PR.
+    #[tokio::test]
+    async fn a_read_retries_a_502_and_a_write_does_not() {
+        let c = reqwest::Client::new();
+        let (url, calls) = flaky(vec![502]).await;
+        assert_eq!(super::send_retrying(c.get(&url)).await.unwrap().status(), 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let (url, calls) = flaky(vec![502]).await;
+        let r = super::send_retrying(c.post(&url).json(&serde_json::json!({}))).await.unwrap();
+        assert_eq!(r.status().as_u16(), 502);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Catches: retrying a timeout — the first POST may have been a slow success.
+    #[tokio::test]
+    async fn a_write_that_times_out_is_sent_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = axum::Router::new().fallback(axum::routing::any(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<axum::http::StatusCode>().await
+            }
+        }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(150))
+            .build()
+            .unwrap();
+        assert!(super::send_retrying(c.post(&url).json(&serde_json::json!({}))).await.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     /// Catches: replaying a streamed body — a push or a blob upload sent twice corrupts both.
