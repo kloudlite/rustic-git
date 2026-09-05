@@ -25,7 +25,7 @@ pub async fn run(c: &mut Ctx) {
     // writes a workspace's `authorized_keys` Secret only for an owner who has one (see
     // `write_user_key`). A person reaches that page in the web; the probe never does, so it reads
     // it here — otherwise every gateway login answers "Permission denied (publickey)".
-    if let Err(e) = get(c, &api(c, "/v1/platform-key"), &c.probe_jwt.clone()).await {
+    if let Err(e) = get(c, &api(c, &format!("/v1/platform-key?owner={PROBE_USER}")), &c.probe_jwt.clone()).await {
         tracing::warn!(reason = "platform-key", error = %e, "slo.identity.degraded");
     }
     // The session JWT is minted in-process from the Secret, so there is no password path to walk:

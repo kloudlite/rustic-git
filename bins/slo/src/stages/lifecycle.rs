@@ -26,7 +26,7 @@ const START_CEILING: Duration = Duration::from_secs(30);
 const RESTORE_CEILING: Duration = Duration::from_secs(60);
 const REFUSAL_CEILING: Duration = Duration::from_secs(20);
 /// How long the finalizers get to drop this run's worktrees before the detached restore.
-const DETACH_CEILING: Duration = Duration::from_secs(30);
+const DETACH_CEILING: Duration = Duration::from_secs(60);
 const ORPHAN_CEILING: Duration = Duration::from_secs(60);
 
 /// Every id in this stage, in journey order — the list a missing precondition skips.

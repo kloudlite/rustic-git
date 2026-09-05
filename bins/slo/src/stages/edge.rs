@@ -56,7 +56,11 @@ pub async fn run(c: &mut Ctx) {
 /// `edge.dns`: every public hostname resolves. One step for all of them — a fleet with one
 /// unresolvable hostname is one broken front door, not a fraction of one.
 async fn dns(c: &mut Ctx) {
-    let hosts = c.cfg.hosts.clone();
+    let mut hosts = c.cfg.hosts.clone();
+    // The ssh host has no HTTPS, so it is not in KLOUDLITE_SLO_HOSTS; it still has to resolve.
+    if !hosts.contains(&c.cfg.ssh_host) {
+        hosts.push(c.cfg.ssh_host.clone());
+    }
     if hosts.is_empty() {
         return c.skip("edge.dns", "KLOUDLITE_SLO_HOSTS names no hostname");
     }

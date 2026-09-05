@@ -1587,7 +1587,8 @@ data:
   # into, and the same one the admin Deployment's KLOUDLITE_REGION names.
   KLOUDLITE_REGION: centralindia-k3s
   # Extra hostnames stage 10 resolves and reads a certificate for, beyond the four above.
-  KLOUDLITE_SLO_HOSTS: dev.kloudlite.io,cr.khost.dev,git.khost.dev
+  # HTTPS hosts only (cert and origin checks); the ssh host is dialled by `edge.dns` on its own.
+  KLOUDLITE_SLO_HOSTS: dev.kloudlite.io,cr.khost.dev
   # OPTIONAL. The `known_hosts` line the git tier's SSH listener must present, PINNED rather than
   # learned — a probe that ran `ssh-keyscan` and trusted the answer would report `ssh.hostkey`
   # green through the exact substitution this SLO exists to catch. Unset, `ssh.hostkey` SKIPS; it

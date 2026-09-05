@@ -55,6 +55,9 @@ fn refused_by_admission(code: u16, message: &str) -> Result<()> {
             Err(anyhow!("the probe could not impersonate at all: {message}"))
         }
         403 => Ok(()),
+        // A ValidatingAdmissionPolicy denial is a 422 whose message names the policy — the
+        // refusal this step exists to see; a 422 from the schema names a field instead.
+        422 if message.contains("ValidatingAdmissionPolicy") => Ok(()),
         _ => Err(anyhow!("the attempt answered {code}: {message}")),
     }
 }

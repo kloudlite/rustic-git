@@ -338,6 +338,8 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, matches: &M) -> usize {
                 gone += 1;
                 tracing::info!(kind = "request", name = %id, "slo.teardown.deleted");
             }
+            // 409: already decided (the admin stage denied it), which is the state teardown wants.
+            Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => gone += 1,
             Ok(r) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %r.status(), "slo.teardown.failed"),
             Err(e) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %e, "slo.teardown.failed"),
         }
