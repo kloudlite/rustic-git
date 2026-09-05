@@ -100,6 +100,11 @@ spec:
               value: http://kloudlite-git-admin
             - name: KLOUDLITE_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: kloudlite-git-peer, key: secret } }
+            # The "Open in HyperDX" links on /superadmin. Same value as the admin Deployment's —
+            # they are two readers of one console, and a mismatch sends half the links elsewhere.
+            # Unset means no link rather than a dead one.
+            - name: KLOUDLITE_GIT_HYPERDX_URL
+              value: https://hyperdx-dev.kloudlite.io
             # Team invitations go out through Resend. Both optional: unset, the invite is still
             # created and the inviter is shown the link to pass on by hand, rather than the app
             # pretending an email went out. `from` must be on a domain verified in Resend.

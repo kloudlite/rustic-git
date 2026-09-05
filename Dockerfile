@@ -121,3 +121,42 @@ RUN apk add --no-cache libstdc++ libgcc \
     && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
     && sed -i 's/^kl:!:/kl:*:/' /etc/shadow \
     && printf '%s\n' 'Kloudlite workspace — you are kl (no root, no sudo).' > /etc/motd
+
+# The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
+# crane, kubectl, dig, openssl — and shipping that to the three server processes would hand a
+# compromised request handler everything it needs to talk to the cluster.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS slo
+# git + openssh-client: stage 2 pushes and clones over both transports, with a real client, because
+# a probe that used our own library would pass on a bug only a real client trips.
+# curl: fetching the two tools below at build time, and the edge stage's origin check.
+# openssl + bind9-dnsutils: `edge.cert` reads the served certificate and `edge.dns` resolves the
+# hostnames without trusting the pod's resolver cache.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git openssh-client curl openssl bind9-dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+# crane and kubectl are pinned by CONTENT, not by tag: both are fetched from a release URL a
+# third party controls, and a moved tag would silently change what the probe runs. A checksum
+# mismatch fails the build, which is the only place it can be caught.
+ARG CRANE_VERSION=v0.20.3
+ARG CRANE_SHA256=36c67a932f489b3f2724b64af90b599a8ef2aa7b004872597373c0ad694dc059
+ARG KUBECTL_VERSION=v1.31.5
+ARG KUBECTL_SHA256=fbecbfd375b3686002c2e81d51c390172f5ffba3d6b47920d55342cb03f557af
+RUN set -eux; \
+    curl -fsSL -o /tmp/crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"; \
+    echo "${CRANE_SHA256}  /tmp/crane.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/crane.tgz -C /usr/local/bin crane; \
+    curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
+    echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c -; \
+    chmod +x /usr/local/bin/crane /usr/local/bin/kubectl; \
+    rm -f /tmp/crane.tgz
+ARG PROFILE=release
+COPY target/${PROFILE}/kloudlite-git-slo /usr/local/bin/kloudlite-git-slo
+# `kl` is the user CLI, built by the same `cargo build`: stage 1's `id.cli.flow` and stage 5's
+# tunnel checks exercise the CLI a person actually runs, not a reimplementation of it.
+COPY target/${PROFILE}/kl /usr/local/bin/kl
+# uid 1001 as everywhere else. No home directory: the pod's root filesystem is read-only and
+# everything git, ssh and crane write goes under the /tmp emptyDir (HOME is set to it in the
+# CronJob), so a home baked in here would only be a read-only trap.
+RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin kloudlite
+USER kloudlite
+ENTRYPOINT ["kloudlite-git-slo"]

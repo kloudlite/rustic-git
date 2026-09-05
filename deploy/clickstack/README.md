@@ -114,6 +114,14 @@ HyperDX definitions live in that file, next to each rule, in the "HyperDX alert"
 them once from there; a rule added to the file must be added to both, or the two disagree with no
 way to tell which is right.
 
+Two rules are the exception, and the file's "HyperDX alert" column says so: **`SloBurn`** and
+**`SloProbeMissing`** read `kloudlite.slo_results` and `kloudlite.slo_runs` — tables of OURS, not
+the collector's `otel_*` — so there is nothing on a HyperDX source to search and no definition to
+create. They are console only; the SQL evaluator IS the alert, and the admin process pages through
+`KLOUDLITE_GIT_SLO_WEBHOOK` (one JSON line per failed probe run and per `SloBurn` transition)
+rather than through HyperDX. Do not try to reproduce them here — a HyperDX rule that cannot see
+the data would sit permanently green beside a real breach.
+
 ## Recovery
 
 Losing ClickHouse loses history and nothing else — no repository, workspace, snapshot or quota

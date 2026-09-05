@@ -833,6 +833,11 @@ spec:
               valueFrom: { secretKeyRef: { name: kloudlite-git-clickhouse, key: user, optional: true } }
             - name: KLOUDLITE_GIT_CLICKHOUSE_PASSWORD
               valueFrom: { secretKeyRef: { name: kloudlite-git-clickhouse, key: password, optional: true } }
+            # One JSON line per failed probe run and per SloBurn transition
+            # (crates/workspaces/src/history/notify.rs). Optional: unset means the console and the
+            # HyperDX alert are the only places a breach shows up, never a crash.
+            - name: KLOUDLITE_GIT_SLO_WEBHOOK
+              valueFrom: { secretKeyRef: { name: kloudlite-git-slo-webhook, key: url, optional: true } }
             # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
             - name: KLOUDLITE_GIT_HYPERDX_URL
               value: https://hyperdx-dev.kloudlite.io
@@ -1492,3 +1497,327 @@ spec:
       volumes:
         - name: conf
           configMap: { name: kloudlite-git-otel-cluster }
+---
+# The SLO probe: one synthetic user's whole day, walked every five minutes and reported to the
+# admin process while it runs (docs/superpowers/specs/2026-09-05-slo-probe-design.md). The
+# catalogue it judges itself against is Rust — `crates/workspaces/src/slo/catalogue.rs` — with
+# `deploy/slo.md` held equal to it by a test, so this yaml carries no thresholds at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kloudlite-git-slo
+  namespace: kloudlite-git
+---
+# Its authority over THIS cluster (AKS) is the leader-failover drill and nothing else: delete one
+# srv pod, watch the lease move. `pods: delete` with no `resourceNames` because the pod it must
+# delete is whichever one holds the lease, a name that changes every roll — the namespace is the
+# boundary instead. No secrets, no deployments, no exec here: the workspace exec and the node
+# drills happen in the k3s cluster, through the mounted kubeconfig below, which carries its own
+# far tighter grants (deploy/k3s/api-rbac.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kloudlite-git-slo
+  namespace: kloudlite-git
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kloudlite-git-slo
+  namespace: kloudlite-git
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kloudlite-git-slo
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-git-slo
+    namespace: kloudlite-git
+---
+# Every non-secret knob the probe reads, in ONE place: the three CronJobs below are the same
+# container three times over and differ only in schedule, suite and deadline. YAML anchors cannot
+# cross documents, so a ConfigMap is what keeps the fleet's addresses from being written out (and
+# drifting) three times. The names are `bins/slo/src/config.rs`'s, which is the contract — a
+# required one missing here is exit code 2 at boot, not a silent default.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kloudlite-git-slo-env
+  namespace: kloudlite-git
+data:
+  KLOUDLITE_GIT_LOG_FORMAT: json
+  # The admin process, the only writer of the `kloudlite` database — every /admin/* call and the
+  # run report itself.
+  KLOUDLITE_GIT_ADMIN_API_URL: http://kloudlite-git-admin
+  # The ordinary /v1 process. Deliberately a DIFFERENT address from the one above: `sec.user.process`
+  # proves an admin route is absent here, which means nothing if the two resolve to one pod.
+  KLOUDLITE_GIT_API_URL: http://kloudlite-git-api
+  # The public names, not cluster Services: the probe is a synthetic USER, so it goes in through
+  # Cloudflare and the ingress exactly as a person's browser and `git` do. A ClusterIP here would
+  # keep every edge and TLS check green through an outage of the only path users have.
+  KLOUDLITE_GIT_WEB_URL: https://dev.kloudlite.io
+  KLOUDLITE_GIT_URL: https://dev.kloudlite.io
+  KLOUDLITE_GIT_REGISTRY: cr.khost.dev
+  # host or host:port. SSH cannot go through Cloudflare's proxy, so this is the DNS-only name
+  # straight at the git load balancer, on 22.
+  KLOUDLITE_GIT_SSH_HOST: git.khost.dev
+  # The k3s region the probe's workspace and environment go to. Must be a region `/v1` places
+  # into, and the same one the admin Deployment's KLOUDLITE_GIT_REGION names.
+  KLOUDLITE_GIT_REGION: centralindia-k3s
+  # Extra hostnames stage 10 resolves and reads a certificate for, beyond the four above.
+  KLOUDLITE_GIT_SLO_HOSTS: dev.kloudlite.io,cr.khost.dev,git.khost.dev
+  # OPTIONAL. The `known_hosts` line the git tier's SSH listener must present, PINNED rather than
+  # learned — a probe that ran `ssh-keyscan` and trusted the answer would report `ssh.hostkey`
+  # green through the exact substitution this SLO exists to catch. Unset, `ssh.hostkey` SKIPS; it
+  # never passes. To obtain it, read the server's own published key rather than the network:
+  #   kubectl -n kloudlite-git exec kloudlite-git-srv-0 -- \
+  #     ssh-keygen -lf /etc/kloudlite-git/host_key.pub
+  # and paste the `ssh-ed25519 AAAA…` line (no host prefix) here.
+  KLOUDLITE_GIT_SLO_SSH_HOSTKEY: ""
+  # OPTIONAL. The digest `slo-probe/canary` must resolve to, so `reg.canary` fails on a SUBSTITUTED
+  # image rather than merely a missing one. Unset, the check only requires the pull to succeed.
+  # To obtain it, after `kloudlite-git-slo bootstrap` has pushed the canary:
+  #   crane digest cr.khost.dev/slo-probe/canary:latest
+  KLOUDLITE_GIT_SLO_CANARY_DIGEST: ""
+---
+# The fast suite, every five minutes. `Forbid`: a run that overshoots its window is a symptom, and
+# two probes racing would delete each other's `run-{id}` objects and report both as broken.
+# `activeDeadlineSeconds: 540` is 60 s inside the schedule — `vol.orphan.collected` waits up to
+# five minutes and is the long pole.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kloudlite-git-slo-fast
+  namespace: kloudlite-git
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 540
+      # No retry. A failed journey is a SAMPLE, already reported and already counted against the
+      # budget; running it again would file a second run under a second id and quietly halve the
+      # measured failure rate.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: { app: kloudlite-git-slo, suite: fast }
+          annotations:
+            # The probe writes its results to ClickHouse through the admin process; its own
+            # /metrics is never up long enough to scrape, and a scrape target that is absent 99 %
+            # of the time is an alert nobody can act on.
+            prometheus.io/scrape: "false"
+        spec:
+          serviceAccountName: kloudlite-git-slo
+          automountServiceAccountToken: true
+          # Never restarted in place: the parent process files the final report and exits with the
+          # code that says what happened (0 passed, 1 a step failed, 2 unusable config, 3 the
+          # report never landed). A restart would overwrite that with a second run's story.
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+          containers:
+            - name: slo
+              image: ghcr.io/kloudlite/kloudlite-git-slo:latest
+              args: ["run", "--suite", "fast"]
+              envFrom:
+                - configMapRef: { name: kloudlite-git-slo-env }
+              env:
+                # The probe holds no password: it MINTS its own user and admin tokens with this
+                # key, which is why it needs the same Secret the server tier signs with.
+                - name: KLOUDLITE_GIT_JWT_SECRET
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-jwt, key: secret } }
+                # The workspace CRDs and the pods to exec into live in the k3s cluster, so the
+                # mounted kubeconfig is what stages 5-7 and the drills talk to — the projected
+                # ServiceAccount token above reaches only THIS cluster's pods.
+                - name: KUBECONFIG
+                  value: /etc/kloudlite-git/k3s/config
+                # git, ssh and crane all write under $HOME, and the root filesystem is read-only.
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
+                - { name: k3s-kubeconfig, mountPath: /etc/kloudlite-git/k3s, readOnly: true }
+          volumes:
+            # The git clones, the crane blobs and the run's own steps.json. 2Gi because the weekly
+            # suite pushes a large pack and a large layer through here.
+            - name: tmp
+              emptyDir:
+                sizeLimit: 2Gi
+            # The probe user's private key, generated ONCE by the operator; the run registers its
+            # public half itself. Not optional: without it every SSH step fails and the git tier
+            # looks broken. See deploy/k3s/README.md for the recipe.
+            - name: ssh-key
+              secret:
+                secretName: kloudlite-git-slo
+                defaultMode: 0400
+                items:
+                  # The filename is config.rs's KLOUDLITE_GIT_SLO_SSH_KEY default; ssh refuses a
+                  # key file it can read the mode of and finds group-readable, hence 0400 above.
+                  - { key: ssh_key, path: id_ed25519 }
+            - name: k3s-kubeconfig
+              secret:
+                secretName: kloudlite-git-slo-k3s-kubeconfig
+                defaultMode: 0400
+---
+# The weekly suite: the fast journey plus the heavy checks (large push, cold nix profile,
+# cross-node start) and the control-plane failover drill. 02:00 Sunday UTC — off the fast suite's
+# :00 slot by a schedule Kubernetes will not overlap anyway, and outside anyone's working hours.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kloudlite-git-slo-weekly
+  namespace: kloudlite-git
+spec:
+  schedule: "0 2 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      # An hour: the cold profile build alone is ~28 s of nix evaluation on top of a full journey,
+      # and the failover drill waits out a lease TTL.
+      activeDeadlineSeconds: 3600
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: { app: kloudlite-git-slo, suite: weekly }
+          annotations:
+            prometheus.io/scrape: "false"
+        spec:
+          serviceAccountName: kloudlite-git-slo
+          automountServiceAccountToken: true
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+          containers:
+            - name: slo
+              image: ghcr.io/kloudlite/kloudlite-git-slo:latest
+              args: ["run", "--suite", "weekly"]
+              envFrom:
+                - configMapRef: { name: kloudlite-git-slo-env }
+              env:
+                - name: KLOUDLITE_GIT_JWT_SECRET
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-jwt, key: secret } }
+                - name: KUBECONFIG
+                  value: /etc/kloudlite-git/k3s/config
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
+                - { name: k3s-kubeconfig, mountPath: /etc/kloudlite-git/k3s, readOnly: true }
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 4Gi
+            - name: ssh-key
+              secret:
+                secretName: kloudlite-git-slo
+                defaultMode: 0400
+                items:
+                  - { key: ssh_key, path: id_ed25519 }
+            - name: k3s-kubeconfig
+              secret:
+                secretName: kloudlite-git-slo-k3s-kubeconfig
+                defaultMode: 0400
+---
+# The monthly suite: the backup checks and the destructive drills (dead node, drain, Redis down).
+# Also a SUNDAY schedule, not a day-of-month one — cron cannot say "the first Sunday", so this
+# fires every Sunday at 03:00 and the binary itself returns 0 without running anything when the
+# day of month is past 7 (`parent` in bins/slo/src/main.rs). Three of four firings are a no-op
+# pod, which is far cheaper than a `0 3 1 * *` that runs the drills on a Tuesday afternoon.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kloudlite-git-slo-monthly
+  namespace: kloudlite-git
+spec:
+  schedule: "0 3 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      # Two hours: the dead-node drill alone waits out WS_NODE_DEAD_SECS and then the heal.
+      activeDeadlineSeconds: 7200
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: { app: kloudlite-git-slo, suite: monthly }
+          annotations:
+            prometheus.io/scrape: "false"
+        spec:
+          serviceAccountName: kloudlite-git-slo
+          automountServiceAccountToken: true
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+          containers:
+            - name: slo
+              image: ghcr.io/kloudlite/kloudlite-git-slo:latest
+              args: ["run", "--suite", "monthly"]
+              envFrom:
+                - configMapRef: { name: kloudlite-git-slo-env }
+              env:
+                - name: KLOUDLITE_GIT_JWT_SECRET
+                  valueFrom: { secretKeyRef: { name: kloudlite-git-jwt, key: secret } }
+                - name: KUBECONFIG
+                  value: /etc/kloudlite-git/k3s/config
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
+                - { name: k3s-kubeconfig, mountPath: /etc/kloudlite-git/k3s, readOnly: true }
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 4Gi
+            - name: ssh-key
+              secret:
+                secretName: kloudlite-git-slo
+                defaultMode: 0400
+                items:
+                  - { key: ssh_key, path: id_ed25519 }
+            - name: k3s-kubeconfig
+              secret:
+                secretName: kloudlite-git-slo-k3s-kubeconfig
+                defaultMode: 0400

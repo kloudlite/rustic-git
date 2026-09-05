@@ -88,6 +88,9 @@ exists in Azure and is copied. A `(cross)` Secret must hold the same value in bo
 | `kloudlite-git-k3s-kubeconfig` **(cross)** | `config` | a kubeconfig whose user is the k3s `kloudlite-git-api` ServiceAccount token — B.3 mints it | api | no — /v1 workspace routes 503 |
 | `kloudlite-git-web` | `auth-secret` (required); `github-id`/`-secret`, `google-id`/`-secret`, `allowed-emails`, `shared-password` (optional) | `auth-secret` minted: `openssl rand -hex 32`; OAuth values from the provider consoles (callback `https://dev.kloudlite.io/api/auth/callback/<provider>`) | web | providers optional |
 | `kloudlite-git-mail` | `resend-api-key`, `from` | Resend console | web | yes — invites shown as links |
+| `kloudlite-git-slo` | `ssh_key` | minted: `ssh-keygen -t ed25519 -N '' -C slo-probe -f slo_ed25519` (the private file). The run registers the public half itself | slo CronJobs | no — every SSH step fails without it |
+| `kloudlite-git-slo-k3s-kubeconfig` **(cross)** | `config` | a second kubeconfig on the B.3 recipe, for the probe's own reads and the drills | slo CronJobs | no — stages 5–7 skip |
+| `kloudlite-git-slo-webhook` | `url` | the chat webhook the failed-run line goes to | admin | yes — console and HyperDX only |
 
 ```sh
 kubectl -n kloudlite-git create secret generic kloudlite-git-storage --from-literal=account=<acct> --from-literal=key=<key>
@@ -99,9 +102,12 @@ kubectl -n kloudlite-git create secret generic kloudlite-git-redis --from-litera
 kubectl -n kloudlite-git create secret generic kloudlite-git-k3s-kubeconfig --from-file=config=<kubeconfig from B.3>
 kubectl -n kloudlite-git create secret generic kloudlite-git-web --from-literal=auth-secret=$(openssl rand -hex 32) [--from-literal=github-id=... ...]
 kubectl -n kloudlite-git create secret generic kloudlite-git-mail --from-literal=resend-api-key=... --from-literal=from='...'
+ssh-keygen -q -t ed25519 -N '' -C slo-probe -f slo_ed25519 && kubectl -n kloudlite-git create secret generic kloudlite-git-slo --from-file=ssh_key=slo_ed25519 && shred -u slo_ed25519 slo_ed25519.pub
+kubectl -n kloudlite-git create secret generic kloudlite-git-slo-k3s-kubeconfig --from-file=config=<a second kubeconfig from B.3>
+kubectl -n kloudlite-git create secret generic kloudlite-git-slo-webhook --from-literal=url='<chat webhook>'   # optional
 ```
 
-Verify: `kubectl -n kloudlite-git get secrets` lists all ten. Nothing else creates them.
+Verify: `kubectl -n kloudlite-git get secrets` lists all thirteen. Nothing else creates them.
 
 ### A.3 Apply and roll
 
@@ -346,6 +352,27 @@ curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: applic
 KUBECONFIG=.local/k3s.yaml kubectl get snapshots          # the new one reaches phase ready = the node claimed it, snapshotted and recorded the commit
 kl ws ssh $ID -- true                                      # the gateway: DNS, NSG, harden-node, the copied jwt Secret
 ```
+
+### The real verification: one probe run
+
+Everything above checks a handful of things by hand. The SLO probe checks all hundred, and it is
+the FIRST thing to read after a rebuild — a green fast run says the whole journey works, and a red
+one names the step, which is far more than "the pods are Running" ever proves. Do not wait for the
+five-minute schedule:
+
+```sh
+# once, idempotent — claims the two usernames. `--from` takes no arg override, hence the jq.
+kubectl -n kloudlite-git create job slo-bootstrap --from=cronjob/kloudlite-git-slo-fast \
+  --dry-run=client -o json | jq '.spec.template.spec.containers[0].args=["bootstrap"]' | kubectl apply -f -
+kubectl -n kloudlite-git create job slo-now       --from=cronjob/kloudlite-git-slo-fast
+kubectl -n kloudlite-git logs -f job/slo-now
+```
+
+Then `/superadmin/slo` in the web app: the run appears step by step while it is still running.
+Expect a rebuilt cluster's first run to be RED on the 30-day budgets — the window is empty, and
+`unknown` is not `ok` — while every step in the run detail is green. That is the correct reading;
+the budgets fill in over the following month. `deploy/k3s/quotas-slo.yaml` must be applied on the
+region first, or stages 5–7 fail on quota rather than on anything real.
 
 ---
 

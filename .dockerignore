@@ -6,8 +6,12 @@
 !target/release/kloudlite-git-worker
 !target/release/kloudlite-git-agent
 !target/release/kloudlite-git-gateway
+!target/release/kloudlite-git-slo
+!target/release/kl
 !target/dev-image/kloudlite-git
 !target/dev-image/kloudlite-git-api
 !target/dev-image/kloudlite-git-worker
 !target/dev-image/kloudlite-git-agent
 !target/dev-image/kloudlite-git-gateway
+!target/dev-image/kloudlite-git-slo
+!target/dev-image/kl

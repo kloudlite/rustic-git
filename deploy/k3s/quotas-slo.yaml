@@ -1,0 +1,41 @@
+# The two owners the SLO probe runs as. Applied by hand on the k3s cluster, like every other
+# `Quota` — `bins/api` writes these only through a superadmin decision on a `Request`, and the
+# probe's own allocation is a deploy-time fact, not a request anyone made.
+#
+# Cluster-scoped and named by the owner slug (crates/workspaces/src/crd/mod.rs). Without these two
+# objects the probe falls back to `default-user`, which is a real person's allowance — and
+# `quota.refused` (the fast suite's check that /v1 refuses an over-quota create) would then need to
+# create a person's worth of workspaces before it saw a 409.
+apiVersion: kloudlite-git.io/v1alpha1
+kind: Quota
+metadata:
+  name: slo-probe
+spec:
+  # Exactly the one workspace and the one environment a run holds at a time. A second of either is
+  # a leaked object from a crashed run, and the 409 that refuses it is the signal, not a nuisance:
+  # `run-{id}` teardown sweeps by name prefix on the NEXT run, so a leak surfaces here first.
+  workspaces: 1
+  environments: 1
+  # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
+  # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
+  # is caught within a day rather than never.
+  snapshots: 10
+  diskGb: 5
+  cpu: 2
+  memoryGb: 4
+---
+# The second tenant. It exists ONLY to be refused: `sec.cross.owner` proves one owner cannot read
+# another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any
+# stage ever manages to allocate as this owner the create fails here rather than succeeding
+# quietly and leaving the SLO green.
+apiVersion: kloudlite-git.io/v1alpha1
+kind: Quota
+metadata:
+  name: slo-other
+spec:
+  workspaces: 0
+  environments: 0
+  snapshots: 0
+  diskGb: 0
+  cpu: 0
+  memoryGb: 0

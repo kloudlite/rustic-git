@@ -26,6 +26,27 @@ rsync -az --delete \
   --exclude target --exclude .git --exclude node_modules --exclude web \
   "$REPO_ROOT/" "$BUILD_HOST:~/kloudlite-git/"
 
+if [ "${1:-}" = "--slo" ]; then
+  # The probe is its own image and its own schedule: nothing rolls it, so a dev build goes onto the
+  # three CronJobs with `kubectl set image`. Safe to do here where it is not on agent-daemonset.yaml
+  # — the pin lives in deploy/kloudlite-git.yaml, which the next `deploy/roll.sh` reasserts, so
+  # there is no yaml claiming a SHA that is not running.
+  echo "==> building and pushing the slo image"
+  ssh "$BUILD_HOST" "cd ~/kloudlite-git && \
+    cargo build --profile dev-image --locked --bin kloudlite-git-slo --bin kl && \
+    sudo docker build --build-arg PROFILE=dev-image --target slo -t '$REG/kloudlite-git-slo:$TAG' . && \
+    sudo docker push '$REG/kloudlite-git-slo:$TAG'"
+  # The CronJobs live on AKS, so this is the same context --aks below uses, not the k3s one the
+  # agent roll above targets.
+  for c in kloudlite-git-slo-fast kloudlite-git-slo-weekly kloudlite-git-slo-monthly; do
+    kubectl -n kloudlite-git set image "cronjob/$c" "slo=$REG/kloudlite-git-slo:$TAG" >/dev/null
+  done
+  # A CronJob has no rollout to wait for: the next scheduled Job picks the new image up. To see one
+  # now: kubectl -n kloudlite-git create job slo-now --from=cronjob/kloudlite-git-slo-fast
+  echo "the three slo CronJobs now run $TAG — a dev image. deploy/roll.sh restores CI's pin."
+  exit 0
+fi
+
 echo "==> building $TAG (profile dev-image)"
 # The Dockerfile is runtime-only (see its header): cargo runs on the VM itself, against its warm
 # target dir, and the two docker builds only COPY target/dev-image/. The VM needs rustup's stable
@@ -66,5 +87,5 @@ if [ "${1:-}" = "--aks" ]; then
   done
   echo "central tier now runs $TAG — a dev image. deploy/roll.sh restores CI's pin."
 else
-  echo "server image: $REG/kloudlite-git:$TAG  (pass --aks to roll the central tier too)"
+  echo "server image: $REG/kloudlite-git:$TAG  (pass --aks to roll the central tier too, --slo for the probe)"
 fi

@@ -48,8 +48,41 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f system-netpol.yaml -f otel-agent.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f system-netpol.yaml -f otel-agent.yaml -f quotas-slo.yaml
 ```
+
+### The SLO probe's two owners
+
+`quotas-slo.yaml` is above because the probe (`deploy/kloudlite-git.yaml`'s three CronJobs) runs
+as `slo-probe` and `slo-other` in THIS cluster, and without the two `Quota` objects it inherits
+`default-user` — a real person's allowance, which makes `quota.refused` cost a person's worth of
+workspaces before it sees its 409. Safe to re-apply; nothing else references them.
+
+```sh
+kubectl apply -f quotas-slo.yaml
+
+# The probe's SSH key, once, on the AKS side (it is a Secret there, not here). Generate it and
+# register the public half; the runs use the private one for every SSH step.
+ssh-keygen -t ed25519 -N '' -C slo-probe -f /tmp/slo_ed25519
+kubectl -n kloudlite-git create secret generic kloudlite-git-slo --from-file=ssh_key=/tmp/slo_ed25519
+shred -u /tmp/slo_ed25519            # the cluster has it now; a copy on a laptop is a second key to lose
+
+# A kubeconfig for the probe, exactly as "Rotating the api tier's kubeconfig" below mints the
+# api's — same recipe, same api-rbac.yaml ServiceAccount, stored on AKS as
+# kloudlite-git-slo-k3s-kubeconfig. Without it stages 5-7 cannot see the workspace CRDs.
+
+# Then claim the two usernames, once. Idempotent.
+# `create job --from` copies the pod template verbatim and takes no argument override, so the
+# subcommand is swapped in on the way past.
+kubectl -n kloudlite-git create job slo-bootstrap --from=cronjob/kloudlite-git-slo-fast \
+  --dry-run=client -o json | jq '.spec.template.spec.containers[0].args=["bootstrap"]' | kubectl apply -f -
+```
+
+Every object a run creates is named `run-{run_id}` and swept by name prefix, so leftovers from a
+crashed run are cleaned up by the NEXT run rather than accumulating. To see them:
+`kubectl get workspaces,environments,snapshots -l kloudlite-git.io/owner=slo-probe`. Deleting a
+`run-*` object by hand is always safe — nothing outside the probe references one — and is the
+right move only if the probe itself is stopped and the objects are holding quota.
 
 ### Upgrading an existing cluster off PersistentVolumes
 

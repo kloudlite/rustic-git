@@ -431,6 +431,21 @@ point-in-time scrape could not compute a `for 5m` and left nine of ten rules per
 `GET /admin/history/{series}` — a fixed catalogue of twelve names plus `usage`, one SQL each, with
 every caller-shaped value (range, step, region, owner, dimension) through an allow-list or
 `series::ident` because that path has no bound parameters; an unknown name is a 404.
+**The SLO probe is a synthetic user, not a metric.** `bins/slo` (`kloudlite-git-slo`, its own
+image) walks one tenant's whole day — sign in, push over HTTP and SSH, a PR, the registry, a
+workspace, an environment, the lifecycle verbs, the admin queue, the security refusals, the edge —
+as three `CronJob`s in `deploy/kloudlite-git.yaml`: `*/5 * * * *` (`Forbid`, 540 s), weekly and
+monthly, all `restartPolicy: Never` / `backoffLimit: 0`, because a failed journey is a SAMPLE
+already counted and a retry would file a second run under a second id. It reports WHILE IT RUNS —
+a `PUT /admin/slo/runs/{id}` after every stage — to the admin process, which stays the single
+writer of the `kloudlite` database; the probe writes no ClickHouse row itself and holds no
+password, minting its own tokens from `kloudlite-git-jwt`. The catalogue is Rust
+(`crates/workspaces/src/slo/catalogue.rs`) with `deploy/slo.md` held equal to it by a test, exactly
+as `deploy/alerts.md` is held to `history::alerts`, so a target lives in one place and the yaml
+carries none. Teardown deletes by the `run-{id}` name prefix, so a crashed run is swept by the
+next one and a run can never delete another's live objects; the two owners it runs as are capped
+by `deploy/k3s/quotas-slo.yaml`, applied by hand on the region.
+
 `KLOUDLITE_GIT_CLICKHOUSE_URL` is optional everywhere: without it every process runs exactly as today
 and `/admin/history/*` answers `503 history unavailable`, which the web renders as a flat
 placeholder. `KLOUDLITE_GIT_HYPERDX_URL` is optional the same way — unset means no "Open in HyperDX"

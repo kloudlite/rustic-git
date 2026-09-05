@@ -90,10 +90,11 @@ jobs:
           cargo build --release --locked
           --bin kloudlite-git --bin kloudlite-git-api --bin kloudlite-git-worker
           --bin kloudlite-git-agent --bin kloudlite-git-gateway
+          --bin kloudlite-git-slo --bin kl
       - name: glibc ceiling
         run: |
           set -eu
-          for b in kloudlite-git kloudlite-git-api kloudlite-git-worker kloudlite-git-agent kloudlite-git-gateway; do
+          for b in kloudlite-git kloudlite-git-api kloudlite-git-worker kloudlite-git-agent kloudlite-git-gateway kloudlite-git-slo kl; do
             need=$(objdump -T "target/release/$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
             echo "$b needs $need"
             if [ "$(printf '%s\nGLIBC_2.36\n' "$need" | sort -V | tail -1)" != GLIBC_2.36 ]; then
@@ -109,6 +110,8 @@ jobs:
             target/release/kloudlite-git-worker
             target/release/kloudlite-git-agent
             target/release/kloudlite-git-gateway
+            target/release/kloudlite-git-slo
+            target/release/kl
           if-no-files-found: error
           retention-days: 1
 
@@ -132,7 +135,7 @@ jobs:
           name: bins
           path: target/release
       # upload-artifact drops the mode bits and the Dockerfile COPYs the files as they are.
-      - run: chmod +x target/release/kloudlite-git*
+      - run: chmod +x target/release/kloudlite-git* target/release/kl
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         # Default docker-container driver: required for `type=gha` cache, which the classic
         # `docker` driver cannot export to.
@@ -175,6 +178,19 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite-git-gateway:latest
             ghcr.io/kloudlite/kloudlite-git-gateway:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha
+      # The SLO probe. Same commit as the tier it probes, deliberately: a probe pinned behind the
+      # fleet reports the previous release's journey and calls it green.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: slo
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/kloudlite/kloudlite-git-slo:latest
+            ghcr.io/kloudlite/kloudlite-git-slo:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha
       # No binary of ours inside: the default workspace image is alpine plus what sshd and VS

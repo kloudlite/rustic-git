@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Repin every image in deploy/ to one commit: `deploy/pin.sh <sha> [web-sha]`.
 #
-# THE CONTRACT. Five images, two SHAs, one edit:
-#   - kloudlite-git, kloudlite-git-agent, kloudlite-git-gateway, kloudlite-git-workspace are four targets of ONE Dockerfile, built
+# THE CONTRACT. Six images, two SHAs, one edit:
+#   - kloudlite-git, kloudlite-git-agent, kloudlite-git-gateway, kloudlite-git-workspace, kloudlite-git-slo are five targets of ONE Dockerfile, built
 #     from ONE commit by image.yml. The server tier, the agent and the gateway therefore always
 #     pin the SAME sha — the agent speaks to the server's `vol/` surface, and two SHAs there is a
-#     wire-compatibility bet nobody placed. That is <sha>: kloudlite-git.yaml (srv, api, worker), k3s/agent-daemonset.yaml, k3s/gateway.yaml.
+#     wire-compatibility bet nobody placed. That is <sha>: kloudlite-git.yaml (srv, api, worker, the
+#     three slo CronJobs), k3s/agent-daemonset.yaml, k3s/gateway.yaml. The probe rides the same SHA
+#     for the same reason: one pinned behind the fleet reports the previous release's journey.
 #   - kloudlite-git-web is built by web.yml, which runs only when web/** changes, so its SHA is
 #     usually older and is the optional second argument: kloudlite-git-web.yaml.
 #   No kustomize, no envsubst: the manifests stay plain files kubectl applies as they are, and
@@ -41,7 +43,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite-git kloudlite-git-agent kloudlite-git-gateway kloudlite-git-workspace; do
+for img in kloudlite-git kloudlite-git-agent kloudlite-git-gateway kloudlite-git-workspace kloudlite-git-slo; do
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
@@ -64,6 +66,7 @@ pin 'kloudlite-git-gateway' "$SHA" "${DIGEST[kloudlite-git-gateway]}" k3s/gatewa
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
 pin 'kloudlite-git-workspace' "$SHA" "${DIGEST[kloudlite-git-workspace]}" k3s/agent-daemonset.yaml
+pin 'kloudlite-git-slo' "$SHA" "${DIGEST[kloudlite-git-slo]}" kloudlite-git.yaml
 [ -z "$WEB" ] || pin 'kloudlite-git-web' "$WEB" "${DIGEST[kloudlite-git-web]}" kloudlite-git-web.yaml
 
 grep -rn --include='*.yaml' -E 'image: ghcr\.io/kloudlite/' . | sed 's/^\.\///'
