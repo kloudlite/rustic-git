@@ -2011,7 +2011,12 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
         .collect();
     assert_eq!(env["URL"], "ssh://git@git.example.com:22/alice/site.git");
     assert_eq!(env["BRANCH"], "main");
-    assert!(env["GIT_SSH_COMMAND"].contains(k8s::USER_KEY_PATH));
+    // ssh refuses root's own key at the volume's 0444, so the seeder clones with a 0600 copy it
+    // installs first; the key path it reads is the mounted one, the one it uses is the copy.
+    let cmd = inits[0].command.as_ref().unwrap().join(" ");
+    assert!(cmd.contains(&format!("install -m 600 {}/id_ed25519", k8s::USER_KEY_PATH)), "{cmd}");
+    assert!(cmd.contains("GIT_SSH_COMMAND=\"ssh -i /tmp/seed_key"), "{cmd}");
+    assert!(!env.contains_key("GIT_SSH_COMMAND"), "the env would point ssh at the refused 0444 file");
     // The whole point of moving the clone into the pod: no minted credential rides along.
     let rendered = serde_json::to_string(&pod).unwrap();
     for gone in ["credentialSecret", "http.extraHeader", "x-access-token"] {
