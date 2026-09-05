@@ -1,0 +1,91 @@
+# The SLO probe's identity on a region cluster. Its kubeconfig is minted from this ServiceAccount
+# the way the api tier's is (README, "Rotating the api tier's kubeconfig") and stored on AKS as
+# `kloudlite-git-slo-k3s-kubeconfig`. The header table IS the role: one row per call the probe
+# makes on this cluster, and nothing the api tier's own role would let it write.
+#
+# | Call                                          | Rule                                              |
+# | --------------------------------------------- | ------------------------------------------------- |
+# | wait for Ready/Replicated, list worktrees     | workspaces, environments: get, list                |
+# | volume history, orphan collection             | volumes, snapshots: get, list                      |
+# | exec the home write, read /home/kl on 2nd node| pods: get, list · pods/exec: create                |
+# | cordon (weekly), taint (monthly)              | nodes: get, list, patch                            |
+# | dead-node drill deletes ONE agent pod         | pods: delete in kube-system, DaemonSet's pods only |
+# | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
+#
+# `pods/exec` is cluster-wide because a workspace pod lives in `ws-slo-probe` and an environment's
+# in `env-{id}`, a namespace that exists for one run — a per-namespace Role could not be written
+# ahead of time. The probe only ever execs into pods it created (`run-{id}` names).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kloudlite-git-slo
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kloudlite-git-slo
+rules:
+  - apiGroups: ["kloudlite-git.io"]
+    resources: ["workspaces", "environments", "volumes", "snapshots"]
+    verbs: ["get", "list"]
+  # The dry-run spec patch in `sec.agent.spec` is issued while impersonating the agent, so the
+  # verb the probe itself needs on workspaces is `patch` — the admission policy is what refuses
+  # it, and that refusal is the sample. A real patch would need the finalizer/label carve-outs
+  # the agent has, which the probe does not.
+  - apiGroups: ["kloudlite-git.io"]
+    resources: ["workspaces"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["impersonate"]
+    resourceNames: ["kloudlite-git-agent"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kloudlite-git-slo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kloudlite-git-slo
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-git-slo
+    namespace: kube-system
+---
+# The one delete: the monthly dead-node drill removes the agent pod on the node it tainted. Pod
+# names are generated, so this cannot be narrowed by resourceName; it is narrowed by namespace
+# instead — the agent DaemonSet is the only kloudlite workload in kube-system on a region.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kloudlite-git-slo-drill
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kloudlite-git-slo-drill
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kloudlite-git-slo-drill
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-git-slo
+    namespace: kube-system

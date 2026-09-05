@@ -67,9 +67,12 @@ ssh-keygen -t ed25519 -N '' -C slo-probe -f /tmp/slo_ed25519
 kubectl -n kloudlite-git create secret generic kloudlite-git-slo --from-file=ssh_key=/tmp/slo_ed25519
 shred -u /tmp/slo_ed25519            # the cluster has it now; a copy on a laptop is a second key to lose
 
-# A kubeconfig for the probe, exactly as "Rotating the api tier's kubeconfig" below mints the
-# api's — same recipe, same api-rbac.yaml ServiceAccount, stored on AKS as
+# The probe's own identity on this region: apply slo-rbac.yaml (the header table is the role —
+# exec into its pods, cordon/taint for the drills, impersonate the agent for one dry-run), then
+# mint a kubeconfig for the `kloudlite-git-slo` ServiceAccount exactly as "Rotating the api
+# tier's kubeconfig" below does for the api's, and store it on AKS as
 # kloudlite-git-slo-k3s-kubeconfig. Without it stages 5-7 cannot see the workspace CRDs.
+kubectl apply -f slo-rbac.yaml
 
 # Then claim the two usernames, once. Idempotent.
 # `create job --from` copies the pod template verbatim and takes no argument override, so the
