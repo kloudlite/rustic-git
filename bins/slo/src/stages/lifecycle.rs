@@ -136,6 +136,17 @@ async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>)
                 .await
                 .context("could not delete the environment")?;
             gone(c, &env_url, &jwt, WAIT, "the environment's worktree").await?;
+            // And every OTHER environment this run still holds, because `env.restore` leaves one
+            // standing ON THIS SNAPSHOT: a restore grafts a new working copy onto it and waits for
+            // it to run, so the snapshot `snap.delete` is about to take is a running worktree's
+            // base until that copy goes — which the api refuses with 409, correctly. Deleting them
+            // here is also what makes the assertion below mean anything: with no working copy left
+            // at all, the volume surviving can only be the snapshot holding it.
+            for id in environments(c).await {
+                let url = api(c, &format!("/v1/environments/{id}"));
+                let _ = super::call(c, reqwest::Method::DELETE, &url, &jwt, None).await;
+                gone(c, &url, &jwt, WAIT, "a leftover environment on this run's volume").await?;
+            }
             match volume_listed(c, &jwt, &volume).await? {
                 true => Ok(()),
                 false => Err(anyhow!(
@@ -658,6 +669,20 @@ async fn worktrees(c: &Ctx) -> Vec<String> {
     let url = api(c, "/v1/workspaces");
     let prefix = c.prefix();
     let rows = get(c, &url, &c.probe_jwt).await.unwrap_or(Value::Null);
+    rows.as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| r.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(&prefix)))
+                .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every environment THIS RUN created, by name prefix — `worktrees`' twin for the other kind.
+async fn environments(c: &Ctx) -> Vec<String> {
+    let prefix = c.prefix();
+    let rows = get(c, &api(c, "/v1/environments"), &c.probe_jwt).await.unwrap_or(Value::Null);
     rows.as_array()
         .map(|rows| {
             rows.iter()
