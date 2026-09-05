@@ -55,7 +55,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: kloudlite-git
-          image: ghcr.io/kloudlite/kloudlite-git:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:328f62335bd71f44b7de6ced98e4b7826e3fa607b2edc2ab0724ab4a0aa334ac
+          image: ghcr.io/kloudlite/kloudlite-git:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:d89a200c8c7cf3270454c411997647f044d116f53e98b3324e8b562073ac30c0
           args: ["serve"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -388,7 +388,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: api
-          image: ghcr.io/kloudlite/kloudlite-git:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:328f62335bd71f44b7de6ced98e4b7826e3fa607b2edc2ab0724ab4a0aa334ac
+          image: ghcr.io/kloudlite/kloudlite-git:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:d89a200c8c7cf3270454c411997647f044d116f53e98b3324e8b562073ac30c0
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["kloudlite-git-api"]
@@ -564,7 +564,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/kloudlite-git:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:328f62335bd71f44b7de6ced98e4b7826e3fa607b2edc2ab0724ab4a0aa334ac
+          image: ghcr.io/kloudlite/kloudlite-git:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:d89a200c8c7cf3270454c411997647f044d116f53e98b3324e8b562073ac30c0
           command: ["kloudlite-git-worker"]
           env:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
@@ -769,7 +769,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: admin
-          image: ghcr.io/kloudlite/kloudlite-git:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:328f62335bd71f44b7de6ced98e4b7826e3fa607b2edc2ab0724ab4a0aa334ac
+          image: ghcr.io/kloudlite/kloudlite-git:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:d89a200c8c7cf3270454c411997647f044d116f53e98b3324e8b562073ac30c0
           command: ["kloudlite-git-api"]
           ports:
             - { name: http, containerPort: 8090 }
@@ -1650,7 +1650,7 @@ spec:
             fsGroup: 1001
           containers:
             - name: slo
-              image: ghcr.io/kloudlite/kloudlite-git-slo:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:9b032c45bbda2bd14383b9f495e600d84eca58f1b658c20ede63e2d166dee850
+              image: ghcr.io/kloudlite/kloudlite-git-slo:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:ae686b705ee92cc8c221b99da1e886702367e2e1bfe7934a84e28eb5b09276e6
               args: ["run", "--suite", "fast"]
               envFrom:
                 - configMapRef: { name: kloudlite-git-slo-env }
@@ -1742,7 +1742,7 @@ spec:
             fsGroup: 1001
           containers:
             - name: slo
-              image: ghcr.io/kloudlite/kloudlite-git-slo:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:9b032c45bbda2bd14383b9f495e600d84eca58f1b658c20ede63e2d166dee850
+              image: ghcr.io/kloudlite/kloudlite-git-slo:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:ae686b705ee92cc8c221b99da1e886702367e2e1bfe7934a84e28eb5b09276e6
               args: ["run", "--suite", "weekly"]
               envFrom:
                 - configMapRef: { name: kloudlite-git-slo-env }
@@ -1819,7 +1819,7 @@ spec:
             fsGroup: 1001
           containers:
             - name: slo
-              image: ghcr.io/kloudlite/kloudlite-git-slo:9ece86c58549365b9bf515d4447f618b92944d0a@sha256:9b032c45bbda2bd14383b9f495e600d84eca58f1b658c20ede63e2d166dee850
+              image: ghcr.io/kloudlite/kloudlite-git-slo:76f3b9426a7416d39f1cc5e0ebe849f5f3c38f0b@sha256:ae686b705ee92cc8c221b99da1e886702367e2e1bfe7934a84e28eb5b09276e6
               args: ["run", "--suite", "monthly"]
               envFrom:
                 - configMapRef: { name: kloudlite-git-slo-env }
