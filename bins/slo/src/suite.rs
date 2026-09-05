@@ -77,6 +77,8 @@ pub const DEFAULT_BUDGET_SECS: u64 = 780;
 
 /// The reason every id a spent budget cost is skipped with.
 pub const OVER_BUDGET: &str = "run budget exhausted";
+/// The detail on every id a fast run skips because an hourly run is in flight.
+pub const HOURLY_IN_FLIGHT: &str = "an hourly run is in flight";
 
 /// Whether the run has spent its wall-clock budget.
 ///
@@ -94,17 +96,45 @@ pub fn over_budget(c: &Ctx, budget: Duration) -> bool {
 /// having fired. Ids come from the catalogue rather than from the stage code, because a stage that
 /// never ran cannot say what it would have reported.
 pub fn skip_remaining(c: &mut Ctx, kind: Suite, remaining: &[Stage]) -> usize {
+    skip_remaining_because(c, kind, remaining, OVER_BUDGET)
+}
+
+pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why: &str) -> usize {
     let catalogue = journey(kind);
     let mut skipped = 0;
     for stage in remaining {
         c.stage = stage.name.to_string();
         let ids = catalogue.iter().find(|(name, _)| *name == stage.name).map(|(_, ids)| ids.clone());
         for id in ids.unwrap_or_default() {
-            c.skip(id, OVER_BUDGET);
+            c.skip(id, why);
             skipped += 1;
         }
     }
     skipped
+}
+
+/// Is an hourly run in flight right now? Asked by the fast suite before it starts anything.
+///
+/// The two suites run as different tenants, so they no longer collide on a key or a grant — but
+/// they still share the region's nodes, and a fast workspace placed beside the hourly's five
+/// waits on `Insufficient cpu` and fails its own ceiling. The hourly journey covers every fast id
+/// at the same targets, so the fast run YIELDS: every id skipped, no sample filed, nothing
+/// measured twice. A `running` row older than an hour is a crash the parent never closed, and
+/// does not count; the answer is `false` on any error, because a probe that cannot ask must
+/// still probe.
+pub async fn hourly_in_flight(c: &Ctx) -> bool {
+    let url = stages::admin(c, "/admin/slo/runs?suite=hourly&limit=3");
+    let Ok(v) = stages::get(c, &url, &c.admin_jwt).await else { return false };
+    let rows = v.get("runs").and_then(|r| r.as_array()).cloned().or_else(|| v.as_array().cloned()).unwrap_or_default();
+    rows.iter().any(|r| {
+        let running = r.get("state").and_then(|s| s.as_str()) == Some("running");
+        let fresh = r
+            .get("started")
+            .and_then(|s| s.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < 3600);
+        running && fresh
+    })
 }
 
 /// The child's whole journey: run each stage, hand the parent what it measured, report — and stop
@@ -114,6 +144,14 @@ pub fn skip_remaining(c: &mut Ctx, kind: Suite, remaining: &[Stage]) -> usize {
 /// the one path a deployment cannot be asked to reproduce.
 pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
     let stages = suite(kind);
+    if kind == Suite::Fast && hourly_in_flight(c).await {
+        let skipped = skip_remaining_because(c, kind, &stages, HOURLY_IN_FLIGHT);
+        tracing::warn!(skipped, "slo.run.yielded");
+        hand_over(c);
+        let last = c.stage.clone();
+        report(c, &last).await;
+        return;
+    }
     for (i, stage) in stages.iter().enumerate() {
         // Checked BEFORE a stage, never inside one: a stage cut in half reports some of its ids
         // and silently drops the rest, which is the hole these skips exist to avoid.
