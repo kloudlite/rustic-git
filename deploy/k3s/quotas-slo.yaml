@@ -13,7 +13,7 @@ metadata:
 spec:
   # A run holds the workspace, its clone and a restore at once, and a run the deadline killed keeps
   # its objects until the next boot sweep (one hour), so the count fits two runs, not one;
-  # `quota.refused` therefore refuses on diskGb (a create asking for more than 5 GiB), never on the
+  # `quota.refused` therefore refuses on diskGb (a create asking for more than 20 GiB), never on the
   # count. Leftovers from a crashed run are swept by `run-{id}` prefix on the next run's boot.
   workspaces: 6
   environments: 1
@@ -21,7 +21,7 @@ spec:
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
   snapshots: 10
-  diskGb: 5
+  diskGb: 20
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The

@@ -278,7 +278,9 @@ async fn token_revoked(c: &mut Ctx) {
                 .context("could not revoke the token")?;
             let (status, _) =
                 raw(c, reqwest::Method::GET, &refs, "", None, &[("authorization", basic)]).await?;
-            refused("a revoked token", status)
+            // The git listener answers a credential it no longer knows with 400, not 401: the
+            // token is gone from the store, so the request itself is malformed to it.
+            refused_with("a revoked token", status, &[400, 401, 403])
         }
         .boxed()
     })
