@@ -557,11 +557,22 @@ async fn refuse_then_merge(
         .ok_or_else(|| anyhow!("the answer carried no number"))?;
     let merge = format!("{pulls}/{number}/merge?strategy=fast-forward");
     post(c, &merge, jwt, Value::Null).await.context("could not ask for the merge")?;
-    poll_json(c, refs, jwt, MERGE_CAP, |r| {
+    let landed = poll_json(c, refs, jwt, MERGE_CAP, |r| {
         super::git::oid_of(r, BASE_BRANCH).as_deref() == Some(target.as_str())
     })
-    .await
-    .context("the merge into a protected branch never landed")
+    .await;
+    if landed.is_err() {
+        // The worker's own verdict, so a refusal reads as the fleet's sentence rather than as a
+        // silence: `merge.state` and `merge.detail` are what the person waiting would see.
+        let pr = super::get(c, &format!("{pulls}/{number}"), jwt).await.ok();
+        let job = pr.as_ref().and_then(|p| p.get("merge")).cloned().unwrap_or(Value::Null);
+        let (state, detail) = (
+            job.get("state").and_then(Value::as_str).unwrap_or("no job").to_string(),
+            job.get("detail").and_then(Value::as_str).unwrap_or("").to_string(),
+        );
+        return landed.map(|_| ()).with_context(|| format!("the merge into a protected branch never landed: merge {state} {detail}"));
+    }
+    Ok(())
 }
 
 /// `repo.commit.patch`: an edit made the way the web's editor makes one — a new file, on a NEW
