@@ -272,7 +272,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "quota.view", feature: "Admin", sli: "`GET /v1/quota` reflects the objects the run holds", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "request.approve", feature: "Admin", sli: "An approved quota request raises the quota and unblocks the refused create", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "admin.stop.workspace", feature: "Admin", sli: "An admin stop is visible to the owner as `stopped`", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "superadmin.grant", feature: "Security", sli: "Granting and revoking superadmin flips `/admin/overview` between 200 and 403", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "superadmin.grant", feature: "Security", sli: "Granting superadmin adds the account to the roster and revoking takes it off", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "feed.experience", feature: "Pull requests", sli: "The feed shows the team and repo events of this run", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "home.persists", feature: "Workspaces", sli: "A file written in one workspace is read from a fresh workspace's home", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
 

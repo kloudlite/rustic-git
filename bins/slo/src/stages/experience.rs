@@ -87,6 +87,10 @@ pub async fn run(c: &mut Ctx) {
             "env.clone" | "env.restore.inplace" | "env.stop.start" => {}
             "vol.history" => experience_env::history(c).await,
             "quota.view" => experience_env::quota_view(c).await,
+            "request.approve" => super::experience_admin::request_approve(c).await,
+            "admin.stop.workspace" => super::experience_admin::admin_stop(c).await,
+            "superadmin.grant" => super::experience_admin::superadmin_grant(c).await,
+            "feed.experience" => super::experience_admin::feed(c).await,
             _ => c.skip(id, "not implemented yet"),
         }
     }

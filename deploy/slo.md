@@ -123,7 +123,7 @@ cannot fill a five-minute window.
 | `quota.view` | Admin | `GET /v1/quota` reflects the objects the run holds | 99.9 % | hourly | 14 · Experience |
 | `request.approve` | Admin | An approved quota request raises the quota and unblocks the refused create | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `admin.stop.workspace` | Admin | An admin stop is visible to the owner as `stopped` | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
-| `superadmin.grant` | Security | Granting and revoking superadmin flips `/admin/overview` between 200 and 403 | 100 % | hourly | 14 · Experience |
+| `superadmin.grant` | Security | Granting superadmin adds the account to the roster and revoking takes it off | 100 % | hourly | 14 · Experience |
 | `feed.experience` | Pull requests | The feed shows the team and repo events of this run | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `home.persists` | Workspaces | A file written in one workspace is read from a fresh workspace's home | 99.9 % | hourly | 14 · Experience |
 | — | Identity | A person can reset access via the email magic link | — | manual | manual · email link |
