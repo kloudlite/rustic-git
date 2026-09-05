@@ -82,11 +82,17 @@ jobs:
     # the HOST and are mounted in: that is the whole reason this runs on build-0.
     container:
       image: rust:1-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7
+      # As the runner's own user (azureuser, uid 1000), never root: a root checkout inside the
+      # container leaves files the host-side test job cannot delete, and the next run's checkout
+      # fails with "permission denied" on .git/index.lock — which is exactly what happened.
+      options: --user 1000:1000
       volumes:
         - /home/azureuser/ci-target:/ci-target
         - /home/azureuser/ci-cargo:/usr/local/cargo/registry
     env:
       CARGO_TARGET_DIR: /ci-target
+      # The image's HOME is root's; a non-root cargo needs somewhere writable for its own state.
+      HOME: /tmp
     permissions:
       contents: read
     steps:
