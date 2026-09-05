@@ -11,10 +11,10 @@ kind: Quota
 metadata:
   name: slo-probe
 spec:
-  # Exactly the one workspace and the one environment a run holds at a time. A second of either is
-  # a leaked object from a crashed run, and the 409 that refuses it is the signal, not a nuisance:
-  # `run-{id}` teardown sweeps by name prefix on the NEXT run, so a leak surfaces here first.
-  workspaces: 1
+  # A run holds the workspace, its clone and a restore at once, so the count must fit the journey;
+  # `quota.refused` therefore refuses on diskGb (a create asking for more than 5 GiB), never on the
+  # count. Leftovers from a crashed run are swept by `run-{id}` prefix on the next run's boot.
+  workspaces: 4
   environments: 1
   # Ten pushes: a run cuts a handful and deletes them in teardown. Deep enough that one crashed
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
