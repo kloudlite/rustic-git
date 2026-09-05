@@ -264,3 +264,48 @@ Email sign-in and passkey registration (need an inbox / an authenticator). Per-r
 pods (one probe on AKS reaches every region through the api; a second region gets a second
 `CronJob` with a different `KLOUDLITE_SLO_REGION`, no code). Public status page. Alert
 routing beyond the one webhook. Node SSH.
+
+## Addendum, 2026-09-05: the Experience suite
+
+The owner's instruction after go-live: "I want everything, including package installations and
+removal — I want to gauge the experience of the user." The fast suite proves the platform is up;
+this suite walks every remaining verb a person can perform, once an hour, as `kloudlite-slo-hourly`
+(`7 * * * *`, `Forbid`, `activeDeadlineSeconds: 2400`), reporting under stage `14 · Experience`
+with `Suite::Hourly` (attainment 30 d; burn pair 24 h / 4 h only, threshold 6). It runs the fast
+stages first, so every hourly run is also a fast sample.
+
+| id | SLI | Target |
+|---|---|---|
+| `ws.packages.add` | Adding a package to a running workspace makes it runnable (`which`) | 95 % ≤ 180 s |
+| `ws.packages.remove` | Removing it makes it disappear from the profile | 95 % ≤ 120 s |
+| `ws.seeded` | A workspace created from a repo and branch has that clone checked out | 95 % ≤ 180 s |
+| `key.platform.regenerate` | Regenerating the platform key keeps seeding working | 99.9 % |
+| `team.create` | A team can be created by a person | 99.9 % |
+| `team.invite.accept` | An invite is created, previewed and accepted once | 99.9 % ≤ 5 s |
+| `team.role.set` | A member's role changes and is reflected in the profile | 99.9 % |
+| `team.repo.shared` | A member clones a team repo; a non-member is refused | 99.9 % |
+| `team.workspace` | A team workspace lands in the team namespace and starts | 95 % ≤ 90 s |
+| `team.member.remove` | A removed member loses access to the team repo | 99.9 % |
+| `team.delete` | Deleting the team removes its profile and refuses its slug | 99.9 % |
+| `repo.protection` | A protected branch refuses a direct push and still merges via a PR | 99.9 % |
+| `repo.commit.patch` | An edit made through the web commit endpoint lands in the log | 99.9 % ≤ 5 s |
+| `repo.compare` | Comparing two branches lists the right commits | 99.9 % ≤ 1 s |
+| `pr.comment` | A comment on a PR is readable back | 99.9 % |
+| `pr.close` | A closed PR is refused a merge | 99.9 % |
+| `commit.verify` | The signature endpoint answers for a pushed commit | 99.9 % ≤ 1 s |
+| `env.services.multi` | An environment with two services has both ready and resolving each other | 95 % ≤ 180 s |
+| `env.clone` | A stopped environment clones with all services ready | 95 % ≤ 180 s |
+| `env.restore.inplace` | Restore in place brings a service's data back | 99.9 % |
+| `env.stop.start` | Stop then start round trip | 95 % ≤ 120 s |
+| `vol.history` | History lists pushes newest first with their messages; refs answer | 99.9 % ≤ 1 s |
+| `quota.view` | `GET /v1/quota` reflects the objects the run holds | 99.9 % |
+| `request.approve` | An approved quota request raises the quota and unblocks the refused create | 99.9 % ≤ 10 s |
+| `admin.stop.workspace` | An admin stop is visible to the owner as `stopped` | 99.9 % ≤ 30 s |
+| `superadmin.grant` | Granting and revoking superadmin flips `/admin/overview` between 200 and 403 | 100 % |
+| `feed.experience` | The feed shows the team and repo events of this run | 99.9 % ≤ 30 s |
+| `home.persists` | A file written in one workspace is read from a fresh workspace's home | 99.9 % |
+
+Teardown covers the new objects (team, second repo, team workspace, second environment) by the
+same `run-{id}` prefix; the team slug is `run-{id}-team`. Everything the suite creates for the
+`slo-other` user is deleted from `slo-other`'s side too. The quota it raises through
+`request.approve` is written back to `deploy/k3s/quotas-slo.yaml`'s values at the end of the step.
