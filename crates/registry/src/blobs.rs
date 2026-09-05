@@ -80,10 +80,14 @@ async fn blob_response(
     // gets the blob only if this image holds it — and a 404, not a 403, when it does not, so the
     // URL of a public image is not an existence oracle for its private siblings' layers.
     if who.as_deref() != Some(owner.as_str()) {
-        match super::store::image_holds_blob(&app.store, &owner, &name, &d).await {
+        match crate::fenced_retry(&app, &owner, &name, false, || {
+            super::store::image_holds_blob(&app.store, &owner, &name, &d)
+        })
+        .await
+        {
             Ok(true) => {}
             Ok(false) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob"),
-            Err(e) => return crate::oci_internal(e),
+            Err(r) => return r,
         }
     }
     let path = blob_path(&owner, &d);
@@ -148,8 +152,12 @@ pub async fn start_upload(
         let from_owner = from.split('/').next().unwrap_or_default();
         let mount_path = blob_path(&owner, &d);
         if from_owner == owner && app.store.os.head(&mount_path).await.is_ok() {
-            if let Err(e) = super::store::hold_blob(&app.store, &owner, &name, &d).await {
-                return crate::oci_internal(e);
+            if let Err(r) = crate::fenced_retry(&app, &owner, &name, true, || {
+                super::store::hold_blob(&app.store, &owner, &name, &d)
+            })
+            .await
+            {
+                return r;
             }
             return created(&owner, &name, &d);
         }
@@ -208,8 +216,10 @@ pub(super) async fn finish_blob(
     // The image now exists, even with no manifest yet: a push that uploads layers and then fails
     // should leave something the owner can see and clean up. `hold_blob`, never
     // `set_image_visibility` — a push must not flip a public image back to private.
-    if let Err(e) = super::store::hold_blob(&app.store, owner, name, &d).await {
-        return crate::oci_internal(e);
+    if let Err(r) =
+        crate::fenced_retry(app, owner, name, true, || super::store::hold_blob(&app.store, owner, name, &d)).await
+    {
+        return r;
     }
     created(owner, name, &d)
 }

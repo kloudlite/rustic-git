@@ -59,6 +59,60 @@ pub fn oci_internal(e: crate::Error) -> Response {
     oci_err(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", "internal error")
 }
 
+/// The answer when a fence was CORRECT: the ownership map now names a peer, so this node must not
+/// reopen the database (that is what fences the legitimate owner). 503 rather than a redirect
+/// because docker and crane follow a 307 on a blob GET but not on an upload's POST/PATCH/PUT —
+/// both, however, retry a 503, so one shape covers every verb. The code is the one the client
+/// already knows how to restart from: an upload session that moved node is gone.
+pub fn fenced_elsewhere(upload: bool) -> Response {
+    let (code, msg) = if upload {
+        ("BLOB_UPLOAD_UNKNOWN", "upload moved to another node; restart it")
+    } else {
+        ("UNAVAILABLE", "image is owned by another node; retry")
+    };
+    let mut r = oci_err(StatusCode::SERVICE_UNAVAILABLE, code, msg);
+    r.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    r
+}
+
+/// One `/v2` database operation, retried ONCE through `App::on_fenced` — the registry half of the
+/// arm `router/git.rs` has for repos. A stray opener fences a handle this node still owns; without
+/// this the first request after a roll answered 500 UNKNOWN and the client gave up. `f` must be
+/// re-runnable: it is called a second time only after the fenced handle was evicted.
+pub async fn fenced_retry<T, F, Fut>(
+    app: &App,
+    owner: &str,
+    name: &str,
+    upload: bool,
+    f: F,
+) -> std::result::Result<T, Response>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = crate::Result<T>>,
+{
+    match f().await {
+        Ok(v) => Ok(v),
+        Err(e) if pool::is_fenced(&e) => {
+            // `img`/`{owner}/{name}`: the same pair the pool and the ownership map are keyed by,
+            // so `on_fenced` routes and evicts the image's database, not a repo of that name.
+            let (o, n) = pool_coords(owner, name);
+            if !app.on_fenced(o, &n).await {
+                return Err(fenced_elsewhere(upload));
+            }
+            match f().await {
+                Ok(v) => Ok(v),
+                // a second fence is a real error, not retried again
+                Err(e) if pool::is_fenced(&e) => Err(fenced_elsewhere(upload)),
+                Err(e) => Err(oci_internal(e)),
+            }
+        }
+        Err(e) => Err(oci_internal(e)),
+    }
+}
+
 pub fn is_v2_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
     p == "v2" || p.starts_with("v2/")

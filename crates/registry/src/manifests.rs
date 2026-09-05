@@ -207,19 +207,6 @@ pub async fn put_manifest(
         .to_string();
     // The media type travels with the manifest: a GET must answer the same Content-Type the push
     // declared, and the bytes themselves are not re-parsed to recover it.
-    let db = match app.store.image_db(&owner, &name).await {
-        Ok(d) => d,
-        Err(e) => return crate::oci_internal(e),
-    };
-    // Read BEFORE the put: it is the one row written for every manifest and no other, so it is
-    // what says whether this digest is new to the image — which is what the manifest counter needs
-    // and what used to cost a full prefix LIST. A read error reads as "already there", which only
-    // ever under-counts; the GC reconcile is what corrects drift either way.
-    let existed = db
-        .get(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes())
-        .await
-        .map(|v| v.is_some())
-        .unwrap_or(true);
     // Tags named by the request, validated BEFORE anything is written: a push by digest may name
     // tags as `?tag=` (the spec's tag param, possibly repeated), and a malformed one refuses the
     // whole push rather than being skipped — a client that asked for a tag and did not get it has
@@ -242,31 +229,17 @@ pub async fn put_manifest(
     if let Err(e) = app.store.os.put(&manifest_path(&owner, &name, &d), PutPayload::from(body.clone())).await {
         return crate::oci_internal(e.into());
     }
-    // Every row the push writes, in ONE batch, and only after the bytes landed: the media type,
-    // the blob rows, the referrer row, the tag(s), the manifest counters. One WAL flush instead
-    // of one per row — a multi-arch push was N × 7 flush waits — and atomic, so a stranger
-    // resolving the tag can never find a layer this image does not yet admit holding (the rule
-    // that used to be an ordering between separate puts).
-    let mut batch = slatedb::WriteBatch::new();
-    batch.put(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes(), media.as_bytes());
-    batch.put(
-        manifest_meta_key(&d),
-        format!("{}\n{}\n{}", body.len(), crate::ownership::now_ms(), declared_size(&body)).into_bytes(),
-    );
-    super::store::note_blobs(&mut batch, &digests, &d.to_string());
-    let subject = super::referrers::index(&mut batch, &d, &body);
-    for t in &tags {
-        super::store::batch_tag(&mut batch, t, &d);
-    }
-    super::store::batch_image(&mut batch);
-    // Counters are the marker's inputs and the GC reconcile rewrites a drifted marker, so a
-    // failure to compute them is logged, never a failed push.
-    if let Err(e) = app.store.note_manifest_put(&mut batch, &owner, &name, existed).await {
-        tracing::warn!(owner = %owner, name = %name, reason = "put", error = %e, "registry.counter.write.failed");
-    }
-    if let Err(e) = db.write(batch).await {
-        return crate::oci_internal(e.into());
-    }
+    // One re-runnable unit, so the fence arm can replay the whole thing: every row this push
+    // writes goes in ONE batch, and a retry has to rebuild it (a `WriteBatch` is consumed by the
+    // write that failed).
+    let subject = match crate::fenced_retry(&app, &owner, &name, false, || {
+        push_rows(&app, &owner, &name, &d, &media, &digests, &body, &tags)
+    })
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
     // A re-push of the same digest may declare a new Content-Type; the cached answer would keep
     // serving the old one otherwise.
     app.store.manifests().remove(&format!("{owner}/{name}/{d}"));
@@ -292,6 +265,50 @@ pub async fn put_manifest(
         );
     }
     resp
+}
+
+/// The rows a manifest push writes, in ONE batch and only after the bytes landed: the media type,
+/// the blob rows, the referrer row, the tag(s), the manifest counters. One WAL flush instead of one
+/// per row — a multi-arch push was N × 7 flush waits — and atomic, so a stranger resolving the tag
+/// can never find a layer this image does not yet admit holding (the rule that used to be an
+/// ordering between separate puts). Returns the manifest's `subject`, when it has one.
+#[allow(clippy::too_many_arguments)]
+async fn push_rows(
+    app: &App,
+    owner: &str,
+    name: &str,
+    d: &Digest,
+    media: &str,
+    digests: &[Digest],
+    body: &Bytes,
+    tags: &[String],
+) -> crate::Result<Option<Digest>> {
+    let db = app.store.image_db(owner, name).await?;
+    // Read BEFORE the batch: the media-type row is written for every manifest and no other, so it
+    // is what says whether this digest is new to the image — which is what the manifest counter
+    // needs and what used to cost a full prefix LIST. A read error reads as "already there", which
+    // only ever under-counts; the GC reconcile is what corrects drift either way.
+    let existed =
+        db.get(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes()).await.map(|v| v.is_some()).unwrap_or(true);
+    let mut batch = slatedb::WriteBatch::new();
+    batch.put(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes(), media.as_bytes());
+    batch.put(
+        manifest_meta_key(d),
+        format!("{}\n{}\n{}", body.len(), crate::ownership::now_ms(), declared_size(body)).into_bytes(),
+    );
+    super::store::note_blobs(&mut batch, digests, &d.to_string());
+    let subject = super::referrers::index(&mut batch, d, body);
+    for t in tags {
+        super::store::batch_tag(&mut batch, t, d);
+    }
+    super::store::batch_image(&mut batch);
+    // Counters are the marker's inputs and the GC reconcile rewrites a drifted marker, so a
+    // failure to compute them is logged, never a failed push.
+    if let Err(e) = app.store.note_manifest_put(&mut batch, owner, name, existed).await {
+        tracing::warn!(owner = %owner, name = %name, reason = "put", error = %e, "registry.counter.write.failed");
+    }
+    db.write(batch).await?;
+    Ok(subject)
 }
 
 pub async fn get_manifest(
@@ -331,7 +348,11 @@ async fn manifest_response(
     let mut pulled_tag: Option<String> = None;
     let d = match r {
         Reference::Digest(d) => d,
-        Reference::Tag(t) => match app.store.tag(&owner, &name, &t).await {
+        Reference::Tag(t) => match crate::fenced_retry(&app, &owner, &name, false, || {
+            app.store.tag(&owner, &name, &t)
+        })
+        .await
+        {
             Ok(Some(d)) => {
                 // GET by tag only — a HEAD is docker probing, and a GET by digest is docker
                 // re-reading what the tag already resolved to; counting either would inflate.
@@ -341,7 +362,7 @@ async fn manifest_response(
                 d
             }
             Ok(None) => return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such tag"),
-            Err(e) => return crate::oci_internal(e),
+            Err(r) => return r,
         },
     };
     let cache_key = format!("{owner}/{name}/{d}");
@@ -368,15 +389,16 @@ async fn manifest_response(
         }
         Err(e) => return crate::oci_internal(e.into()),
     };
-    let media = match app.store.image_db(&owner, &name).await {
-        Ok(db) => db
-            .get(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes())
-            .await
-            .ok()
-            .flatten()
+    let media = match crate::fenced_retry(&app, &owner, &name, false, || async {
+        let db = app.store.image_db(&owner, &name).await?;
+        Ok(db.get(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes()).await?)
+    })
+    .await
+    {
+        Ok(v) => v
             .map(|v| String::from_utf8_lossy(&v).to_string())
             .unwrap_or_else(|| "application/vnd.oci.image.manifest.v1+json".into()),
-        Err(e) => return crate::oci_internal(e),
+        Err(r) => return r,
     };
     app.store.manifests().insert(cache_key, (bytes.clone(), media.clone()));
     if let Some(t) = &pulled_tag {
@@ -411,29 +433,37 @@ pub async fn delete_manifest(
     };
     // `image_db` creates what it opens; a delete aimed at nothing must not leave a phantom image
     // for the listing (and the worker's reconcile) to find.
-    match app.store.image_exists(&owner, &name).await {
+    match crate::fenced_retry(&app, &owner, &name, false, || app.store.image_exists(&owner, &name)).await {
         Ok(true) => {}
         Ok(false) => return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest"),
-        Err(e) => return crate::oci_internal(e),
+        Err(r) => return r,
     }
     match r {
-        Reference::Tag(t) => match app.store.tag(&owner, &name, &t).await {
-            Ok(Some(_)) => match app.store.delete_tag(&owner, &name, &t).await {
-                Ok(()) => StatusCode::ACCEPTED.into_response(),
-                Err(e) => crate::oci_internal(e),
-            },
-            Ok(None) => oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such tag"),
-            Err(e) => crate::oci_internal(e),
+        // Unlinking a tag is idempotent, so the whole read-then-delete is what the fence arm
+        // re-runs: a retry that only deleted would answer 202 for a tag that never existed.
+        Reference::Tag(t) => match crate::fenced_retry(&app, &owner, &name, false, || async {
+            match app.store.tag(&owner, &name, &t).await? {
+                Some(_) => app.store.delete_tag(&owner, &name, &t).await.map(|()| true),
+                None => Ok(false),
+            }
+        })
+        .await
+        {
+            Ok(true) => StatusCode::ACCEPTED.into_response(),
+            Ok(false) => oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such tag"),
+            Err(r) => r,
         },
         Reference::Digest(d) => {
-            let tags = match app.store.tags_pointing_at(&owner, &name, &d).await {
-                Ok(t) => t,
-                Err(e) => return crate::oci_internal(e),
-            };
-            for t in tags {
-                if let Err(e) = app.store.delete_tag(&owner, &name, &t).await {
-                    return crate::oci_internal(e);
+            match crate::fenced_retry(&app, &owner, &name, false, || async {
+                for t in app.store.tags_pointing_at(&owner, &name, &d).await? {
+                    app.store.delete_tag(&owner, &name, &t).await?;
                 }
+                Ok(())
+            })
+            .await
+            {
+                Ok(()) => {}
+                Err(r) => return r,
             }
             if let Err(e) = super::referrers::unindex(&app, &owner, &name, &d).await {
                 return crate::oci_internal(e);
@@ -441,19 +471,15 @@ pub async fn delete_manifest(
             // The media-type row lives in the image DB, not the object store, so
             // it survives independently of the manifest object below — delete it
             // here or it's an orphan forever (never swept, never read again).
-            match app.store.image_db(&owner, &name).await {
-                Ok(db) => {
-                    if let Err(e) = db.delete(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes()).await {
-                        return crate::oci_internal(e.into());
-                    }
-                    if let Err(e) = db.delete(manifest_meta_key(&d)).await {
-                        return crate::oci_internal(e.into());
-                    }
-                    if let Err(e) = super::store::forget_manifest_blobs(&db, &d).await {
-                        return crate::oci_internal(e);
-                    }
-                }
-                Err(e) => return crate::oci_internal(e),
+            if let Err(r) = crate::fenced_retry(&app, &owner, &name, false, || async {
+                let db = app.store.image_db(&owner, &name).await?;
+                db.delete(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes()).await?;
+                db.delete(manifest_meta_key(&d)).await?;
+                super::store::forget_manifest_blobs(&db, &d).await
+            })
+            .await
+            {
+                return r;
             }
             app.store.manifests().remove(&format!("{owner}/{name}/{d}"));
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
@@ -483,9 +509,9 @@ pub async fn tags_list(
     if let Err(r) = auth::allow(&app, &trusted, &headers, &owner, &name, false).await {
         return r;
     }
-    let all = match app.store.tags(&owner, &name).await {
+    let all = match crate::fenced_retry(&app, &owner, &name, false, || app.store.tags(&owner, &name)).await {
         Ok(t) => t,
-        Err(e) => return crate::oci_internal(e),
+        Err(r) => return r,
     };
     if all.is_empty() && !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
         return oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");

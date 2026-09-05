@@ -423,8 +423,8 @@ async fn received(app: &App, owner: &str, name: &str, uuid: &str) -> crate::Resu
 pub async fn open_session(app: &App, owner: &str, name: &str) -> Response {
     let uuid = new_uuid();
     // The image must exist (even manifest-less) so a completed upload has somewhere to belong.
-    if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::oci_internal(e);
+    if let Err(r) = crate::fenced_retry(app, owner, name, true, || app.store.touch_image(owner, name)).await {
+        return r;
     }
     // An EMPTY staging object, written now: the object is the session, so a session with no
     // bytes yet must still be something `received` can find and the sweep can age out.
@@ -782,8 +782,10 @@ pub async fn complete(
         None => return upload_unknown(),
         _ => {}
     }
-    if let Err(e) = super::store::hold_blob(&app.store, owner, name, &d).await {
-        return crate::oci_internal(e);
+    if let Err(r) =
+        crate::fenced_retry(app, owner, name, true, || super::store::hold_blob(&app.store, owner, name, &d)).await
+    {
+        return r;
     }
     // Both branches have already disposed of anything multipart, so there is nothing left to abort.
     discard(app, owner, name, uuid, None).await;

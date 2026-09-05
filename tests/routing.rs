@@ -2247,3 +2247,111 @@ async fn a_refused_handover_keeps_the_repo_instead_of_reporting_it_moved() {
     );
     assert_eq!(a.store.pool.warm_count(), 0, "the handle is closed either way");
 }
+
+/// The registry half of `a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner`: an
+/// image's database is fenced by a stray opener, routing still says this node owns the image, so
+/// the manifest GET must reopen and serve 200 — not the 500 UNKNOWN it used to answer (the
+/// "first registry request to a moved image can 500 once" gap in CLAUDE.md's Deploying section).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fenced_image_reopens_when_this_node_is_still_the_owner() {
+    let e = common::env().await;
+    let token = e.store.create_token("acme").await.unwrap();
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer"]).await;
+    let f = fleet(1);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"digest": kloudlite_registry::Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [{"digest": kloudlite_registry::Digest::of(b"layer").to_string(), "size": 5}],
+    })
+    .to_string();
+    let put = client()
+        .await
+        .put(format!("http://{}/v2/acme/nginx/manifests/latest", a.public))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201);
+
+    // A stray opener (an admin command run against a live pod) takes the writer epoch.
+    let (o, n) = kloudlite_registry::pool_coords("acme", "nginx");
+    let adb = a.store.pool.get(o, &n).await.unwrap();
+    let stray = slatedb::Db::builder(kloudlite_storage::pool::path(o, &n), e.store.os.clone())
+        .build()
+        .await
+        .unwrap();
+    stray.put(b"k", b"v").await.unwrap();
+    {
+        let mut st = adb.subscribe();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while st.borrow().close_reason.is_none() {
+                st.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("a must observe the fence");
+    }
+    drop(adb);
+    stray.close().await.unwrap();
+    // The tag resolution reads the fenced database: still the owner, so reopen and serve.
+    let res = client()
+        .await
+        .get(format!("http://{}/v2/acme/nginx/manifests/latest", a.public))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "still the owner: reopen and serve");
+    assert_eq!(res.bytes().await.unwrap().to_vec(), manifest.into_bytes());
+}
+
+/// The other half: the map now names a peer, so the fence was CORRECT and this node must not
+/// reopen (that is what fences the legitimate owner). The client gets the OCI envelope with a
+/// 503 and a `Retry-After` — which docker and crane retry — never a 500 UNKNOWN.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fenced_image_owned_by_a_peer_is_503_not_500() {
+    let e = common::env().await;
+    let f = fleet(3);
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-2", &f).await;
+    let (o, n) = kloudlite_registry::pool_coords("acme", "nginx");
+    a.app.claim(&kloudlite_registry::routing_key("acme", "nginx")).await.unwrap();
+    // b holds a stale handle; a takes the writer epoch, so b is fenced and the map names a.
+    let bdb = b.store.pool.get(o, &n).await.unwrap();
+    let _ = a.store.pool.get(o, &n).await.unwrap();
+    {
+        let mut st = bdb.subscribe();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while st.borrow().close_reason.is_none() {
+                st.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("b's handle must observe the fence within 5s");
+    }
+    drop(bdb);
+    let r: Result<(), axum::response::Response> =
+        kloudlite_registry::fenced_retry(&b.app, "acme", "nginx", false, || async {
+            b.store.pool.get(o, &n).await.map(|_| ())
+        })
+        .await;
+    let resp = r.expect_err("a fence a peer owns must refuse, never reopen");
+    assert_eq!(resp.status(), 503);
+    assert_eq!(resp.headers().get("retry-after").unwrap(), "1");
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["errors"][0]["code"], "UNAVAILABLE");
+    // An upload verb gets the same 503 under the code its clients already restart from: docker
+    // and crane follow a 307 on a blob GET but not on POST/PATCH/PUT.
+    let up = kloudlite_registry::fenced_elsewhere(true);
+    assert_eq!(up.status(), 503);
+    let body = axum::body::to_bytes(up.into_body(), 4096).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["errors"][0]["code"], "BLOB_UPLOAD_UNKNOWN");
+    assert_eq!(b.store.pool.warm_count(), 0, "b must not have reopened");
+}
