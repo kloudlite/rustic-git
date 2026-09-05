@@ -35,6 +35,9 @@ jobs:
           - 27017:27017
     env:
       KLOUDLITE_TEST_MONGO_URI: mongodb://localhost:27017
+      # One target dir shared by both runner slots on build-0, so whichever slot takes this job
+      # finds the last run's compiled tests instead of starting cold.
+      CARGO_TARGET_DIR: /home/azureuser/ci-target-test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The VM's own toolchain (rustup in ~/.cargo); the runner service starts with a bare PATH.

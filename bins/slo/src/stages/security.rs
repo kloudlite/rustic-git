@@ -195,7 +195,9 @@ pub(crate) async fn agent_spec(c: &mut Ctx) {
             let as_agent = kube::Client::try_from(cfg).context("could not build the client")?;
             let api: kube::Api<crd::Workspace> = kube::Api::all(as_agent);
             let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
-            let patch = serde_json::json!({ "spec": { "desiredState": "Stopped" } });
+            // Lowercase: the CRD's enum is `running|stopped`; a wrong case is a 422 from the schema,
+            // which is not the admission policy refusing anything.
+            let patch = serde_json::json!({ "spec": { "desiredState": "stopped" } });
             match api.patch(&name, &params, &kube::api::Patch::Merge(&patch)).await {
                 // A 2xx IS the failure here: admission let the agent rewrite desired state.
                 Ok(_) => Err(anyhow!("the agent was ALLOWED to write spec.desiredState")),
