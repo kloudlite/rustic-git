@@ -48,7 +48,7 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f system-netpol.yaml -f otel-agent.yaml -f quotas-slo.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml
 ```
 
 ### The SLO probe's two owners
