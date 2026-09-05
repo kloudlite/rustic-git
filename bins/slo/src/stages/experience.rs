@@ -16,6 +16,7 @@
 //! ponytail: skips only, no probe code — the second implementer fills `run` in id order and
 //! deletes this note when the last skip is gone.
 
+use super::experience_env;
 use crate::ctx::Ctx;
 
 /// The catalogue's stage name, verbatim.
@@ -79,6 +80,13 @@ pub async fn run(c: &mut Ctx) {
             "pr.comment" => super::experience_teams::comment(c).await,
             "pr.close" => super::experience_teams::close(c).await,
             "commit.verify" => super::experience_teams::verify(c).await,
+            // The four environment ids are one journey on one environment, walked here so the
+            // chain (a clone of an environment that never came up is not a measurement) stays in
+            // one place; they report in this same order.
+            "env.services.multi" => experience_env::environments(c).await,
+            "env.clone" | "env.restore.inplace" | "env.stop.start" => {}
+            "vol.history" => experience_env::history(c).await,
+            "quota.view" => experience_env::quota_view(c).await,
             _ => c.skip(id, "not implemented yet"),
         }
     }

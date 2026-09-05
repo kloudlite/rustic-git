@@ -15,6 +15,7 @@ pub mod environment;
 pub mod experience;
 pub mod experience_teams;
 pub mod experience_ws;
+pub mod experience_env;
 pub mod git;
 pub mod identity;
 pub mod lifecycle;
@@ -180,6 +181,7 @@ pub async fn teardown(c: &mut Ctx) {
     let prefix = c.prefix();
     let mut swept = sweep_all(c, move |name| name.starts_with(&prefix)).await;
     swept += drop_env_volume(c).await;
+    swept += drop_extra_volumes(c).await;
     tracing::info!(count = swept, "slo.teardown.completed");
 }
 
@@ -258,6 +260,22 @@ async fn drop_env_volume(c: &mut Ctx) -> usize {
             }
             Err(e) => tracing::warn!(kind = "volume", op = "delete", name = %volume, error = %format!("{e:#}"), "slo.teardown.failed"),
         }
+    }
+    gone
+}
+
+/// The volumes a stage registered by name, after the prefix sweep has taken their working copies.
+///
+/// The sweep matches a volume on `display_name` and usually gets there first; usually is not good
+/// enough for an object that is a subvolume on a node — a volume the sweep raced (its parent's
+/// finalizer still running) would otherwise be left for the next run's boot, and a boot sweep that
+/// never happens is a leak per hour. `DELETE /v1/volumes/{name}` takes a detached volume with all
+/// its snapshots, so one call each is the whole of it.
+async fn drop_extra_volumes(c: &mut Ctx) -> usize {
+    let mut gone = 0;
+    for v in c.state.extra_volumes.clone() {
+        let url = api(c, &format!("/v1/volumes/{v}"));
+        gone += del(c, "volume", &v, &url, &c.probe_jwt.clone()).await as usize;
     }
     gone
 }

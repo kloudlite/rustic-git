@@ -48,6 +48,14 @@ pub struct State {
     /// stage creates is named `run-{run_id}-…`, so teardown's prefix sweep finds them by name
     /// whether or not the stage got as far as deleting them itself.
     pub ux_workspace: Option<String>,
+    /// Stage 14's own environment (two services), its clone, and the workspace whose two pushes
+    /// `vol.history` reads. Named `run-…`, so the prefix sweep finds them; held here because the
+    /// four environment ids are one journey on one object.
+    pub env_multi: Option<String>,
+    pub env_clone: Option<String>,
+    pub history_workspace: Option<String>,
+    /// Volumes to delete BY NAME after the prefix sweep — see `stages::drop_extra_volumes`.
+    pub extra_volumes: Vec<String>,
     pub request: Option<String>,
 }
 
