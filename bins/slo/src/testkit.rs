@@ -20,6 +20,7 @@ pub async fn ctx() -> Ctx {
         ssh_host: "127.0.0.1".into(),
         region: "test".into(),
         hosts: vec![],
+        origin_ip: None,
         jwt_secret: "0123456789abcdef0123456789abcdef".into(),
         ssh_key_path: "/dev/null".into(),
         ssh_hostkey: String::new(),

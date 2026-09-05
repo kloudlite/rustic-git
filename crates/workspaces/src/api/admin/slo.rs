@@ -11,6 +11,7 @@
 use super::history_or_503;
 use crate::api::ApiState;
 use crate::history::{series::ident, slo, HistoryError};
+use crate::slo::catalogue::{self, Suite};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -58,11 +59,32 @@ pub(crate) async fn put_run(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// One stage of the journey as the console renders it. `ids` may be empty (Boot, Teardown).
+#[derive(serde::Serialize)]
+struct JourneyStage {
+    name: &'static str,
+    ids: Vec<&'static str>,
+}
+
+fn journey_of(suite: Suite) -> Vec<JourneyStage> {
+    catalogue::journey(suite).into_iter().map(|(name, ids)| JourneyStage { name, ids }).collect()
+}
+
+#[derive(serde::Serialize)]
+struct Journeys {
+    fast: Vec<JourneyStage>,
+    weekly: Vec<JourneyStage>,
+    monthly: Vec<JourneyStage>,
+}
+
 #[derive(serde::Serialize)]
 struct Overview {
     slos: Vec<slo::SloStatus>,
     running: Option<slo::Run>,
     runs: Vec<slo::Run>,
+    /// The walk each suite makes, served with the page rather than looked up per run: it is
+    /// compiled into the binary and the console needs it to render a run that has no steps yet.
+    journey: Journeys,
     generated: String,
 }
 
@@ -74,6 +96,11 @@ pub(crate) async fn overview(State(s): State<Arc<ApiState>>) -> Result<Response,
         slos: slo::statuses(h).await.map_err(bad_gateway)?,
         running: slo::running(h).await.map_err(bad_gateway)?,
         runs: slo::runs(h, None, 20).await.map_err(bad_gateway)?,
+        journey: Journeys {
+            fast: journey_of(Suite::Fast),
+            weekly: journey_of(Suite::Weekly),
+            monthly: journey_of(Suite::Monthly),
+        },
         generated: chrono::Utc::now().to_rfc3339(),
     })
     .into_response())
@@ -104,6 +131,9 @@ struct RunDetail {
     #[serde(flatten)]
     run: slo::Run,
     steps: Vec<slo::StepReport>,
+    /// This run's own suite. A suite the catalogue does not name falls back to the fast journey,
+    /// which is every suite's prefix — never an empty list, which would render as no journey.
+    journey: Vec<JourneyStage>,
 }
 
 pub(crate) async fn run_detail(
@@ -115,7 +145,8 @@ pub(crate) async fn run_detail(
         .await
         .map_err(bad_gateway)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "no such run").into_response())?;
-    Ok(Json(RunDetail { run, steps }).into_response())
+    let suite = Suite::parse(&run.suite).unwrap_or(Suite::Fast);
+    Ok(Json(RunDetail { run, steps, journey: journey_of(suite) }).into_response())
 }
 
 // ── the three reads the probe itself makes (stage 10, "edge and pipeline") ───

@@ -9,12 +9,15 @@ use serde_json::Value;
 
 use crate::ctx::{Ctx, PROBE_USER};
 
+pub mod admin;
+pub mod edge;
 pub mod environment;
 pub mod git;
 pub mod identity;
 pub mod lifecycle;
 pub mod pr;
 pub mod registry;
+pub mod security;
 pub mod workspace;
 
 /// The journey stages this file's neighbours implement, named as the catalogue's "Journey
@@ -27,6 +30,10 @@ pub const REGISTRY: &str = "4 · Registry";
 pub const WORKSPACE: &str = "5 · Workspace";
 pub const ENVIRONMENT: &str = "6 · Environment";
 pub const LIFECYCLE: &str = "7 · Lifecycle";
+pub const ADMIN: &str = "8 · Admin";
+pub const SECURITY: &str = "9 · Security";
+/// Edge AND pipeline: the two halves are one journey step, and `deploy/slo.md` names it once.
+pub const EDGE: &str = "10 · Edge";
 
 /// One HTTP call, with the body carried into the error.
 ///
@@ -89,6 +96,12 @@ pub(crate) async fn raw(
 /// `{api_url}{path}`, with the trailing slash the deployment may or may not have set removed once.
 pub(crate) fn api(c: &Ctx, path: &str) -> String {
     format!("{}{path}", c.cfg.api_url.trim_end_matches('/'))
+}
+
+/// The same, against the admin process. Deliberately a second function rather than a flag: the two
+/// URLs are different processes, and `sec.user.process` is the SLO that says so.
+pub(crate) fn admin(c: &Ctx, path: &str) -> String {
+    format!("{}{path}", c.cfg.admin_url.trim_end_matches('/'))
 }
 
 /// `GET url` until `want` is satisfied, or `cap` elapses.

@@ -35,11 +35,18 @@ pub struct Programs {
     pub ssh: String,
     /// The CLI, which the gateway steps run as ssh's ProxyCommand.
     pub kl: String,
+    /// Stage 10's four. `bash` is there for its `/dev/tcp` and for the one pipe openssl needs;
+    /// `kubectl` is the hand-run twin of `sec.agent.spec`'s impersonated patch, kept here so the
+    /// image's tool list is written down in one place.
+    pub openssl: String,
+    pub dig: String,
+    pub bash: String,
+    pub kubectl: String,
 }
 
 impl Default for Programs {
     fn default() -> Self {
-        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into(), ssh: "ssh".into(), kl: "kl".into() }
+        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into(), ssh: "ssh".into(), kl: "kl".into(), openssl: "openssl".into(), dig: "dig".into(), bash: "bash".into(), kubectl: "kubectl".into() }
     }
 }
 

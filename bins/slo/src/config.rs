@@ -21,6 +21,9 @@ pub struct Config {
     pub region: String,
     /// Extra hostnames stage 10 resolves and checks a certificate for, beyond the ones above.
     pub hosts: Vec<String>,
+    /// The ingress address Cloudflare sends `hosts[0]` to. `None` — unset — skips `edge.origin`
+    /// rather than inventing an address: a probe that guessed one would report the wrong origin.
+    pub origin_ip: Option<String>,
     /// The `kloudlite-git-jwt` Secret. The probe mints its own tokens rather than holding a
     /// password, so this is the only credential in the pod.
     pub jwt_secret: String,
@@ -63,6 +66,7 @@ impl Config {
                 .map(|h| h.trim().to_string())
                 .filter(|h| !h.is_empty())
                 .collect(),
+            origin_ip: Some(opt("KLOUDLITE_GIT_SLO_ORIGIN_IP", "")).filter(|v| !v.is_empty()),
             jwt_secret: req("KLOUDLITE_GIT_JWT_SECRET")?,
             ssh_key_path: opt("KLOUDLITE_GIT_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),
             ssh_hostkey: opt("KLOUDLITE_GIT_SLO_SSH_HOSTKEY", ""),

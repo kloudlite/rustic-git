@@ -13,6 +13,7 @@ pub mod report;
 pub mod stages;
 pub mod step;
 pub mod suite;
+pub mod tls;
 pub mod tools;
 
 #[cfg(test)]
