@@ -1600,7 +1600,7 @@ data:
   # image rather than merely a missing one. Unset, the check only requires the pull to succeed.
   # To obtain it, after `kloudlite-git-slo bootstrap` has pushed the canary:
   #   crane digest cr.khost.dev/slo-probe/canary:latest
-  KLOUDLITE_GIT_SLO_CANARY_DIGEST: ""
+  KLOUDLITE_GIT_SLO_CANARY_DIGEST: "sha256:15896b4a18eb04e8adafd7970410145e52ce891213b9e4b08ddb47e808b5909e"
   # The ingress controller's public IP, for `edge.origin` (curl with --resolve past Cloudflare).
   # Empty: that id skips. `kubectl -n ingress-nginx get svc` shows it.
   KLOUDLITE_GIT_SLO_ORIGIN_IP: "4.224.189.61"
