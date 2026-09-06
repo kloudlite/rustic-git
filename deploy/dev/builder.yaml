@@ -4,6 +4,12 @@
 # ServiceAccount, Secrets and ConfigMap so `kloudlite-slo run --suite …` runs here exactly as the
 # CronJobs run it. Traffic-serving tiers are tested by editing a Service selector to point at this
 # pod (label it `app: <tier>` by hand), then reverting. Dev only — nothing here is a deployment.
+#
+# Images are built HERE too: a privileged `buildkitd` sidecar (its cache on the same disk) runs the
+# Dockerfile for `deploy/dev/ship.sh`, which pushes CI-shaped tags (`ghcr.io/kloudlite/<image>:<sha>`)
+# so `deploy/pin.sh` and `deploy/roll.sh` work unchanged — minutes on a warm target instead of a
+# CI queue. The push needs a token with `write:packages` (`gh auth refresh -s write:packages`
+# in the pod, then `crane auth login ghcr.io`).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -63,6 +69,10 @@ spec:
               # Bring back whatever `pm2 save` recorded (a tier served from here); probe runs are
               # one-shot and are not saved, so a restart never resumes one.
               /work/npm/bin/pm2 resurrect >/dev/null 2>&1 || true
+              if [ ! -x /work/bin/buildctl ]; then
+                curl -fsSL -o /tmp/buildkit.tgz https://github.com/moby/buildkit/releases/download/v0.18.2/buildkit-v0.18.2.linux-amd64.tar.gz
+                tar -xzf /tmp/buildkit.tgz -C /tmp bin/buildctl && install -m 755 /tmp/bin/buildctl /work/bin/buildctl
+              fi
               if [ ! -x /work/bin/crane ]; then
                 mkdir -p /work/bin
                 curl -fsSL -o /tmp/crane.tgz https://github.com/google/go-containerregistry/releases/download/v0.20.3/go-containerregistry_Linux_x86_64.tar.gz
@@ -81,21 +91,39 @@ spec:
             - { name: PATH, value: /work/bin:/work/npm/bin:/work/target/dev-image:/work/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin }
             - { name: PM2_HOME, value: /work/home/.pm2 }
             - { name: HOME, value: /work/home }
+            - { name: DOCKER_CONFIG, value: /work/home/.docker }
+            - { name: BUILDKIT_HOST, value: unix:///run/buildkit/buildkitd.sock }
             - { name: KUBECONFIG, value: /etc/kloudlite/k3s/config }
             - name: KLOUDLITE_JWT_SECRET
               valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
           envFrom:
             - configMapRef: { name: kloudlite-slo-env }
           resources:
-            requests: { cpu: "12", memory: 24Gi }
-            limits: { cpu: "15", memory: 56Gi }
+            requests: { cpu: "10", memory: 24Gi }
+            limits: { cpu: "15", memory: 52Gi }
           volumeMounts:
             - { name: work, mountPath: /work }
+            - { name: buildkit-sock, mountPath: /run/buildkit }
             - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
             - { name: ssh-fast, mountPath: /etc/slo-ssh-fast, readOnly: true }
             - { name: ssh-hourly, mountPath: /etc/slo-ssh-hourly, readOnly: true }
             - { name: ssh-drill, mountPath: /etc/slo-ssh-drill, readOnly: true }
+        # The image builder. Privileged because the Dockerfile's apt layers need a real overlay
+        # snapshotter; its state (layer cache, pulled bases) lives on the same disk as the target
+        # dir so a rebuild after a pod restart is as warm as the cargo build is.
+        - name: buildkitd
+          image: moby/buildkit:v0.18.2
+          args: ["--addr", "unix:///run/buildkit/buildkitd.sock", "--root", "/work/buildkit"]
+          securityContext: { privileged: true }
+          resources:
+            requests: { cpu: "2", memory: 2Gi }
+            limits: { cpu: "8", memory: 8Gi }
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: buildkit-sock, mountPath: /run/buildkit }
       volumes:
+        - name: buildkit-sock
+          emptyDir: {}
         - name: work
           persistentVolumeClaim: { claimName: dev-work }
         - name: k3s-kubeconfig

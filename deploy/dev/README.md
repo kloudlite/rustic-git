@@ -61,3 +61,14 @@ Rules that keep this honest:
 
 Cost: one Standard_D16s_v5 (about $0.8/hour). Delete the pool when the campaign is over:
 `az aks nodepool delete -g kolomi-rg --cluster-name kolomi-cluster -n builder`.
+
+## Images from the pod (`ship.sh`)
+
+`deploy/dev/ship.sh` is CI in the pod: clippy + tests (CI's commands), `cargo build --release`,
+then the four images built by the `buildkitd` sidecar from the real Dockerfile and pushed as
+`ghcr.io/kloudlite/<image>:<full sha>` (+ `latest`) — the same tags CI writes, so `deploy/pin.sh
+<sha>` and `deploy/roll.sh` follow unchanged. It refuses a dirty tree or a HEAD that is not
+`origin/master`: the tag must mean the code GitHub has. CI still runs on master as the safety
+net; nothing waits on it. One-time: in the pod, `gh auth refresh -s write:packages` then
+`crane auth login ghcr.io -u <github user> -p "$(gh auth token)"` (buildctl reads the same
+`$DOCKER_CONFIG`). Build cache lives in `/work/buildkit`.
