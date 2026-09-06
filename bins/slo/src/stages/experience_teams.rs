@@ -352,11 +352,15 @@ pub(super) async fn workspace(c: &mut Ctx) {
             }
             let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
             let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k.clone(), &ns);
-            match pods.get_opt(&id).await {
+            let out = match pods.get_opt(&id).await {
                 Ok(Some(_)) => Ok(()),
                 Ok(None) => Err(anyhow!("the workspace is ready but has no pod in {ns}")),
                 Err(e) => Err(anyhow!("could not read {ns}: {e}")),
-            }
+            };
+            // The pod has been seen, which is the whole assertion — so it is freed here rather than
+            // at `team.delete`, minutes later. A pool node is 8 vCPU and a workspace requests 2.
+            super::lifecycle::park(c, &id).await;
+            out
         }
         .boxed()
     })

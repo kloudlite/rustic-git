@@ -62,6 +62,11 @@ pub struct State {
     pub env_multi: Option<String>,
     pub env_clone: Option<String>,
     pub history_workspace: Option<String>,
+    /// Workspaces whose POD the run frees as soon as nothing needs it — the restore's, and any
+    /// other working copy a step makes and does not delete. Names only: the objects stay, and
+    /// teardown's prefix sweep takes them. The region's pool nodes are 8 vCPU and a workspace
+    /// requests 2, so a suite holding four at once has a fifth that can never schedule.
+    pub extra_workspaces: Vec<String>,
     /// Volumes to delete BY NAME after the prefix sweep — see `stages::drop_extra_volumes`.
     pub extra_volumes: Vec<String>,
     pub request: Option<String>,

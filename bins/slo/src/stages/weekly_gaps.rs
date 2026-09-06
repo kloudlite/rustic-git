@@ -859,6 +859,11 @@ async fn lanes(c: &mut Ctx) {
 ///
 /// A fleet with one placeable node cannot spread, and saying so is the honest answer: the step
 /// SKIPS rather than passing on the owner it started from, which would have been a tautology.
+///
+// ponytail: on THIS region a second node also has to have room — a pool node is 8 vCPU and a
+// workspace requests 2 — so `ws.spread` and the two cross-node ids can fail for capacity on a busy
+// hour rather than for placement. The ceiling is the pool: a bigger node, or a second one kept
+// free, is what makes them measure only what they name.
 async fn spread(c: &mut Ctx) {
     let (Some(ws), Some(k)) = (c.state.workspace.clone(), c.kube.clone()) else {
         let why = if c.state.workspace.is_none() { "no workspace" } else { "no kubeconfig" };
@@ -939,6 +944,17 @@ async fn gw_caps(c: &mut Ctx) {
     let key = c.cfg.ssh_key_path.clone();
     c.step("gw.caps", TUNNEL_CEILING, move |c| {
         async move {
+            // Started first: stage 7 parks the workspace's pod as soon as its own ids are done
+            // (the region's nodes cannot hold four at once), and a tunnel needs something running.
+            let doc = api(c, &format!("/v1/workspaces/{ws}"));
+            post(c, &api(c, &format!("/v1/workspaces/{ws}/start")), &c.probe_jwt.clone(), Value::Null)
+                .await
+                .context("could not start the workspace to tunnel into")?;
+            poll_json(c, &doc, &c.probe_jwt.clone(), Duration::from_secs(120), |v| {
+                v.get("state").and_then(Value::as_str) == Some("ready")
+            })
+            .await
+            .context("the workspace never came back ready for the tunnel")?;
             // One session, spent twice. The second connect must be refused: a CONNECT token is
             // one-shot, and replaying one is either a bug or an attack.
             let session = super::workspace::ssh_session(c, &ws).await?;

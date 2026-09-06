@@ -245,6 +245,14 @@ async fn workspace_half(c: &mut Ctx) {
         return;
     };
     restore(c, &snapshot).await;
+    // Both pods freed as soon as nothing above needs them: the restore's, which no later id in any
+    // suite touches, and stage 5's own, which the Experience stage only ever reads through the API.
+    // The volumes and every snapshot stay — a stop is not a delete — so `vol.*`, `wt.delete` and
+    // the weekly ids below are unaffected. Peak concurrent pods for an hourly run becomes two.
+    for parked in c.state.extra_workspaces.clone() {
+        park(c, &parked).await;
+    }
+    park(c, &ws).await;
     refusals(c, &volume, &snapshot).await;
     detached_restorable(c, &snapshot).await;
     orphan_collected(c, &volume).await;
@@ -479,6 +487,11 @@ async fn restore(c: &mut Ctx, snapshot: &str) {
                 .get("id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("the restore answered no workspace id"))?;
+            // Kept so the stage can STOP it a moment later: the region's pool nodes are 8 vCPU
+            // and a workspace requests 2, and a workspace is pinned to the node holding its volume
+            // — four of them alive at once is a fifth that can never schedule, which is what the
+            // live runs were actually reporting as "never became ready".
+            c.state.extra_workspaces.push(id.to_string());
             let ws = api(c, &format!("/v1/workspaces/{id}"));
             poll_json(c, &ws, &jwt, RESTORE_CEILING, |v| {
                 v.get("state").and_then(Value::as_str) == Some("ready")
@@ -488,6 +501,19 @@ async fn restore(c: &mut Ctx, snapshot: &str) {
         .boxed()
     })
     .await;
+}
+
+/// Free a workspace's POD, keeping the object, its volume and its snapshots.
+///
+/// Best effort and never a sample: this is scheduling hygiene, not an assertion — every id above
+/// has already made its own. A stop that fails costs the run a scheduled pod, which the next
+/// create will report for itself.
+pub(crate) async fn park(c: &Ctx, id: &str) {
+    let url = api(c, &format!("/v1/workspaces/{id}/stop"));
+    match post(c, &url, &c.probe_jwt.clone(), Value::Null).await {
+        Ok(_) => tracing::info!(name = %id, "slo.workspace.parked"),
+        Err(e) => tracing::warn!(name = %id, error = %format!("{e:#}"), "slo.workspace.park.failed"),
+    }
 }
 
 /// `vol.refusals`: the three deletes that must be refused, in one step, first failure wins.
