@@ -187,6 +187,24 @@ pub async fn sweep_nodes(k: &dyn Cluster, tmp: &Path) {
 
 /// An EXPLICIT in-cluster client. `Ctx::kube` follows `KUBECONFIG` and lands in k3s, where none of
 /// the server tier's pods run — every caller here wants the AKS cluster the probe is running in.
+/// Whether a NetworkPolicy is enforced here at all. A policy engine is a DaemonSet in kube-system
+/// (Azure NPM `azure-npm`, Cilium `cilium`, Calico `calico-node`); without one the API server
+/// accepts the object and nothing reads it — `networkProfile.networkPolicy: none` on AKS — so a
+/// deny drill cuts nothing and reports what the fleet did with the dependency UP (2026-09-06:
+/// `drill.redis.down` saw pull events arrive over the "denied" stream). Skipping is the honest
+/// verdict; a pass would be the false green this probe exists to prevent.
+pub async fn netpol_enforced(k: &kube::Client) -> Result<bool> {
+    use kube::ResourceExt;
+    let api: kube::Api<k8s_openapi::api::apps::v1::DaemonSet> = kube::Api::namespaced(k.clone(), "kube-system");
+    let names: Vec<String> =
+        api.list(&kube::api::ListParams::default()).await.map_err(|e| anyhow!("could not list kube-system DaemonSets: {e}"))?.items.iter().map(|d| d.name_any()).collect();
+    Ok(names.iter().any(|n| n == "azure-npm" || n.starts_with("cilium") || n == "calico-node" || n.starts_with("kube-router")))
+}
+
+/// The skip reason both deny drills give when `netpol_enforced` says no.
+pub const NETPOL_UNENFORCED: &str =
+    "NetworkPolicy is not enforced on this cluster (no policy engine in kube-system): the deny would cut nothing";
+
 pub fn incluster() -> Result<kube::Client> {
     let cfg = kube::Config::incluster().map_err(|e| anyhow!("{e}"))?;
     kube::Client::try_from(cfg).map_err(|e| anyhow!("{e}"))

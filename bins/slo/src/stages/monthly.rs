@@ -88,6 +88,11 @@ async fn clickhouse_down(c: &mut Ctx) {
         Ok(k) => k,
         Err(e) => return c.skip("drill.clickhouse.down", &format!("no in-cluster client: {e:#}")),
     };
+    match drill::netpol_enforced(&k).await {
+        Ok(true) => {}
+        Ok(false) => return c.skip("drill.clickhouse.down", drill::NETPOL_UNENFORCED),
+        Err(e) => return c.skip("drill.clickhouse.down", &format!("{e:#}")),
+    }
     let ips = match resolve(c, &host).await {
         Ok(ips) => ips,
         Err(e) => return c.skip("drill.clickhouse.down", &format!("{e:#}")),
@@ -715,6 +720,11 @@ async fn redis_down(c: &mut Ctx) {
         Ok(k) => k,
         Err(e) => return c.skip("drill.redis.down", &format!("no in-cluster client: {e:#}")),
     };
+    match drill::netpol_enforced(&k).await {
+        Ok(true) => {}
+        Ok(false) => return c.skip("drill.redis.down", drill::NETPOL_UNENFORCED),
+        Err(e) => return c.skip("drill.redis.down", &format!("{e:#}")),
+    }
     let ips = match resolve(c, &host).await {
         Ok(ips) => ips,
         Err(e) => return c.skip("drill.redis.down", &format!("{e:#}")),
@@ -841,8 +851,7 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     // (58 s after `poll_json`'s own margin) was ONE beat, so a marker written just after a pass was
     // a failed drill for the fleet behaving exactly as designed. Two beats and the drift.
     let feed = api(c, &format!("/v1/activity?owner={probe}"));
-    let want = format!("{probe}/{name}");
-    poll_json(c, &feed, &jwt, FEED_FALLBACK, |v| created(v, &want))
+    poll_json(c, &feed, &jwt, FEED_FALLBACK, |v| created(v, &probe, name))
         .await
         .context("the activity feed never showed the repo")?;
 
@@ -858,12 +867,17 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     }
 }
 
-fn created(feed: &Value, repo: &str) -> bool {
+/// A feed row's `repo` is the BARE name (`feed.rs`: `repo: r.name`); the owner is only in `href`.
+/// Matching `owner/name` against it never matched anything, which is what failed this drill on
+/// every run before the netpol was even in question.
+fn created(feed: &Value, owner: &str, name: &str) -> bool {
+    let href = format!("/{owner}/{name}");
     let events = feed.get("events").and_then(Value::as_array).or_else(|| feed.as_array());
     events.is_some_and(|rows| {
         rows.iter().any(|e| {
             e.get("kind").and_then(Value::as_str) == Some("repo_created")
-                && e.get("repo").and_then(Value::as_str) == Some(repo)
+                && e.get("repo").and_then(Value::as_str) == Some(name)
+                && e.get("href").and_then(Value::as_str) == Some(href.as_str())
         })
     })
 }
@@ -941,6 +955,17 @@ mod tests {
     }
 
     #[test]
+    fn a_repo_created_row_is_matched_by_bare_name_and_owner_href() {
+        let feed = serde_json::json!([
+            {"kind": "pull_merged", "repo": "web", "href": "/alice/web/pulls/1"},
+            {"kind": "repo_created", "repo": "web", "href": "/alice/web"},
+        ]);
+        assert!(created(&feed, "alice", "web"));
+        assert!(!created(&feed, "bob", "web"), "same name under another owner is not this repo");
+        assert!(!created(&feed, "alice", "api"));
+    }
+
+    #[test]
     fn the_daily_slots_are_the_seven_the_backup_script_writes() {
         let have = slots_due(Utc::now(), None);
         assert_eq!(have.len(), 7);
@@ -965,10 +990,10 @@ mod tests {
     #[test]
     fn only_this_repos_creation_counts() {
         let feed = json!([
-            { "kind": "repo_created", "repo": "slo-probe/run-monthly-1-redis" },
-            { "kind": "pull_merged", "repo": "slo-probe/run-monthly-1-redis" },
+            { "kind": "repo_created", "repo": "run-monthly-1-redis", "href": "/slo-probe/run-monthly-1-redis" },
+            { "kind": "pull_merged", "repo": "run-monthly-1-redis", "href": "/slo-probe/run-monthly-1-redis/pulls/1" },
         ]);
-        assert!(created(&feed, "slo-probe/run-monthly-1-redis"));
-        assert!(!created(&feed, "slo-probe/run-monthly-2-redis"));
+        assert!(created(&feed, "slo-probe", "run-monthly-1-redis"));
+        assert!(!created(&feed, "slo-probe", "run-monthly-2-redis"));
     }
 }
