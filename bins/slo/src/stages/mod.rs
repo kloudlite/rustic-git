@@ -578,7 +578,7 @@ async fn drop_requests(c: &mut Ctx) -> usize {
         let p = kube::api::DeleteParams::default();
         // Either kind: the id is the object's name in both collections, and the run does not
         // remember which route made it.
-        let took = matches!(reqs.delete(&name, &p).await, Ok(_)) || matches!(legacy.delete(&name, &p).await, Ok(_));
+        let took = reqs.delete(&name, &p).await.is_ok() || legacy.delete(&name, &p).await.is_ok();
         match took {
             true => {
                 gone += 1;
