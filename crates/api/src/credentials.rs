@@ -879,6 +879,18 @@ async fn ensure_platform_key(api: &Api, owner: &str, force: bool) -> std::result
         .await
         .map_err(|_| bad("could not install the key"))?;
     tracing::info!(%owner, replaced = old_fp.is_some(), %fingerprint, "key.platform.installed");
+    // Push the new key into every workspace namespace Secret before answering, the same hook an
+    // ssh key add or remove fires. AWAITED, not spawned like `spawn_keys_changed`: a rotation
+    // REVOKES the old fingerprint, so between the store write and the Secret write every pod of
+    // this owner is mounting a key the git tier has just stopped accepting. A caller that creates
+    // a seeded workspace the instant this returns — the SLO probe does exactly that — would
+    // otherwise clone with the revoked key and fail for as long as the stale Secret lives.
+    //
+    // Best effort in the same sense the hook itself is: it logs its own failures and cannot fail
+    // the rotation, which has already happened and must not be reported as not having happened.
+    if let Some(hook) = api.on_keys_changed.clone() {
+        hook(owner.to_string()).await;
+    }
     Ok(PlatformKey { public, fingerprint })
 }
 
@@ -1032,6 +1044,45 @@ mod tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod platform_key_rotation_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A rotation REVOKES the old fingerprint, so it is not finished when the store write lands —
+    /// it is finished when every workspace of that owner has stopped mounting the revoked key.
+    /// The probe caught this the hard way: it rotated, created a seeded workspace in the next
+    /// breath, and the pod cloned with the key the rotation had just deleted, failing every retry
+    /// for four minutes. The hook must fire, and must be awaited rather than spawned.
+    #[tokio::test]
+    async fn rotating_the_platform_key_pushes_it_to_the_workspaces_before_answering() {
+        let fired = Arc::new(AtomicUsize::new(0));
+        let seen = fired.clone();
+        let mut api = crate::testing::test_api_with_secret("s").await;
+        api.on_keys_changed = Some(Arc::new(move |owner: String| {
+            let fired = fired.clone();
+            Box::pin(async move {
+                assert_eq!(owner, "alice");
+                fired.fetch_add(1, Ordering::SeqCst);
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        }));
+
+        // First generation writes a key too, and a workspace created before it lands mounts
+        // nothing — so this fires there as well, not only on the forced path.
+        let first = super::ensure_platform_key(&api, "alice", false).await.expect("generate");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "the first key is pushed out too");
+
+        let rotated = super::ensure_platform_key(&api, "alice", true).await.expect("rotate");
+        assert_ne!(rotated.fingerprint, first.fingerprint, "a forced call really rotates");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "the rotation pushed the new key before answering");
+
+        // An unforced read of an existing key changes nothing, so it must not fire.
+        let read = super::ensure_platform_key(&api, "alice", false).await.expect("read");
+        assert_eq!(read.fingerprint, rotated.fingerprint);
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "a plain read is not a key change");
     }
 }
 

@@ -30,6 +30,12 @@ const HISTORY_CEILING: Duration = Duration::from_secs(10);
 const KIND: &str = "other";
 
 pub async fn run(c: &mut Ctx) {
+    // A request a DEAD run left behind blocks this run's create — one pending per owner per kind,
+    // and a status-less row is pending. Outside the step, so the sweep is not charged to the SLI.
+    let swept = super::sweep_requests(c).await;
+    if swept > 0 {
+        tracing::info!(count = swept, "slo.requests.swept");
+    }
     match queue(c).await {
         Some(id) => audit_row(c, &id).await,
         // The deny is the write whose row is looked for, so with no request there is nothing to
@@ -64,10 +70,9 @@ async fn queue(c: &mut Ctx) -> Option<String> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("the answer carried no request id"))?
                     .to_string();
-                // Recorded before the wait, so teardown denies it even if the queue read fails —
-                // and deletes the CR, which a deny alone leaves standing forever.
+                // Recorded before the wait, so teardown denies it even if the queue read fails.
+                // The CR itself goes in `sweep_requests`, by owner, whether or not this ran.
                 c.state.request = Some(id.clone());
-                c.state.requests.push(id.clone());
                 poll_json(c, &queue, &admin_jwt, QUEUE_CEILING, |v| {
                     // `pending` rather than a literal comparison: a row the API server has not
                     // stamped a status onto yet IS pending to the api (`is_pending_generic`), and a

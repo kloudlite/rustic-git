@@ -198,7 +198,7 @@ pub async fn teardown(c: &mut Ctx) {
     swept += drop_env_volume(c).await;
     swept += drop_extra_volumes(c).await;
     // After the deny sweep above: a request is denied through the API and then the object goes.
-    swept += drop_requests(c).await;
+    swept += sweep_requests(c).await;
     tracing::info!(count = swept, "slo.teardown.completed");
 }
 
@@ -562,51 +562,42 @@ pub(crate) fn pending(row: &Value) -> bool {
     state.is_empty() || state.eq_ignore_ascii_case("pending")
 }
 
-/// Delete the `Request`/`QuotaRequest` objects this run opened.
+/// Delete every `Request`/`QuotaRequest` that belongs to this suite's two tenants.
 ///
-/// `deny_requests` below closes them, which is all the API can do — but a decided request is still
-/// an object, and a region had collected 305 of them from months of runs before this existed. They
-/// are named `req-{hex}`, so no prefix sweep can ever see them; the run records each id as it opens
-/// one (`State::requests`) and this deletes exactly those. Never by owner: another run may be
-/// mid-flight with its own, and taking somebody else's request away mid-decision is worse than a
-/// leak. Best effort throughout — a leftover costs an object, an error here costs the report.
-async fn drop_requests(c: &mut Ctx) -> usize {
+/// By OWNER, and deliberately so — this used to delete only the ids the run recorded plus any
+/// whose reason carried the run's prefix, on the grounds that another run might be mid-flight with
+/// its own. Two things made that wrong. A run that dies mid-way (deadline, a killed pod, a
+/// crashed step) never reaches teardown, and its request is named `req-{hex}` with a reason no
+/// later run's prefix matches — so it stood forever, and a status-less one is PENDING to the api
+/// (`is_pending_generic`) and refused every later run's `req.queue` with "a request is already
+/// pending". A region had 300 decided rows and one such blocker within a day of the old sweep.
+/// And the mid-flight worry is gone: the tenants are per suite (`SUITE_TENANTS`), and two runs of
+/// one suite never overlap (`suite_in_flight` yields to the run in progress), so everything these
+/// two owners have is THIS suite's — no other run can hold one of them mid-decision.
+///
+/// Called twice: at teardown, and BEFORE `req.queue` opens a new one, so a blocker a dead run left
+/// is cleared without waiting for the next successful teardown. Whatever the state, including
+/// none. Best effort throughout — a leftover costs an object, an error here costs the report.
+pub(crate) async fn sweep_requests(c: &Ctx) -> usize {
     let Some(k) = c.kube.clone() else { return 0 };
     use kloudlite_workspaces::crd;
+    let mine = |owner: &str| owner == c.probe_user || owner == c.other_user;
     let (reqs, legacy): (kube::Api<crd::Request>, kube::Api<crd::QuotaRequest>) =
         (kube::Api::all(k.clone()), kube::Api::all(k.clone()));
-    // The recorded ids, plus every request whose REASON carries this run's prefix — the two
-    // contexts that open one hold a `&Ctx` and cannot record it, and the reason is the same
-    // per-run marker `deny_requests` already matches on. Never by owner.
-    let prefix = c.prefix();
-    let mut names = c.state.requests.clone();
-    // Whatever their state, including NONE: a status-less row is pending to the api, and it is the
-    // shape that survived every earlier sweep. The CR list is the authority here — the listings go
-    // through a filter, this does not.
+    let mut names: Vec<(bool, String)> = vec![];
     if let Ok(list) = reqs.list(&kube::api::ListParams::default()).await {
-        names.extend(
-            list.items
-                .iter()
-                .filter(|r| r.spec.reason.starts_with(&prefix))
-                .map(kube::ResourceExt::name_any),
-        );
+        names.extend(list.items.iter().filter(|r| mine(&r.spec.owner)).map(|r| (false, kube::ResourceExt::name_any(r))));
     }
     if let Ok(list) = legacy.list(&kube::api::ListParams::default()).await {
-        names.extend(
-            list.items
-                .iter()
-                .filter(|r| r.spec.reason.starts_with(&prefix))
-                .map(kube::ResourceExt::name_any),
-        );
+        names.extend(list.items.iter().filter(|r| mine(&r.spec.owner)).map(|r| (true, kube::ResourceExt::name_any(r))));
     }
-    names.sort_unstable();
-    names.dedup();
     let mut gone = 0;
-    for name in names {
+    for (is_legacy, name) in names {
         let p = kube::api::DeleteParams::default();
-        // Either kind: the id is the object's name in both collections, and the run does not
-        // remember which route made it.
-        let took = reqs.delete(&name, &p).await.is_ok() || legacy.delete(&name, &p).await.is_ok();
+        let took = match is_legacy {
+            true => legacy.delete(&name, &p).await.is_ok(),
+            false => reqs.delete(&name, &p).await.is_ok(),
+        };
         match took {
             true => {
                 gone += 1;

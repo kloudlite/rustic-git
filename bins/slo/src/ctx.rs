@@ -70,12 +70,6 @@ pub struct State {
     /// Volumes to delete BY NAME after the prefix sweep — see `stages::drop_extra_volumes`.
     pub extra_volumes: Vec<String>,
     pub request: Option<String>,
-    /// Every `Request`/`QuotaRequest` this run opened, by the server-generated id that is also the
-    /// CR's own name. Teardown DELETES these: `Request` has no delete on any tier — only a
-    /// superadmin decision — so denying one leaves the object behind forever, and a region had
-    /// collected 305 of them before this existed. Recorded rather than swept by owner: another
-    /// run may be mid-flight with its own.
-    pub requests: Vec<String>,
 }
 
 pub struct Ctx {
