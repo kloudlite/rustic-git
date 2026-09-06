@@ -755,20 +755,15 @@ async fn retain(c: &mut Ctx, cold: Option<&str>) {
             // The cold workspace's own volume and a push of this step's own: stage 5's volume and
             // push are gone by now (stage 7 deletes both), and a push is the half of the rule that
             // matters — it is the cut retain must never prune.
-            // The cold workspace was just restarted by `ws.spread`; its doc names the volume once
-            // the reconcile has recorded it, which is moments, not never.
-            let started = std::time::Instant::now();
-            let volume = loop {
-                let v = get(c, &doc, &jwt).await.context("could not read the workspace")?;
-                if let Some(id) = v.get("volume").and_then(Value::as_str) {
-                    break id.to_string();
-                }
-                if started.elapsed() >= Duration::from_secs(60) {
-                    return Err(anyhow!("the workspace never named its volume"));
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            };
+            // The push comes first: the doc names its volume only once a snapshot exists.
             let pushes = Some(super::experience_env::push_once(c, &ws, "retain").await.context("could not push")?);
+            let volume = get(c, &doc, &jwt)
+                .await
+                .context("could not read the workspace")?
+                .get("volume")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("the workspace names no volume after a push"))?
+                .to_string();
             let history = api(c, &format!("/v1/volumes/{volume}/history"));
             // Long enough that several sync beats have certainly cut and pruned.
             tokio::time::sleep(SWEEP_CAP - Duration::from_secs(60)).await;
@@ -933,23 +928,39 @@ async fn spread(c: &mut Ctx, cold: Option<&str>) {
             api(c, &format!("/v1/workspaces/{ws}/start")),
         );
         async move {
+            // A push first: the doc names its volume only once a snapshot exists, and the
+            // volume id is the rendezvous key.
+            super::experience_env::push_once(c, &ws, "spread").await.context("could not push")?;
             let before = get(c, &doc, &jwt).await.context("could not read the workspace")?;
             let was = before.get("placement").and_then(Value::as_str).unwrap_or_default().to_string();
+            let volume = before
+                .get("volume")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("the workspace names no volume after a push"))?
+                .to_string();
             post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
             poll_json(c, &doc, &jwt, Duration::from_secs(60), |v| {
                 v.get("state").and_then(Value::as_str) == Some("stopped")
             })
             .await
             .context("it never stopped")?;
-            post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
-            // Ready AND elsewhere, in one predicate: coming back on the node it left is placement
-            // never having handed the volume over, which is what this id is about.
+            // The candidate set is only settled once the stop cut has landed on a peer; before
+            // that the owner is the one node that may start it, and "it stayed" proves nothing.
             poll_json(c, &doc, &jwt, Duration::from_secs(120), |v| {
-                v.get("state").and_then(Value::as_str) == Some("ready")
-                    && v.get("placement").and_then(Value::as_str).is_some_and(|n| !n.is_empty() && n != was)
+                v.pointer("/replicated/ready").and_then(Value::as_bool) == Some(true)
             })
             .await
-            .with_context(|| format!("it came back on {was}: the movable volume was never handed over"))
+            .context("the stop cut never reached a peer")?;
+            let (preferred, candidates) = rendezvous_choice(&k, &volume, &ws, &was).await?;
+            post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
+            poll_json(c, &doc, &jwt, Duration::from_secs(120), |v| {
+                v.get("state").and_then(Value::as_str) == Some("ready")
+                    && v.get("placement").and_then(Value::as_str) == Some(preferred.as_str())
+            })
+            .await
+            .with_context(|| {
+                format!("it did not come back on {preferred}, the rendezvous choice over {candidates:?} (it was on {was})")
+            })
         }
         .boxed()
     })
@@ -957,6 +968,43 @@ async fn spread(c: &mut Ctx, cold: Option<&str>) {
 }
 
 /// Nodes placement may choose: Ready, not cordoned, not being decommissioned. Fewer than two and
+/// The node the agent's own spread rule picks for `volume`'s next start: rendezvous over
+/// `{owner} ∪ {nodes up to date for the worktree}`, exactly `peer::preferred_node` — the same
+/// hash (`replicate::targets`) and the same up-to-date test (`VolumeReplica.status.branches`
+/// names the newest Ready transient). Recomputed here rather than read back because the agent
+/// records no "preferred" anywhere: the contract is the rule, and this is the rule.
+async fn rendezvous_choice(k: &kube::Client, volume: &str, ws: &str, owner: &str) -> Result<(String, Vec<String>)> {
+    use kloudlite_workspaces::crd;
+    let snaps: Api<crd::Snapshot> = Api::all(k.clone());
+    let snaps = snaps
+        .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await
+        .context("could not list the snapshots")?;
+    let newest = crd::newest_transient_of(&snaps.items, ws);
+    let rows: Api<crd::VolumeReplica> = Api::all(k.clone());
+    let rows = rows.list(&ListParams::default()).await.context("could not list the volume replicas")?;
+    let mut candidates: Vec<String> = rows
+        .items
+        .iter()
+        .filter(|r| r.spec.volume == volume)
+        .filter(|r| {
+            r.status.as_ref().is_some_and(|st| match newest.as_deref() {
+                None => st.phase == "Synced",
+                Some(want) => st.branches.get(ws).is_some_and(|held| held == want),
+            })
+        })
+        .map(|r| r.spec.node.clone())
+        .collect();
+    candidates.push(owner.to_string());
+    candidates.sort();
+    candidates.dedup();
+    let preferred = kloudlite_workspaces::replicate::targets(volume, "", &candidates, 2)
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no candidate node at all"))?;
+    Ok((preferred, candidates))
+}
+
 /// there is nothing to spread across.
 async fn placeable_nodes(k: &kube::Client) -> Result<usize> {
     use k8s_openapi::api::core::v1::Node;
@@ -1075,7 +1123,11 @@ fn spawn_tunnel(
     ws: &str,
     session: &str,
 ) -> std::io::Result<tokio::process::Child> {
+    // `ssh_args` ends in the command `true`; pushing after it would run `true sleep 60`, which
+    // exits at once — ten tunnels the gateway counted for 300 ms each, and an eleventh that
+    // "stayed open" against a count of zero. The held tunnel replaces the command.
     let mut argv = super::workspace::ssh_args(kl, key, ws);
+    argv.pop();
     argv.push("sleep 60".into());
     tokio::process::Command::new(ssh)
         .args(&argv)

@@ -60,7 +60,16 @@ def cleanup(rid):
             if str(r.get("name", "")).startswith(prefix):
                 try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}/{r['id']}", headers=H, method="DELETE"), timeout=30); gone += 1
                 except Exception as e: print("delete", kind, r.get("name"), "failed:", e)
-    print(f"cleanup: {gone} objects of {prefix} deleted")
+    # A volume is named by its workspace id, not the run prefix; every detached one a probe
+    # tenant still owns is a killed run's leftover and counts against the tenant's diskGb.
+    try:
+        rows = json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/v1/volumes?owner={tenant}", headers=H), timeout=20))
+        for r in (rows if isinstance(rows, list) else rows.get("items") or []):
+            if r.get("deleted") and r.get("volume"):
+                try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/volumes/{r['volume']}", headers=H, method="DELETE"), timeout=30); gone += 1
+                except Exception as e: print("delete volume", r.get("name"), "failed:", e)
+    except Exception as e: print("list volumes failed:", e)
+    print(f"cleanup: {gone} objects of {prefix} (and detached volumes) deleted")
 
 seen = 0
 for _ in range(720):

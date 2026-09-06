@@ -676,6 +676,12 @@ async fn env_cross_node(c: &mut Ctx) {
                 })
                 .await
                 .with_context(|| format!("it did not come back running on a node other than {owner}"))?;
+                // `running` is the environment's word; the StatefulSet behind it is still
+                // pulling and starting on the new node, and an exec into a container that is
+                // not up yet exits 1 with nothing to say.
+                super::environment::service_ready(c, &env, CROSS_POLL)
+                    .await
+                    .context("the service never came ready on the peer node")?;
                 let ns = kloudlite_workspaces::crd::env_namespace(&env);
                 let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
                 // `redis-0`: stage 6's one service, one StatefulSet, one replica.

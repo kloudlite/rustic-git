@@ -23,14 +23,16 @@ LOG=/work/runs/$SUITE-$(date -u +%H%M).log
 # `pm2 monit` is the dashboard, `pm2 list` shows what is up (deploy/dev/attach.sh opens these).
 # pm2 keeps the log under PM2_HOME; the run is also written to $LOG and to the pod's stdout
 # (kubectl logs, HyperDX).
+FFARG=""; [ "$FF" = 0 ] && FFARG="--no-fail-fast"
+# The fail-fast watcher (deploy/dev/pod/watch.py) starts in the SAME exec, under pm2 as
+# `watch-<suite>`: it stops the suite on the first failed step, closes its row and deletes its
+# objects. Verified online before this script returns — a run without its watcher is a run
+# that piles failures up instead of failing fast.
 kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; pm2 describe $SUITE >/dev/null 2>&1 && pm2 delete $SUITE >/dev/null; \
   ps -o stat= -C kloudlite-slo 2>/dev/null | grep -qv Z && { echo 'a suite is already running in the pod' >&2; exit 3; }; \
   cd /work/src && KLOUDLITE_SLO_USER=$U KLOUDLITE_SLO_OTHER=$O KLOUDLITE_SLO_BUDGET_SECS=$B KLOUDLITE_SLO_SSH_KEY=$K/id_ed25519 \
   pm2 start --name $SUITE --no-autorestart --time --log $LOG --merge-logs /work/target/dev-image/kloudlite-slo -- run --suite $SUITE >/dev/null && \
-  (tail -n +1 -f $LOG > /proc/1/fd/1 &) ; sleep 1; echo started $SUITE under pm2, log $LOG"
-# The fail-fast watcher runs IN THE POD under pm2 (`pm2 logs watch-<suite>`), never on the laptop:
-# deploy/dev/pod/watch.py stops the suite on the first failed step, closes its row and deletes its
-# objects. This script returns as soon as both are started.
-FFARG=""; [ "$FF" = 0 ] && FFARG="--no-fail-fast"
-kubectl -n kloudlite exec "$POD" -- bash -c "pm2 delete watch-$SUITE >/dev/null 2>&1; pm2 start --name watch-$SUITE --no-autorestart --time --merge-logs python3 -- -u /work/src/deploy/dev/pod/watch.py $SUITE $U $LOG $FFARG >/dev/null && echo watcher started as watch-$SUITE"
+  (tail -n +1 -f $LOG > /proc/1/fd/1 &) ; sleep 1; echo started $SUITE under pm2, log $LOG; \
+  pm2 delete watch-$SUITE >/dev/null 2>&1; pm2 start --name watch-$SUITE --no-autorestart --time --merge-logs python3 -- -u /work/src/deploy/dev/pod/watch.py $SUITE $U $LOG $FFARG >/dev/null; sleep 2; \
+  pm2 jlist | python3 -c 'import sys,json; p=[x for x in json.load(sys.stdin) if x[\"name\"]==\"watch-$SUITE\"]; ok=p and p[0][\"pm2_env\"][\"status\"]==\"online\"; print(\"watcher\", \"online\" if ok else \"NOT RUNNING\"); sys.exit(0 if ok else 4)'"
 echo "follow with: deploy/dev/attach.sh $SUITE   (or: deploy/dev/attach.sh watch-$SUITE)"
