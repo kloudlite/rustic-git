@@ -72,3 +72,12 @@ then the four images built by the `buildkitd` sidecar from the real Dockerfile a
 net; nothing waits on it. One-time: in the pod, `gh auth refresh -s write:packages` then
 `crane auth login ghcr.io -u <github user> -p "$(gh auth token)"` (buildctl reads the same
 `$DOCKER_CONFIG`). Build cache lives in `/work/buildkit`.
+
+## Verifying a pinned image (`run-job.sh`)
+
+`deploy/dev/run-job.sh <suite>` runs the suite as a Job from its pinned CronJob (the real image,
+the real env) and follows it. On the first failed step it force-kills the probe pod — a plain
+`delete job` leaves the pod running through its grace period, and it went on to run a drain drill
+and label a node — closes the run's row, sweeps its objects (`pod/close-run.py`) and removes any
+decommission label a drill left behind. pm2 runs (`run-suite.sh`) are for code in the pod; a Job is
+the verdict on what is pinned.
