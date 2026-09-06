@@ -1822,14 +1822,16 @@ mod tests {
     /// fits is decided by the REQUEST, not the limit. These numbers are therefore a pricing input,
     /// not a tuning knob — drifting them silently changes what a workspace costs.
     ///
-    /// "M session" in the model is a workspace. On a 32-OCPU / 128 GB session node at 94% usable
-    /// memory: 120 GB ÷ 4 GB = 30 workspaces, needing 30 × 2 = 60 vCPU of the 64 available.
+    /// "M session" in the model is a workspace, and MEMORY is what it is packed by: on a
+    /// 32-OCPU / 128 GB session node at 94% usable memory, 120 GB ÷ 4 GB = 30 workspaces. CPU is
+    /// requested at 500m and deliberately oversubscribed (owner, 2026-09-06) — see
+    /// `PodResources::default` for why, and `docs/capacity-model.md` for what that trades away.
     #[test]
     fn pod_requests_match_the_capacity_model() {
         let r = PodResources::default();
         assert_eq!(r.memory_request, "4Gi", "M workspace guarantee is 4 GB");
         assert_eq!(r.memory_limit, "8Gi", "M workspace limit is 8 GB");
-        assert_eq!(r.cpu_request, "2", "2 vCPU guaranteed, and deliberately not oversubscribed");
+        assert_eq!(r.cpu_request, "500m", "cpu is compressible, so it is requested low and burst to the limit");
         assert_eq!(r.cpu_limit, "4");
 
         // An environment service: 4 GB limit packed at 1.5x oversubscription.
@@ -1858,7 +1860,7 @@ mod tests {
         // defaultRequest is what capacity is priced on, for anything that names no request.
         let dr = item.default_request.as_ref().unwrap();
         assert_eq!(dr.get("memory").unwrap().0, "4Gi");
-        assert_eq!(dr.get("cpu").unwrap().0, "2");
+        assert_eq!(dr.get("cpu").unwrap().0, "500m");
 
         // Shared user namespace: no ownerReference, or deleting one workspace drops the ceiling
         // for every sibling.

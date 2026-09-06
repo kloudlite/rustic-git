@@ -504,22 +504,28 @@ pub struct PodResources {
 
 impl Default for PodResources {
     /// The workspace slot from the capacity model — the sheet's "M session" row, and `session` is
-    /// its word for a workspace: guarantee 4 GB / 2 vCPU, limit 8 GB / 4 vCPU. The model and its
-    /// provenance are tabulated in `docs/capacity-model.md`; change a number there and here
-    /// together, never one alone.
+    /// its word for a workspace: MEMORY guaranteed 4 GB, limit 8 GB; CPU requested 500m, limit
+    /// 4 vCPU. The model and its provenance are tabulated in `docs/capacity-model.md`; change a
+    /// number there and here together, never one alone.
     ///
-    /// The REQUEST is the load-bearing half. It is what the scheduler packs against, so it — not
-    /// the limit — decides how many sessions a node holds and therefore what a session costs. The
-    /// previous 512Mi/250m request was a small floor "with room to burst", which let a 128 GB node
-    /// accept roughly 235 sessions against the model's ~30, and made the model's "guaranteed CPU is
-    /// NOT oversubscribed on session nodes" false: 235 × 2 vCPU of promised capacity on 64 vCPU.
+    /// The MEMORY request is the load-bearing half, and it is the guarantee: memory is
+    /// incompressible, so a pod over it is an eviction candidate and a pod over its limit is
+    /// killed outright, losing unpushed work. It stays at the sold 4 GB, and it is what the
+    /// scheduler packs against — a 128 GB session node holds ~30 sessions, as the model prices.
     ///
-    /// The arithmetic these numbers have to satisfy, on a 32-OCPU / 128 GB session node at the
-    /// model's 94% usable-memory headroom: 120 GB ÷ 4 GB = 30 sessions, needing 30 × 2 = 60 vCPU of
-    /// 64. Memory-bound, CPU fits, guarantee honoured.
+    /// CPU requests 500m rather than the sold 2 vCPU because CPU is COMPRESSIBLE: a request is a
+    /// floor under contention, not a ceiling, and the limit still lets a busy workspace burst to
+    /// 4 vCPU whenever cores are free. Reserving 2 vCPU for a workspace nobody is typing in capped
+    /// an 8-vCPU node at three workspaces and left the fourth `Pending` behind a full node while
+    /// its cores sat idle. The trade is deliberate and the owner's (2026-09-06): CPU on workspace
+    /// nodes is now oversubscribed, so a node whose workspaces are ALL busy at once throttles
+    /// rather than refusing work. 500m is a provisional figure — workspace namespaces are not in
+    /// the metrics pipeline, so nobody has measured idle usage yet; measure, then set it.
+    ///
+    /// Do not "fix" this by raising the CPU request back to the limit: that reinstates the queue.
     fn default() -> Self {
         Self {
-            cpu_request: "2".into(),
+            cpu_request: "500m".into(),
             cpu_limit: "4".into(),
             memory_request: "4Gi".into(),
             memory_limit: "8Gi".into(),

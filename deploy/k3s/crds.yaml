@@ -379,7 +379,7 @@
                       },
                       "resources": {
                         "default": {
-                          "cpuRequest": "2",
+                          "cpuRequest": "500m",
                           "cpuLimit": "4",
                           "memoryRequest": "4Gi",
                           "memoryLimit": "8Gi"
