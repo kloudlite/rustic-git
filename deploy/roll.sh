@@ -44,7 +44,7 @@ suspended=$(kubectl -n kloudlite get cronjobs -o jsonpath='{range .items[?(@.spe
 # merging with what is live, so piping it back applied the running state and moved nothing
 # (2026-09-06, a roll that "succeeded" with the old image everywhere).
 kubectl create --dry-run=client -o json -f kloudlite.yaml -f kloudlite-web.yaml \
-  | jq -s --arg keep "$suspended" '{apiVersion: "v1", kind: "List", items: map(if .kind=="CronJob" and (.metadata.name as $n | $keep | split(" ") | index($n)) then .spec.suspend = true else . end)}' \
+  | jq -s --arg keep "$suspended" '{apiVersion: "v1", kind: "List", items: map(if .kind=="CronJob" and (.metadata.name as $n | $keep | split(" ") | index($n)) then .spec.suspend = true else . end) | walk(if type == "object" then with_entries(select(.value != null)) else . end)}' \
   | kubectl apply -f -
 for c in $suspended; do echo "kept $c suspended"; done
 kubectl -n kloudlite rollout status statefulset/kloudlite-srv --timeout=900s
