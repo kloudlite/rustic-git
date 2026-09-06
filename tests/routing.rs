@@ -2149,6 +2149,19 @@ async fn a_drain_hands_its_repos_to_a_live_peer() {
         .header("git-protocol", "version=2")
         .send().await.unwrap();
     assert_eq!(res.status(), 200, "the handover left the repo servable with no gap");
+
+    // The draining pod is still in the Service for up to one readiness period, and a request
+    // that lands on it for a repo with NO live entry — released and not yet reclaimed, or never
+    // claimed at all — must be forwarded to a peer, not refused. This was the one 503 per roll
+    // `roll.zero.errors` kept counting after the handover itself was fixed.
+    e.store.create_repo("alice", "api").await.unwrap();
+    let res = c.get(format!("http://{}/alice/api/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 200, "a draining pod forwards an unowned repo to a peer instead of answering 503");
+    let owner = leader.app.owner("alice/api").await.unwrap().expect("the forwarded request made the peer claim it");
+    assert_ne!(owner.node, "kloudlite-1", "the draining pod must not have claimed it for itself");
 }
 
 /// A draining node that holds the leader lease resigns it FIRST. Every reassignment is a write to

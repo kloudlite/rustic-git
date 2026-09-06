@@ -625,7 +625,18 @@ impl App {
                 // already owns keeps serving (the entry below names us and is live); only the
                 // claim path is closed.
                 if self.store.pool.is_closed() || self.is_draining() {
-                    return Route::Unavailable;
+                    // ...but it can still ROUTE. A draining pod keeps receiving requests for up to
+                    // one readiness period after `begin_draining` (the Service drops it on the next
+                    // /healthz), and a repo with no live entry in that window — its own, just
+                    // released and not yet claimed by the peer `hand_over` named — used to answer
+                    // 503 from here. Forward to the node the handover picks for this repo: the same
+                    // deterministic choice, so the peer that takes the request is the one about to
+                    // own it, and its own `route_for` claims on arrival. The weekly's
+                    // `roll.zero.errors` counted exactly one such answer per roll.
+                    return match self.handover_target(repo).await {
+                        Some(peer) => self.route_to(peer),
+                        None => Route::Unavailable,
+                    };
                 }
                 // A repo the map does not name is CLAIMED before anyone opens it. Routing on
                 // "does the prefix exist" was a two-writer window: the first write to a new repo,
