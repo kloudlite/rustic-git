@@ -52,7 +52,7 @@ fn may_claim(me: &str, owner: &str, p: &Placement) -> bool {
 }
 
 /// cpu millicores and memory MiB, the two dimensions the scheduler packs against.
-type Want = (u64, u64);
+pub(crate) type Want = (u64, u64);
 
 /// The REQUESTS already committed on this node: every non-terminated pod assigned to it, summed
 /// over its containers. `Succeeded`/`Failed` pods are excluded — the kubelet has released their
@@ -106,7 +106,10 @@ fn admissible_pct(node: Option<&Node>) -> u64 {
 /// ponytail: an environment counts its full size until its FIRST pod appears and nothing after
 /// that, so a half-started environment is under-counted for one reconcile. Per-service accounting
 /// is the upgrade, and only worth it if envs ever start slowly enough to matter.
-async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod]) -> Result<Want, ReconcileErr> {
+/// `skip` is the parent this sum is being computed FOR, when there is one: the caller is about to
+/// create its pod, so its commitment is the `want` being tested and counting it on both sides of
+/// the comparison would refuse every parent its own capacity.
+async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod], skip: Option<&str>) -> Result<Want, ReconcileErr> {
     let mine = ListParams::default().fields(&format!("status.nodeName={}", ctx.node));
     let has_pod = |ns: &str, label: Option<&str>| {
         pods.iter().any(|p| match label {
@@ -117,12 +120,18 @@ async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod]) -> Result<Want, ReconcileErr
     let mut total = (0, 0);
     for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await?.items {
         let id = w.name_any();
+        if Some(id.as_str()) == skip {
+            continue;
+        }
         if w.spec.desired_state == crd::DesiredState::Running && !has_pod("", Some(&id)) {
             let (c, m) = want_of(&w.spec.resources);
             total = (total.0 + c, total.1 + m);
         }
     }
     for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&mine).await?.items {
+        if Some(e.name_any().as_str()) == skip {
+            continue;
+        }
         let ns = crd::env_namespace(&e.name_any());
         if e.spec.desired_state == crd::DesiredState::Running && !has_pod(&ns, None) {
             let (c, m) = env_want(e.spec.services.len());
@@ -153,6 +162,35 @@ fn fits(node: Option<&Node>, pods: &[Pod], committed: Want, want: Want) -> bool 
     let (pod_cpu, pod_mem) = requested(pods);
     let (used_cpu, used_mem) = (pod_cpu + committed.0, pod_mem + committed.1);
     cpu.saturating_sub(used_cpu) >= want.0 && mem.saturating_sub(used_mem) >= want.1
+}
+
+/// Whether this node still has room to START `parent` — the check the RECLAIM path never gets.
+///
+/// `decide` runs `fits` once, at claim time, and only for a parent with no bytes anywhere. Neither
+/// covers the two ways a pod reaches a full node anyway: an already-placed parent restarting
+/// (`decide` declines it at the `node_name` gate and never looks at capacity again), and the window
+/// between a claim and the later reconcile that builds the pod. Both used to end as a `Pending` pod
+/// with nothing on the parent to explain it. This is the same arithmetic, asked at the one moment
+/// that is actually load-bearing: immediately before the pod is created.
+///
+/// It does NOT move anything. A parent whose bytes are here has no other correct node, so refusing
+/// is not a worse outcome than `Pending` — it is the same outcome with a reason attached.
+pub(crate) async fn room_to_start(ctx: &Arc<Ctx>, parent: &str, want: Want) -> Result<bool, ReconcileErr> {
+    let node = Api::<Node>::all(ctx.client.clone()).get_opt(&ctx.node).await?;
+    let pods: Api<Pod> = Api::all(ctx.client.clone());
+    let mine = pods.list(&ListParams::default().fields(&format!("spec.nodeName={}", ctx.node))).await?.items;
+    let committed = claimed_here(ctx, &mine, Some(parent)).await?;
+    Ok(fits(node.as_ref(), &mine, committed, want))
+}
+
+/// What one workspace's pod will request, for callers outside this module.
+pub(crate) fn workspace_want(r: &crd::PodResources) -> Want {
+    want_of(r)
+}
+
+/// What one environment's StatefulSets will request in total, for callers outside this module.
+pub(crate) fn environment_want(services: usize) -> Want {
+    env_want(services)
 }
 
 /// Gathers `Placement` for `volume` (`None` when the child `Volume` has not been created yet —
@@ -311,7 +349,7 @@ async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, ge
     if !p.has_snapshots {
         let pods: Api<Pod> = Api::all(ctx.client.clone());
         let mine = pods.list(&ListParams::default().fields(&format!("spec.nodeName={}", ctx.node))).await?.items;
-        let committed = claimed_here(ctx, &mine).await?;
+        let committed = claimed_here(ctx, &mine, None).await?;
         if !fits(me.as_ref(), &mine, committed, want) {
             let why = format!("no node has room for it: it requests {}m cpu and {} MiB", want.0, want.1);
             tracing::info!(%name, cpu_m = want.0, mem_mi = want.1, "claim.declined.capacity");
@@ -610,6 +648,22 @@ mod tests {
         // And what is CLAIMED here but has no pod yet counts exactly like a pod would: this is the
         // burst case, where the claim lands a whole reconcile before the pod does.
         assert!(!fits(Some(&n), &[pod("Running", "5", "8Gi")], (1500, 0), want));
+    }
+
+    /// The start gate asks `fits` about a parent that is ALREADY claimed here and has no pod yet,
+    /// so that parent is inside `claimed_here`'s own sum. Counting it there AND as `want` refuses
+    /// every workspace exactly its own size — a node with room for one more would start nothing.
+    /// `claimed_here`'s `skip` is what keeps the two sides of the comparison disjoint.
+    #[test]
+    fn the_start_gate_does_not_count_the_parent_it_is_asking_about_twice() {
+        let n = node(serde_json::json!({"kloudlite.io/session": "true"}), "8", "33554432Ki");
+        let want = (2000, 4096);
+        // Three workspaces running (6 vCPU), and the one being started is the only thing claimed
+        // here without a pod. Excluded from `committed`, as the gate excludes it: it fits.
+        let running = [pod("Running", "2", "4Gi"), pod("Running", "2", "4Gi"), pod("Running", "2", "4Gi")];
+        assert!(fits(Some(&n), &running, (0, 0), want));
+        // Counted on both sides, the same node refuses it — the double count this skip removes.
+        assert!(!fits(Some(&n), &running, want, want));
     }
 
     /// The model packs env nodes to 80% and workspace nodes to the guarantee; a node with both

@@ -389,6 +389,33 @@ async fn run_environment(
         .map_err(|e| ReconcileErr(format!("mkdir panicked: {e}")))?
         .map_err(ReconcileErr)?;
 
+    // The same start-time capacity gate the workspace reconciler runs, for the same reason: the
+    // claim checked capacity once, and an environment restarting onto its own node never reaches
+    // that check at all. Only before the FIRST StatefulSet exists — once they are applied their
+    // capacity is spent, and refusing here would strand a running environment at `Creating`.
+    // An environment is all-or-nothing on purpose: its services share a namespace and a volume,
+    // and half of them scheduled is not a working environment.
+    if Api::<StatefulSet>::namespaced(ctx.client.clone(), ns).list(&kube::api::ListParams::default()).await?.items.is_empty()
+        && !crate::claim::room_to_start(ctx, &e.name_any(), crate::claim::environment_want(e.spec.services.len())).await?
+    {
+        let st = crd::EnvironmentStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            conditions: kept_conditions(
+                &prev.conditions,
+                crd::condition(
+                    "Ready",
+                    false,
+                    "NoCapacity",
+                    &format!("{} has no room for this environment right now; it starts as soon as room frees up", ctx.node),
+                    gen,
+                ),
+            ),
+            ..prev.clone()
+        };
+        write_env_status(e, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {
         let set = k8s::service_statefulset(svc, &e.name_any(), &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;

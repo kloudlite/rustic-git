@@ -1118,6 +1118,46 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     .await;
                 }
             };
+            // The capacity gate for the START, as against `claim`'s for the PLACEMENT. Only when
+            // the pod does not exist yet: a running pod's capacity is already spent, and refusing
+            // here would tear down nothing while parking a healthy workspace at `Creating`.
+            // A `Pending` pod nobody can explain is the failure this removes — the workspace now
+            // says the node is full, and stays claimable the moment room appears.
+            let pod_name = w.name_any();
+            if pods.get_opt(&pod_name).await?.is_none()
+                && !crate::claim::room_to_start(ctx, &pod_name, crate::claim::workspace_want(&w.spec.resources)).await?
+            {
+                let st = crd::WorkspaceStatus {
+                    phase: crd::Phase::Creating,
+                    observed_generation: None,
+                    volume_ref: Some(id.clone()),
+                    pod_ref: None,
+                    conditions: super::with_drain_notice(
+                        &prev.conditions,
+                        replaced(
+                            &with_attached(
+                                ws_conditions(
+                                    &prev,
+                                    crd::condition(
+                                        "Ready",
+                                        false,
+                                        "NoCapacity",
+                                        &format!("{} has no room for this workspace right now; it starts as soon as room frees up", ctx.node),
+                                        gen,
+                                    ),
+                                ),
+                                attached.clone(),
+                            ),
+                            running_condition(&prev.conditions, gen),
+                        ),
+                        me.decommissioning,
+                        gen,
+                    ),
+                    ..prev
+                };
+                write_ws_status(w, st, ctx).await?;
+                return Ok(Action::requeue(TICK));
+            }
             create_if_absent(&pods, &pod).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
@@ -1126,7 +1166,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // clone `id` is the source VOLUME, and reading readiness or reporting `podRef` by `id`
             // would point this workspace at its source's pod — the gateway dials `podRef`, so an
             // ssh to the clone would land in the source's shell.
-            let pod_name = w.name_any();
             if !pod_is_ready(&pods, &pod_name).await? {
                 let st = crd::WorkspaceStatus {
                     phase: crd::Phase::Creating,
