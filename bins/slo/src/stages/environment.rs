@@ -202,9 +202,18 @@ async fn dns(c: &mut Ctx, env: &str) {
     let env = env.to_string();
     c.step("env.dns", DNS_CEILING, move |c| {
         async move {
-            match resolves(c, &env, DNS_CEILING).await? {
-                true => Ok(()),
-                false => Err(anyhow!("`{SERVICE}` does not resolve and answer inside the environment")),
+            // Polled to the ceiling, never asked once: the service pod is Running a beat before
+            // redis accepts, and one early `ping` read as "DNS is broken" failed half the runs.
+            let started = std::time::Instant::now();
+            loop {
+                let cap = DNS_CEILING.saturating_sub(started.elapsed());
+                if resolves(c, &env, cap.max(Duration::from_secs(2))).await.unwrap_or(false) {
+                    return Ok(());
+                }
+                if started.elapsed() + Duration::from_secs(2) >= DNS_CEILING {
+                    return Err(anyhow!("`{SERVICE}` does not resolve and answer inside the environment"));
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
         .boxed()

@@ -324,13 +324,16 @@ async fn image_delete(c: &mut Ctx, secret: &str, image: &str) {
                 return Err(anyhow!("the tag is still in the tag list after the delete"));
             }
             post(c, &del_image, &jwt, serde_json::Value::Null).await.context("could not delete the image")?;
-            let rows = super::get(c, &listing, &jwt).await.context("could not read the catalogue")?;
-            let still = rows.as_array().is_some_and(|rows| {
-                rows.iter().any(|r| r.get("name").and_then(|n| n.as_str()) == Some(image.as_str()))
-            });
-            if still {
-                return Err(anyhow!("the image is still in the catalogue after the delete"));
-            }
+            // The listing is a cached view (`Cache-Control: max-age=5` on public reads, the api's
+            // own listing cache behind it), so the delete is judged by the target's bound, not by
+            // the first read after it.
+            super::poll_json(c, &listing, &jwt, DELETE_CEILING, |rows| {
+                !rows.as_array().is_some_and(|rows| {
+                    rows.iter().any(|r| r.get("name").and_then(|n| n.as_str()) == Some(image.as_str()))
+                })
+            })
+            .await
+            .context("the image is still in the catalogue after the delete")?;
             Ok(())
         }
         .boxed()
