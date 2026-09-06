@@ -262,6 +262,27 @@ pub(crate) async fn seeded_from_cuts(ctx: &Arc<Ctx>, volume: &str) -> Result<std
             }
         }
     }
+    // A shared-volume clone (`CloneOf { commit: Some(cut) }`) has no Volume of its own — it is a
+    // second worktree of THIS volume, and the cut it grafts onto is named on the WORKSPACE. Until
+    // that worktree is checked out the cut is the whole of what the clone is, and it was not
+    // protected here: a clone that waited a minute for room on its node saw the source's stop
+    // cut land, retention keep exactly that one transient, and its own graft point vanish —
+    // `NoSuchSnapshot`, abandoned for good. A clone that has reached `ready` has its worktree and
+    // no longer needs the cut.
+    //
+    // ponytail: a cluster-wide Workspace list per retained cut. Fine at this fleet's size; a
+    // field-selectable "clone of" label is the upgrade if retention ever shows up in a profile.
+    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
+        let materialised = w.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
+        if materialised {
+            continue;
+        }
+        if let Some(VolumeSource::CloneOf { volume: src, commit: Some(cut) }) = w.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
+            if src == volume {
+                held.insert(cut.clone());
+            }
+        }
+    }
     Ok(held)
 }
 
@@ -357,7 +378,51 @@ mod snapshot_tests {
             status: 200,
             body: list_of("Volume", vec![]),
         });
+        // Same for the Workspace list `seeded_from_cuts` now reads for shared-volume clones.
+        routes.push(Route {
+            method: "GET",
+            path: "/apis/kloudlite.io/v1alpha1/workspaces".into(),
+            status: 200,
+            body: list_of("Workspace", vec![]),
+        });
         shared_test_ctx(pool, node, routes)
+    }
+
+    /// The cut a still-creating shared-volume clone grafts onto is not prunable. The fast suite
+    /// lost `ws.clone.p95` to this: the clone waited for room, the source stopped, retention kept
+    /// exactly the stop cut, and the clone's graft point was gone when its turn came.
+    #[tokio::test]
+    async fn retention_keeps_the_cut_an_unmaterialised_clone_still_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cuts = vec![
+            serde_json::to_value(&*snapshot("clone-ws-1-cafe", "vol-1", "ws-1", "", true, crd::Phase::Ready)).unwrap(),
+            serde_json::to_value(&*snapshot("stop-ws-1-4", "vol-1", "ws-1", "clone-ws-1-cafe", true, crd::Phase::Ready)).unwrap(),
+        ];
+        let clone = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-2", "uid": "ws-2-uid", "generation": 1},
+            "spec": {"owner": "alice", "team": "", "name": "copy", "region": "r1", "image": "img", "desiredState": "running",
+                     "storage": {"quotaGb": 5, "source": {"cloneOf": {"volume": "vol-1", "commit": "clone-ws-1-cafe"}}}},
+            "status": {"phase": "creating", "nodeName": "node-a"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", cuts.clone()) },
+            Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/workspaces".into(), status: 200, body: list_of("Workspace", vec![clone]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        retain(&ctx, "vol-1", "stop-ws-1-4").await;
+        assert!(
+            !rec.calls().iter().any(|c| c.contains("DELETE") && c.contains("clone-ws-1-cafe")),
+            "the clone's graft point must survive the stop cut: {:?}", rec.calls()
+        );
+
+        // The control: with no clone naming it, the older transient goes as before.
+        let tmp2 = tempfile::tempdir().unwrap();
+        let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", cuts) },
+                          Route { method: "DELETE", path: "/apis/kloudlite.io/v1alpha1/snapshots/clone-ws-1-cafe".into(), status: 200, body: serde_json::json!({}) }];
+        let (ctx, rec) = test_ctx(tmp2.path(), "node-a", routes);
+        retain(&ctx, "vol-1", "stop-ws-1-4").await;
+        assert!(rec.calls().iter().any(|c| c == "DELETE /apis/kloudlite.io/v1alpha1/snapshots/clone-ws-1-cafe"), "unreferenced, it is pruned: {:?}", rec.calls());
     }
 
     fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
