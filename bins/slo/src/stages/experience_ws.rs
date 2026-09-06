@@ -16,7 +16,8 @@ use serde_json::{json, Value};
 
 use super::git::BASE_BRANCH;
 use super::workspace::ws_exec;
-use super::{api, call, poll_json, post};
+use super::{api, call, get, poll_json, post};
+use crate::tools;
 use crate::ctx::Ctx;
 
 /// Per-step ceilings, each at or above its catalogue target so a slow answer is a breach with a
@@ -146,15 +147,87 @@ pub async fn platform_key(c: &mut Ctx) {
             post(c, &url, &c.probe_jwt.clone(), Value::Null)
                 .await
                 .context("could not regenerate the platform key")?;
-            let id = seed(c, &name, &repo).await?;
-            let out = clone_subject(c, &id, &name).await;
-            drop_ws(c, &id).await;
+            let out = match seed(c, &name, &repo).await {
+                Ok(id) => {
+                    let out = clone_subject(c, &id, &name).await;
+                    drop_ws(c, &id).await;
+                    out
+                }
+                // The seed never came up. What is worth knowing then is the SERVER's view, not the
+                // probe's guess: which fingerprint the api reports now, whether that key
+                // authenticates from here, and what the seed container last said. Bounded, and
+                // fingerprints only — key material never reaches a step detail.
+                Err(e) => Err(anyhow!("{e:#}; {}", why_seeding_failed(c, &name).await)),
+            };
             out
         }
         .boxed()
     })
     .await;
 }
+
+/// The server's own account of a failed seed, for the failure detail. Never an error of its own:
+/// this runs only when the step has already failed, and a diagnostic that could fail would replace
+/// the real reason with its own.
+async fn why_seeding_failed(c: &Ctx, name: &str) -> String {
+    let mut parts = vec![];
+    let probe = c.probe_user.clone();
+    // (a) the fingerprint the api reports NOW — a rotation the git tier never saw shows up as this
+    // disagreeing with what the seed pod presented.
+    let url = api(c, &format!("/v1/platform-key?owner={probe}"));
+    let fp = tokio::time::timeout(DIAG_STEP, get(c, &url, &c.probe_jwt))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|v| v.get("fingerprint").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| "unreadable".into());
+    parts.push(format!("the api now reports platform key {fp}"));
+    // (b) whether the git tier accepts THIS pod's own key. `id.key.usable` uses the same binary
+    // and the same host; a refusal here says the git tier is refusing a key the api says is
+    // installed, which is the fault, and an acceptance says the seed pod's copy is stale.
+    let (host, port) = c.cfg.ssh_endpoint();
+    let target = format!("git@{host}");
+    let argv: Vec<String> = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-p"]
+        .iter()
+        .map(|a| (*a).to_string())
+        .chain([port.to_string(), "-i".into(), c.cfg.ssh_key_path.clone(), "-T".into(), target])
+        .collect();
+    let said = match tokio::time::timeout(DIAG_STEP, tools::run(&c.programs.ssh, &argv, &Default::default(), None, DIAG_STEP)).await {
+        Ok(Ok(_)) => "the probe's own key authenticates".to_string(),
+        Ok(Err(e)) => {
+            let detail = format!("{e:#}");
+            match detail.contains("Permission denied") {
+                true => "the git tier REFUSES the probe's own key".to_string(),
+                false => format!("ssh said {}", detail.chars().take(120).collect::<String>()),
+            }
+        }
+        Err(_) => "the ssh check timed out".to_string(),
+    };
+    parts.push(said);
+    // (c) the seed container's own last line.
+    if let Some(k) = &c.kube {
+        let ns = kloudlite_workspaces::crd::ws_namespace(&probe, "");
+        let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k.clone(), &ns);
+        let logs = tokio::time::timeout(
+            DIAG_STEP,
+            pods.logs(name, &kube::api::LogParams { container: Some(SEED_CONTAINER.into()), tail_lines: Some(3), ..Default::default() }),
+        )
+        .await;
+        let last = match logs {
+            Ok(Ok(text)) => text.lines().last().unwrap_or("").chars().take(160).collect::<String>(),
+            _ => "unreadable".to_string(),
+        };
+        parts.push(format!("the seed container last said {last:?}"));
+    }
+    parts.join("; ")
+}
+
+/// Each diagnostic read's own bound. Three of them, so the whole capture stays inside 20 s and can
+/// never turn a failed step into a timed-out one.
+const DIAG_STEP: Duration = Duration::from_secs(6);
+
+/// The init container `k8s::seed_container` names.
+const SEED_CONTAINER: &str = "git-seed";
 
 /// `home.persists`: a file written in one workspace's home is read from a FRESH workspace's.
 ///
