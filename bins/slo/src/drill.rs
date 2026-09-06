@@ -27,6 +27,11 @@ pub const DRILL_TAINT: &str = "kloudlite.io/slo-drill";
 pub trait Cluster: Send + Sync {
     async fn taint(&self, node: &str, on: bool) -> Result<()>;
     async fn cordon(&self, node: &str, on: bool) -> Result<()>;
+    /// The product's own drain verb: `kloudlite.io/decommission=true`, the label the agent watches
+    /// and `peer::unplaceable` reads. A CORDON is invisible to placement — the first live weekly
+    /// run cordoned a node, killed the pod on it and watched nothing reschedule for 148 s — so a
+    /// drill that wants a worktree to move must set this, not `spec.unschedulable`.
+    async fn decommission(&self, node: &str, on: bool) -> Result<()>;
     /// `Some(spec)` creates the NetworkPolicy, `None` deletes it.
     async fn netpol(&self, ns: &str, name: &str, spec: Option<Value>) -> Result<()>;
     /// Every node still carrying `DRILL_TAINT`. The sweep's half that needs no memory: a drill
@@ -78,6 +83,22 @@ pub async fn with_taint<T>(
 ) -> Result<T> {
     k.taint(node, true).await?;
     undoing(cap, body, || k.taint(node, false)).await
+}
+
+/// Make a node unplaceable the way the platform does, for the length of `body`.
+///
+/// The label is written down first, exactly as the cordon is: a label an operator set by hand and
+/// one a killed drill left behind look identical, and teardown's sweep is what clears it.
+pub async fn with_decommission<T>(
+    k: &dyn Cluster,
+    tmp: &Path,
+    node: &str,
+    cap: Duration,
+    body: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    note_cordon(tmp, node);
+    k.decommission(node, true).await?;
+    undoing(cap, body, || k.decommission(node, false)).await
 }
 
 /// `tmp` is where the cordon is WRITTEN DOWN before it is made — an `unschedulable` node looks
@@ -155,6 +176,12 @@ pub async fn sweep_nodes(k: &dyn Cluster, tmp: &Path) {
             Ok(()) => tracing::info!(kind = "cordon", name = %node, "slo.drill.swept"),
             Err(e) => tracing::warn!(kind = "cordon", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
         }
+        // Both, blind: the same file records either mutation, and a label left on a node is a node
+        // placement will never use again.
+        match k.decommission(&node, false).await {
+            Ok(()) => tracing::info!(kind = "decommission", name = %node, "slo.drill.swept"),
+            Err(e) => tracing::warn!(kind = "decommission", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
+        }
     }
 }
 
@@ -201,6 +228,21 @@ impl Cluster for kube::Client {
             node,
             &kube::api::PatchParams::default(),
             &kube::api::Patch::Merge(&json!({ "spec": { "unschedulable": on } })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn decommission(&self, node: &str, on: bool) -> Result<()> {
+        use kloudlite_workspaces::crd::DECOMMISSION_LABEL;
+        let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
+        // `null` REMOVES a label in a merge patch, which is what the undo needs — an empty string
+        // would leave the key there, and `unplaceable` reads the key.
+        let value = if on { serde_json::json!("true") } else { Value::Null };
+        api.patch(
+            node,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(&json!({ "metadata": { "labels": { DECOMMISSION_LABEL: value } } })),
         )
         .await?;
         Ok(())
@@ -289,6 +331,10 @@ pub(crate) mod tests {
             self.record(format!("cordon {node} {on}"));
             Ok(())
         }
+        async fn decommission(&self, node: &str, on: bool) -> Result<()> {
+            self.record(format!("decommission {node} {on}"));
+            Ok(())
+        }
         async fn netpol(&self, ns: &str, name: &str, spec: Option<Value>) -> Result<()> {
             self.record(format!("netpol {ns}/{name} {}", spec.is_some()));
             Ok(())
@@ -308,6 +354,7 @@ pub(crate) mod tests {
         for out in [
             with_taint(&k, "node-a", cap, boom()).await,
             with_cordon(&k, &tmp, "node-a", cap, boom()).await,
+            with_decommission(&k, &tmp, "node-a", cap, boom()).await,
             with_netpol(&k, "kloudlite", "slo-drill-redis", json!({}), cap, boom()).await,
         ] {
             // The BODY's failure is what comes back — the drill measured something and it failed.
@@ -320,6 +367,8 @@ pub(crate) mod tests {
                 "taint node-a false",
                 "cordon node-a true",
                 "cordon node-a false",
+                "decommission node-a true",
+                "decommission node-a false",
                 "netpol kloudlite/slo-drill-redis true",
                 "netpol kloudlite/slo-drill-redis false",
             ]
@@ -370,7 +419,7 @@ pub(crate) mod tests {
         let tmp = tmpdir("sweep");
         note_cordon(&tmp, "node-b");
         sweep_nodes(&k, &tmp).await;
-        assert_eq!(k.calls(), ["taint node-a false", "cordon node-b false"]);
+        assert_eq!(k.calls(), ["taint node-a false", "cordon node-b false", "decommission node-b false"]);
     }
 
     /// A drill that worked and could not clean up after itself is NOT a pass: the fleet is left
@@ -388,6 +437,9 @@ pub(crate) mod tests {
                 }
             }
             async fn cordon(&self, _: &str, _: bool) -> Result<()> {
+                Ok(())
+            }
+            async fn decommission(&self, _: &str, _: bool) -> Result<()> {
                 Ok(())
             }
             async fn netpol(&self, _: &str, _: &str, _: Option<Value>) -> Result<()> {

@@ -24,6 +24,11 @@ use crate::{drill, tools};
 /// 100 MiB, written a mebibyte at a time so the probe never holds the commit in memory — the pod's
 /// limit is 512Mi and the emptyDir it writes into is the budget that matters.
 const LARGE_COMMIT_BYTES: u64 = 100 * 1024 * 1024;
+/// What the HTTP half sends. Ten mebibytes under Cloudflare's 100 MB upload cap, which the app
+/// host is proxied by: the first live weekly run pushed 100 MiB and was answered `413` by the
+/// EDGE, not by `max_body` (the ingress sets `proxy-body-size: 0`). A person hitting that ceiling
+/// pushes over SSH, which has no proxy in front of it — which is exactly what the SSH half sends.
+const LARGE_HTTP_BYTES: u64 = 90 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 /// Ten times the fast suite's layer. Big enough that the push is a real transfer through the
 /// ingress and Cloudflare rather than a round trip, small enough to fit the CronJob's 4Gi tmp.
@@ -78,6 +83,8 @@ pub async fn run(c: &mut Ctx) {
     settings_revert(c).await;
     settings_roll(c).await;
     gc_sweep(c).await;
+    // The 2026-09-06 coverage review's twelve, in `weekly_gaps`.
+    super::weekly_gaps::run(c).await;
 }
 
 /// `settings.revert`: the undo beside `settings.live`'s save.
@@ -178,8 +185,11 @@ async fn settings_roll(c: &mut Ctx) {
                 .await
                 .context("the agent was not ready to begin with, so this step's roll is not its own")?;
             let before = get(c, &settings, &jwt).await.context("could not read the cluster settings")?;
-            let field = boot_field_of(&before)
-                .ok_or_else(|| anyhow!("the cluster settings carry none of the Boot fields"))?;
+            // The first `CLUSTER_SETTING_META` Boot field, whether or not the document stores one:
+            // a fresh cluster stores none (every value is the compiled-in default until somebody
+            // saves), and the first live weekly run failed with "the cluster settings carry none of
+            // the Boot fields" — a fact about an empty document, not about the precheck.
+            let field = boot_field_of(&before);
             let held = before.pointer(&format!("/spec/{field}")).cloned().unwrap_or(Value::Null);
             let body = serde_json::json!({ "reason": SETTINGS_NOTE });
             post(c, &roll, &jwt, body).await.context("the roll was refused")?;
@@ -228,12 +238,15 @@ const AGENT: &str = "kloudlite-agent";
 /// about the wire shape, and the test below is what holds the two lists together.
 const BOOT_FIELDS: [&str; 3] = ["defaultImage", "gitInitImage", "runtimeClass"];
 
-/// The first Boot field the region's settings actually carry.
-fn boot_field_of(doc: &Value) -> Option<String> {
+/// The Boot field this step will try to save: the first one the settings actually STORE, and
+/// otherwise simply the first the meta names. A stored value is preferred only because the
+/// "nothing is written" half then compares against something a person put there.
+fn boot_field_of(doc: &Value) -> String {
     BOOT_FIELDS
         .iter()
         .find(|f| doc.pointer(&format!("/spec/{f}")).is_some())
-        .map(|f| (*f).to_string())
+        .unwrap_or(&BOOT_FIELDS[0])
+        .to_string()
 }
 
 /// A value for the refused save. Deliberately DIFFERENT from what is stored — a save of the same
@@ -394,13 +407,18 @@ async fn large_push(c: &mut Ctx) {
         let args = crate::stages::git::authed(c, &["push", "-q", &http, &branch]);
         let (git, env) = (c.programs.git.clone(), crate::stages::git::git_env(c));
         async move {
-            fill(&work.join("large.bin"), LARGE_COMMIT_BYTES).context("could not write the large file")?;
+            fill(&work.join("large.bin"), LARGE_HTTP_BYTES).context("could not write the large file")?;
             let g = |a: Vec<String>| crate::stages::git::git(c, a, Some(&work));
             g(vec!["checkout".into(), "-q".into(), "-b".into(), branch.clone()]).await?;
             g(vec!["add".into(), "-A".into()]).await?;
             g(vec!["commit".into(), "-q".into(), "-m".into(), "large".into()]).await?;
             crate::stages::git::git(c, args, Some(&work)).await.context("the HTTP push failed")?;
             let Some((url, cmd)) = ssh else { return Ok(()) };
+            // The SSH half carries the full 100 MiB: no proxy sits in front of that listener, so
+            // it is the door a person uses when the edge refuses theirs.
+            fill(&work.join("large.bin"), LARGE_COMMIT_BYTES).context("could not write the large file")?;
+            crate::stages::git::git(c, vec!["add".into(), "-A".into()], Some(&work)).await?;
+            crate::stages::git::git(c, vec!["commit".into(), "-q".into(), "-m".into(), "larger".into()], Some(&work)).await?;
             let mut env = env;
             env.insert("GIT_SSH_COMMAND".into(), cmd);
             let argv = vec!["push".to_string(), "-q".into(), url, branch];
@@ -533,9 +551,11 @@ async fn create(c: &Ctx, name: &str, cap: Duration) -> Result<String> {
 /// `ws.cross.node` and `homes.cross.node`: the workspace comes back on a DIFFERENT node, and the
 /// home it finds there is the same home.
 ///
-/// The cordon is what forces the move — a stopped workspace may start on any node that is up to
-/// date for its worktree, and the owner is the one it would otherwise pick — and it is undone on
-/// every path out of the step, including a start that never converges (`drill::with_cordon`). The
+/// The DECOMMISSION LABEL is what forces the move, not a cordon: `peer::unplaceable` reads that
+/// label (and node death), and a cordon is invisible to placement — the first live weekly run
+/// cordoned a node, watched the pod on it die and nothing reschedule for 148 s, and reported the
+/// product working as designed as a breach. The label is the product's own drain verb, and it is
+/// undone on every path out of the step, including a start that never converges. The
 /// home read is a second id rather than a second assertion inside the first because the two fail
 /// for completely different reasons: a workspace that would not move is placement, a home that
 /// reads back wrong is the NFS export.
@@ -581,7 +601,7 @@ async fn cross_node(c: &mut Ctx, ws: Option<&str>) {
                     .await
                     .with_context(|| format!("it did not come back ready on a node other than {owner}"))
                 };
-                drill::with_cordon(&k, &tmp, &owner, CROSS_BODY, body).await
+                drill::with_decommission(&k, &tmp, &owner, CROSS_BODY, body).await
             }
             .boxed()
         })
@@ -657,7 +677,8 @@ async fn env_cross_node(c: &mut Ctx) {
                 }
                 Ok(())
             };
-            drill::with_cordon(&k, &tmp, &owner, CROSS_BODY, body).await
+            // The label, not a cordon — the same reason `ws.cross.node` uses it.
+            drill::with_decommission(&k, &tmp, &owner, CROSS_BODY, body).await
         }
         .boxed()
     })
@@ -813,6 +834,19 @@ mod tests {
                 "settings.revert",
                 "settings.roll",
                 "reg.gc.sweep",
+                // The 2026-09-06 batch, walked by `weekly_gaps::run` at the end of this stage.
+                "roll.zero.errors",
+                "srv.drain.handover",
+                "reg.moved.image",
+                "reg.blob.session",
+                "git.gc.packs",
+                "git.limits",
+                "admin.workload.roll",
+                "ws.spread",
+                "snap.retain",
+                "agent.janitor",
+                "srv.lanes",
+                "gw.caps",
             ]
         );
         // A missing precondition is a skip, never a second count of a failure recorded elsewhere.
@@ -851,8 +885,10 @@ mod tests {
         assert_ne!(boot_value(&Value::Null), Value::Null);
         // And the first Boot field the document actually carries is the one that is tried.
         let doc = serde_json::json!({ "spec": { "gitInitImage": "x", "runtimeClass": "gvisor" } });
-        assert_eq!(boot_field_of(&doc).as_deref(), Some("gitInitImage"));
-        assert!(boot_field_of(&serde_json::json!({ "spec": { "nodeDeadSecs": 180 } })).is_none());
+        assert_eq!(boot_field_of(&doc), "gitInitImage");
+        // And a document that stores NO Boot field still names one: a fresh cluster stores none,
+        // and the precheck the id is about does not care whether a value was ever saved.
+        assert_eq!(boot_field_of(&serde_json::json!({ "spec": { "nodeDeadSecs": 180 } })), BOOT_FIELDS[0]);
     }
 
     /// The bytes have to be incompressible: git packs a commit, and a hundred megabytes of zeroes

@@ -290,16 +290,34 @@ async fn tunnel(c: &mut Ctx, id: &str) {
     let id = id.to_string();
     c.step("gw.tunnel.p95", TUNNEL_CEILING, move |c| {
         async move {
-            let session = ssh_session(c, &id).await?;
             let (ssh, kl) = (c.programs.ssh.clone(), c.programs.kl.clone());
-            tools::run(&ssh, &ssh_args(&kl, &key, &id), &session_env(&session), None, TUNNEL_CEILING)
-                .await
-                .map(|_| ())
+            // Retried, like the seed key is: the workspace's `authorized_keys` Secret reaches the
+            // pod through the kubelet, which propagates it on its own beat — a first live drill run
+            // met `Permission denied (publickey)` on a pod that was Ready and had not read it yet.
+            // A refusal that never clears inside the window is still the failure; one that clears
+            // in three seconds was never one.
+            let start = std::time::Instant::now();
+            loop {
+                let session = ssh_session(c, &id).await?;
+                let out = tools::run(&ssh, &ssh_args(&kl, &key, &id), &session_env(&session), None, TUNNEL_CEILING).await;
+                match out {
+                    Ok(_) => return Ok(()),
+                    Err(e) if start.elapsed() < KEY_PROPAGATION => {
+                        tracing::info!(error = %format!("{e:#}"), "slo.tunnel.retrying");
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         }
         .boxed()
     })
     .await;
 }
+
+/// How long a workspace's `authorized_keys` Secret gets to reach its pod. The kubelet's own
+/// propagation beat, not a guess about the gateway: everything else in this step is one request.
+const KEY_PROPAGATION: Duration = Duration::from_secs(30);
 
 /// `gw.unregistered.refused`: the same tunnel with a key the fleet has never seen. Only a REFUSAL
 /// passes — a tunnel that failed to open at all is the outage this exists to catch, not a pass.
@@ -340,7 +358,7 @@ async fn unregistered_refused(c: &mut Ctx, id: &str) {
 }
 
 /// The connect ticket `kl ws ssh` mints, as the JSON `kl ws proxy` reads from its environment.
-async fn ssh_session(c: &Ctx, id: &str) -> Result<String> {
+pub(crate) async fn ssh_session(c: &Ctx, id: &str) -> Result<String> {
     let url = api(c, &format!("/v1/workspaces/{id}/ssh-session"));
     let doc = post(c, &url, &c.probe_jwt.clone(), Value::Null)
         .await
@@ -350,7 +368,7 @@ async fn ssh_session(c: &Ctx, id: &str) -> Result<String> {
 
 /// What `kl ws proxy` expects to be handed: the whole `Session` document, so the child makes no api
 /// call and needs no `kl login` state in the pod.
-fn session_env(session: &str) -> std::collections::HashMap<String, String> {
+pub(crate) fn session_env(session: &str) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([(SESSION_ENV.to_string(), session.to_string())])
 }
 

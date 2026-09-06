@@ -412,7 +412,10 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "reg.moved.image", feature: "Container registry", sli: "The first pull of an image whose database has just moved nodes succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "reg.blob.session", feature: "Container registry", sli: "A chunked upload resumes and completes, a cancelled session is gone, a deleted blob 404s and referrers answers for a pushed manifest", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "git.gc.packs", feature: "Git hosting", sli: "After a push and a consolidation pass the repo still clones to the same tree and its index markers still list it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "git.limits", feature: "Git hosting", sli: "A body over the git and the registry limit is refused 413 by the limit that owns it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    // Only the manifest ceiling is testable in band: `max_layer` is 5 GiB and the git `max_body`
+    // 2 GiB, and a probe that sent either would be measuring the CronJob's disk. What this catches
+    // is the failure people have actually hit — the three limits collapsing into one.
+    Slo { id: "git.limits", feature: "Git hosting", sli: "A manifest over its own limit is refused 413 while a blob of the same size is accepted — the two ceilings are different knobs", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "gw.caps", feature: "Workspaces", sli: "The gateway refuses a tunnel past its per-workspace cap and keeps the ones already open", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "admin.workload.roll", feature: "Admin", sli: "A roll of one reader restarts exactly that workload and it returns ready", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "ws.spread", feature: "Workspaces", sli: "An idle volume whose preferred node is not its owner is handed over and the workspace starts there", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },

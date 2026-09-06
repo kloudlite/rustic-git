@@ -462,7 +462,7 @@ const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json,applic
 
 /// `{registry}` as an HTTP base. The deployment sets a bare host, because that is what a `docker
 /// pull` line carries; a value with a scheme is accepted so a test can point it at a stub.
-fn base(c: &Ctx) -> String {
+pub(crate) fn base(c: &Ctx) -> String {
     let r = c.cfg.registry.trim_end_matches('/');
     if r.starts_with("http://") || r.starts_with("https://") {
         r.to_string()
@@ -493,7 +493,7 @@ fn anonymous(c: &Ctx) -> Crane {
 
 /// A registry bearer for `scope`. `secret: None` asks anonymously, which the registry answers with
 /// a token for nobody — the one a public pull uses.
-async fn bearer(c: &Ctx, secret: Option<&str>, scope: &str) -> Result<String> {
+pub(crate) async fn bearer(c: &Ctx, secret: Option<&str>, scope: &str) -> Result<String> {
     let probe = c.probe_user.clone();
     use base64::Engine;
     let url = format!("{}/v2/token?service={}&scope={}", base(c), host(c), urlencoding(scope));
@@ -537,14 +537,14 @@ fn has(v: &serde_json::Value, field: &str, want: &str) -> bool {
         .is_some_and(|rows| rows.iter().any(|r| r.as_str() == Some(want)))
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     format!("sha256:{:x}", sha2::Sha256::digest(bytes))
 }
 
 /// One layer's worth of bytes nothing else has. Random rather than a pattern so a registry that
 /// deduplicated by content across runs could not make `reg.push.ok` measure nothing.
-fn random_layer() -> Vec<u8> {
+pub(crate) fn random_layer() -> Vec<u8> {
     let mut buf = vec![0u8; LAYER_BYTES];
     rand::thread_rng().fill_bytes(&mut buf);
     buf

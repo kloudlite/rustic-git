@@ -189,7 +189,7 @@ first destructive stage.
 | `reg.moved.image` | Container registry | The first pull of an image whose database has just moved nodes succeeds | 99.9 % | weekly | 12 · Weekly |
 | `reg.blob.session` | Container registry | A chunked upload resumes and completes, a cancelled session is gone, a deleted blob 404s and referrers answers for a pushed manifest | 99.9 % | weekly | 12 · Weekly |
 | `git.gc.packs` | Git hosting | After a push and a consolidation pass the repo still clones to the same tree and its index markers still list it | 99.9 % | weekly | 12 · Weekly |
-| `git.limits` | Git hosting | A body over the git and the registry limit is refused 413 by the limit that owns it | 99.9 % | weekly | 12 · Weekly |
+| `git.limits` | Git hosting | A manifest over its own limit is refused 413 while a blob of the same size is accepted — the two ceilings are different knobs | 99.9 % | weekly | 12 · Weekly |
 | `gw.caps` | Workspaces | The gateway refuses a tunnel past its per-workspace cap and keeps the ones already open | 99.9 % | weekly | 12 · Weekly |
 | `admin.workload.roll` | Admin | A roll of one reader restarts exactly that workload and it returns ready | 99.9 % ≤ 180000 ms | weekly | 12 · Weekly |
 | `ws.spread` | Workspaces | An idle volume whose preferred node is not its owner is handed over and the workspace starts there | 99.9 % | weekly | 12 · Weekly |

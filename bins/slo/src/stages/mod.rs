@@ -27,6 +27,7 @@ pub mod pr;
 pub mod registry;
 pub mod security;
 pub mod weekly;
+pub mod weekly_gaps;
 pub mod workspace;
 
 /// The journey stages this file's neighbours implement, named as the catalogue's "Journey
