@@ -473,6 +473,13 @@ console works with no ClickHouse deployed. `KLOUDLITE_ADMIN_FIXTURES=1` answers 
 `lib/fixtures/superadmin.ts` (one guard in `adminCall`) so every screen renders offline —
 `scripts/superadmin-screens.mjs` screenshots all ten at 1440 into `.local/screens/`.
 
+## Dev loop
+
+Do not run `cargo` on the laptop for this repo: the disk fills and every build competes with the
+editor. Builds, tests, clippy and probe runs happen in the dev pod on the AKS `builder` node —
+`deploy/dev/README.md` is the whole recipe (`deploy/dev/sync.sh`, `deploy/dev/test.sh`,
+`deploy/dev/exec.sh`, `deploy/dev/slo.sh`).
+
 ## Deploying
 
 CI builds images tagged with the commit SHA on push to master — **only if that commit's test job
