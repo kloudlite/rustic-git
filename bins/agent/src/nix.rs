@@ -380,8 +380,23 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
-        let started = std::time::Instant::now();
-        let err = nix.build("1", Duration::from_millis(300)).await.unwrap_err();
+        // ETXTBSY: another thread of this test binary can fork while the script's write fd is
+        // still open, and the child holds it until it execs — so the exec of a file we have only
+        // just written intermittently fails with "Text file busy". It is a property of writing
+        // and exec'ing in one multi-threaded process, not of the code under test, so retry it.
+        let (started, err) = {
+            let mut out = None;
+            for _ in 0..10 {
+                let at = std::time::Instant::now();
+                let e = nix.build("1", Duration::from_millis(300)).await.unwrap_err();
+                if !e.contains("Text file busy") {
+                    out = Some((at, e));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            out.expect("the script never became executable")
+        };
         // The bound is the grandchild's own lifetime, halved — not a guess at how fast a runner
         // reaps: if the process GROUP is not killed this waits out the full 40 s, and anything
         // under 20 s can only mean the kill worked. A tighter bound measures CI's load instead.
