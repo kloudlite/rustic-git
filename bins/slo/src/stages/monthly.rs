@@ -37,6 +37,10 @@ const READ_CEILING: Duration = Duration::from_secs(60);
 /// The dead-node drill waits out `nodeDeadSecs` and then a start elsewhere; the drain waits out the
 /// agent's own beat, which the console gives ten minutes.
 const DRAIN_CAP: Duration = Duration::from_secs(600);
+/// Two marker-reconcile beats plus drift — see `without_redis`. The `repo_created` half of the
+/// feed comes off the index markers, never the stream, and one beat was not a wait.
+const FEED_FALLBACK: Duration = Duration::from_secs(150);
+
 /// Long enough that a fleet leaning on Redis for anything load-bearing would show it, short enough
 /// that the CronJob's two hours still fit the dead-node drill after it.
 const REDIS_DOWN: Duration = Duration::from_secs(300);
@@ -810,9 +814,14 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     // `repo_created` specifically: the PR half of the feed is stream-only ON PURPOSE
     // (`feed.rs`, "no fallback here"), so with Redis down it is expected to be quiet and asserting
     // on it would fail a drill that the system passed by design.
+    // 150 s, not 60: the `repo_created` half is not a stream fallback at all — `feed.rs:206` builds
+    // it from `repo_listing`, i.e. the index markers, which the owning node's own lane reconciles
+    // every 30 s plus ~200 ms per repo of drift (`bins/server/src/lanes.rs:76`). The old 60 s cap
+    // (58 s after `poll_json`'s own margin) was ONE beat, so a marker written just after a pass was
+    // a failed drill for the fleet behaving exactly as designed. Two beats and the drift.
     let feed = api(c, &format!("/v1/activity?owner={probe}"));
     let want = format!("{probe}/{name}");
-    poll_json(c, &feed, &jwt, Duration::from_secs(60), |v| created(v, &want))
+    poll_json(c, &feed, &jwt, FEED_FALLBACK, |v| created(v, &want))
         .await
         .context("the activity feed never showed the repo")?;
 
