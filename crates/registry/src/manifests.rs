@@ -68,6 +68,33 @@ fn declared_digests_parse(v: &serde_json::Value) -> bool {
 /// before `put_manifest` ever runs its own check below.
 pub const MAX_MANIFEST: usize = 4 * 1024 * 1024;
 
+/// How much of an oversized manifest body is swallowed before the connection is simply dropped.
+const DRAIN_CEILING: usize = 64 * 1024 * 1024;
+
+/// The manifest body, or `None` when it is over `MAX_MANIFEST` — and in that case the rest of it
+/// has been READ AND DISCARDED (up to `DRAIN_CEILING`) before the caller answers. Refusing while
+/// the body is still arriving is what axum's own body limit does, and hyper then closes the
+/// connection with the request half-sent; ingress-nginx, still writing that body upstream, sees
+/// a broken pipe and answers the client 502 instead of relaying the 413 — a limit the client
+/// cannot tell from an outage. Draining first keeps the connection whole so the refusal gets
+/// through.
+async fn read_manifest(body: axum::body::Body) -> Option<Bytes> {
+    use futures::StreamExt;
+    let mut stream = body.into_data_stream();
+    let (mut buf, mut seen) = (Vec::new(), 0usize);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        seen += chunk.len();
+        if seen > DRAIN_CEILING {
+            return None;
+        }
+        if seen <= MAX_MANIFEST {
+            buf.extend_from_slice(&chunk);
+        }
+    }
+    (seen <= MAX_MANIFEST).then(|| buf.into())
+}
+
 /// A reference is either a digest or a tag. Tags are the same shape as any other name segment.
 enum Reference {
     Digest(Digest),
@@ -91,14 +118,14 @@ pub async fn put_manifest(
     headers: HeaderMap,
     Path((owner, name, reference_str)): Path<(String, String, String)>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Response {
     if let Err(r) = auth::allow(&app, &trusted, &headers, &owner, &name, true).await {
         return r;
     }
-    if body.len() > MAX_MANIFEST {
+    let Some(body) = read_manifest(body).await else {
         return oci_err(StatusCode::PAYLOAD_TOO_LARGE, "SIZE_INVALID", "manifest too large");
-    }
+    };
     // Parsed once, to READ — never re-emitted (the digest is over the bytes as sent). Anything
     // that is not a JSON OBJECT is refused here: `gc::referenced` cannot walk it for the blobs it
     // names and would otherwise abort every sweep for this owner, forever, on one bad push. A
