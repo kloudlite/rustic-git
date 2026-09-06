@@ -27,6 +27,10 @@ const SRV: &str = "kloudlite-srv";
 /// `srv.drain.handover` found "no srv pod to drain" and `roll.zero.errors` tracked no pod at all
 /// and passed with nothing observed.
 const SRV_PODS: &str = "app=kloudlite,role=server";
+/// The srv container's `http` port (`deploy/kloudlite.yaml`), the one `/healthz` answers on and
+/// the one the network policy opens to everybody. This dialled 3000 — the WEB app's port — so
+/// `srv.drain.handover` reported the leaving pod as never having answered at all.
+const SRV_HTTP_PORT: u16 = 8080;
 
 /// The roll's own budget: a StatefulSet of a handful of pods, each with a 90 s grace period for
 /// its handover. The step gets a minute on top, as every step with an undo does.
@@ -359,7 +363,7 @@ async fn draining(c: &Ctx, ip: &str, cap: Duration) -> Result<bool> {
     let start = std::time::Instant::now();
     let mut answered = false;
     loop {
-        match c.http.get(format!("http://{ip}:3000/healthz")).timeout(Duration::from_secs(3)).send().await {
+        match c.http.get(format!("http://{ip}:{SRV_HTTP_PORT}/healthz")).timeout(Duration::from_secs(3)).send().await {
             Ok(r) => {
                 let body = r.text().await.unwrap_or_default();
                 answered = true;
