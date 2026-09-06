@@ -234,17 +234,21 @@ impl Cluster for kube::Client {
     }
 
     async fn decommission(&self, node: &str, on: bool) -> Result<()> {
-        use kloudlite_workspaces::crd::DECOMMISSION_LABEL;
+        use kloudlite_workspaces::crd::{DECOMMISSION_LABEL, DECOMMISSION_STATUS};
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         // `null` REMOVES a label in a merge patch, which is what the undo needs — an empty string
         // would leave the key there, and `unplaceable` reads the key.
         let value = if on { serde_json::json!("true") } else { Value::Null };
-        api.patch(
-            node,
-            &kube::api::PatchParams::default(),
-            &kube::api::Patch::Merge(&json!({ "metadata": { "labels": { DECOMMISSION_LABEL: value } } })),
-        )
-        .await?;
+        // The undo takes the `draining …` stamp with the label, exactly as the admin's `undrain`
+        // does: the agent writes that annotation only while labelled and clears nothing on its
+        // own, so a drill that removed the label alone left "draining running=2 …" on a node that
+        // was not draining — the same stale stamp the admin route exists to prevent.
+        let patch = match on {
+            true => json!({ "metadata": { "labels": { DECOMMISSION_LABEL: value } } }),
+            false => json!({ "metadata": { "labels": { DECOMMISSION_LABEL: value },
+                                            "annotations": { DECOMMISSION_STATUS: Value::Null } } }),
+        };
+        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await?;
         Ok(())
     }
 

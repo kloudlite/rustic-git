@@ -603,7 +603,15 @@ async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<String> {
         .iter()
         .find(|n| {
             let name = kube::ResourceExt::name_any(*n);
-            Some(name.as_str()) != avoid
+            let labels = n.metadata.labels.as_ref();
+            // A POOL node only: the drain and the `drained …` stamp are the node's own agent's
+            // work, and the agent runs only where `kloudlite.io/session` or `/env` is set. The
+            // control plane carries neither, has nothing to drain, and stamps nothing — picking
+            // it labelled k3s-cp and waited the whole cap for a stamp that could never come.
+            let pool = ["kloudlite.io/session", "kloudlite.io/env"]
+                .iter()
+                .any(|k| labels.and_then(|l| l.get(*k)).map(String::as_str) == Some("true"));
+            pool && Some(name.as_str()) != avoid
                 && !busy.contains(&name)
                 && !n.metadata.labels.as_ref().is_some_and(|l| l.contains_key(crd::DECOMMISSION_LABEL))
                 // A node already cordoned by a person is one somebody is retiring by hand.
