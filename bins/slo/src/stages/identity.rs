@@ -154,7 +154,26 @@ async fn key(c: &mut Ctx, name: &str) {
                     .context("could not read the probe's public key")?;
                 let public = public.trim().to_string();
                 let body = serde_json::json!({ "owner": probe, "name": name, "key": public });
-                post(c, &api(c, "/v1/keys"), &jwt, body).await.context("could not register the key")?;
+                // The probe's key is ONE key per tenant, registered under this run's name and
+                // removed at teardown — so a run that died before teardown (a deadline, a killed
+                // pod) leaves it registered under the dead run's name, and the api refuses the
+                // same fingerprint twice. That leftover is this tenant's own and this step's to
+                // replace: delete it by fingerprint and register again. Any other 409 is a fault.
+                if let Err(e) = post(c, &api(c, "/v1/keys"), &jwt, body.clone()).await {
+                    let text = format!("{e:#}");
+                    if !text.contains("409") {
+                        return Err(e.context("could not register the key"));
+                    }
+                    let fp = tools::plain(&keygen, &["-lf", &key_path], Duration::from_secs(10))
+                        .await
+                        .context("could not fingerprint the probe's key")?;
+                    let fp = fp.split_whitespace().nth(1).unwrap_or_default().to_string();
+                    let del = api(c, &format!("/v1/keys/{fp}"));
+                    super::call(c, reqwest::Method::DELETE, &del, &jwt, None)
+                        .await
+                        .context("could not remove the leftover key a dead run left registered")?;
+                    post(c, &api(c, "/v1/keys"), &jwt, body).await.context("could not register the key after replacing the leftover")?;
+                }
                 let listed = get(c, &api(c, &format!("/v1/keys?owner={probe}")), &jwt).await?;
                 let found = listed
                     .as_array()
