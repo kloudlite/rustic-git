@@ -303,7 +303,7 @@ pub const CATALOGUE: &[Slo] = &[
     // Stage 10 · edge and pipeline
     Slo { id: "edge.dns", feature: "Edge and pipeline", sli: "The public hostname resolves", target: avail(99.99), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "edge.cert", feature: "Edge and pipeline", sli: "The TLS certificate is valid for the public hostname", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
-    Slo { id: "edge.origin", feature: "Edge and pipeline", sli: "Cloudflare reaches the origin", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
+    Slo { id: "edge.origin", feature: "Edge and pipeline", sli: "The origin answers a direct request on the address its ingress publishes", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "edge.ssh.lb", feature: "Edge and pipeline", sli: "The SSH load balancer accepts a connection", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "tel.log.latency", feature: "Edge and pipeline", sli: "A structured log line reaches HyperDX", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "tel.pod.coverage", feature: "Edge and pipeline", sli: "Every pod is scraped by the region's collector", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
@@ -382,7 +382,7 @@ pub const CATALOGUE: &[Slo] = &[
     // The LOW rows of the review, grouped by the tier that answers them rather than one id per
     // route: each is a single read whose failure is the same failure, and a per-route id would be
     // a catalogue nobody reads.
-    Slo { id: "repo.metadata", feature: "Git hosting", sli: "A repo PATCH of its non-description fields is saved, and the browse `lastmod` route answers", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "repo.metadata", feature: "Git hosting", sli: "The browse `lastmod` route answers for a commit this run pushed", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.session.reads", feature: "Identity", sli: "The passkey `used` mark, the legacy quota-request create and the api's own settings read all answer", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "kl.commands", feature: "Identity", sli: "`kl ws`, `kl ws list --team` and `kl logout` answer", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "admin.reads", feature: "Admin", sli: "`/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
@@ -407,7 +407,7 @@ pub const CATALOGUE: &[Slo] = &[
 
     // The deploy the owner actually worries about, and the one event the fast suite is designed to
     // yield through — which is why it has to be a drill of its own rather than a fast sample.
-    Slo { id: "roll.zero.errors", feature: "Control plane", sli: "A rolling restart of the srv tier lands with zero non-2xx on a concurrent push and pull loop, and every pod that left logged `ownership.drained`", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "roll.zero.errors", feature: "Control plane", sli: "A rolling restart of the srv tier lands with no failed answer on a concurrent push and pull loop — a 421 the router recovers is not one — and every pod that left logged `ownership.drained`", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "srv.drain.handover", feature: "Control plane", sli: "A drained pod reports `draining` on `/healthz` and its repos are served by a live peer", target: bound(30_000), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "reg.moved.image", feature: "Container registry", sli: "The first pull of an image whose database has just moved nodes succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "reg.blob.session", feature: "Container registry", sli: "A chunked upload resumes and completes, a cancelled session is gone, a deleted blob 404s and referrers answers for a pushed manifest", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -418,10 +418,10 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "git.limits", feature: "Git hosting", sli: "A manifest over its own limit is refused 413 while a blob of the same size is accepted — the two ceilings are different knobs", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "gw.caps", feature: "Workspaces", sli: "The gateway refuses a tunnel past its per-workspace cap and keeps the ones already open", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "admin.workload.roll", feature: "Admin", sli: "A roll of one reader restarts exactly that workload and it returns ready", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "ws.spread", feature: "Workspaces", sli: "An idle volume whose preferred node is not its owner is handed over and the workspace starts there", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "ws.spread", feature: "Workspaces", sli: "A stopped workspace whose volume nothing holds comes back on a different node", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "snap.retain", feature: "Workspace lifecycle", sli: "After several sync beats exactly one Ready sync point per worktree remains and every push is still in history", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "agent.janitor", feature: "Workspaces", sli: "The janitor leaves no attach directory, profile-index entry or snapshot record behind for an object this run deleted", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "srv.lanes", feature: "Control plane", sli: "The registry pull counter is flushed to the image row, and the ownership map is checkpointed and pruned", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "agent.janitor", feature: "Workspaces", sli: "No snapshot record of this run outlives the volume it names", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "srv.lanes", feature: "Control plane", sli: "Pulls of an image reach its pull counter, which is the server lane beat writing it back", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly
     Slo { id: "bak.tarball.age", feature: "Backups", sli: "The latest backup tarball is recent", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
@@ -434,7 +434,7 @@ pub const CATALOGUE: &[Slo] = &[
     // operator recipe in deploy/k3s/README.md, so the console shows "not automated" rather than a
     // green row nothing produced. Same for the two ids below it.
     Slo { id: "drill.dead.node", feature: "Resilience drills", sli: "A dead-node drill heals every replica onto a live node — walked by the operator's node-level drill, not by the probe", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
-    Slo { id: "drill.drain", feature: "Resilience drills", sli: "A drain of the node holding a running worktree keeps that worktree running and releases the idle volumes beside it", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    Slo { id: "drill.drain", feature: "Resilience drills", sli: "A drain of the node holding a running worktree stamps the node draining and leaves that worktree's pod running", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.redis.down", feature: "Resilience drills", sli: "The system keeps operating correctly with Redis down", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "cluster.decommission", feature: "Resilience drills", sli: "A decommission is refused until the agent stamps `drained`, then cordons the node", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.clickhouse.down", feature: "Resilience drills", sli: "With ClickHouse denied, every /v1 verb still works and `/admin/history/*` answers 503, never 500", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },

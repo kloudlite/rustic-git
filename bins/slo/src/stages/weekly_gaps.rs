@@ -29,7 +29,10 @@ const ROLL_CAP: Duration = Duration::from_secs(600);
 const DRAIN_CAP: Duration = Duration::from_secs(60);
 const READ_CEILING: Duration = Duration::from_secs(60);
 const SWEEP_CAP: Duration = Duration::from_secs(180);
-const TUNNEL_CEILING: Duration = Duration::from_secs(120);
+/// `gw.caps` alone: two 30 s `ssh` runs for the replay half, eleven session mints, ten tunnels
+/// spawned a beat apart and a 20 s wait on the eleventh. 300 s is that with room, and the id is
+/// availability — a step cut off by its own ceiling would report the probe, not the gateway.
+const TUNNEL_CEILING: Duration = Duration::from_secs(300);
 
 fn step_cap(body: Duration) -> Duration {
     body + Duration::from_secs(60)
@@ -73,6 +76,10 @@ async fn roll_zero_errors(c: &mut Ctx) {
     let Some(repo) = c.state.repo.clone() else {
         return c.skip("roll.zero.errors", "no repo to read through the roll");
     };
+    let work = c.tmp.join("git").join(&repo);
+    if !work.is_dir() {
+        return c.skip("roll.zero.errors", "stage 2 left no working tree to push from");
+    }
     let aks = match drill::incluster() {
         Ok(k) => k,
         Err(e) => return c.skip("roll.zero.errors", &format!("no in-cluster client: {e:#}")),
@@ -83,6 +90,12 @@ async fn roll_zero_errors(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         let sts: Api<StatefulSet> = Api::namespaced(aks.clone(), CENTRAL_NS);
         let pods: Api<Pod> = Api::namespaced(aks.clone(), CENTRAL_NS);
+        let push = Pushing {
+            work,
+            url: format!("{}/{probe}/{repo}.git", c.cfg.git_url.trim_end_matches('/')),
+            branch: format!("roll-{}", c.run_id),
+            n: Default::default(),
+        };
         async move {
             settled(&sts).await.context("the srv tier was already mid-roll, so this is not our roll")?;
             let before = pod_names(&pods).await?;
@@ -101,7 +114,7 @@ async fn roll_zero_errors(c: &mut Ctx) {
             let settle = || async {
                 settled(&sts).await.context("the srv tier was left mid-roll")
             };
-            let watch = async { watch_roll(c, &pods, &refs, &jwt, &before).await };
+            let watch = async { watch_roll(c, &pods, &refs, &jwt, &before, &push).await };
             drill::undoing(ROLL_CAP, watch, settle).await
         }
         .boxed()
@@ -109,32 +122,50 @@ async fn roll_zero_errors(c: &mut Ctx) {
     .await;
 }
 
-/// The loop: read through the roll, and collect the handover evidence off the pods on the way out.
+/// The loop: read and push through the roll, and collect the handover evidence on the way out.
+///
+/// Pods are tracked by UID, never by name: `kloudlite-srv` is a StatefulSet, so `kloudlite-srv-0`
+/// is deleted and recreated under the same name — a name-based "every old pod is gone" test can
+/// never become true, and the id would breach on every run for the roll working perfectly.
+///
+/// A **421** is not a failure. It is what the routing middleware answers while ownership moves
+/// between pods, which is the event being measured; the client's own recovery is to ask again, so
+/// the step asks again (bounded) and counts only a 421 that will not resolve. A 502/503, a timeout
+/// or a dropped connection IS a failure — and is counted, never propagated: aborting on the first
+/// dropped keep-alive would report a transport blip instead of the roll.
 async fn watch_roll(
     c: &Ctx,
     pods: &Api<Pod>,
     refs: &str,
     jwt: &str,
-    before: &[String],
+    before: &[(String, String)],
+    push: &Pushing,
 ) -> Result<()> {
     let started = std::time::Instant::now();
     let mut bad = vec![];
     let mut drained: Vec<String> = vec![];
     let mut leaving: Vec<String> = vec![];
+    let mut last_push = std::time::Instant::now() - PUSH_EVERY;
     loop {
-        // The read a person's clone makes, through the public listener and the routing middleware
-        // — which is where a roll that lost a database shows up first.
-        let (status, body) = super::raw(c, reqwest::Method::GET, refs, jwt, None, &[]).await?;
-        if !status.is_success() {
-            bad.push(format!("{status}: {}", body.chars().take(120).collect::<String>()));
+        // The read a person's clone makes, through the public listener and the routing middleware.
+        if let Err(why) = routed(c, refs, jwt).await {
+            bad.push(why);
+        }
+        // And the WRITE, which is the half a roll is most likely to break: the database has to be
+        // open on whichever node now owns it.
+        if last_push.elapsed() >= PUSH_EVERY {
+            last_push = std::time::Instant::now();
+            if let Err(e) = push.once(c).await {
+                bad.push(format!("push: {e:#}"));
+            }
         }
         for pod in pods.list(&ListParams::default().labels("app=kloudlite-srv")).await.map_err(|e| anyhow!("{e}"))?.items {
-            let name = kube::ResourceExt::name_any(&pod);
-            if pod.metadata.deletion_timestamp.is_none() || drained.contains(&name) {
+            let (name, uid) = (kube::ResourceExt::name_any(&pod), uid_of(&pod));
+            if pod.metadata.deletion_timestamp.is_none() || drained.contains(&uid) {
                 continue;
             }
-            if !leaving.contains(&name) {
-                leaving.push(name.clone());
+            if !leaving.contains(&uid) {
+                leaving.push(uid.clone());
             }
             // Logs while it is still there: once the pod is gone so is its log, which is why this
             // is read on the beat rather than after the roll.
@@ -143,12 +174,13 @@ async fn watch_roll(
                 .await
                 .unwrap_or_default();
             if log.contains("ownership.drained") {
-                drained.push(name);
+                drained.push(uid);
             }
         }
-        // Done when every pod that was there at the start is gone, and nothing is terminating.
+        // Done when no pod carrying an ORIGINAL uid is left, and the tier is back to full count.
         let now = pod_names(pods).await?;
-        if before.iter().all(|p| !now.contains(p)) && now.len() >= before.len() {
+        let olds: Vec<&String> = before.iter().map(|(_, uid)| uid).collect();
+        if now.iter().all(|(_, uid)| !olds.contains(&uid)) && now.len() >= before.len() {
             break;
         }
         if started.elapsed() >= ROLL_CAP - Duration::from_secs(60) {
@@ -157,19 +189,77 @@ async fn watch_roll(
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     if !bad.is_empty() {
-        return Err(anyhow!("{} non-2xx answers through the roll: {}", bad.len(), bad.join(" · ")));
+        return Err(anyhow!("{} bad answers through the roll: {}", bad.len(), bad.join(" · ")));
     }
     let silent: Vec<&String> = leaving.iter().filter(|p| !drained.contains(p)).collect();
     if !silent.is_empty() {
         return Err(anyhow!(
-            "{} left without logging `ownership.drained`",
-            silent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            "{} pod(s) left without logging `ownership.drained`",
+            silent.len()
         ));
     }
     Ok(())
 }
 
-async fn pod_names(pods: &Api<Pod>) -> Result<Vec<String>> {
+/// One routed read, with the 421 recovery a real client performs.
+///
+/// `Ok(())` for a 2xx, including one reached only after a 421 — the middleware handing a request
+/// to the node that now owns the database is the roll working. Everything else comes back as the
+/// text the step will report.
+async fn routed(c: &Ctx, url: &str, jwt: &str) -> std::result::Result<(), String> {
+    for attempt in 0..RETRIES {
+        match super::raw(c, reqwest::Method::GET, url, jwt, None, &[]).await {
+            Ok((status, _)) if status.is_success() => return Ok(()),
+            // 421 Misdirected Request: ask again, which is what the client does.
+            Ok((status, body)) if status.as_u16() == 421 => {
+                if attempt + 1 == RETRIES {
+                    return Err(format!("421 did not resolve after {RETRIES} tries: {}", body.chars().take(120).collect::<String>()));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Ok((status, body)) => return Err(format!("{status}: {}", body.chars().take(120).collect::<String>())),
+            // A dropped connection is a failed answer, counted — never propagated, or one blip
+            // would end the step before it had measured the roll.
+            Err(e) => return Err(format!("transport: {e:#}")),
+        }
+    }
+    Ok(())
+}
+
+/// How many times a 421 is re-issued before it counts against the id. Three tries over a second is
+/// more patience than a git client has and far less than the roll takes.
+const RETRIES: usize = 3;
+
+/// How often the loop pushes, rather than every beat: a push is a pack negotiation, and one every
+/// two seconds would measure the probe's own git rather than the fleet.
+const PUSH_EVERY: Duration = Duration::from_secs(10);
+
+/// The push half of the loop: one commit onto its own branch, over HTTP, each time it is asked.
+struct Pushing {
+    work: std::path::PathBuf,
+    url: String,
+    branch: String,
+    n: std::sync::atomic::AtomicUsize,
+}
+
+impl Pushing {
+    async fn once(&self, c: &Ctx) -> Result<()> {
+        let i = self.n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::fs::write(self.work.join("roll.txt"), format!("{i}\n")).context("could not write")?;
+        super::git::git(c, vec!["add".into(), "-A".into()], Some(&self.work)).await?;
+        super::git::git(c, vec!["commit".into(), "-q".into(), "-m".into(), format!("roll {i}")], Some(&self.work)).await?;
+        let refspec = format!("HEAD:refs/heads/{}", self.branch);
+        super::git::git(c, super::git::authed(c, &["push", "-q", &self.url, &refspec]), Some(&self.work)).await.map(|_| ())
+    }
+}
+
+fn uid_of(p: &Pod) -> String {
+    p.metadata.uid.clone().unwrap_or_else(|| kube::ResourceExt::name_any(p))
+}
+
+/// The live srv pods as `(name, uid)`. The uid is what identity means across a StatefulSet roll —
+/// the name comes back, the uid never does.
+async fn pod_names(pods: &Api<Pod>) -> Result<Vec<(String, String)>> {
     Ok(pods
         .list(&ListParams::default().labels("app=kloudlite-srv"))
         .await
@@ -177,7 +267,7 @@ async fn pod_names(pods: &Api<Pod>) -> Result<Vec<String>> {
         .items
         .iter()
         .filter(|p| p.metadata.deletion_timestamp.is_none())
-        .map(kube::ResourceExt::name_any)
+        .map(|p| (kube::ResourceExt::name_any(p), uid_of(p)))
         .collect())
 }
 
@@ -222,7 +312,7 @@ async fn drain_handover(c: &mut Ctx) {
         let sts: Api<StatefulSet> = Api::namespaced(aks.clone(), CENTRAL_NS);
         async move {
             let names = pod_names(&pods).await?;
-            let victim = names.first().cloned().ok_or_else(|| anyhow!("no srv pod to drain"))?;
+            let victim = names.first().map(|(name, _)| name.clone()).ok_or_else(|| anyhow!("no srv pod to drain"))?;
             let ip = pods
                 .get(&victim)
                 .await
@@ -319,18 +409,24 @@ async fn moved_image(c: &mut Ctx) {
             // Warm: this pull opens the image's database on whichever node owns it now.
             let _ = std::fs::remove_dir_all(&dest);
             crane.pull(&reference, &dest).await.context("the image would not pull before the move")?;
-            // Every pod out and back, one at a time — the ownership map moves with them.
-            for pod in pod_names(&pods).await? {
-                pods.delete(&pod, &kube::api::DeleteParams::default())
+            // Every pod out and back, one at a time — the ownership map moves with them. Inside
+            // `undoing` like every other fleet mutation: a body that times out mid-restart must
+            // still leave the tier waited out rather than half rolled.
+            let settle = || async { settled(&sts).await.context("the srv tier was left mid-restart") };
+            let body = async {
+                for (pod, _) in pod_names(&pods).await? {
+                    pods.delete(&pod, &kube::api::DeleteParams::default())
+                        .await
+                        .map_err(|e| anyhow!("could not restart {pod}: {e}"))?;
+                    settled(&sts).await.with_context(|| format!("the tier did not come back after {pod}"))?;
+                }
+                let _ = std::fs::remove_dir_all(&dest);
+                crane
+                    .pull(&reference, &dest)
                     .await
-                    .map_err(|e| anyhow!("could not restart {pod}: {e}"))?;
-                settled(&sts).await.with_context(|| format!("the tier did not come back after {pod}"))?;
-            }
-            let _ = std::fs::remove_dir_all(&dest);
-            crane
-                .pull(&reference, &dest)
-                .await
-                .context("the first pull after the image's database moved failed")
+                    .context("the first pull after the image's database moved failed")
+            };
+            drill::undoing(ROLL_CAP, body, settle).await
         }
         .boxed()
     })
@@ -754,17 +850,25 @@ async fn lanes(c: &mut Ctx) {
 
 // ── placement and the gateway ───────────────────────────────────────────
 
-/// `ws.spread`: an idle volume is handed to the node rendezvous prefers.
+/// `ws.spread`: a movable volume lands on the node placement prefers, and that is a DIFFERENT one.
 ///
 /// `ws.cross.node` forces a move by making the owner unplaceable, which is the FAILURE path. This
-/// is the ordinary one: a volume with nothing running on it is movable, and its owner hands it over
-/// when the preferred node is not itself — which is the whole of how a fleet balances. Nothing is
-/// broken to make it happen; the workspace is simply stopped and started, and what the id asserts
-/// is that it comes back READY on whichever node placement chose, with the placement recorded.
+/// is the ordinary one: a volume with nothing running on it is movable, and its owner hands it
+/// over when rendezvous prefers somebody else — the whole of how a fleet balances. Nothing is
+/// broken to make it happen.
+///
+/// A fleet with one placeable node cannot spread, and saying so is the honest answer: the step
+/// SKIPS rather than passing on the owner it started from, which would have been a tautology.
 async fn spread(c: &mut Ctx) {
-    let Some(ws) = c.state.workspace.clone() else {
-        return c.skip("ws.spread", "no workspace");
+    let (Some(ws), Some(k)) = (c.state.workspace.clone(), c.kube.clone()) else {
+        let why = if c.state.workspace.is_none() { "no workspace" } else { "no kubeconfig" };
+        return c.skip("ws.spread", why);
     };
+    match placeable_nodes(&k).await {
+        Ok(n) if n >= 2 => {}
+        Ok(_) => return c.skip("ws.spread", "one placeable node: this region cannot spread"),
+        Err(e) => return c.skip("ws.spread", &format!("{e:#}")),
+    }
     c.step("ws.spread", step_cap(SWEEP_CAP), move |c| {
         let jwt = c.probe_jwt.clone();
         let doc = api(c, &format!("/v1/workspaces/{ws}"));
@@ -782,25 +886,44 @@ async fn spread(c: &mut Ctx) {
             .await
             .context("it never stopped")?;
             post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
-            poll_json(c, &doc, &jwt, Duration::from_secs(90), |v| {
+            // Ready AND elsewhere, in one predicate: coming back on the node it left is placement
+            // never having handed the volume over, which is what this id is about.
+            poll_json(c, &doc, &jwt, Duration::from_secs(120), |v| {
                 v.get("state").and_then(Value::as_str) == Some("ready")
+                    && v.get("placement").and_then(Value::as_str).is_some_and(|n| !n.is_empty() && n != was)
             })
             .await
-            .context("it never came back ready")?;
-            let after = get(c, &doc, &jwt).await.context("could not re-read the workspace")?;
-            // The placement is RECORDED, whichever node won: a start that named no node is a
-            // worktree nobody can find, and the rendezvous handing it back to its owner is a
-            // legitimate answer on a fleet where the owner IS the preferred node.
-            let now = after.get("placement").and_then(Value::as_str).unwrap_or_default();
-            if now.is_empty() {
-                return Err(anyhow!("the started workspace names no node"));
-            }
-            tracing::info!(from = %was, to = %now, "slo.spread.placed");
-            Ok(())
+            .with_context(|| format!("it came back on {was}: the movable volume was never handed over"))
         }
         .boxed()
     })
     .await;
+}
+
+/// Nodes placement may choose: Ready, not cordoned, not being decommissioned. Fewer than two and
+/// there is nothing to spread across.
+async fn placeable_nodes(k: &kube::Client) -> Result<usize> {
+    use k8s_openapi::api::core::v1::Node;
+    let api: Api<Node> = Api::all(k.clone());
+    let list = api.list(&ListParams::default()).await.map_err(|e| anyhow!("could not list the nodes: {e}"))?;
+    Ok(list
+        .items
+        .iter()
+        .filter(|n| {
+            let ready = n
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
+            let cordoned = n.spec.as_ref().and_then(|s| s.unschedulable).unwrap_or(false);
+            let leaving = n
+                .metadata
+                .labels
+                .as_ref()
+                .is_some_and(|l| l.contains_key(kloudlite_workspaces::crd::DECOMMISSION_LABEL));
+            ready && !cordoned && !leaving
+        })
+        .count())
 }
 
 /// `gw.caps`: the two things between one person and the region's gateway.
@@ -829,47 +952,45 @@ async fn gw_caps(c: &mut Ctx) {
                 return Err(anyhow!("a connect token was accepted twice"));
             }
 
-            // The per-workspace cap. Each tunnel is its own ssh, held open by a sleep, and every
-            // one of them is killed on the way out — a leaked child would hold a slot until the
-            // gateway's own 30-minute idle close.
+            // The per-workspace cap. Each tunnel is its own ssh, held open by a sleep; the
+            // eleventh is judged by the GATEWAY's own answer — ssh exits when the tunnel is
+            // refused — waited for with a bound rather than sampled a second after spawn, which
+            // read a still-handshaking child as "the cap is not enforced".
             let mut open = vec![];
-            let mut refused = None;
-            for i in 0..=MAX_PER_WS {
+            for i in 0..MAX_PER_WS {
                 let session = super::workspace::ssh_session(c, &ws).await?;
-                let mut argv = super::workspace::ssh_args(&kl, &key, &ws);
-                argv.push("sleep 60".into());
-                let child = tokio::process::Command::new(&ssh)
-                    .args(&argv)
-                    .envs(super::workspace::session_env(&session))
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .kill_on_drop(true)
-                    .spawn();
-                match child {
+                match spawn_tunnel(&ssh, &kl, &key, &ws, &session) {
                     Ok(ch) => open.push(ch),
-                    Err(e) if i >= MAX_PER_WS => refused = Some(format!("{e}")),
-                    Err(e) => return Err(anyhow!("tunnel {i} could not be opened at all: {e}")),
+                    Err(e) => {
+                        for mut ch in open {
+                            let _ = ch.kill().await;
+                        }
+                        return Err(anyhow!("tunnel {i} could not be opened at all: {e}"));
+                    }
                 }
-                // The cap is enforced when the tunnel is DIALLED, and an ssh that was refused
-                // exits on its own — so the eleventh is judged by whether it is still running.
-                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            let last = open.pop();
-            let over = match last {
-                Some(mut ch) => match ch.try_wait() {
-                    Ok(Some(status)) => !status.success(),
-                    // Still running past the cap: the gateway let an eleventh tunnel through.
-                    Ok(None) => false,
-                    Err(e) => return Err(anyhow!("could not judge the eleventh tunnel: {e}")),
-                },
-                None => refused.is_some(),
+            // A moment for the ten to be counted by the gateway before the eleventh asks.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let session = super::workspace::ssh_session(c, &ws).await?;
+            let over = match spawn_tunnel(&ssh, &kl, &key, &ws, &session) {
+                Ok(mut ch) => {
+                    let out = tokio::time::timeout(OVER_CAP, ch.wait()).await;
+                    let _ = ch.kill().await;
+                    match out {
+                        // Refused: ssh exited on its own, non-zero, inside the window.
+                        Ok(Ok(status)) => !status.success(),
+                        Ok(Err(_)) => false,
+                        // Still pumping after the window: the eleventh tunnel is live.
+                        Err(_) => false,
+                    }
+                }
+                Err(_) => true,
             };
             for mut ch in open {
                 let _ = ch.kill().await;
             }
             if !over {
-                return Err(anyhow!("an eleventh tunnel to one workspace was allowed: the cap of {MAX_PER_WS} is not being enforced"));
+                return Err(anyhow!("an eleventh tunnel to one workspace stayed open: the cap of {MAX_PER_WS} is not being enforced"));
             }
             Ok(())
         }
@@ -877,6 +998,31 @@ async fn gw_caps(c: &mut Ctx) {
     })
     .await;
 }
+
+/// One held-open tunnel, as a child process. `kill_on_drop` so a step that times out takes its
+/// tunnels with it rather than leaving slots held until the gateway's 30-minute idle close.
+fn spawn_tunnel(
+    ssh: &str,
+    kl: &str,
+    key: &str,
+    ws: &str,
+    session: &str,
+) -> std::io::Result<tokio::process::Child> {
+    let mut argv = super::workspace::ssh_args(kl, key, ws);
+    argv.push("sleep 60".into());
+    tokio::process::Command::new(ssh)
+        .args(&argv)
+        .envs(super::workspace::session_env(session))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+}
+
+/// How long the eleventh tunnel gets to be refused. An ssh that is still connected after this has
+/// been let through — the gateway refuses at dial, not lazily.
+const OVER_CAP: Duration = Duration::from_secs(20);
 
 /// `tunnel::MAX_PER_WS`. Repeated rather than imported — the gateway is a binary crate with no
 /// library target, and the number is part of its contract with a person's editor.
@@ -891,33 +1037,51 @@ const MAX_PER_WS: usize = 10;
 /// target is the agent DaemonSet, the same reader `settings.roll` uses, because it is the one
 /// workload whose restart costs the fleet nothing.
 async fn workload_roll(c: &mut Ctx) {
-    let region = c.cfg.region.clone();
+    let (region, Some(k3s)) = (c.cfg.region.clone(), c.kube.clone()) else {
+        return c.skip("admin.workload.roll", "no kubeconfig to read the restart annotation from");
+    };
     c.step("admin.workload.roll", step_cap(Duration::from_secs(240)), move |c| {
         let jwt = c.admin_jwt.clone();
         let workloads = admin(c, "/admin/workloads");
         let roll = admin(c, &format!("/admin/workloads/{region}/kloudlite-agent/roll"));
+        let k3s = k3s.clone();
         async move {
-            let before = rows_of(c, &workloads, &jwt).await?;
+            let before = annotation_of(&k3s).await.context("could not read the agent DaemonSet")?;
             post(c, &roll, &jwt, json!({ "reason": "slo probe workload roll" }))
                 .await
                 .context("the roll was refused")?;
-            // It really rolled — ready dips below desired — and it really came back.
-            let dipped = poll_rows(c, &workloads, &jwt, Duration::from_secs(120), |r| {
-                agent_row(r).is_some_and(|(ready, desired)| ready < desired)
-            })
-            .await;
+            // The WRITE itself: `kloudlite.io/restarted-at` on the pod template is what a roll IS,
+            // and it is a fact rather than a race — the old check sampled `/admin/workloads` for a
+            // dip below desired, which a single-node DaemonSet need never show.
+            let after = annotation_of(&k3s).await.context("could not re-read the agent DaemonSet")?;
+            if after == before {
+                return Err(anyhow!("the roll answered 2xx and the restart annotation did not move"));
+            }
+            // And every reader came back: a roll that restarts a workload into CrashLoop is a roll
+            // nobody wanted.
             poll_rows(c, &workloads, &jwt, Duration::from_secs(180), |r| {
                 agent_row(r).is_some_and(|(ready, desired)| ready >= desired && desired > 0)
             })
             .await
-            .context("the rolled workload never came back ready")?;
-            dipped.context("the roll answered 2xx and nothing restarted")?;
-            let _ = before;
-            Ok(())
+            .context("the rolled workload never came back ready")
         }
         .boxed()
     })
     .await;
+}
+
+/// The roll annotation on the agent DaemonSet's pod template, or the empty string when it carries
+/// none yet — which is the ordinary state before the first roll, and still a value that must move.
+async fn annotation_of(k3s: &kube::Client) -> Result<String> {
+    use k8s_openapi::api::apps::v1::DaemonSet;
+    let api: Api<DaemonSet> = Api::namespaced(k3s.clone(), "kube-system");
+    let ds = api.get("kloudlite-agent").await.map_err(|e| anyhow!("{e}"))?;
+    Ok(ds
+        .spec
+        .and_then(|s| s.template.metadata)
+        .and_then(|m| m.annotations)
+        .and_then(|a| a.get("kloudlite.io/restarted-at").cloned())
+        .unwrap_or_default())
 }
 
 async fn rows_of(c: &Ctx, url: &str, jwt: &str) -> Result<Vec<Value>> {

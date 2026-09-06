@@ -60,11 +60,15 @@ pub(super) async fn quota_namespace(c: &mut Ctx) {
                 .and_then(|s| s.hard.clone())
                 .ok_or_else(|| anyhow!("Kubernetes has not tracked `owner-quota` yet: it bounds nothing until it does"))?;
             let used = q.status.as_ref().and_then(|s| s.used.clone()).unwrap_or_default();
-            let want = [("limits.cpu", cpu.to_string()), ("limits.memory", format!("{mem}Gi"))];
-            for (key, value) in want {
-                let got = hard.get(key).map(|v| v.0.clone()).unwrap_or_default();
-                if got != value {
-                    return Err(anyhow!("`owner-quota` bounds {key} at {got:?}, but the effective Quota says {value}"));
+            // Parsed, never compared as strings: the API server normalizes a Quantity, so `4`
+            // comes back as `4`, `4000m` or `4` depending on what was written, and `8Gi` may read
+            // as `8589934592`. A string comparison failed a namespace quota that was correct.
+            let want = [("limits.cpu", millis(&format!("{cpu}")), "cpu"), ("limits.memory", bytes(&format!("{mem}Gi")), "memory")];
+            for (key, value, what) in want {
+                let got = hard.get(key).map(|q| q.0.as_str()).unwrap_or_default();
+                let parsed = if what == "cpu" { millis(got) } else { bytes(got) };
+                if parsed != value {
+                    return Err(anyhow!("`owner-quota` bounds {key} at {got:?}, but the effective Quota says {value:?} (in {})", if what == "cpu" { "millicores" } else { "bytes" }));
                 }
                 if !used.contains_key(key) {
                     return Err(anyhow!("Kubernetes reports no usage for {key}, so it is not enforcing it"));
@@ -75,6 +79,27 @@ pub(super) async fn quota_namespace(c: &mut Ctx) {
         .boxed()
     })
     .await;
+}
+
+/// A cpu Quantity in millicores, and a memory Quantity in bytes. Enough of the format to compare
+/// two spellings of the same number — which is all this step does with them; anything it cannot
+/// read answers `None`, and an unparsable ceiling is a mismatch rather than a silent pass.
+fn millis(q: &str) -> Option<u64> {
+    let q = q.trim();
+    match q.strip_suffix('m') {
+        Some(n) => n.parse().ok(),
+        None => q.parse::<f64>().ok().map(|v| (v * 1000.0).round() as u64),
+    }
+}
+
+fn bytes(q: &str) -> Option<u64> {
+    let q = q.trim();
+    for (suffix, mult) in [("Ki", 1u64 << 10), ("Mi", 1 << 20), ("Gi", 1 << 30), ("Ti", 1u64 << 40), ("K", 1_000), ("M", 1_000_000), ("G", 1_000_000_000)] {
+        if let Some(n) = q.strip_suffix(suffix) {
+            return n.parse::<f64>().ok().map(|v| (v * mult as f64).round() as u64);
+        }
+    }
+    q.parse::<f64>().ok().map(|v| v.round() as u64)
 }
 
 /// `env.services.policies`: the `OwnerBinding`'s per-namespace NetworkPolicies exist.
@@ -342,6 +367,16 @@ pub(super) async fn reads(c: &mut Ctx) {
 mod tests {
     use super::*;
     use crate::testkit;
+
+    /// Two spellings of one ceiling are one ceiling. A string comparison failed a namespace quota
+    /// that was correct, which is the whole reason these two exist.
+    #[test]
+    fn a_quantity_is_compared_as_a_number() {
+        assert_eq!(millis("4"), millis("4000m"));
+        assert_eq!(bytes("8Gi"), bytes("8589934592"));
+        assert_ne!(bytes("8Gi"), bytes("8G"));
+        assert_eq!(millis("nonsense"), None);
+    }
 
     /// Every id this file owns is produced exactly once with nothing reachable — a run that
     /// measured nothing is still a complete run, which is what lets the console tell a grey stage

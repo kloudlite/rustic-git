@@ -1908,9 +1908,16 @@ spec:
   failedJobsHistoryLimit: 5
   jobTemplate:
     spec:
-      # An hour: the cold profile build alone is ~28 s of nix evaluation on top of a full journey,
-      # and the failover drill waits out a lease TTL.
-      activeDeadlineSeconds: 3600
+      # Two hours, and here is the arithmetic — the 2026-09-06 coverage batch added twelve weekly
+      # ids under an unchanged hour, which a deadline kill would have cost the whole run's report.
+      # Worst case of the added ceilings, in seconds: roll 660 + drain 120 + moved image 660 +
+      # blob session 60 + gc packs 240 + limits 60 + workload roll 300 + spread 240 + retain 240 +
+      # janitor 240 + lanes 240 + gw caps 300 = 3360, on top of the existing weekly stage (~1400
+      # worst case: two large pushes, a cold nix build, two cross-node moves, the settings trio and
+      # the GC pass) and the fast journey it runs first (840). That is ~5600 worst case; 7200 is
+      # that with room, and `KLOUDLITE_SLO_BUDGET_SECS` 6600 is what makes the CHILD stop first so
+      # teardown and the report still happen. Nominal is far less — most ceilings are never met.
+      activeDeadlineSeconds: 7200
       backoffLimit: 0
       template:
         metadata:
@@ -1946,7 +1953,7 @@ spec:
                 - name: KLOUDLITE_SLO_OTHER
                   value: "slo-drill-other"
                 - name: KLOUDLITE_SLO_BUDGET_SECS
-                  value: "3300"
+                  value: "6600"
                 - name: KLOUDLITE_JWT_SECRET
                   valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 - name: KUBECONFIG
@@ -1994,7 +2001,10 @@ spec:
   # a node and blocks Redis for five minutes. Dev cluster only, and shipped SUSPENDED — the owner
   # unsuspends it by hand once the fast suite has run green for a week.
   suspend: true
-  schedule: "0 3 * * 0"
+  # 04:00, not 03:00: the weekly suite's deadline is now two hours, so an 03:00 monthly could start
+  # while a slow weekly was still holding a node. The drills also wait for each other, and that
+  # stays — this is the belt to that pair of braces.
+  schedule: "0 4 * * 0"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5

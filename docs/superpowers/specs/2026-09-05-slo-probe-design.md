@@ -530,3 +530,40 @@ an environment the previous batch did not, so `deploy/k3s/quotas-slo.yaml` and `
 untouched. **RBAC does change and is applied by hand**: on AKS, `statefulsets: patch` pinned to
 `kloudlite-srv`, `pods/log: get`, `ingresses: get,list`, and `slo-drill-clickhouse` added to the
 NetworkPolicy delete names; on k3s, `resourcequotas: get,list`.
+
+### Coverage batch 2, fix round 1 (review `gaps2-review.md`)
+
+- **The roll watch could never exit.** `kloudlite-srv` is a StatefulSet, so `kloudlite-srv-0` comes
+  back under its own name; the loop now tracks pods by UID at both ends, and `roll.zero.errors`
+  can finish at all.
+- **A 421 is not a failure.** It is what the routing middleware answers while ownership moves,
+  which is the event being measured — the read is re-issued (three tries) and only a
+  non-recovering one counts. A 502/503/timeout or a dropped connection is counted as a bad answer
+  rather than propagated, so one blip no longer ends the step before it has measured anything.
+  The loop also PUSHES every 10 s, which the SLI promised and the read-only loop did not do.
+- **Weekly budget, written down.** Added ceilings sum to 3360 s on top of the existing weekly stage
+  (~1400) and the fast journey (840): `activeDeadlineSeconds` 3600 → 7200 with
+  `KLOUDLITE_SLO_BUDGET_SECS` 6600, arithmetic in the yaml comment as the fast suite has. The
+  monthly CronJob moves to 04:00 Sunday so the two can never overlap even at the deadline.
+  `reg.moved.image`'s restart now runs inside `drill::undoing` like every other fleet mutation.
+- **Six SLI sentences narrowed to what the step asserts**: `srv.lanes` (the pull counter only),
+  `agent.janitor` (the snapshot-record sweep only), `drill.drain` (the stamp and the surviving
+  pod), `ws.spread`, `repo.metadata` (`lastmod`), `edge.origin` ("the origin answers a direct
+  request on the address its ingress publishes" — the probe is not Cloudflare).
+- **`ws.spread` no longer accepts the node it started from**: it requires a different one, and
+  SKIPS with "one placeable node: this region cannot spread" where the region has only one.
+- **`ws.quota.namespace` parses Quantities** (millicores and bytes) instead of comparing `4` to
+  `4000m`. **`gw.caps`** judges the eleventh tunnel by the gateway's own answer, waited for with a
+  20 s bound, and the step's ceiling goes 120 → 300 s to fit its own work. **`admin.workload.roll`**
+  asserts the restart ANNOTATION moved and every reader came back ready, dropping the
+  ready-dipped race a single-node DaemonSet need never show.
+- **Not done, with the reason.** MEDIUM-7 (move the three documented skips to the `manual` suite):
+  `history::slo::validate` refuses a reported step whose id is not in `CATALOGUE`, so a manual row
+  would make the probe's own skips unreportable and the console would show nothing at all rather
+  than "not automated" — strictly worse than the current state. The LOWs (`git.limits` →
+  `reg.limits` rename, the cordon file recording its mutation kind, the `slo_steps_total` counter
+  incremented before `audit.row` is retro-skipped, the legacy quota-request row left pending) are
+  left; none changes a verdict. From the monthly hand run: `drill.drain`/`cluster.decommission`
+  now print the node's decommission-status annotation in the failure, so the `draining running=0
+  owned=0 copies=1 thin=0` stall names itself — the probe's expectation is unchanged, because the
+  stall looks like a product bug (a lone replica copy that never healed or retired).

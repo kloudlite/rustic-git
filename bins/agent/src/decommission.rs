@@ -108,6 +108,30 @@ pub async fn decommission_beat(ctx: &Arc<Ctx>) {
     let copies = beat.replicas.iter().filter(|r| r.spec.node == ctx.node).count();
     let thin = thin_volumes(&beat, &ctx.node);
     let status = drain_status(running, owned, copies, thin, &chrono::Utc::now().to_rfc3339());
+    // The counts say how much is left, never WHY it is left, and a drain that sits at
+    // `copies=1` for ten minutes is undiagnosable from the annotation alone (2026-09-06 drill).
+    // One line per beat naming the first volume still here and what holds it: a parent placed
+    // here pins it (`retire_pass`'s `hosted` arm), and a copy nobody else has Synced yet cannot
+    // be retired. Both are legitimate waits — the point is to say which one this is.
+    if !status.starts_with(crate::crd::DRAINED_PREFIX) {
+        let hosted = beat.hosted_volumes();
+        if let Some(r) = beat.replicas.iter().find(|r| r.spec.node == ctx.node) {
+            let vol = r.spec.volume.as_str();
+            let elsewhere = beat
+                .replicas
+                .iter()
+                .filter(|o| o.spec.volume == vol && o.spec.node != ctx.node && o.status.as_ref().is_some_and(|st| st.phase == "Synced"))
+                .count();
+            let why = if hosted.contains(vol) {
+                "a parent is still placed here"
+            } else if elsewhere == 0 {
+                "no other node holds a Synced copy yet"
+            } else {
+                "waiting for the retire pass"
+            };
+            tracing::info!(volume = %vol, reason = why, running, owned, copies, thin, "decommission.blocked");
+        }
+    }
     // Sticky: the stamp answers "when did this node drain", so the FIRST beat that saw nothing
     // left is the one that owns it. Rewriting a fresh `now` every 30 s would turn the operator's
     // gate into "when did we last look", and lose the only timestamp anyone wants. A node that

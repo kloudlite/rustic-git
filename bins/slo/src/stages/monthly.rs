@@ -570,7 +570,7 @@ async fn draining_stamp(k: &kube::Client, node: &str, cap: Duration) -> Result<(
             return Ok(());
         }
         if at.elapsed() >= cap {
-            return Err(anyhow!("the node's agent never stamped its drain: it reports {stamp:?}"));
+            return Err(anyhow!("{node}'s agent never stamped its drain: it reports {stamp:?}"));
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -665,7 +665,10 @@ async fn stamped(k: &kube::Client, node: &str, cap: Duration) -> Result<()> {
             return Ok(());
         }
         if at.elapsed() >= cap {
-            return Err(anyhow!("after {} ms it still reports {stamp:?}", cap.as_millis()));
+            // The COUNTS, verbatim: the first live monthly run sat at `draining running=0 owned=0
+            // copies=1 thin=0` for ten minutes — a lone replica copy that never healed or retired,
+            // which is a product stall and reads as one only if the stamp is in the detail.
+            return Err(anyhow!("after {} ms {node} still reports {stamp:?}", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
