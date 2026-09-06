@@ -26,3 +26,4 @@ deploy/k3s/env.sh
 # kubectl writes a discovery/http cache next to whatever KUBECONFIG points at; 28 of these
 # files were committed once. They are regenerated on every kubectl call.
 /.kube/
+__pycache__/
