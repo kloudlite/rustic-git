@@ -539,7 +539,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["id.cli.tokens", "Identity", "A CLI token is listed and, once revoked, is refused", "99.9 %", "hourly", "14 · Experience"],
   ["id.profile.upsert", "Identity", "A profile upsert is saved and read back", "99.9 % ≤ 5000 ms", "hourly", "14 · Experience"],
   ["id.cli.sshconfig", "Identity", "`kl ws sshconfig` writes a host block naming a running workspace", "99.9 % ≤ 15000 ms", "hourly", "14 · Experience"],
-  ["key.ssh.lifecycle", "Identity", "A newly added SSH key clones, and after removal the same key is refused within the auth cache's TTL", "99.9 % ≤ 90000 ms", "hourly", "14 · Experience"],
+  ["key.ssh.lifecycle", "Identity", "A newly added SSH key clones, and after removal the same key is refused at once", "99.9 % ≤ 30000 ms", "hourly", "14 · Experience"],
   ["repo.description", "Git hosting", "A repo description is saved and read back", "99.9 % ≤ 5000 ms", "hourly", "14 · Experience"],
   ["pr.merge.strategies", "Pull requests", "Each merge strategy — merge, squash, rebase, fast-forward — lands the expected tree", "99.9 %", "hourly", "14 · Experience"],
   ["pr.mergeability", "Pull requests", "Mergeability is reported clean for a clean change and dirty for a conflicting one", "99.9 % ≤ 30000 ms", "hourly", "14 · Experience"],

@@ -351,10 +351,10 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "id.cli.tokens", feature: "Identity", sli: "A CLI token is listed and, once revoked, is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.profile.upsert", feature: "Identity", sli: "A profile upsert is saved and read back", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.cli.sshconfig", feature: "Identity", sli: "`kl ws sshconfig` writes a host block naming a running workspace", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    // 90 s, not 30: the credential lookup is cached per node for `auth::CACHE_TTL` (60 s) and a
-    // remove evicts only the cache of the process that performed it, so a removed key is honoured
-    // elsewhere for up to a minute BY DESIGN. A 30 s target called that a breach.
-    Slo { id: "key.ssh.lifecycle", feature: "Identity", sli: "A newly added SSH key clones, and after removal the same key is refused within the auth cache's TTL", target: bound(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // Strict, and it can be: credential HITS are not cached at all (`crates/storage/src/auth.rs`,
+    // `CACHE_TTL` — only misses are, because the cache is per process while the revocation happens
+    // in another one), so a removed key stops working on the very next request, fleet-wide.
+    Slo { id: "key.ssh.lifecycle", feature: "Identity", sli: "A newly added SSH key clones, and after removal the same key is refused at once", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "repo.description", feature: "Git hosting", sli: "A repo description is saved and read back", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "pr.merge.strategies", feature: "Pull requests", sli: "Each merge strategy — merge, squash, rebase, fast-forward — lands the expected tree", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "pr.mergeability", feature: "Pull requests", sli: "Mergeability is reported clean for a clean change and dirty for a conflicting one", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },

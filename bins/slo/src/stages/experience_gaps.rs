@@ -36,10 +36,7 @@ use crate::tools;
 const QUICK: Duration = Duration::from_secs(20);
 const READ_CEILING: Duration = Duration::from_secs(15);
 const KEY_BODY: Duration = Duration::from_secs(60);
-/// The add half's body plus its undo slack, plus the revocation window the remove half waits out:
-/// a key is not really removed until the last node's auth cache has let go of it.
-const KEY_CEILING: Duration =
-    Duration::from_secs(KEY_BODY.as_secs() + UNDO_SLACK + REVOCATION_WINDOW.as_secs());
+const KEY_CEILING: Duration = Duration::from_secs(KEY_BODY.as_secs() + UNDO_SLACK);
 const MERGE_CEILING: Duration = Duration::from_secs(300);
 const MERGEABILITY_CEILING: Duration = Duration::from_secs(60);
 const TEAM_ENV_CEILING: Duration = Duration::from_secs(240);
@@ -331,16 +328,15 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
                 ssh_works(&git_bin, &argv, &env, KEY_BODY - Duration::from_secs(20)).await
             };
             undoing(KEY_BODY, clones, forget).await?;
-            // Polled, not asked once: the credential lookup is cached per NODE for
-            // `auth::CACHE_TTL` (60 s, `crates/storage/src/auth.rs:41`), and `remove_ssh_key`
-            // (:139) evicts only the cache of the process that performed the delete — "other nodes
-            // still take up to a minute" is the design's own sentence (:105). A refusal that
-            // arrives inside that window is the fleet working; one that never arrives is the leak.
+            // STRICT again: credential HITS are not cached at all (`crates/storage/src/auth.rs`'s
+            // comment on `CACHE_TTL` — only misses are, because the cache is per process and the
+            // revoking process is not the authenticating one). A removed key must be refused on
+            // the very next request; the small bound is the api round trip, nothing else.
             let refused = refused_within(&git_bin, &argv, &env, REVOCATION_WINDOW).await;
             match refused {
                 true => Ok(()),
                 false => Err(anyhow!(
-                    "a removed key could still read the repo after {} s, which is past the auth cache's own TTL",
+                    "a removed key could still read the repo {} s after it was deleted",
                     REVOCATION_WINDOW.as_secs()
                 )),
             }
@@ -350,9 +346,10 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
     .await;
 }
 
-/// The window a removed key may still be honoured in: the auth cache's TTL plus a beat. Anything
-/// past it is a credential the fleet forgot to forget.
-const REVOCATION_WINDOW: Duration = Duration::from_secs(75);
+/// All a removed key gets: one api round trip. Hits are not cached, so the very next
+/// authentication reads the store and finds nothing — anything past this is a credential the
+/// fleet forgot to forget.
+const REVOCATION_WINDOW: Duration = Duration::from_secs(10);
 
 /// Whether the key is refused before `cap` runs out. A refusal is `Permission denied`; anything
 /// else ssh says is neither an acceptance nor a refusal and keeps the loop going until the window
@@ -373,7 +370,7 @@ async fn refused_within(
         if start.elapsed() >= cap {
             return false;
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
