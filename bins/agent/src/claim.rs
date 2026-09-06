@@ -193,6 +193,38 @@ pub(crate) fn environment_want(services: usize) -> Want {
     env_want(services)
 }
 
+/// Which of `candidates` still has room for `want`, by the same rule `fits` applies locally.
+///
+/// One cluster-wide pod listing, bucketed by node, rather than a listing per candidate: the caller
+/// runs this on every start of a movable volume.
+///
+/// ponytail: peer buckets count PODS only, never a peer's claimed-but-podless parents the way
+/// `claimed_here` does locally — that would need a cluster-wide parent walk on every start. The
+/// result is a preference, not a gate, and the start gate on the target node is what refuses a
+/// stale answer; upgrade to a full walk only if handovers to a node that then refuses show up.
+pub(crate) async fn nodes_with_room(ctx: &Arc<Ctx>, candidates: &[String], want: Want) -> Result<Vec<String>, ReconcileErr> {
+    let nodes = Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
+    let pods = Api::<Pod>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
+    let mut out = vec![];
+    for c in candidates {
+        let here: Vec<Pod> = pods.iter().filter(|p| p.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(c.as_str())).cloned().collect();
+        // A candidate this node cannot even read is not evidence of room.
+        let node = nodes.iter().find(|n| n.name_any() == *c);
+        if fits(node, &here, (0, 0), want) {
+            out.push(c.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// What the parent described by `state` will request wherever it starts.
+pub(crate) fn want_of_state(state: &crd::SnapshotState) -> Want {
+    match state {
+        crd::SnapshotState::Workspace { resources, .. } => want_of(resources),
+        crd::SnapshotState::Environment { services, .. } => env_want(services.len()),
+    }
+}
+
 /// Gathers `Placement` for `volume` (`None` when the child `Volume` has not been created yet —
 /// every workspace/environment starts that way, and that IS the bootstrap case). Errors propagate
 /// rather than being swallowed: a claim decided on a partial read of "does anyone have this" is

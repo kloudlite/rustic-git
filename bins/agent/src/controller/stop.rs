@@ -140,6 +140,20 @@ where
 ///
 /// If the preferred node never claims (it died in between), nothing is stuck: the volume is
 /// released, so the dead-node sweep's own rule lets any up-to-date node take it.
+/// The pool the rendezvous hash draws from: the candidates that have room, or — when NOTHING has
+/// room — the whole candidate set unchanged.
+///
+/// The fallback is the point. Emptying the set would make `preferred_node` answer `None`, which
+/// `start_placement` reads as "keep it here", quietly turning a full cluster into a rule that
+/// pins every volume to its owner forever. Falling back to the old spread is no worse than the
+/// behaviour this replaced, and the start gate is what explains a full node to the user.
+fn draw_pool(set: Vec<String>, with_room: Vec<String>) -> Vec<String> {
+    match with_room.is_empty() {
+        true => set,
+        false => with_room,
+    }
+}
+
 pub async fn start_placement(
     ctx: &Arc<Ctx>,
     volume: &crd::Volume,
@@ -182,6 +196,17 @@ pub async fn start_placement(
     // The owner is always a candidate: it holds the bytes by construction.
     set.push(ctx.node.clone());
     set.sort();
+    // Prefer a node that can actually take it. `preferred_node` is a rendezvous hash, which spreads
+    // evenly over the CANDIDATE SET and knows nothing about how full each one is — so a small node
+    // kept drawing the same share as a node four times its size, and the parents that landed there
+    // sat `Pending` while the big node idled. Narrowing the set first keeps the hash's stability
+    // (same inputs, same answer) and makes the pool it draws from mean "has room".
+    //
+    // With NOTHING free anywhere the set is left alone rather than emptied: the old spread is no
+    // worse than refusing to place at all, and the start gate is what reports a full node.
+    let want = parents.iter().map(|p| crate::claim::want_of_state(&p.state)).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    let with_room = crate::claim::nodes_with_room(ctx, &set, want).await?;
+    let set = draw_pool(set, with_room);
     let Some(preferred) = crate::peer::preferred_node(&id, &set) else { return Ok(None) };
     if preferred == ctx.node {
         return Ok(None);
@@ -252,3 +277,19 @@ pub(crate) fn running_condition(prev: &[Condition], gen: i64) -> Condition {
 pub(crate) const REPLICATED: &str = "Replicated";
 
 const NO_REPLICA_CONFIGURED: &str = "no replica is configured for this volume";
+
+#[cfg(test)]
+mod placement_tests {
+    use super::draw_pool;
+
+    /// Narrowing the pool is what stops a small node drawing the same share as a big one: the hash
+    /// spreads evenly over whatever set it is given, so the set has to mean "can take this".
+    #[test]
+    fn the_hash_draws_from_the_nodes_that_have_room() {
+        let set = vec!["big".to_string(), "small".to_string()];
+        assert_eq!(draw_pool(set.clone(), vec!["big".to_string()]), vec!["big".to_string()]);
+        // Nothing free anywhere: the whole set, never an empty one — an empty pool reads as
+        // "keep it here" and would pin every volume to its owner while the cluster is full.
+        assert_eq!(draw_pool(set.clone(), vec![]), set);
+    }
+}
