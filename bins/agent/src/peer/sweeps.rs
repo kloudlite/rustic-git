@@ -326,13 +326,24 @@ pub(crate) async fn sweep_dead_nodes(
 /// A copy whose rendezvous slot moved (a node joined, or a dead one came back) is not just
 /// wasted disk: its stale Synced row still wins claims and satisfies stop's flush gate with
 /// data that is no longer being pulled. It goes only once every CURRENT target is Synced, so a
-/// spread never passes through a moment with fewer live copies than before. An unowned volume
-/// is a dead node's mid-takeover: keep everything until someone owns it again. An EMPTY target
+/// spread never passes through a moment with fewer live copies than before. An unowned volume a
+/// parent still names is a dead node's mid-takeover: keep everything until someone owns it again.
+/// An unowned volume NO parent names is a detached one (parents deleted, pushes kept) that nobody
+/// will ever take — it spreads by the same rendezvous as the rest, or a decommissioning node
+/// holding a copy of it could never reach `drained` (seen 2026-09-06: five such volumes pinned
+/// `copies=5` on a draining node for nine minutes). An EMPTY target
 /// list is not "every target is synced" — it's this node itself missing from `live` (its own
 /// Node object flapped NotReady while the agent kept running); `all()` is vacuously true on an
 /// empty iterator, which would otherwise retire every copy on this node in one beat.
-pub(crate) fn should_retire(me: &str, owner: &str, targets: &[String], hosted: bool, synced: &HashSet<String>) -> bool {
-    !owner.is_empty()
+pub(crate) fn should_retire(
+    me: &str,
+    owner: &str,
+    targets: &[String],
+    hosted: bool,
+    synced: &HashSet<String>,
+    parent_named: bool,
+) -> bool {
+    (!owner.is_empty() || !parent_named)
         && owner != me
         && !hosted
         && !targets.is_empty()
@@ -470,6 +481,8 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     // give one answer. Distinct volumes, because two parents on one volume are one backlog item.
     let backlog: HashSet<&str> =
         beat.parents.iter().filter(|p| !p.replicated).map(|p| p.volume.as_str()).collect();
+    // Every volume some parent — running, stopped or interrupted — still names, anywhere.
+    let named: HashSet<&str> = beat.parents.iter().map(|p| p.volume.as_str()).collect();
     metrics::gauge!("replication_backlog").set(backlog.len() as f64);
     // A local voldir with no Volume CR at all is an orphan: nothing lists it, so no pull, no
     // retire and no worktree drop ever visits it again. The Volume is always created before any
@@ -548,7 +561,7 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
             .filter(|r| r.spec.volume == id && r.status.as_ref().is_some_and(|s| s.phase == "Synced"))
             .map(|r| r.spec.node.clone())
             .collect();
-        if !should_retire(&ctx.node, &v.spec.node_name, &targets, hosted.contains(&id), &synced) {
+        if !should_retire(&ctx.node, &v.spec.node_name, &targets, hosted.contains(&id), &synced, named.contains(id.as_str())) {
             // Still a target/replica, just not the owner: a `live/{ws}` worktree under it
             // belongs only to the owner and is what a takeover away from this node left behind
             // — UNLESS this node is `hosted` (serving a pod from it right now): the owner record

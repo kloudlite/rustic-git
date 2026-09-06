@@ -1412,13 +1412,16 @@ async fn a_deleted_transient_is_dropped_from_every_replica() {
 fn should_retire_only_an_unwanted_copy_whose_replacements_are_synced() {
     let t = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let synced = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
-    assert!(!should_retire("b", "b", &t(&["c"]), false, &synced(&["c"])), "owner never retires");
-    assert!(!should_retire("b", "a", &t(&["b"]), false, &synced(&["b"])), "still a target");
-    assert!(!should_retire("b", "a", &t(&["c"]), true, &synced(&["c"])), "hosting a worktree here");
-    assert!(!should_retire("b", "a", &t(&["c"]), false, &synced(&[])), "replacement not synced yet: keep");
-    assert!(!should_retire("b", "", &t(&["c"]), false, &synced(&["c"])), "unowned (dead owner): keep until taken");
-    assert!(!should_retire("b", "a", &t(&[]), false, &synced(&[])), "empty targets (me missing from live) must not vacuously retire");
-    assert!(should_retire("b", "a", &t(&["c"]), false, &synced(&["c"])));
+    assert!(!should_retire("b", "b", &t(&["c"]), false, &synced(&["c"]), true), "owner never retires");
+    assert!(!should_retire("b", "a", &t(&["b"]), false, &synced(&["b"]), true), "still a target");
+    assert!(!should_retire("b", "a", &t(&["c"]), true, &synced(&["c"]), true), "hosting a worktree here");
+    assert!(!should_retire("b", "a", &t(&["c"]), false, &synced(&[]), true), "replacement not synced yet: keep");
+    assert!(!should_retire("b", "", &t(&["c"]), false, &synced(&["c"]), true), "unowned (dead owner) with a parent: keep until taken");
+    assert!(should_retire("b", "", &t(&["c"]), false, &synced(&["c"]), false), "unowned and detached: spreads like any other");
+    assert!(!should_retire("b", "", &t(&["b", "c"]), false, &synced(&["b", "c"]), false), "detached, but this node is a target");
+    assert!(!should_retire("b", "", &t(&["c"]), false, &synced(&[]), false), "detached, replacement not synced: keep");
+    assert!(!should_retire("b", "a", &t(&[]), false, &synced(&[]), true), "empty targets (me missing from live) must not vacuously retire");
+    assert!(should_retire("b", "a", &t(&["c"]), false, &synced(&["c"]), true));
 }
 
 /// `v1` is picked so that `targets("v1", "node-a", [node-a, node-b, node-c], 2) == ["node-c"]`
