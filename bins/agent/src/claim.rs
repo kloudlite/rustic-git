@@ -75,12 +75,10 @@ fn requested(pods: &[Pod]) -> Want {
 /// What percentage of a node's allocatable the model lets a claim fill (`docs/capacity-model.md`).
 ///
 /// A WORKSPACE node (`kloudlite.io/session=true` — the sheet calls a workspace a session) admits up
-/// to 100% of allocatable, so packing is bounded by what the pods REQUEST. Since 2026-09-06 that
-/// is memory alone in practice: the workspace slot requests its full 4 GB but only 500m of cpu
-/// (`crd::PodResources::default`), so workspace CPU is deliberately oversubscribed and memory is
-/// the binding dimension. An ENV node is packed to the model's 80% target instead, leaving the
-/// steady-state headroom the sheet prices. A node carrying BOTH role labels (a single-node install
-/// does) is treated as a workspace node, which is the rule that admits the workspace slot in full.
+/// to the guarantee and no further: "guaranteed CPU is NOT oversubscribed on session nodes". An
+/// ENV node is packed to the model's 80% target instead, leaving the steady-state headroom the
+/// sheet prices. A node carrying BOTH role labels (a single-node install does) is treated as a
+/// workspace node, which is the rule that admits the workspace slot in full.
 ///
 /// The sheet's 45% average utilisation is deliberately NOT here: it prices the fleet, and using it
 /// to admit more than the guarantees would sell capacity that is not there.
