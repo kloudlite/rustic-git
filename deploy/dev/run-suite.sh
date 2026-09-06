@@ -7,11 +7,8 @@
 # start while any SLO Job is active — a hand run and a scheduled one must never overlap.
 set -euo pipefail
 POD=$(kubectl -n kloudlite get pods -l app=dev -o jsonpath='{.items[0].metadata.name}')
-# `--attach /work/runs/<log>`: watch a run already started in the pod instead of starting one.
-ATTACH=""; if [ "${1:-}" = "--attach" ]; then ATTACH=${2:?log path in the pod}; SUITE=attach; shift 2; fi
 FF=1; [ "${1:-}" = "--no-fail-fast" ] && FF=0
-[ -n "$ATTACH" ] || SUITE=${1:?fast|hourly|weekly|monthly}
-if [ -z "$ATTACH" ]; then
+SUITE=${1:?fast|hourly|weekly|monthly}
 case "$SUITE" in
   fast)    U=slo-probe;  O=slo-other;        K=/etc/slo-ssh-fast;   B=840  ;;
   hourly)  U=slo-hourly; O=slo-hourly-other; K=/etc/slo-ssh-hourly; B=3000 ;;
@@ -31,77 +28,9 @@ kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; pm2 describe $
   cd /work/src && KLOUDLITE_SLO_USER=$U KLOUDLITE_SLO_OTHER=$O KLOUDLITE_SLO_BUDGET_SECS=$B KLOUDLITE_SLO_SSH_KEY=$K/id_ed25519 \
   pm2 start --name $SUITE --no-autorestart --time --log $LOG --merge-logs /work/target/dev-image/kloudlite-slo -- run --suite $SUITE >/dev/null && \
   (tail -n +1 -f $LOG > /proc/1/fd/1 &) ; sleep 1; echo started $SUITE under pm2, log $LOG"
-else LOG=$ATTACH; echo "attached to $LOG"; fi
-summarise() { kubectl -n kloudlite exec -i "$POD" -- python3 - "$LOG" <<'PY'
-import sys,json
-done=0; fails=[]; n=0; skipped=0; run=''; last=''
-for l in open(sys.argv[1]):
-    try: d=json.loads(l[l.index('{'):]) if '{' in l else None
-    except Exception: continue
-    if not d: continue
-    m=d.get('message')
-    if m=='slo.run.started': run=d.get('run_id','')
-    if m=='slo.step.done':
-        n+=1; last=d.get('slo_id')
-        if not d.get('ok'): fails.append((d['timestamp'][11:19], d.get('slo_id'), d.get('ms'), str(d.get('detail',''))[:260]))
-    if m=='slo.step.skipped': skipped+=1
-    if m=='slo.run.finished': done=1
-print('DONE' if done else 'RUN', '| run:', run, '| steps:', n, '| skipped:', skipped, '| last:', last, '| fails:', len(fails))
-for f in fails: print('  FAIL', *f)
-PY
-}
-close_row() { kubectl -n kloudlite exec -i "$POD" -- python3 - "$1" <<'PY'
-import sys,os,hmac,hashlib,base64,json,time,urllib.request,datetime
-rid=sys.argv[1]
-def b64(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
-now=int(time.time()); h=b64(json.dumps({"alg":"HS256","typ":"JWT"},separators=(',',':')).encode())
-c=b64(json.dumps({"sub":"slo-probe@kloudlite.io","name":"slo-probe","username":"slo-probe","typ":"session","superadmin":True,"iat":now,"exp":now+600},separators=(',',':')).encode())
-tok=f"{h}.{c}."+b64(hmac.new(os.environ['KLOUDLITE_JWT_SECRET'].encode(),f"{h}.{c}".encode(),hashlib.sha256).digest())
-H={"authorization":"Bearer "+tok,"content-type":"application/json"}; base=os.environ['KLOUDLITE_ADMIN_API_URL'].rstrip('/')
-d=json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/admin/slo/runs/{rid}",headers=H),timeout=20))
-if d.get('state')=='running':
-    body={"run_id":rid,"suite":d["suite"],"region":d["region"],"started":d["started"],"finished":datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%S.000Z'),"state":"failed","stage":d["stage"]+" (killed by the operator: fail-fast)","steps":d["steps"]}
-    print("row closed ->", urllib.request.urlopen(urllib.request.Request(f"{base}/admin/slo/runs/{rid}",data=json.dumps(body).encode(),headers=H,method="PUT"),timeout=20).status)
-else: print("row already", d.get('state'))
-PY
-}
-# What a killed run leaves behind is deleted through /v1 with the tenant's own token, exactly as
-# the probe's teardown would have: a run killed mid-way holds workspaces and environments that
-# crowd the node for the next run (NoCapacity on the very next clone).
-cleanup_run() { kubectl -n kloudlite exec -i "$POD" -- python3 - "$1" "$U" <<'PYC'
-import sys,os,hmac,hashlib,base64,json,time,urllib.request
-rid,user=sys.argv[1],sys.argv[2]; prefix="run-"+rid
-def b64(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
-now=int(time.time()); h=b64(json.dumps({"alg":"HS256","typ":"JWT"},separators=(',',':')).encode())
-c=b64(json.dumps({"sub":f"{user}@kloudlite.io","name":user,"username":user,"typ":"session","iat":now,"exp":now+600},separators=(',',':')).encode())
-tok=f"{h}.{c}."+b64(hmac.new(os.environ['KLOUDLITE_JWT_SECRET'].encode(),f"{h}.{c}".encode(),hashlib.sha256).digest())
-H={"authorization":"Bearer "+tok}; base=os.environ['KLOUDLITE_API_URL'].rstrip('/')
-gone=0
-for kind in ("workspaces","environments"):
-    try: rows=json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}?owner={user}",headers=H),timeout=20))
-    except Exception as e: print("list",kind,"failed:",e); continue
-    for r in (rows if isinstance(rows,list) else rows.get("items") or []):
-        if str(r.get("name","")).startswith(prefix):
-            try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}/{r['id']}",headers=H,method="DELETE"),timeout=30); gone+=1
-            except Exception as e: print("delete",kind,r.get("name"),"failed:",e)
-print(f"cleanup: {gone} objects of {prefix} deleted")
-PYC
-}
-for i in $(seq 1 700); do
-  S=$(summarise 2>/dev/null || true)
-  # An empty summary is the exec failing, not the suite: never kill on it.
-  [ -z "$S" ] && { sleep 15; continue; }
-  case "$S" in
-    DONE*) echo "$S"; exit 0 ;;
-    *"fails: 0"*) ;;
-    *) echo "$S"
-       if [ "$FF" = 1 ]; then
-         RUN=$(echo "$S" | head -1 | sed -n 's/.*run: \([^ ]*\).*/\1/p')
-         kubectl -n kloudlite exec "$POD" -- bash -c "pm2 stop $SUITE >/dev/null 2>&1; pkill -x kloudlite-slo" || true
-         echo "FAIL FAST: killed the run"; [ -n "$RUN" ] && { close_row "$RUN"; cleanup_run "$RUN"; }
-         exit 1
-       fi ;;
-  esac
-  sleep 15
-done
-echo "gave up waiting"; exit 4
+# The fail-fast watcher runs IN THE POD under pm2 (`pm2 logs watch-<suite>`), never on the laptop:
+# deploy/dev/pod/watch.py stops the suite on the first failed step, closes its row and deletes its
+# objects. This script returns as soon as both are started.
+FFARG=""; [ "$FF" = 0 ] && FFARG="--no-fail-fast"
+kubectl -n kloudlite exec "$POD" -- bash -c "pm2 delete watch-$SUITE >/dev/null 2>&1; pm2 start --name watch-$SUITE --no-autorestart --time --merge-logs python3 -- /work/src/deploy/dev/pod/watch.py $SUITE $U $LOG $FFARG >/dev/null && echo watcher started as watch-$SUITE"
+echo "follow with: deploy/dev/attach.sh $SUITE   (or: deploy/dev/attach.sh watch-$SUITE)"
