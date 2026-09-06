@@ -1,0 +1,90 @@
+# The in-cluster dev loop: one pod on the tainted `builder` node pool (Standard_D16s_v5) with a
+# premium disk holding the checkout and the cargo target, so a change is rsync + incremental build +
+# run the binary, with no image, registry or CI in the loop. It carries the SLO probe's own
+# ServiceAccount, Secrets and ConfigMap so `kloudlite-slo run --suite …` runs here exactly as the
+# CronJobs run it. Traffic-serving tiers are tested by editing a Service selector to point at this
+# pod (label it `app: <tier>` by hand), then reverting. Dev only — nothing here is a deployment.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dev-work
+  namespace: kloudlite
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: managed-csi-premium
+  resources:
+    requests:
+      storage: 256Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dev
+  namespace: kloudlite
+  labels: { app: dev }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: dev }
+  template:
+    metadata:
+      labels: { app: dev }
+    spec:
+      serviceAccountName: kloudlite-slo
+      nodeSelector: { builder: "true" }
+      tolerations:
+        - { key: builder, operator: Equal, value: "true", effect: NoSchedule }
+      containers:
+        - name: dev
+          image: rust:1-bookworm
+          # Tools the probe image carries (Dockerfile `slo` target), installed on first start and
+          # kept on the disk's PATH after that; then wait for work.
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+                bash ca-certificates git rsync openssh-client curl openssl bind9-dnsutils \
+                pkg-config libssl-dev clang cmake python3 >/dev/null
+              if [ ! -x /work/bin/crane ]; then
+                mkdir -p /work/bin
+                curl -fsSL -o /tmp/crane.tgz https://github.com/google/go-containerregistry/releases/download/v0.20.3/go-containerregistry_Linux_x86_64.tar.gz
+                echo "36c67a932f489b3f2724b64af90b599a8ef2aa7b004872597373c0ad694dc059  /tmp/crane.tgz" | sha256sum -c - >/dev/null
+                tar -xzf /tmp/crane.tgz -C /work/bin crane
+                curl -fsSL -o /work/bin/kubectl https://dl.k8s.io/release/v1.31.5/bin/linux/amd64/kubectl
+                echo "fbecbfd375b3686002c2e81d51c390172f5ffba3d6b47920d55342cb03f557af  /work/bin/kubectl" | sha256sum -c - >/dev/null
+                chmod +x /work/bin/crane /work/bin/kubectl
+              fi
+              echo ready; exec sleep infinity
+          env:
+            - { name: CARGO_HOME, value: /work/cargo }
+            - { name: CARGO_TARGET_DIR, value: /work/target }
+            - { name: PATH, value: /work/bin:/work/target/dev-image:/work/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin }
+            - { name: HOME, value: /tmp }
+            - { name: KUBECONFIG, value: /etc/kloudlite/k3s/config }
+            - name: KLOUDLITE_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
+          envFrom:
+            - configMapRef: { name: kloudlite-slo-env }
+          resources:
+            requests: { cpu: "12", memory: 24Gi }
+            limits: { cpu: "15", memory: 56Gi }
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+            - { name: ssh-fast, mountPath: /etc/slo-ssh-fast, readOnly: true }
+            - { name: ssh-hourly, mountPath: /etc/slo-ssh-hourly, readOnly: true }
+            - { name: ssh-drill, mountPath: /etc/slo-ssh-drill, readOnly: true }
+      volumes:
+        - name: work
+          persistentVolumeClaim: { claimName: dev-work }
+        - name: k3s-kubeconfig
+          secret: { secretName: kloudlite-slo-k3s-kubeconfig }
+        - name: ssh-fast
+          secret: { secretName: kloudlite-slo, defaultMode: 0400, items: [{ key: ssh_key, path: id_ed25519 }] }
+        - name: ssh-hourly
+          secret: { secretName: kloudlite-slo-hourly, defaultMode: 0400, items: [{ key: ssh_key, path: id_ed25519 }] }
+        - name: ssh-drill
+          secret: { secretName: kloudlite-slo-drill, defaultMode: 0400, items: [{ key: ssh_key, path: id_ed25519 }] }
