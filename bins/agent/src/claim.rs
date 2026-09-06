@@ -91,7 +91,48 @@ fn admissible_pct(node: Option<&Node>) -> u64 {
     }
 }
 
-/// Whether `want` still fits on this node once `pods`' requests are subtracted from its
+/// What this node has already PROMISED but is not yet paying for in pods: every Workspace and
+/// Environment claimed here whose pod does not exist yet, at its own requested size.
+///
+/// Without this the gate is defeated by a burst: the claim writes `status.nodeName` and the pod is
+/// created by a LATER reconcile, so four rapid fresh workspaces each read a pod list with none of
+/// the others in it, all four are admitted onto one 8-vCPU node, and three end up
+/// `FailedScheduling` — the exact failure the gate exists to remove.
+///
+/// A STOPPED parent counts as ZERO: stopping deletes the pod, so its capacity really is free and
+/// its next start is a fresh scheduling decision like any other. A parent that already has a pod
+/// here is skipped, because the pod sum has it.
+///
+/// ponytail: an environment counts its full size until its FIRST pod appears and nothing after
+/// that, so a half-started environment is under-counted for one reconcile. Per-service accounting
+/// is the upgrade, and only worth it if envs ever start slowly enough to matter.
+async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod]) -> Result<Want, ReconcileErr> {
+    let mine = ListParams::default().fields(&format!("status.nodeName={}", ctx.node));
+    let has_pod = |ns: &str, label: Option<&str>| {
+        pods.iter().any(|p| match label {
+            Some(l) => p.metadata.labels.as_ref().and_then(|m| m.get(kloudlite_workspaces::k8s::WORKSPACE_LABEL)).map(String::as_str) == Some(l),
+            None => p.metadata.namespace.as_deref() == Some(ns),
+        })
+    };
+    let mut total = (0, 0);
+    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&mine).await?.items {
+        let id = w.name_any();
+        if w.spec.desired_state == crd::DesiredState::Running && !has_pod("", Some(&id)) {
+            let (c, m) = want_of(&w.spec.resources);
+            total = (total.0 + c, total.1 + m);
+        }
+    }
+    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&mine).await?.items {
+        let ns = crd::env_namespace(&e.name_any());
+        if e.spec.desired_state == crd::DesiredState::Running && !has_pod(&ns, None) {
+            let (c, m) = env_want(e.spec.services.len());
+            total = (total.0 + c, total.1 + m);
+        }
+    }
+    Ok(total)
+}
+
+/// Whether `want` still fits on this node once `pods`' requests and `committed` are subtracted from its
 /// ALLOCATABLE — not its capacity: allocatable is already capacity minus the kubelet's
 /// `--system-reserved`/`--kube-reserved` and eviction threshold, so the system margin is accounted
 /// for and adding a second one here would double-count it. The model's own headroom is the pool's,
@@ -99,13 +140,18 @@ fn admissible_pct(node: Option<&Node>) -> u64 {
 ///
 /// A node with no allocatable readable (no status yet) fits nothing: refusing leaves the parent
 /// visibly unplaced for a peer, where claiming on a guess strands it.
-fn fits(node: Option<&Node>, pods: &[Pod], want: Want) -> bool {
+///
+/// ponytail: cpu and memory only — the node's pod-count ceiling (110 by default) and
+/// ephemeral-storage are ignored. At the workspace slot size memory binds decades before either
+/// does; read them here too if the slots ever get small enough for pod count to bite first.
+fn fits(node: Option<&Node>, pods: &[Pod], committed: Want, want: Want) -> bool {
     let alloc = node.and_then(|n| n.status.as_ref()).and_then(|s| s.allocatable.as_ref());
     let q = |k: &str| alloc.and_then(|a| a.get(k)).map(|v| v.0.as_str()).unwrap_or_default().to_string();
     let pct = admissible_pct(node);
     let cpu = kloudlite_workspaces::quota::millicores(&q("cpu")) * pct / 100;
     let mem = kloudlite_workspaces::quota::mebibytes(&q("memory")) * pct / 100;
-    let (used_cpu, used_mem) = requested(pods);
+    let (pod_cpu, pod_mem) = requested(pods);
+    let (used_cpu, used_mem) = (pod_cpu + committed.0, pod_mem + committed.1);
     cpu.saturating_sub(used_cpu) >= want.0 && mem.saturating_sub(used_mem) >= want.1
 }
 
@@ -265,7 +311,8 @@ async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, ge
     if !p.has_snapshots {
         let pods: Api<Pod> = Api::all(ctx.client.clone());
         let mine = pods.list(&ListParams::default().fields(&format!("spec.nodeName={}", ctx.node))).await?.items;
-        if !fits(me.as_ref(), &mine, want) {
+        let committed = claimed_here(ctx, &mine).await?;
+        if !fits(me.as_ref(), &mine, committed, want) {
             let why = format!("no node has room for it: it requests {}m cpu and {} MiB", want.0, want.1);
             tracing::info!(%name, cpu_m = want.0, mem_mi = want.1, "claim.declined.capacity");
             return Ok(Verdict::NoCapacity(why));
@@ -285,15 +332,19 @@ async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, ge
 /// the fallback is always `await_change()`, never a requeue.
 const ATTEMPTS: usize = 2;
 
-/// Seconds since the object was created, as the stand-in for "unclaimed for": this arm is only
-/// ever reached on the FRESH path, where the object has never been placed at all, so its age IS
-/// how long nothing has had room for it.
-fn unplaced_for<K: Resource<DynamicType = ()>>(obj: &K) -> i64 {
-    obj.meta()
-        .creation_timestamp
-        .as_ref()
-        .map(|t| k8s_openapi::jiff::Timestamp::now().as_second() - t.0.as_second())
-        .unwrap_or(0)
+/// How long this object has been UNPLACED, which is not its age: a parent released by the sweep
+/// (`Placed=False/Moving`) re-enters the fresh path hours after it was created, and measuring from
+/// `creationTimestamp` would stamp `NoCapacity` over the `Moving` condition instantly — before the
+/// peer that was about to take it ever got a turn. The `Placed` condition's `lastTransitionTime`
+/// is exactly "since when has it been unplaced"; `creationTimestamp` is the fallback for a parent
+/// that has never been placed at all, where age and wait are the same number.
+fn unplaced_for<K: Resource<DynamicType = ()> + serde::Serialize>(obj: &K) -> i64 {
+    let since = serde_json::to_value(obj)
+        .ok()
+        .and_then(|v| serde_json::from_value::<Vec<crd::Condition>>(v["status"]["conditions"].clone()).ok())
+        .and_then(|cs| cs.iter().find(|c| c.type_ == "Placed").map(|c| c.last_transition_time.0))
+        .or_else(|| obj.meta().creation_timestamp.as_ref().map(|t| t.0));
+    since.map(|t| k8s_openapi::jiff::Timestamp::now().as_second() - t.as_second()).unwrap_or(0)
 }
 
 /// Everything the claim needs out of one object, whatever its kind.
@@ -409,6 +460,14 @@ fn want_of(r: &crd::PodResources) -> Want {
     (kloudlite_workspaces::quota::millicores(&r.cpu_request), kloudlite_workspaces::quota::mebibytes(&r.memory_request))
 }
 
+/// One StatefulSet per service, every one of them on this node and every one requesting the env
+/// unit — the same arithmetic `quota::usage` prices an environment with, from the same
+/// `env_unit_resources`.
+fn env_want(services: usize) -> Want {
+    let (c, m) = want_of(&kloudlite_workspaces::k8s::env_unit_resources());
+    (c * services as u64, m * services as u64)
+}
+
 pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     // Environments have no clone-of-a-running-source path through placement: `clone_env` copies a
     // volume by id and the copy is materialized by the Volume controller, which needs the same disk
@@ -421,14 +480,7 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             volume: o.status.as_ref().and_then(|s| s.volume_ref.as_deref()),
             region: &o.spec.region,
             owner: &o.spec.owner,
-            // One StatefulSet per service, every one of them on this node and every one of them
-            // requesting the env unit — the same arithmetic `quota::usage` prices an environment
-            // with, from the same `env_unit_resources`.
-            want: {
-                let (c, m) = want_of(&kloudlite_workspaces::k8s::env_unit_resources());
-                let n = o.spec.services.len() as u64;
-                (c * n, m * n)
-            },
+            want: env_want(o.spec.services.len()),
         }
     })
     .await
@@ -548,13 +600,16 @@ mod tests {
     fn a_workspace_node_admits_up_to_its_guarantee_and_no_further() {
         let n = node(serde_json::json!({"kloudlite.io/session": "true"}), "8", "33554432Ki");
         let want = (2000, 4096); // `PodResources::default`, parsed.
-        assert!(fits(Some(&n), &[pod("Running", "5", "8Gi")], want));
-        assert!(!fits(Some(&n), &[pod("Running", "7", "8Gi")], want), "1 vCPU left, 2 asked for");
-        assert!(!fits(Some(&n), &[pod("Running", "1", "30Gi")], want), "memory binds first here");
+        assert!(fits(Some(&n), &[pod("Running", "5", "8Gi")], (0, 0), want));
+        assert!(!fits(Some(&n), &[pod("Running", "7", "8Gi")], (0, 0), want), "1 vCPU left, 2 asked for");
+        assert!(!fits(Some(&n), &[pod("Running", "1", "30Gi")], (0, 0), want), "memory binds first here");
         // A finished pod holds nothing: its capacity is back.
-        assert!(fits(Some(&n), &[pod("Succeeded", "7", "8Gi"), pod("Failed", "7", "8Gi")], want));
+        assert!(fits(Some(&n), &[pod("Succeeded", "7", "8Gi"), pod("Failed", "7", "8Gi")], (0, 0), want));
         // Nothing readable is not "plenty of room".
-        assert!(!fits(None, &[], want));
+        assert!(!fits(None, &[], (0, 0), want));
+        // And what is CLAIMED here but has no pod yet counts exactly like a pod would: this is the
+        // burst case, where the claim lands a whole reconcile before the pod does.
+        assert!(!fits(Some(&n), &[pod("Running", "5", "8Gi")], (1500, 0), want));
     }
 
     /// The model packs env nodes to 80% and workspace nodes to the guarantee; a node with both
@@ -565,10 +620,10 @@ mod tests {
         let env = node(serde_json::json!({"kloudlite.io/env": "true"}), "8", "33554432Ki");
         // 80% of 8 vCPU is 6.4; 5 promised leaves 1.4, not the 2 asked for — where a workspace
         // node would have said yes.
-        assert!(!fits(Some(&env), &[pod("Running", "5", "8Gi")], want));
-        assert!(fits(Some(&env), &[pod("Running", "4", "8Gi")], want));
+        assert!(!fits(Some(&env), &[pod("Running", "5", "8Gi")], (0, 0), want));
+        assert!(fits(Some(&env), &[pod("Running", "4", "8Gi")], (0, 0), want));
         let both = node(serde_json::json!({"kloudlite.io/env": "true", "kloudlite.io/session": "true"}), "8", "33554432Ki");
-        assert!(fits(Some(&both), &[pod("Running", "5", "8Gi")], want), "both labels: the workspace rule");
+        assert!(fits(Some(&both), &[pod("Running", "5", "8Gi")], (0, 0), want), "both labels: the workspace rule");
     }
 
     /// The owner is ALWAYS allowed: it holds the bytes by construction, and a rule that could

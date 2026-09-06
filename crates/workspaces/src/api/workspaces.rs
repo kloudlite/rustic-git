@@ -78,7 +78,7 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
         decommissioning: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Decommissioning").map(ConditionDoc::from)),
         placed: st
             .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Placed"))
-            .filter(|c| c.status != "True")
+            .filter(|c| c.status != "True" && c.reason == "NoCapacity")
             .map(ConditionDoc::from),
         id,
     }

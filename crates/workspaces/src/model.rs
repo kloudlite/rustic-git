@@ -90,10 +90,10 @@ pub struct Workspace {
     /// now costs nothing and the next start lands elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decommissioning: Option<ConditionDoc>,
-    /// The `Placed` condition, and shown only when it is FALSE — `NoCapacity` is the one a person
-    /// has to act on: no node in the region has room for what this asks for, so it will stay in
-    /// `Creating` until something frees up or the fleet grows. A claimed object's `Placed=True`
-    /// says nothing `placement` does not already say.
+    /// The `Placed` condition, and ONLY `Placed=False/NoCapacity` — the one a person has to act
+    /// on: no node in the region has room for what this asks for, so it stays in `Creating` until
+    /// something frees up or the fleet grows. `Placed=True` says nothing `placement` does not
+    /// already say, and `Moving` is a routine hand-off nobody needs told about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed: Option<ConditionDoc>,
 }
@@ -310,10 +310,10 @@ pub struct Environment {
     /// now costs nothing and the next start lands elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decommissioning: Option<ConditionDoc>,
-    /// The `Placed` condition, and shown only when it is FALSE — `NoCapacity` is the one a person
-    /// has to act on: no node in the region has room for what this asks for, so it will stay in
-    /// `Creating` until something frees up or the fleet grows. A claimed object's `Placed=True`
-    /// says nothing `placement` does not already say.
+    /// The `Placed` condition, and ONLY `Placed=False/NoCapacity` — the one a person has to act
+    /// on: no node in the region has room for what this asks for, so it stays in `Creating` until
+    /// something frees up or the fleet grows. `Placed=True` says nothing `placement` does not
+    /// already say, and `Moving` is a routine hand-off nobody needs told about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed: Option<ConditionDoc>,
 }

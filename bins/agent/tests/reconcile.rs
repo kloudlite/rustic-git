@@ -102,7 +102,13 @@ fn ctx_without_homes_export(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<
     ctx_with_homes_export(pool, routes, Arc::new(FakeNix::default()), None)
 }
 
-fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
+fn ctx_with_homes_export(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
+    ctx_on_node("node-a", pool, routes, nix, homes_export)
+}
+
+/// The same fixture as some OTHER node — what the hand-off half of a capacity decline needs: one
+/// node with no room, and a second one that takes the parent it left unplaced.
+fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
     // Every reconcile now unconditionally may ask "does this volume have snapshots yet"
     // (`claim::placement`/`has_snapshots`, the checkout/migrate step) — a call no test fixture
     // needed before the snapshot model became the only model (Task 8). Appended AFTER the caller's
@@ -146,10 +152,10 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
     // walks same-path routes in order and repeats the last, so merely appending this would answer
     // "Ready and unlabelled" from the second pass onward — silently un-draining a node midway
     // through a multi-pass test.
-    if !routes.iter().any(|r| r.method == "GET" && r.path == "/api/v1/nodes/node-a") {
+    if !routes.iter().any(|r| r.method == "GET" && r.path == format!("/api/v1/nodes/{node}")) {
         routes.push(kloudlite_workspaces::kube_test::get(
-            "/api/v1/nodes/node-a",
-            serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"},
+            format!("/api/v1/nodes/{node}"),
+            serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": node},
                                // Allocatable, because a FRESH claim now checks capacity: an
                                // 8-vCPU/32 GiB node, room for several default workspaces.
                                "status": {"allocatable": {"cpu": "8", "memory": "33554432Ki"},
@@ -157,13 +163,17 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
                                                           "lastTransitionTime": rfc3339_ago(60)}]}}),
         ));
     }
-    // The other half of that check: what is already scheduled here. Empty unless the test says
-    // otherwise, same skip rule as the node above.
-    if !routes.iter().any(|r| r.method == "GET" && r.path == "/api/v1/pods") {
-        routes.push(kloudlite_workspaces::kube_test::get(
-            "/api/v1/pods",
-            serde_json::json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}),
-        ));
+    // The other half of that check: what is already scheduled here, and what has been CLAIMED
+    // here but has no pod yet. Empty unless the test says otherwise, same skip rule as the node.
+    // `/api/v1/nodes` too: with the two parent lists answering "empty" instead of 404, a stop's
+    // `wake_peers` now gets far enough to ask who its peers are.
+    for (path, kind) in [("/api/v1/pods", "Pod"), ("/api/v1/nodes", "Node"), (WORKSPACES_LIST, "Workspace"), (ENVIRONMENTS_LIST, "Environment")] {
+        if !routes.iter().any(|r| r.method == "GET" && r.path == path) {
+            routes.push(kloudlite_workspaces::kube_test::get(
+                path,
+                serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "metadata": {}, "items": []}),
+            ));
+        }
     }
     let (client, rec) = mock_client(routes);
     // Best effort: one test hands a plain file as its "pool" on purpose.
@@ -176,7 +186,7 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
         Arc::new(Ctx::new(
             client,
             Arc::new(engine),
-            "node-a".into(),
+            node.into(),
             pool.to_string_lossy().into(),
             "r1".into(),
             vec!["session".into(), "env".into()],
@@ -410,6 +420,8 @@ async fn deleting_a_volume_waits_for_an_in_flight_operation() {
 // ── placement claims ─────────────────────────────────────────────────────
 
 const WS_STATUS: &str = "/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status";
+const WORKSPACES_LIST: &str = "/apis/kloudlite.io/v1alpha1/workspaces";
+const ENVIRONMENTS_LIST: &str = "/apis/kloudlite.io/v1alpha1/environments";
 const BINDINGS: &str = "/apis/kloudlite.io/v1alpha1/ownerbindings";
 
 fn ws_json(status: serde_json::Value) -> serde_json::Value {
@@ -769,6 +781,130 @@ async fn a_workspace_nothing_can_fit_gets_the_no_capacity_condition() {
     assert_eq!(c["reason"], "NoCapacity");
     assert!(c["message"].as_str().unwrap().contains("2000m cpu"), "the message names what it needs: {c}");
     assert!(c["message"].as_str().unwrap().contains("4096 MiB"), "{c}");
+}
+
+/// The hand-off, which is the whole point of declining: the crowded node writes nothing, and the
+/// SAME parent offered to a node with room is claimed by it.
+#[tokio::test]
+async fn a_parent_a_full_node_declined_is_claimed_by_a_node_with_room() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (full, full_rec) = ctx(tmp.path(), crowded(None));
+    let w = workspace(serde_json::json!({}));
+    kloudlite_agent::claim::claim_workspace(&w, &full).await.unwrap();
+    assert!(full_rec.sent("PUT", WS_STATUS).is_empty(), "the full node declines: {:?}", full_rec.calls());
+
+    let (roomy, roomy_rec) = ctx_on_node(
+        "node-b",
+        tmp.path(),
+        vec![
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+        Arc::new(FakeNix::default()),
+        Some("test:/".into()),
+    );
+    kloudlite_agent::claim::claim_workspace(&w, &roomy).await.unwrap();
+    let sent = roomy_rec.sent("PUT", WS_STATUS);
+    assert_eq!(sent.len(), 1, "the node with room takes it: {:?}", roomy_rec.calls());
+    assert_eq!(sent[0]["status"]["nodeName"], "node-b");
+}
+
+/// And the condition does not outlive the problem: a claim replaces the whole condition array, so
+/// a parent that was `NoCapacity` comes back as `Placed=True/Claimed` with no trace of it.
+#[tokio::test]
+async fn a_claim_clears_a_no_capacity_condition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+    let w = workspace(serde_json::json!({
+        "phase": "pending", "nodeName": "",
+        "conditions": [{"type": "Placed", "status": "False", "reason": "NoCapacity",
+                        "message": "no node has room for it: it requests 2000m cpu and 4096 MiB",
+                        "lastTransitionTime": rfc3339_ago(600)}]}));
+
+    kloudlite_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+
+    let conds = rec.sent("PUT", WS_STATUS)[0]["status"]["conditions"].clone();
+    let conds = conds.as_array().unwrap();
+    assert!(conds.iter().any(|c| c["type"] == "Placed" && c["status"] == "True" && c["reason"] == "Claimed"), "{conds:?}");
+    assert!(!conds.iter().any(|c| c["reason"] == "NoCapacity"), "the reason must not survive the claim: {conds:?}");
+}
+
+/// A burst: four workspaces created at once all read a pod list with none of the others in it,
+/// because the claim writes `status.nodeName` a whole reconcile before the pod exists. Counting
+/// what is CLAIMED here — three 2-vCPU workspaces on an 8-vCPU node — is what stops the fourth.
+#[tokio::test]
+async fn workspaces_claimed_here_but_not_yet_running_are_counted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let claimed = |name: &str| {
+        let mut w = ws_json(serde_json::json!({"phase": "pending", "nodeName": "node-a"}));
+        w["metadata"]["name"] = serde_json::json!(name);
+        w
+    };
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![kloudlite_workspaces::kube_test::get(
+            WORKSPACES_LIST,
+            serde_json::json!({"apiVersion": "v1", "kind": "WorkspaceList", "metadata": {},
+                               "items": [claimed("ws-a"), claimed("ws-b"), claimed("ws-c"), claimed("ws-d")]}),
+        )],
+    );
+
+    kloudlite_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert!(
+        rec.sent("PUT", WS_STATUS).is_empty(),
+        "4 claimed x 2 vCPU fills an 8 vCPU node, and not one of them has a pod yet: {:?}", rec.calls()
+    );
+}
+
+/// A STOPPED workspace placed here holds nothing: its pod is gone and its capacity really is free.
+#[tokio::test]
+async fn a_stopped_workspace_placed_here_costs_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stopped = |name: &str| {
+        let mut w = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a"}));
+        w["metadata"]["name"] = serde_json::json!(name);
+        w["spec"]["desiredState"] = serde_json::json!("stopped");
+        w
+    };
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            kloudlite_workspaces::kube_test::get(
+                WORKSPACES_LIST,
+                serde_json::json!({"apiVersion": "v1", "kind": "WorkspaceList", "metadata": {},
+                                   "items": [stopped("ws-a"), stopped("ws-b"), stopped("ws-c")]}),
+            ),
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+
+    kloudlite_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "stopped parents free their capacity: {:?}", rec.calls());
+}
+
+/// A parent RELEASED by the sweep hours after it was created must not be declared `NoCapacity` on
+/// the first decline: the grace runs from the `Placed` transition, which is when it became
+/// unplaced, so the peer that is about to take it gets its turn and `Moving` survives.
+#[tokio::test]
+async fn a_just_released_parent_keeps_its_moving_condition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), crowded(Some(600)));
+    let mut w = ws_json(serde_json::json!({
+        "phase": "pending", "nodeName": "",
+        "conditions": [{"type": "Placed", "status": "False", "reason": "Moving",
+                        "message": "released so an up-to-date node can start it",
+                        "lastTransitionTime": rfc3339_ago(5)}]}));
+    w["metadata"]["creationTimestamp"] = serde_json::json!(rfc3339_ago(86400));
+
+    kloudlite_agent::claim::claim_workspace(&serde_json::from_value(w).unwrap(), &ctx).await.unwrap();
+    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "5s unplaced is inside the grace: {:?}", rec.calls());
 }
 
 /// The correctness path is untouched: a parent whose bytes are HERE is claimed however full this
