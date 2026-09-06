@@ -545,6 +545,23 @@ async fn del(c: &Ctx, kind: &'static str, name: &str, url: &str, jwt: &str) -> b
     }
 }
 
+/// Is this request still open, as the API SERVER counts it?
+///
+/// A row with NO status is pending — `/v1` writes the object and stamps its status in a second
+/// call, and `is_pending_generic` (`crates/workspaces/src/api/mod.rs:575`) reads a missing status
+/// as `Pending` by `unwrap_or_default`. A single status-less row blocked every quota request the
+/// `slo-hourly` tenant made for a day, because the probe's own sweeps only recognised
+/// `state == "pending"` and left it standing. Both shapes are read: the flattened `state` the
+/// listings answer, and the raw `status.state` of a CR.
+pub(crate) fn pending(row: &Value) -> bool {
+    let state = row
+        .get("state")
+        .or_else(|| row.pointer("/status/state"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    state.is_empty() || state.eq_ignore_ascii_case("pending")
+}
+
 /// Delete the `Request`/`QuotaRequest` objects this run opened.
 ///
 /// `deny_requests` below closes them, which is all the API can do — but a decided request is still
@@ -563,7 +580,18 @@ async fn drop_requests(c: &mut Ctx) -> usize {
     // per-run marker `deny_requests` already matches on. Never by owner.
     let prefix = c.prefix();
     let mut names = c.state.requests.clone();
+    // Whatever their state, including NONE: a status-less row is pending to the api, and it is the
+    // shape that survived every earlier sweep. The CR list is the authority here — the listings go
+    // through a filter, this does not.
     if let Ok(list) = reqs.list(&kube::api::ListParams::default()).await {
+        names.extend(
+            list.items
+                .iter()
+                .filter(|r| r.spec.reason.starts_with(&prefix))
+                .map(kube::ResourceExt::name_any),
+        );
+    }
+    if let Ok(list) = legacy.list(&kube::api::ListParams::default()).await {
         names.extend(
             list.items
                 .iter()
@@ -718,6 +746,27 @@ mod tests {
         assert!(!stale("run-anything-1000-x", now));
         assert!(!stale("run-fast-notanumber-repo", now));
         assert!(!stale("run-fast", now));
+    }
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::pending;
+    use serde_json::json;
+
+    /// The five shapes a request row comes in, and which ones a sweep must take. The first two are
+    /// the bug: a row the API server has not stamped is PENDING to the api
+    /// (`is_pending_generic`'s `unwrap_or_default`), and a probe that read it as decided left one
+    /// standing that blocked a tenant's quota requests for a day.
+    #[test]
+    fn a_row_with_no_status_is_pending_like_the_api_says() {
+        assert!(pending(&json!({ "id": "req-1" })), "no state at all");
+        assert!(pending(&json!({ "id": "req-1", "status": {} })), "a status with no state");
+        assert!(pending(&json!({ "id": "req-1", "state": "pending" })));
+        assert!(pending(&json!({ "id": "req-1", "status": { "state": "Pending" } })), "the CR's own casing");
+        assert!(!pending(&json!({ "id": "req-1", "state": "approved" })));
+        assert!(!pending(&json!({ "id": "req-1", "state": "denied" })));
+        assert!(!pending(&json!({ "id": "req-1", "status": { "state": "denied" } })));
     }
 }
 

@@ -69,9 +69,12 @@ async fn queue(c: &mut Ctx) -> Option<String> {
                 c.state.request = Some(id.clone());
                 c.state.requests.push(id.clone());
                 poll_json(c, &queue, &admin_jwt, QUEUE_CEILING, |v| {
+                    // `pending` rather than a literal comparison: a row the API server has not
+                    // stamped a status onto yet IS pending to the api (`is_pending_generic`), and a
+                    // probe that disagreed about that is what let a status-less row block a
+                    // tenant's quota requests for a day.
                     rows(v).iter().any(|r| {
-                        r.get("id").and_then(Value::as_str) == Some(id.as_str())
-                            && r.get("state").and_then(Value::as_str) == Some("pending")
+                        r.get("id").and_then(Value::as_str) == Some(id.as_str()) && super::pending(r)
                     })
                 })
                 .await
