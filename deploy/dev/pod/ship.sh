@@ -33,7 +33,7 @@ for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gate
   ln -f /work/target/release/$b "$CTX/target/release/$b"
 done
 
-for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway slo:kloudlite-slo; do
+for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway slo:kloudlite-slo workspace:kloudlite-workspace; do
   target=${t%%:*}; image=${t#*:}
   echo "==> $image:$SHA"
   buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX" \
