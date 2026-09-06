@@ -639,13 +639,23 @@ async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<C
     let has_snapshot = items.iter().any(|s| {
         s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
     });
-    if has_snapshot
-        && !super::volume::detach_volume(ctx, &volume, uid).await.map_err(|e| ReconcileErr(e.to_string()))?
-    {
-        // Someone else rewrote the owner list under us. An Err, not a requeue: the finalizer
-        // combinator REMOVES the finalizer on any Ok from Cleanup, which would let GC take the
-        // Volume — and the snapshots — while we were still trying to detach it.
-        return Err(ReconcileErr(format!("volume {volume}: owner references changed under the detach")));
+    if has_snapshot {
+        // Siblings on one volume (a source, its clone, a restore) are deleted together and lose
+        // this CAS to each other; `detach_volume` re-reads on every call, so a few tries in place
+        // settle it now rather than after a RETRY-long requeue the probe's orphan check outwaits.
+        let mut detached = false;
+        for _ in 0..3 {
+            if super::volume::detach_volume(ctx, &volume, uid).await.map_err(|e| ReconcileErr(e.to_string()))? {
+                detached = true;
+                break;
+            }
+        }
+        if !detached {
+            // Someone else kept rewriting the owner list under us. An Err, not a requeue: the
+            // finalizer combinator REMOVES the finalizer on any Ok from Cleanup, which would let
+            // GC take the Volume — and the snapshots — while we were still trying to detach it.
+            return Err(ReconcileErr(format!("volume {volume}: owner references changed under the detach")));
+        }
     }
     Ok(Action::await_change())
 }

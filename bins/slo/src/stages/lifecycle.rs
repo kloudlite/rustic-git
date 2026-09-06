@@ -653,7 +653,16 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
                 // parent as an owner and vanished anyway went for some other reason, and a lost
                 // detach is an error rather than a completed finalizer. Read before the wait so a
                 // still-owned Volume is named as that rather than as a slow sweep.
-                still_owned(&k, &volume).await?;
+                // The finalizer detaches on its own beat, and three parents of one volume race
+                // each other for the CAS: an owner still listed right after the DELETE is the
+                // normal case for a moment, and only past the ceiling is it the failure.
+                if let Err(e) = still_owned(&k, &volume).await {
+                    if start.elapsed() >= ORPHAN_CEILING {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
                 let left = ORPHAN_CEILING.saturating_sub(start.elapsed());
                 if crate::kube::wait_for::<crd::Volume>(&k, &volume, left.min(Duration::from_secs(5)), |v| v.is_none())
                     .await
