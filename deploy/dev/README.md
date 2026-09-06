@@ -1,6 +1,8 @@
 # Working from the dev pod
 
-Nothing is built or tested on the laptop. The checkout, the cargo target and the registry cache
+**Edit here, not on the laptop.** Browse and change files in `/work/src` (a shell via `exec.sh`, or
+a script piped into `kubectl exec -i`), then commit and push from the pod. The laptop's clone is a
+mirror that only pulls. Nothing is built or tested on the laptop. The checkout, the cargo target and the registry cache
 live on the `dev-work` disk of the `dev` pod in namespace `kloudlite`, on the tainted `builder`
 node of the main AKS cluster (`deploy/dev/builder.yaml`). The pod's checkout is fed by **git
 only**: edit and commit anywhere (the pod itself, via `exec.sh`, or the laptop), push, and the pod

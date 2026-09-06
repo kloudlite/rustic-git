@@ -125,6 +125,19 @@ fn resolve_export(export: &str) -> Result<String, String> {
 /// Idempotent and re-entrant from the reconcile path, not only from boot: an export that moves
 /// nodes leaves every client's mount stale, and the fix (detach, remount) is the same one boot
 /// runs. Serialised so two reconciles cannot race an unmount against a mount.
+/// Whether this process may `mount(2)` at all: CAP_SYS_ADMIN in its effective set. The privileged
+/// DaemonSet has it; a non-root test run does not, and neither does a root shell in an ordinary
+/// pod — which is the case a plain uid check got wrong.
+pub(crate) fn may_mount() -> bool {
+    const CAP_SYS_ADMIN: u32 = 21;
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return false };
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))
+        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        .is_some_and(|caps| caps & (1u64 << CAP_SYS_ADMIN) != 0)
+}
+
 pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     static REPAIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = REPAIR.lock().unwrap_or_else(|e| e.into_inner());

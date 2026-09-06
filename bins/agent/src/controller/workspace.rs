@@ -728,10 +728,11 @@ pub(crate) async fn migrate_and_seed_baseline(
 /// person an empty home on the node's rootfs and report it Ready, and mkdir under a stale one
 /// (the export moved nodes) fails EIO on every reconcile forever without this.
 fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32) -> Result<(), String> {
-    // Root-gated for the same reason the chown below is: in production the agent is privileged and
+    // Gated on the CAPABILITY to mount, not on uid 0: in production the agent is privileged and
     // `/proc/mounts` tells the truth, while a dev/test pool is an ordinary directory nobody ever
-    // mounted — checking there would refuse every reconcile.
-    if unsafe { libc::geteuid() } == 0 {
+    // mounted — and the tests now also run as root inside an unprivileged dev pod, where a uid
+    // gate let this reach for a real NFS mount of a fixture address and hang two minutes on it.
+    if crate::may_mount() {
         crate::mount_homes(pool, export)?;
     }
     let dir = crate::homes_root(pool).join(owner);

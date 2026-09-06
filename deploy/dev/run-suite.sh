@@ -62,6 +62,28 @@ if d.get('state')=='running':
 else: print("row already", d.get('state'))
 PY
 }
+# What a killed run leaves behind is deleted through /v1 with the tenant's own token, exactly as
+# the probe's teardown would have: a run killed mid-way holds workspaces and environments that
+# crowd the node for the next run (NoCapacity on the very next clone).
+cleanup_run() { kubectl -n kloudlite exec -i "$POD" -- python3 - "$1" "$U" <<'PYC'
+import sys,os,hmac,hashlib,base64,json,time,urllib.request
+rid,user=sys.argv[1],sys.argv[2]; prefix="run-"+rid
+def b64(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+now=int(time.time()); h=b64(json.dumps({"alg":"HS256","typ":"JWT"},separators=(',',':')).encode())
+c=b64(json.dumps({"sub":f"{user}@kloudlite.io","name":user,"username":user,"typ":"session","iat":now,"exp":now+600},separators=(',',':')).encode())
+tok=f"{h}.{c}."+b64(hmac.new(os.environ['KLOUDLITE_JWT_SECRET'].encode(),f"{h}.{c}".encode(),hashlib.sha256).digest())
+H={"authorization":"Bearer "+tok}; base=os.environ['KLOUDLITE_API_URL'].rstrip('/')
+gone=0
+for kind in ("workspaces","environments"):
+    try: rows=json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}?owner={user}",headers=H),timeout=20))
+    except Exception as e: print("list",kind,"failed:",e); continue
+    for r in (rows if isinstance(rows,list) else rows.get("items") or []):
+        if str(r.get("name","")).startswith(prefix):
+            try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}/{r['id']}",headers=H,method="DELETE"),timeout=30); gone+=1
+            except Exception as e: print("delete",kind,r.get("name"),"failed:",e)
+print(f"cleanup: {gone} objects of {prefix} deleted")
+PYC
+}
 for i in $(seq 1 700); do
   S=$(summarise 2>/dev/null || true)
   # An empty summary is the exec failing, not the suite: never kill on it.
@@ -73,7 +95,7 @@ for i in $(seq 1 700); do
        if [ "$FF" = 1 ]; then
          RUN=$(echo "$S" | head -1 | sed -n 's/.*run: \([^ ]*\).*/\1/p')
          kubectl -n kloudlite exec "$POD" -- pkill -x kloudlite-slo || true
-         echo "FAIL FAST: killed the run"; [ -n "$RUN" ] && close_row "$RUN"
+         echo "FAIL FAST: killed the run"; [ -n "$RUN" ] && { close_row "$RUN"; cleanup_run "$RUN"; }
          exit 1
        fi ;;
   esac

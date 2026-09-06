@@ -475,10 +475,12 @@ console works with no ClickHouse deployed. `KLOUDLITE_ADMIN_FIXTURES=1` answers 
 
 ## Dev loop
 
-Do not run `cargo` on the laptop for this repo: the disk fills and every build competes with the
-editor. Builds, tests, clippy and probe runs happen in the dev pod on the AKS `builder` node —
-`deploy/dev/README.md` is the whole recipe (`deploy/dev/sync.sh`, `deploy/dev/test.sh`,
-`deploy/dev/exec.sh`, `deploy/dev/slo.sh`).
+The checkout of record is `/work/src` in the `dev` pod on the AKS `builder` node, not the laptop.
+Browse and edit files THERE (`deploy/dev/exec.sh`, or a script piped into `kubectl exec -i`),
+build, test and run probes there, and commit and push FROM the pod; the laptop only ever
+`git pull`s. Do not run `cargo` on the laptop: the disk fills and every build competes with the
+editor. `deploy/dev/README.md` is the whole recipe (`sync.sh` pulls and builds, `test.sh`,
+`exec.sh`, `run-suite.sh`, `attach.sh`, `tail.sh`).
 
 ## Deploying
 
