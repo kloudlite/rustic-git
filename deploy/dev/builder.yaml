@@ -47,7 +47,7 @@ spec:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq && apt-get install -y -qq --no-install-recommends \
                 bash ca-certificates git rsync openssh-client curl openssl bind9-dnsutils \
-                pkg-config libssl-dev clang cmake python3 tini procps jq >/dev/null
+                pkg-config libssl-dev clang cmake python3 tini procps jq tmux lnav less >/dev/null
               # HOME on the disk: gh's login, the git identity, safe.directory and ssh known_hosts
               # all live under it and must outlive a pod restart.
               mkdir -p /work/home /work/bin
