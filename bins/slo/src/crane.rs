@@ -31,11 +31,17 @@ pub struct Crane {
 
 impl Crane {
     pub fn new(bin: &str, config_dir: PathBuf) -> Crane {
-        Crane { bin: bin.to_string(), config_dir }
+        Crane {
+            bin: bin.to_string(),
+            config_dir,
+        }
     }
 
     fn env(&self) -> HashMap<String, String> {
-        HashMap::from([("DOCKER_CONFIG".into(), self.config_dir.display().to_string())])
+        HashMap::from([(
+            "DOCKER_CONFIG".into(),
+            self.config_dir.display().to_string(),
+        )])
     }
 
     async fn run(&self, args: &[&str], timeout: Duration) -> Result<String> {
@@ -47,26 +53,46 @@ impl Crane {
     /// Writes `{config_dir}/config.json`. The password is the personal token stage 1 minted;
     /// `crane auth login` takes it on the argv, which is why `tools::scrub` knows about `-p`.
     pub async fn login(&self, registry: &str, user: &str, password: &str) -> Result<()> {
-        self.run(&["auth", "login", registry, "-u", user, "-p", password], READ_TIMEOUT).await?;
+        self.run(
+            &["auth", "login", registry, "-u", user, "-p", password],
+            READ_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
     /// Push an OCI layout DIRECTORY (`crane push` accepts one), so the probe never has to build a
     /// docker tarball or talk to a daemon it does not have.
     pub async fn push(&self, dir: &Path, reference: &str) -> Result<()> {
-        self.run(&["push", &dir.display().to_string(), reference], PUSH_TIMEOUT).await?;
+        self.run(
+            &["push", &dir.display().to_string(), reference],
+            PUSH_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
     /// `--format=oci`: the pulled layout is read back off disk by `reg.shared.layer`, and the
     /// default tarball format would hide the per-blob digests that check is entirely about.
     pub async fn pull(&self, reference: &str, dir: &Path) -> Result<()> {
-        self.run(&["pull", "--format=oci", reference, &dir.display().to_string()], PUSH_TIMEOUT)
-            .await?;
+        self.run(
+            &[
+                "pull",
+                "--format=oci",
+                reference,
+                &dir.display().to_string(),
+            ],
+            PUSH_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn digest(&self, reference: &str) -> Result<String> {
-        Ok(self.run(&["digest", reference], READ_TIMEOUT).await?.trim().to_string())
+        Ok(self
+            .run(&["digest", reference], READ_TIMEOUT)
+            .await?
+            .trim()
+            .to_string())
     }
 }

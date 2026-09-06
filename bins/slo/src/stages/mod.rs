@@ -13,12 +13,12 @@ pub mod admin;
 pub mod edge;
 pub mod environment;
 pub mod experience;
-pub mod experience_teams;
-pub mod experience_ws;
+pub mod experience_admin;
 pub mod experience_env;
 pub mod experience_gaps;
 pub mod experience_gaps2;
-pub mod experience_admin;
+pub mod experience_teams;
+pub mod experience_ws;
 pub mod git;
 pub mod identity;
 pub mod lifecycle;
@@ -67,7 +67,10 @@ pub(crate) async fn call(
 ) -> Result<Value> {
     let (status, text) = raw(c, method, url, token, body, &[]).await?;
     if !status.is_success() {
-        return Err(anyhow!("{status}: {}", text.chars().take(300).collect::<String>()));
+        return Err(anyhow!(
+            "{status}: {}",
+            text.chars().take(300).collect::<String>()
+        ));
     }
     // Every route here answers JSON except the ones that answer nothing (204, and the api's
     // plain-text 202 on a merge); `Null` is the honest reading of both.
@@ -109,7 +112,10 @@ pub(crate) async fn raw(
     // here can be a one-shot credential (`?poll=` on the CLI handshake) — but an error with no
     // address at all reads as "error sending request" and says nothing, which cost a live run its
     // triage. The path is what tells a reader the URL was malformed.
-    let r = req.send().await.map_err(|e| anyhow!("{} ({})", e.without_url(), path_of(url)))?;
+    let r = req
+        .send()
+        .await
+        .map_err(|e| anyhow!("{} ({})", e.without_url(), path_of(url)))?;
     let status = r.status();
     Ok((status, r.text().await.unwrap_or_default()))
 }
@@ -156,7 +162,10 @@ pub(crate) async fn poll_json(
             Ok(v) => {
                 let seen = v.to_string();
                 let cut = seen.char_indices().nth(160).map_or(seen.len(), |(i, _)| i);
-                why = format!("the answer does not have it yet; last answer: {}", &seen[..cut]);
+                why = format!(
+                    "the answer does not have it yet; last answer: {}",
+                    &seen[..cut]
+                );
             }
             Err(e) => why = format!("{e:#}"),
         }
@@ -219,7 +228,10 @@ async fn undo_drills(c: &mut Ctx) {
     match crate::drill::incluster() {
         Ok(k) => {
             use crate::drill::Cluster;
-            for name in [crate::stages::monthly::NETPOL, crate::stages::monthly::CH_NETPOL] {
+            for name in [
+                crate::stages::monthly::NETPOL,
+                crate::stages::monthly::CH_NETPOL,
+            ] {
                 if let Err(e) = k.netpol("kloudlite", name, None).await {
                     tracing::warn!(kind = "netpol", name = %name, error = %format!("{e:#}"), "slo.drill.sweep.failed");
                 }
@@ -244,31 +256,67 @@ async fn undo_grants(c: &mut Ctx) {
     // probe never writes and the PUT body never mentions.
     let want = experience_admin::probe_quota();
     let detail = admin(c, &format!("/admin/owners/{probe}"));
-    let same = get(c, &detail, &c.admin_jwt.clone()).await.ok().and_then(|v| v.get("limit").cloned()).is_some_and(|have| {
-        want.as_object().unwrap().iter().all(|(k, v)| have.get(k) == Some(v))
-    });
+    let same = get(c, &detail, &c.admin_jwt.clone())
+        .await
+        .ok()
+        .and_then(|v| v.get("limit").cloned())
+        .is_some_and(|have| {
+            want.as_object()
+                .unwrap()
+                .iter()
+                .all(|(k, v)| have.get(k) == Some(v))
+        });
     if !same {
         let url = admin(c, &format!("/admin/quota/{probe}"));
         let body = serde_json::json!({ "spec": want, "note": "slo probe quota restore" });
-        match call(c, reqwest::Method::PUT, &url, &c.admin_jwt.clone(), Some(body)).await {
+        match call(
+            c,
+            reqwest::Method::PUT,
+            &url,
+            &c.admin_jwt.clone(),
+            Some(body),
+        )
+        .await
+        {
             Ok(_) => tracing::info!(kind = "quota", name = probe, "slo.teardown.restored"),
-            Err(e) => tracing::warn!(kind = "quota", op = "restore", error = %format!("{e:#}"), "slo.teardown.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "quota", op = "restore", error = %format!("{e:#}"), "slo.teardown.failed")
+            }
         }
     }
     // Read first: the DELETE is an admin write with an audit row of its own, and filing one per
     // run for an account that is not on the roster is noise in the log a human reads.
     let all = admin(c, "/api/admin/superadmins");
-    let listed = get(c, &all, &c.admin_jwt.clone()).await.ok().is_some_and(|v| {
-        v.as_array().unwrap_or(&vec![]).iter().any(|r| {
-            r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(&other_email))
-        })
-    });
+    let listed = get(c, &all, &c.admin_jwt.clone())
+        .await
+        .ok()
+        .is_some_and(|v| {
+            v.as_array().unwrap_or(&vec![]).iter().any(|r| {
+                r.get("_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u.eq_ignore_ascii_case(&other_email))
+            })
+        });
     if listed {
         let one = admin(c, &format!("/api/admin/superadmins/{other_email}"));
         let body = serde_json::json!({ "note": "slo probe teardown" });
-        match call(c, reqwest::Method::DELETE, &one, &c.admin_jwt.clone(), Some(body)).await {
-            Ok(_) => tracing::info!(kind = "superadmin", name = other_email, "slo.teardown.restored"),
-            Err(e) => tracing::warn!(kind = "superadmin", op = "revoke", error = %format!("{e:#}"), "slo.teardown.failed"),
+        match call(
+            c,
+            reqwest::Method::DELETE,
+            &one,
+            &c.admin_jwt.clone(),
+            Some(body),
+        )
+        .await
+        {
+            Ok(_) => tracing::info!(
+                kind = "superadmin",
+                name = other_email,
+                "slo.teardown.restored"
+            ),
+            Err(e) => {
+                tracing::warn!(kind = "superadmin", op = "revoke", error = %format!("{e:#}"), "slo.teardown.failed")
+            }
         }
     }
 }
@@ -285,7 +333,13 @@ async fn unprotect(c: &mut Ctx) {
     let jwt = c.probe_jwt.clone();
     let repos = list(
         c,
-        &Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |_, _| String::new() },
+        &Kind {
+            kind: "repo",
+            list: "/v1/repos",
+            name_field: "name",
+            id_field: "name",
+            del: |_, _| String::new(),
+        },
         &probe,
         &jwt,
     )
@@ -312,17 +366,36 @@ async fn hide(c: &mut Ctx) {
     if let Some(repo) = c.state.repo.clone() {
         let url = api(c, &format!("/v1/repos/{probe}/{repo}"));
         let body = serde_json::json!({ "visibility": "private" });
-        match call(c, reqwest::Method::PATCH, &url, &c.probe_jwt.clone(), Some(body)).await {
+        match call(
+            c,
+            reqwest::Method::PATCH,
+            &url,
+            &c.probe_jwt.clone(),
+            Some(body),
+        )
+        .await
+        {
             Ok(_) => tracing::info!(kind = "repo", name = %repo, "slo.teardown.hidden"),
-            Err(e) => tracing::warn!(kind = "repo", op = "hide", name = %repo, error = %format!("{e:#}"), "slo.teardown.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "repo", op = "hide", name = %repo, error = %format!("{e:#}"), "slo.teardown.failed")
+            }
         }
     }
     let prefix = c.prefix();
-    for name in images(c, &probe, &c.probe_jwt.clone(), &|n: &str| n.starts_with(&prefix)).await {
-        let url = api(c, &format!("/api/{probe}/{name}/imagevisibility?visibility=private"));
+    for name in images(c, &probe, &c.probe_jwt.clone(), &|n: &str| {
+        n.starts_with(&prefix)
+    })
+    .await
+    {
+        let url = api(
+            c,
+            &format!("/api/{probe}/{name}/imagevisibility?visibility=private"),
+        );
         match post(c, &url, &c.probe_jwt.clone(), Value::Null).await {
             Ok(_) => tracing::info!(kind = "image", name = %name, "slo.teardown.hidden"),
-            Err(e) => tracing::warn!(kind = "image", op = "hide", name = %name, error = %format!("{e:#}"), "slo.teardown.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "image", op = "hide", name = %name, error = %format!("{e:#}"), "slo.teardown.failed")
+            }
         }
     }
 }
@@ -335,7 +408,9 @@ async fn hide(c: &mut Ctx) {
 /// then the volume itself. Best effort, like every other delete here: what is left is litter the
 /// next run's boot sweep collects.
 async fn drop_env_volume(c: &mut Ctx) -> usize {
-    let Some(volume) = c.state.env_volume.clone() else { return 0 };
+    let Some(volume) = c.state.env_volume.clone() else {
+        return 0;
+    };
     let mut gone = 0;
     let snapshot = c.state.env_snapshot.clone();
     for url in snapshot
@@ -348,7 +423,9 @@ async fn drop_env_volume(c: &mut Ctx) -> usize {
                 gone += 1;
                 tracing::info!(kind = "volume", name = %volume, "slo.teardown.deleted");
             }
-            Err(e) => tracing::warn!(kind = "volume", op = "delete", name = %volume, error = %format!("{e:#}"), "slo.teardown.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "volume", op = "delete", name = %volume, error = %format!("{e:#}"), "slo.teardown.failed")
+            }
         }
     }
     gone
@@ -389,23 +466,65 @@ struct Kind {
 /// Order matters at exactly one point: a volume is reference-counted, so its workspace and
 /// environment must be gone before a volume delete can succeed at all.
 const KINDS: &[Kind] = &[
-    Kind { kind: "workspace", list: "/v1/workspaces", name_field: "name", id_field: "id", del: |id, _| format!("/v1/workspaces/{id}") },
-    Kind { kind: "environment", list: "/v1/environments", name_field: "name", id_field: "id", del: |id, _| format!("/v1/environments/{id}") },
+    Kind {
+        kind: "workspace",
+        list: "/v1/workspaces",
+        name_field: "name",
+        id_field: "id",
+        del: |id, _| format!("/v1/workspaces/{id}"),
+    },
+    Kind {
+        kind: "environment",
+        list: "/v1/environments",
+        name_field: "name",
+        id_field: "id",
+        del: |id, _| format!("/v1/environments/{id}"),
+    },
     // `display_name`, not `name`: a volume's `name` is the ws/env id (`ws-a1b2…`), which carries no
     // run prefix at all — the caller-chosen name only survives on `display_name`, so matching on
     // `name` swept nothing and every probe volume leaked.
-    Kind { kind: "volume", list: "/v1/volumes", name_field: "display_name", id_field: "name", del: |n, _| format!("/v1/volumes/{n}") },
-    Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |n, owner| format!("/v1/repos/{owner}/{n}") },
-    Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |id, _| format!("/v1/tokens/{id}") },
+    Kind {
+        kind: "volume",
+        list: "/v1/volumes",
+        name_field: "display_name",
+        id_field: "name",
+        del: |n, _| format!("/v1/volumes/{n}"),
+    },
+    Kind {
+        kind: "repo",
+        list: "/v1/repos",
+        name_field: "name",
+        id_field: "name",
+        del: |n, owner| format!("/v1/repos/{owner}/{n}"),
+    },
+    Kind {
+        kind: "token",
+        list: "/v1/tokens",
+        name_field: "name",
+        id_field: "_id",
+        del: |id, _| format!("/v1/tokens/{id}"),
+    },
     // The id is escaped, not interpolated: an ssh credential's id is its `SHA256:<base64>`
     // fingerprint and base64 contains `/`, so the plain `format!` built a three-segment path that
     // matched no route and fell through to the GET-only fallback as a 405 — every probe key this
     // sweep ever tried to delete was left standing.
-    Kind { kind: "key", list: "/v1/keys", name_field: "name", id_field: "_id", del: |id, _| format!("/v1/keys/{}", experience_gaps::path_seg(id)) },
+    Kind {
+        kind: "key",
+        list: "/v1/keys",
+        name_field: "name",
+        id_field: "_id",
+        del: |id, _| format!("/v1/keys/{}", experience_gaps::path_seg(id)),
+    },
     // `id.cli.flow` mints a real 30-day CLI token every five minutes. Its own collection, because
     // a CLI token is not listed by `/v1/tokens` — without this the probe would leak one credential
     // per run forever, which is a worse thing to own than the SLO is to measure.
-    Kind { kind: "cli-token", list: "/v1/cli/tokens", name_field: "name", id_field: "id", del: |id, _| format!("/v1/cli/tokens/{id}") },
+    Kind {
+        kind: "cli-token",
+        list: "/v1/cli/tokens",
+        name_field: "name",
+        id_field: "id",
+        del: |id, _| format!("/v1/cli/tokens/{id}"),
+    },
 ];
 
 /// Both tenants. The Experience suite makes the second user a real participant — it is invited to a
@@ -428,16 +547,30 @@ async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: String, match
             if !matches(&name) {
                 continue;
             }
-            let url = format!("{}{}", c.cfg.api_url.trim_end_matches('/'), (k.del)(&id, owner));
-            match c.http.delete(&url).header("authorization", c.bearer(&jwt)).send().await {
+            let url = format!(
+                "{}{}",
+                c.cfg.api_url.trim_end_matches('/'),
+                (k.del)(&id, owner)
+            );
+            match c
+                .http
+                .delete(&url)
+                .header("authorization", c.bearer(&jwt))
+                .send()
+                .await
+            {
                 Ok(r) if r.status().is_success() => {
                     gone += 1;
                     tracing::info!(kind = k.kind, name = %name, "slo.teardown.deleted");
                 }
                 // Best-effort by design: a 409 here is usually "something still references it",
                 // and the next run's boot sweep gets it once that reference is gone.
-                Ok(r) => tracing::warn!(kind = k.kind, op = "delete", name = %name, error = %r.status(), "slo.teardown.failed"),
-                Err(e) => tracing::warn!(kind = k.kind, op = "delete", name = %name, error = %e, "slo.teardown.failed"),
+                Ok(r) => {
+                    tracing::warn!(kind = k.kind, op = "delete", name = %name, error = %r.status(), "slo.teardown.failed")
+                }
+                Err(e) => {
+                    tracing::warn!(kind = k.kind, op = "delete", name = %name, error = %e, "slo.teardown.failed")
+                }
             }
         }
     }
@@ -456,7 +589,13 @@ async fn sweep_teams<M: Fn(&str) -> bool>(c: &mut Ctx, jwt: &str, matches: &M) -
     let mut gone = 0;
     let teams = list(
         c,
-        &Kind { kind: "team", list: "/v1/teams", name_field: "_id", id_field: "_id", del: |s, _| format!("/v1/teams/{s}") },
+        &Kind {
+            kind: "team",
+            list: "/v1/teams",
+            name_field: "_id",
+            id_field: "_id",
+            del: |s, _| format!("/v1/teams/{s}"),
+        },
         "",
         jwt,
     )
@@ -466,12 +605,29 @@ async fn sweep_teams<M: Fn(&str) -> bool>(c: &mut Ctx, jwt: &str, matches: &M) -
             continue;
         }
         // The team's repositories, which block the delete. Same prefix, the team as the owner.
-        for (name, _) in
-            list(c, &Kind { kind: "repo", list: "/v1/repos", name_field: "name", id_field: "name", del: |_, _| String::new() }, &slug, jwt)
-                .await
+        for (name, _) in list(
+            c,
+            &Kind {
+                kind: "repo",
+                list: "/v1/repos",
+                name_field: "name",
+                id_field: "name",
+                del: |_, _| String::new(),
+            },
+            &slug,
+            jwt,
+        )
+        .await
         {
             if matches(&name) {
-                gone += del(c, "repo", &name, &api(c, &format!("/v1/repos/{slug}/{name}")), jwt).await as usize;
+                gone += del(
+                    c,
+                    "repo",
+                    &name,
+                    &api(c, &format!("/v1/repos/{slug}/{name}")),
+                    jwt,
+                )
+                .await as usize;
             }
         }
         // Every credential minted UNDER the team, not only the ones whose name carries the run
@@ -479,13 +635,20 @@ async fn sweep_teams<M: Fn(&str) -> bool>(c: &mut Ctx, jwt: &str, matches: &M) -
         // credential that outlives its team is a credential nobody can see to revoke.
         for (name, id) in list(
             c,
-            &Kind { kind: "token", list: "/v1/tokens", name_field: "name", id_field: "_id", del: |_, _| String::new() },
+            &Kind {
+                kind: "token",
+                list: "/v1/tokens",
+                name_field: "name",
+                id_field: "_id",
+                del: |_, _| String::new(),
+            },
             &slug,
             jwt,
         )
         .await
         {
-            gone += del(c, "token", &name, &api(c, &format!("/v1/tokens/{id}")), jwt).await as usize;
+            gone +=
+                del(c, "token", &name, &api(c, &format!("/v1/tokens/{id}")), jwt).await as usize;
         }
         // A team with an orphaned workspace is worse than a leaked team: the workspace is billed
         // to an owner that no longer exists and no listing anywhere shows it. So the team is
@@ -510,26 +673,46 @@ pub(crate) const TEAM_DRAIN: Duration = Duration::from_secs(60);
 /// row the next run's prefix sweep picks up.
 pub(crate) async fn drain_team(c: &Ctx, slug: &str, jwt: &str) -> Result<()> {
     let url = api(c, &format!("/v1/workspaces?team={slug}"));
-    let rows = get(c, &url, jwt).await.context("could not list the team's workspaces")?;
+    let rows = get(c, &url, jwt)
+        .await
+        .context("could not list the team's workspaces")?;
     let ids: Vec<String> = rows
         .as_array()
-        .map(|rows| rows.iter().filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string)).collect())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     for id in ids {
-        call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{id}")), jwt, None)
-            .await
-            .with_context(|| format!("could not delete the team workspace {id}"))?;
+        call(
+            c,
+            reqwest::Method::DELETE,
+            &api(c, &format!("/v1/workspaces/{id}")),
+            jwt,
+            None,
+        )
+        .await
+        .with_context(|| format!("could not delete the team workspace {id}"))?;
     }
     // The delete is a wish — the workspace goes when its finalizer has dropped the worktree — so
     // the listing going empty is the only thing that says the team is safe to take.
-    poll_json(c, &url, jwt, TEAM_DRAIN, |v| v.as_array().is_some_and(|rows| rows.is_empty()))
-        .await
-        .context("the team still holds a workspace")
+    poll_json(c, &url, jwt, TEAM_DRAIN, |v| {
+        v.as_array().is_some_and(|rows| rows.is_empty())
+    })
+    .await
+    .context("the team still holds a workspace")
 }
 
 /// One best-effort DELETE, logged the way every other line in teardown logs. `true` when it went.
 async fn del(c: &Ctx, kind: &'static str, name: &str, url: &str, jwt: &str) -> bool {
-    match c.http.delete(url).header("authorization", c.bearer(jwt)).send().await {
+    match c
+        .http
+        .delete(url)
+        .header("authorization", c.bearer(jwt))
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => {
             tracing::info!(kind, name = %name, "slo.teardown.deleted");
             true
@@ -586,10 +769,20 @@ pub(crate) async fn sweep_requests(c: &Ctx) -> usize {
         (kube::Api::all(k.clone()), kube::Api::all(k.clone()));
     let mut names: Vec<(bool, String)> = vec![];
     if let Ok(list) = reqs.list(&kube::api::ListParams::default()).await {
-        names.extend(list.items.iter().filter(|r| mine(&r.spec.owner)).map(|r| (false, kube::ResourceExt::name_any(r))));
+        names.extend(
+            list.items
+                .iter()
+                .filter(|r| mine(&r.spec.owner))
+                .map(|r| (false, kube::ResourceExt::name_any(r))),
+        );
     }
     if let Ok(list) = legacy.list(&kube::api::ListParams::default()).await {
-        names.extend(list.items.iter().filter(|r| mine(&r.spec.owner)).map(|r| (true, kube::ResourceExt::name_any(r))));
+        names.extend(
+            list.items
+                .iter()
+                .filter(|r| mine(&r.spec.owner))
+                .map(|r| (true, kube::ResourceExt::name_any(r))),
+        );
     }
     let mut gone = 0;
     for (is_legacy, name) in names {
@@ -603,7 +796,9 @@ pub(crate) async fn sweep_requests(c: &Ctx) -> usize {
                 gone += 1;
                 tracing::info!(kind = "request", name = %name, "slo.teardown.deleted");
             }
-            false => tracing::warn!(kind = "request", op = "delete", name = %name, "slo.teardown.failed"),
+            false => {
+                tracing::warn!(kind = "request", op = "delete", name = %name, "slo.teardown.failed")
+            }
         }
     }
     gone
@@ -612,16 +807,35 @@ pub(crate) async fn sweep_requests(c: &Ctx) -> usize {
 /// `Request` has no delete on any tier — only a superadmin decision — so the sweep DENIES a
 /// leftover instead. That is what teardown actually needs: a pending request blocks the next
 /// run's `req.queue` step (one pending per owner per kind), and a denied one does not.
-async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str, matches: &M) -> usize {
+async fn deny_requests<M: Fn(&str) -> bool>(
+    c: &mut Ctx,
+    owner: &str,
+    jwt: &str,
+    matches: &M,
+) -> usize {
     let mut gone = 0;
     // The reason, not the name: the id is a server-generated `req-…` that no prefix can match.
-    for (reason, id) in
-        list(c, &Kind { kind: "request", list: "/v1/requests", name_field: "reason", id_field: "id", del: |_, _| String::new() }, owner, jwt).await
+    for (reason, id) in list(
+        c,
+        &Kind {
+            kind: "request",
+            list: "/v1/requests",
+            name_field: "reason",
+            id_field: "id",
+            del: |_, _| String::new(),
+        },
+        owner,
+        jwt,
+    )
+    .await
     {
         if !matches(&reason) {
             continue;
         }
-        let url = format!("{}/admin/requests/{id}/deny", c.cfg.admin_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/admin/requests/{id}/deny",
+            c.cfg.admin_url.trim_end_matches('/')
+        );
         match c
             .http
             .post(&url)
@@ -636,8 +850,12 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str,
             }
             // 409: already decided (the admin stage denied it), which is the state teardown wants.
             Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => gone += 1,
-            Ok(r) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %r.status(), "slo.teardown.failed"),
-            Err(e) => tracing::warn!(kind = "request", op = "deny", name = %id, error = %e, "slo.teardown.failed"),
+            Ok(r) => {
+                tracing::warn!(kind = "request", op = "deny", name = %id, error = %r.status(), "slo.teardown.failed")
+            }
+            Err(e) => {
+                tracing::warn!(kind = "request", op = "deny", name = %id, error = %e, "slo.teardown.failed")
+            }
         }
     }
     gone
@@ -646,7 +864,12 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str,
 /// Images are not a `/v1` collection: they are listed and deleted through the server tier's
 /// browse API, which the api process proxies at `/api/{owner}/…`. A delete is a POST with no body
 /// (`crates/api/src/images.rs`), not a DELETE, which is why this cannot be another `Kind`.
-async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str, matches: &M) -> usize {
+async fn sweep_images<M: Fn(&str) -> bool>(
+    c: &mut Ctx,
+    owner: &str,
+    jwt: &str,
+    matches: &M,
+) -> usize {
     let mut gone = 0;
     for name in images(c, owner, jwt, matches).await {
         let del = api(c, &format!("/api/{owner}/{name}/imagedelete"));
@@ -655,7 +878,9 @@ async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str, 
                 gone += 1;
                 tracing::info!(kind = "image", name = %name, "slo.teardown.deleted");
             }
-            Err(e) => tracing::warn!(kind = "image", op = "delete", name = %name, error = %format!("{e:#}"), "slo.teardown.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "image", op = "delete", name = %name, error = %format!("{e:#}"), "slo.teardown.failed")
+            }
         }
     }
     gone
@@ -663,7 +888,12 @@ async fn sweep_images<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str, 
 
 /// The probe-owned image names `matches` claims. A listing that fails is an empty list, like every
 /// other read in teardown.
-async fn images<M: Fn(&str) -> bool + ?Sized>(c: &Ctx, owner: &str, jwt: &str, matches: &M) -> Vec<String> {
+async fn images<M: Fn(&str) -> bool + ?Sized>(
+    c: &Ctx,
+    owner: &str,
+    jwt: &str,
+    matches: &M,
+) -> Vec<String> {
     let url = api(c, &format!("/api/{owner}/images"));
     let rows: Vec<serde_json::Value> = match get(c, &url, jwt).await {
         Ok(v) => serde_json::from_value(v).unwrap_or_default(),
@@ -681,7 +911,11 @@ async fn images<M: Fn(&str) -> bool + ?Sized>(c: &Ctx, owner: &str, jwt: &str, m
 /// `(name, id)` for every object of one kind under the probe's owner. A list that fails is an
 /// empty list: teardown cannot fix an unreachable API, and the next run tries again.
 async fn list(c: &Ctx, k: &Kind, owner: &str, jwt: &str) -> Vec<(String, String)> {
-    let url = format!("{}{}?owner={owner}", c.cfg.api_url.trim_end_matches('/'), k.list);
+    let url = format!(
+        "{}{}?owner={owner}",
+        c.cfg.api_url.trim_end_matches('/'),
+        k.list
+    );
     let rows: Vec<serde_json::Value> = match c
         .http
         .get(&url)
@@ -702,7 +936,10 @@ async fn list(c: &Ctx, k: &Kind, owner: &str, jwt: &str) -> Vec<(String, String)
     };
     rows.iter()
         .filter_map(|v| {
-            Some((v.get(k.name_field)?.as_str()?.to_string(), v.get(k.id_field)?.as_str()?.to_string()))
+            Some((
+                v.get(k.name_field)?.as_str()?.to_string(),
+                v.get(k.id_field)?.as_str()?.to_string(),
+            ))
         })
         .collect()
 }
@@ -711,13 +948,19 @@ async fn list(c: &Ctx, k: &Kind, owner: &str, jwt: &str) -> Vec<(String, String)
 /// parse: the sweep only ever deletes what it can positively identify as its own litter, and
 /// `run-` is a prefix a person could plausibly give a repo of their own.
 fn stale(name: &str, now: i64) -> bool {
-    let Some(rest) = name.strip_prefix("run-") else { return false };
+    let Some(rest) = name.strip_prefix("run-") else {
+        return false;
+    };
     let mut parts = rest.split('-');
-    let (Some(suite), Some(ts)) = (parts.next(), parts.next()) else { return false };
+    let (Some(suite), Some(ts)) = (parts.next(), parts.next()) else {
+        return false;
+    };
     if Suite::parse(suite).is_none() {
         return false;
     }
-    ts.parse::<i64>().map(|t| now - t > STALE_SECS).unwrap_or(false)
+    ts.parse::<i64>()
+        .map(|t| now - t > STALE_SECS)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -752,12 +995,20 @@ mod pending_tests {
     #[test]
     fn a_row_with_no_status_is_pending_like_the_api_says() {
         assert!(pending(&json!({ "id": "req-1" })), "no state at all");
-        assert!(pending(&json!({ "id": "req-1", "status": {} })), "a status with no state");
+        assert!(
+            pending(&json!({ "id": "req-1", "status": {} })),
+            "a status with no state"
+        );
         assert!(pending(&json!({ "id": "req-1", "state": "pending" })));
-        assert!(pending(&json!({ "id": "req-1", "status": { "state": "Pending" } })), "the CR's own casing");
+        assert!(
+            pending(&json!({ "id": "req-1", "status": { "state": "Pending" } })),
+            "the CR's own casing"
+        );
         assert!(!pending(&json!({ "id": "req-1", "state": "approved" })));
         assert!(!pending(&json!({ "id": "req-1", "state": "denied" })));
-        assert!(!pending(&json!({ "id": "req-1", "status": { "state": "denied" } })));
+        assert!(!pending(
+            &json!({ "id": "req-1", "status": { "state": "denied" } })
+        ));
     }
 }
 
@@ -778,8 +1029,14 @@ mod http_tests {
         let url = format!("{}/v1/cli/token?poll=SECRETPOLLVALUE", c.cfg.api_url);
         let e = get(&c, &url, "").await.expect_err("nothing is listening");
         let detail = format!("{e:#}");
-        assert!(!detail.contains("SECRETPOLLVALUE"), "the poll secret leaked: {detail}");
+        assert!(
+            !detail.contains("SECRETPOLLVALUE"),
+            "the poll secret leaked: {detail}"
+        );
         assert!(!detail.contains("poll="), "the query leaked: {detail}");
-        assert!(detail.contains("/v1/cli/token"), "the path is what makes a bad URL visible: {detail}");
+        assert!(
+            detail.contains("/v1/cli/token"),
+            "the path is what makes a bad URL visible: {detail}"
+        );
     }
 }

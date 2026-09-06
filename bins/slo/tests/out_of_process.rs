@@ -41,7 +41,9 @@ async fn stub() -> (String, Reports, Arc<AtomicUsize>) {
                 Json(serde_json::json!([]))
             }
         }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -78,16 +80,32 @@ async fn a_panicking_stage_still_yields_a_finished_report_and_a_teardown() {
     let logs = String::from_utf8_lossy(&out.stderr).to_string();
     // The child aborted, so the run is a failure — but it is a REPORTED failure.
     assert_eq!(out.status.code(), Some(1), "exit; logs:\n{logs}");
-    assert!(logs.contains("slo.teardown.completed"), "teardown did not run; logs:\n{logs}");
-    assert!(logs.contains("slo.run.finished"), "no final log; logs:\n{logs}");
+    assert!(
+        logs.contains("slo.teardown.completed"),
+        "teardown did not run; logs:\n{logs}"
+    );
+    assert!(
+        logs.contains("slo.run.finished"),
+        "no final log; logs:\n{logs}"
+    );
 
     let reports = reports.lock().expect("lock");
     let last = reports.last().expect("at least one report");
-    assert!(!last["finished"].is_null(), "final report has no finished: {last}");
+    assert!(
+        !last["finished"].is_null(),
+        "final report has no finished: {last}"
+    );
     assert_eq!(last["state"], "failed");
     assert_eq!(last["stage"], "11 · Teardown");
     // Every report in the run is one row: the child must not open a run id of its own.
-    assert!(reports.iter().all(|r| r["run_id"] == last["run_id"]), "two run ids");
+    assert!(
+        reports.iter().all(|r| r["run_id"] == last["run_id"]),
+        "two run ids"
+    );
     // Teardown really swept — six `/v1` collections plus the request queue.
-    assert!(lists.load(Ordering::SeqCst) >= 7, "teardown listed {} times", lists.load(Ordering::SeqCst));
+    assert!(
+        lists.load(Ordering::SeqCst) >= 7,
+        "teardown listed {} times",
+        lists.load(Ordering::SeqCst)
+    );
 }

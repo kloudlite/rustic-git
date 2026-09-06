@@ -45,9 +45,15 @@ mod tests {
     #[test]
     fn cert_days_parses_openssl_enddate() {
         let now = Utc.with_ymd_and_hms(2026, 9, 5, 0, 0, 0).unwrap();
-        assert_eq!(days_left("notAfter=Sep 18 12:00:00 2026 GMT\n", now).unwrap(), 13);
+        assert_eq!(
+            days_left("notAfter=Sep 18 12:00:00 2026 GMT\n", now).unwrap(),
+            13
+        );
         // The single-digit day openssl space-pads, and an already-expired certificate.
-        assert_eq!(days_left("notAfter=Sep  8 00:00:00 2026 GMT", now).unwrap(), 3);
+        assert_eq!(
+            days_left("notAfter=Sep  8 00:00:00 2026 GMT", now).unwrap(),
+            3
+        );
         assert!(days_left("notAfter=Sep  1 00:00:00 2026 GMT", now).unwrap() < 0);
         // Nothing to read is an error, never "far away".
         assert!(days_left("unable to load certificate", now).is_err());

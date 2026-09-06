@@ -33,7 +33,11 @@ pub async fn run(c: &mut Ctx) {
     // report an instant merge that never happened.
     let refs_url = api(c, &format!("/api/{probe}/{name}/refs"));
     let jwt = c.probe_jwt.clone();
-    let target = match get(c, &refs_url, &jwt).await.ok().and_then(|r| oid_of(&r, HEAD_BRANCH)) {
+    let target = match get(c, &refs_url, &jwt)
+        .await
+        .ok()
+        .and_then(|r| oid_of(&r, HEAD_BRANCH))
+    {
         Some(oid) => oid,
         None => {
             let why = format!("`{HEAD_BRANCH}` was never pushed");
@@ -55,18 +59,27 @@ pub async fn run(c: &mut Ctx) {
 
     let merged = {
         let (name, refs_url, target) = (name.clone(), refs_url.clone(), target.clone());
-        c.step("pr.merge.p95", MERGE_CAP + Duration::from_secs(30), move |c| {
-            let jwt = c.probe_jwt.clone();
-            let url = api(c, &format!("/v1/repos/{probe}/{name}/pulls/{number}/merge?strategy=fast-forward"));
-            async move {
-                post(c, &url, &jwt, serde_json::Value::Null).await.context("could not ask for the merge")?;
-                poll_json(c, &refs_url, &jwt, MERGE_CAP, |refs| {
-                    oid_of(refs, BASE_BRANCH).as_deref() == Some(target.as_str())
-                })
-                .await
-            }
-            .boxed()
-        })
+        c.step(
+            "pr.merge.p95",
+            MERGE_CAP + Duration::from_secs(30),
+            move |c| {
+                let jwt = c.probe_jwt.clone();
+                let url = api(
+                    c,
+                    &format!("/v1/repos/{probe}/{name}/pulls/{number}/merge?strategy=fast-forward"),
+                );
+                async move {
+                    post(c, &url, &jwt, serde_json::Value::Null)
+                        .await
+                        .context("could not ask for the merge")?;
+                    poll_json(c, &refs_url, &jwt, MERGE_CAP, |refs| {
+                        oid_of(refs, BASE_BRANCH).as_deref() == Some(target.as_str())
+                    })
+                    .await
+                }
+                .boxed()
+            },
+        )
         .await
     };
 
@@ -78,16 +91,18 @@ pub async fn run(c: &mut Ctx) {
         return;
     }
 
-    c.step("feed.latency", FEED_CAP + Duration::from_secs(10), move |c| {
-        let probe = c.probe_user.clone();
-        let jwt = c.probe_jwt.clone();
-        let url = api(c, &format!("/v1/activity?owner={probe}"));
-        let repo = name.clone();
-        async move {
-            poll_json(c, &url, &jwt, FEED_CAP, |feed| merge_event(feed, &repo)).await
-        }
-        .boxed()
-    })
+    c.step(
+        "feed.latency",
+        FEED_CAP + Duration::from_secs(10),
+        move |c| {
+            let probe = c.probe_user.clone();
+            let jwt = c.probe_jwt.clone();
+            let url = api(c, &format!("/v1/activity?owner={probe}"));
+            let repo = name.clone();
+            async move { poll_json(c, &url, &jwt, FEED_CAP, |feed| merge_event(feed, &repo)).await }
+                .boxed()
+        },
+    )
     .await;
 }
 
@@ -103,7 +118,9 @@ async fn open(c: &mut Ctx, name: &str) -> Result<i64> {
         "head": HEAD_BRANCH,
     });
     let out = post(c, &url, &jwt, body).await?;
-    out.get("number").and_then(|v| v.as_i64()).ok_or_else(|| anyhow!("the answer carried no number"))
+    out.get("number")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow!("the answer carried no number"))
 }
 
 /// Whether the feed has the merge of THIS repo yet.
@@ -112,7 +129,10 @@ async fn open(c: &mut Ctx, name: &str) -> Result<i64> {
 /// one repo per run, but a leftover the sweep has not taken yet would otherwise answer for a merge
 /// that happened an hour ago.
 fn merge_event(feed: &serde_json::Value, repo: &str) -> bool {
-    let events = feed.get("events").and_then(|v| v.as_array()).or_else(|| feed.as_array());
+    let events = feed
+        .get("events")
+        .and_then(|v| v.as_array())
+        .or_else(|| feed.as_array());
     // Exact, not a suffix: `run-fast-1` is a suffix of `run-fast-11`, and the sweep leaves
     // yesterday's runs listed long enough for that to matter. The feed's `repo` is the BARE name
     // (`feed.rs` writes it without the owner), which the first live run proved.

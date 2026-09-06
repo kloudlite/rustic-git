@@ -43,8 +43,14 @@ const PORT: u16 = 6379;
 const QUOTA_GB: u64 = 1;
 
 /// Every id after the create, in journey order.
-const AFTER_CREATE: [&str; 6] =
-    ["env.exec.ok", "env.dns", "env.attach", "env.detach", "env.push.p95", "env.clone.p95"];
+const AFTER_CREATE: [&str; 6] = [
+    "env.exec.ok",
+    "env.dns",
+    "env.attach",
+    "env.detach",
+    "env.push.p95",
+    "env.clone.p95",
+];
 
 pub async fn run(c: &mut Ctx) {
     if !create(c).await {
@@ -78,8 +84,15 @@ async fn exec_ok(c: &mut Ctx, env: &str) {
             let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
             let ns = kloudlite_workspaces::crd::env_namespace(&env);
             let pod = format!("{SERVICE}-0");
-            let (code, out, err) =
-                crate::kube::exec(k, &ns, &pod, None, &["sh", "-c", "echo slo"], SVC_EXEC_CEILING).await?;
+            let (code, out, err) = crate::kube::exec(
+                k,
+                &ns,
+                &pod,
+                None,
+                &["sh", "-c", "echo slo"],
+                SVC_EXEC_CEILING,
+            )
+            .await?;
             if code != 0 || out.trim() != "slo" {
                 return Err(anyhow!("exec exited {code}: {}", err.trim()));
             }
@@ -104,7 +117,9 @@ async fn clone(c: &mut Ctx, env: &str) {
         let url = api(c, &format!("/v1/environments/{env}/clone"));
         let body = serde_json::json!({ "name": name });
         async move {
-            let doc = post(c, &url, &jwt, body).await.context("could not clone the environment")?;
+            let doc = post(c, &url, &jwt, body)
+                .await
+                .context("could not clone the environment")?;
             let id = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -131,12 +146,21 @@ async fn clone(c: &mut Ctx, env: &str) {
 /// Wait until `SERVICE`'s StatefulSet in this environment reports a ready replica. Without a
 /// kubeconfig there is nothing to read, and the caller has already measured the record.
 pub(super) async fn service_ready(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
-    let Some(k) = c.kube.as_ref() else { return Ok(()) };
+    let Some(k) = c.kube.as_ref() else {
+        return Ok(());
+    };
     let ns = kloudlite_workspaces::crd::env_namespace(env);
-    let sts: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(k.clone(), &ns);
+    let sts: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> =
+        kube::Api::namespaced(k.clone(), &ns);
     let start = std::time::Instant::now();
     loop {
-        let ready = sts.get(SERVICE).await.ok().and_then(|s| s.status).and_then(|st| st.ready_replicas).unwrap_or(0);
+        let ready = sts
+            .get(SERVICE)
+            .await
+            .ok()
+            .and_then(|s| s.status)
+            .and_then(|st| st.ready_replicas)
+            .unwrap_or(0);
         if ready >= 1 {
             return Ok(());
         }
@@ -147,9 +171,11 @@ pub(super) async fn service_ready(c: &Ctx, env: &str, cap: Duration) -> Result<(
     }
 }
 
-/// `env.create.p95`: the create and the wait for `ready` — same reason `ws.create.p95` waits.
-async fn create(c: &mut Ctx) -> bool {
-    let name = format!("{}-env", c.prefix());
+/// The journey's environment shape — one `redis` service — created under `name` and waited for
+/// until it is `running` with that service's pod ready. `env.create.p95` measures this; the
+/// weekly's `env.cross.node` stands up one of its own with it, since stage 8 has deleted the
+/// journey's by then.
+pub(super) async fn create_running(c: &mut Ctx, name: &str) -> Result<String> {
     let body = serde_json::json!({
         "name": name,
         "region": c.cfg.region,
@@ -165,25 +191,35 @@ async fn create(c: &mut Ctx) -> bool {
             "ports": [PORT],
         }],
     });
+    let jwt = c.probe_jwt.clone();
+    let url = api(c, "/v1/environments");
+    let doc = post(c, &url, &jwt, body)
+        .await
+        .context("could not create the environment")?;
+    let id = doc
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("the answer carried no environment id"))?
+        .to_string();
+    let env = api(c, &format!("/v1/environments/{id}"));
+    poll_json(c, &env, &jwt, CREATE_CEILING, |v| {
+        v.get("state").and_then(Value::as_str) == Some("running")
+    })
+    .await?;
+    // `running` is the environment's own word; the service pod behind it is what `env.dns`
+    // execs into, so the create is not done until that StatefulSet reports a ready replica.
+    service_ready(c, &id, CREATE_CEILING).await?;
+    Ok(id)
+}
+
+/// `env.create.p95`: the create and the wait for `ready` — same reason `ws.create.p95` waits.
+async fn create(c: &mut Ctx) -> bool {
+    let name = format!("{}-env", c.prefix());
     c.step("env.create.p95", CREATE_CEILING, move |c| {
-        let jwt = c.probe_jwt.clone();
-        let url = api(c, "/v1/environments");
         async move {
-            let doc = post(c, &url, &jwt, body).await.context("could not create the environment")?;
-            let id = doc
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the answer carried no environment id"))?
-                .to_string();
-            c.state.environment = Some(id.clone());
-            let env = api(c, &format!("/v1/environments/{id}"));
-            poll_json(c, &env, &jwt, CREATE_CEILING, |v| {
-                v.get("state").and_then(Value::as_str) == Some("running")
-            })
-            .await?;
-            // `running` is the environment's own word; the service pod behind it is what `env.dns`
-            // execs into, so the create is not done until that StatefulSet reports a ready replica.
-            service_ready(c, &id, CREATE_CEILING).await
+            let id = create_running(c, &name).await?;
+            c.state.environment = Some(id);
+            Ok(())
         }
         .boxed()
     })
@@ -207,11 +243,16 @@ async fn dns(c: &mut Ctx, env: &str) {
             let started = std::time::Instant::now();
             loop {
                 let cap = DNS_CEILING.saturating_sub(started.elapsed());
-                if resolves(c, &env, cap.max(Duration::from_secs(2))).await.unwrap_or(false) {
+                if resolves(c, &env, cap.max(Duration::from_secs(2)))
+                    .await
+                    .unwrap_or(false)
+                {
                     return Ok(());
                 }
                 if started.elapsed() + Duration::from_secs(2) >= DNS_CEILING {
-                    return Err(anyhow!("`{SERVICE}` does not resolve and answer inside the environment"));
+                    return Err(anyhow!(
+                        "`{SERVICE}` does not resolve and answer inside the environment"
+                    ));
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -254,7 +295,11 @@ async fn resolves(c: &Ctx, env: &str, cap: Duration) -> Result<bool> {
 /// would not also pass.
 async fn attach(c: &mut Ctx, env: &str) {
     let (Some(ws), true) = (c.state.workspace.clone(), c.kube.is_some()) else {
-        let why = if c.kube.is_none() { "no kubeconfig" } else { "no workspace" };
+        let why = if c.kube.is_none() {
+            "no kubeconfig"
+        } else {
+            "no workspace"
+        };
         c.skip("env.attach", why);
         c.skip("env.detach", why);
         return;
@@ -266,7 +311,9 @@ async fn attach(c: &mut Ctx, env: &str) {
             let url = api(c, &format!("/v1/workspaces/{w}/attach"));
             let body = serde_json::json!({ "environment": e });
             async move {
-                post(c, &url, &jwt, body).await.context("could not attach")?;
+                post(c, &url, &jwt, body)
+                    .await
+                    .context("could not attach")?;
                 until(c, &w, true, ATTACH_CEILING).await
             }
             .boxed()
@@ -281,7 +328,9 @@ async fn attach(c: &mut Ctx, env: &str) {
         let jwt = c.probe_jwt.clone();
         let url = api(c, &format!("/v1/workspaces/{ws}/detach"));
         async move {
-            post(c, &url, &jwt, Value::Null).await.context("could not detach")?;
+            post(c, &url, &jwt, Value::Null)
+                .await
+                .context("could not detach")?;
             until(c, &ws, false, ATTACH_CEILING).await
         }
         .boxed()
@@ -301,8 +350,15 @@ async fn until(c: &Ctx, ws: &str, want: bool, cap: Duration) -> Result<()> {
             return Ok(());
         }
         if start.elapsed() >= cap {
-            let what = if want { "never resolved" } else { "still resolves" };
-            return Err(anyhow!("`{SERVICE}` {what} in the workspace after {} ms", cap.as_millis()));
+            let what = if want {
+                "never resolved"
+            } else {
+                "still resolves"
+            };
+            return Err(anyhow!(
+                "`{SERVICE}` {what} in the workspace after {} ms",
+                cap.as_millis()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -318,7 +374,9 @@ async fn push(c: &mut Ctx, env: &str) {
         let url = api(c, &format!("/v1/environments/{env}/push"));
         let history = api(c, &format!("/v1/volumes/{env}/history"));
         async move {
-            let doc = post(c, &url, &jwt, serde_json::json!({})).await.context("could not push")?;
+            let doc = post(c, &url, &jwt, serde_json::json!({}))
+                .await
+                .context("could not push")?;
             let snap = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -327,9 +385,11 @@ async fn push(c: &mut Ctx, env: &str) {
             // Both, so teardown can delete them by name: the environment's Volume outlives the
             // environment for as long as this snapshot references it.
             c.state.env_snapshot = Some(snap.clone());
-            poll_json(c, &history, &jwt, PUSH_CEILING, |v| super::workspace::row_ready(v, &snap))
-                .await
-                .context("the snapshot never turned ready")
+            poll_json(c, &history, &jwt, PUSH_CEILING, |v| {
+                super::workspace::row_ready(v, &snap)
+            })
+            .await
+            .context("the snapshot never turned ready")
         }
         .boxed()
     })

@@ -46,7 +46,18 @@ pub struct Programs {
 
 impl Default for Programs {
     fn default() -> Self {
-        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into(), ssh: "ssh".into(), kl: "kl".into(), openssl: "openssl".into(), dig: "dig".into(), bash: "bash".into(), kubectl: "kubectl".into() }
+        Programs {
+            git: "git".into(),
+            ssh_keygen: "ssh-keygen".into(),
+            ssh_keyscan: "ssh-keyscan".into(),
+            crane: "crane".into(),
+            ssh: "ssh".into(),
+            kl: "kl".into(),
+            openssl: "openssl".into(),
+            dig: "dig".into(),
+            bash: "bash".into(),
+            kubectl: "kubectl".into(),
+        }
     }
 }
 
@@ -67,10 +78,18 @@ pub fn scrub(s: &str) -> String {
         // `-p` and `--password` are `crane auth login`'s, and `"auth":` is the docker config
         // document crane writes and echoes back in some failures — both carry the probe's
         // personal token, which is a credential for the whole registry namespace.
-        let cut = ["authorization:", "bearer ", "authorization=", "-p ", "--password ", "--password=", "\"auth\":"]
-            .iter()
-            .filter_map(|m| lower.find(m).map(|at| at + m.len()))
-            .min();
+        let cut = [
+            "authorization:",
+            "bearer ",
+            "authorization=",
+            "-p ",
+            "--password ",
+            "--password=",
+            "\"auth\":",
+        ]
+        .iter()
+        .filter_map(|m| lower.find(m).map(|at| at + m.len()))
+        .min();
         match cut {
             Some(at) => {
                 out.push_str(&line[..at]);
@@ -94,7 +113,11 @@ pub async fn run(
     timeout: Duration,
 ) -> Result<String> {
     let mut cmd = Command::new(name);
-    cmd.args(args).envs(env).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args)
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
@@ -109,7 +132,10 @@ pub async fn run(
     if !out.status.success() {
         let err = scrub(String::from_utf8_lossy(&out.stderr).trim());
         // No argv, ever: see the module comment.
-        return Err(anyhow!("{name} exited {}: {err}", out.status.code().unwrap_or(-1)));
+        return Err(anyhow!(
+            "{name} exited {}: {err}",
+            out.status.code().unwrap_or(-1)
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -130,7 +156,10 @@ mod tests {
         let leaked = format!("fatal: could not read Authorization: Bearer {secret}");
         let out = scrub(&leaked);
         assert!(!out.contains(secret), "{out}");
-        assert!(out.starts_with("fatal: could not read Authorization:"), "{out}");
+        assert!(
+            out.starts_with("fatal: could not read Authorization:"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -168,16 +197,25 @@ mod tests {
             .await
             .expect_err("sh exits 7");
         let detail = format!("{e:#}");
-        assert!(!detail.contains(token), "the token leaked into the detail: {detail}");
+        assert!(
+            !detail.contains(token),
+            "the token leaked into the detail: {detail}"
+        );
         assert!(detail.contains("sh exited 7"), "{detail}");
     }
 
     #[tokio::test]
     async fn a_hung_command_is_a_timeout_not_a_hang() {
         let args = vec!["30".to_string()];
-        let e = run("sleep", &args, &HashMap::new(), None, Duration::from_millis(50))
-            .await
-            .expect_err("cut off");
+        let e = run(
+            "sleep",
+            &args,
+            &HashMap::new(),
+            None,
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("cut off");
         assert!(format!("{e:#}").contains("timed out"), "{e:#}");
     }
 }

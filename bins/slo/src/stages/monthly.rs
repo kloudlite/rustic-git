@@ -72,7 +72,6 @@ async fn interrupted(c: &mut Ctx) {
     c.skip("env.clone.interrupted", NODE_LEVEL_DRILL);
 }
 
-
 /// `drill.clickhouse.down`: the history layer is optional, and the fleet must behave as if it is.
 ///
 /// `KLOUDLITE_CLICKHOUSE_URL` unset is a supported deployment answered with `503 history
@@ -82,11 +81,19 @@ async fn interrupted(c: &mut Ctx) {
 /// still works and `/admin/history/*` answers 503 rather than 500.
 async fn clickhouse_down(c: &mut Ctx) {
     let Some(host) = c.cfg.clickhouse_host.clone() else {
-        return c.skip("drill.clickhouse.down", "no KLOUDLITE_SLO_CLICKHOUSE_HOST to deny");
+        return c.skip(
+            "drill.clickhouse.down",
+            "no KLOUDLITE_SLO_CLICKHOUSE_HOST to deny",
+        );
     };
     let k = match drill::incluster() {
         Ok(k) => k,
-        Err(e) => return c.skip("drill.clickhouse.down", &format!("no in-cluster client: {e:#}")),
+        Err(e) => {
+            return c.skip(
+                "drill.clickhouse.down",
+                &format!("no in-cluster client: {e:#}"),
+            )
+        }
     };
     let ips = match resolve(c, &host).await {
         Ok(ips) => ips,
@@ -105,24 +112,50 @@ async fn clickhouse_down(c: &mut Ctx) {
                 // Long enough that a pooled connection has certainly failed over.
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 // Ordinary work, unaffected: the history layer is a reader, never the record.
-                get(c, &quota, &jwt).await.context("`/v1/quota` stopped answering with ClickHouse down")?;
-                let owner = c.probe_user.clone();
-                post(c, &repos, &jwt, json!({ "owner": owner, "name": name, "visibility": "private" }))
+                get(c, &quota, &jwt)
                     .await
-                    .context("a repo could not be created with ClickHouse down")?;
-                let _ = super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/repos/{owner}/{name}")), &jwt, None).await;
+                    .context("`/v1/quota` stopped answering with ClickHouse down")?;
+                let owner = c.probe_user.clone();
+                post(
+                    c,
+                    &repos,
+                    &jwt,
+                    json!({ "owner": owner, "name": name, "visibility": "private" }),
+                )
+                .await
+                .context("a repo could not be created with ClickHouse down")?;
+                let _ = super::call(
+                    c,
+                    reqwest::Method::DELETE,
+                    &api(c, &format!("/v1/repos/{owner}/{name}")),
+                    &jwt,
+                    None,
+                )
+                .await;
                 // And the history reads degrade rather than break: 503 is the contract the web
                 // renders a placeholder for, and a 500 is the page falling over.
-                let (status, text) = super::raw(c, reqwest::Method::GET, &history, &admin_jwt, None, &[]).await?;
+                let (status, text) =
+                    super::raw(c, reqwest::Method::GET, &history, &admin_jwt, None, &[]).await?;
                 match status.as_u16() {
                     503 => Ok(()),
                     // Still answering is fine too: a replica may have taken over, and this drill
                     // is about what happens when it does NOT.
                     code if (200..300).contains(&code) => Ok(()),
-                    code => Err(anyhow!("`/admin/history/*` answered {code} with ClickHouse down, not 503: {}", text.chars().take(160).collect::<String>())),
+                    code => Err(anyhow!(
+                        "`/admin/history/*` answered {code} with ClickHouse down, not 503: {}",
+                        text.chars().take(160).collect::<String>()
+                    )),
                 }
             };
-            drill::with_netpol(&k, "kloudlite", CH_NETPOL, deny_clickhouse(&ips), body_cap, body).await
+            drill::with_netpol(
+                &k,
+                "kloudlite",
+                CH_NETPOL,
+                deny_clickhouse(&ips),
+                body_cap,
+                body,
+            )
+            .await
         }
         .boxed()
     })
@@ -189,14 +222,21 @@ async fn decommission(c: &mut Ctx) {
             // go back on every path out, in the order that leaves the node usable.
             let undo = || async {
                 use crate::drill::Cluster;
-                let uncordon = k.cordon(&node, false).await.context("the node was left CORDONED");
-                let undrained = verb(c, &base, "undrain", &jwt, &reason).await.context("the node was left DRAINING");
+                let uncordon = k
+                    .cordon(&node, false)
+                    .await
+                    .context("the node was left CORDONED");
+                let undrained = verb(c, &base, "undrain", &jwt, &reason)
+                    .await
+                    .context("the node was left DRAINING");
                 uncordon.and(undrained)
             };
             let body = async {
                 // Before the drain: nothing has stamped `drained`, so this must be refused.
                 refused_until_drained(c, &base, &jwt, &reason).await?;
-                verb(c, &base, "drain", &jwt, &reason).await.context("the drain was refused")?;
+                verb(c, &base, "drain", &jwt, &reason)
+                    .await
+                    .context("the drain was refused")?;
                 stamped(&k, &node, DRAIN_CAP - Duration::from_secs(60))
                     .await
                     .context("the node never finished draining, so the gate could not be tried")?;
@@ -204,7 +244,9 @@ async fn decommission(c: &mut Ctx) {
                 // console's own contract is that a decommission stops at `spec.unschedulable`.
                 verb(c, &base, "decommission", &jwt, &reason)
                     .await
-                    .context("the decommission was refused even though the agent had stamped `drained`")?;
+                    .context(
+                        "the decommission was refused even though the agent had stamped `drained`",
+                    )?;
                 cordoned(&k, &node).await
             };
             drill::undoing(DRAIN_CAP, body, undo).await
@@ -230,7 +272,9 @@ async fn refused_until_drained(c: &Ctx, base: &str, jwt: &str, reason: &Value) -
     .await?;
     match status.as_u16() {
         409 => Ok(()),
-        200..=299 => Err(anyhow!("a node that has not drained was ALLOWED to be decommissioned")),
+        200..=299 => Err(anyhow!(
+            "a node that has not drained was ALLOWED to be decommissioned"
+        )),
         other => Err(anyhow!(
             "the decommission answered {other}, which is not the gate refusing: {}",
             body.chars().take(200).collect::<String>()
@@ -241,10 +285,15 @@ async fn refused_until_drained(c: &Ctx, base: &str, jwt: &str, reason: &Value) -
 /// The node is unschedulable — where a decommission stops, and no further.
 async fn cordoned(k: &kube::Client, node: &str) -> Result<()> {
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
-    let obj = api.get(node).await.map_err(|e| anyhow!("could not read {node}: {e}"))?;
+    let obj = api
+        .get(node)
+        .await
+        .map_err(|e| anyhow!("could not read {node}: {e}"))?;
     match obj.spec.and_then(|s| s.unschedulable) {
         Some(true) => Ok(()),
-        _ => Err(anyhow!("the decommission was taken but {node} is not cordoned")),
+        _ => Err(anyhow!(
+            "the decommission was taken but {node} is not cordoned"
+        )),
     }
 }
 
@@ -265,9 +314,14 @@ async fn slots() -> Result<Vec<(String, chrono::DateTime<Utc>)>> {
         .with_container_name(BACKUP_CONTAINER)
         .build()
         .context("could not reach the backup container")?;
-    let objects: Vec<object_store::ObjectMeta> =
-        object_store::ObjectStore::list(&store, None).try_collect().await.context("could not list it")?;
-    Ok(objects.into_iter().map(|o| (o.location.to_string(), o.last_modified)).collect())
+    let objects: Vec<object_store::ObjectMeta> = object_store::ObjectStore::list(&store, None)
+        .try_collect()
+        .await
+        .context("could not list it")?;
+    Ok(objects
+        .into_iter()
+        .map(|o| (o.location.to_string(), o.last_modified))
+        .collect())
 }
 
 /// `bak.tarball.age`: the newest hourly slot is under two hours old.
@@ -374,7 +428,10 @@ async fn versioning(c: &mut Ctx) {
     c.step("bak.versioning", READ_CEILING, move |c| {
         async move {
             let doc = arm(c, &path).await?;
-            match doc.pointer("/properties/isVersioningEnabled").and_then(Value::as_bool) {
+            match doc
+                .pointer("/properties/isVersioningEnabled")
+                .and_then(Value::as_bool)
+            {
                 Some(true) => Ok(()),
                 // Absent and `false` are the same answer to the only question here.
                 _ => Err(anyhow!("blob versioning is OFF on {}", az.storage_account)),
@@ -401,7 +458,10 @@ async fn cosmos(c: &mut Ctx) {
     c.step("bak.cosmos", READ_CEILING, move |c| {
         async move {
             let doc = arm(c, &path).await?;
-            match doc.pointer("/properties/backupPolicy/type").and_then(Value::as_str) {
+            match doc
+                .pointer("/properties/backupPolicy/type")
+                .and_then(Value::as_str)
+            {
                 Some(t) if !t.is_empty() => {
                     tracing::info!(kind = "cosmos", policy = t, "slo.backup.read");
                     Ok(())
@@ -420,13 +480,19 @@ async fn cosmos(c: &mut Ctx) {
 /// cache for a process that makes two requests in its life is code that can only rot.
 async fn arm(c: &Ctx, path: &str) -> Result<Value> {
     let var = |k: &str| std::env::var(k).with_context(|| format!("{k} is not set"));
-    let (tenant, client, secret) =
-        (var("AZURE_TENANT_ID")?, var("AZURE_CLIENT_ID")?, var("AZURE_CLIENT_SECRET")?);
+    let (tenant, client, secret) = (
+        var("AZURE_TENANT_ID")?,
+        var("AZURE_CLIENT_ID")?,
+        var("AZURE_CLIENT_SECRET")?,
+    );
     let token_url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
     let r = c
         .http
         .post(&token_url)
-        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
         .body(form(&[
             ("grant_type", "client_credentials"),
             ("client_id", &client),
@@ -439,13 +505,20 @@ async fn arm(c: &Ctx, path: &str) -> Result<Value> {
         // request is a client secret.
         .map_err(|e| anyhow!("could not reach Entra: {}", e.without_url()))?;
     if !r.status().is_success() {
-        return Err(anyhow!("Entra answered {} to the token request", r.status()));
+        return Err(anyhow!(
+            "Entra answered {} to the token request",
+            r.status()
+        ));
     }
     let token = r
         .json::<Value>()
         .await
         .ok()
-        .and_then(|v| v.get("access_token").and_then(Value::as_str).map(str::to_string))
+        .and_then(|v| {
+            v.get("access_token")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .ok_or_else(|| anyhow!("Entra answered no access token"))?;
     super::get(c, &format!("https://management.azure.com{path}"), &token).await
 }
@@ -464,7 +537,11 @@ fn form(pairs: &[(&str, &str)]) -> String {
             })
             .collect::<String>()
     };
-    pairs.iter().map(|(k, v)| format!("{}={}", enc(k), enc(v))).collect::<Vec<_>>().join("&")
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", enc(k), enc(v)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 // ── drills ──────────────────────────────────────────────────────────────
@@ -490,8 +567,6 @@ async fn dead_node(c: &mut Ctx) {
 /// The reason every id that needs a genuinely dead node carries, naming where the recipe lives.
 const NODE_LEVEL_DRILL: &str = "a dead node needs the operator's node-level drill: stop the kubelet on one pool node — recipe in deploy/k3s/README.md";
 
-
-
 /// `drill.drain`: a drain does NOT interrupt what is running on the node.
 ///
 /// The SLI says "without interrupting a running worktree" and the drill used to pick an IDLE node
@@ -509,7 +584,10 @@ async fn drain(c: &mut Ctx) {
         return c.skip("drill.drain", "no kubeconfig");
     };
     let Some(ws) = probe_workspace(c).await else {
-        return c.skip("drill.drain", "no probe workspace to keep running through a drain");
+        return c.skip(
+            "drill.drain",
+            "no probe workspace to keep running through a drain",
+        );
     };
     let Some(node) = node_of(c, &ws).await else {
         return c.skip("drill.drain", "the workspace names no node");
@@ -522,21 +600,29 @@ async fn drain(c: &mut Ctx) {
         let doc = api(c, &format!("/v1/workspaces/{ws}"));
         let reason = json!({ "reason": format!("slo probe drill {}", c.run_id) });
         async move {
-            verb(c, &base, "drain", &jwt, &reason).await.context("the drain was refused")?;
+            verb(c, &base, "drain", &jwt, &reason)
+                .await
+                .context("the drain was refused")?;
             let body = async {
                 // The agent's own beat is `WS_DECOMMISSION_SECS` (30); two of them, so the stamp
                 // below is a decision it made rather than one it has not reached yet.
                 draining_stamp(&k, &node, DRAIN_CAP / 2).await?;
-                let now = get(c, &doc, &probe_jwt).await.context("could not read the workspace")?;
+                let now = get(c, &doc, &probe_jwt)
+                    .await
+                    .context("could not read the workspace")?;
                 let state = now.get("state").and_then(Value::as_str).unwrap_or_default();
                 if !matches!(state, "ready" | "running") {
-                    return Err(anyhow!("a running workspace on a draining node went to `{state}`"));
+                    return Err(anyhow!(
+                        "a running workspace on a draining node went to `{state}`"
+                    ));
                 }
                 // The pod itself, not only the phase: a controller that deleted and recreated it
                 // has interrupted the person at the keyboard whatever the status says afterwards.
                 let after = pod_uid(&k, c, &ws).await;
                 if before.is_some() && after != before {
-                    return Err(anyhow!("the workspace's pod was replaced while its node drained"));
+                    return Err(anyhow!(
+                        "the workspace's pod was replaced while its node drained"
+                    ));
                 }
                 Ok(())
             };
@@ -562,7 +648,10 @@ async fn draining_stamp(k: &kube::Client, node: &str, cap: Duration) -> Result<(
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
     let at = std::time::Instant::now();
     loop {
-        let obj = api.get(node).await.map_err(|e| anyhow!("could not read {node}: {e}"))?;
+        let obj = api
+            .get(node)
+            .await
+            .map_err(|e| anyhow!("could not read {node}: {e}"))?;
         let stamp = obj
             .metadata
             .annotations
@@ -574,7 +663,9 @@ async fn draining_stamp(k: &kube::Client, node: &str, cap: Duration) -> Result<(
             return Ok(());
         }
         if at.elapsed() >= cap {
-            return Err(anyhow!("{node}'s agent never stamped its drain: it reports {stamp:?}"));
+            return Err(anyhow!(
+                "{node}'s agent never stamped its drain: it reports {stamp:?}"
+            ));
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -583,7 +674,9 @@ async fn draining_stamp(k: &kube::Client, node: &str, cap: Duration) -> Result<(
 /// One node verb on the admin API. Both halves take the same reason, which is what the audit row
 /// carries — a drain nobody can explain is worse in the log than no drain at all.
 async fn verb(c: &Ctx, base: &str, v: &str, jwt: &str, reason: &Value) -> Result<()> {
-    post(c, &format!("{base}/{v}"), jwt, reason.clone()).await.map(|_| ())
+    post(c, &format!("{base}/{v}"), jwt, reason.clone())
+        .await
+        .map(|_| ())
 }
 
 /// A node holding nothing that is running, not already being retired, and not the one the taint
@@ -598,7 +691,10 @@ async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<String> {
     use kloudlite_workspaces::crd;
     let busy = running_nodes(k).await?;
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
-    let list = api.list(&kube::api::ListParams::default()).await.map_err(|e| anyhow!("could not list the nodes: {e}"))?;
+    let list = api
+        .list(&kube::api::ListParams::default())
+        .await
+        .map_err(|e| anyhow!("could not list the nodes: {e}"))?;
     list.items
         .iter()
         .find(|n| {
@@ -634,14 +730,24 @@ async fn running_nodes(k: &kube::Client) -> Result<Vec<String>> {
         .map_err(|e| anyhow!("could not list the workspaces: {e}"))?
         .items
         .iter()
-        .map(|w| (w.status.as_ref().map(|s| s.node_name.clone()), is_running(w.status.as_ref().map(|s| s.phase.as_str()))))
+        .map(|w| {
+            (
+                w.status.as_ref().map(|s| s.node_name.clone()),
+                is_running(w.status.as_ref().map(|s| s.phase.as_str())),
+            )
+        })
         .chain(
             env.list(&p)
                 .await
                 .map_err(|e| anyhow!("could not list the environments: {e}"))?
                 .items
                 .iter()
-                .map(|e| (e.status.as_ref().map(|s| s.node_name.clone()), is_running(e.status.as_ref().map(|s| s.phase.as_str())))),
+                .map(|e| {
+                    (
+                        e.status.as_ref().map(|s| s.node_name.clone()),
+                        is_running(e.status.as_ref().map(|s| s.phase.as_str())),
+                    )
+                }),
         )
     {
         if let (Some(node), true) = (node.filter(|n| !n.is_empty()), running) {
@@ -653,7 +759,10 @@ async fn running_nodes(k: &kube::Client) -> Result<Vec<String>> {
 
 /// Anything but a stopped or failed phase is something a person could be typing into.
 fn is_running(phase: Option<&str>) -> bool {
-    !matches!(phase.unwrap_or_default(), "" | "Stopped" | "stopped" | "Failed" | "failed")
+    !matches!(
+        phase.unwrap_or_default(),
+        "" | "Stopped" | "stopped" | "Failed" | "failed"
+    )
 }
 
 /// Wait for the agent's sticky `drained <RFC 3339>` stamp.
@@ -662,7 +771,10 @@ async fn stamped(k: &kube::Client, node: &str, cap: Duration) -> Result<()> {
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
     let at = std::time::Instant::now();
     loop {
-        let obj = api.get(node).await.map_err(|e| anyhow!("could not read {node}: {e}"))?;
+        let obj = api
+            .get(node)
+            .await
+            .map_err(|e| anyhow!("could not read {node}: {e}"))?;
         // Annotation first, label second: the agent stamps an annotation and `undrain` clears one,
         // but a value that long is not a legal label, so reading only labels would wait forever.
         let stamp = obj
@@ -670,7 +782,12 @@ async fn stamped(k: &kube::Client, node: &str, cap: Duration) -> Result<()> {
             .annotations
             .as_ref()
             .and_then(|a| a.get(crd::DECOMMISSION_STATUS))
-            .or_else(|| obj.metadata.labels.as_ref().and_then(|l| l.get(crd::DECOMMISSION_STATUS)))
+            .or_else(|| {
+                obj.metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(crd::DECOMMISSION_STATUS))
+            })
             .cloned()
             .unwrap_or_default();
         if stamp.starts_with(crd::DRAINED_PREFIX) {
@@ -680,7 +797,10 @@ async fn stamped(k: &kube::Client, node: &str, cap: Duration) -> Result<()> {
             // The COUNTS, verbatim: the first live monthly run sat at `draining running=0 owned=0
             // copies=1 thin=0` for ten minutes — a lone replica copy that never healed or retired,
             // which is a product stall and reads as one only if the stamp is in the detail.
-            return Err(anyhow!("after {} ms {node} still reports {stamp:?}", cap.as_millis()));
+            return Err(anyhow!(
+                "after {} ms {node} still reports {stamp:?}",
+                cap.as_millis()
+            ));
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -783,36 +903,79 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     let probe = c.probe_user.clone();
     let jwt = c.probe_jwt.clone();
     let body = json!({ "owner": probe, "name": name, "visibility": "private" });
-    post(c, &api(c, "/v1/repos"), &jwt, body).await.context("the repo would not create")?;
+    post(c, &api(c, "/v1/repos"), &jwt, body)
+        .await
+        .context("the repo would not create")?;
 
     let work = c.tmp.join("git").join(name);
     std::fs::create_dir_all(&work).context("could not make a working tree")?;
     let g = |a: Vec<String>| super::git::git(c, a, Some(&work));
-    g(vec!["init".into(), "-q".into(), "--initial-branch=main".into()]).await?;
+    g(vec![
+        "init".into(),
+        "-q".into(),
+        "--initial-branch=main".into(),
+    ])
+    .await?;
     std::fs::write(work.join("README.md"), format!("# {name}\n")).context("could not write")?;
     g(vec!["add".into(), "-A".into()]).await?;
-    g(vec!["commit".into(), "-q".into(), "-m".into(), "seed".into()]).await?;
+    g(vec![
+        "commit".into(),
+        "-q".into(),
+        "-m".into(),
+        "seed".into(),
+    ])
+    .await?;
     let url = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
     let push = super::git::authed(c, &["push", "-q", &url, "main"]);
-    super::git::git(c, push, Some(&work)).await.context("the push failed with Redis down")?;
+    super::git::git(c, push, Some(&work))
+        .await
+        .context("the push failed with Redis down")?;
 
-    g(vec!["checkout".into(), "-q".into(), "-b".into(), "slo".into()]).await?;
-    std::fs::write(work.join("change.txt"), format!("{}\n", c.run_id)).context("could not write")?;
+    g(vec![
+        "checkout".into(),
+        "-q".into(),
+        "-b".into(),
+        "slo".into(),
+    ])
+    .await?;
+    std::fs::write(work.join("change.txt"), format!("{}\n", c.run_id))
+        .context("could not write")?;
     g(vec!["add".into(), "-A".into()]).await?;
-    g(vec!["commit".into(), "-q".into(), "-m".into(), "change".into()]).await?;
+    g(vec![
+        "commit".into(),
+        "-q".into(),
+        "-m".into(),
+        "change".into(),
+    ])
+    .await?;
     let push = super::git::authed(c, &["push", "-q", &url, "slo"]);
-    super::git::git(c, push, Some(&work)).await.context("the branch push failed")?;
+    super::git::git(c, push, Some(&work))
+        .await
+        .context("the branch push failed")?;
 
     let refs = api(c, &format!("/api/{probe}/{name}/refs"));
     let head = super::git::oid_of(&get(c, &refs, &jwt).await?, "slo")
         .ok_or_else(|| anyhow!("the branch never appeared"))?;
     let pulls = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
-    let pr = post(c, &pulls, &jwt, json!({ "title": "slo redis drill", "base": "main", "head": "slo" }))
+    let pr = post(
+        c,
+        &pulls,
+        &jwt,
+        json!({ "title": "slo redis drill", "base": "main", "head": "slo" }),
+    )
+    .await
+    .context("the pull request would not open")?;
+    let number = pr
+        .get("number")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("no pull number"))?;
+    let merge = api(
+        c,
+        &format!("/v1/repos/{probe}/{name}/pulls/{number}/merge?strategy=fast-forward"),
+    );
+    post(c, &merge, &jwt, Value::Null)
         .await
-        .context("the pull request would not open")?;
-    let number = pr.get("number").and_then(Value::as_i64).ok_or_else(|| anyhow!("no pull number"))?;
-    let merge = api(c, &format!("/v1/repos/{probe}/{name}/pulls/{number}/merge?strategy=fast-forward"));
-    post(c, &merge, &jwt, Value::Null).await.context("the merge was refused")?;
+        .context("the merge was refused")?;
     // The merge runs in the worker, which is announced through the stream AND re-announced on the
     // owner's own 15 s beat — that fallback is what this half of the drill is about.
     poll_json(c, &refs, &jwt, Duration::from_secs(120), |r| {
@@ -839,16 +1002,23 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     // stream unreachable it must keep answering its own reads rather than wedging on the consumer.
     // A 503 is the no-ClickHouse deployment and is fine; a 500 or a hang is the claim being false.
     let history = admin(c, "/admin/history/audit_events?range=1d&step=1h");
-    let (status, text) = super::raw(c, reqwest::Method::GET, &history, &c.admin_jwt, None, &[]).await?;
+    let (status, text) =
+        super::raw(c, reqwest::Method::GET, &history, &c.admin_jwt, None, &[]).await?;
     match status.as_u16() {
         503 => Ok(()),
         code if (200..300).contains(&code) => Ok(()),
-        code => Err(anyhow!("the admin process answered {code} with Redis down: {}", text.chars().take(160).collect::<String>())),
+        code => Err(anyhow!(
+            "the admin process answered {code} with Redis down: {}",
+            text.chars().take(160).collect::<String>()
+        )),
     }
 }
 
 fn created(feed: &Value, repo: &str) -> bool {
-    let events = feed.get("events").and_then(Value::as_array).or_else(|| feed.as_array());
+    let events = feed
+        .get("events")
+        .and_then(Value::as_array)
+        .or_else(|| feed.as_array());
     events.is_some_and(|rows| {
         rows.iter().any(|e| {
             e.get("kind").and_then(Value::as_str) == Some("repo_created")
@@ -911,7 +1081,11 @@ mod tests {
                 "drill.clickhouse.down",
             ]
         );
-        assert_eq!(c.failed(), 0, "an unconfigured probe skips; it does not breach");
+        assert_eq!(
+            c.failed(),
+            0,
+            "an unconfigured probe skips; it does not breach"
+        );
     }
 
     /// The slot names are the shell script's contract, and the daily check is about EXISTENCE:
@@ -919,7 +1093,10 @@ mod tests {
     /// recent" cannot see.
     #[test]
     fn the_daily_slots_are_the_seven_the_backup_script_writes() {
-        let have: Vec<String> = DAYS.iter().map(|d| format!("daily-{d}{SLOT_SUFFIX}")).collect();
+        let have: Vec<String> = DAYS
+            .iter()
+            .map(|d| format!("daily-{d}{SLOT_SUFFIX}"))
+            .collect();
         assert_eq!(have.len(), 7);
         assert!(have.contains(&"daily-Mon.tgz.enc".to_string()));
         // `date +%a`'s own answer for today has to be one of them, or the daily check is asking
@@ -932,7 +1109,10 @@ mod tests {
     #[test]
     fn the_redis_policy_only_ever_excepts_addresses() {
         let spec = deny_egress(&["10.0.0.7".into(), "10.0.0.8".into()]);
-        let except = spec.pointer("/egress/0/to/0/ipBlock/except").and_then(Value::as_array).expect("except");
+        let except = spec
+            .pointer("/egress/0/to/0/ipBlock/except")
+            .and_then(Value::as_array)
+            .expect("except");
         assert_eq!(except.len(), 2);
         assert_eq!(except[0], "10.0.0.7/32");
         // DNS stays open: a pod that cannot resolve is a DNS outage, not the Redis one being drilled.

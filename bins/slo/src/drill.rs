@@ -139,7 +139,10 @@ fn note_cordon(tmp: &Path, node: &str) {
     if !nodes.iter().any(|n| n == node) {
         nodes.push(node.to_string());
     }
-    if let Err(e) = serde_json::to_vec(&nodes).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+    if let Err(e) = serde_json::to_vec(&nodes)
+        .map_err(|e| e.to_string())
+        .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
+    {
         tracing::warn!(op = "write", name = %path.display(), error = %e, "slo.drill.note.failed");
     }
 }
@@ -168,19 +171,25 @@ pub async fn sweep_nodes(k: &dyn Cluster, tmp: &Path) {
     for node in tainted {
         match k.taint(&node, false).await {
             Ok(()) => tracing::info!(kind = "taint", name = %node, "slo.drill.swept"),
-            Err(e) => tracing::warn!(kind = "taint", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "taint", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed")
+            }
         }
     }
     for node in cordoned(tmp) {
         match k.cordon(&node, false).await {
             Ok(()) => tracing::info!(kind = "cordon", name = %node, "slo.drill.swept"),
-            Err(e) => tracing::warn!(kind = "cordon", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "cordon", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed")
+            }
         }
         // Both, blind: the same file records either mutation, and a label left on a node is a node
         // placement will never use again.
         match k.decommission(&node, false).await {
             Ok(()) => tracing::info!(kind = "decommission", name = %node, "slo.drill.swept"),
-            Err(e) => tracing::warn!(kind = "decommission", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
+            Err(e) => {
+                tracing::warn!(kind = "decommission", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed")
+            }
         }
     }
 }
@@ -238,7 +247,11 @@ impl Cluster for kube::Client {
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         // `null` REMOVES a label in a merge patch, which is what the undo needs — an empty string
         // would leave the key there, and `unplaceable` reads the key.
-        let value = if on { serde_json::json!("true") } else { Value::Null };
+        let value = if on {
+            serde_json::json!("true")
+        } else {
+            Value::Null
+        };
         // The undo takes the `draining …` stamp with the label, exactly as the admin's `undrain`
         // does: the agent writes that annotation only while labelled and clears nothing on its
         // own, so a drill that removed the label alone left "draining running=2 …" on a node that
@@ -248,7 +261,12 @@ impl Cluster for kube::Client {
             false => json!({ "metadata": { "labels": { DECOMMISSION_LABEL: value },
                                             "annotations": { DECOMMISSION_STATUS: Value::Null } } }),
         };
-        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await?;
+        api.patch(
+            node,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await?;
         Ok(())
     }
 
@@ -410,7 +428,11 @@ pub(crate) mod tests {
             })
             .await;
         assert!(!ok, "an overrunning drill is a failed sample");
-        assert!(c.steps[0].detail.contains("timed out"), "{}", c.steps[0].detail);
+        assert!(
+            c.steps[0].detail.contains("timed out"),
+            "{}",
+            c.steps[0].detail
+        );
         assert_eq!(k.calls(), ["taint node-a true", "taint node-a false"]);
     }
 
@@ -423,7 +445,14 @@ pub(crate) mod tests {
         let tmp = tmpdir("sweep");
         note_cordon(&tmp, "node-b");
         sweep_nodes(&k, &tmp).await;
-        assert_eq!(k.calls(), ["taint node-a false", "cordon node-b false", "decommission node-b false"]);
+        assert_eq!(
+            k.calls(),
+            [
+                "taint node-a false",
+                "cordon node-b false",
+                "decommission node-b false"
+            ]
+        );
     }
 
     /// A drill that worked and could not clean up after itself is NOT a pass: the fleet is left
@@ -453,7 +482,9 @@ pub(crate) mod tests {
                 Ok(vec![])
             }
         }
-        let e = with_taint(&Stuck, "node-a", Duration::from_secs(30), async { Ok(()) }).await.unwrap_err();
+        let e = with_taint(&Stuck, "node-a", Duration::from_secs(30), async { Ok(()) })
+            .await
+            .unwrap_err();
         assert!(format!("{e:#}").contains("could not undo itself"), "{e:#}");
     }
 }

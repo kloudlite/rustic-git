@@ -34,17 +34,50 @@ const PANIC_ENV: &str = "KLOUDLITE_SLO_TEST_PANIC";
 /// run would have nothing to compare against.
 fn fast() -> Vec<Stage> {
     vec![
-        Stage { name: "0 · Boot", run: |c| Box::pin(stages::boot(c)) },
-        Stage { name: stages::IDENTITY, run: |c| Box::pin(stages::identity::run(c)) },
-        Stage { name: stages::GIT, run: |c| Box::pin(stages::git::run(c)) },
-        Stage { name: stages::PULL_REQUEST, run: |c| Box::pin(stages::pr::run(c)) },
-        Stage { name: stages::REGISTRY, run: |c| Box::pin(stages::registry::run(c)) },
-        Stage { name: stages::WORKSPACE, run: |c| Box::pin(stages::workspace::run(c)) },
-        Stage { name: stages::ENVIRONMENT, run: |c| Box::pin(stages::environment::run(c)) },
-        Stage { name: stages::LIFECYCLE, run: |c| Box::pin(stages::lifecycle::run(c)) },
-        Stage { name: stages::ADMIN, run: |c| Box::pin(stages::admin::run(c)) },
-        Stage { name: stages::SECURITY, run: |c| Box::pin(stages::security::run(c)) },
-        Stage { name: stages::EDGE, run: |c| Box::pin(stages::edge::run(c)) },
+        Stage {
+            name: "0 · Boot",
+            run: |c| Box::pin(stages::boot(c)),
+        },
+        Stage {
+            name: stages::IDENTITY,
+            run: |c| Box::pin(stages::identity::run(c)),
+        },
+        Stage {
+            name: stages::GIT,
+            run: |c| Box::pin(stages::git::run(c)),
+        },
+        Stage {
+            name: stages::PULL_REQUEST,
+            run: |c| Box::pin(stages::pr::run(c)),
+        },
+        Stage {
+            name: stages::REGISTRY,
+            run: |c| Box::pin(stages::registry::run(c)),
+        },
+        Stage {
+            name: stages::WORKSPACE,
+            run: |c| Box::pin(stages::workspace::run(c)),
+        },
+        Stage {
+            name: stages::ENVIRONMENT,
+            run: |c| Box::pin(stages::environment::run(c)),
+        },
+        Stage {
+            name: stages::LIFECYCLE,
+            run: |c| Box::pin(stages::lifecycle::run(c)),
+        },
+        Stage {
+            name: stages::ADMIN,
+            run: |c| Box::pin(stages::admin::run(c)),
+        },
+        Stage {
+            name: stages::SECURITY,
+            run: |c| Box::pin(stages::security::run(c)),
+        },
+        Stage {
+            name: stages::EDGE,
+            run: |c| Box::pin(stages::edge::run(c)),
+        },
     ]
 }
 
@@ -56,16 +89,28 @@ pub fn suite(kind: Suite) -> Vec<Stage> {
     // Hourly is the fast journey plus Experience and nothing else — it never walks the weekly or
     // monthly stages, which is why this is its own arm rather than another step in the ladder.
     if kind == Suite::Hourly {
-        stages.push(Stage { name: stages::EXPERIENCE, run: |c| Box::pin(stages::experience::run(c)) });
+        stages.push(Stage {
+            name: stages::EXPERIENCE,
+            run: |c| Box::pin(stages::experience::run(c)),
+        });
     }
     if matches!(kind, Suite::Weekly | Suite::Monthly) {
-        stages.push(Stage { name: stages::WEEKLY, run: |c| Box::pin(stages::weekly::run(c)) });
+        stages.push(Stage {
+            name: stages::WEEKLY,
+            run: |c| Box::pin(stages::weekly::run(c)),
+        });
     }
     if kind == Suite::Monthly {
-        stages.push(Stage { name: stages::MONTHLY, run: |c| Box::pin(stages::monthly::run(c)) });
+        stages.push(Stage {
+            name: stages::MONTHLY,
+            run: |c| Box::pin(stages::monthly::run(c)),
+        });
     }
     if std::env::var(PANIC_ENV).as_deref() == Ok("1") {
-        stages.push(Stage { name: "· Panic", run: |_| Box::pin(async { panic!("test panic") }) });
+        stages.push(Stage {
+            name: "· Panic",
+            run: |_| Box::pin(async { panic!("test panic") }),
+        });
     }
     stages
 }
@@ -104,7 +149,10 @@ const CENTRAL_NS: &str = "kloudlite";
 /// Measured from `Ctx::started`, which is the PARENT's clock (it is encoded in the run id): the
 /// budget bounds the run, not the child, and the parent's own boot is part of the pod's deadline.
 pub fn over_budget(c: &Ctx, budget: Duration) -> bool {
-    let spent = chrono::Utc::now().signed_duration_since(c.started).to_std().unwrap_or_default();
+    let spent = chrono::Utc::now()
+        .signed_duration_since(c.started)
+        .to_std()
+        .unwrap_or_default();
     spent >= budget
 }
 
@@ -123,7 +171,10 @@ pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why
     let mut skipped = 0;
     for stage in remaining {
         c.stage = stage.name.to_string();
-        let ids = catalogue.iter().find(|(name, _)| *name == stage.name).map(|(_, ids)| ids.clone());
+        let ids = catalogue
+            .iter()
+            .find(|(name, _)| *name == stage.name)
+            .map(|(_, ids)| ids.clone());
         for id in ids.unwrap_or_default() {
             c.skip(id, why);
             skipped += 1;
@@ -136,7 +187,10 @@ pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why
 /// older than the suite's own deadline is a crash the parent never closed, and does not count;
 /// the answer is `false` on any error, because a probe that cannot ask must still probe.
 pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
-    let url = stages::admin(c, &format!("/admin/slo/runs?suite={}&limit=3", suite.as_str()));
+    let url = stages::admin(
+        c,
+        &format!("/admin/slo/runs?suite={}&limit=3", suite.as_str()),
+    );
     let v = match stages::get(c, &url, &c.admin_jwt).await {
         Ok(v) => v,
         Err(e) => {
@@ -144,7 +198,12 @@ pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
             return false;
         }
     };
-    let rows = v.get("runs").and_then(|r| r.as_array()).cloned().or_else(|| v.as_array().cloned()).unwrap_or_default();
+    let rows = v
+        .get("runs")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .or_else(|| v.as_array().cloned())
+        .unwrap_or_default();
     // The CronJob deadlines from deploy/kloudlite.yaml: a `running` row older than its own
     // deadline is a crash the parent never closed.
     let deadline: i64 = match suite {
@@ -200,8 +259,15 @@ pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
 /// so the shorter run YIELDS: every id skipped, no sample filed, nothing measured twice.
 pub fn yields_to(kind: Suite) -> &'static [(Suite, &'static str)] {
     match kind {
-        Suite::Fast => &[(Suite::Monthly, MONTHLY_IN_FLIGHT), (Suite::Weekly, WEEKLY_IN_FLIGHT), (Suite::Hourly, HOURLY_IN_FLIGHT)],
-        Suite::Hourly => &[(Suite::Monthly, MONTHLY_IN_FLIGHT), (Suite::Weekly, WEEKLY_IN_FLIGHT)],
+        Suite::Fast => &[
+            (Suite::Monthly, MONTHLY_IN_FLIGHT),
+            (Suite::Weekly, WEEKLY_IN_FLIGHT),
+            (Suite::Hourly, HOURLY_IN_FLIGHT),
+        ],
+        Suite::Hourly => &[
+            (Suite::Monthly, MONTHLY_IN_FLIGHT),
+            (Suite::Weekly, WEEKLY_IN_FLIGHT),
+        ],
         Suite::Weekly | Suite::Monthly => &[],
     }
 }
@@ -219,14 +285,21 @@ pub async fn wait_for_shorter_runs(c: &Ctx, me: Suite) {
     while started.elapsed() < Duration::from_secs(900) {
         // The other drill too: weekly and monthly share the drill tenant and both touch nodes,
         // so two of them at once would undo each other's undo.
-        let other = if me == Suite::Weekly { Suite::Monthly } else { Suite::Weekly };
+        let other = if me == Suite::Weekly {
+            Suite::Monthly
+        } else {
+            Suite::Weekly
+        };
         let busy = suite_in_flight(c, Suite::Fast).await
             || suite_in_flight(c, Suite::Hourly).await
             || suite_in_flight(c, other).await;
         if !busy {
             return;
         }
-        tracing::info!(waited_secs = started.elapsed().as_secs(), "slo.drill.waiting");
+        tracing::info!(
+            waited_secs = started.elapsed().as_secs(),
+            "slo.drill.waiting"
+        );
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
     tracing::warn!("slo.drill.waited.out");
@@ -237,18 +310,30 @@ type Counts = Option<(i32, i32, i32)>;
 fn deployment_counts(o: &Deployment) -> Counts {
     let st = o.status.as_ref()?;
     let desired = o.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
-    Some((st.updated_replicas.unwrap_or(0), st.ready_replicas.unwrap_or(0), desired))
+    Some((
+        st.updated_replicas.unwrap_or(0),
+        st.ready_replicas.unwrap_or(0),
+        desired,
+    ))
 }
 
 fn statefulset_counts(o: &StatefulSet) -> Counts {
     let st = o.status.as_ref()?;
     let desired = o.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
-    Some((st.updated_replicas.unwrap_or(0), st.ready_replicas.unwrap_or(0), desired))
+    Some((
+        st.updated_replicas.unwrap_or(0),
+        st.ready_replicas.unwrap_or(0),
+        desired,
+    ))
 }
 
 fn daemonset_counts(o: &DaemonSet) -> Counts {
     let st = o.status.as_ref()?;
-    Some((st.updated_number_scheduled.unwrap_or(0), st.number_ready, st.desired_number_scheduled))
+    Some((
+        st.updated_number_scheduled.unwrap_or(0),
+        st.number_ready,
+        st.desired_number_scheduled,
+    ))
 }
 
 /// Mid-roll: some pod is not yet on the new template, or not yet ready.
@@ -279,9 +364,19 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
     let aks = crate::drill::incluster()?;
     for (name, kind) in KNOWN_CENTRAL {
         let rolling = match kind {
-            Kind::StatefulSet => statefulset_counts(&Api::namespaced(aks.clone(), CENTRAL_NS).get(name).await?),
-            Kind::Deployment => deployment_counts(&Api::<Deployment>::namespaced(aks.clone(), CENTRAL_NS).get(name).await?),
-            Kind::DaemonSet => daemonset_counts(&Api::<DaemonSet>::namespaced(aks.clone(), CENTRAL_NS).get(name).await?),
+            Kind::StatefulSet => {
+                statefulset_counts(&Api::namespaced(aks.clone(), CENTRAL_NS).get(name).await?)
+            }
+            Kind::Deployment => deployment_counts(
+                &Api::<Deployment>::namespaced(aks.clone(), CENTRAL_NS)
+                    .get(name)
+                    .await?,
+            ),
+            Kind::DaemonSet => daemonset_counts(
+                &Api::<DaemonSet>::namespaced(aks.clone(), CENTRAL_NS)
+                    .get(name)
+                    .await?,
+            ),
         };
         if mid_rollout(rolling) {
             tracing::info!(workload = name, "slo.rollout.in_flight");
@@ -291,7 +386,9 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
     // The region's agent, through the mounted k3s kubeconfig. `None` is a deployment gap, not a
     // roll — the same rule every other step that needs a kubeconfig follows.
     let Some(k3s) = &c.kube else { return Ok(false) };
-    let ds = Api::<DaemonSet>::namespaced(k3s.clone(), "kube-system").get("kloudlite-agent").await?;
+    let ds = Api::<DaemonSet>::namespaced(k3s.clone(), "kube-system")
+        .get("kloudlite-agent")
+        .await?;
     if mid_rollout(daemonset_counts(&ds)) {
         tracing::info!(workload = "kloudlite-agent", "slo.rollout.in_flight");
         return Ok(true);
@@ -307,7 +404,9 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
 pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
     let stages = suite(kind);
     // Its own suite FIRST, and for every suite: a twin is the one collision no ladder covers.
-    let mut yield_to = suite_in_flight(c, kind).await.then_some(SAME_SUITE_IN_FLIGHT);
+    let mut yield_to = suite_in_flight(c, kind)
+        .await
+        .then_some(SAME_SUITE_IN_FLIGHT);
     for (longer, why) in yields_to(kind) {
         if yield_to.is_some() {
             break;
@@ -336,7 +435,11 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
         // and silently drops the rest, which is the hole these skips exist to avoid.
         if over_budget(c, budget) {
             let skipped = skip_remaining(c, kind, &stages[i..]);
-            tracing::warn!(budget_secs = budget.as_secs(), skipped, "slo.run.budget.spent");
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                skipped,
+                "slo.run.budget.spent"
+            );
             hand_over(c);
             // Under the LAST stage `skip_remaining` stamped, which is where the run stopped.
             let last = c.stage.clone();
@@ -346,7 +449,12 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
         c.stage = stage.name.to_string();
         let started = std::time::Instant::now();
         (stage.run)(c).await;
-        tracing::info!(stage = stage.name, failed = c.failed(), duration_ms = started.elapsed().as_millis() as u64, "slo.stage.done");
+        tracing::info!(
+            stage = stage.name,
+            failed = c.failed(),
+            duration_ms = started.elapsed().as_millis() as u64,
+            "slo.stage.done"
+        );
         // Before the PUT, not after: if the report is what is broken, the parent still gets every
         // step this run measured.
         hand_over(c);
@@ -399,15 +507,21 @@ mod tests {
         // behind; the assertion below is what says none did.
         walk(&mut c, Suite::Hourly, Duration::ZERO).await;
 
-        let expected: Vec<&str> =
-            journey(Suite::Hourly).into_iter().flat_map(|(_, ids)| ids).collect();
+        let expected: Vec<&str> = journey(Suite::Hourly)
+            .into_iter()
+            .flat_map(|(_, ids)| ids)
+            .collect();
         for id in &expected {
             let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == *id).collect();
             assert_eq!(rows.len(), 1, "{id} was not skipped exactly once");
             assert!(rows[0].skipped, "{id} ran");
             assert_eq!(rows[0].detail, OVER_BUDGET);
         }
-        assert_eq!(c.steps.len(), expected.len(), "an id nobody asked for was reported");
+        assert_eq!(
+            c.steps.len(),
+            expected.len(),
+            "an id nobody asked for was reported"
+        );
         assert_eq!(c.failed(), 0, "a skip is not a failure");
     }
 
@@ -446,14 +560,24 @@ mod tests {
         let mut c = crate::testkit::ctx_against(app).await;
         c.cfg.admin_url = c.cfg.api_url.clone();
         *beat.lock().expect("lock") = chrono::Utc::now().to_rfc3339();
-        assert!(suite_in_flight(&c, Suite::Hourly).await, "a beating run must block");
+        assert!(
+            suite_in_flight(&c, Suite::Hourly).await,
+            "a beating run must block"
+        );
         *beat.lock().expect("lock") =
             (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
-        assert!(!suite_in_flight(&c, Suite::Hourly).await, "a dead run blocked its suite");
+        assert!(
+            !suite_in_flight(&c, Suite::Hourly).await,
+            "a dead run blocked its suite"
+        );
         // ClickHouse's own format, and an absent column (an older admin process).
-        *beat.lock().expect("lock") =
-            (chrono::Utc::now() - chrono::Duration::minutes(30)).format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-        assert!(!suite_in_flight(&c, Suite::Hourly).await, "the stored format was not read");
+        *beat.lock().expect("lock") = (chrono::Utc::now() - chrono::Duration::minutes(30))
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string();
+        assert!(
+            !suite_in_flight(&c, Suite::Hourly).await,
+            "the stored format was not read"
+        );
     }
 
     /// A run must never see ITSELF as a reason to yield. The parent files a `running` row before
@@ -495,11 +619,15 @@ mod tests {
     #[test]
     fn only_a_workload_short_of_desired_is_mid_rollout() {
         use k8s_openapi::api::apps::v1::{
-            DaemonSetSpec, DaemonSetStatus, DeploymentSpec, DeploymentStatus, StatefulSetSpec, StatefulSetStatus,
+            DaemonSetSpec, DaemonSetStatus, DeploymentSpec, DeploymentStatus, StatefulSetSpec,
+            StatefulSetStatus,
         };
 
         let deploy = |updated, ready| Deployment {
-            spec: Some(DeploymentSpec { replicas: Some(3), ..Default::default() }),
+            spec: Some(DeploymentSpec {
+                replicas: Some(3),
+                ..Default::default()
+            }),
             status: Some(DeploymentStatus {
                 updated_replicas: Some(updated),
                 ready_replicas: Some(ready),
@@ -513,7 +641,10 @@ mod tests {
         assert!(!mid_rollout(deployment_counts(&Deployment::default())));
 
         let sts = StatefulSet {
-            spec: Some(StatefulSetSpec { replicas: Some(3), ..Default::default() }),
+            spec: Some(StatefulSetSpec {
+                replicas: Some(3),
+                ..Default::default()
+            }),
             status: Some(StatefulSetStatus {
                 updated_replicas: Some(1),
                 ready_replicas: Some(3),

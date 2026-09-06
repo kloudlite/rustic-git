@@ -128,18 +128,26 @@ async fn lifecycle(c: &mut Ctx) {
         let listing = api(c, &format!("/v1/repos?owner={probe}"));
         async move {
             let body = serde_json::json!({ "owner": probe, "name": name, "visibility": "private" });
-            post(c, &repos, &jwt, body.clone()).await.context("could not create the repo")?;
+            post(c, &repos, &jwt, body.clone())
+                .await
+                .context("could not create the repo")?;
             if !listed(c, &listing, &jwt, &name).await? {
                 return Err(anyhow!("the repo was created but is not listed"));
             }
-            super::call(c, reqwest::Method::DELETE, &one, &jwt, None).await.context("could not delete it")?;
+            super::call(c, reqwest::Method::DELETE, &one, &jwt, None)
+                .await
+                .context("could not delete it")?;
             if listed(c, &listing, &jwt, &name).await? {
                 return Err(anyhow!("the deleted repo is still listed"));
             }
             // The slug is free again — the whole reason the delete is worth asserting rather than
             // assuming. Taken back straight away so the run leaves nothing behind either way.
-            post(c, &repos, &jwt, body).await.context("the deleted repo's slug was not freed")?;
-            super::call(c, reqwest::Method::DELETE, &one, &jwt, None).await.map(|_| ())
+            post(c, &repos, &jwt, body)
+                .await
+                .context("the deleted repo's slug was not freed")?;
+            super::call(c, reqwest::Method::DELETE, &one, &jwt, None)
+                .await
+                .map(|_| ())
         }
         .boxed()
     })
@@ -149,9 +157,10 @@ async fn lifecycle(c: &mut Ctx) {
 /// Whether the owner's repo listing carries `name`.
 async fn listed(c: &Ctx, url: &str, jwt: &str, name: &str) -> Result<bool> {
     let rows = get(c, url, jwt).await.context("could not list the repos")?;
-    Ok(rows
-        .as_array()
-        .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))))
+    Ok(rows.as_array().is_some_and(|rows| {
+        rows.iter()
+            .any(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))
+    }))
 }
 
 /// `git.push.ssh`: the other door.
@@ -180,8 +189,15 @@ async fn push_ssh(c: &mut Ctx, work: &Path, name: &str) {
         async move {
             // From the head branch's commit, which stage 2 already made: a `push src:dst` needs no
             // checkout at all, so this leaves the working tree exactly as the later steps want it.
-            let argv = vec!["push".to_string(), "-q".into(), url, format!("{HEAD_BRANCH}:refs/heads/{branch}")];
-            tools::run(&git, &argv, &env, Some(&work), Duration::from_secs(40)).await.map(|_| ())
+            let argv = vec![
+                "push".to_string(),
+                "-q".into(),
+                url,
+                format!("{HEAD_BRANCH}:refs/heads/{branch}"),
+            ];
+            tools::run(&git, &argv, &env, Some(&work), Duration::from_secs(40))
+                .await
+                .map(|_| ())
         }
         .boxed()
     })
@@ -198,7 +214,10 @@ async fn push_ssh(c: &mut Ctx, work: &Path, name: &str) {
 /// route, or an app that cannot reach its api all fail here.
 async fn web_pages(c: &mut Ctx) {
     let probe = c.probe_user.clone();
-    for (id, path) in [(WEB_IDS[0], format!("/{probe}")), (WEB_IDS[1], "/workspaces".to_string())] {
+    for (id, path) in [
+        (WEB_IDS[0], format!("/{probe}")),
+        (WEB_IDS[1], "/workspaces".to_string()),
+    ] {
         c.step(id, Duration::from_secs(15), move |c| {
             let url = format!("{}{path}", c.cfg.web_url.trim_end_matches('/'));
             async move { renders(c, &url, &path).await }.boxed()
@@ -213,12 +232,20 @@ async fn web_pages(c: &mut Ctx) {
 /// dropped the route would land on the app's 404 with a 200 from plenty of frameworks, and a
 /// redirect anywhere but `/login` is the app sending people somewhere nobody asked for.
 pub(crate) async fn renders(c: &Ctx, url: &str, path: &str) -> Result<()> {
-    let r = c.http.get(url).send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
+    let r = c
+        .http
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
     let landed = r.url().path().to_string();
     let body = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
+        return Err(anyhow!(
+            "{status}: {}",
+            body.chars().take(200).collect::<String>()
+        ));
     }
     if landed != path && !landed.starts_with("/login") {
         return Err(anyhow!("asking for {path} landed on {landed}"));
@@ -251,7 +278,10 @@ pub(crate) fn git_env(c: &Ctx) -> HashMap<String, String> {
         ("GIT_COMMITTER_NAME".into(), "kloudlite slo probe".into()),
         ("GIT_COMMITTER_EMAIL".into(), probe_email),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-        ("GIT_CONFIG_GLOBAL".into(), c.tmp.join("gitconfig").display().to_string()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            c.tmp.join("gitconfig").display().to_string(),
+        ),
         ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
     ])
 }
@@ -293,10 +323,24 @@ async fn push_base(c: &mut Ctx, work: &Path, name: &str) -> bool {
         async move {
             std::fs::create_dir_all(&work)
                 .with_context(|| format!("could not make {}", work.display()))?;
-            git(c, vec!["init".into(), "-q".into(), format!("--initial-branch={BASE_BRANCH}")], Some(&work)).await?;
+            git(
+                c,
+                vec![
+                    "init".into(),
+                    "-q".into(),
+                    format!("--initial-branch={BASE_BRANCH}"),
+                ],
+                Some(&work),
+            )
+            .await?;
             write(&work, "README.md", &format!("# {name}\n"))?;
             git(c, vec!["add".into(), "-A".into()], Some(&work)).await?;
-            git(c, vec!["commit".into(), "-q".into(), "-m".into(), "seed".into()], Some(&work)).await?;
+            git(
+                c,
+                vec!["commit".into(), "-q".into(), "-m".into(), "seed".into()],
+                Some(&work),
+            )
+            .await?;
             git(c, args, Some(&work)).await.map(|_| ())
         }
         .boxed()
@@ -314,10 +358,25 @@ async fn push_head(c: &mut Ctx, work: &Path, name: &str) -> bool {
     c.step("git.push.p95", GIT_TIMEOUT, move |c| {
         let args = authed(c, &["push", "-q", &url, HEAD_BRANCH]);
         async move {
-            git(c, vec!["checkout".into(), "-q".into(), "-b".into(), HEAD_BRANCH.into()], Some(&work)).await?;
+            git(
+                c,
+                vec![
+                    "checkout".into(),
+                    "-q".into(),
+                    "-b".into(),
+                    HEAD_BRANCH.into(),
+                ],
+                Some(&work),
+            )
+            .await?;
             write(&work, "change.txt", &format!("{run_id}\n"))?;
             git(c, vec!["add".into(), "-A".into()], Some(&work)).await?;
-            git(c, vec!["commit".into(), "-q".into(), "-m".into(), "change".into()], Some(&work)).await?;
+            git(
+                c,
+                vec!["commit".into(), "-q".into(), "-m".into(), "change".into()],
+                Some(&work),
+            )
+            .await?;
             git(c, args, Some(&work)).await.map(|_| ())
         }
         .boxed()
@@ -359,7 +418,11 @@ pub(crate) async fn known_hosts(c: &Ctx) -> Result<PathBuf> {
     }
     let (host, port) = c.cfg.ssh_endpoint();
     // `[host]:port` is the form ssh matches a non-22 port against; the bare host for 22.
-    let subject = if port == 22 { host.to_string() } else { format!("[{host}]:{port}") };
+    let subject = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
     let path = c.tmp.join("known_hosts");
     let line = c.cfg.ssh_hostkey.trim();
     // A `SHA256:…` fingerprint identifies a key but cannot be written into a known_hosts file, so
@@ -401,9 +464,13 @@ fn pin_kind(pin: &str) -> Pin {
 }
 
 async fn keyscan(c: &Ctx, host: &str, port: u16) -> Result<String> {
-    tools::plain(&c.programs.ssh_keyscan, &["-p", &port.to_string(), host], Duration::from_secs(20))
-        .await
-        .context("could not read the served host key")
+    tools::plain(
+        &c.programs.ssh_keyscan,
+        &["-p", &port.to_string(), host],
+        Duration::from_secs(20),
+    )
+    .await
+    .context("could not read the served host key")
 }
 
 pub(crate) fn ssh_command(c: &Ctx, key: &str, hosts: &Path) -> String {
@@ -428,27 +495,41 @@ pub(crate) fn ssh_url(c: &Ctx, name: &str) -> String {
 /// and "the host key changed" is the one cause an operator must never have to guess at.
 async fn hostkey(c: &mut Ctx) {
     if c.cfg.ssh_hostkey.trim().is_empty() {
-        c.skip("ssh.hostkey", "no host key is pinned (KLOUDLITE_SLO_SSH_HOSTKEY)");
+        c.skip(
+            "ssh.hostkey",
+            "no host key is pinned (KLOUDLITE_SLO_SSH_HOSTKEY)",
+        );
         return;
     }
     c.step("ssh.hostkey", Duration::from_secs(30), |c| {
         let (host, port) = c.cfg.ssh_endpoint();
         let (host, port) = (host.to_string(), port);
         let pinned = c.cfg.ssh_hostkey.trim().to_string();
-        let (scan, keygen) = (c.programs.ssh_keyscan.clone(), c.programs.ssh_keygen.clone());
+        let (scan, keygen) = (
+            c.programs.ssh_keyscan.clone(),
+            c.programs.ssh_keygen.clone(),
+        );
         async move {
-            let served = tools::plain(&scan, &["-p", &port.to_string(), &host], Duration::from_secs(20))
-                .await
-                .context("could not read the served host key")?;
+            let served = tools::plain(
+                &scan,
+                &["-p", &port.to_string(), &host],
+                Duration::from_secs(20),
+            )
+            .await
+            .context("could not read the served host key")?;
             let hit = match pin_kind(&pinned) {
                 // `ssh-keygen -lf -` prints one `bits SHA256:… host (ALG)` line per key the scan
                 // offered; the pin matching any of them is the pin being served.
                 Pin::Fingerprint => {
                     let path = c.tmp.join("served_hostkeys");
                     std::fs::write(&path, &served).context("could not stage the served keys")?;
-                    let listed = tools::plain(&keygen, &["-lf", &path.display().to_string()], Duration::from_secs(10))
-                        .await
-                        .context("could not fingerprint the served host key")?;
+                    let listed = tools::plain(
+                        &keygen,
+                        &["-lf", &path.display().to_string()],
+                        Duration::from_secs(10),
+                    )
+                    .await
+                    .context("could not fingerprint the served host key")?;
                     listed.split_whitespace().any(|w| w == pinned)
                 }
                 // The base64 blob is the identity; comparing whole lines would fail on a comment
@@ -490,7 +571,12 @@ async fn ssh_clone(c: &mut Ctx, name: &str) {
         env.insert("GIT_SSH_COMMAND".into(), cmd);
         let args = vec!["clone".into(), "-q".into(), url, dest.display().to_string()];
         let git = c.programs.git.clone();
-        async move { tools::run(&git, &args, &env, None, GIT_TIMEOUT).await.map(|_| ()) }.boxed()
+        async move {
+            tools::run(&git, &args, &env, None, GIT_TIMEOUT)
+                .await
+                .map(|_| ())
+        }
+        .boxed()
     })
     .await;
 }
@@ -513,12 +599,25 @@ async fn unregistered_refused(c: &mut Ctx, name: &str) {
     let _ = std::fs::remove_file(junk.with_extension("pub"));
     let made = tools::plain(
         &c.programs.ssh_keygen,
-        &["-q", "-t", "ed25519", "-N", "", "-C", "unregistered", "-f", &junk.display().to_string()],
+        &[
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-C",
+            "unregistered",
+            "-f",
+            &junk.display().to_string(),
+        ],
         Duration::from_secs(20),
     )
     .await;
     if let Err(e) = made {
-        c.skip("ssh.unregistered.refused", &format!("no throwaway key: {e:#}"));
+        c.skip(
+            "ssh.unregistered.refused",
+            &format!("no throwaway key: {e:#}"),
+        );
         return;
     }
     c.step("ssh.unregistered.refused", GIT_TIMEOUT, move |c| {
@@ -541,7 +640,9 @@ async fn unregistered_refused(c: &mut Ctx, name: &str) {
                     if detail.contains("Permission denied") {
                         Ok(())
                     } else {
-                        Err(anyhow!("ssh failed for some other reason than a refusal: {detail}"))
+                        Err(anyhow!(
+                            "ssh failed for some other reason than a refusal: {detail}"
+                        ))
                     }
                 }
             }
@@ -564,16 +665,20 @@ async fn browse(c: &mut Ctx, name: &str, head: Option<&str>) {
 
     {
         let (head, url) = (head.clone(), refs_url.clone());
-        c.step("browse.commit.visible", VISIBLE_CAP + Duration::from_secs(10), move |c| {
-            let jwt = c.probe_jwt.clone();
-            async move {
-                poll_json(c, &url, &jwt, VISIBLE_CAP, |refs| {
-                    oid_of(refs, BASE_BRANCH).as_deref() == Some(head.as_str())
-                })
-                .await
-            }
-            .boxed()
-        })
+        c.step(
+            "browse.commit.visible",
+            VISIBLE_CAP + Duration::from_secs(10),
+            move |c| {
+                let jwt = c.probe_jwt.clone();
+                async move {
+                    poll_json(c, &url, &jwt, VISIBLE_CAP, |refs| {
+                        oid_of(refs, BASE_BRANCH).as_deref() == Some(head.as_str())
+                    })
+                    .await
+                }
+                .boxed()
+            },
+        )
         .await;
     }
 
@@ -597,7 +702,6 @@ pub(crate) fn oid_of(refs: &serde_json::Value, branch: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(str::to_string)
 }
-
 
 /// The web app's repo page, rendered.
 ///
@@ -644,7 +748,9 @@ async fn web_repo_page(c: &mut Ctx, name: &str) {
 
 async fn visibility(c: &Ctx, url: &str, jwt: &str, to: &str) -> Result<()> {
     let body = serde_json::json!({ "visibility": to });
-    super::call(c, reqwest::Method::PATCH, url, jwt, Some(body)).await.map(|_| ())
+    super::call(c, reqwest::Method::PATCH, url, jwt, Some(body))
+        .await
+        .map(|_| ())
 }
 
 /// The page must actually carry the repo's content, not merely answer 200: a signed-out visitor
@@ -653,7 +759,10 @@ async fn visibility(c: &Ctx, url: &str, jwt: &str, to: &str) -> Result<()> {
 async fn rendered(c: &Ctx, url: &str, name: &str) -> Result<()> {
     let (status, body) = super::raw(c, reqwest::Method::GET, url, "", None, &[]).await?;
     if !status.is_success() {
-        return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
+        return Err(anyhow!(
+            "{status}: {}",
+            body.chars().take(200).collect::<String>()
+        ));
     }
     // The file listing is rendered client-side, so the server's HTML carries the repo's NAME
     // (title and breadcrumb) but not its tree; the tree itself is `browse.p95`'s job.
@@ -697,7 +806,10 @@ mod tests {
     const INDEPENDENT: [&str; 3] = ["repo.lifecycle", "web.org.page", "web.workspaces.page"];
 
     fn sample<'a>(c: &'a Ctx, id: &str) -> &'a kloudlite_workspaces::history::slo::StepReport {
-        c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("no {id}"))
+        c.steps
+            .iter()
+            .find(|s| s.slo_id == id)
+            .unwrap_or_else(|| panic!("no {id}"))
     }
 
     /// A repo that cannot be created is ONE failure, already counted where it happened — the whole
@@ -706,7 +818,10 @@ mod tests {
     #[tokio::test]
     async fn git_stage_skips_everything_when_repo_create_fails() {
         let app = axum::Router::new()
-            .route("/v1/repos", axpost(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .route(
+                "/v1/repos",
+                axpost(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            )
             .fallback(axget(|| async { StatusCode::NOT_FOUND }));
         let mut c = testkit::ctx_against(app).await;
         c.stage = super::super::GIT.to_string();
@@ -714,12 +829,18 @@ mod tests {
         run(&mut c).await;
 
         assert_eq!(
-            c.steps.iter().filter(|s| !INDEPENDENT.contains(&s.slo_id.as_str()) && !s.ok && !s.skipped).count(),
+            c.steps
+                .iter()
+                .filter(|s| !INDEPENDENT.contains(&s.slo_id.as_str()) && !s.ok && !s.skipped)
+                .count(),
             0,
             "a create failure must not be counted a second time as an SLO"
         );
         for id in IDS.into_iter().filter(|id| !INDEPENDENT.contains(id)) {
-            assert!(sample(&c, id).skipped, "{id} should be skipped, not sampled");
+            assert!(
+                sample(&c, id).skipped,
+                "{id} should be skipped, not sampled"
+            );
         }
         assert!(c.state.repo.is_none());
     }
@@ -730,7 +851,10 @@ mod tests {
     #[tokio::test]
     async fn a_local_git_failure_fails_the_push_id_rather_than_vanishing() {
         let app = axum::Router::new()
-            .route("/v1/repos", axpost(|| async { (StatusCode::CREATED, "{}") }))
+            .route(
+                "/v1/repos",
+                axpost(|| async { (StatusCode::CREATED, "{}") }),
+            )
             .fallback(axget(|| async { StatusCode::NOT_FOUND }));
         let mut c = testkit::ctx_against(app).await;
         c.stage = super::super::GIT.to_string();
@@ -742,17 +866,24 @@ mod tests {
         run(&mut c).await;
 
         let push = sample(&c, "git.push.ok");
-        assert!(!push.skipped && !push.ok, "the push id must carry the failure");
+        assert!(
+            !push.skipped && !push.ok,
+            "the push id must carry the failure"
+        );
         assert!(!push.detail.is_empty(), "with the reason");
         for id in AFTER_PUSH {
-            assert!(sample(&c, id).skipped, "{id} should be skipped once the push failed");
+            assert!(
+                sample(&c, id).skipped,
+                "{id} should be skipped once the push failed"
+            );
         }
         // One failure among the stage's OWN ids, not one per downstream id. `id.jwt.tiers` also
         // fails here — it dials a git url no test serves — and is a different stage's sample.
         assert_eq!(
             c.steps
                 .iter()
-                .filter(|s| IDS.contains(&s.slo_id.as_str()) && !INDEPENDENT.contains(&s.slo_id.as_str()))
+                .filter(|s| IDS.contains(&s.slo_id.as_str())
+                    && !INDEPENDENT.contains(&s.slo_id.as_str()))
                 .filter(|s| !s.ok && !s.skipped)
                 .count(),
             1
@@ -766,7 +897,8 @@ mod tests {
     async fn unregistered_key_refusal_is_ok_only_when_ssh_fails() {
         let app = axum::Router::new().fallback(axget(|| async { StatusCode::NOT_FOUND }));
         let mut c = testkit::ctx_against(app).await;
-        c.cfg.ssh_hostkey = "host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPinnedProbeHostKeyForTests".into();
+        c.cfg.ssh_hostkey =
+            "host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPinnedProbeHostKeyForTests".into();
         std::fs::create_dir_all(&c.tmp).expect("tmp");
         // Both stubbed by `true`, so the throwaway key "is generated" and the "ssh" attempt
         // succeeds — which is exactly the fleet accepting a key it must not.
@@ -778,7 +910,11 @@ mod tests {
         let s = sample(&c, "ssh.unregistered.refused");
         assert!(!s.skipped, "it ran");
         assert!(!s.ok, "an accepted unregistered key is a failure");
-        assert!(s.detail.contains("unregistered key was allowed"), "{}", s.detail);
+        assert!(
+            s.detail.contains("unregistered key was allowed"),
+            "{}",
+            s.detail
+        );
     }
 
     /// A refusal is `Permission denied`, and nothing else. `false` fails the way a DNS error or a
@@ -788,7 +924,8 @@ mod tests {
     async fn a_failure_that_is_not_a_refusal_is_not_a_pass() {
         let app = axum::Router::new().fallback(axget(|| async { StatusCode::NOT_FOUND }));
         let mut c = testkit::ctx_against(app).await;
-        c.cfg.ssh_hostkey = "host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPinnedProbeHostKeyForTests".into();
+        c.cfg.ssh_hostkey =
+            "host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPinnedProbeHostKeyForTests".into();
         std::fs::create_dir_all(&c.tmp).expect("tmp");
         c.programs.git = "false".into();
         c.programs.ssh_keygen = "true".into();

@@ -92,7 +92,11 @@ pub async fn run(c: &mut Ctx) {
 /// Both a repo that exists and one that does not, because a router that answered 404 only for
 /// missing repos would be mounted after all.
 async fn peer_listener(c: &mut Ctx) {
-    let repo = c.state.repo.clone().unwrap_or_else(|| "no-such-repo".into());
+    let repo = c
+        .state
+        .repo
+        .clone()
+        .unwrap_or_else(|| "no-such-repo".into());
     let probe = c.probe_user.clone();
     c.step("sec.peer.listener", REFUSAL_CEILING, move |c| {
         let git = c.cfg.git_url.trim_end_matches('/').to_string();
@@ -104,8 +108,15 @@ async fn peer_listener(c: &mut Ctx) {
                 "/api/no-such-owner/no-such-repo/refs".to_string(),
                 format!("/api/{probe}/images"),
             ] {
-                let (status, _) =
-                    raw(c, reqwest::Method::GET, &format!("{git}{path}"), &jwt, None, &[]).await?;
+                let (status, _) = raw(
+                    c,
+                    reqwest::Method::GET,
+                    &format!("{git}{path}"),
+                    &jwt,
+                    None,
+                    &[],
+                )
+                .await?;
                 // The probe's own credential is sent on purpose: a route that answers 404 to an
                 // authenticated owner is a route that is not there.
                 refused_with(&format!("`{path}` on the public listener"), status, &[404])?;
@@ -149,10 +160,14 @@ async fn visibility(c: &mut Ctx) {
             let (status, _) = raw(c, reqwest::Method::GET, &refs, &other, None, &[]).await?;
             refused("reading the private repo as another owner", status)?;
             let hide = || async {
-                flip(c, &patch, &jwt, "private").await.context("the repo was left PUBLIC")
+                flip(c, &patch, &jwt, "private")
+                    .await
+                    .context("the repo was left PUBLIC")
             };
             let shown = async {
-                flip(c, &patch, &jwt, "public").await.context("could not publish the repo")?;
+                flip(c, &patch, &jwt, "public")
+                    .await
+                    .context("could not publish the repo")?;
                 // Recorded, NOT judged here: whether a public repo reads is a positive, and this
                 // id is at 100 % — where only refusals belong, because a 100 % budget cannot
                 // absorb one flake. `repo.visibility.public` is the id that judges it.
@@ -161,8 +176,15 @@ async fn visibility(c: &mut Ctx) {
                 // The refusal halves never reach that check (auth answers first), which is why
                 // only the successful read needs it; without it a public repo answers 400 and this
                 // id reported the probe's own missing header as the fleet refusing a read.
-                let (status, body) =
-                    raw(c, reqwest::Method::GET, &refs, &other, None, &[git_protocol_v2()]).await?;
+                let (status, body) = raw(
+                    c,
+                    reqwest::Method::GET,
+                    &refs,
+                    &other,
+                    None,
+                    &[git_protocol_v2()],
+                )
+                .await?;
                 *public.lock().expect("lock") = Some(match status.is_success() {
                     true => String::new(),
                     false => format!("{status}: {}", body.chars().take(200).collect::<String>()),
@@ -193,21 +215,27 @@ async fn public_readable(c: &mut Ctx, seen: Arc<Mutex<Option<String>>>) {
     let Some(detail) = out else {
         return c.skip("repo.visibility.public", "the repo was never made public");
     };
-    c.step("repo.visibility.public", Duration::from_secs(5), move |_| {
-        async move {
-            match detail.is_empty() {
-                true => Ok(()),
-                false => Err(anyhow!("a public repo refused another owner: {detail}")),
+    c.step(
+        "repo.visibility.public",
+        Duration::from_secs(5),
+        move |_| {
+            async move {
+                match detail.is_empty() {
+                    true => Ok(()),
+                    false => Err(anyhow!("a public repo refused another owner: {detail}")),
+                }
             }
-        }
-        .boxed()
-    })
+            .boxed()
+        },
+    )
     .await;
 }
 
 async fn flip(c: &Ctx, url: &str, jwt: &str, to: &str) -> Result<()> {
     let body = serde_json::json!({ "visibility": to });
-    super::call(c, reqwest::Method::PATCH, url, jwt, Some(body)).await.map(|_| ())
+    super::call(c, reqwest::Method::PATCH, url, jwt, Some(body))
+        .await
+        .map(|_| ())
 }
 
 /// The clone handshake, as a plain GET.
@@ -234,7 +262,10 @@ async fn private_repo(c: &mut Ctx) {
         let url = refs_url(c, &repo);
         let other = c.other_jwt.clone();
         async move {
-            for (who, token) in [("another owner", other.as_str()), ("an anonymous client", "")] {
+            for (who, token) in [
+                ("another owner", other.as_str()),
+                ("an anonymous client", ""),
+            ] {
                 let (status, _) = raw(c, reqwest::Method::GET, &url, token, None, &[]).await?;
                 refused(&format!("cloning the private repo as {who}"), status)?;
             }
@@ -256,9 +287,17 @@ async fn cross_owner(c: &mut Ctx) {
         .environment
         .clone()
         .map(|id| format!("/v1/environments/{id}"))
-        .or_else(|| c.state.workspace.clone().map(|id| format!("/v1/workspaces/{id}")));
+        .or_else(|| {
+            c.state
+                .workspace
+                .clone()
+                .map(|id| format!("/v1/workspaces/{id}"))
+        });
     let Some(path) = target else {
-        return c.skip("sec.cross.owner", "no environment or workspace of ours to read");
+        return c.skip(
+            "sec.cross.owner",
+            "no environment or workspace of ours to read",
+        );
     };
     c.step("sec.cross.owner", REFUSAL_CEILING, move |c| {
         let url = api(c, &path);
@@ -280,7 +319,10 @@ async fn admin_claim(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         async move {
             let (status, _) = raw(c, reqwest::Method::GET, &url, &jwt, None, &[]).await?;
-            refused_by_claim("an admin route reached without the superadmin claim", status)
+            refused_by_claim(
+                "an admin route reached without the superadmin claim",
+                status,
+            )
         }
         .boxed()
     })
@@ -297,7 +339,9 @@ async fn user_process(c: &mut Ctx) {
         async move {
             let (status, _) = raw(c, reqwest::Method::GET, &url, &jwt, None, &[]).await?;
             if status.as_u16() != 404 {
-                return Err(anyhow!("the user process answered {status} for an admin path"));
+                return Err(anyhow!(
+                    "the user process answered {status} for an admin path"
+                ));
             }
             Ok(())
         }
@@ -322,8 +366,14 @@ pub(crate) async fn agent_spec(c: &mut Ctx) {
     }
     c.state.agent_spec_done = true;
     let Some(client) = c.kube.clone() else {
-        c.skip("sec.agent.spec", "no kubeconfig: the admission policy cannot be tested");
-        return c.skip("agent.spec.allowed", "no kubeconfig: the admission policy cannot be tested");
+        c.skip(
+            "sec.agent.spec",
+            "no kubeconfig: the admission policy cannot be tested",
+        );
+        return c.skip(
+            "agent.spec.allowed",
+            "no kubeconfig: the admission policy cannot be tested",
+        );
     };
     // Pre-flight: without the `impersonate` verb every attempt below is refused for the WRONG
     // reason, and a step that passes on the probe's own missing grant measures nothing.
@@ -332,8 +382,14 @@ pub(crate) async fn agent_spec(c: &mut Ctx) {
         return c.skip("agent.spec.allowed", "probe identity cannot impersonate");
     }
     let Some(name) = a_workspace(&client, c.state.workspace.clone()).await else {
-        c.skip("sec.agent.spec", "no Workspace exists to attempt a spec write on");
-        return c.skip("agent.spec.allowed", "no Workspace exists to attempt a spec write on");
+        c.skip(
+            "sec.agent.spec",
+            "no Workspace exists to attempt a spec write on",
+        );
+        return c.skip(
+            "agent.spec.allowed",
+            "no Workspace exists to attempt a spec write on",
+        );
     };
     let volume = a_volume(&client).await;
     c.step("sec.agent.spec", REFUSAL_CEILING, move |_| {
@@ -342,11 +398,17 @@ pub(crate) async fn agent_spec(c: &mut Ctx) {
             cfg.auth_info.impersonate = Some(AGENT_SA.to_string());
             let as_agent = kube::Client::try_from(cfg).context("could not build the client")?;
             let api: kube::Api<crd::Workspace> = kube::Api::all(as_agent.clone());
-            let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
+            let params = kube::api::PatchParams {
+                dry_run: true,
+                ..Default::default()
+            };
             // Lowercase: the CRD's enum is `running|stopped`; a wrong case is a 422 from the schema,
             // which is not the admission policy refusing anything.
             let patch = serde_json::json!({ "spec": { "desiredState": "stopped" } });
-            match api.patch(&name, &params, &kube::api::Patch::Merge(&patch)).await {
+            match api
+                .patch(&name, &params, &kube::api::Patch::Merge(&patch))
+                .await
+            {
                 // A 2xx IS the failure here: admission let the agent rewrite desired state.
                 Ok(_) => return Err(anyhow!("the agent was ALLOWED to write spec.desiredState")),
                 Err(kube::Error::Api(e)) => refused_by_admission(e.code, &e.message)?,
@@ -376,7 +438,10 @@ async fn agent_spec_allowed(c: &mut Ctx, volume: Option<String>) {
         return c.skip("agent.spec.allowed", "no kubeconfig");
     }
     let Some(volume) = volume else {
-        return c.skip("agent.spec.allowed", "no Volume exists to attempt an allowed write on");
+        return c.skip(
+            "agent.spec.allowed",
+            "no Volume exists to attempt an allowed write on",
+        );
     };
     c.step("agent.spec.allowed", REFUSAL_CEILING, move |_| {
         async move {
@@ -384,7 +449,10 @@ async fn agent_spec_allowed(c: &mut Ctx, volume: Option<String>) {
             cfg.auth_info.impersonate = Some(AGENT_SA.to_string());
             let as_agent = kube::Client::try_from(cfg).context("could not build the client")?;
             let api: kube::Api<crd::Volume> = kube::Api::all(as_agent);
-            let params = kube::api::PatchParams { dry_run: true, ..Default::default() };
+            let params = kube::api::PatchParams {
+                dry_run: true,
+                ..Default::default()
+            };
             for (field, patch) in [
                 // A `RestoreWish`, not a string: `crd::VolumeSpec::restore_to` is an object with
                 // a `snapshotId`, a `volume` and a `requestedAt`, and a bare string is a 422 from
@@ -398,15 +466,25 @@ async fn agent_spec_allowed(c: &mut Ctx, volume: Option<String>) {
                         "requestedAt": "2026-01-01T00:00:00Z",
                     }}}),
                 ),
-                ("spec.quotaGb", serde_json::json!({ "spec": { "quotaGb": 1 } })),
+                (
+                    "spec.quotaGb",
+                    serde_json::json!({ "spec": { "quotaGb": 1 } }),
+                ),
             ] {
-                match api.patch(&volume, &params, &kube::api::Patch::Merge(&patch)).await {
+                match api
+                    .patch(&volume, &params, &kube::api::Patch::Merge(&patch))
+                    .await
+                {
                     Ok(_) => {}
                     Err(kube::Error::Api(e)) => return denied_or_noise(field, e.code, &e.message),
                     // NOT a refusal: a connection reset, a TLS error or a timeout is the probe's
                     // own path to the API server, and calling that "the agent was refused" would
                     // burn this budget on infrastructure noise.
-                    Err(e) => return Err(anyhow!("the API server could not be reached for {field}: {e}")),
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "the API server could not be reached for {field}: {e}"
+                        ))
+                    }
                 }
             }
             Ok(())
@@ -423,11 +501,15 @@ async fn agent_spec_allowed(c: &mut Ctx, volume: Option<String>) {
 /// or a 5xx is the cluster being busy, and neither is the policy refusing anything.
 fn denied_or_noise(field: &str, code: u16, message: &str) -> Result<()> {
     match code {
-        403 => Err(anyhow!("the agent was REFUSED {field}, which its reconcilers need: {message}")),
-        422 if message.contains("ValidatingAdmissionPolicy") => {
-            Err(anyhow!("the admission policy refused {field}, which its reconcilers need: {message}"))
-        }
-        _ => Err(anyhow!("the {field} write answered {code}, which is not a policy decision: {message}")),
+        403 => Err(anyhow!(
+            "the agent was REFUSED {field}, which its reconcilers need: {message}"
+        )),
+        422 if message.contains("ValidatingAdmissionPolicy") => Err(anyhow!(
+            "the admission policy refused {field}, which its reconcilers need: {message}"
+        )),
+        _ => Err(anyhow!(
+            "the {field} write answered {code}, which is not a policy decision: {message}"
+        )),
     }
 }
 
@@ -436,7 +518,12 @@ fn denied_or_noise(field: &str, code: u16, message: &str) -> Result<()> {
 async fn a_volume(client: &kube::Client) -> Option<String> {
     use kube::api::ResourceExt;
     let api: kube::Api<crd::Volume> = kube::Api::all(client.clone());
-    api.list(&kube::api::ListParams::default()).await.ok()?.items.first().map(|v| v.name_any())
+    api.list(&kube::api::ListParams::default())
+        .await
+        .ok()?
+        .items
+        .first()
+        .map(|v| v.name_any())
 }
 
 /// Whether the probe's own identity may impersonate a ServiceAccount at all. A review the API
@@ -475,9 +562,14 @@ async fn may_impersonate(client: &kube::Client) -> bool {
 async fn a_workspace(client: &kube::Client, ours: Option<String>) -> Option<String> {
     use kube::api::ResourceExt;
     let api: kube::Api<crd::Workspace> = kube::Api::all(client.clone());
-    let items = api.list(&kube::api::ListParams::default()).await.ok()?.items;
+    let items = api
+        .list(&kube::api::ListParams::default())
+        .await
+        .ok()?
+        .items;
     let names: Vec<String> = items.iter().map(|w| w.name_any()).collect();
-    ours.filter(|o| names.contains(o)).or_else(|| names.into_iter().next())
+    ours.filter(|o| names.contains(o))
+        .or_else(|| names.into_iter().next())
 }
 
 /// `id.token.revoked`: a personal token stops working the moment it is revoked.
@@ -499,16 +591,31 @@ async fn token_revoked(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         async move {
             let body = serde_json::json!({ "owner": probe, "name": name });
-            let out = super::post(c, &tokens, &jwt, body).await.context("could not mint a token to revoke")?;
-            let id = out.pointer("/_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("the answer carried no id"))?;
-            let secret = out.get("token").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("the answer carried no token"))?;
+            let out = super::post(c, &tokens, &jwt, body)
+                .await
+                .context("could not mint a token to revoke")?;
+            let id = out
+                .pointer("/_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("the answer carried no id"))?;
+            let secret = out
+                .get("token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("the answer carried no token"))?;
             let basic = basic(secret);
             let url = format!("{tokens}/{id}");
             super::call(c, reqwest::Method::DELETE, &url, &jwt, None)
                 .await
                 .context("could not revoke the token")?;
-            let (status, _) =
-                raw(c, reqwest::Method::GET, &refs, "", None, &[("authorization", basic)]).await?;
+            let (status, _) = raw(
+                c,
+                reqwest::Method::GET,
+                &refs,
+                "",
+                None,
+                &[("authorization", basic)],
+            )
+            .await?;
             refused_with("a revoked token", status, &[400, 401, 403])
         }
         .boxed()
@@ -518,7 +625,10 @@ async fn token_revoked(c: &mut Ctx) {
 
 fn basic(secret: &str) -> String {
     use base64::Engine;
-    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("x:{secret}")))
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("x:{secret}"))
+    )
 }
 
 #[cfg(test)]
@@ -585,17 +695,32 @@ mod tests {
         visibility(&mut c).await;
         agent_spec(&mut c).await;
 
-        for id in ["repo.visibility", "repo.visibility.public", "sec.agent.spec", "agent.spec.allowed"] {
+        for id in [
+            "repo.visibility",
+            "repo.visibility.public",
+            "sec.agent.spec",
+            "agent.spec.allowed",
+        ] {
             assert_eq!(c.steps.iter().filter(|s| s.slo_id == id).count(), 1, "{id}");
         }
         // This fleet refuses the PATCH too, so the flip never happens — and the positive sibling
         // SKIPS rather than failing, which is the property the split is for: a repo that was never
         // published cannot say anything about whether a published one reads.
-        let public = c.steps.iter().find(|s| s.slo_id == "repo.visibility.public").expect("id");
-        assert!(public.skipped && public.detail == "the repo was never made public", "{public:?}");
+        let public = c
+            .steps
+            .iter()
+            .find(|s| s.slo_id == "repo.visibility.public")
+            .expect("id");
+        assert!(
+            public.skipped && public.detail == "the repo was never made public",
+            "{public:?}"
+        );
         // No kubeconfig is a deployment gap for both agent ids, never a breach.
         for id in ["sec.agent.spec", "agent.spec.allowed"] {
-            assert!(c.steps.iter().find(|s| s.slo_id == id).expect(id).skipped, "{id}");
+            assert!(
+                c.steps.iter().find(|s| s.slo_id == id).expect(id).skipped,
+                "{id}"
+            );
         }
     }
 
@@ -604,11 +729,19 @@ mod tests {
     /// splitting this off a 100 % id was meant to avoid.
     #[test]
     fn only_a_denial_fails_the_allowed_writes() {
-        assert!(denied_or_noise("spec.quotaGb", 403, "denied").unwrap_err().to_string().contains("REFUSED"));
+        assert!(denied_or_noise("spec.quotaGb", 403, "denied")
+            .unwrap_err()
+            .to_string()
+            .contains("REFUSED"));
         let policy = denied_or_noise("spec.restoreTo", 422, "ValidatingAdmissionPolicy denied");
-        assert!(policy.unwrap_err().to_string().contains("admission policy refused"));
+        assert!(policy
+            .unwrap_err()
+            .to_string()
+            .contains("admission policy refused"));
         for code in [404, 429, 500, 503] {
-            let e = denied_or_noise("spec.quotaGb", code, "busy").unwrap_err().to_string();
+            let e = denied_or_noise("spec.quotaGb", code, "busy")
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("not a policy decision"), "{code}: {e}");
         }
     }
@@ -617,8 +750,12 @@ mod tests {
     /// proves the admin router is mounted, which is precisely what it exists to refute.
     #[tokio::test]
     async fn the_user_process_step_wants_a_404_and_nothing_else() {
-        for (code, want_ok) in [(StatusCode::NOT_FOUND, true), (StatusCode::FORBIDDEN, false)] {
-            let app = axum::Router::new().route("/admin/overview", get(move || async move { code }));
+        for (code, want_ok) in [
+            (StatusCode::NOT_FOUND, true),
+            (StatusCode::FORBIDDEN, false),
+        ] {
+            let app =
+                axum::Router::new().route("/admin/overview", get(move || async move { code }));
             let mut c = crate::testkit::ctx_against(app).await;
             user_process(&mut c).await;
             assert_eq!(c.steps[0].ok, want_ok, "{code}");

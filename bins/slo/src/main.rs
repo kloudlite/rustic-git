@@ -82,10 +82,17 @@ async fn main() {
     };
     let code = match cli.cmd {
         Cmd::Bootstrap => bootstrap(cfg).await,
-        Cmd::Run { suite: kind, inner: false, .. } => parent(cfg, kind).await,
-        Cmd::Run { suite: kind, inner: true, run_id, budget_secs } => {
-            child(cfg, kind, run_id, budget(budget_secs)).await
-        }
+        Cmd::Run {
+            suite: kind,
+            inner: false,
+            ..
+        } => parent(cfg, kind).await,
+        Cmd::Run {
+            suite: kind,
+            inner: true,
+            run_id,
+            budget_secs,
+        } => child(cfg, kind, run_id, budget(budget_secs)).await,
     };
     std::process::exit(code);
 }
@@ -94,7 +101,12 @@ async fn main() {
 /// fallback. One function so the parent and the child read the same number the same way.
 fn budget(flag: Option<u64>) -> Duration {
     let secs = flag
-        .or_else(|| std::env::var("KLOUDLITE_SLO_BUDGET_SECS").ok()?.parse().ok())
+        .or_else(|| {
+            std::env::var("KLOUDLITE_SLO_BUDGET_SECS")
+                .ok()?
+                .parse()
+                .ok()
+        })
         .unwrap_or(kloudlite_slo::suite::DEFAULT_BUDGET_SECS);
     Duration::from_secs(secs)
 }
@@ -110,7 +122,10 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
     // Sunday of the month". This guard is the other half of that expression: past the 7th it is
     // not the first Sunday, and the drills below are far too destructive to run four times a month.
     if kind == Suite::Monthly && chrono::Utc::now().day() > 7 {
-        tracing::info!(reason = "not the first week of the month", "slo.run.skipped");
+        tracing::info!(
+            reason = "not the first week of the month",
+            "slo.run.skipped"
+        );
         return 0;
     }
     let mut c = match Ctx::new(cfg, kind, None).await {
@@ -179,14 +194,21 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
         .unwrap_or_default();
     // And every name the child recorded, so teardown deletes by name what the prefix sweep
     // cannot see (an environment's volume is named by the platform, not by us).
-    if let Some(state) = std::fs::read(c.state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+    if let Some(state) = std::fs::read(c.state_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+    {
         c.state = state;
     }
 
     c.stage = TEARDOWN.to_string();
     let teardown_started = Instant::now();
     stages::teardown(&mut c).await;
-    tracing::info!(stage = TEARDOWN, duration_ms = teardown_started.elapsed().as_millis() as u64, "slo.stage.done");
+    tracing::info!(
+        stage = TEARDOWN,
+        duration_ms = teardown_started.elapsed().as_millis() as u64,
+        "slo.stage.done"
+    );
 
     // Always recorded, on every path out of here: a duration only present on the happy path is a
     // series that silently under-reports exactly the runs somebody wants to see.
@@ -197,7 +219,11 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
         true
     });
     let failed = c.failed();
-    let state = if failed == 0 && !c.run_failed { "passed" } else { "failed" };
+    let state = if failed == 0 && !c.run_failed {
+        "passed"
+    } else {
+        "failed"
+    };
     tracing::info!(run_id = %c.run_id, state, failed, "slo.run.finished");
     match () {
         // Report first: an unstored run is the failure a human must act on, even if it also had
@@ -239,7 +265,10 @@ async fn bootstrap(cfg: Config) -> i32 {
     let mut code = 0;
     // One admin call creates both identities: the api tier only creates a person at sign-in, and a
     // synthetic user never signs in, so `/v1/users/username` alone answered 400 "no such user".
-    let url = format!("{}/admin/slo/bootstrap", c.cfg.admin_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/admin/slo/bootstrap",
+        c.cfg.admin_url.trim_end_matches('/')
+    );
     // Every suite's pair, not just this process's: `bootstrap` is run once per deploy and the
     // suites are isolated from each other by owning DIFFERENT tenants (ctx::SUITE_TENANTS), so a
     // bootstrap that only claimed the pair its own env named would leave the hourly and drill
@@ -254,12 +283,26 @@ async fn bootstrap(cfg: Config) -> i32 {
         })
         .collect();
     let body = serde_json::json!({ "users": users });
-    match c.http.post(&url).header("authorization", c.bearer(&c.admin_jwt)).json(&body).send().await {
-        Ok(r) if r.status().is_success() => tracing::info!(kind = "users", "slo.bootstrap.completed"),
+    match c
+        .http
+        .post(&url)
+        .header("authorization", c.bearer(&c.admin_jwt))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!(kind = "users", "slo.bootstrap.completed")
+        }
         Ok(r) => {
             let status = r.status().as_u16();
             let detail = r.text().await.unwrap_or_default();
-            tracing::error!(kind = "users", code = status, detail, "slo.bootstrap.failed");
+            tracing::error!(
+                kind = "users",
+                code = status,
+                detail,
+                "slo.bootstrap.failed"
+            );
             code = EXIT_FAILED;
         }
         Err(e) => {

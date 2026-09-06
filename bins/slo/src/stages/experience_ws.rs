@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use super::git::BASE_BRANCH;
 use super::workspace::ws_exec;
 use super::{api, call, get, poll_json, post};
-use crate::tools;
 use crate::ctx::Ctx;
+use crate::tools;
 
 /// Per-step ceilings, each at or above its catalogue target so a slow answer is a breach with a
 /// number rather than a step the probe cut off. `key.platform.regenerate` and `home.persists` are
@@ -179,7 +179,11 @@ async fn why_seeding_failed(c: &Ctx, name: &str) -> String {
         .await
         .ok()
         .and_then(|r| r.ok())
-        .and_then(|v| v.get("fingerprint").and_then(Value::as_str).map(str::to_string))
+        .and_then(|v| {
+            v.get("fingerprint")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "unreadable".into());
     parts.push(format!("the api now reports platform key {fp}"));
     // (b) whether the git tier accepts THIS pod's own key. `id.key.usable` uses the same binary
@@ -187,12 +191,31 @@ async fn why_seeding_failed(c: &Ctx, name: &str) -> String {
     // installed, which is the fault, and an acceptance says the seed pod's copy is stale.
     let (host, port) = c.cfg.ssh_endpoint();
     let target = format!("git@{host}");
-    let argv: Vec<String> = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-p"]
-        .iter()
-        .map(|a| (*a).to_string())
-        .chain([port.to_string(), "-i".into(), c.cfg.ssh_key_path.clone(), "-T".into(), target])
-        .collect();
-    let said = match tokio::time::timeout(DIAG_STEP, tools::run(&c.programs.ssh, &argv, &Default::default(), None, DIAG_STEP)).await {
+    let argv: Vec<String> = [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-p",
+    ]
+    .iter()
+    .map(|a| (*a).to_string())
+    .chain([
+        port.to_string(),
+        "-i".into(),
+        c.cfg.ssh_key_path.clone(),
+        "-T".into(),
+        target,
+    ])
+    .collect();
+    let said = match tokio::time::timeout(
+        DIAG_STEP,
+        tools::run(&c.programs.ssh, &argv, &Default::default(), None, DIAG_STEP),
+    )
+    .await
+    {
         Ok(Ok(_)) => "the probe's own key authenticates".to_string(),
         Ok(Err(e)) => {
             let detail = format!("{e:#}");
@@ -207,14 +230,28 @@ async fn why_seeding_failed(c: &Ctx, name: &str) -> String {
     // (c) the seed container's own last line.
     if let Some(k) = &c.kube {
         let ns = kloudlite_workspaces::crd::ws_namespace(&probe, "");
-        let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k.clone(), &ns);
+        let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
+            kube::Api::namespaced(k.clone(), &ns);
         let logs = tokio::time::timeout(
             DIAG_STEP,
-            pods.logs(name, &kube::api::LogParams { container: Some(SEED_CONTAINER.into()), tail_lines: Some(3), ..Default::default() }),
+            pods.logs(
+                name,
+                &kube::api::LogParams {
+                    container: Some(SEED_CONTAINER.into()),
+                    tail_lines: Some(3),
+                    ..Default::default()
+                },
+            ),
         )
         .await;
         let last = match logs {
-            Ok(Ok(text)) => text.lines().last().unwrap_or("").chars().take(160).collect::<String>(),
+            Ok(Ok(text)) => text
+                .lines()
+                .last()
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect::<String>(),
             _ => "unreadable".to_string(),
         };
         parts.push(format!("the seed container last said {last:?}"));
@@ -250,7 +287,10 @@ pub async fn home_persists(c: &mut Ctx) {
             let write = format!("set -e\nprintf %s {want} > {HOME_FILE}\nsync {HOME_FILE}");
             let (code, _, err) = ws_exec(c, &src, &write, EXEC).await?;
             if code != 0 {
-                return Err(anyhow!("writing the home file exited {code}: {}", err.trim()));
+                return Err(anyhow!(
+                    "writing the home file exited {code}: {}",
+                    err.trim()
+                ));
             }
             let fresh = create(c, &name, json!({ "packages": [] })).await?;
             // Asked of the FRESH pod, before either goes: the redirect is per-pod, and the pod a
@@ -262,7 +302,10 @@ pub async fn home_persists(c: &mut Ctx) {
             drop_ws(c, &fresh).await;
             drop_ws(c, &src).await;
             if code != 0 {
-                return Err(anyhow!("reading the home file exited {code}: {}", err.trim()));
+                return Err(anyhow!(
+                    "reading the home file exited {code}: {}",
+                    err.trim()
+                ));
             }
             if out.trim() != want {
                 return Err(anyhow!("the fresh workspace read back {:?}", out.trim()));
@@ -295,7 +338,10 @@ async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
     );
     let (code, out, err) = ws_exec(c, ws, &script, EXEC).await?;
     if code != 0 {
-        return Err(anyhow!("reading the cache environment exited {code}: {}", err.trim()));
+        return Err(anyhow!(
+            "reading the cache environment exited {code}: {}",
+            err.trim()
+        ));
     }
     state_is_local(&out, cache, state)
 }
@@ -310,23 +356,36 @@ async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
 /// that had fallen back to the shared NFS home would be a plain directory under it with no mount
 /// line of its own.
 fn state_is_local(out: &str, cache: &str, state: &str) -> Result<()> {
-    let lines: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    for (what, seen) in [("XDG_CACHE_HOME", lines.first()), ("CARGO_TARGET_DIR", lines.get(1))] {
+    let lines: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    for (what, seen) in [
+        ("XDG_CACHE_HOME", lines.first()),
+        ("CARGO_TARGET_DIR", lines.get(1)),
+    ] {
         match seen {
             Some(v) if v.starts_with(cache) => {}
             other => {
-                return Err(anyhow!("{what} is {other:?}, not under the local cache at {cache}"))
+                return Err(anyhow!(
+                    "{what} is {other:?}, not under the local cache at {cache}"
+                ))
             }
         }
     }
     let mount = lines.iter().find(|l| l.starts_with("mount "));
     let Some(mount) = mount else {
-        return Err(anyhow!("{state} is not a mount of its own, so it is on the shared export"));
+        return Err(anyhow!(
+            "{state} is not a mount of its own, so it is on the shared export"
+        ));
     };
     // And it is not the export wearing a different path: NFS under the state dir is exactly the
     // fallback this assertion exists to catch.
     if mount.contains("nfs") {
-        return Err(anyhow!("{state} is mounted from the shared export ({mount}), not the local cache"));
+        return Err(anyhow!(
+            "{state} is mounted from the shared export ({mount}), not the local cache"
+        ));
     }
     Ok(())
 }
@@ -377,12 +436,24 @@ async fn clone_subject(c: &Ctx, id: &str, name: &str) -> Result<()> {
     let script = format!("git -C {dir} rev-parse HEAD");
     let (code, out, err) = ws_exec(c, id, &script, EXEC).await?;
     if code != 0 {
-        return Err(anyhow!("the clone is not there: exit {code}: {}", err.trim()));
+        return Err(anyhow!(
+            "the clone is not there: exit {code}: {}",
+            err.trim()
+        ));
     }
     // Against the branch's CURRENT tip, not a remembered subject: by stage 14 the fast journey
     // has merged a change into `main`, so "seed" is no longer what a fresh clone checks out.
-    let refs = api(c, &format!("/api/{}/{}/refs", c.probe_user, c.state.repo.clone().unwrap_or_default()));
-    let listed = super::get(c, &refs, &c.probe_jwt).await.context("could not read the branch tip")?;
+    let refs = api(
+        c,
+        &format!(
+            "/api/{}/{}/refs",
+            c.probe_user,
+            c.state.repo.clone().unwrap_or_default()
+        ),
+    );
+    let listed = super::get(c, &refs, &c.probe_jwt)
+        .await
+        .context("could not read the branch tip")?;
     let tip = listed
         .as_array()
         .into_iter()
@@ -391,7 +462,10 @@ async fn clone_subject(c: &Ctx, id: &str, name: &str) -> Result<()> {
         .and_then(|r| r.get("oid").and_then(Value::as_str))
         .ok_or_else(|| anyhow!("the branch has no tip"))?;
     if out.trim() != tip {
-        return Err(anyhow!("the checked-out commit is {} but main is {tip}", out.trim()));
+        return Err(anyhow!(
+            "the checked-out commit is {} but main is {tip}",
+            out.trim()
+        ));
     }
     Ok(())
 }
@@ -433,7 +507,10 @@ async fn which(c: &Ctx, id: &str, want: bool, cap: Duration) -> Result<()> {
         }
         if start.elapsed() >= cap {
             let wanted = if want { "runnable" } else { "gone" };
-            return Err(anyhow!("{PKG} is not {wanted} after {} ms: {why}", cap.as_millis()));
+            return Err(anyhow!(
+                "{PKG} is not {wanted} after {} ms: {why}",
+                cap.as_millis()
+            ));
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -458,8 +535,13 @@ mod tests {
     use axum::routing::{get, patch, post as apost};
 
     /// The five ids this file owns, in the order `experience.rs` calls them.
-    const MINE: [&str; 5] =
-        ["ws.packages.add", "ws.packages.remove", "ws.seeded", "key.platform.regenerate", "home.persists"];
+    const MINE: [&str; 5] = [
+        "ws.packages.add",
+        "ws.packages.remove",
+        "ws.seeded",
+        "key.platform.regenerate",
+        "home.persists",
+    ];
 
     async fn all(c: &mut Ctx) {
         packages(c).await;
@@ -470,7 +552,9 @@ mod tests {
 
     fn once<'a>(c: &'a Ctx, id: &str) -> &'a kloudlite_workspaces::history::slo::StepReport {
         let mut hits = c.steps.iter().filter(|s| s.slo_id == id);
-        let s = hits.next().unwrap_or_else(|| panic!("{id} was not reported"));
+        let s = hits
+            .next()
+            .unwrap_or_else(|| panic!("{id} was not reported"));
         assert!(hits.next().is_none(), "{id} was reported twice");
         s
     }
@@ -495,19 +579,35 @@ mod tests {
     #[tokio::test]
     async fn a_refused_create_fails_the_first_id_and_skips_the_dependent_ones() {
         let app = axum::Router::new()
-            .route("/v1/workspaces", apost(|| async { (axum::http::StatusCode::CONFLICT, "over quota") }))
-            .route("/v1/workspaces/{id}", get(|| async { axum::Json(json!({"state": "ready"})) }).patch(patch(|| async { axum::Json(json!({})) })))
-            .route("/v1/platform-key", apost(|| async { axum::Json(json!({"fingerprint": "SHA256:x"})) }));
+            .route(
+                "/v1/workspaces",
+                apost(|| async { (axum::http::StatusCode::CONFLICT, "over quota") }),
+            )
+            .route(
+                "/v1/workspaces/{id}",
+                get(|| async { axum::Json(json!({"state": "ready"})) })
+                    .patch(patch(|| async { axum::Json(json!({})) })),
+            )
+            .route(
+                "/v1/platform-key",
+                apost(|| async { axum::Json(json!({"fingerprint": "SHA256:x"})) }),
+            );
         let mut c = testkit::ctx_against(app).await;
         // A client, not a cluster: nothing here execs, and the point is that the kubeconfig guard
         // is not what produced these reports.
-        c.kube = Some(kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap())).expect("client"));
+        c.kube = Some(
+            kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap()))
+                .expect("client"),
+        );
         c.state.repo = Some("run-fast-1".into());
         all(&mut c).await;
         for id in ["ws.packages.add", "ws.seeded", "key.platform.regenerate"] {
             let s = once(&c, id);
             assert!(!s.ok && !s.skipped, "{s:?}");
-            assert!(s.detail.contains("409"), "the refusal is in the detail: {s:?}");
+            assert!(
+                s.detail.contains("409"),
+                "the refusal is in the detail: {s:?}"
+            );
         }
         for id in ["ws.packages.remove", "home.persists"] {
             let s = once(&c, id);
@@ -515,7 +615,10 @@ mod tests {
         }
         // Nothing anywhere carries a credential.
         for s in &c.steps {
-            assert!(!s.detail.contains(&c.probe_jwt), "a jwt reached a detail: {s:?}");
+            assert!(
+                !s.detail.contains(&c.probe_jwt),
+                "a jwt reached a detail: {s:?}"
+            );
         }
     }
 
@@ -552,6 +655,11 @@ mod tests {
         assert_eq!(BASE_BRANCH, "main");
         // `git.push.ok` commits with `-m seed`; if that changes, this test is the reminder.
         let git = include_str!("git.rs");
-        assert!(git.contains(&format!(r#""commit".into(), "-q".into(), "-m".into(), "{SEED_SUBJECT}".into()"#)), "stage 2's seed subject moved");
+        assert!(
+            git.contains(&format!(
+                r#""commit".into(), "-q".into(), "-m".into(), "{SEED_SUBJECT}".into()"#
+            )),
+            "stage 2's seed subject moved"
+        );
     }
 }

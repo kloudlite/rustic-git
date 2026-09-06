@@ -52,7 +52,8 @@ impl Ctx {
             Err(_) => (false, format!("timed out after {} ms", timeout.as_millis())),
         };
         tracing::info!(slo_id = id, ok, ms, detail = %detail, "slo.step.done");
-        metrics::counter!("slo_steps_total", "ok" => if ok { "true" } else { "false" }).increment(1);
+        metrics::counter!("slo_steps_total", "ok" => if ok { "true" } else { "false" })
+            .increment(1);
         self.steps.push(StepReport {
             slo_id: id.to_string(),
             ts,
@@ -132,7 +133,11 @@ mod tests {
             })
             .await;
         assert!(!ok);
-        assert!(c.steps[0].detail.starts_with("timed out after"), "{}", c.steps[0].detail);
+        assert!(
+            c.steps[0].detail.starts_with("timed out after"),
+            "{}",
+            c.steps[0].detail
+        );
         assert_eq!(c.failed(), 1);
     }
 
@@ -140,7 +145,8 @@ mod tests {
     async fn a_failing_step_records_the_whole_error_chain() {
         let mut c = ctx().await;
         c.step("id.signin", DEFAULT_TIMEOUT, |_| {
-            async { Err(anyhow::anyhow!("connection refused").context("could not sign in")) }.boxed()
+            async { Err(anyhow::anyhow!("connection refused").context("could not sign in")) }
+                .boxed()
         })
         .await;
         assert_eq!(c.steps[0].detail, "could not sign in: connection refused");

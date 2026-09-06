@@ -74,8 +74,14 @@ pub async fn environments(c: &mut Ctx) {
     // first act is to start it again, so a clone that failed leaves a state the restore would
     // measure instead of the restore.
     if !clone(c, &env).await {
-        c.skip("env.restore.inplace", "the clone left the environment mid-flight");
-        c.skip("env.stop.start", "the clone left the environment mid-flight");
+        c.skip(
+            "env.restore.inplace",
+            "the clone left the environment mid-flight",
+        );
+        c.skip(
+            "env.stop.start",
+            "the clone left the environment mid-flight",
+        );
         return;
     }
     // A restore that failed leaves the environment mid-flight — services scaled down, a wish
@@ -123,7 +129,9 @@ async fn multi(c: &mut Ctx) -> Option<String> {
             let jwt = c.probe_jwt.clone();
             let url = api(c, "/v1/environments");
             async move {
-                let doc = post(c, &url, &jwt, body).await.context("could not create the environment")?;
+                let doc = post(c, &url, &jwt, body)
+                    .await
+                    .context("could not create the environment")?;
                 let id = id_of(&doc)?;
                 // Before the wait: an environment that never became ready still exists, and
                 // teardown needs its volume whatever happened here.
@@ -132,9 +140,13 @@ async fn multi(c: &mut Ctx) -> Option<String> {
                 running(c, &id, MULTI_CEILING).await?;
                 // Asked from `web`, about `redis`: a sibling resolving a DIFFERENT service is the
                 // whole claim, and a service resolving itself would pass with one StatefulSet.
-                let (code, _, err) = svc_exec(c, &id, WEB, &format!("getent hosts {REDIS}"), EXEC_CEILING).await?;
+                let (code, _, err) =
+                    svc_exec(c, &id, WEB, &format!("getent hosts {REDIS}"), EXEC_CEILING).await?;
                 if code != 0 {
-                    return Err(anyhow!("`{REDIS}` does not resolve from `{WEB}`: {}", err.trim()));
+                    return Err(anyhow!(
+                        "`{REDIS}` does not resolve from `{WEB}`: {}",
+                        err.trim()
+                    ));
                 }
                 Ok(())
             }
@@ -158,11 +170,15 @@ async fn clone(c: &mut Ctx, env: &str) -> bool {
         let clone = api(c, &format!("/v1/environments/{env}/clone"));
         let read = api(c, &format!("/v1/environments/{env}"));
         async move {
-            post(c, &stop, &jwt, Value::Null).await.context("could not stop the environment")?;
+            post(c, &stop, &jwt, Value::Null)
+                .await
+                .context("could not stop the environment")?;
             poll_json(c, &read, &jwt, CLONE_CEILING, |v| state_is(v, "stopped"))
                 .await
                 .context("the environment never stopped")?;
-            let doc = post(c, &clone, &jwt, serde_json::json!({ "name": name })).await.context("could not clone")?;
+            let doc = post(c, &clone, &jwt, serde_json::json!({ "name": name }))
+                .await
+                .context("could not clone")?;
             let id = id_of(&doc)?;
             c.state.env_clone = Some(id.clone());
             c.state.extra_volumes.push(id.clone());
@@ -187,7 +203,9 @@ async fn restore_in_place(c: &mut Ctx, env: &str) -> bool {
         let restore = api(c, &format!("/v1/environments/{env}/restore-in-place"));
         let history = api(c, &format!("/v1/volumes/{env}/history"));
         async move {
-            post(c, &start, &jwt, Value::Null).await.context("could not start the environment")?;
+            post(c, &start, &jwt, Value::Null)
+                .await
+                .context("could not start the environment")?;
             running(c, &env, RESTORE_CEILING).await?;
             // `save` is load-bearing: a snapshot is of the DISK, and redis holds a `SET` in memory
             // until it decides to write an RDB. Without it this step restores an empty dataset and
@@ -198,19 +216,28 @@ async fn restore_in_place(c: &mut Ctx, env: &str) -> bool {
                 .await
                 .context("could not push")?;
             let snap = id_of(&doc)?;
-            poll_json(c, &history, &jwt, RESTORE_CEILING, |v| super::workspace::row_ready(v, &snap))
-                .await
-                .context("the snapshot never turned ready")?;
+            poll_json(c, &history, &jwt, RESTORE_CEILING, |v| {
+                super::workspace::row_ready(v, &snap)
+            })
+            .await
+            .context("the snapshot never turned ready")?;
             expect_exec(c, &env, "redis-cli del slo", "could not delete the marker").await?;
-            post(c, &restore, &jwt, serde_json::json!({ "snapshot_id": snap }))
-                .await
-                .context("could not restore in place")?;
+            post(
+                c,
+                &restore,
+                &jwt,
+                serde_json::json!({ "snapshot_id": snap }),
+            )
+            .await
+            .context("could not restore in place")?;
             // The services are scaled down and back up under a restore, so an exec that FAILS is
             // "not yet", never "the value is gone" — reading a dead pod as a verdict would fail
             // this step on every restore that worked.
             let deadline = std::time::Instant::now() + RESTORE_CEILING - Duration::from_secs(5);
             loop {
-                if let Ok((0, out, _)) = svc_exec(c, &env, REDIS, "redis-cli get slo", EXEC_CEILING).await {
+                if let Ok((0, out, _)) =
+                    svc_exec(c, &env, REDIS, "redis-cli get slo", EXEC_CEILING).await
+                {
                     if out.trim() == want {
                         return Ok(());
                     }
@@ -237,9 +264,13 @@ async fn stop_start(c: &mut Ctx, env: &str) {
         let stop = api(c, &format!("/v1/environments/{env}/stop"));
         let start = api(c, &format!("/v1/environments/{env}/start"));
         async move {
-            post(c, &stop, &jwt, Value::Null).await.context("could not stop")?;
+            post(c, &stop, &jwt, Value::Null)
+                .await
+                .context("could not stop")?;
             pods_gone(c, &env, STOP_START_CEILING).await?;
-            post(c, &start, &jwt, Value::Null).await.context("could not start")?;
+            post(c, &start, &jwt, Value::Null)
+                .await
+                .context("could not start")?;
             running(c, &env, STOP_START_CEILING).await
         }
         .boxed()
@@ -258,13 +289,19 @@ pub async fn history(c: &mut Ctx) {
     // — the fleet WAS asked, and the pushes the read needs are what failed.
     let prepared = match tokio::time::timeout(PREPARE_CEILING, prepare(c)).await {
         Ok(out) => out,
-        Err(_) => Err(anyhow!("the two pushes did not happen within {} ms", PREPARE_CEILING.as_millis())),
+        Err(_) => Err(anyhow!(
+            "the two pushes did not happen within {} ms",
+            PREPARE_CEILING.as_millis()
+        )),
     };
     let (volume, tip) = match prepared {
         Ok(v) => v,
         Err(e) => {
             let why = format!("{e:#}");
-            c.step("vol.history", HISTORY_CEILING, move |_| async move { Err(anyhow!("{why}")) }.boxed()).await;
+            c.step("vol.history", HISTORY_CEILING, move |_| {
+                async move { Err(anyhow!("{why}")) }.boxed()
+            })
+            .await;
             return;
         }
     };
@@ -273,8 +310,12 @@ pub async fn history(c: &mut Ctx) {
         let hist = api(c, &format!("/v1/volumes/{volume}/history"));
         let refs = api(c, &format!("/v1/volumes/{volume}/refs"));
         async move {
-            let rows = get(c, &hist, &jwt).await.context("could not read the history")?;
-            let main = get(c, &refs, &jwt).await.context("could not read the refs")?;
+            let rows = get(c, &hist, &jwt)
+                .await
+                .context("could not read the history")?;
+            let main = get(c, &refs, &jwt)
+                .await
+                .context("could not read the refs")?;
             reads_back(&rows, &main, &tip)
         }
         .boxed()
@@ -296,7 +337,9 @@ async fn prepare(c: &mut Ctx) -> Result<(String, String)> {
         "quota_gb": QUOTA_GB,
         "packages": ["bash"],
     });
-    let doc = post(c, &url, &jwt, body).await.context("could not create the history workspace")?;
+    let doc = post(c, &url, &jwt, body)
+        .await
+        .context("could not create the history workspace")?;
     let id = id_of(&doc)?;
     c.state.history_workspace = Some(id.clone());
     // A fresh workspace's Volume is named after the workspace itself.
@@ -309,7 +352,9 @@ async fn prepare(c: &mut Ctx) -> Result<(String, String)> {
     // In order, and each waited out: two pushes racing would both claim the same parent, and the
     // second is refused while the first is still `Working`.
     for msg in ["one", "two"] {
-        tip = push_once(c, &id, msg).await.with_context(|| format!("the {msg:?} push"))?;
+        tip = push_once(c, &id, msg)
+            .await
+            .with_context(|| format!("the {msg:?} push"))?;
     }
     Ok((id, tip))
 }
@@ -319,22 +364,33 @@ pub(crate) async fn push_once(c: &Ctx, ws: &str, message: &str) -> Result<String
     let jwt = c.probe_jwt.clone();
     let url = api(c, &format!("/v1/workspaces/{ws}/push"));
     let history = api(c, &format!("/v1/volumes/{ws}/history"));
-    let doc = post(c, &url, &jwt, serde_json::json!({ "message": message })).await.context("could not push")?;
-    let snap = id_of(&doc)?;
-    poll_json(c, &history, &jwt, WS_CEILING, |v| super::workspace::row_ready(v, &snap))
+    let doc = post(c, &url, &jwt, serde_json::json!({ "message": message }))
         .await
-        .context("the snapshot never turned ready")?;
+        .context("could not push")?;
+    let snap = id_of(&doc)?;
+    poll_json(c, &history, &jwt, WS_CEILING, |v| {
+        super::workspace::row_ready(v, &snap)
+    })
+    .await
+    .context("the snapshot never turned ready")?;
     Ok(snap)
 }
 
 /// What the two reads have to say. A function of its own so the assertion is testable without a
 /// fleet behind it — it is the whole meaning of the id.
 fn reads_back(rows: &Value, refs: &Value, tip: &str) -> Result<()> {
-    let rows = rows.as_array().ok_or_else(|| anyhow!("the history is not a list"))?;
-    let messages: Vec<&str> = rows.iter().filter_map(|r| r.get("message").and_then(Value::as_str)).collect();
+    let rows = rows
+        .as_array()
+        .ok_or_else(|| anyhow!("the history is not a list"))?;
+    let messages: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("message").and_then(Value::as_str))
+        .collect();
     // Newest first, which is the one thing about this listing a consumer cannot re-derive.
     if messages.first() != Some(&"two") || messages.get(1) != Some(&"one") {
-        return Err(anyhow!("the history is not newest-first with both messages: {messages:?}"));
+        return Err(anyhow!(
+            "the history is not newest-first with both messages: {messages:?}"
+        ));
     }
     match refs.get("main").and_then(Value::as_str) {
         Some(m) if m == tip => Ok(()),
@@ -352,7 +408,9 @@ pub async fn quota_view(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         let url = api(c, "/v1/quota");
         async move {
-            let doc = get(c, &url, &jwt).await.context("could not read the quota")?;
+            let doc = get(c, &url, &jwt)
+                .await
+                .context("could not read the quota")?;
             reflects(&doc)
         }
         .boxed()
@@ -364,11 +422,21 @@ pub async fn quota_view(c: &mut Ctx) {
 /// pushed. Every one of them must be counted, and none of them may exceed its own limit.
 fn reflects(doc: &Value) -> Result<()> {
     for dim in ["workspaces", "environments", "snapshots"] {
-        let used = doc.get("used").and_then(|u| u.get(dim)).and_then(Value::as_u64);
-        let limit = doc.get("limit").and_then(|l| l.get(dim)).and_then(Value::as_u64);
+        let used = doc
+            .get("used")
+            .and_then(|u| u.get(dim))
+            .and_then(Value::as_u64);
+        let limit = doc
+            .get("limit")
+            .and_then(|l| l.get(dim))
+            .and_then(Value::as_u64);
         match (used, limit) {
             (Some(u), Some(l)) if u >= 1 && u <= l => {}
-            (Some(u), Some(l)) => return Err(anyhow!("{dim}: {u} of {l} does not reflect what this run holds")),
+            (Some(u), Some(l)) => {
+                return Err(anyhow!(
+                    "{dim}: {u} of {l} does not reflect what this run holds"
+                ))
+            }
             _ => return Err(anyhow!("the quota answer carries no {dim}")),
         }
     }
@@ -391,9 +459,11 @@ fn state_is(v: &Value, want: &str) -> bool {
 /// not what a person waits for.
 async fn running(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
     let read = api(c, &format!("/v1/environments/{env}"));
-    poll_json(c, &read, &c.probe_jwt.clone(), cap, |v| state_is(v, "running"))
-        .await
-        .context("the environment never reported running")?;
+    poll_json(c, &read, &c.probe_jwt.clone(), cap, |v| {
+        state_is(v, "running")
+    })
+    .await
+    .context("the environment never reported running")?;
     all_ready(c, env, cap).await
 }
 
@@ -405,14 +475,23 @@ async fn all_ready(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
     loop {
         let mut waiting = None;
         for svc in SERVICES {
-            let ready = sts.get(svc).await.ok().and_then(|s| s.status).and_then(|st| st.ready_replicas).unwrap_or(0);
+            let ready = sts
+                .get(svc)
+                .await
+                .ok()
+                .and_then(|s| s.status)
+                .and_then(|st| st.ready_replicas)
+                .unwrap_or(0);
             if ready < 1 {
                 waiting = Some(svc);
             }
         }
         let Some(svc) = waiting else { return Ok(()) };
         if start.elapsed() >= cap {
-            return Err(anyhow!("`{svc}` had no ready replica after {} ms", cap.as_millis()));
+            return Err(anyhow!(
+                "`{svc}` had no ready replica after {} ms",
+                cap.as_millis()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -426,12 +505,19 @@ async fn pods_gone(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
     let pods: kube::Api<Pod> = kube::Api::namespaced(k.clone(), &ns);
     let start = std::time::Instant::now();
     loop {
-        let left = pods.list(&kube::api::ListParams::default()).await.map(|l| l.items.len()).unwrap_or(usize::MAX);
+        let left = pods
+            .list(&kube::api::ListParams::default())
+            .await
+            .map(|l| l.items.len())
+            .unwrap_or(usize::MAX);
         if left == 0 {
             return Ok(());
         }
         if start.elapsed() >= cap {
-            return Err(anyhow!("{left} pod(s) still running after {} ms", cap.as_millis()));
+            return Err(anyhow!(
+                "{left} pod(s) still running after {} ms",
+                cap.as_millis()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -439,15 +525,31 @@ async fn pods_gone(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
 
 /// One command in a service pod. One StatefulSet per service, one replica, so the ordinal is zero;
 /// the container carries the service's own name.
-async fn svc_exec(c: &Ctx, env: &str, svc: &str, script: &str, cap: Duration) -> Result<(i32, String, String)> {
+async fn svc_exec(
+    c: &Ctx,
+    env: &str,
+    svc: &str,
+    script: &str,
+    cap: Duration,
+) -> Result<(i32, String, String)> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
     let ns = kloudlite_workspaces::crd::env_namespace(env);
-    crate::kube::exec(k, &ns, &format!("{svc}-0"), Some(svc), &["sh", "-c", script], cap).await
+    crate::kube::exec(
+        k,
+        &ns,
+        &format!("{svc}-0"),
+        Some(svc),
+        &["sh", "-c", script],
+        cap,
+    )
+    .await
 }
 
 /// The same, where a non-zero exit is the step's failure.
 async fn expect_exec(c: &Ctx, env: &str, script: &str, what: &str) -> Result<()> {
-    let (code, _, err) = svc_exec(c, env, REDIS, script, EXEC_CEILING).await.context(what.to_string())?;
+    let (code, _, err) = svc_exec(c, env, REDIS, script, EXEC_CEILING)
+        .await
+        .context(what.to_string())?;
     if code != 0 {
         return Err(anyhow!("{what}: exited {code}: {}", err.trim()));
     }
@@ -463,11 +565,13 @@ mod tests {
     /// Both reads, and the one thing about them a consumer cannot re-derive: the order.
     #[test]
     fn history_must_be_newest_first_with_the_tip_as_main() {
-        let rows = serde_json::json!([{"id": "s2", "message": "two"}, {"id": "s1", "message": "one"}]);
+        let rows =
+            serde_json::json!([{"id": "s2", "message": "two"}, {"id": "s1", "message": "one"}]);
         let refs = serde_json::json!({"main": "s2"});
         assert!(reads_back(&rows, &refs, "s2").is_ok());
         // Backwards is the regression this exists for.
-        let old = serde_json::json!([{"id": "s1", "message": "one"}, {"id": "s2", "message": "two"}]);
+        let old =
+            serde_json::json!([{"id": "s1", "message": "one"}, {"id": "s2", "message": "two"}]);
         assert!(reads_back(&old, &refs, "s2").is_err());
         // A ref that is not the newest push is a clone grafting onto the wrong cut.
         assert!(reads_back(&rows, &serde_json::json!({"main": "s1"}), "s2").is_err());
@@ -505,8 +609,17 @@ mod tests {
         let mut c = testkit::ctx().await;
         c.kube = None;
         environments(&mut c).await;
-        for id in ["env.services.multi", "env.clone", "env.restore.inplace", "env.stop.start"] {
-            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
+        for id in [
+            "env.services.multi",
+            "env.clone",
+            "env.restore.inplace",
+            "env.stop.start",
+        ] {
+            let s = c
+                .steps
+                .iter()
+                .find(|s| s.slo_id == id)
+                .unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no kubeconfig", "{s:?}");
             assert_eq!(c.steps.iter().filter(|s| s.slo_id == id).count(), 1, "{id}");
         }
@@ -522,18 +635,32 @@ mod tests {
         );
         let mut c = testkit::ctx_against(app).await;
         history(&mut c).await;
-        let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == "vol.history").collect();
+        let rows: Vec<_> = c
+            .steps
+            .iter()
+            .filter(|s| s.slo_id == "vol.history")
+            .collect();
         assert_eq!(rows.len(), 1, "{:?}", c.steps);
         assert!(!rows[0].ok && !rows[0].skipped, "{:?}", rows[0]);
-        assert!(rows[0].detail.contains("history workspace"), "{:?}", rows[0]);
+        assert!(
+            rows[0].detail.contains("history workspace"),
+            "{:?}",
+            rows[0]
+        );
     }
 
     /// And the whole path once, against a fleet that answers: create, ready, two pushes, both reads.
     #[tokio::test]
     async fn vol_history_passes_once_against_an_api_that_answers() {
         let app = axum::Router::new()
-            .route("/v1/workspaces", route_post(|| async { axum::Json(serde_json::json!({"id": "ws-1"})) }))
-            .route("/v1/workspaces/{id}", route_get(|| async { axum::Json(serde_json::json!({"state": "ready"})) }))
+            .route(
+                "/v1/workspaces",
+                route_post(|| async { axum::Json(serde_json::json!({"id": "ws-1"})) }),
+            )
+            .route(
+                "/v1/workspaces/{id}",
+                route_get(|| async { axum::Json(serde_json::json!({"state": "ready"})) }),
+            )
             .route(
                 "/v1/workspaces/{id}/push",
                 route_post(|axum::Json(b): axum::Json<serde_json::Value>| async move {
@@ -550,10 +677,17 @@ mod tests {
                     ]))
                 }),
             )
-            .route("/v1/volumes/{name}/refs", route_get(|| async { axum::Json(serde_json::json!({"main": "s2"})) }));
+            .route(
+                "/v1/volumes/{name}/refs",
+                route_get(|| async { axum::Json(serde_json::json!({"main": "s2"})) }),
+            );
         let mut c = testkit::ctx_against(app).await;
         history(&mut c).await;
-        let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == "vol.history").collect();
+        let rows: Vec<_> = c
+            .steps
+            .iter()
+            .filter(|s| s.slo_id == "vol.history")
+            .collect();
         assert_eq!(rows.len(), 1, "{:?}", c.steps);
         assert!(rows[0].ok, "{:?}", rows[0]);
         // Registered, or teardown leaks a subvolume every hour.
@@ -575,14 +709,22 @@ mod tests {
         );
         let mut c = testkit::ctx_against(ok).await;
         quota_view(&mut c).await;
-        assert_eq!(c.steps.iter().filter(|s| s.slo_id == "quota.view").count(), 1);
+        assert_eq!(
+            c.steps.iter().filter(|s| s.slo_id == "quota.view").count(),
+            1
+        );
         assert!(c.steps[0].ok, "{:?}", c.steps[0]);
 
-        let down = axum::Router::new()
-            .route("/v1/quota", route_get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }));
+        let down = axum::Router::new().route(
+            "/v1/quota",
+            route_get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
         let mut c = testkit::ctx_against(down).await;
         quota_view(&mut c).await;
-        assert_eq!(c.steps.iter().filter(|s| s.slo_id == "quota.view").count(), 1);
+        assert_eq!(
+            c.steps.iter().filter(|s| s.slo_id == "quota.view").count(),
+            1
+        );
         assert!(!c.steps[0].ok && !c.steps[0].skipped, "{:?}", c.steps[0]);
     }
 }

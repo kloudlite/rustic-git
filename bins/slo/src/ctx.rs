@@ -127,8 +127,11 @@ pub const OTHER_USER: &str = "slo-other";
 /// hit "that key is already added" and its `sec.*`/`quota.refused` checks read the hourly's
 /// grants. The names come from the CronJob's env, so a suite is isolated by its yaml, not by code.
 /// Every `slo-*` user is created by `bootstrap` and capped by deploy/k3s/quotas-slo.yaml.
-pub const SUITE_TENANTS: &[(&str, &str)] =
-    &[(PROBE_USER, OTHER_USER), ("slo-hourly", "slo-hourly-other"), ("slo-drill", "slo-drill-other")];
+pub const SUITE_TENANTS: &[(&str, &str)] = &[
+    (PROBE_USER, OTHER_USER),
+    ("slo-hourly", "slo-hourly-other"),
+    ("slo-drill", "slo-drill-other"),
+];
 
 pub fn email_of(user: &str) -> String {
     format!("{user}@kloudlite.io")
@@ -140,7 +143,8 @@ impl Ctx {
     pub async fn new(cfg: Config, suite: Suite, run_id: Option<String>) -> anyhow::Result<Ctx> {
         let jwt = Jwt::new(&cfg.jwt_secret).map_err(|e| anyhow::anyhow!("jwt secret: {e}"))?;
         let mint = |email: &str, user: &str| {
-            jwt.mint(email, user, Some(user)).map_err(|e| anyhow::anyhow!("mint {user}: {e}"))
+            jwt.mint(email, user, Some(user))
+                .map_err(|e| anyhow::anyhow!("mint {user}: {e}"))
         };
         // The id carries the run's start, so a child handed one recovers the parent's clock
         // rather than stamping a second, later `started` on the same run.
@@ -155,7 +159,12 @@ impl Ctx {
             probe_jwt: mint(&email_of(&cfg.probe_user), &cfg.probe_user)?,
             other_jwt: mint(&email_of(&cfg.other_user), &cfg.other_user)?,
             admin_jwt: jwt
-                .mint_admin(&email_of(&cfg.probe_user), &cfg.probe_user, Some(&cfg.probe_user), true)
+                .mint_admin(
+                    &email_of(&cfg.probe_user),
+                    &cfg.probe_user,
+                    Some(&cfg.probe_user),
+                    true,
+                )
                 .map_err(|e| anyhow::anyhow!("mint admin: {e}"))?,
             probe_user: cfg.probe_user.clone(),
             other_user: cfg.other_user.clone(),
