@@ -1670,6 +1670,10 @@ metadata:
   name: kloudlite-slo-fast
   namespace: kloudlite
 spec:
+  # Declared, not left to the default: a hand `kubectl patch … suspend=true` during a drill is
+  # otherwise never undone by `deploy/roll.sh` (a field absent from the yaml is a field apply
+  # leaves alone), and the five-minute probe stayed off for three hours on 2026-09-06.
+  suspend: false
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
