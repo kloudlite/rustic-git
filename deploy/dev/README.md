@@ -14,7 +14,7 @@ pulls. There is no rsync, so what runs in the cluster is always a pushed commit.
 | tests, clippy | `deploy/dev/test.sh -p <crate> --lib …` (pulls first); clippy: `deploy/dev/exec.sh cargo clippy --workspace --all-targets -- -D warnings` |
 | a shell in the checkout | `deploy/dev/exec.sh` |
 | run a probe suite, fail fast | `deploy/dev/run-suite.sh weekly` (kills on the first failed step, closes the row); `--no-fail-fast` to let it finish; `--attach /work/runs/<log>` to watch one already running |
-| watch a run live, interactively | `deploy/dev/attach.sh` — tmux in the pod, the suite in its own window (Ctrl-b d detaches, Ctrl-b [ scrolls); `deploy/dev/attach.sh lnav` browses the newest run log |
+| watch a run live, interactively | `deploy/dev/attach.sh` (`pm2 logs`, live), `attach.sh weekly` (one suite), `attach.sh monit` (dashboard), `attach.sh list`; `attach.sh shell` is a tmux shell in the pod |
 | watch a run live, non-interactively | `deploy/dev/tail.sh` (one line per step), `kubectl -n kloudlite logs -f deploy/dev` or k9s (raw JSON lines), HyperDX (search `k8s.pod.name:dev-*`, filter `ok:false` or an `slo_id`) — the run also streams to the pod's stdout; the console's SLO page shows it stage by stage |
 | serve a tier from the pod | build it, run the binary in the pod with that tier's env, then `kubectl -n kloudlite patch svc <tier>` to select `app: dev` (label the pod) — and put the selector back |
 

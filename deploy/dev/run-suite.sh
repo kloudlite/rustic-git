@@ -22,13 +22,15 @@ esac
 ACTIVE=$(kubectl -n kloudlite get jobs -o json | python3 -c 'import sys,json; print(" ".join(j["metadata"]["name"] for j in json.load(sys.stdin)["items"] if (j.get("status",{}).get("active") or 0)>0))')
 [ -z "$ACTIVE" ] || { echo "refusing: probe Job(s) active: $ACTIVE" >&2; exit 3; }
 LOG=/work/runs/$SUITE-$(date -u +%H%M).log
-# The suite runs in a tmux window named after it, in the pod's `slo` session: attach with
-# `deploy/dev/attach.sh` to watch live (scroll with the prefix + [), or open more windows there.
-# The same output goes to the log file and to the pod's stdout (kubectl logs, HyperDX).
-kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; ps -o stat= -C kloudlite-slo 2>/dev/null | grep -qv Z && { echo 'a suite is already running in the pod' >&2; exit 3; }; \
-  tmux has-session -t slo 2>/dev/null || tmux new-session -d -s slo -n shell -c /work/src; \
-  tmux new-window -t slo -n $SUITE -c /work/src \"env KLOUDLITE_SLO_USER=$U KLOUDLITE_SLO_OTHER=$O KLOUDLITE_SLO_BUDGET_SECS=$B KLOUDLITE_SLO_SSH_KEY=$K/id_ed25519 \
-  /work/target/dev-image/kloudlite-slo run --suite $SUITE 2>&1 | tee $LOG > /proc/1/fd/1; echo; echo '[run ended — this window stays; press Enter to close]'; read\"; sleep 1; echo started $LOG in tmux window slo:$SUITE"
+# The suite runs under pm2 as a one-shot process named after it: `pm2 logs <suite>` streams it,
+# `pm2 monit` is the dashboard, `pm2 list` shows what is up (deploy/dev/attach.sh opens these).
+# pm2 keeps the log under PM2_HOME; the run is also written to $LOG and to the pod's stdout
+# (kubectl logs, HyperDX).
+kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; pm2 describe $SUITE >/dev/null 2>&1 && pm2 delete $SUITE >/dev/null; \
+  ps -o stat= -C kloudlite-slo 2>/dev/null | grep -qv Z && { echo 'a suite is already running in the pod' >&2; exit 3; }; \
+  cd /work/src && KLOUDLITE_SLO_USER=$U KLOUDLITE_SLO_OTHER=$O KLOUDLITE_SLO_BUDGET_SECS=$B KLOUDLITE_SLO_SSH_KEY=$K/id_ed25519 \
+  pm2 start --name $SUITE --no-autorestart --time --log $LOG --merge-logs /work/target/dev-image/kloudlite-slo -- run --suite $SUITE >/dev/null && \
+  (tail -n +1 -f $LOG > /proc/1/fd/1 &) ; sleep 1; echo started $SUITE under pm2, log $LOG"
 else LOG=$ATTACH; echo "attached to $LOG"; fi
 summarise() { kubectl -n kloudlite exec -i "$POD" -- python3 - "$LOG" <<'PY'
 import sys,json
@@ -94,7 +96,7 @@ for i in $(seq 1 700); do
     *) echo "$S"
        if [ "$FF" = 1 ]; then
          RUN=$(echo "$S" | head -1 | sed -n 's/.*run: \([^ ]*\).*/\1/p')
-         kubectl -n kloudlite exec "$POD" -- pkill -x kloudlite-slo || true
+         kubectl -n kloudlite exec "$POD" -- bash -c "pm2 stop $SUITE >/dev/null 2>&1; pkill -x kloudlite-slo" || true
          echo "FAIL FAST: killed the run"; [ -n "$RUN" ] && { close_row "$RUN"; cleanup_run "$RUN"; }
          exit 1
        fi ;;

@@ -47,7 +47,8 @@ spec:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq && apt-get install -y -qq --no-install-recommends \
                 bash ca-certificates git rsync openssh-client curl openssl bind9-dnsutils \
-                pkg-config libssl-dev clang cmake python3 tini procps jq tmux lnav less >/dev/null
+                pkg-config libssl-dev clang cmake python3 tini procps jq tmux lnav less nodejs npm >/dev/null
+              rustup component add clippy rustfmt >/dev/null 2>&1 || true
               # HOME on the disk: gh's login, the git identity, safe.directory and ssh known_hosts
               # all live under it and must outlive a pod restart.
               mkdir -p /work/home /work/bin
@@ -56,6 +57,9 @@ spec:
                 tar -xzf /tmp/gh.tgz -C /tmp && install -m 755 /tmp/gh_2.86.0_linux_amd64/bin/gh /work/bin/gh
               fi
               git config --global --add safe.directory /work/src || true
+              # pm2 on the disk: `pm2 logs <suite>` / `pm2 monit` are the interactive view of a run;
+              # its state and logs live under PM2_HOME=/work/home/.pm2 and outlive a restart.
+              if [ ! -x /work/npm/bin/pm2 ]; then npm install -g --prefix /work/npm pm2 >/dev/null 2>&1; fi
               if [ ! -x /work/bin/crane ]; then
                 mkdir -p /work/bin
                 curl -fsSL -o /tmp/crane.tgz https://github.com/google/go-containerregistry/releases/download/v0.20.3/go-containerregistry_Linux_x86_64.tar.gz
@@ -71,7 +75,8 @@ spec:
           env:
             - { name: CARGO_HOME, value: /work/cargo }
             - { name: CARGO_TARGET_DIR, value: /work/target }
-            - { name: PATH, value: /work/bin:/work/target/dev-image:/work/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin }
+            - { name: PATH, value: /work/bin:/work/npm/bin:/work/target/dev-image:/work/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin }
+            - { name: PM2_HOME, value: /work/home/.pm2 }
             - { name: HOME, value: /work/home }
             - { name: KUBECONFIG, value: /etc/kloudlite/k3s/config }
             - name: KLOUDLITE_JWT_SECRET
