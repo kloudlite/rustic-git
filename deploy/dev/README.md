@@ -2,22 +2,24 @@
 
 Nothing is built or tested on the laptop. The checkout, the cargo target and the registry cache
 live on the `dev-work` disk of the `dev` pod in namespace `kloudlite`, on the tainted `builder`
-node of the main AKS cluster (`deploy/dev/builder.yaml`). The laptop holds the source and runs
-the editor; every compile, test and probe run happens in the pod.
+node of the main AKS cluster (`deploy/dev/builder.yaml`). The pod's checkout is fed by **git
+only**: edit and commit anywhere (the pod itself, via `exec.sh`, or the laptop), push, and the pod
+pulls. There is no rsync, so what runs in the cluster is always a pushed commit.
 
 | want | run |
 | --- | --- |
-| push edits to the pod | `deploy/dev/sync.sh` (builds every binary) or `deploy/dev/sync.sh --slo` (probe + `kl` only) |
-| tests, clippy | `deploy/dev/test.sh -p <crate> --lib …` (syncs first); clippy: `deploy/dev/exec.sh cargo clippy --workspace --all-targets -- -D warnings` |
+| bring the pod to origin/master and build | `deploy/dev/sync.sh` (every binary) or `deploy/dev/sync.sh --slo` (probe + `kl` only) |
+| tests, clippy | `deploy/dev/test.sh -p <crate> --lib …` (pulls first); clippy: `deploy/dev/exec.sh cargo clippy --workspace --all-targets -- -D warnings` |
 | a shell in the checkout | `deploy/dev/exec.sh` |
 | run a probe suite | `deploy/dev/slo.sh fast\|hourly\|weekly\|monthly` — the CronJob's tenant, key and budget, no image |
 | serve a tier from the pod | build it, run the binary in the pod with that tier's env, then `kubectl -n kloudlite patch svc <tier>` to select `app: dev` (label the pod) — and put the selector back |
 
-## Git: commits and pushes happen in the pod
+## Git: the pod pulls, and can push
 
-The pod's `/work/src/.git` is the repository of record for day-to-day work, and the laptop is the
-editor. `sync.sh` and `test.sh` copy the WORKING TREE only (`.git` is excluded), so a commit
-made in the pod is never overwritten by a later sync; the laptop catches up with `git pull`.
+`/work/src` is a normal clone of `kloudlite/rustic-git`. `sync.sh`/`test.sh` fast-forward it to
+`origin/master`; an edit made in the pod is committed and pushed from the pod (`exec.sh`, then
+`git commit && git push`), and the laptop catches up with `git pull`. Uncommitted edits in the pod
+block the fast-forward — commit or stash them first.
 
 One-time, done by a person because it is a login:
 
@@ -30,8 +32,8 @@ git config --global user.email "karthik@kloudlite.io"
 ```
 
 `HOME` is `/work/home` on the disk, so the login, the identity and `safe.directory` survive a pod
-restart. Then, in the pod: `git add … && git commit && git push`. The commit-msg hook is not in the
-pod — keep the same rule by hand: no tool attribution in messages.
+restart. Done 2026-09-06 as `karthik1729`. The commit-msg hook is not in the pod — keep the same
+rule by hand: no tool attribution in messages.
 
 Rules that keep this honest:
 
