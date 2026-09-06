@@ -733,7 +733,9 @@ fn deny_egress(ips: &[String]) -> Value {
             // `kloudlite-admin` too: it is the `history` consumer group, and the claim about it is
             // that it IDLES with Redis down — which nothing was measuring, because the policy did
             // not reach it.
-            { "key": "app", "operator": "In", "values": ["kloudlite-srv", "kloudlite-worker", "kloudlite-admin"] }
+            // `kloudlite`, not `kloudlite-srv`: the srv pods carry the tier's name, not the
+            // StatefulSet's (`app: kloudlite, role: server` in deploy/kloudlite.yaml).
+            { "key": "app", "operator": "In", "values": ["kloudlite", "kloudlite-worker", "kloudlite-admin"] }
         ]},
         "policyTypes": ["Egress"],
         "egress": [

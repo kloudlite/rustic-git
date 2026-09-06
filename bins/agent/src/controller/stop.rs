@@ -193,8 +193,17 @@ pub async fn start_placement(
         });
     }
     let mut set: Vec<String> = candidates.unwrap_or_default().into_iter().collect();
-    // The owner is always a candidate: it holds the bytes by construction.
-    set.push(ctx.node.clone());
+    // The owner is a candidate because it holds the bytes — unless it is being RETIRED and a peer
+    // is up to date. A decommissioning owner used to stay in the set, and the hash then kept the
+    // volume home a third of the time; the parent restarted on the node an operator was draining,
+    // a running parent pins its volume, and the drain could not finish until somebody stopped it
+    // by hand. With no up-to-date peer the owner stays: bytes only here is the one case where the
+    // draining node is still the right answer, and the decommission beat releases it later.
+    let owner_placeable =
+        !crate::peer::unplaceable(nodes.iter().find(|n| n.name_any() == ctx.node), floor, now);
+    if owner_placeable || set.is_empty() {
+        set.push(ctx.node.clone());
+    }
     set.sort();
     // Prefer a node that can actually take it. `preferred_node` is a rendezvous hash, which spreads
     // evenly over the CANDIDATE SET and knows nothing about how full each one is — so a small node

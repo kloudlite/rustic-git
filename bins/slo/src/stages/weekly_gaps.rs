@@ -22,6 +22,11 @@ use crate::{drill, tools};
 /// about is the objects the deployment actually carries.
 const CENTRAL_NS: &str = "kloudlite";
 const SRV: &str = "kloudlite-srv";
+/// The srv PODS, which do not carry the StatefulSet's name as their `app`: `deploy/kloudlite.yaml`
+/// labels them `app: kloudlite, role: server`. Selecting `app=kloudlite-srv` matched nothing, so
+/// `srv.drain.handover` found "no srv pod to drain" and `roll.zero.errors` tracked no pod at all
+/// and passed with nothing observed.
+const SRV_PODS: &str = "app=kloudlite,role=server";
 
 /// The roll's own budget: a StatefulSet of a handful of pods, each with a 90 s grace period for
 /// its handover. The step gets a minute on top, as every step with an undo does.
@@ -38,7 +43,10 @@ fn step_cap(body: Duration) -> Duration {
     body + Duration::from_secs(60)
 }
 
-pub async fn run(c: &mut Ctx) {
+/// `cold` is `ws.cold.profile`'s workspace, the one workspace of this run that is still there by
+/// stage 12: stage 7's lifecycle verbs DELETE `State::workspace` and its volume (`wt.delete`,
+/// `snap.delete`), so the three ids here that used to read them answered 404 every time.
+pub async fn run(c: &mut Ctx, cold: Option<&str>) {
     roll_zero_errors(c).await;
     drain_handover(c).await;
     moved_image(c).await;
@@ -46,11 +54,11 @@ pub async fn run(c: &mut Ctx) {
     gc_packs(c).await;
     limits(c).await;
     workload_roll(c).await;
-    spread(c).await;
-    retain(c).await;
+    spread(c, cold).await;
+    retain(c, cold).await;
     janitor(c).await;
     lanes(c).await;
-    gw_caps(c).await;
+    gw_caps(c, cold).await;
 }
 
 // ── the deploy ──────────────────────────────────────────────────────────
@@ -159,7 +167,7 @@ async fn watch_roll(
                 bad.push(format!("push: {e:#}"));
             }
         }
-        for pod in pods.list(&ListParams::default().labels("app=kloudlite-srv")).await.map_err(|e| anyhow!("{e}"))?.items {
+        for pod in pods.list(&ListParams::default().labels(SRV_PODS)).await.map_err(|e| anyhow!("{e}"))?.items {
             let (name, uid) = (kube::ResourceExt::name_any(&pod), uid_of(&pod));
             if pod.metadata.deletion_timestamp.is_none() || drained.contains(&uid) {
                 continue;
@@ -261,7 +269,7 @@ fn uid_of(p: &Pod) -> String {
 /// the name comes back, the uid never does.
 async fn pod_names(pods: &Api<Pod>) -> Result<Vec<(String, String)>> {
     Ok(pods
-        .list(&ListParams::default().labels("app=kloudlite-srv"))
+        .list(&ListParams::default().labels(SRV_PODS))
         .await
         .map_err(|e| anyhow!("could not list the srv pods: {e}"))?
         .items
@@ -711,17 +719,28 @@ async fn gc_packs(c: &mut Ctx) {
 /// difference between a replica having something recent to fetch and a person losing the cut they
 /// asked for. Both halves are read off the CRDs, because history deliberately does not list sync
 /// points at all.
-async fn retain(c: &mut Ctx) {
-    let (Some(k), Some(volume)) = (c.kube.clone(), c.state.volume.clone()) else {
-        let why = if c.kube.is_none() { "no kubeconfig" } else { "no volume" };
+async fn retain(c: &mut Ctx, cold: Option<&str>) {
+    let (Some(k), Some(ws)) = (c.kube.clone(), cold.map(str::to_string)) else {
+        let why = if c.kube.is_none() { "no kubeconfig" } else { "no cold workspace" };
         return c.skip("snap.retain", why);
     };
-    let pushes = c.state.snapshot.clone();
     c.step("snap.retain", step_cap(SWEEP_CAP), move |c| {
         let jwt = c.probe_jwt.clone();
-        let history = api(c, &format!("/v1/volumes/{volume}/history"));
+        let doc = api(c, &format!("/v1/workspaces/{ws}"));
         async move {
             use kloudlite_workspaces::crd;
+            // The cold workspace's own volume and a push of this step's own: stage 5's volume and
+            // push are gone by now (stage 7 deletes both), and a push is the half of the rule that
+            // matters — it is the cut retain must never prune.
+            let volume = get(c, &doc, &jwt)
+                .await
+                .context("could not read the workspace")?
+                .get("volume")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("the workspace names no volume"))?
+                .to_string();
+            let pushes = Some(super::experience_env::push_once(c, &ws, "retain").await.context("could not push")?);
+            let history = api(c, &format!("/v1/volumes/{volume}/history"));
             // Long enough that several sync beats have certainly cut and pruned.
             tokio::time::sleep(SWEEP_CAP - Duration::from_secs(60)).await;
             let api: kube::Api<crd::Snapshot> = kube::Api::all(k.clone());
@@ -864,9 +883,9 @@ async fn lanes(c: &mut Ctx) {
 // workspace requests 2 — so `ws.spread` and the two cross-node ids can fail for capacity on a busy
 // hour rather than for placement. The ceiling is the pool: a bigger node, or a second one kept
 // free, is what makes them measure only what they name.
-async fn spread(c: &mut Ctx) {
-    let (Some(ws), Some(k)) = (c.state.workspace.clone(), c.kube.clone()) else {
-        let why = if c.state.workspace.is_none() { "no workspace" } else { "no kubeconfig" };
+async fn spread(c: &mut Ctx, cold: Option<&str>) {
+    let (Some(ws), Some(k)) = (cold.map(str::to_string), c.kube.clone()) else {
+        let why = if cold.is_none() { "no cold workspace" } else { "no kubeconfig" };
         return c.skip("ws.spread", why);
     };
     match placeable_nodes(&k).await {
@@ -937,9 +956,9 @@ async fn placeable_nodes(k: &kube::Client) -> Result<usize> {
 /// are refusals, and a gateway that stopped enforcing either would look perfectly healthy to every
 /// other id. The replay half is first because it costs one request; the cap half opens ten real
 /// tunnels and requires the eleventh to be refused, then closes all of them.
-async fn gw_caps(c: &mut Ctx) {
-    let Some(ws) = c.state.workspace.clone() else {
-        return c.skip("gw.caps", "no workspace");
+async fn gw_caps(c: &mut Ctx, cold: Option<&str>) {
+    let Some(ws) = cold.map(str::to_string) else {
+        return c.skip("gw.caps", "no cold workspace");
     };
     let key = c.cfg.ssh_key_path.clone();
     c.step("gw.caps", TUNNEL_CEILING, move |c| {
@@ -1140,7 +1159,7 @@ mod tests {
     async fn every_id_is_produced_once_with_nothing_reachable() {
         let mut c = crate::testkit::ctx().await;
         c.kube = None;
-        run(&mut c).await;
+        run(&mut c, None).await;
         let ids: Vec<&str> = c.steps.iter().map(|s| s.slo_id.as_str()).collect();
         assert_eq!(
             ids,

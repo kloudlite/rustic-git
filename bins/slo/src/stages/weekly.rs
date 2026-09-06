@@ -84,7 +84,7 @@ pub async fn run(c: &mut Ctx) {
     settings_roll(c).await;
     gc_sweep(c).await;
     // The 2026-09-06 coverage review's twelve, in `weekly_gaps`.
-    super::weekly_gaps::run(c).await;
+    super::weekly_gaps::run(c, cold.as_deref()).await;
 }
 
 /// `settings.revert`: the undo beside `settings.live`'s save.

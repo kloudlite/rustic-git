@@ -315,7 +315,7 @@ async fn prepare(c: &mut Ctx) -> Result<(String, String)> {
 }
 
 /// One push with a message, waited to `ready`. Answers the snapshot id.
-async fn push_once(c: &Ctx, ws: &str, message: &str) -> Result<String> {
+pub(crate) async fn push_once(c: &Ctx, ws: &str, message: &str) -> Result<String> {
     let jwt = c.probe_jwt.clone();
     let url = api(c, &format!("/v1/workspaces/{ws}/push"));
     let history = api(c, &format!("/v1/volumes/{ws}/history"));
