@@ -108,6 +108,11 @@ pub fn millicores(q: &str) -> u64 {
 
 /// Mebibytes from a Kubernetes memory quantity, for the two suffixes this repo writes.
 pub fn mebibytes(q: &str) -> u64 {
+    // `Ki` first and by division: a Node's `status.allocatable` memory is written that way
+    // (`131923924Ki`), and the claim's capacity check reads it through here.
+    if let Some(n) = q.strip_suffix("Ki") {
+        return n.parse::<u64>().unwrap_or(0) / 1024;
+    }
     for (suffix, mib) in [("Gi", 1024u64), ("Mi", 1), ("G", 954), ("M", 1)] {
         if let Some(n) = q.strip_suffix(suffix) {
             return n.parse::<u64>().unwrap_or(0) * mib;
@@ -215,6 +220,8 @@ mod tests {
         assert_eq!(mebibytes("8Gi"), 8192);
         assert_eq!(mebibytes("2730Mi"), 2730);
         assert_eq!(mebibytes("4Gi"), 4096);
+        // What a Node's allocatable is written in.
+        assert_eq!(mebibytes("131923924Ki"), 128831);
         // An unparseable quantity is 0, never a panic and never a silent huge number: a bad value
         // must not be a way to look over quota, and it must not take the whole listing down.
         assert_eq!(millicores("nonsense"), 0);

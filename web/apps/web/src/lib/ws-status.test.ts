@@ -42,6 +42,19 @@ describe("noticesFor", () => {
     expect(n).toEqual([{ tone: "info", text: "This node is being retired; stop when convenient and the next start lands elsewhere." }]);
   });
 
+  // The endless-`Creating` case: the claim declined everywhere for capacity, and the page has to
+  // say so rather than showing a spinner nobody can act on.
+  test("no node with room is stated, with what it needs", () => {
+    const n = noticesFor({
+      state: "creating",
+      placed: { ready: false, reason: "NoCapacity", message: "no node has room for it: it requests 2000m cpu and 4096 MiB" },
+    });
+    expect(n).toEqual([{
+      tone: "warning",
+      text: "No node has room for this right now — it starts as soon as one does (no node has room for it: it requests 2000m cpu and 4096 MiB).",
+    }]);
+  });
+
   // A condition that has flipped back to False keeps its reason; reading the reason alone would
   // leave "its node is down" on the page forever after the node came back.
   test("a cleared Degraded says nothing, even with the reason still NodeDead", () => {

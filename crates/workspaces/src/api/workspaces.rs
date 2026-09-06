@@ -76,6 +76,10 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
         replicated: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Replicated").map(ConditionDoc::from)),
         degraded: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Degraded").map(ConditionDoc::from)),
         decommissioning: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Decommissioning").map(ConditionDoc::from)),
+        placed: st
+            .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Placed"))
+            .filter(|c| c.status != "True")
+            .map(ConditionDoc::from),
         id,
     }
 }

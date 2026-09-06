@@ -150,8 +150,19 @@ fn ctx_with_homes_export(pool: &std::path::Path, mut routes: Vec<Route>, nix: Ar
         routes.push(kloudlite_workspaces::kube_test::get(
             "/api/v1/nodes/node-a",
             serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"},
-                               "status": {"conditions": [{"type": "Ready", "status": "True",
+                               // Allocatable, because a FRESH claim now checks capacity: an
+                               // 8-vCPU/32 GiB node, room for several default workspaces.
+                               "status": {"allocatable": {"cpu": "8", "memory": "33554432Ki"},
+                                          "conditions": [{"type": "Ready", "status": "True",
                                                           "lastTransitionTime": rfc3339_ago(60)}]}}),
+        ));
+    }
+    // The other half of that check: what is already scheduled here. Empty unless the test says
+    // otherwise, same skip rule as the node above.
+    if !routes.iter().any(|r| r.method == "GET" && r.path == "/api/v1/pods") {
+        routes.push(kloudlite_workspaces::kube_test::get(
+            "/api/v1/pods",
+            serde_json::json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}),
         ));
     }
     let (client, rec) = mock_client(routes);
@@ -686,6 +697,102 @@ async fn a_decommissioning_node_claims_nothing() {
 
     kloudlite_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
     assert!(rec.sent("PUT", WS_STATUS).is_empty(), "a draining node must not claim: {:?}", rec.calls());
+}
+
+// ── capacity ──────────────────────────────────────────────────────────────
+
+/// An 8-vCPU node with 7 vCPU already requested by pods assigned to it — the shape that stranded a
+/// real workspace: the claim landed, the pod was `FailedScheduling: Insufficient cpu`, and nothing
+/// ever un-places a live node's claim.
+fn crowded(created_ago: Option<i64>) -> Vec<Route> {
+    let mut v = vec![
+        kloudlite_workspaces::kube_test::get(
+            "/api/v1/nodes/node-a",
+            serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "node-a"},
+                               "status": {"allocatable": {"cpu": "8", "memory": "33554432Ki"},
+                                          "conditions": [{"type": "Ready", "status": "True",
+                                                          "lastTransitionTime": rfc3339_ago(60)}]}}),
+        ),
+        kloudlite_workspaces::kube_test::get(
+            "/api/v1/pods",
+            serde_json::json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": [
+                {"metadata": {"name": "busy", "namespace": "ws-bob"},
+                 "spec": {"containers": [{"name": "c", "resources": {"requests": {"cpu": "7", "memory": "8Gi"}}}]},
+                 "status": {"phase": "Running"}},
+                // Terminated: its capacity is back, and counting it would refuse claims on a node
+                // full of yesterday's finished pods.
+                {"metadata": {"name": "done", "namespace": "ws-bob"},
+                 "spec": {"containers": [{"name": "c", "resources": {"requests": {"cpu": "8", "memory": "8Gi"}}}]},
+                 "status": {"phase": "Succeeded"}}]}),
+        ),
+    ];
+    if created_ago.is_some() {
+        v.push(Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) });
+        v.push(kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces/ws-1", ws_json(serde_json::json!({}))));
+    }
+    v
+}
+
+/// A default workspace requests 2 vCPU; only 1 is left. The node must decline so a peer with room
+/// takes it — and it must not write the "nobody has room" condition yet, because a peer claiming
+/// this a second later is the normal case.
+#[tokio::test]
+async fn a_node_without_room_declines_a_fresh_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), crowded(None));
+
+    kloudlite_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "a node with 1 vCPU free must not take a 2 vCPU workspace: {:?}", rec.calls());
+    assert!(
+        rec.requests().iter().any(|c| c.contains("/api/v1/pods?") && c.contains("spec.nodeName%3Dnode-a")),
+        "the pod list must be scoped to this node: {:?}", rec.requests()
+    );
+}
+
+/// The same node, but the workspace has been sitting unplaced past the bound: somebody has to say
+/// why, or it stays `Creating` forever with no explanation. Every node that declines writes the
+/// same condition and `mark_parent_of`'s idle check absorbs the duplicates.
+#[tokio::test]
+async fn a_workspace_nothing_can_fit_gets_the_no_capacity_condition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), crowded(Some(600)));
+    let mut w = ws_json(serde_json::json!({}));
+    w["metadata"]["creationTimestamp"] = serde_json::json!(rfc3339_ago(600));
+
+    kloudlite_agent::claim::claim_workspace(&serde_json::from_value(w).unwrap(), &ctx).await.unwrap();
+
+    let sent = rec.sent("PUT", WS_STATUS);
+    assert_eq!(sent.len(), 1, "one condition write, and it is not a claim: {:?}", rec.calls());
+    assert!(sent[0]["status"]["nodeName"].as_str().unwrap_or_default().is_empty(), "declining never places: {}", sent[0]);
+    let c = sent[0]["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "Placed").expect("Placed");
+    assert_eq!(c["status"], "False");
+    assert_eq!(c["reason"], "NoCapacity");
+    assert!(c["message"].as_str().unwrap().contains("2000m cpu"), "the message names what it needs: {c}");
+    assert!(c["message"].as_str().unwrap().contains("4096 MiB"), "{c}");
+}
+
+/// The correctness path is untouched: a parent whose bytes are HERE is claimed however full this
+/// node is — no other node can run it correctly, and packing never outranks that. The Pod list is
+/// not even issued.
+#[tokio::test]
+async fn a_workspace_whose_snapshots_are_here_claims_regardless_of_capacity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = crowded(None);
+    routes.push(Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![snapshot_cr("vol-1-a", "vol-1")]) });
+    routes.push(kloudlite_workspaces::kube_test::get(
+        format!("/apis/kloudlite.io/v1alpha1/volumereplicas/{}", crd::replica_name("vol-1", "node-a")),
+        volume_replica("vol-1", "node-a", "Synced"),
+    ));
+    routes.push(Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) });
+    routes.push(binding_route());
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "volumeRef": "vol-1"}));
+
+    kloudlite_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    let sent = rec.sent("PUT", WS_STATUS);
+    assert_eq!(sent.len(), 1, "the data is here: claim it: {:?}", rec.calls());
+    assert_eq!(sent[0]["status"]["nodeName"], "node-a");
+    assert!(!rec.calls().iter().any(|c| c == "GET /api/v1/pods"), "no capacity check on the non-fresh path: {:?}", rec.calls());
 }
 
 // ── snapshot-model placement ──────────────────────────────────────────────

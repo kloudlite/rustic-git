@@ -1049,7 +1049,8 @@ pub fn workspace_pod(
     Ok(Pod { metadata: m, spec: Some(pod_spec), ..Default::default() })
 }
 
-/// The env unit from the capacity model: 4 GB limit, packed at 1.5x oversubscription, so the
+/// The env unit from the capacity model (`docs/capacity-model.md` — one environment SERVICE, and
+/// the sheet's row of that name): 4 GB limit, packed at 1.5x oversubscription, so the
 /// request is 4 GB / 1.5 = 2730Mi. Requesting 512Mi against a 4Gi limit was 8x oversubscription,
 /// not 1.5x — five times more services on a node than the model prices, every one of them able to
 /// claim memory that is not there.

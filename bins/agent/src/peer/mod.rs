@@ -15,7 +15,7 @@
 
 mod placement;
 mod pull;
-mod sweeps;
+pub(crate) mod sweeps;
 mod wake;
 #[cfg(test)]
 mod tests;

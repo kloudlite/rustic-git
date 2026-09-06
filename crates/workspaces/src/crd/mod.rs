@@ -503,7 +503,10 @@ pub struct PodResources {
 }
 
 impl Default for PodResources {
-    /// The "M" session slot from the capacity model: guarantee 4 GB / 2 vCPU, limit 8 GB / 4 vCPU.
+    /// The workspace slot from the capacity model — the sheet's "M session" row, and `session` is
+    /// its word for a workspace: guarantee 4 GB / 2 vCPU, limit 8 GB / 4 vCPU. The model and its
+    /// provenance are tabulated in `docs/capacity-model.md`; change a number there and here
+    /// together, never one alone.
     ///
     /// The REQUEST is the load-bearing half. It is what the scheduler packs against, so it — not
     /// the limit — decides how many sessions a node holds and therefore what a session costs. The

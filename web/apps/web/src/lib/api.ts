@@ -776,6 +776,8 @@ export type ApiWorkspace = {
   degraded?: { ready: boolean; reason: string; message: string } | null;
   /** `Decommissioning/NodeLeaving` — the node is being retired; the next start lands elsewhere. */
   decommissioning?: { ready: boolean; reason: string; message: string } | null;
+  /** Sent only when `Placed` is false — `NoCapacity` means no node has room for it yet. */
+  placed?: { ready: boolean; reason: string; message: string } | null;
   /** What a clone was grafted onto, and whether that cut predates the source's node going down.
    *  Only a clone response carries it — an environment clone never does. */
   based_on?: { snapshot: string; at?: string | null; age_seconds: number; interrupted: boolean } | null;
@@ -810,6 +812,8 @@ export type ApiEnvironment = {
   degraded?: { ready: boolean; reason: string; message: string } | null;
   /** `Decommissioning/NodeLeaving` — the node is being retired; the next start lands elsewhere. */
   decommissioning?: { ready: boolean; reason: string; message: string } | null;
+  /** Sent only when `Placed` is false — `NoCapacity` means no node has room for it yet. */
+  placed?: { ready: boolean; reason: string; message: string } | null;
 };
 
 /** The caller's workspaces in `team`, or their personal ones when it is absent or their own

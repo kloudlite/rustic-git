@@ -13,11 +13,17 @@ export function noticesFor(x: {
   replicated?: ConditionDoc | null;
   degraded?: ConditionDoc | null;
   decommissioning?: ConditionDoc | null;
+  placed?: ConditionDoc | null;
 }): WsNotice[] {
   // Interrupted first: it is the only one that changes what the buttons can do (start is refused,
   // clone is the way forward), so it must not be buried under a copying notice.
   if (x.degraded?.ready && x.degraded.reason === "NodeDead") {
     return [{ tone: "warning", text: "Its node is down. It resumes when the node returns — or clone it from the last synced point." }];
+  }
+  // The API only sends `placed` when it is false, and `NoCapacity` is the one reason a person can
+  // act on: nothing is wrong, there is simply nowhere to put it yet.
+  if (x.placed && !x.placed.ready && x.placed.reason === "NoCapacity") {
+    return [{ tone: "warning", text: `No node has room for this right now — it starts as soon as one does (${x.placed.message}).` }];
   }
   if (x.decommissioning?.ready && x.decommissioning.reason === "NodeLeaving") {
     return [{ tone: "info", text: "This node is being retired; stop when convenient and the next start lands elsewhere." }];

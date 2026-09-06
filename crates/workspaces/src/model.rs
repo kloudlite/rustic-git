@@ -90,6 +90,12 @@ pub struct Workspace {
     /// now costs nothing and the next start lands elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decommissioning: Option<ConditionDoc>,
+    /// The `Placed` condition, and shown only when it is FALSE — `NoCapacity` is the one a person
+    /// has to act on: no node in the region has room for what this asks for, so it will stay in
+    /// `Creating` until something frees up or the fleet grows. A claimed object's `Placed=True`
+    /// says nothing `placement` does not already say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed: Option<ConditionDoc>,
 }
 
 /// A `meta/v1.Condition` flattened for the web — the shape `packages_status` and `replicated`
@@ -304,6 +310,12 @@ pub struct Environment {
     /// now costs nothing and the next start lands elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decommissioning: Option<ConditionDoc>,
+    /// The `Placed` condition, and shown only when it is FALSE — `NoCapacity` is the one a person
+    /// has to act on: no node in the region has room for what this asks for, so it will stay in
+    /// `Creating` until something frees up or the fleet grows. A claimed object's `Placed=True`
+    /// says nothing `placement` does not already say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed: Option<ConditionDoc>,
 }
 
 

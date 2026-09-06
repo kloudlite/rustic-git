@@ -237,7 +237,7 @@ pub(crate) async fn mark_parent(ctx: &Arc<Ctx>, p: &crate::listing::Parent, cond
 /// The generic half. Status is edited as JSON because `Workspace` and `Environment` share no
 /// status type — the same reason `listing::Parent` exists at all.
 #[allow(clippy::too_many_arguments)]
-async fn mark_parent_of<K>(ctx: &Arc<Ctx>, name: &str, kind: &'static str, (cond_type, cond_status): (&'static str, bool), reason: &str, why: &str, release: bool)
+pub(crate) async fn mark_parent_of<K>(ctx: &Arc<Ctx>, name: &str, kind: &'static str, (cond_type, cond_status): (&'static str, bool), reason: &str, why: &str, release: bool)
 where
     K: kube::Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
 {
@@ -254,6 +254,13 @@ where
         let mut status = serde_json::to_value(&cur).unwrap_or_default()["status"].take();
         if status.is_null() {
             status = serde_json::json!({});
+        }
+        // `phase` is schema-required, so a status built from an object that has NONE yet (a
+        // never-reconciled parent — which is exactly what the claim's `NoCapacity` arm marks)
+        // fails to deserialize and the write is silently dropped. `Pending` is what such an object
+        // already reads as everywhere else: created, not yet claimed.
+        if status["phase"].is_null() {
+            status["phase"] = serde_json::json!(crd::Phase::Pending);
         }
         let gen = cur.meta().generation.unwrap_or(0);
         let prev: Vec<crd::Condition> = serde_json::from_value(status["conditions"].clone()).unwrap_or_default();
