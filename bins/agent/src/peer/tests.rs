@@ -1471,6 +1471,60 @@ async fn retire_pass_drops_a_copy_whose_slot_moved_once_the_replacement_is_synce
     assert!(!ctx.engine.pool.voldir("v1").exists(), "the local copy must be gone");
 }
 
+fn vol_released_deleting(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "9",
+                     "deletionTimestamp": "2026-09-06T18:09:33Z", "finalizers": ["kloudlite.io/subvolume"]},
+        "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 2},
+        "status": {"phase": "unavailable"},
+    })
+}
+
+/// A deleting volume nobody owns: this node holds a copy, so it drops its row and its bytes —
+/// and does not touch the finalizer this beat, because the row list it read still names itself.
+#[tokio::test]
+async fn retire_pass_drops_this_nodes_copy_of_a_deleting_released_volume() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/v1")).unwrap();
+    let mine = serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": "v1.node-b", "uid": "uid-b"},
+        "spec": {"volume": "v1", "node": "node-b"},
+        "status": {"phase": "Synced", "branches": {}},
+    });
+    let beat = beat_of(vec![vol_released_deleting("v1")], vec![mine.clone()], vec![]);
+    let routes = vec![Route { method: "DELETE", path: format!("{VOLREPLICAS}/v1.node-b"), status: 200, body: mine }];
+    let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+    let live = vec!["node-a".to_string(), "node-b".to_string()];
+
+    retire_pass(&ctx, &beat, &live).await;
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {VOLREPLICAS}/v1.node-b")), "{:?}", rec.calls());
+    assert!(!ctx.engine.pool.voldir("v1").exists(), "the copy of a deleting volume goes");
+    assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "the finalizer waits for a beat with no rows: {:?}", rec.calls());
+}
+
+/// The same volume with no row left anywhere: the rendezvous-preferred live node — and only it —
+/// removes the finalizer, so the delete a person asked for finally completes.
+#[tokio::test]
+async fn retire_pass_finalizes_a_deleting_released_volume_once_no_copy_remains() {
+    let tmp = tempfile::tempdir().unwrap();
+    let beat = beat_of(vec![vol_released_deleting("v1")], vec![], vec![]);
+    let live = vec!["node-a".to_string(), "node-b".to_string()];
+    let preferred = preferred_node("v1", &live).unwrap();
+    let other = if preferred == "node-a" { "node-b" } else { "node-a" };
+
+    let (ctx, rec) = test_ctx(tmp.path(), other, Vec::new());
+    retire_pass(&ctx, &beat, &live).await;
+    assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "not the preferred node: hands off: {:?}", rec.calls());
+
+    let routes = vec![Route { method: "PATCH", path: format!("{VOLUMES}/v1"), status: 200, body: vol_released_deleting("v1") }];
+    let (ctx, rec) = test_ctx(tmp.path(), &preferred, routes);
+    retire_pass(&ctx, &beat, &live).await;
+    assert!(rec.calls().iter().any(|c| c == &format!("PATCH {VOLUMES}/v1")), "the preferred node removes the finalizer: {:?}", rec.calls());
+}
+
 /// Same setup, but node-c's row is still `Syncing` — node-b's copy must be kept, on disk and
 /// in its `VolumeReplica` row, until the replacement actually finishes.
 #[tokio::test]

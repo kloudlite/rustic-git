@@ -552,7 +552,13 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     .unwrap_or_default();
     for v in vols {
         let id = v.name_any();
-        if v.metadata.deletion_timestamp.is_some() || !held.contains(&id) {
+        if v.metadata.deletion_timestamp.is_some() {
+            if v.spec.node_name.is_empty() {
+                finalize_released(ctx, v, rows, held.contains(&id), live).await;
+            }
+            continue;
+        }
+        if !held.contains(&id) {
             continue;
         }
         let owner_alive = live.iter().any(|n| n == &v.spec.node_name);
@@ -632,6 +638,48 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
 /// decision here. A released pin (`node_name` empty — `Volume.spec.node_name` is cleared, never
 /// absent) has no owner left to be it, so the rendezvous top candidate over `live` stands in, the
 /// same substitute `preferred_node` already is for "who takes this volume next".
+/// A RELEASED volume being deleted has no owner node, and `SUBVOLUME_FINALIZER` runs only in the
+/// owner's controller — so a `DELETE /v1/volumes/{name}` on a detached volume hung forever with
+/// every node keeping its copy, and a draining node could never reach `drained` (four such
+/// volumes held session-0 at `copies=5`, 2026-09-06). Every holder drops its own row and bytes;
+/// once no row is left anywhere, the rendezvous-preferred live node removes the finalizer — one
+/// actor, the same rule `collect_unreferenced_volumes` picks its deleter by. Snapshot CRs are
+/// owned by the Volume and go with it; their bytes are `sweep_orphan_snap_bytes`' next pass.
+async fn finalize_released(ctx: &Arc<Ctx>, v: &crd::Volume, rows: &[crd::VolumeReplica], held: bool, live: &[String]) {
+    let id = v.name_any();
+    let mine = rows.iter().any(|r| r.spec.volume == id && r.spec.node == ctx.node);
+    if mine || held {
+        let rname = crd::replica_name(&id, &ctx.node);
+        if let Err(e) = Api::<crd::VolumeReplica>::all(ctx.client.clone()).delete(&rname, &Default::default()).await {
+            if !matches!(&e, kube::Error::Api(s) if s.code == 404) {
+                tracing::warn!(volume = %id, reason = "keeping-copy", error = %e, "replica.delete.failed");
+                return;
+            }
+        }
+        let (engine, vol) = (ctx.engine.clone(), id.clone());
+        if let Err(e) = tokio::task::spawn_blocking(move || janitor::cleanup_local(&engine, &vol)).await {
+            tracing::warn!(volume = %id, reason = "panicked", error = %e, "volume.drop.failed");
+            return;
+        }
+        tracing::info!(volume = %id, reason = "deleting", "volume.dropped");
+        return; // the row list is this beat's; the finalizer waits for the next one to see it gone
+    }
+    if rows.iter().any(|r| r.spec.volume == id) || preferred_node(&id, live).as_deref() != Some(ctx.node.as_str()) {
+        return;
+    }
+    let current = v.metadata.finalizers.clone().unwrap_or_default();
+    if !current.iter().any(|f| f == crd::SUBVOLUME_FINALIZER) {
+        return;
+    }
+    let kept: Vec<String> = current.iter().filter(|f| f.as_str() != crd::SUBVOLUME_FINALIZER).cloned().collect();
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    match crate::controller::volume::cas(&api, &id, "/metadata/finalizers", serde_json::json!(current), serde_json::json!(kept)).await {
+        Ok(Some(_)) => tracing::info!(volume = %id, reason = "released", "volume.finalized"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(volume = %id, error = %e, "volume.finalize.failed"),
+    }
+}
+
 async fn collect_unreferenced_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshots: &[crd::Snapshot], live: &[String]) {
     let floor = replica_interval(&ctx.settings).as_secs() as i64;
     let now = k8s_openapi::jiff::Timestamp::now();
