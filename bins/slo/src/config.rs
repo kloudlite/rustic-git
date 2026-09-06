@@ -21,8 +21,10 @@ pub struct Config {
     pub region: String,
     /// Extra hostnames stage 10 resolves and checks a certificate for, beyond the ones above.
     pub hosts: Vec<String>,
-    /// The ingress address Cloudflare sends `hosts[0]` to. `None` — unset — skips `edge.origin`
-    /// rather than inventing an address: a probe that guessed one would report the wrong origin.
+    /// Where `edge.origin` reaches the origin directly — an IP or a DNS name, resolved at the
+    /// step. In-cluster that is the ingress controller's Service name, since the load balancer in
+    /// front does not hairpin. `None` — unset — skips `edge.origin` rather than inventing an
+    /// address: a probe that guessed one would report the wrong origin.
     pub origin_ip: Option<String>,
     /// The `kloudlite-jwt` Secret. The probe mints its own tokens rather than holding a
     /// password, so this is the only credential in the pod.

@@ -258,39 +258,37 @@ async fn cert(c: &mut Ctx) {
     .await;
 }
 
-/// `edge.origin`: the origin answers when reached directly, with the proxy's own SNI.
+/// `edge.origin`: the origin answers when reached directly, the way the proxy reaches it.
 ///
-/// A dedicated client rather than `Ctx::http`: the whole point is to pin this hostname to the
-/// ingress address the proxy uses, and reqwest's `resolve` does that without a `curl` in the image.
+/// Cloudflare fronts the origin over PLAIN HTTP (the Ingress carries no TLS secret and
+/// `ssl-redirect` is off), so the direct request is `http://{host}/` with the host resolved to
+/// the ingress address — `KLOUDLITE_SLO_ORIGIN_IP`, an IP or a DNS name. From inside the cluster
+/// that is the ingress controller's own Service: the Azure load balancer in front of it does not
+/// hairpin, so the public address never answers a pod. A dedicated client rather than
+/// `Ctx::http`: reqwest's `resolve` pins the hostname without a `curl` in the image.
 /// ANY status is a pass — a 404 from the origin is still the origin answering, and only a
 /// connection failure is the outage this SLI is about.
 async fn origin(c: &mut Ctx) {
     let Some(host) = c.cfg.hosts.first().cloned() else {
         return c.skip("edge.origin", "no hostname to pin");
     };
-    // Back to a documented skip when the env is empty, and this time the reason is measured
-    // rather than assumed: reading the address off the Ingress worked, and the dial timed out
-    // after 15 s. A pod cannot reach its own cluster's public load-balancer address on Azure —
-    // the LB does not hairpin — so no address the CLUSTER publishes is dialable from inside it.
-    // The env stays as the override for a probe run from somewhere that can reach it.
-    let Some(ip) = c.cfg.origin_ip.clone() else {
-        return c.skip(
-            "edge.origin",
-            "no KLOUDLITE_SLO_ORIGIN_IP: the ingress address the cluster publishes does not hairpin back into the pod network, so a probe inside the cluster cannot dial the origin",
-        );
+    let Some(target) = c.cfg.origin_ip.clone() else {
+        return c.skip("edge.origin", "no KLOUDLITE_SLO_ORIGIN_IP: nothing to pin the origin to");
     };
     c.step("edge.origin", ORIGIN_CEILING, move |_| {
         async move {
-            let addr: std::net::SocketAddr = format!("{ip}:443")
-                .parse()
-                .with_context(|| format!("KLOUDLITE_SLO_ORIGIN_IP {ip:?} is not an address"))?;
+            let addr = tokio::net::lookup_host(format!("{target}:80"))
+                .await
+                .ok()
+                .and_then(|mut a| a.next())
+                .ok_or_else(|| anyhow!("KLOUDLITE_SLO_ORIGIN_IP {target:?} is neither an address nor a name that resolves"))?;
             let client = reqwest::Client::builder()
                 .resolve(&host, addr)
                 .timeout(ORIGIN_CEILING)
                 .build()
                 .context("could not build the pinned client")?;
             client
-                .get(format!("https://{host}/"))
+                .get(format!("http://{host}/"))
                 .send()
                 .await
                 // `without_url`: the same rule as `stages::raw` — reqwest's Display carries the

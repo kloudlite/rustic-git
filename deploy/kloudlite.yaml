@@ -1647,12 +1647,11 @@ data:
   # To obtain it, after `kloudlite-slo bootstrap` has pushed the canary:
   #   crane digest cr.khost.dev/slo-probe/canary:latest
   KLOUDLITE_SLO_CANARY_DIGEST: "sha256:15896b4a18eb04e8adafd7970410145e52ce891213b9e4b08ddb47e808b5909e"
-  # The ingress controller's public IP, for `edge.origin` (a dial past Cloudflare with the host
-  # pinned to it). Empty: that id skips. Left empty on purpose: the Azure load balancer does not
-  # hairpin, so from a pod that address never answers (verified 2026-09-06: 8 s timeout from the
-  # dev pod, 200 via Cloudflare) — a value here would make the id fail rather than lie. Set it
-  # only for a probe that runs OUTSIDE the cluster.
-  KLOUDLITE_SLO_ORIGIN_IP: ""
+  # Where `edge.origin` reaches the origin directly, with the host pinned to it: an IP or a DNS
+  # name. The ingress controller's own Service, not its public IP — the Azure load balancer does
+  # not hairpin, so from a pod the public address never answers (8 s timeout, verified
+  # 2026-09-06), while the Service answers the same plain-HTTP request Cloudflare sends.
+  KLOUDLITE_SLO_ORIGIN_IP: "ingress-nginx-controller.ingress-nginx.svc.cluster.local"
   # The ClickHouse host `drill.clickhouse.down` (monthly) denies the admin process egress to.
   # Empty: that drill skips, like `drill.redis.down` does without its own host.
   KLOUDLITE_SLO_CLICKHOUSE_HOST: ""

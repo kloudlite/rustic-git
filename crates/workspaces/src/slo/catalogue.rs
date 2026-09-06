@@ -303,7 +303,7 @@ pub const CATALOGUE: &[Slo] = &[
     // Stage 10 · edge and pipeline
     Slo { id: "edge.dns", feature: "Edge and pipeline", sli: "The public hostname resolves", target: avail(99.99), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "edge.cert", feature: "Edge and pipeline", sli: "The TLS certificate is valid for the public hostname", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
-    Slo { id: "edge.origin", feature: "Edge and pipeline", sli: "The origin answers a direct request on the address its ingress publishes", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
+    Slo { id: "edge.origin", feature: "Edge and pipeline", sli: "The origin answers a direct HTTP request on its ingress, the way the proxy reaches it", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "edge.ssh.lb", feature: "Edge and pipeline", sli: "The SSH load balancer accepts a connection", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "tel.log.latency", feature: "Edge and pipeline", sli: "A structured log line reaches HyperDX", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "tel.pod.coverage", feature: "Edge and pipeline", sli: "Every pod is scraped by the region's collector", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
