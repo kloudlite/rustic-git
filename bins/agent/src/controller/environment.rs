@@ -395,7 +395,16 @@ async fn run_environment(
     // capacity is spent, and refusing here would strand a running environment at `Creating`.
     // An environment is all-or-nothing on purpose: its services share a namespace and a volume,
     // and half of them scheduled is not a working environment.
-    if Api::<StatefulSet>::namespaced(ctx.client.clone(), ns).list(&kube::api::ListParams::default()).await?.items.is_empty()
+    // "Not started yet" is read off the FIRST service's StatefulSet rather than a list of the
+    // namespace: the services are applied in order in the loop below, so the first one existing
+    // means this environment has already been started here and its capacity is already spent.
+    let first = e.spec.services.first().map(|s| s.name.clone());
+    let started = match &first {
+        Some(name) => deployments.get_opt(name).await?.is_some(),
+        // No services at all: nothing to schedule, so nothing to gate.
+        None => true,
+    };
+    if !started
         && !crate::claim::room_to_start(ctx, &e.name_any(), crate::claim::environment_want(e.spec.services.len())).await?
     {
         let st = crd::EnvironmentStatus {

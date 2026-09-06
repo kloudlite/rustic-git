@@ -5072,7 +5072,15 @@ fn a_directory_left_by_the_old_subpath_mount_is_replaced_by_the_file() {
 
 /// A bare `Ctx` on a named node with EXACTLY the routes given — no defaults appended, because
 /// these tests assert on the absence of calls as much as on their content.
-fn ctx_with_node(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+fn ctx_with_node(pool: &std::path::Path, node: &str, mut routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    // `start_placement` narrows its candidates to the nodes that have room, which reads what is
+    // scheduled on each. A test that says nothing about pods means an empty cluster, not a 404.
+    if !routes.iter().any(|r| r.method == "GET" && r.path == "/api/v1/pods") {
+        routes.push(kloudlite_workspaces::kube_test::get(
+            "/api/v1/pods",
+            serde_json::json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}),
+        ));
+    }
     let (client, rec) = mock_client(routes);
     let profiles = pool.join("profiles");
     let _ = std::fs::create_dir_all(&profiles);
@@ -5307,6 +5315,53 @@ async fn when_the_owner_is_preferred_it_starts_here_with_no_writes() {
     let parents = vec![stopped_parent("ws-1", "vol-3")];
     assert_eq!(kloudlite_agent::controller::start_placement(&ctx, &vol_obj("vol-3", "node-a"), &parents).await.unwrap(), None);
     assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH") || c.starts_with("PUT")));
+}
+
+/// The narrowing rule, against the case above: the SAME volume, whose rendezvous still scores the
+/// owner top, moves to the peer once the owner has no room for it. This is the pile-up that put
+/// three workspaces on an 8-vCPU node and left the fourth `Pending` while a bigger node idled —
+/// the hash spread evenly over the candidates and knew nothing about how full each one was.
+#[tokio::test]
+async fn a_full_owner_hands_a_movable_volume_to_a_peer_with_room() {
+    let tmp = tempfile::tempdir().unwrap();
+    let holds = serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": "vol-3.node-b"}, "spec": {"volume": "vol-3", "node": "node-b"},
+        "status": {"phase": "Synced", "branches": {"ws-1": "stop-ws-1-3"}},
+    });
+    let sized = |name: &str| {
+        serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": name,
+                           "labels": {"kloudlite.io/session": "true"}},
+                           "status": {"allocatable": {"cpu": "8", "memory": "33554432Ki"},
+                                      "conditions": [{"type": "Ready", "status": "True",
+                                                      "lastTransitionTime": rfc3339_ago(60)}]}})
+    };
+    // node-a is full: four default workspaces at 2 vCPU each is the whole 8 vCPU. Three would
+    // still fit a fourth exactly, which is the arithmetic `fits` is deliberately strict about.
+    let busy = |n: u32| {
+        serde_json::json!({"apiVersion": "v1", "kind": "Pod",
+                           "metadata": {"name": format!("ws-{n}"), "namespace": "ws-alice"},
+                           "spec": {"nodeName": "node-a", "containers": [{"name": "c",
+                                    "resources": {"requests": {"cpu": "2", "memory": "4Gi"}}}]},
+                           "status": {"phase": "Running"}})
+    };
+    let routes = vec![
+        Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/volumereplicas".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [holds]}) },
+        Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/snapshots".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-3", "ws-1", 7)]}) },
+        Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "NodeList", "items": [sized("node-a"), sized("node-b")]}) },
+        Route { method: "GET", path: "/api/v1/pods".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "PodList", "items": [busy(1), busy(2), busy(3), busy(4)]}) },
+        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-3".into(), status: 200, body: vol_owned("vol-3", "") },
+        Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: placed_ws("ws-1", "node-a") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "") },
+    ];
+    let (ctx, _rec) = ctx_with_node(tmp.path(), "node-a", routes);
+    let parents = vec![stopped_parent("ws-1", "vol-3")];
+    let to = kloudlite_agent::controller::start_placement(&ctx, &vol_obj("vol-3", "node-a"), &parents).await.unwrap();
+    assert_eq!(to.as_deref(), Some("node-b"), "the owner is out of room, so the up-to-date peer takes it");
 }
 
 /// F5 (drill, 2026-09-03): a workspace stopped on a node that then died kept the sweep's
