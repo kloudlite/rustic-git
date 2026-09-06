@@ -280,8 +280,27 @@ pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> R
     // sets (`k8s::login_env`), not a profile's. That is what `cache_is_local` is reading back, and
     // calling it "the login shell" was wrong.
     let user = kloudlite_workspaces::k8s::SSH_USER;
-    crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["su", user, "-s", "/bin/sh", "-c", script], cap).await
+    let start = std::time::Instant::now();
+    loop {
+        let out = crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["su", user, "-s", "/bin/sh", "-c", script], cap).await?;
+        // A non-zero exit that printed NOTHING is the exec landing on a sandbox that exists but
+        // cannot run `su` yet — `homes.cross.node` reads the moved home in the same second the
+        // new pod turns Ready, and got exit 1 with empty stdout and stderr where the same read a
+        // moment later succeeds. Every real failure of a script says something: a missing file,
+        // a refused permission, a bad command. Bounded, so a container that stays mute is still
+        // reported as what it is.
+        let (code, stdout, stderr) = &out;
+        if *code != 0 && stdout.is_empty() && stderr.is_empty() && start.elapsed() < EXEC_SETTLE {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+        return Ok(out);
+    }
 }
+
+/// How long a mute non-zero exec is retried before it is believed. Longer than a sandbox takes to
+/// finish coming up after the pod reports Ready; short against every step ceiling that execs.
+const EXEC_SETTLE: Duration = Duration::from_secs(20);
 
 /// `gw.tunnel.p95`: the whole `kl ssh` path — mint a session, then let `ssh` reach the pod through
 /// `kl ws proxy`, which is the websocket tunnel to the region's gateway.
