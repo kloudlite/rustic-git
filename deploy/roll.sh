@@ -40,8 +40,11 @@ wait_for_probes
 # missed tick within the second between the two, straight into the rollout (seen 18:41 on
 # 2026-09-06 with the patch-after version).
 suspended=$(kubectl -n kloudlite get cronjobs -o jsonpath='{range .items[?(@.spec.suspend==true)]}{.metadata.name}{" "}{end}')
-kubectl apply --dry-run=client -o json -f kloudlite.yaml -f kloudlite-web.yaml \
-  | jq --arg keep "$suspended" '(.items[] | select(.kind=="CronJob" and (.metadata.name as $n | $keep | split(" ") | index($n))) | .spec.suspend) = true' \
+# `create --dry-run=client`, never `apply --dry-run=client`: the latter prints the object AFTER
+# merging with what is live, so piping it back applied the running state and moved nothing
+# (2026-09-06, a roll that "succeeded" with the old image everywhere).
+kubectl create --dry-run=client -o json -f kloudlite.yaml -f kloudlite-web.yaml \
+  | jq -s --arg keep "$suspended" '{apiVersion: "v1", kind: "List", items: map(if .kind=="CronJob" and (.metadata.name as $n | $keep | split(" ") | index($n)) then .spec.suspend = true else . end)}' \
   | kubectl apply -f -
 for c in $suspended; do echo "kept $c suspended"; done
 kubectl -n kloudlite rollout status statefulset/kloudlite-srv --timeout=900s
