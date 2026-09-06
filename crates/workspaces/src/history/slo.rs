@@ -101,6 +101,11 @@ pub struct Run {
     pub failed_step: String,
     pub failed_detail: String,
     pub duration_ms: u64,
+    /// The row's own heartbeat: `updated` is the ReplacingMergeTree version, written on every
+    /// report — i.e. after every stage. A `running` row whose `updated` has gone stale is a run
+    /// whose pod was killed and never filed a terminal state, and served alongside the row so a
+    /// reader can tell that from a run that is simply slow.
+    pub updated: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -488,10 +493,12 @@ pub async fn statuses(h: &History) -> Result<Vec<SloStatus>, HistoryError> {
 /// The columns every `Run` read selects, in the order `parse_run` expects.
 const RUN_COLS: &str = "run_id, suite, region, toString(started), toString(finished), state, \
      stage, steps_total, steps_failed, failed_step, failed_detail, \
-     if(finished IS NULL, 0, dateDiff('millisecond', started, finished)) AS duration_ms";
+     if(finished IS NULL, 0, dateDiff('millisecond', started, finished)) AS duration_ms, \
+     toString(updated)";
 
 fn parse_run(r: &[serde_json::Value]) -> Run {
     let finished = text(r.get(4));
+    let updated = text(r.get(12));
     Run {
         run_id: text(r.first()),
         suite: text(r.get(1)),
@@ -506,6 +513,7 @@ fn parse_run(r: &[serde_json::Value]) -> Run {
         failed_step: text(r.get(9)),
         failed_detail: text(r.get(10)),
         duration_ms: num(r.get(11)),
+        updated: (!updated.is_empty()).then(|| ts(&updated)),
     }
 }
 

@@ -152,6 +152,14 @@ pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
         Suite::Hourly | Suite::Weekly => 3_600,
         Suite::Monthly => 7_200,
     };
+    // The longest a live run may go without reporting. A report lands after every STAGE, and the
+    // longest stage is the hourly Experience walk; a killed run's row would otherwise sit
+    // `running` until `started` fell out of the deadline window above, and every run of that suite
+    // yielded for the whole hour — which is what a hand-deleted Job did on 2026-09-06.
+    let heartbeat = match suite {
+        Suite::Fast => chrono::Duration::minutes(5),
+        _ => chrono::Duration::minutes(10),
+    };
     rows.iter().any(|r| {
         // Never THIS run: the parent files a `running` row before the child walks, so a run
         // asking "is my suite busy?" would always find itself and yield forever.
@@ -164,7 +172,22 @@ pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
             .and_then(|s| s.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .is_some_and(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < deadline);
-        running && fresh
+        // And the row's own heartbeat: `updated` moves on every report. A row that has not been
+        // written inside `heartbeat` belongs to a pod that is gone, whatever its state says. An
+        // ABSENT `updated` is read as fresh — an older admin process that does not serve the
+        // column must not make every run ignore every other one.
+        let beating = r
+            .get("updated")
+            .and_then(|s| s.as_str())
+            .map(|s| match chrono::DateTime::parse_from_rfc3339(s) {
+                Ok(t) => chrono::Utc::now().signed_duration_since(t) < heartbeat,
+                // ClickHouse's own `toString` is `YYYY-MM-DD hh:mm:ss.SSS`, not RFC 3339.
+                Err(_) => chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                    .map(|t| chrono::Utc::now().naive_utc().signed_duration_since(t) < heartbeat)
+                    .unwrap_or(true),
+            })
+            .unwrap_or(true);
+        running && fresh && beating
     })
 }
 
@@ -395,6 +418,42 @@ mod tests {
         let c = crate::testkit::ctx().await;
         assert!(!over_budget(&c, Duration::from_secs(3600)));
         assert!(over_budget(&c, Duration::ZERO));
+    }
+
+    /// A `running` row whose heartbeat has stopped is a pod that is gone, not a run in flight —
+    /// otherwise one hand-deleted Job blocks its whole suite until the row's `started` ages out,
+    /// which cost the hourly suite an hour of samples.
+    #[tokio::test]
+    async fn a_running_row_that_stopped_beating_does_not_block() {
+        use axum::routing::get;
+        use std::sync::Arc;
+        let beat: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+        let when = beat.clone();
+        let app = axum::Router::new().route(
+            "/admin/slo/runs",
+            get(move || {
+                let updated = when.lock().expect("lock").clone();
+                async move {
+                    axum::Json(serde_json::json!({ "runs": [{
+                        "run_id": "hourly-1",
+                        "state": "running",
+                        "started": chrono::Utc::now().to_rfc3339(),
+                        "updated": updated,
+                    }]}))
+                }
+            }),
+        );
+        let mut c = crate::testkit::ctx_against(app).await;
+        c.cfg.admin_url = c.cfg.api_url.clone();
+        *beat.lock().expect("lock") = chrono::Utc::now().to_rfc3339();
+        assert!(suite_in_flight(&c, Suite::Hourly).await, "a beating run must block");
+        *beat.lock().expect("lock") =
+            (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+        assert!(!suite_in_flight(&c, Suite::Hourly).await, "a dead run blocked its suite");
+        // ClickHouse's own format, and an absent column (an older admin process).
+        *beat.lock().expect("lock") =
+            (chrono::Utc::now() - chrono::Duration::minutes(30)).format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        assert!(!suite_in_flight(&c, Suite::Hourly).await, "the stored format was not read");
     }
 
     /// A run must never see ITSELF as a reason to yield. The parent files a `running` row before

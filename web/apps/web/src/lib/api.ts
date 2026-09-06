@@ -1517,6 +1517,9 @@ export type SloRun = {
   failed_step: string;
   failed_detail: string;
   duration_ms: number;
+  /** The row's own heartbeat, written on every report. A `running` row whose `updated` has gone
+   *  stale belongs to a pod that is gone — which is how the probe tells one from a slow run. */
+  updated?: string | null;
 };
 
 /** A `skipped` step is stored but counts neither way — the probe could not attempt it. */
