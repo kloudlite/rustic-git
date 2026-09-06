@@ -48,6 +48,14 @@ spec:
               apt-get update -qq && apt-get install -y -qq --no-install-recommends \
                 bash ca-certificates git rsync openssh-client curl openssl bind9-dnsutils \
                 pkg-config libssl-dev clang cmake python3 >/dev/null
+              # HOME on the disk: gh's login, the git identity, safe.directory and ssh known_hosts
+              # all live under it and must outlive a pod restart.
+              mkdir -p /work/home /work/bin
+              if [ ! -x /work/bin/gh ]; then
+                curl -fsSL -o /tmp/gh.tgz https://github.com/cli/cli/releases/download/v2.86.0/gh_2.86.0_linux_amd64.tar.gz
+                tar -xzf /tmp/gh.tgz -C /tmp && install -m 755 /tmp/gh_2.86.0_linux_amd64/bin/gh /work/bin/gh
+              fi
+              git config --global --add safe.directory /work/src || true
               if [ ! -x /work/bin/crane ]; then
                 mkdir -p /work/bin
                 curl -fsSL -o /tmp/crane.tgz https://github.com/google/go-containerregistry/releases/download/v0.20.3/go-containerregistry_Linux_x86_64.tar.gz
@@ -62,7 +70,7 @@ spec:
             - { name: CARGO_HOME, value: /work/cargo }
             - { name: CARGO_TARGET_DIR, value: /work/target }
             - { name: PATH, value: /work/bin:/work/target/dev-image:/work/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin }
-            - { name: HOME, value: /tmp }
+            - { name: HOME, value: /work/home }
             - { name: KUBECONFIG, value: /etc/kloudlite/k3s/config }
             - name: KLOUDLITE_JWT_SECRET
               valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }

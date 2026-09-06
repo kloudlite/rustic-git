@@ -13,6 +13,26 @@ the editor; every compile, test and probe run happens in the pod.
 | run a probe suite | `deploy/dev/slo.sh fast\|hourly\|weekly\|monthly` — the CronJob's tenant, key and budget, no image |
 | serve a tier from the pod | build it, run the binary in the pod with that tier's env, then `kubectl -n kloudlite patch svc <tier>` to select `app: dev` (label the pod) — and put the selector back |
 
+## Git: commits and pushes happen in the pod
+
+The pod's `/work/src/.git` is the repository of record for day-to-day work, and the laptop is the
+editor. `sync.sh` and `test.sh` copy the WORKING TREE only (`.git` is excluded), so a commit
+made in the pod is never overwritten by a later sync; the laptop catches up with `git pull`.
+
+One-time, done by a person because it is a login:
+
+```sh
+deploy/dev/exec.sh                                   # a shell in /work/src
+gh auth login --hostname github.com --git-protocol https --web   # or --device
+gh auth setup-git                                    # git push uses gh's token from now on
+git config --global user.name  "Karthik Th"
+git config --global user.email "karthik@kloudlite.io"
+```
+
+`HOME` is `/work/home` on the disk, so the login, the identity and `safe.directory` survive a pod
+restart. Then, in the pod: `git add … && git commit && git push`. The commit-msg hook is not in the
+pod — keep the same rule by hand: no tool attribution in messages.
+
 Rules that keep this honest:
 
 - **Never roll over a probe run.** `deploy/roll.sh` waits for every SLO Job; before the hand-run
