@@ -32,7 +32,13 @@ for j in json.load(sys.stdin)["items"]:
 }
 wait_for_probes
 [ "${1:-}" = "--wait-only" ] && exit 0
+# A schedule suspended by hand stays suspended across the roll. The manifest says `suspend: false`
+# for the fast and hourly probes, so a plain apply would switch them back on — and a CronJob that
+# missed a tick fires the moment it is unsuspended, i.e. straight into the rollout, which is a
+# failed sample that measured this script rather than the platform.
+suspended=$(kubectl -n kloudlite get cronjobs -o jsonpath='{range .items[?(@.spec.suspend==true)]}{.metadata.name}{" "}{end}')
 kubectl apply -f kloudlite.yaml -f kloudlite-web.yaml
+for c in $suspended; do kubectl -n kloudlite patch cronjob "$c" -p '{"spec":{"suspend":true}}' >/dev/null && echo "kept $c suspended"; done
 kubectl -n kloudlite rollout status statefulset/kloudlite-srv --timeout=900s
 for d in kloudlite-api kloudlite-worker kloudlite-web; do
   kubectl -n kloudlite rollout status "deployment/$d" --timeout=300s
