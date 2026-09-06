@@ -481,8 +481,9 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
     // give one answer. Distinct volumes, because two parents on one volume are one backlog item.
     let backlog: HashSet<&str> =
         beat.parents.iter().filter(|p| !p.replicated).map(|p| p.volume.as_str()).collect();
-    // Every volume some parent — running, stopped or interrupted — still names, anywhere.
-    let named: HashSet<&str> = beat.parents.iter().map(|p| p.volume.as_str()).collect();
+    // Every volume some parent — running, stopped or interrupted — still names, on ANY node:
+    // `beat.parents` is this node's share, and a takeover in flight is by definition elsewhere.
+    let named: HashSet<&str> = beat.all_parents.iter().map(|p| p.volume.as_str()).collect();
     metrics::gauge!("replication_backlog").set(backlog.len() as f64);
     // A local voldir with no Volume CR at all is an orphan: nothing lists it, so no pull, no
     // retire and no worktree drop ever visits it again. The Volume is always created before any
@@ -562,6 +563,13 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
             .map(|r| r.spec.node.clone())
             .collect();
         if !should_retire(&ctx.node, &v.spec.node_name, &targets, hosted.contains(&id), &synced, named.contains(id.as_str())) {
+            // A copy this node keeps while it is draining is the one thing standing between the
+            // node and `drained`; say why, with the inputs, so a stuck drain is readable from the
+            // log rather than reconstructed from four CRs.
+            if !live.iter().any(|n| n == &ctx.node) && v.spec.node_name != ctx.node {
+                tracing::info!(volume = %id, owner = %v.spec.node_name, ?targets, ?synced,
+                    hosted = hosted.contains(&id), named = named.contains(id.as_str()), "retire.kept");
+            }
             // Still a target/replica, just not the owner: a `live/{ws}` worktree under it
             // belongs only to the owner and is what a takeover away from this node left behind
             // — UNLESS this node is `hosted` (serving a pod from it right now): the owner record
