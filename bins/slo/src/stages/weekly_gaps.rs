@@ -839,7 +839,10 @@ async fn lanes(c: &mut Ctx) {
     c.step("srv.lanes", step_cap(SWEEP_CAP), move |c| {
         let crane = super::registry::authed(c);
         let jwt = c.probe_jwt.clone();
-        let images = api(c, &format!("/api/{probe}/images"));
+        // The TAG rows, not the images listing: `pulls` is a per-tag counter and only
+        // `imagetags` carries it — the listing rows are markers (name, manifests, visibility) and
+        // polling them for a field they never have is a step that cannot pass.
+        let tags = api(c, &format!("/api/{probe}/{name}/imagetags"));
         let dest = c.tmp.join("pull-lanes");
         async move {
             let layer = super::registry::random_layer();
@@ -852,10 +855,10 @@ async fn lanes(c: &mut Ctx) {
                 crane.pull(&reference, &dest).await.context("the image would not pull")?;
             }
             // The flush lane's own beat, then the number it is supposed to have written.
-            poll_json(c, &images, &jwt, SWEEP_CAP - Duration::from_secs(60), |v| {
-                let rows = v.get("images").and_then(Value::as_array).or_else(|| v.as_array()).cloned().unwrap_or_default();
+            poll_json(c, &tags, &jwt, SWEEP_CAP - Duration::from_secs(60), |v| {
+                let rows = v.get("tags").and_then(Value::as_array).or_else(|| v.as_array()).cloned().unwrap_or_default();
                 rows.iter().any(|r| {
-                    r.get("name").and_then(Value::as_str) == Some(name.as_str())
+                    r.get("tag").and_then(Value::as_str) == Some("latest")
                         && r.get("pulls").and_then(Value::as_u64).unwrap_or(0) > 0
                 })
             })
