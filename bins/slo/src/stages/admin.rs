@@ -64,8 +64,10 @@ async fn queue(c: &mut Ctx) -> Option<String> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("the answer carried no request id"))?
                     .to_string();
-                // Recorded before the wait, so teardown denies it even if the queue read fails.
+                // Recorded before the wait, so teardown denies it even if the queue read fails —
+                // and deletes the CR, which a deny alone leaves standing forever.
                 c.state.request = Some(id.clone());
+                c.state.requests.push(id.clone());
                 poll_json(c, &queue, &admin_jwt, QUEUE_CEILING, |v| {
                     rows(v).iter().any(|r| {
                         r.get("id").and_then(Value::as_str) == Some(id.as_str())

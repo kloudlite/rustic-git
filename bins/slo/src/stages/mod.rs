@@ -197,6 +197,8 @@ pub async fn teardown(c: &mut Ctx) {
     let mut swept = sweep_all(c, move |name| name.starts_with(&prefix)).await;
     swept += drop_env_volume(c).await;
     swept += drop_extra_volumes(c).await;
+    // After the deny sweep above: a request is denied through the API and then the object goes.
+    swept += drop_requests(c).await;
     tracing::info!(count = swept, "slo.teardown.completed");
 }
 
@@ -541,6 +543,51 @@ async fn del(c: &Ctx, kind: &'static str, name: &str, url: &str, jwt: &str) -> b
             false
         }
     }
+}
+
+/// Delete the `Request`/`QuotaRequest` objects this run opened.
+///
+/// `deny_requests` below closes them, which is all the API can do — but a decided request is still
+/// an object, and a region had collected 305 of them from months of runs before this existed. They
+/// are named `req-{hex}`, so no prefix sweep can ever see them; the run records each id as it opens
+/// one (`State::requests`) and this deletes exactly those. Never by owner: another run may be
+/// mid-flight with its own, and taking somebody else's request away mid-decision is worse than a
+/// leak. Best effort throughout — a leftover costs an object, an error here costs the report.
+async fn drop_requests(c: &mut Ctx) -> usize {
+    let Some(k) = c.kube.clone() else { return 0 };
+    use kloudlite_workspaces::crd;
+    let (reqs, legacy): (kube::Api<crd::Request>, kube::Api<crd::QuotaRequest>) =
+        (kube::Api::all(k.clone()), kube::Api::all(k.clone()));
+    // The recorded ids, plus every request whose REASON carries this run's prefix — the two
+    // contexts that open one hold a `&Ctx` and cannot record it, and the reason is the same
+    // per-run marker `deny_requests` already matches on. Never by owner.
+    let prefix = c.prefix();
+    let mut names = c.state.requests.clone();
+    if let Ok(list) = reqs.list(&kube::api::ListParams::default()).await {
+        names.extend(
+            list.items
+                .iter()
+                .filter(|r| r.spec.reason.starts_with(&prefix))
+                .map(kube::ResourceExt::name_any),
+        );
+    }
+    names.sort_unstable();
+    names.dedup();
+    let mut gone = 0;
+    for name in names {
+        let p = kube::api::DeleteParams::default();
+        // Either kind: the id is the object's name in both collections, and the run does not
+        // remember which route made it.
+        let took = matches!(reqs.delete(&name, &p).await, Ok(_)) || matches!(legacy.delete(&name, &p).await, Ok(_));
+        match took {
+            true => {
+                gone += 1;
+                tracing::info!(kind = "request", name = %name, "slo.teardown.deleted");
+            }
+            false => tracing::warn!(kind = "request", op = "delete", name = %name, "slo.teardown.failed"),
+        }
+    }
+    gone
 }
 
 /// `Request` has no delete on any tier — only a superadmin decision — so the sweep DENIES a

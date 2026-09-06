@@ -14,6 +14,7 @@
 # | env.attach.pair reads the attach-{ws} policy  | networkpolicies: get, list                         |
 # | cordon (weekly), taint (monthly)              | nodes: get, list, patch                            |
 # | the namespace quota `owner-quota` is projected| resourcequotas: get, list                          |
+# | teardown deletes the requests this run opened | requests, quotarequests: get, list, delete         |
 # | dead-node drill deletes ONE agent pod         | pods: delete in kube-system, DaemonSet's pods only |
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
 #
@@ -37,6 +38,13 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments", "volumes", "snapshots", "volumereplicas"]
     verbs: ["get", "list"]
+  # `requests`/`quotarequests`: a decided request is still an OBJECT — there is no delete on any
+  # tier, only a superadmin decision — so teardown deletes the ones this run opened, by recorded id
+  # or by a reason carrying the run prefix. Never by owner: another run may be mid-decision. A
+  # region had collected 305 of these before this grant existed.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["requests", "quotarequests"]
+    verbs: ["get", "list", "delete"]
   # The dry-run spec patch in `sec.agent.spec` is issued while impersonating the agent, so the
   # verb the probe itself needs on workspaces is `patch` — the admission policy is what refuses
   # it, and that refusal is the sample. A real patch would need the finalizer/label carve-outs
