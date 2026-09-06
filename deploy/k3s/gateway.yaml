@@ -87,10 +87,14 @@ metadata:
 spec:
   # One per pool node: `session-0` and `env-0`. Raising this past the node count leaves pods
   # Pending on `hostPort`.
-  replicas: 2
-  # Recreate, not RollingUpdate: with a hostPort and a required anti-affinity the old pod owns
-  # the node's port, so a rolling update can never place its replacement and wedges forever.
-  # Both replicas going down together is a few seconds of "reconnect", nothing more.
+  # ONE replica, and not a preference: the gateway counts open tunnels per workspace (10), per
+  # owner (100) and the connect tokens it has spent IN MEMORY (`bins/gateway/src/tunnel.rs`). Two
+  # replicas behind one Service made every one of those per pod — the weekly's `gw.caps` opened an
+  # eleventh tunnel through the other pod, and a spent token could be replayed against it. Raise
+  # this only once the counts live somewhere every replica reads (a per-workspace Lease on the
+  # k3s API, or the api as the counter); `the_gateway_runs_one_replica_while_it_counts_in_memory`
+  # in the gateway crate pins it. A restart is a few seconds of "reconnect", nothing more.
+  replicas: 1
   strategy:
     type: Recreate
   selector:

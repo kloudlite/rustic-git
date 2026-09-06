@@ -36,8 +36,9 @@ summarise() { kubectl -n kloudlite exec -i "$POD" -- python3 - "$LOG" <<'PY'
 import sys,json
 done=0; fails=[]; n=0; skipped=0; run=''; last=''
 for l in open(sys.argv[1]):
-    try: d=json.loads(l)
-    except: continue
+    try: d=json.loads(l[l.index('{'):]) if '{' in l else None
+    except Exception: continue
+    if not d: continue
     m=d.get('message')
     if m=='slo.run.started': run=d.get('run_id','')
     if m=='slo.step.done':

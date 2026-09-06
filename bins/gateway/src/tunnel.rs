@@ -279,6 +279,17 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
 
 #[cfg(test)]
 mod tests {
+    /// The per-workspace and per-owner tunnel counts and the spent-token set are per PROCESS. A
+    /// second replica behind the same Service silently doubles every cap and lets a spent token be
+    /// replayed against the other pod — which the weekly's `gw.caps` caught. Until the counts move
+    /// somewhere every replica reads, the manifest runs one.
+    #[test]
+    fn the_gateway_runs_one_replica_while_it_counts_in_memory() {
+        let yaml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/gateway.yaml")).unwrap();
+        let replicas: Vec<&str> = yaml.lines().filter(|l| l.trim_start().starts_with("replicas:")).map(str::trim).collect();
+        assert_eq!(replicas, vec!["replicas: 1"], "in-memory counters need exactly one gateway pod");
+    }
+
     use super::*;
 
     fn gw() -> Arc<Gateway> {

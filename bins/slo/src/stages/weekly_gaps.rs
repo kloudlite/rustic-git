@@ -663,6 +663,25 @@ const OVER_MANIFEST: usize = 5 * 1024 * 1024;
 /// prune, image sweep, marker reconcile, repo-owner reconcile, stale upload sweep) and the server's
 /// pack consolidation. A sweep that took the wrong pack loses a person's history, and the way to
 /// see it is the only way that matters: push, wait a pass out, clone, compare.
+/// Poll `check` every few seconds until it answers `Ok(None)`, and say how long that took — the
+/// number a person would feel. Replaces the fixed `sleep(SWEEP_CAP - 60 s)` the sweep steps used
+/// to take: a sleep asserted after a wait it chose, and reported nothing about how long the fleet
+/// actually needed. `Some(why)` is what still stands in the way; at `cap` that is the reason.
+async fn settle<F, Fut>(cap: Duration, what: &str, mut check: F) -> Result<Duration>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<String>>>,
+{
+    let start = std::time::Instant::now();
+    loop {
+        match check().await? {
+            None => return Ok(start.elapsed()),
+            Some(why) if start.elapsed() >= cap => return Err(anyhow!("{what} after {} s: {why}", cap.as_secs())),
+            Some(_) => tokio::time::sleep(Duration::from_secs(5)).await,
+        }
+    }
+}
+
 async fn gc_packs(c: &mut Ctx) {
     let (Some(repo), probe) = (c.state.repo.clone(), c.probe_user.clone()) else {
         return c.skip("git.gc.packs", "no repo");
@@ -736,13 +755,19 @@ async fn retain(c: &mut Ctx, cold: Option<&str>) {
             // The cold workspace's own volume and a push of this step's own: stage 5's volume and
             // push are gone by now (stage 7 deletes both), and a push is the half of the rule that
             // matters — it is the cut retain must never prune.
-            let volume = get(c, &doc, &jwt)
-                .await
-                .context("could not read the workspace")?
-                .get("volume")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the workspace names no volume"))?
-                .to_string();
+            // The cold workspace was just restarted by `ws.spread`; its doc names the volume once
+            // the reconcile has recorded it, which is moments, not never.
+            let started = std::time::Instant::now();
+            let volume = loop {
+                let v = get(c, &doc, &jwt).await.context("could not read the workspace")?;
+                if let Some(id) = v.get("volume").and_then(Value::as_str) {
+                    break id.to_string();
+                }
+                if started.elapsed() >= Duration::from_secs(60) {
+                    return Err(anyhow!("the workspace never named its volume"));
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            };
             let pushes = Some(super::experience_env::push_once(c, &ws, "retain").await.context("could not push")?);
             let history = api(c, &format!("/v1/volumes/{volume}/history"));
             // Long enough that several sync beats have certainly cut and pruned.
@@ -1101,11 +1126,29 @@ async fn workload_roll(c: &mut Ctx) {
             }
             // And every reader came back: a roll that restarts a workload into CrashLoop is a roll
             // nobody wanted.
-            poll_rows(c, &workloads, &jwt, Duration::from_secs(180), |r| {
+            // The roll is not over when the pods are ready: they were ready BEFORE it started, and
+            // reading that answered "back" in 178 ms while every agent was still about to restart —
+            // so `ws.spread`, next in line, ran across three agent restarts and lost its handover.
+            // Over means every pod is on the new template and ready, which the DaemonSet's own
+            // status says; how long that takes is the number a person waits on a settings save.
+            let took = settle(Duration::from_secs(180), "the rolled DaemonSet never settled", || async {
+                use k8s_openapi::api::apps::v1::DaemonSet;
+                let api: Api<DaemonSet> = Api::namespaced(k3s.clone(), "kube-system");
+                let ds = api.get("kloudlite-agent").await.map_err(|e| anyhow!("{e}"))?;
+                let st = ds.status.unwrap_or_default();
+                let (desired, updated, ready) = (st.desired_number_scheduled, st.updated_number_scheduled.unwrap_or(0), st.number_ready);
+                let settled = desired > 0 && updated >= desired && ready >= desired
+                    && ds.metadata.generation.is_some_and(|g| st.observed_generation.unwrap_or(0) >= g);
+                Ok((!settled).then(|| format!("{updated}/{desired} on the new template, {ready} ready")))
+            })
+            .await?;
+            tracing::info!(ms = took.as_millis() as u64, "slo.workload.roll.settled");
+            // And the admin's own view agrees, which is what the console shows a person.
+            poll_rows(c, &workloads, &jwt, Duration::from_secs(60), |r| {
                 agent_row(r).is_some_and(|(ready, desired)| ready >= desired && desired > 0)
             })
             .await
-            .context("the rolled workload never came back ready")
+            .context("the console never showed the rolled workload ready")
         }
         .boxed()
     })

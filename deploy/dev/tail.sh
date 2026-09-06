@@ -11,8 +11,9 @@ echo "following $LOG"
 kubectl -n kloudlite exec "$POD" -- tail -n +1 -f "$LOG" | python3 -u -c '
 import sys, json
 for line in sys.stdin:
-    try: d = json.loads(line)
+    try: d = json.loads(line[line.index("{"):]) if "{" in line else None
     except Exception: continue
+    if not d: continue
     m = d.get("message", ""); t = d.get("timestamp", "")[11:19]
     if m == "slo.step.done":
         print(t, "FAIL" if not d.get("ok") else " ok ", f"{d.get(\"ms\", 0):>7}ms", d.get("slo_id"), (d.get("detail") or "")[:140])
