@@ -152,6 +152,21 @@ pub async fn reconcile_owned_markers(app: &App) {
             crate::index::Kind::Repo => app.store.is_public(owner, name).await,
             crate::index::Kind::Img => {
                 use crate::registry::store::ImageExt;
+                // A marker is a view of the DB, and an image whose `image` row is gone has nothing
+                // to view. `imagedelete` removes the marker FIRST and the rows after, and the
+                // handle stays warm between the two — so this lane, meeting a warm image with no
+                // marker, wrote a fresh one (private, zero manifests) over the delete. The fast
+                // suite's `reg.image.delete` then found the image still listed, and one such
+                // ghost from a delete cut short by a roll sat in a tenant's catalogue all day
+                // with a database nobody could open.
+                match app.store.image_exists(owner, name).await {
+                    Ok(false) => continue,
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(owner = %owner, repo = %name, reason = "read", error = %e, "index.marker.reconcile.failed");
+                        continue;
+                    }
+                }
                 app.store.image_is_public(owner, name).await
             }
         };

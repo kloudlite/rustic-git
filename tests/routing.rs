@@ -2164,6 +2164,36 @@ async fn a_drain_hands_its_repos_to_a_live_peer() {
     assert_ne!(owner.node, "kloudlite-1", "the draining pod must not have claimed it for itself");
 }
 
+/// The marker lane must not resurrect an image mid-delete. `imagedelete` removes the marker, then
+/// the `image` rows, then evicts — and between the first two the handle is warm with no marker,
+/// which is exactly the shape the lane repairs. Repairing it wrote a private, zero-manifest ghost
+/// the delete never removed, and the fast suite kept finding the image listed after its delete.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_marker_lane_leaves_an_image_mid_delete_alone() {
+    use kloudlite_registry::store::ImageExt;
+    use kloudlite_storage::index::{self, Kind, Marker};
+    let e = common::env().await;
+    let f = fleet(2);
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    a.store.touch_image("alice", "nginx").await.unwrap();
+    index::write(&a.store, Kind::Img, "alice", &Marker {
+        name: "nginx".into(), public: true, created_by: "alice@example.com".into(),
+        created_ms: 1, description: String::new(), manifests: 1, updated_ms: 1,
+    }).await.unwrap();
+    assert!(a.store.pool.warm_repos().iter().any(|r| r == "img/alice/nginx"), "the image is warm, as a delete leaves it");
+
+    // The delete's first two steps, with the handle still warm.
+    index::remove(&a.store, Kind::Img, "alice", "nginx").await.unwrap();
+    a.store.delete_image_rows("alice", "nginx").await.unwrap();
+
+    kloudlite_server::lanes::reconcile_owned_markers(&a.app).await;
+    assert!(
+        index::read(&a.store.os, Kind::Img, "alice", "nginx").await.is_none(),
+        "the lane must not write a marker for an image whose rows are gone"
+    );
+}
+
 /// A draining node that holds the leader lease resigns it FIRST. Every reassignment is a write to
 /// the ownership map, and the map's writer is this process — so handing repos over before giving
 /// the lease up would write them through a writer that is about to close, and the last of them
